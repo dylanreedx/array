@@ -94,7 +94,8 @@ enum BoardCommentsChecks {
         try require(runtime.board(id: boardID)!.card(cardID)!.comments.count == 2, "own comment deletion passes through the native bridge")
         runtime.history(for: boardID).undoManager.undo()
         await detail.qaLoadComments()
-        let output = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("array-scratch/card-comments")
+        let output = ProcessInfo.processInfo.environment["CONTINUUM_BOARD_COMMENTS_QA_OUTPUT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("array-scratch/card-comments")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         for dark in [true, false] {
             let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -186,11 +187,35 @@ enum BoardCommentsChecks {
         try ownership("assign", recipient, "multi-restore")
         var multiOutcomes: [(AgentID, String)] = []
         runtime.commentDeliveryForQA?.onOutcome = { multiOutcomes.append(($0, $1)) }
-        _ = runtime.apply(.addComment(cardID: cardID, comment: BoardComment(authorID: "local", authorName: "You", createdAt: Date(), body: "@\(sender.rawValue.uuidString) review together")), to: boardID)
+        _ = runtime.apply(.addComment(cardID: cardID, comment: BoardComment(authorID: "local", authorName: "You", createdAt: Date(), body: "@\(sender.rawValue.uuidString) @\(sender.rawValue.uuidString) @Comment sender @\(recipient.rawValue.uuidString) @Comment recipient @\(recipient.rawValue.uuidString) review together")), to: boardID)
         await runtime.commentDeliveryForQA?.waitForPendingDeliveriesForQA()
         for agent in [recipient, sender] {
-            try require(multiOutcomes.filter { $0.0 == agent && ["delivered", "queued"].contains($0.1) }.count == 1, "each assignee mentioned in the comment receives exactly one delivery")
+            try require(multiOutcomes.filter { $0.0 == agent && ["delivered", "queued"].contains($0.1) }.count == 1, "each assignee mentioned repeatedly by UUID/name receives exactly one delivery")
+            try require(supervisor.queuedMessages(for: agent).filter { $0.text.contains("review together") }.count == 1, "duplicate mentions produce exactly one actual queued prompt per busy owner")
         }
+        let thirdOwner = supervisor.spawn(role: nil, prompt: nil, cwd: f.pbRoot, harness: .pi, model: "fixture-model", thinking: "high", projectId: f.projectPb, projectRoot: f.pbRoot, displayName: "Third comment owner")
+        defer { supervisor.stop(thirdOwner) }
+        _ = supervisor.setWorkspaceToolsEnabled(agentID: thirdOwner, true)
+        let owners = [recipient, sender, thirdOwner]
+        _ = runtime.apply(.setCardAssignees(id: cardID, agents: owners), to: boardID)
+        multiOutcomes.removeAll()
+        _ = runtime.apply(.addComment(cardID: cardID, comment: BoardComment(authorID: "local", authorName: "You", createdAt: Date(), body: "Human starts the three-owner review")), to: boardID)
+        await runtime.commentDeliveryForQA?.waitForPendingDeliveriesForQA()
+        try require(owners.allSatisfy { id in multiOutcomes.filter { $0.0 == id && ["delivered", "queued"].contains($0.1) }.count == 1 }, "human comment wakes all three owners once")
+        let beforeQueues = owners.map { supervisor.queuedMessages(for: $0).count }
+        let beforePrompts = runner.prompts.count
+        multiOutcomes.removeAll()
+        for (i, owner) in owners.enumerated() { try agentComment(owner, "Unmentioned progress from owner \(i)", "multi-quiet-progress-\(i)") }
+        await runtime.commentDeliveryForQA?.waitForPendingDeliveriesForQA()
+        try require(!multiOutcomes.contains { ["delivered", "queued"].contains($0.1) }
+                    && owners.map { supervisor.queuedMessages(for: $0).count } == beforeQueues && runner.prompts.count == beforePrompts,
+                    "three co-owners' unmentioned progress comments cause zero turns or queue entries")
+        multiOutcomes.removeAll()
+        try agentComment(recipient, "@\(sender.rawValue.uuidString) @Comment sender please inspect", "multi-explicit-mention")
+        await runtime.commentDeliveryForQA?.waitForPendingDeliveriesForQA()
+        try require(multiOutcomes.filter { ["delivered", "queued"].contains($0.1) }.map { $0.0 } == [sender],
+                    "agent comment wakes only the explicitly mentioned co-owner once")
+        _ = runtime.apply(.setCardAssignees(id: cardID, agents: [sender, recipient]), to: boardID)
         view.readOnlyOwner = nil
         view.agentDisplayName = { $0 == recipient ? "First owner" : "Second owner" }
         await detail.qaLoadComments()
@@ -206,6 +231,26 @@ enum BoardCommentsChecks {
             let image = try await web.takeSnapshot(configuration: nil)
             if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) {
                 try png.write(to: output.appendingPathComponent(dark ? "multi-dark.png" : "multi-light.png"))
+            }
+        }
+        // Native snapshot supplies a joined fallback label. Missing plural IDs
+        // must each contribute only their own unavailable placeholder in WebKit.
+        let missingAgain = AgentID(rawValue: UUID())
+        _ = runtime.apply(.setCardAssignees(id: cardID, agents: [recipient, missing, missingAgain]), to: boardID)
+        view.agentDisplayName = { $0 == recipient ? "Comment recipient" : nil }
+        for dark in [false, true] {
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            view.appearance = window.appearance
+            await detail.qaLoadComments()
+            _ = try await web.evaluateJavaScript("window.taskEditor.theme(\(dark ? "{bg:'#14171c',card:'#1c212a',text:'#e9ebef',muted:'#a3aab5',line:'#414751',accent:'#9db7ff',mode:'dark'}" : "{bg:'#ffffff',card:'#f5f6f8',text:'#202329',muted:'#6b7079',line:'#e2e5ea',accent:'#4262dc',mode:'light'}"))")
+            _ = try await web.evaluateJavaScript("document.getAnimations().forEach(animation => animation.finish())")
+            try require((try await web.evaluateJavaScript("document.getElementById('assignee-value').textContent")) as? String == "Comment recipient, Unavailable agent, Unavailable agent",
+                        "removed owners each show one fallback through the native snapshot in \(dark ? "dark" : "light") appearance")
+            try require((try await web.evaluateJavaScript("(() => { const label = document.getElementById('assignee-value').getBoundingClientRect(); const button = document.getElementById('assignee').getBoundingClientRect(); return label.top >= button.top && label.bottom <= button.bottom && label.left >= button.left && label.right <= button.right; })()")) as? Bool == true,
+                        "all owner labels fit inside the existing assignee control in \(dark ? "dark" : "light") appearance")
+            let image = try await web.takeSnapshot(configuration: nil)
+            if let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) {
+                try png.write(to: output.appendingPathComponent(dark ? "multi-missing-dark.png" : "multi-missing-light.png"))
             }
         }
         try ownership("unassign", nil, "multi-final-clear")

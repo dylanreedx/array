@@ -614,8 +614,10 @@ Core --companion-agent-destination-check and Sync --companion-task-publication-c
 ### BOARD-COMMENT-AGENT — card thread delivery
 
 Implemented by `BoardRuntime.configureCommentDelivery` → `BoardCommentDelivery`
-→ `AgentSupervisor.accept`. A durable new comment targets all assigned locally
-managed agents and same-project @UUID/@display-name mentions. The author's own
+→ `AgentSupervisor.accept`. A durable human comment targets all assigned locally
+managed agents and same-project @UUID/@display-name mentions. Agent-written
+comments target only explicit mentions; unmentioned progress stays quiet for
+co-owners, preventing ownership alone from fanning replies into new turns. The author's own
 agent is suppressed (`quiet_self`). Assignment and mention recipients are unioned
 by agent ID, so each receives at most one delivery per comment. An empty
 recipient set is quiet. Duplicate commits and history replay are
@@ -624,9 +626,10 @@ retract an already accepted turn or queue item. Validation or persistence failur
 produces no delivery. Comments remain durable if delivery fails.
 
 Idle targets receive `sendPrompt`; busy/starting targets receive the durable
-composer `queue`, without interruption. A project-scoped host hop budget (six)
-survives queued turns and resets for recipients of a human comment. Above the
-cap: `quiet_chain_limit`. Archived/missing/remote targets: `unavailable`.
+composer `queue`, without interruption. A project-scoped per-agent chain-depth
+limit (six) survives queued turns and resets for recipients of a human comment.
+This is a depth limit for explicit mention chains, not a total-turn budget for
+a root comment. Above the cap: `quiet_chain_limit`. Archived/missing/remote targets: `unavailable`.
 Admission failures are logged with the stable path ID and `failed_<reason>`;
 there is no automatic retry. The thread itself remains the readable record.
 The payload contains board/card IDs, a title capped at 240 characters (with an
@@ -640,6 +643,9 @@ not trigger delivery. Cards open the thread through the existing task-details
 action; delivered prompts use the existing agent transcript/message surfaces.
 
 Witness: `--board-comments-check` covers multiple assigned recipients deduplicated
-against mentions, persistence/reload, additive assignment and targeted/clear-all
+against repeated UUID/name mentions (including one actual queue entry per busy
+owner), persistence/reload, additive assignment and targeted/clear-all
 unassignment, visible owner names in both appearances, assigned delivery, busy queueing,
-self suppression, mention-chain suppression, persistence/Undo and guest rendering.
+self suppression, three-owner unmentioned agent comments producing zero turns/queue
+entries, explicit co-owner mention delivery, mention-chain suppression,
+persistence/Undo and guest rendering.

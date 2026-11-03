@@ -71,3 +71,17 @@ test('multiple assignees are visible and choices remove one owner at a time',()=
  assert.equal(w.document.getElementById('assignee-value').textContent,'Assign agents');
  dom.window.close();
 });
+
+test('missing plural owners each render one fallback instead of repeating the joined native label',()=>{
+ const dom=new JSDOM(readFileSync(new URL('../src/index.html',import.meta.url),'utf8'),{url:'file:///TaskEditor/index.html',runScripts:'outside-only',pretendToBeVisual:true});
+ const w=dom.window;
+ w.webkit={messageHandlers:{taskEditor:{postMessage:()=>{}}}};
+ w.eval(readFileSync(new URL('../../../Sources/ContinuumRevived/Resources/TaskEditor/editor.js',import.meta.url),'utf8'));
+ w.taskEditor.load({title:'Removed owners',body:'',attachments:[],columns:[],agents:[{id:'a',name:'Alpha',detail:''}],assigneeIDs:['a','removed'],assigneeID:'a',assigneeName:'Alpha, Unavailable agent'});
+ assert.equal(w.document.getElementById('assignee-value').textContent,'Alpha, Unavailable agent');
+ w.taskEditor.metadata({assigneeIDs:['a','removed','also-removed'],assigneeName:'Alpha, Unavailable agent, Unavailable agent'});
+ assert.equal(w.document.getElementById('assignee-value').textContent,'Alpha, Unavailable agent, Unavailable agent');
+ w.taskEditor.metadata({agents:[],assigneeIDs:['removed'],assigneeName:'Unavailable agent'});
+ assert.equal(w.document.getElementById('assignee-value').textContent,'Unavailable agent');
+ dom.window.close();
+});

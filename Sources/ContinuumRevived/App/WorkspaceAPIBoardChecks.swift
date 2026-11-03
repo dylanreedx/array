@@ -224,7 +224,17 @@ enum WorkspaceAPIBoardChecks {
     /// Driven through the production board provider (`configuredBoardRuntime`),
     /// so the real post-commit sync decides, against real agent tiles.
     private static func runComposerHandoff() throws {
-        let fixture = try WorkspaceAPIChecks.makeFixture()
+        var runners: [ScriptedAgentRunner] = []
+        let fixture = try WorkspaceAPIChecks.makeFixture(configureDelegate: { delegate in
+            let support = URL(fileURLWithPath: ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"]!)
+                .appendingPathComponent("multi-handoff-supervisor")
+            delegate.agentSupervisor = AgentSupervisor(
+                store: AgentStore(applicationSupportDirectory: support), makeRunner: { _ in
+                    let runner = ScriptedAgentRunner(script: [.sessionStateChanged(.ready), .turnStarted(threadId: "handoff", turnId: "send")], holdUntilStopped: true)
+                    runners.append(runner)
+                    return runner
+                })
+        })
         defer { fixture.tearDown() }
         let supervisor = fixture.delegate.qaAgentSupervisor
         let support = fixture.tempRoot.appendingPathComponent("composer-handoff", isDirectory: true)
@@ -243,9 +253,10 @@ enum WorkspaceAPIBoardChecks {
                 zPosition: .fromLegacyRank(3), runtimeRef: nil,
                 metadata: TileMetadata(launchProfileId: "managed"))
             let view = ManagedAgentTileNSView(tile: tile)
-            view.bindV2ComposerState(draftStore: drafts, promptHistory: AgentPromptHistory(), attachmentStore: attachments)
             view.attach(agentID: agentID, supervisor: supervisor)
             fixture.canvas.installProjectTile(tileView: view, for: tile, targetZoneId: fixture.zoneB)
+            fixture.delegate.wireManagedAgentTile(tileID, agentID: agentID)
+            view.bindV2ComposerState(draftStore: drafts, promptHistory: AgentPromptHistory(), attachmentStore: attachments)
             return (agentID, view)
         }
         let (caller, callerTile) = agentTile("Dark mode", x: 40)
@@ -316,7 +327,100 @@ enum WorkspaceAPIBoardChecks {
         try expect(kanban.onTaskAssign?(userTask, caller) == nil, "handoff: the user's Assign applies")
         try expect(pump(until: { chip(callerTile) == userTask }),
                    "handoff: a user assignment still stages the task in the agent's composer")
-        supervisor.stop(caller)
-        supervisor.stop(other)
+        let (third, thirdTile) = agentTile("Third owner", x: 1080)
+        defer { for agent in [caller, other, third] { supervisor.stop(agent) } }
+        guard let otherComposer = otherTile.qaPageZoomComposerView,
+              let thirdComposer = thirdTile.qaPageZoomComposerView else {
+            throw Failure(message: "multi-handoff: missing production composers")
+        }
+        let multiTask = try create("Together without sending")
+        _ = boardRuntime.apply(.setCardAssignees(id: multiTask, agents: [other, third, other]), to: boardID)
+        try expect(pump(until: { chip(otherTile) == multiTask && chip(thirdTile) == multiTask }),
+                   "multi-handoff: one user commit automatically stages every owner through the production post-commit path")
+        try expect(boardRuntime.board(id: boardID)?.card(multiTask)?.assignees == [other, third]
+                   && runners.allSatisfy { $0.prompts.isEmpty },
+                   "multi-handoff: duplicate owners normalize and automatic handoff never sends")
+        _ = try apply(["op": "unassign", "cardId": multiTask.uuidString, "assigneeAgentId": other.rawValue.uuidString], "remove first owner")
+        try expect(pump(until: { chip(otherTile) == nil }) && chip(thirdTile) == multiTask,
+                   "multi-handoff: API removal clears only the removed owner's chip")
+        // Keep BOTH owners assigned while the SECOND sends through the wired
+        // tile/composer/supervisor acceptance hook rather than calling advance directly.
+        let secondOwnerTask = try create("Second owner starts the shared task")
+        _ = boardRuntime.apply(.setCardAssignees(id: secondOwnerTask, agents: [other, third]), to: boardID)
+        try expect(pump(until: { chip(otherTile) == secondOwnerTask && chip(thirdTile) == secondOwnerTask && !thirdComposer.qaIsPreparingBoardTask }),
+                   "multi-handoff: both owners retain context before the second owner sends")
+        thirdComposer.composerRequestedSend(thirdComposer.textView)
+        try expect(pump(until: { boardRuntime.board(id: boardID)?.card(secondOwnerTask)?.columnId == columns[1].id })
+                   && boardRuntime.board(id: boardID)?.card(secondOwnerTask)?.assignees == [other, third],
+                   "multi-handoff: second owner's accepted composer send advances the task to Doing")
+        try expect(runners.reduce(0) { $0 + $1.prompts.count } == 1,
+                   "multi-handoff: only the explicit accepted send reaches a scripted runner")
+
+        let missing = AgentID(rawValue: UUID())
+        let staleTask = try create("Unavailable owner does not block a handoff")
+        _ = boardRuntime.apply(.setCardAssignees(id: staleTask, agents: [missing, other]), to: boardID)
+        try expect(pump(until: { chip(otherTile) == staleTask }),
+                   "multi-handoff: an unavailable first owner does not block another owner's automatic chip")
+        _ = try apply(["op": "unassign", "cardId": staleTask.uuidString, "assigneeAgentId": missing.rawValue.uuidString], "remove stale identity")
+        try expect(boardRuntime.board(id: boardID)?.card(staleTask)?.assignees == [other] && chip(otherTile) == staleTask,
+                   "multi-handoff: stale identity removal preserves the available owner's context")
+        _ = try apply(["op": "unassign", "cardId": staleTask.uuidString], "clear remaining owners")
+        try expect(pump(until: { chip(otherTile) == nil }), "multi-handoff: clear-all removes the remaining context")
+
+        // Hold the actual image-import completion, unassign during that await,
+        // then release it. The production post-commit task must clear a late chip.
+        let imageTask = try create("Remove while image preparation awaits")
+        let imageStore = BoardAttachmentStore(projectRoot: fixture.pbRoot)
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let png = bitmap.representation(using: .png, properties: [:])!
+        let validation = try AgentComposerImageValidation(validatedContentType: "image/png", pixelWidth: 4, pixelHeight: 4, byteCount: UInt64(png.count))
+        var image: BoardAttachment?
+        Task { image = try? await imageStore.importImage(png, filename: "assignment.png", validation: validation, boardID: boardID) }
+        try expect(pump(until: { image != nil }), "multi-handoff: task image uses the project attachment store")
+        let original = boardRuntime.board(id: boardID)!.card(imageTask)!
+        var imageContent = BoardTaskContent(card: original); imageContent.attachments = [image!]
+        _ = boardRuntime.apply(.editTask(id: imageTask, expected: BoardTaskContent(card: original), content: imageContent), to: boardID)
+        var resumeImport: CheckedContinuation<Void, Never>?
+        var importReleased = false
+        otherComposer.qaAfterBoardTaskImageImport = {
+            await withCheckedContinuation { resumeImport = $0 }
+            importReleased = true
+        }
+        defer { otherComposer.qaAfterBoardTaskImageImport = nil; resumeImport?.resume(); resumeImport = nil }
+        try expect(pump(until: { !otherComposer.qaIsPreparingBoardTask }), "multi-handoff: earlier composer preparation has completed before the image race")
+        _ = try apply(["op": "assign", "cardId": imageTask.uuidString, "assigneeAgentId": other.rawValue.uuidString], "assign image task")
+        try expect(pump(until: { resumeImport != nil }),
+                   "multi-handoff: editing one card does not busy unrelated owners; real task image import reaches its held completion")
+        _ = try apply(["op": "unassign", "cardId": imageTask.uuidString, "assigneeAgentId": other.rawValue.uuidString], "remove during image import")
+        try expect(pump(until: { chip(otherTile) == nil }), "multi-handoff: removal clears the in-progress context")
+        let continuation = resumeImport; resumeImport = nil; continuation?.resume()
+        try expect(pump(until: { importReleased && chip(otherTile) == nil && otherComposer.draft.imageAttachments.isEmpty }),
+                   "multi-handoff: completion cannot resurrect removed ownership or leave task images")
+        var restored: ContinuumRevivedCore.AgentComposerDraft?
+        var loadedDraft = false
+        Task {
+            try? await drafts.flushReportingFailure(agentID: other)
+            restored = await AgentComposerDraftStore(applicationSupportDirectory: support).load(for: other)
+            loadedDraft = true
+        }
+        try expect(pump(until: { loadedDraft }) && restored?.taskContext == nil && restored?.imageAttachments.isEmpty != false,
+                   "multi-handoff: removed context stays absent in the durable composer draft")
+        // Prepare remains deliberately first-owner-only. Removing existing chips
+        // here separates its observable effect from automatic assignment fanout.
+        let prepareTask = try create("Explicit Prepare opens first owner")
+        _ = boardRuntime.apply(.setCardAssignees(id: prepareTask, agents: [caller, other]), to: boardID)
+        try expect(pump(until: { chip(callerTile) == prepareTask && chip(otherTile) == prepareTask }), "multi-handoff: both Prepare-fixture owners first receive automatic context")
+        var prepareFinished = false
+        var prepareError: String?
+        Task { @MainActor in
+            await callerTile.clearBoardTask(boardID: boardID, cardID: prepareTask)
+            await otherTile.clearBoardTask(boardID: boardID, cardID: prepareTask)
+            prepareError = await kanban.onTaskPrepare?(prepareTask)
+            prepareFinished = true
+        }
+        try expect(pump(until: { prepareFinished }) && prepareError == nil
+                   && chip(callerTile) == prepareTask && chip(otherTile) == nil,
+                   "multi-handoff: explicit Prepare retains its intentional first-owner-only behavior")
+
     }
 }

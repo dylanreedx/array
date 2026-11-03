@@ -1707,6 +1707,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         draft.taskContext = nil; draft.revision &+= 1
         updateTaskContextRail(); updateAttachmentRail(); publishDraftChange()
     }
+    /// Suspends the real image import completion in deterministic assignment checks.
+    var qaAfterBoardTaskImageImport: (@MainActor () async -> Void)?
+    var qaIsPreparingBoardTask: Bool { isPreparingTask }
+
     /// Import a frozen task snapshot without changing the user's independent draft.
     func prepareBoardTask(
         boardID: UUID,
@@ -1755,6 +1759,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
             let stored = try await attachmentStore.importValidatedPastedImage(data, displayName: image.filename, validation: validation, forDraftOf: agentID)
             copied.append(stored.promptAttachment)
         }
+        if !card.attachments.isEmpty { await qaAfterBoardTaskImageImport?() }
         guard isCurrentBinding(agentID: agentID, generation: generation), pendingSubmittedLease == nil, actionTask == nil else {
             throw NSError(domain: "BoardTask", code: 4, userInfo: [NSLocalizedDescriptionKey: "The composer changed while importing. Try preparing again."])
         }

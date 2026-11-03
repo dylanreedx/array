@@ -23,7 +23,13 @@ final class BoardCommentDelivery {
               seen.insert(comment.id).inserted,
               let card = transaction.after.card(cardID) else { return }
         let candidates = supervisor.records.values.filter { $0.projectId == projectID && $0.archivedAt == nil && $0.capabilities.locallyManaged }
-        var recipients = Set(card.assignees)
+        // Human comments hand off to all owners. Agent progress stays in the
+        // thread unless it explicitly mentions someone; ownership alone must
+        // not turn co-owners' replies into a conversation of automatic turns.
+        let agentAuthored = actingAgent != nil || UUID(uuidString: comment.authorID) != nil
+        var recipients = agentAuthored ? Set<AgentID>() : Set(card.assignees)
+        if agentAuthored, let author = UUID(uuidString: comment.authorID).map({ AgentID(rawValue: $0) }),
+           card.assignees.contains(author) { recipients.insert(author) } // quiet_self
         for agent in candidates {
             let uuidMention = "@" + agent.id.rawValue.uuidString.lowercased()
             let text = comment.body.lowercased()

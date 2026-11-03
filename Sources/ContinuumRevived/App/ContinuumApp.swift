@@ -10732,8 +10732,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let contentChanged = old.map { BoardTaskContent(card: $0) } != new.map { BoardTaskContent(card: $0) }
             let taskFieldsEdited: Bool
             switch transaction.command {
-            case .editCard, .editTask, .editTaskFields, .setCardLinks:
-                taskFieldsEdited = true
+            case let .editCard(id, _, _), let .editTask(id, _, _),
+                 let .editTaskFields(id, _, _, _), let .setCardLinks(id, _):
+                taskFieldsEdited = id == cardID
             default:
                 taskFieldsEdited = false
             }
