@@ -83,7 +83,10 @@ enum TranscriptSavePerfChecks {
         // A burst: 220 finished turns per agent at once.
         let runs = 220
         let burstStart = mainThreadCPU()
-        for turn in 1...runs { for id in agentIDs { deliverTurn(supervisor, id, turn) } }
+        // Delivered in its own autorelease pool, so what the delivery autoreleases
+        // (the agent-record writes' Foundation objects) is freed with it, as each
+        // run-loop turn frees its own in the app, not in the next measured frame.
+        autoreleasepool { for turn in 1...runs { for id in agentIDs { deliverTurn(supervisor, id, turn) } } }
         print(String(format: "METRIC transcript-save agents=3 turns=%d burst delivery %.1fms", runs, ms(mainThreadCPU() - burstStart)))
         var fallout: [Double] = []
         var quiet = 0
@@ -111,7 +114,7 @@ enum TranscriptSavePerfChecks {
         var delivery: [Double] = [], rest: [Double] = []
         for turn in (runs + 1)...(runs + 90) {
             let before = mainThreadCPU()
-            for id in agentIDs { deliverTurn(supervisor, id, turn) }
+            autoreleasepool { for id in agentIDs { deliverTurn(supervisor, id, turn) } }
             delivery.append(ms(mainThreadCPU() - before))
             rest.append(await idleFrame())
         }

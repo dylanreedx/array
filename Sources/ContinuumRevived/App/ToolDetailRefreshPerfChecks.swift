@@ -13,8 +13,9 @@ import ContinuumRevivedCore
 /// - After a burst (220 tool runs per agent delivered at once to three agents'
 ///   captures), the main thread stays under 4 ms in every frame, and the
 ///   fallout totals under 50 ms. Before, every event read every record and the
-///   main thread freed each snapshot, for seconds. The supervisor's own fallout
-///   after the same burst is reported too; it also holds transcript saves.
+///   main thread freed each snapshot, for seconds. The whole supervisor after
+///   the same burst (tool detail and transcript saves together) stays under
+///   4 ms per frame too.
 /// - Paced: a tool run per agent every frame while the transcript is presented
 ///   each frame (as a tile does): under 4 ms per frame at p95.
 /// - Same output: each capture holds the store's own records, and every tool
@@ -131,7 +132,10 @@ enum ToolDetailRefreshPerfChecks {
 
         // A burst: every agent's tool runs at once.
         let runs = 220
-        for turn in 1...runs { for id in ids { deliverTurn(supervisor, id, turn) } }
+        // Delivered in its own autorelease pool, so what the delivery autoreleases
+        // (the agent-record writes' Foundation objects) is freed with it, as each
+        // run-loop turn frees its own in the app, not in the next measured frame.
+        autoreleasepool { for turn in 1...runs { for id in ids { deliverTurn(supervisor, id, turn) } } }
         var fallout: [Double] = []
         var quiet = 0
         let started = ContinuousClock.now
@@ -141,10 +145,12 @@ enum ToolDetailRefreshPerfChecks {
             quiet = spent < 0.25 ? quiet + 1 : 0
         }
         let settled = ContinuousClock.now - started
-        // Reported, not asserted: this fallout also holds the supervisor's
-        // transcript saves, one captured document per finished turn.
+        // The whole supervisor after the burst: tool detail and transcript saves
+        // together (`--transcript-save-perf-check` owns the saves' share).
         print("METRIC tool-detail-refresh supervisor agents=3 runs=\(runs) after-burst per-frame \(stats(fallout)) settled=\(String(format: "%.0f", ms(settled)))ms")
         try expect(quiet >= 5, "the main thread never went quiet within 30 s of the burst")
+        try expect(fallout.max() ?? 0 < frameBudgetMilliseconds, String(format:
+            "after a burst one frame spent %.3f ms of the supervisor's main-thread time, over the %.1f ms budget", fallout.max() ?? 0, frameBudgetMilliseconds))
         try await sameOutput(supervisor, ids, "after the burst", runs: runs)
 
         // Paced: a tool run per agent per frame, the transcript presented each
