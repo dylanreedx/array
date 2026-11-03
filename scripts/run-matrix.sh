@@ -622,7 +622,7 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --shared-tile-render-check
   run_app_check .build/debug/Array --portal-kinds-check
   # Host vs guest of each shared kind through the production share path
-  # (view classes, elements, pixels; light and dark). KNOWN-RED below.
+  # (view classes, elements, pixels; light and dark).
   run_app_check .build/debug/Array --shared-tile-parity-check
   run_app_check .build/debug/Array --portal-board-check
   run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
@@ -1588,7 +1588,7 @@ run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
 run_app_check .build/debug/Array --shared-tile-render-check
 run_app_check .build/debug/Array --portal-kinds-check
 # Host vs guest of each shared kind through the production share path: view
-# classes, rendered elements and pixels, light and dark (KNOWN-RED below).
+# classes, rendered elements and pixels, light and dark.
 run_app_check .build/debug/Array --shared-tile-parity-check
 run_app_check .build/debug/Array --portal-board-check
 run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
