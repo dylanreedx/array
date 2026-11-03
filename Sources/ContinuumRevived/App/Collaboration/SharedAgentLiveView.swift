@@ -394,8 +394,12 @@ final class SharedAgentLiveView: NSView {
         guard strip.action.presentation.primaryAction == .send else { return }
         strip.composer.composerRequestedSend(strip.composer.textView)
     }
-    /// The Send button, pressed. Checks drive the real control.
-    func qaPressSend() { send.sendAction(send.action, to: send.target) }
+    /// The Send button the guest sees, pressed: the host chrome's when it is
+    /// drawn, else the projection view's own. Checks drive the real control.
+    func qaPressSend() {
+        if showsChrome { strip.action.sendAction(strip.action.action, to: strip.action.target) }
+        else { send.sendAction(send.action, to: send.target) }
+    }
 
     /// Fire-and-forget from the composer; only a service-queued prompt clears
     /// the draft. Anything else leaves it to send again.

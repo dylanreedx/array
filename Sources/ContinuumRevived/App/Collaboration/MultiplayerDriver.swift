@@ -457,10 +457,12 @@ final class MultiplayerDriver {
             } else {
                 try await eventually("the shared view offers its composer") { liveView?.offersComposer == true }
                 guard let live = liveView else { throw Failure(description: "no shared agent view") }
-                live.composer.apply(AgentComposerDraft(text: text, selection: NSRange(location: (text as NSString).length, length: 0), revision: 1))
+                // The composer the guest sees: the host chrome's strip once it is drawn.
+                let composer = live.activeComposer
+                composer.apply(AgentComposerDraft(text: text, selection: NSRange(location: (text as NSString).length, length: 0), revision: 1))
                 live.qaPressSend()
                 // Sent: the composer clears once the relay holds it.
-                try await eventually("the prompt left the composer", timeout: 30) { live.composer.draft.text.isEmpty }
+                try await eventually("the prompt left the composer", timeout: 30) { composer.draft.text.isEmpty }
             }
             return [:]
 
