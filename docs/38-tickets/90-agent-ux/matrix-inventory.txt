@@ -103,6 +103,7 @@ check --canvas-zoom-momentum-check
 check --character-perf-check
 check --character-settings-check
 check --character-size-check
+check --character-sounds-check
 check --character-sprite-check
 check --character-themes-live-check
 check --checks-never-take-focus-check
@@ -564,6 +565,7 @@ leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
 leg run_app_check .build/debug/Array --character-perf-check
 leg run_app_check .build/debug/Array --character-settings-check
 leg run_app_check .build/debug/Array --character-size-check
+leg run_app_check .build/debug/Array --character-sounds-check
 leg run_app_check .build/debug/Array --character-sprite-check
 leg run_app_check .build/debug/Array --character-themes-live-check
 leg run_app_check .build/debug/Array --checks-never-take-focus-check
@@ -992,7 +994,7 @@ count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 201
+count ContinuumRevivedCoreChecks 203
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
