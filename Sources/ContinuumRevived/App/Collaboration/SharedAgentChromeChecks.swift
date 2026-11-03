@@ -233,12 +233,15 @@ enum SharedAgentChromeChecks {
         characters.userThemesChangedOnDisk()
 
         // Turn ends: status, Stop and tail follow, and still agree.
+        let checkpointsBefore = publisher.checkpoints, framesBefore = guest.transcriptView.appliedFrames
         deliver(.itemCompleted(threadId: thread, itemId: "cmd-1", kind: .commandExecution, status: .completed))
         deliver(.turnCompleted(threadId: thread, turnId: "t1", outcome: .completed, errorMessage: nil))
         try await sync()
         print("after the turn: published \(publisher.publishedChrome?.header.stateLabel ?? "nil"), guest \(guest.chrome?.header.stateLabel ?? "nil"), supervisor \(String(describing: supervisor.turnSnapshot(for: agent)?.state)), error \(String(describing: publisher.lastError)), chrome ops \(publisher.chromeOps)")
         try compareFacts("after the turn")
         try expect(guestTile.qaChromeFacts["action.kind"] != "stop", "the Stop goes when the host's turn ends")
+        try expect(publisher.checkpoints == checkpointsBefore && guest.transcriptView.appliedFrames > framesBefore,
+                   "the turn's end reached the guest's chrome in streamed frames, not a new checkpoint (\(publisher.checkpoints - checkpointsBefore) checkpoints, \(guest.transcriptView.appliedFrames - framesBefore) frames)")
 
         // A late joiner and a resnapshot get the chrome and the set from the checkpoint alone.
         SharedAgentCharacterSets.qaReset()
