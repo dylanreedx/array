@@ -1228,6 +1228,10 @@ final class AgentSupervisor {
     /// while avoiding a fresh Pi/Node/resource-loader startup on every message.
     private var idleSessionRunners: [AgentID: AgentRunning] = [:]
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
+    /// How many events each agent's tails have been sent. A local notice is
+    /// stamped with it, so a tile still reading its tail can place the notice
+    /// after exactly the events that preceded it (`AgentLocalNotice.afterEvent`).
+    private var tailEventCount: [AgentID: UInt64] = [:]
     private var history: [AgentID: [AgentRuntimeEvent]] = [:]
     /// C4: the semantic document, built here so it exists whether or not any
     /// tile is attached — a tile-less child (the common case at fan-out) used
@@ -7570,7 +7574,8 @@ final class AgentSupervisor {
         transcriptProjections[id] = projection
         scheduleTranscriptPersist(for: id, final: true)
         for observe in (localNoticeObservers[id] ?? [:]).values {
-            observe(AgentLocalNotice(id: noticeID, title: "", body: "", screenshot: metadata))
+            observe(AgentLocalNotice(id: noticeID, title: "", body: "", screenshot: metadata,
+                                     afterEvent: tailEventCount[id] ?? 0))
         }
     }
 
@@ -8782,6 +8787,9 @@ final class AgentSupervisor {
         var snapshot: ManagedAgentTranscriptModel?
         /// Events strictly after the snapshot/recent-events boundary.
         var tail: AsyncStream<AgentRuntimeEvent>
+        /// The `tailEventCount` the tail's first event follows: a reader that
+        /// counts from here knows how far it has read in notice stamps.
+        var tailBase: UInt64 = 0
     }
 
     /// Whether `transcriptAttachment` returns a semantic snapshot boundary. Without
@@ -8936,7 +8944,9 @@ final class AgentSupervisor {
                 Task { @MainActor in self?.removeSubscriber(token, for: id) }
             }
         }
-        return TranscriptAttachment(snapshot: snapshot, tail: tail)
+        // A compatibility replay is counted as already read: at worst a notice
+        // shows a few replayed events early, as it did before, never late.
+        return TranscriptAttachment(snapshot: snapshot, tail: tail, tailBase: tailEventCount[id] ?? 0)
     }
 
     /// Snapshot-then-tail, per `ActivityStore.subscribe()`: the buffered history is
@@ -9217,7 +9227,7 @@ final class AgentSupervisor {
         // persisted projection, so `/status` showed a bubble, dropped the gyro
         // and said nothing until the tile next re-attached.
         for observe in (localNoticeObservers[id] ?? [:]).values {
-            observe(AgentLocalNotice(id: noticeID, title: title, body: body))
+            observe(AgentLocalNotice(id: noticeID, title: title, body: body, afterEvent: tailEventCount[id] ?? 0))
         }
         guard transcriptStore != nil else { return }
         var projection = transcriptProjection(for: id)
@@ -10394,6 +10404,7 @@ final class AgentSupervisor {
                 pendingWatchedArrival.2, pendingWatchedArrival.3)
         }
 
+        tailEventCount[id, default: 0] &+= 1
         for continuation in (subscribers[id] ?? [:]).values {
             continuation.yield(event)
         }
@@ -10893,6 +10904,9 @@ struct AgentLocalNotice: Equatable {
     let title: String
     let body: String
     var screenshot: AgentImageAttachmentMetadata? = nil
+    /// The agent's `tailEventCount` when the notice was written: it belongs
+    /// after that many tail events, and before the next.
+    var afterEvent: UInt64 = 0
 }
 
 /// A runner that emits a fixed script instead of spawning Pi. `holdUntilStopped`

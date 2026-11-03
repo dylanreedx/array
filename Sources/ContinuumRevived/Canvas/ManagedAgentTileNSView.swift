@@ -227,6 +227,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var capabilityObserverToken: UUID?
     private var promptEchoObserverToken: UUID?
     private var localNoticeObserverToken: UUID?
+    /// How far this tile has read its supervisor tail, in the supervisor's
+    /// `tailEventCount`, and the notices written ahead of that point. A notice
+    /// arrives at once; the events before it may still be queued in the tail.
+    private var tailEventsRead: UInt64 = 0
+    private var noticesAheadOfTail: [AgentLocalNotice] = []
     private var outsideHistoryObserverToken: UUID?
     private var runtimeObservationObserverToken: UUID?
     private var sharedToolDetailObserverToken: UUID?
@@ -872,14 +877,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             if let token = localNoticeObserverToken { supervisor.removeLocalNoticeObserver(token, for: agentID) }
             localNoticeObserverToken = supervisor.addLocalNoticeObserver(for: agentID) { [weak self] notice in
                 guard let self, self.attachedAgentID == agentID else { return }
-                if let image = notice.screenshot {
-                    try? self.model.appendBrowserScreenshot(id: notice.id, metadata: image)
-                } else {
-                    self.model.appendNotice(id: notice.id, title: notice.title, text: notice.body)
-                }
-                self.synchronizeV2Transcript(final: true)
-                self.refreshCompactStatus()
-                self.refreshTranscriptThinkingIndicator()
+                // In order: after the events written before it, which this
+                // tile may not have read yet. Appending it now put a screenshot
+                // mid-transcript here and last in the saved document.
+                self.noticesAheadOfTail.append(notice)
+                self.appendNoticesReachedByTail()
             }
             if let v2AttachmentStore { composer.bindAttachmentStore(v2AttachmentStore, agentID: agentID) }
             if let v2DraftStore { composer.bindDraftStore(v2DraftStore, agentID: agentID) }
@@ -935,6 +937,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             if supervisor.rehydratedTranscript(for: agentID) != nil { hasRenderedRehydratedSession = true }
         }
         let stream = attachment.tail
+        tailEventsRead = attachment.tailBase
+        noticesAheadOfTail.removeAll()
         eventSubscription = Task { @MainActor [weak self] in
             for await event in stream {
                 guard let self else { break }
@@ -947,7 +951,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 // display-routing convenience.
                 self.ingest(bound, originalEvent: event)
                 self.onIngestedEvent?(bound)
+                self.tailEventsRead &+= 1
+                if !self.noticesAheadOfTail.isEmpty { self.appendNoticesReachedByTail() }
             }
+            // The tail ended (the agent was removed): nothing more precedes them.
+            if let self, !Task.isCancelled { self.appendNoticesReachedByTail(all: true) }
         }
         // A restored agent may have a prior transcript the supervisor already
         // read from its session file. Render it directly (display-only, see
@@ -958,6 +966,25 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
         refreshTranscriptThinkingIndicator()
         refreshFaceSwitch()
+    }
+
+    /// Appends, oldest first, every waiting notice whose preceding events this
+    /// tile has read (`all`: every waiting notice).
+    private func appendNoticesReachedByTail(all: Bool = false) {
+        var appended = false
+        while let notice = noticesAheadOfTail.first, all || notice.afterEvent <= tailEventsRead {
+            noticesAheadOfTail.removeFirst()
+            if let image = notice.screenshot {
+                try? model.appendBrowserScreenshot(id: notice.id, metadata: image)
+            } else {
+                model.appendNotice(id: notice.id, title: notice.title, text: notice.body)
+            }
+            appended = true
+        }
+        guard appended else { return }
+        synchronizeV2Transcript(final: true)
+        refreshCompactStatus()
+        refreshTranscriptThinkingIndicator()
     }
 
     /// Install the supervisor-owned semantic truth before following its live tail.
