@@ -88,6 +88,7 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
     /// than one line of text.
     public var body: String
     public var links: [CardLink]
+    public var comments: [BoardComment] = []
     public var attachments: [BoardAttachment]
     /// The agent this task is assigned to. Distinct from a `CardLink.agent`:
     /// a link is one of many references, an assignee is a singular
@@ -120,7 +121,7 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
         self.updatedAt = updatedAt
     }
     private enum CodingKeys: String, CodingKey {
-        case id, columnId, position, title, body, links, attachments, assignee, createdAt, updatedAt
+        case id, columnId, position, title, body, links, attachments, comments, assignee, createdAt, updatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -131,6 +132,7 @@ public struct BoardCard: Codable, Equatable, Sendable, Identifiable {
         title = try c.decode(String.self, forKey: .title)
         body = try c.decodeIfPresent(String.self, forKey: .body) ?? ""
         links = try c.decodeIfPresent([CardLink].self, forKey: .links) ?? []
+        comments = try c.decodeIfPresent([BoardComment].self, forKey: .comments) ?? []
         attachments = try c.decodeIfPresent([BoardAttachment].self, forKey: .attachments) ?? []
         assignee = try c.decodeIfPresent(AgentID.self, forKey: .assignee)
         createdAt = try c.decode(Date.self, forKey: .createdAt)

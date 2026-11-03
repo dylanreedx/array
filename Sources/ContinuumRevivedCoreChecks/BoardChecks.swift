@@ -19,6 +19,7 @@ import Foundation
 //       claim of the ticket, stated as a byte comparison.
 
 func runBoardChecks() {
+    runBoardCommentCheck()
     runBoardOrderingDeterminismCheck()
     runBoardPrecisionExhaustionCheck()
     runBoardInverseCheck()
@@ -766,4 +767,27 @@ private func runBoardTaskContentCheck() {
         expect(decoded == draft, "B13: prepared context survives a draft round trip")
         expect(decoded.text == "My instructions" && context.promptText(additionalInstructions: decoded.text).contains("Detailed **task**"), "B13: context stays separate until prompt assembly")
     } catch { expect(false, "B13: draft round trip: \(error)") }
+}
+
+private func runBoardCommentCheck() {
+    let (board, _, _) = makeFixture()
+    guard let card = board.cards.first else { fatalError("comment fixture requires a card") }
+    let comment = BoardComment(authorID: "local", authorName: "You", createdAt: Date(timeIntervalSince1970: 100), body: "**Progress**")
+    let added = applyOrFail(.addComment(cardID: card.id, comment: comment), to: board, "comment add")
+    expect(added.after.card(card.id)?.comments == [comment], "comment add preserves attribution and markdown")
+    let undone = applyOrFail(added.inverse, to: added.after, "comment undo")
+    expect(undone.after.card(card.id)?.comments.isEmpty == true, "comment inverse removes comment")
+    let edited = applyOrFail(.editComment(cardID: card.id, commentID: comment.id, authorID: "local", body: "Updated"), to: added.after, "comment edit")
+    expect(edited.after.card(card.id)?.comments.first?.body == "Updated", "comment edit changes body")
+    let reverted = applyOrFail(edited.inverse, to: edited.after, "comment edit undo")
+    expect(reverted.after.card(card.id)?.comments == [comment], "comment edit inverse restores body")
+    switch BoardEngine.apply(.deleteComment(cardID: card.id, commentID: comment.id, authorID: "other"), to: added.after, now: Date()) {
+    case .success: expect(false, "another author cannot delete comment")
+    case .failure: break
+    }
+    do {
+        let bytes = try JSONEncoder().encode(added.after)
+        let restored = try JSONDecoder().decode(Board.self, from: bytes)
+        expect(restored.card(card.id)?.comments == [comment], "comment survives board encoding")
+    } catch { fatalError("comment persistence: \(error)") }
 }

@@ -140,6 +140,12 @@ public enum WorkspaceAPIExposure {
         "board.revision": .internal, // Concurrency token, bumped only by BoardEngine.
         "board.columns": .notExposed("Column structure stays user-managed; board.manage create uses the default columns."),
         "board.cards": .exposed(.boardApply),
+        "boardCard.comments": .notExposed("Comment API integration pending."),
+        "boardComment.id": .internal,
+        "boardComment.authorID": .internal,
+        "boardComment.authorName": .internal,
+        "boardComment.createdAt": .internal,
+        "boardComment.body": .notExposed("Comment API integration pending."),
     ]
 
     public static func violations(

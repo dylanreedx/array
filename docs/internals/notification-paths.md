@@ -552,3 +552,14 @@ large paired-phone bootstrap and byte bounds described under PUB-04/PUB-05.
 IOS-03 now reads authenticated task.batch.v1 events through the existing relay poll, independently of the legacy activity demux. Relay receipt time survives replay; a higher cursor with a lower task revision cannot replace newer state. Unknown/restarted work stays visibly unconfirmed. The exact notification task shows succeeded/running/queued/blocked participants and links to unfinished agents; current conversation may include newer work and does not redefine the old task. Missing task history, absent agent, old agent-only payloads and unpaired/foreign-instance links have explicit unavailable paths. Freshness remains visible on detail. Silent background fetch (IOS-04) does not navigate. Cold launch buffers navigation only; it does not replay an approval or execute a reply.
 
 Core --companion-agent-destination-check and Sync --companion-task-publication-check cover identity, old-task/new-agent isolation, unknown restart, receipt freshness and actual URLSession task-poll delivery. Relay integration checks inspect the persisted fake-APNs request's exact destination. Matrix registration is required; source wiring alone does not prove cold-launch/foreground phone rendering. Text reply remains unimplemented: current relay command capabilities accept approval/stop only, and hosted per-phone encryption/authoritative session ACK require a new contract.
+
+### BOARD-COMMENT-AGENT — proposed, not implemented
+
+A newly committed card comment should notify its assigned agent and explicitly
+mentioned agents through the existing agent-message queue: idle starts a turn;
+busy queues without interrupting. The payload should contain board/card IDs,
+card title, the new comment and a bounded recent-thread excerpt. Suppress the
+originating agent and cap inherited agent-to-agent chains. Missing/deleted or
+unavailable agents should leave the durable comment visible and report failed
+delivery; Undo and edits should not redispatch. This path is design only: the
+comment storage foundation does not deliver notifications.

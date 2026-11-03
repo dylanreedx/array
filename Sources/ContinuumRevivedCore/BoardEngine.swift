@@ -19,6 +19,9 @@ public enum BoardCommand: Equatable, Sendable {
     /// barrier, one revision, and one undo even when body, links and ownership
     /// are supplied together.
     case createTask(id: UUID, columnId: UUID, title: String, body: String, links: [CardLink], assignee: AgentID?, after: UUID?, before: UUID?)
+    case addComment(cardID: UUID, comment: BoardComment)
+    case editComment(cardID: UUID, commentID: UUID, authorID: String, body: String)
+    case deleteComment(cardID: UUID, commentID: UUID, authorID: String)
     case editCard(id: UUID, title: String?, body: String?)
     /// Atomic task field edit used by non-UI surfaces. Attachments remain owned
     /// by the detail editor and are preserved verbatim.
@@ -139,6 +142,25 @@ public enum BoardEngine {
                 title: title, body: body, links: links, assignee: assignee,
                 createdAt: now, updatedAt: now))
             inverse = .deleteCard(id: id)
+
+        case let .addComment(cardID, comment):
+            guard let i = next.cards.firstIndex(where: { $0.id == cardID }) else { return .failure(.unknownCard(cardID)) }
+            guard !next.cards[i].comments.contains(where: { $0.id == comment.id }) else { return .failure(.contentConflict) }
+            next.cards[i].comments.append(comment)
+            next.cards[i].comments.sort { $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt }
+            next.cards[i].updatedAt = now
+            inverse = .deleteComment(cardID: cardID, commentID: comment.id, authorID: comment.authorID)
+        case let .editComment(cardID, commentID, authorID, body):
+            guard let i = next.cards.firstIndex(where: { $0.id == cardID }) else { return .failure(.unknownCard(cardID)) }
+            guard let j = next.cards[i].comments.firstIndex(where: { $0.id == commentID && $0.authorID == authorID }) else { return .failure(.contentConflict) }
+            inverse = .editComment(cardID: cardID, commentID: commentID, authorID: authorID, body: next.cards[i].comments[j].body)
+            next.cards[i].comments[j].body = body
+            next.cards[i].updatedAt = now
+        case let .deleteComment(cardID, commentID, authorID):
+            guard let i = next.cards.firstIndex(where: { $0.id == cardID }) else { return .failure(.unknownCard(cardID)) }
+            guard let j = next.cards[i].comments.firstIndex(where: { $0.id == commentID && $0.authorID == authorID }) else { return .failure(.contentConflict) }
+            inverse = .addComment(cardID: cardID, comment: next.cards[i].comments.remove(at: j))
+            next.cards[i].updatedAt = now
 
         case let .editCard(id, title, body):
             guard let index = next.cards.firstIndex(where: { $0.id == id }) else {
