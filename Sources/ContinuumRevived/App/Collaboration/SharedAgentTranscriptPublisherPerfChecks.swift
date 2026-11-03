@@ -225,6 +225,8 @@ enum SharedAgentTranscriptPublisherPerfChecks {
         let supervisor = fixture.supervisor, agent = fixture.ids[0], thread = AgentSupervisor.threadId(for: agent)
         let offMainSink = RecordingSink(), referenceSink = RecordingSink()
         let offMain = SharedAgentTranscriptPublisher(supervisor: supervisor, agent: agent, generation: 1, sink: offMainSink)
+        // The main stream carries the tile's chrome, as `init(supervisor:)` wires it.
+        let chromeBuilder = SharedAgentChromeBuilder(supervisor: supervisor, agent: agent)
         // The pre-move publish: the synchronous walk, planned on the main actor.
         // Everything else as `init(supervisor:)` wires it.
         let reference = SharedAgentTranscriptPublisher(agent: agent, generation: 1, sink: referenceSink,
@@ -233,6 +235,7 @@ enum SharedAgentTranscriptPublisherPerfChecks {
                 (supervisor?.sharedTranscriptToolBlocks(for: agent) ?? [:]).compactMapValues { SharedAgentToolPresentation(presented: $0) }
             }, detailRevision: { [weak supervisor] in supervisor?.sharedTranscriptDetailRevision(for: agent) },
             imageData: { [weak supervisor] document in await supervisor?.sharedTranscriptImages(for: agent, document: document) ?? [:] },
+            chrome: { chromeBuilder.build() },
             document: { [weak supervisor] in supervisor?.transcriptDocument(for: agent) })
         reference.qaPlansOnMainActor = true
 
