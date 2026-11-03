@@ -27,6 +27,18 @@ With those tools, agents can discover the workspace, open documents, work with b
 
 Managed mode is on by default. A lead plans work and can hand tasks to helpers shown inside its sidebar card. Helpers can be popped out, folded back, or pinned. Change the setting in **Settings → Agents → Managed mode**. The Managed badge can be hidden there too.
 
+## Helper updates
+
+A lead can hear when an Array helper finishes, fails, or is stopped, including helpers reached by message. Updates arriving within eight seconds are grouped into one short lead turn. A busy lead receives the update through its queue after its current turn. Reports include the helper’s name, outcome, short report or a capped final message, and error text when it fails.
+
+In the lead’s sidebar menu, **Wake me when helpers finish** controls this behavior for that lead. It defaults on for Managed leads and off for plain agents. Changing it keeps the same agent, harness, model and session. Off, the lead can still collect results with `wait_agents`; message handles return their actual settled outcome too.
+
+Temporary provider failures—overload, rate limits, HTTP 5xx errors or dropped streams—get up to two host retries in the helper’s existing session. The lead receives the final result, including “failed after 2 retries” if both retries fail. Errors from the helper’s work do not trigger a retry. The separate ten-minute no-progress watchdog still alerts the lead about stuck helpers.
+
+Each update spends a lead turn. Grouping and short reports keep that cost small, and avoid spending turns on periodic polling. These model messages add no direct Mac or phone notification.
+
+This workflow is inspired by [Duckherd](https://github.com/AliAlsalkhadi/duckherd), created by Ali Alsalkhadi: a lead plans, helpers do the work, and short reports bring the lead back to whatever is ready next.
+
 ## Give a useful task
 
 Include the goal, relevant paths, constraints, and the outcome you want to review:
