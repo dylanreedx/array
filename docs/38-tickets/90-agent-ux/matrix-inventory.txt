@@ -167,6 +167,7 @@ check --gesture-telemetry-check
 check --helper-command-evidence-check
 check --helper-completion-check
 check --helper-message-result-check
+check --helper-provider-retry-check
 check --helper-retry-check
 check --helper-tile-auto-fold-check
 check --helper-tile-cap-check
@@ -585,6 +586,7 @@ leg run_app_check .build/debug/Array --gesture-telemetry-check
 leg run_app_check .build/debug/Array --helper-command-evidence-check
 leg run_app_check .build/debug/Array --helper-completion-check
 leg run_app_check .build/debug/Array --helper-message-result-check
+leg run_app_check .build/debug/Array --helper-provider-retry-check
 leg run_app_check .build/debug/Array --helper-retry-check
 leg run_app_check .build/debug/Array --helper-tile-auto-fold-check
 leg run_app_check .build/debug/Array --helper-tile-cap-check

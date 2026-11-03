@@ -1,8 +1,77 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 @MainActor
 enum HelperCompletionChecks {
+    static func runRetries() async throws {
+        let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "helper provider retry check")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+        let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-provider-retry")
+        defer { bench.tearDown() }
+        let s = bench.supervisor, parent = bench.f.agentId
+        var terminalCounts: [AgentID: Int] = [:]
+        let observer = s.addDeliveredEventObserver { id, event in
+            if case .turnCompleted = event { terminalCounts[id, default: 0] += 1 }
+        }
+        defer { s.removeDeliveredEventObserver(observer) }
+        s.helperProviderRetryDelay = 10_000_000
+        s.helperCompletionEnabled = { _ in true }
+        var now = Date()
+        s.helperCompletionNow = { now }
+        let setup = """
+                key = os.environ.get("ARRAY_AGENT_ID") or str(os.getpid())
+                statefile = os.path.join(os.getcwd(), "retry-" + key + ".json")
+                mode, attempt = None, 0
+                if os.path.exists(statefile):
+                    with open(statefile) as saved:
+                        mode, attempt = json.load(saved)
+                if not any(line == "Helper turn updates" for line in str(text).splitlines()):
+                    for candidate in ["RETRY-SUCCESS", "RETRY-EXHAUST", "RETRY-WORK", "RETRY-RATE", "RETRY-HTTP", "RETRY-HTTP501", "RETRY-STREAM"]:
+                        if candidate in str(text):
+                            mode = candidate
+                if mode:
+                    attempt += 1
+                    with open(statefile, "w") as saved:
+                        json.dump([mode, attempt], saved)
+        """
+        let end = """
+                if mode and (mode == "RETRY-EXHAUST" or mode == "RETRY-WORK" or attempt < 3):
+                    error = {"RETRY-WORK": "helper work assertion failed", "RETRY-RATE": "rate limited", "RETRY-HTTP": "HTTP 503", "RETRY-HTTP501": "HTTP 501", "RETRY-STREAM": "stream disconnected"}.get(mode, "serverOverloaded")
+                    emit({"type": "turn_end", "message": {"role": "assistant", "stopReason": "error", "errorMessage": error}})
+                else:
+                    emit({"type": "turn_end", "message": {"role": "assistant"}})
+        """
+        var script = WorkspaceAgentReportChecks.fakePi
+        script = script.replacingOccurrences(of: "        with open(os.path.join(os.getcwd(), \"prompts.log\"), \"a\") as log:", with: setup + "\n        with open(os.path.join(os.getcwd(), \"prompts.log\"), \"a\") as log:")
+        script = script.replacingOccurrences(of: "        emit({\"type\": \"turn_end\", \"message\": {\"role\": \"assistant\"}})", with: end)
+        try script.write(to: bench.binDir.appendingPathComponent("pi"), atomically: true, encoding: .utf8)
+        for (marker, expectedRetries, expectedOutcome) in [("RETRY-SUCCESS", 2, AgentTerminalOutcome.succeeded), ("RETRY-EXHAUST", 2, .failed), ("RETRY-WORK", 0, .failed), ("RETRY-RATE", 2, .succeeded), ("RETRY-HTTP", 2, .succeeded), ("RETRY-HTTP501", 2, .succeeded), ("RETRY-STREAM", 2, .succeeded)] {
+            let child = try bench.delegate(marker)
+            let settled = await waitUntil(timeout: 20, pollInterval: 0.02) { !s.isRunning(child) && s.records[child]?.latestTerminalEvent != nil }
+            try HelperGuardChecks.expect(settled, "retry helper did not settle")
+            try HelperGuardChecks.expect((s.helperProviderRetryCounts[child] ?? 0) == expectedRetries, "\(marker): wrong retry count")
+            try HelperGuardChecks.expect(terminalCounts[child] == 1, "intermediate retry terminal reached production subscribers")
+            try HelperGuardChecks.expect(s.records[child]?.latestTerminalEvent?.outcome == expectedOutcome, "\(marker): wrong final outcome")
+            now.addTimeInterval(9)
+            await s.flushHelperCompletions()
+            let idle = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(parent) }
+            try HelperGuardChecks.expect(idle, "lead did not finish update")
+            let log = try String(contentsOf: URL(fileURLWithPath: s.records[parent]!.cwd).appendingPathComponent("prompts.log"), encoding: .utf8)
+            let updates = log.split(separator: "\n").compactMap { try? JSONDecoder().decode(String.self, from: Data($0.utf8)) }.filter { $0.components(separatedBy: "\n").contains("Helper turn updates") && $0.contains(child.rawValue.uuidString) }
+            try HelperGuardChecks.expect(updates.count == 1, "intermediate failure leaked or final wake repeated")
+            if marker == "RETRY-EXHAUST" { try HelperGuardChecks.expect(updates[0].contains("failed after 2 retries: serverOverloaded"), "exhausted retries missing from report") }
+            if marker == "RETRY-SUCCESS" { try HelperGuardChecks.expect(updates[0].contains("succeeded") && !updates[0].contains("failed:"), "successful retry was reported failed") }
+        }
+        s.helperProviderRetryDelay = 5_000_000_000
+        let stopped = try bench.delegate("RETRY-EXHAUST-stop")
+        let waiting = await waitUntil(timeout: 15, pollInterval: 0.02) { s.helperProviderRetryCounts[stopped] == 1 }
+        try HelperGuardChecks.expect(waiting && s.isRunning(stopped), "retry pause was not held open")
+        s.stop(stopped)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        try HelperGuardChecks.expect(!s.isRunning(stopped) && s.helperProviderRetryCounts[stopped] == 1
+            && s.records[stopped]?.latestTerminalEvent?.outcome == .interrupted, "Stop did not cancel pending retry")
+    }
     static func runSetting() async throws {
         let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-wake-setting")
         defer { bench.tearDown() }
@@ -100,7 +169,9 @@ enum HelperCompletionChecks {
         let child = try bench.delegate("HOLD-first")
         let started = await waitUntil(timeout: 15, pollInterval: 0.02) { s.isRunning(child) }
         try HelperGuardChecks.expect(started, "helper did not start")
-        _ = s.fileReport(.init(summary: "WAKE-REPORT"), for: child)
+        _ = s.fileReport(.init(summary: "WAKE-REPORT",
+            findings: Array(repeating: .init(level: .note, text: String(repeating: "detail ", count: 55)), count: 6),
+            detailsPath: "WAKE-DETAILS"), for: child)
         finish(child, "first")
         now.addTimeInterval(7)
         await s.flushHelperCompletions()
@@ -116,6 +187,8 @@ enum HelperCompletionChecks {
         }
         let received = await waitUntil(timeout: 15, pollInterval: 0.02) { log().contains("WAKE-REPORT") && !s.isRunning(parent) }
         try HelperGuardChecks.expect(received, "idle lead did not receive helper report")
+        try HelperGuardChecks.expect(log().contains("WAKE-DETAILS") && log().components(separatedBy: "detail ").count - 1 == 330,
+            "structured report was truncated in the lead update")
         finish(child, "first")
         now.addTimeInterval(9)
         await s.flushHelperCompletions()

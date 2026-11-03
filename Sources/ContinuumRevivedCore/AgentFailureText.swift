@@ -12,6 +12,17 @@ public protocol AgentRunFailureDescribing: Error {
 
 /// Bounded, redacted failure words from what a provider CLI actually said.
 public enum AgentFailureText {
+    /// Provider terminal failures eligible for bounded host continuation. Tool
+    /// output and model reports never use this classification path.
+    public static func isTransientProviderFailure(_ raw: String) -> Bool {
+        let text = raw.lowercased()
+        if ["serveroverloaded", "server overloaded", "rate_limit", "ratelimit", "rate limit",
+            "streamdisconnected", "stream disconnected", "stream interrupted", "stream closed",
+            "connection reset", "unexpected eof"].contains(where: text.contains) { return true }
+        return text.range(of: #"(?:^|(?:http(?: error)?|status(?: code)?|error code)[\s:=]+)(?:429|5[0-9]{2})\b"#,
+                          options: .regularExpression) != nil
+    }
+
     /// The last few non-empty stderr lines, ANSI-stripped, redacted, bounded.
     /// stderr is the CLI's own diagnostic channel; it is the only place a
     /// crash says why.
@@ -52,7 +63,7 @@ public enum AgentFailureText {
         // "401 Unauthorized…", "503 …": an HTTP status leading the line.
         let leadsWithStatus = lowered.count >= 3 && lowered.prefix(3).allSatisfy(\.isNumber)
             && (lowered.hasPrefix("4") || lowered.hasPrefix("5"))
-        guard leadsWithStatus || markers.contains(where: { padded.contains($0) }) else { return nil }
+        guard leadsWithStatus || isTransientProviderFailure(line) || markers.contains(where: { padded.contains($0) }) else { return nil }
         return bounded(SecretRedactor.redactLocalDiagnostics(line), maxCharacters)
     }
 

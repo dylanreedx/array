@@ -3417,6 +3417,7 @@ final class AgentSupervisor {
             return false
         }
         let prompt = prepared.prompt
+        guard helperProviderRetryErrors[id] == nil else { return false }
         guard var record = records[id] else {
             warn("AgentSupervisor.send: no agent \(id.rawValue.uuidString)")
             return false
@@ -3438,10 +3439,13 @@ final class AgentSupervisor {
             warn("AgentSupervisor.send: \(refusal)")
             return false
         }
-        updateCompanionTasks { ledger in
-            companionRunBindings[id] = try ledger.begin(agentID: id.rawValue, parent: taskParent, queuedID: queuedItemID ?? prepared.companionQueuedItemID)
-            companionAcceptedStarts.insert(id)
-            if companionQueueHydrationPending.contains(id), let run = companionRunBindings[id] { try ledger.markIncomplete(run) }
+        if !continuingHelperRetry.contains(id) {
+            helperProviderRetryCounts[id] = nil
+            updateCompanionTasks { ledger in
+                companionRunBindings[id] = try ledger.begin(agentID: id.rawValue, parent: taskParent, queuedID: queuedItemID ?? prepared.companionQueuedItemID)
+                companionAcceptedStarts.insert(id)
+                if companionQueueHydrationPending.contains(id), let run = companionRunBindings[id] { try ledger.markIncomplete(run) }
+            }
         }
         // A teammate's prompt is named by what they typed, never by the
         // "From Sam" envelope it travels in.
@@ -3597,7 +3601,7 @@ final class AgentSupervisor {
     ) {
         guard let record = records[id] else { return }
         let runnerGeneration = RunnerGenerationToken()
-        if companionAcceptedStarts.remove(id) == nil {
+        if companionAcceptedStarts.remove(id) == nil && !continuingHelperRetry.contains(id) {
             updateCompanionTasks { ledger in companionRunBindings[id] = try ledger.beginUnknown(agentID: id.rawValue) }
         }
         runnerGenerationTokens[id] = runnerGeneration
@@ -4247,7 +4251,9 @@ final class AgentSupervisor {
 
     /// Kills the bound runner's process group and closes the turn synchronously.
     private func killRunner(_ id: AgentID, pauseAfterStop: Bool = true) {
-        let hadRunner = runners[id] != nil
+        let retrying = helperProviderRetryErrors.removeValue(forKey: id) != nil
+        helperProviderRetryTasks.removeValue(forKey: id)?.cancel()
+        let hadRunner = runners[id] != nil || retrying
         interruptingAgents.remove(id)
         deferredForceSends[id] = nil
         openToolItems[id] = nil
@@ -4298,6 +4304,7 @@ final class AgentSupervisor {
     /// without this its Pi process outlives the session that started it. Iterates a
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
+        for id in Array(helperProviderRetryErrors.keys) { stop(id) }
         for id in Array(runners.keys) { stop(id) }
         for id in Array(idleSessionRunners.keys) {
             guard let idle = idleSessionRunners.removeValue(forKey: id) else { continue }
@@ -7359,6 +7366,45 @@ final class AgentSupervisor {
 
     // MARK: - App-wide Managed mode
 
+    var helperProviderRetryDelay: UInt64 = 2_000_000_000
+    private(set) var helperProviderRetryCounts: [AgentID: Int] = [:]
+    private var helperProviderRetryErrors: [AgentID: String] = [:]
+    private var helperProviderRetryTasks: [AgentID: Task<Void, Never>] = [:]
+    private var helperRetryAdmissionFailures: Set<AgentID> = []
+    private var continuingHelperRetry: Set<AgentID> = []
+
+    private func reserveHelperProviderRetry(_ id: AgentID, error: String?) -> Bool {
+        guard let error, AgentFailureText.isTransientProviderFailure(error),
+              records[id]?.capabilities.locallyManaged == true, !helperRetryAdmissionFailures.contains(id),
+              records[id]?.parentAgentID != nil || helperMessageSubscriptions[id]?.isEmpty == false,
+              !stopRequestedAgents.contains(id) else { return false }
+        if helperProviderRetryErrors[id] != nil { return true }
+        guard (helperProviderRetryCounts[id] ?? 0) < 2 else { return false }
+        helperProviderRetryCounts[id, default: 0] += 1
+        helperProviderRetryErrors[id] = error
+        return true
+    }
+
+    private func scheduleHelperProviderRetry(_ id: AgentID) {
+        guard let error = helperProviderRetryErrors[id], helperProviderRetryTasks[id] == nil else { return }
+        helperProviderRetryTasks[id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: self.helperProviderRetryDelay)
+            guard !Task.isCancelled, self.helperProviderRetryErrors[id] != nil else { return }
+            self.helperProviderRetryTasks[id] = nil
+            self.helperProviderRetryErrors[id] = nil
+            self.continuingHelperRetry.insert(id)
+            let accepted = self.send("Continue the task interrupted by a temporary provider error. Resume from the current session state; do not repeat completed work.", to: id)
+            self.continuingHelperRetry.remove(id)
+            if !accepted {
+                self.helperRetryAdmissionFailures.insert(id)
+                self.deliver(.turnCompleted(threadId: Self.threadId(for: id), turnId: "retry-unavailable:\(UUID())",
+                    outcome: .failed, errorMessage: error + " (retry could not resume)"), to: id)
+                self.helperRetryAdmissionFailures.remove(id)
+            }
+        }
+    }
+
     private struct HelperMessageSubscription {
         var parent: AgentID
         var handle: String
@@ -7447,24 +7493,25 @@ final class AgentSupervisor {
         let status: String
         switch outcome {
         case .completed: status = "succeeded"
-        case .failed: status = "failed"
+        case .failed: status = (helperProviderRetryCounts[id] ?? 0) > 0 ? "failed after \(helperProviderRetryCounts[id]!) retries" : "failed"
         case .interrupted, .cancelled: status = "stopped"
         }
+        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let report: String
-        if let filed = child.lastReport, filed.filedAt > (lastSettledAt[id] ?? reportTurnBaseline),
+        if let filed = child.lastReport, filed.filedAt > baseline,
            let encoded = try? JSONEncoder().encode(filed.report) {
             report = String(decoding: encoded, as: UTF8.self)
         } else {
-            report = transcriptProjections[id]?.finalAssistantText ?? ""
+            report = String((transcriptProjections[id]?.finalAssistantText ?? "").prefix(2400))
         }
-        let text = "Helper \(String(child.humanDisplayName.prefix(80))) (\(id.rawValue.uuidString)): \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(String(report.prefix(2400)))"
+        let text = "Helper \(String(child.humanDisplayName.prefix(80))) (\(id.rawValue.uuidString)): \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(report)"
         let parents = Set([child.parentAgentID].compactMap { $0 }
             + (helperMessageSubscriptions[id] ?? []).map(\.parent))
         for parent in parents where records[parent] != nil && wakesForHelperCompletion(parent) {
-        var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(
-            deadline: helperCompletionNow().addingTimeInterval(8), updates: [])
-        batch.updates.append((id, text))
-        helperCompletionBatches[parent] = batch
+            var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(
+                deadline: helperCompletionNow().addingTimeInterval(8), updates: [])
+            batch.updates.append((id, text))
+            helperCompletionBatches[parent] = batch
         }
         scheduleHelperCompletionFlush()
     }
@@ -7499,6 +7546,7 @@ final class AgentSupervisor {
             if !accepted {
                 var pending = helperCompletionBatches[parent] ?? HelperCompletionBatch(deadline: helperCompletionNow(), updates: [])
                 pending.updates.insert(contentsOf: batch.updates, at: 0)
+                pending.deadline = helperCompletionNow().addingTimeInterval(8)
                 helperCompletionBatches[parent] = pending
             }
         }
@@ -7689,7 +7737,7 @@ final class AgentSupervisor {
     /// True while a prompt is in flight. Exposed for the checks and for P2A.5,
     /// which must know whether detaching a view leaves work running.
     func isRunning(_ id: AgentID) -> Bool {
-        runners[id] != nil
+        runners[id] != nil || helperProviderRetryErrors[id] != nil
     }
 
     /// CX-01 Phase 2a (`.plans/59` §11): the semantic transcript document this
@@ -10360,6 +10408,8 @@ final class AgentSupervisor {
         _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
     ) {
         var event = incomingEvent
+        if case .turnCompleted(_, _, .failed, let error) = event,
+           reserveHelperProviderRetry(id, error: error) { return }
         if Self.isRealActivity(event) { helperFoldEligibleSince[id] = nil }
         switch event {
         case .tokenUsageUpdated, .contextWindowUpdated: break
@@ -10882,6 +10932,11 @@ final class AgentSupervisor {
             // `.turnCompleted` event itself — that event still fires while
             // `runners[id]` holds this very runner, so draining there would
             // refuse against an occupied slot every time.
+            if helperProviderRetryErrors[id] != nil {
+                pendingQueueOutcome[id] = nil
+                scheduleHelperProviderRetry(id)
+                return
+            }
             let outcome = pendingQueueOutcome.removeValue(forKey: id)
             // T5 (D2) — a force send's interrupt does not pause the queue: the
             // forced message runs now, and everything queued stays held behind it

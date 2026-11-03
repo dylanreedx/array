@@ -83,6 +83,22 @@ GET replay itself never sends a push. Payloads up to 8 MiB can publish, includin
 existing Macs that previously received `payloadTooLarge` above 512 KiB. This is a
 bounded compatibility fix; arbitrary event clients still need cursor-gap recovery.
 
+Helper completion wakes (0.7.41) are internal agent messages, using the existing
+supervisor send/composer queue. They add no direct Mac banner, sound, badge,
+phone push, widget or Live Activity sender. Disabling the per-lead setting is
+quiet for this model-message path; result files remain collectable. A refused
+lead send remains pending for another flush rather than creating a user alert.
+The no-progress watchdog remains independent.
+
+For **SRC-01**, a transient helper provider failure reserved for a host
+retry is withheld from terminal delivery. **SRC-02** retains existing runtime-error
+handling; there is no new direct alert sender. Success, exhausted retries,
+a work failure or an explicit Stop reaches the existing delivery path. The
+provider-retry supervisor witness observes exactly one final terminal event,
+including quiet intermediate failures; this is offline source-delivery coverage,
+not a claim of real Mac/phone presentation. Existing activity, snapshot,
+recipient, suppression and tap policies continue to govern those surfaces.
+
 Sources: `ManagedAgentActivityBridge.swift` in Core/AgentProviders;
 `recordManagedActivity`, `scheduleCompanionSyncPublish`, `agentActivity` in
 App/ContinuumApp.swift; Sync/DesktopCompanionSyncService.swift;
