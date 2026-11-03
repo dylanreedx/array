@@ -33,6 +33,14 @@ Drag a task between columns or reorder it within a column. Board changes have th
 
 An assignee records responsibility. Assigning an agent is distinct from sending it a prompt. Use the task handoff/send flow when you want work to start.
 
+## Comments on cards
+
+Every card has a Markdown comment thread below its description. Comments show the author, character and time, and cards show a comment count. You can post, edit and delete your own comments, with Undo.
+
+Commenting on a card assigned to an agent, or @mentioning an agent by full name, sends the comment as its next turn. An idle agent starts right away; a busy agent receives it after its current turn. Agents reply in the thread. Agent-to-agent mention chains stop after six hops; a person’s comment resets the count.
+
+On a shared board, collaborators see the thread live as read-only. Posting from a collaborator’s side is coming in a later release.
+
 ## Reference a board in an agent prompt
 
 Drag a board's header into an agent composer, just as you would reference another agent. The composer adds a board reference; write what you want the agent to do, then send your prompt. Hold Option when dragging the header to move the tile instead.

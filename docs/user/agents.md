@@ -7,11 +7,25 @@ order: 20
 
 A managed agent is a conversation tile attached to a specific harness, model, and checkout. Array runs that harness and displays its events; the provider supplies the model and the CLI’s behavior.
 
+A **Claude CLI Terminal** or **Codex CLI Terminal** is instead an interactive terminal: the CLI owns the session in that terminal. It is not a managed conversation tile. [How CLI tiles differ](/docs/cli-connections/).
+
+With thanks to Duckherd and its creator Ali Alsalkhadi for the duck pixel art used by Array’s agent characters.
+
 ## Pick the harness first
 
 **Claude Code**, **Codex**, and **Pi** are distinct runtimes. Each owns its authentication, model catalog, session format, and supported operations. An existing agent keeps its selected harness across relaunches. Changing the default in Settings seeds new agents; it does not convert old conversations.
 
-Models come from the selected CLI’s live catalog. If a model is missing, verify that CLI’s version, login, and account access. Array does not silently run a different harness when one is unavailable.
+Sign in through each CLI’s own login flow. Array does not ask you to paste API keys. Models come from the selected CLI’s live catalog. If a model is missing, verify that CLI’s version, login, and account access. Array does not silently run a different harness when one is unavailable.
+
+## Permissions and workspace tools
+
+Managed CLIs run with full access to your account’s files and commands. **Agent permissions** controls Array’s workspace tools separately; it is not an operating-system sandbox. **Free within a project** permits workspace actions in the agent’s project without asking; **Ask first** asks for approval for actions such as delegation or changing the canvas. You can also turn workspace tools off. [Permissions and workspace tools](/docs/canvas-tools/).
+
+With those tools, agents can discover the workspace, open documents, work with boards, arrange tiles, and communicate with agents, subject to their grants.
+
+## Managed mode
+
+Managed mode is on by default. A lead plans work and can hand tasks to helpers shown inside its sidebar card. Helpers can be popped out, folded back, or pinned. Change the setting in **Settings → Agents → Managed mode**. The Managed badge can be hidden there too.
 
 ## Give a useful task
 
@@ -79,7 +93,7 @@ Ask for delegation explicitly when you want a separate agent tile. For example:
 
 > Delegate a read-only review of the parser tests to a child agent in another tile. Keep implementation here, then collect the child’s findings.
 
-`array_delegate` creates a child beside its parent, inheriting its provider, model, and checkout. It does not create a worktree. A provider’s built-in subagent tool can run inside the same tile instead. [Canvas tools and delegation](/docs/canvas-tools/).
+`array_delegate` creates a child in the same checkout without creating a worktree. By default it inherits the parent’s harness and model; the lead can choose another harness and an available model. Helper chips appear in the transcript, and the lead’s sidebar glyph shows working while a helper works. Agents can send messages with `array_message_agent` and collect results with `wait_agents`. A provider’s built-in subagent tool can run inside the same tile instead. [Canvas tools and delegation](/docs/canvas-tools/).
 
 ## Keep long work grounded
 

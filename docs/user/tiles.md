@@ -21,7 +21,15 @@ A terminal can execute real commands. Its scrollback is not a managed-agent conv
 
 A web surface for a URL or local development preview. Run your server in a terminal, then open its address here. A browser tile does not start the server for you.
 
-Managed agents with workspace tools enabled can open and use browser tiles in their project. Agent-created browsers use the shared **Agents** profile, separate from your Default profile. You can select Agents on a browser tile to sign in to a development app for agents to use. An agent must ask before taking control of one of your own browser tiles, and control returns to you when you interact with it. The browser header shows who is driving and offers **Take control**. Moving a tile off the Agents profile also takes it back.
+### Browser profiles and sign-ins
+
+Browser profiles keep website data, including cookies and sign-ins, on disk. They persist when you close a tile or restart Array. Every browser tile using the same profile shares those sign-ins.
+
+**Default** is separate from **Agents**. Browsers opened by agents use Agents. To let agents use a signed-in site, choose Agents in a browser tile and sign in there. Agents can then act as you on that site. An agent must ask before controlling a browser tile on your own profile. The header shows who is driving; choose **Take control** to take it back. Interacting with the tile or moving it off the Agents profile also returns control to you.
+
+Use the profile menu in a browser tile's header to switch profiles or choose **Create Profile…**. Creating one switches that tile to it. To delete a custom profile, select it in that menu, choose **Delete Current Profile…**, and confirm. Tiles using it switch to Default. Deleting the profile removes it from the profile list but does **not** remove its WebKit website data. The built-in Default and Agents profiles cannot be deleted. On Agents, **Sign out of everything** clears its website data.
+
+Passkeys do not work in browser tiles yet. Use another sign-in option offered by the site.
 
 With Agent permissions set to Free, an agent can read and screenshot any browser tile in its project, including yours. With Ask first, reading one of your tiles asks first, like taking control.
 

@@ -51,11 +51,13 @@ Canvas movement uses the same geometry route and undo history as a user drag. It
 
 `array_board_query` discovers boards and columns or reads a board’s tasks, revision, bodies, links, image metadata, and assignees. `array_board_apply` creates, edits, moves, assigns, unassigns, or deletes one task through the same durable board machinery as the UI.
 
+`array_board_manage` creates, renames or deletes a whole board. It creates the default columns and opens a tile in the agent’s zone; it only deletes empty boards. Rename and delete use the current board revision, and every call uses a stable request key. Under **Ask first**, the first create or delete asks for approval; rename uses the board-edit grant. Changes can be undone and preserve your view. [Workspace tools reference](/docs/workspace-api/#array_board_manage).
+
 The agent queries before writing and supplies a revision and stable request key. A board task is user-authored content; its presence does not automatically instruct every agent to execute it. [Board workflows](/docs/boards/).
 
 ## Visible delegation
 
-`array_delegate` creates a child agent in a visible tile, inheriting the parent’s provider, model, and checkout. It creates no worktree. Use it only when the user has asked for delegation.
+`array_delegate` creates a child agent in a visible tile, in the parent’s checkout. By default it inherits the parent’s harness and model; the lead can choose another harness and an available model. It creates no worktree. Use it only when the user has asked for delegation.
 
 `array_reveal_agent` presents an existing child without creating a new one. `array_message_agent` starts a turn on another agent: under **Free within a project**, any agent in the same project, so you can ask an agent to “message the agent to your right”; under **Ask first**, only the agents it created and the agent that created it. It never interrupts an active turn. A chain of agent-to-agent turns with no prompt from you stops after 20, so two agents cannot keep each other running forever. `wait_agents` collects child results using the returned operation handles.
 
@@ -82,3 +84,5 @@ This scopes the workspace API. It is not an operating-system sandbox for all pro
 | `outcome_unknown` | Recover the original operation’s outcome before repeating it. |
 
 For uncertain writes, `array_get_operation` and recent operations help recover the outcome. Reusing the same idempotency key for the same request prevents a dropped reply from creating a second agent or delivering a message twice. An expired outcome is not permission to repeat it blindly.
+
+For the full tool catalog and inputs, see the [workspace tools reference](/docs/workspace-api/).
