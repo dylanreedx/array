@@ -273,6 +273,18 @@ extension SharedAgentTranscriptView {
     /// The guest's transcript as the appearance census renders it: a prompt,
     /// a reply with markup and a tool call, rebuilt from a checkpoint the way
     /// a lane read delivers one.
+    /// The fixture as a guest sees it: in a tile, whose chrome is the themed
+    /// view the appearance sweep follows (`UIProbeAppearance`).
+    static func appearanceSurface(size: NSSize) -> NSView {
+        let tile = SharedAgentTileNSView(tile: Tile(id: UUID(), kind: .sharedAgent, title: "Map the checkout states",
+                                                    frame: .init(x: 0, y: 0, width: size.width, height: size.height),
+                                                    zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: .init()))
+        tile.frame = NSRect(origin: .zero, size: size)
+        tile.apply(.live, hostName: "Dylan", colour: .systemTeal)
+        tile.setContentView(appearanceFixture(size: size))
+        return tile
+    }
+
     static func appearanceFixture(size: NSSize) -> SharedAgentTranscriptView {
         let thread = "appearance"
         var model = ManagedAgentTranscriptModel(threadId: thread)
