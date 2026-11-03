@@ -219,6 +219,7 @@ final class SharedAgentLiveView: NSView {
             guard generation == ticket else { return false }
             transcriptView.receive(value)
             helpers.update(transcriptView.mirror.helpers)
+            onRead?()
             setTranscriptLive(true)
             return true
         } catch {
