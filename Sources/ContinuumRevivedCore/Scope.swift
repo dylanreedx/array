@@ -17,6 +17,9 @@ public struct Scope: OptionSet, Codable, Hashable, Sendable {
     public static let transcriptRead = Scope(rawValue: 1 << 5)
     /// Narrow remote stop authority; does not imply send/steer/queue.
     public static let agentStop = Scope(rawValue: 1 << 6)
+    /// Send the agent a message from the phone (plan 104 step 3). Separate
+    /// from `agentStop`, which deliberately does not imply send.
+    public static let agentMessage = Scope(rawValue: 1 << 7)
 
     public static let observer: Scope = [.orchestrationRead]
     public static let `operator`: Scope = [.orchestrationRead, .orchestrationOperate, .terminalOperate]

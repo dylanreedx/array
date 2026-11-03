@@ -72,6 +72,21 @@ public actor TranscriptProjectionSender {
         }
     }
 
+    /// One phone's request through the relay command queue (plan 104 step 2).
+    /// The hosted relay does not let the phone publish `transcriptSubscribe`,
+    /// so the request arrives as a command and the answer leaves as an event.
+    public func publish(agentID: UUID, knownVersion: UInt64?) async -> CompanionTranscriptOutcome {
+        guard authorizedScope.contains(.transcriptRead) else { return .unauthorized }
+        guard let source = await documentProvider(agentID) else { return .unavailable }
+        guard knownVersion != source.document.version else { return .unchanged }
+        do {
+            try await demux.send(.transcriptEnvelope(makeEnvelope(agentID: agentID, source: source)))
+            return .published
+        } catch {
+            return .failed
+        }
+    }
+
     private func makeEnvelope(
         agentID: UUID,
         source: (sessionID: String, document: AgentDocument)

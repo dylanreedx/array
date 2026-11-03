@@ -317,7 +317,10 @@ private func checkHostedRelayPairingProjection() {
         instanceId: instanceID, pairedDeviceCount: 2)
     expect(paired.isPaired, "hosted relay pairing: relay devices unlock desktop publishing")
     expect(paired.instanceId == instanceID, "hosted relay pairing: relay instance identity is preserved")
-    expect(paired.authorizedScope == .companionControl,
+    // Plan 104 step 3: plus agentMessage. Which phone may message is the
+    // relay's per-phone `sendMessages` capability; the Mac's profile only has
+    // to admit it. Still no terminal, access or operator authority.
+    expect(paired.authorizedScope == Scope.companionControl.union(.agentMessage),
            "hosted relay pairing: server-fixed companion profile is preserved")
     expect(!paired.authorizedScope.contains(.terminalOperate),
            "hosted relay pairing: hosted phones never gain terminal authority")

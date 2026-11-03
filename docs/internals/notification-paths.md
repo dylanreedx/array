@@ -334,9 +334,36 @@ in the new source too.
 | IOS-01 | Notification arrives while app foreground | Delegate requests banner/list/sound/badge, including when viewing that agent |
 | IOS-02 | Notification arrives background/terminated | OS presentation subject to device authorization/settings; physical acceptance not yet witnessed by this audit |
 | IOS-03 | User taps notification or Open | Source: validated array/continuum agent UUID link → paired-instance fence → Agents NavigationStack exact agent. Cold launch buffers the URL until model/pairing loads. Task alerts carry task/run/instance IDs and show that exact task, never the latest task on a reused agent. Legacy links open the agent with an explicit missing-task message. Invalid/foreign links show unavailable; missing/deleted agents remain unavailable rather than opening another agent. No command authority from a URL. Production v15/installed phone still select only a tab. |
-| IOS-04 | User chooses Approve/Deny | handlePushAction checks scope/IDs → respondToApproval; errors logged. Production desktop seam currently unknownRequest; do not claim working approval execution |
+| IOS-04 | User chooses Approve/Deny | handlePushAction checks scope/IDs → respondToApproval; errors logged. **Production (installed phone, v15 relay): broken before the Mac.** The phone publishes `sync.message` to `/v2/events`; the hosted relay requires `publishState`, which a phone never has, so it answers 403 and nothing reaches the Mac (the Mac's seam was also always unknownRequest). **Source (not deployed):** on a hosted (https) relay the phone sends `approval.respond` to the relay command queue (CMD-01…07); the Mac answers through `AgentSupervisor.respondToRequest`, which only reaches a request the agent has open, and reports `sent` (handed to the CLI; the request leaving the activity is the CLI's answer), `unknownRequest`, or `unauthorized`. Gap: unreachable by design for now. The Mac does put the request id on needsAttention events (`ManagedAgentActivityBridge`), but managed agents never open approval requests (Claude runs with `bypassPermissions`, Codex with `approval_policy=never`, and no production runner implements `AgentRequestResponding`), so no approval row exists for real agents until permission prompts are turned on |
 | IOS-05 | Remote background callback | refreshNow + non-navigating deep-link handling; callback reports newData, but relay refresh does not await an actual new fetch |
 | IOS-06 | Missing model, invalid action/IDs or insufficient scope | No valid approval intent; may fall back to opening deep link; no implicit authority |
+
+### Phone commands through the relay queue (source only; not deployed)
+
+Phone Stop and Approve on a hosted relay. Owners: `RelayStore` command
+functions, `RelayServer` `/v2/commands*`, `RelayCommandChannel` and
+`CompanionCommandReceiver` (`ContinuumRevivedSync/CompanionCommands.swift`),
+`DesktopCompanionSyncService.perform`, `CompanionCommandActions`. Witnesses:
+`ContinuumRevivedRelayCoreChecks` (`runRelayCommandChecks`),
+`ContinuumRevivedRelayChecks` (`runCompanionCommandDeliveryChecks`, over HTTP
+against the real relay server and the Mac's sync service), app
+`--companion-command-check`. Needs the schema-6 relay and a new phone build;
+the deployed v15 relay has none of it.
+
+| ID | Condition | Outcome |
+| --- | --- | --- |
+| CMD-01 | Phone sends Stop or Approve | `POST /v2/commands`; relay checks the phone's capability for the kind (`stopAgents` / `respondToApprovals`), stamps the authenticated device, stores the payload (≤16 KiB). Unknown kind 400, Mac or missing capability 403 |
+| CMD-02 | Same idempotency key again | Same receipt, one command. Same key carrying a different command: 409 `commandConflict` |
+| CMD-03 | Mac offline when sent | Command waits. The Mac collects everything unanswered (`GET /v2/commands/pending`), not from the event head, so it runs when the Mac returns |
+| CMD-04 | Not collected within 10 minutes | Never collected or run; a late result is not stored; the phone reads `expired` and says nothing happened. Every row, answered or not, is deleted a day after it was sent, on the next command from that Mac's phones |
+| CMD-05 | Sending phone revoked before collection | Its queued commands are not collected |
+| CMD-06 | Mac runs it | Stop: `accept(.stop)` (the composer's interrupt-first Stop) → `stopped`, `notRunning`, `notFound`, `unsupported`; Approve: `respondToRequest` → `sent` or `unknownRequest`. Result posted once; first result wins; a result whose post failed is re-posted without re-running |
+| CMD-07 | Phone waits 5 s for the result | `completed` shows the Mac's outcome in plain words; still `pending` says the Mac has not picked it up yet and will within 10 minutes if it comes online; another phone of the same Mac cannot read it (404) |
+| CMD-08 | Phone shows an agent's detail (transcript request) | Every 5 s while open, `transcript.request` (capability `readTranscripts`) carrying the key id and the version shown, never content. The Mac publishes the transcript as an encrypted `transcriptEnvelope` event → `published`; same version → `unchanged`; no transcript → `unavailable`; a key the Mac does not hold → `unknownKey` (a phone paired before the pairing secret; its card asks for a re-pair). The key comes from the secret in the pairing link's fragment, which the relay never receives. Witness: `runCompanionTranscriptDeliveryChecks` (also asserts the relay's files hold neither the transcript text nor the secret). Not a notification: no banner, sound or badge |
+| CMD-09 | Phone sends an agent a message | `agent.message`, needs `sendMessages`, which the relay grants only to a phone that asked at pairing (`wantsMessages`, sent only with a pairing secret); older phone builds keep the exact set they accept, others get 403. The text is sealed on the phone (key from the pairing secret; the command's key and agent bound in) and opened on the Mac, which runs it as typed text through `AgentSupervisor.accept(.send)` → `accepted`; a running turn → `busy` (no queue or steer from the phone yet); `notReady`, `notFound`, `empty`, `refused`; won't open → `invalid`; unknown key → `unknownKey`; a Mac without the handler → `unsupported`. The phone keeps the draft until `accepted`, and a retry resends the same sealed bytes, so one prompt. Across a Mac crash too: the Mac journals each message on disk (`CompanionCommandJournal`, `companion-command-journal.json` in its own app-support dir, entries dropped after the relay's 1-day retention), marked started before the hand-off and its result after. On restart a journaled result is re-posted without running, and a message started with no result is not run again and answers `interrupted`; the phone says "Your Mac restarted while sending this. Check the agent before sending it again." and keeps the draft (a retry is a new seal). Witnesses: `runCompanionReplyDeliveryChecks`, `runCompanionMessageJournalChecks`, app `--companion-command-check`. Not a notification |
+
+Sync-message Stop/Approve (`agentStopRequest`, `approvalResponse`) remain for
+the local relay and CloudKit paths, now through the same Mac actions.
 
 ### Durable hosted alert outbox (source only)
 

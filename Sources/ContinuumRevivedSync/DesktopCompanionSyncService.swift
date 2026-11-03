@@ -1,6 +1,8 @@
+import CryptoKit
 import ContinuumRevivedAgentUI
 import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
+import ContinuumRevivedRelayProtocol
 import Foundation
 
 public struct DesktopCompanionSyncConfiguration: Equatable, Sendable {
@@ -43,10 +45,13 @@ public struct DesktopCompanionPairingSnapshot: Equatable, Sendable {
     /// input when projecting that state into the sync service.
     public static func hostedRelay(instanceId: UUID, pairedDeviceCount: Int) -> DesktopCompanionPairingSnapshot {
         guard pairedDeviceCount > 0 else { return .unpaired(instanceId: instanceId) }
+        // The relay decides per phone whether it may message (its
+        // `sendMessages` capability); the Mac also needs the sealed text to
+        // open under a key from that phone's pairing secret.
         return DesktopCompanionPairingSnapshot(
             instanceId: instanceId,
             pairedDeviceCount: pairedDeviceCount,
-            authorizedScope: .companionControl
+            authorizedScope: Scope.companionControl.union(.agentMessage)
         )
     }
 
@@ -293,6 +298,7 @@ public actor DesktopCompanionSyncService {
     public typealias TranscriptChannelProvider = @Sendable () async -> [TranscriptChannelKey]
     public typealias TranscriptDocumentProvider = TranscriptProjectionSender.DocumentProvider
     public typealias AgentStopHandler = AgentStopResponder.StopHandler
+    public typealias AgentMessageHandler = @Sendable (UUID, String) async -> AgentMessageOutcome
     public typealias FetchChangesHook = @Sendable () async throws -> Void
     public typealias SubscriptionHook = @Sendable () async throws -> Void
 
@@ -305,6 +311,12 @@ public actor DesktopCompanionSyncService {
     private let transcriptChannelProvider: TranscriptChannelProvider
     private let transcriptDocumentProvider: TranscriptDocumentProvider
     private let agentStopHandler: AgentStopHandler
+    private let agentMessageHandler: AgentMessageHandler
+    private let approvals: any ApprovalResponding
+    private let commandChannel: RelayCommandChannel?
+    private let commandJournal: CompanionCommandJournal?
+    private let commandDiagnostic: (@Sendable (String) -> Void)?
+    private var commandReceiver: CompanionCommandReceiver?
     private let freshnessPublisher: any CompanionLifecycleHintPublishing
     private let fetchChangesHook: FetchChangesHook
     private let ensureSubscriptionHook: SubscriptionHook
@@ -319,6 +331,7 @@ public actor DesktopCompanionSyncService {
     private var approvalResponder: ApprovalResponder?
     private var agentStopResponder: AgentStopResponder?
     private var transcriptSenders: [UUID: TranscriptProjectionSender] = [:]
+    private var transcriptChannelKeys: [UUID: SymmetricKey] = [:]
     private var activityStore: ActivityStore?
     private var spatialStore: MemorySpatialOpLogStore?
     private let taskSnapshotProvider: (@Sendable (UInt64) async throws -> CompanionTaskSnapshotBatch)?
@@ -338,6 +351,11 @@ public actor DesktopCompanionSyncService {
         transcriptChannels: @escaping TranscriptChannelProvider = { [] },
         transcriptDocument: @escaping TranscriptDocumentProvider = { _ in nil },
         stopAgent: @escaping AgentStopHandler = { _ in .unsupported },
+        sendMessage: @escaping AgentMessageHandler = { _, _ in .unsupported },
+        approvals: (any ApprovalResponding)? = nil,
+        commandChannel: RelayCommandChannel? = nil,
+        commandJournal: CompanionCommandJournal? = nil,
+        commandDiagnostic: (@Sendable (String) -> Void)? = nil,
         freshnessPublisher: any CompanionLifecycleHintPublishing,
         fetchChanges: @escaping FetchChangesHook = {},
         ensureSubscription: @escaping SubscriptionHook = {},
@@ -355,6 +373,11 @@ public actor DesktopCompanionSyncService {
         self.transcriptChannelProvider = transcriptChannels
         self.transcriptDocumentProvider = transcriptDocument
         self.agentStopHandler = stopAgent
+        self.agentMessageHandler = sendMessage
+        self.approvals = approvals ?? UnknownRequestApprovalSeam()
+        self.commandChannel = commandChannel
+        self.commandJournal = commandJournal
+        self.commandDiagnostic = commandDiagnostic
         self.freshnessPublisher = freshnessPublisher
         self.fetchChangesHook = fetchChanges
         self.ensureSubscriptionHook = ensureSubscription
@@ -392,7 +415,7 @@ public actor DesktopCompanionSyncService {
             let activity = ActivityProjectionSender(store: store, demux: demux, authorizedScope: pairing.authorizedScope)
             let spatialSender = SpatialOpSender(store: spatial, demux: demux, authorizedScope: pairing.authorizedScope)
             let responder = ApprovalResponder(
-                seam: UnknownRequestApprovalSeam(),
+                seam: approvals,
                 demux: demux,
                 authorizedScope: pairing.authorizedScope,
                 onAck: { [weak self] ack in
@@ -414,6 +437,16 @@ public actor DesktopCompanionSyncService {
             self.spatialSender = spatialSender
             approvalResponder = responder
             agentStopResponder = stopResponder
+            if let commandChannel {
+                let scope = pairing.authorizedScope
+                let receiver = CompanionCommandReceiver(channel: commandChannel, journal: commandJournal,
+                                                        onDiagnostic: commandDiagnostic) { [weak self] command in
+                    guard let self else { return RelayCommandResult(outcome: "unavailable") }
+                    return await self.perform(command, scope: scope)
+                }
+                await receiver.start()
+                commandReceiver = receiver
+            }
             started = true
             if taskSnapshotProvider != nil, transport is any CompanionTaskPublishingTransport {
                 taskPulse = Task { [weak self] in
@@ -443,6 +476,8 @@ public actor DesktopCompanionSyncService {
         await spatialSender?.stop()
         await approvalResponder?.stop()
         await agentStopResponder?.stop()
+        await commandReceiver?.stop()
+        commandReceiver = nil
         for sender in transcriptSenders.values { await sender.stop() }
         activitySender = nil
         spatialSender = nil
@@ -454,8 +489,66 @@ public actor DesktopCompanionSyncService {
         started = false
     }
 
+    /// One phone command, through the same handlers the sync messages use.
+    /// The relay already checked the phone's capability; the pairing scope is
+    /// checked again here so a narrower local grant still holds.
+    func perform(_ command: RelayCommand, scope: Scope) async -> RelayCommandResult {
+        switch command.kind {
+        case RelayCommandKind.agentStop:
+            guard scope.contains(.agentStop) else { return .init(outcome: AgentStopOutcome.unauthorized.rawValue) }
+            return .init(outcome: await agentStopHandler(command.agentID).rawValue)
+        case RelayCommandKind.approvalRespond:
+            guard (try? authorize(.respondToApproval, grantedScopes: scope)) != nil else {
+                return .init(outcome: ApprovalResponseOutcome.unauthorized.rawValue)
+            }
+            guard let payload = command.payload,
+                  let approval = try? JSONDecoder().decode(CompanionApprovalCommand.self, from: payload) else {
+                return .init(outcome: "invalid")
+            }
+            let outcome: ApprovalResponseOutcome
+            switch await approvals.respond(agentId: command.agentID, requestId: approval.requestId, decision: approval.decision) {
+            case .resolved: outcome = .resolved
+            case .sent: outcome = .sent
+            case .stale: outcome = .stale
+            case .unknownRequest: outcome = .unknownRequest
+            }
+            diagnostics.lastApprovalResponseOutcome = outcome
+            return .init(outcome: outcome.rawValue)
+        case RelayCommandKind.transcriptRequest:
+            guard scope.contains(.transcriptRead) else { return .init(outcome: CompanionTranscriptOutcome.unauthorized.rawValue) }
+            guard let payload = command.payload,
+                  let request = try? JSONDecoder().decode(CompanionTranscriptRequest.self, from: payload) else {
+                return .init(outcome: "invalid")
+            }
+            // A phone paired since this service started brings a key the
+            // senders were not built with; look again before saying no.
+            if transcriptSenders[request.keyID] == nil { await refreshTranscriptSenders(scope: scope) }
+            guard let sender = transcriptSenders[request.keyID] else {
+                return .init(outcome: CompanionTranscriptOutcome.unknownKey.rawValue)
+            }
+            return .init(outcome: await sender.publish(agentID: command.agentID, knownVersion: request.knownVersion).rawValue)
+        case RelayCommandKind.agentMessage:
+            // Runs at most once per command: the receiver keeps an unposted
+            // result and re-posts it rather than running the command again.
+            guard scope.contains(.agentMessage) else { return .init(outcome: AgentMessageOutcome.unauthorized.rawValue) }
+            guard let payload = command.payload,
+                  let sealed = try? JSONDecoder().decode(CompanionSealedMessage.self, from: payload) else {
+                return .init(outcome: AgentMessageOutcome.invalid.rawValue)
+            }
+            if transcriptChannelKeys[sealed.keyID] == nil { await refreshTranscriptSenders(scope: scope) }
+            guard let key = transcriptChannelKeys[sealed.keyID] else { return .init(outcome: AgentMessageOutcome.unknownKey.rawValue) }
+            guard let text = try? TranscriptSyncCrypto.openMessage(sealed, key: key, idempotencyKey: command.idempotencyKey, agentID: command.agentID) else {
+                return .init(outcome: AgentMessageOutcome.invalid.rawValue)
+            }
+            return .init(outcome: await agentMessageHandler(command.agentID, text).rawValue)
+        default:
+            return .init(outcome: "unsupported")
+        }
+    }
+
     private func refreshTranscriptSenders(scope: Scope) async {
         let channels = scope.contains(.transcriptRead) ? await transcriptChannelProvider() : []
+        transcriptChannelKeys = Dictionary(channels.map { ($0.keyID, $0.key) }, uniquingKeysWith: { first, _ in first })
         let wanted = Set(channels.map(\.keyID))
         let obsolete = transcriptSenders.keys.filter { !wanted.contains($0) }
         for keyID in obsolete {

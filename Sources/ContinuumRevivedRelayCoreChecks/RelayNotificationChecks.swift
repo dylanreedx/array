@@ -127,7 +127,7 @@ func runRelayNotificationChecks() async throws {
                                    "desktop", "publishState", "Existing Mac", 1000])
     }
     let store = try RelayStore(path: path, masterKey: key)
-    try require(try await store.health().schemaVersion == 5, "v1 database must migrate to notification-outbox schema")
+    try require(try await store.health().schemaVersion == 6, "v1 database must migrate to notification-outbox schema")
     try require(try await store.authenticate("legacy-fixture-bearer").instanceID == legacyInstance,
                 "schema upgrade must preserve existing instance and credential authority")
     let invite = try await store.createAlphaInvite(expiresAt: Date().addingTimeInterval(60))

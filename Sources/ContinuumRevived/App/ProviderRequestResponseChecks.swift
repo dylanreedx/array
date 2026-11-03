@@ -39,6 +39,7 @@ enum ProviderRequestResponseChecks {
 
         private let lock = NSLock()
         private var deliveredStorage: [(String, ApprovalDecision)] = []
+        private var promptsStorage: [String] = []
         private let held = DispatchSemaphore(value: 0)
         /// Flipped by a witness to model a transport that accepts the call and
         /// then fails, which is the case the UI has to survive.
@@ -57,7 +58,16 @@ enum ProviderRequestResponseChecks {
             lock.unlock()
         }
 
+        /// Every prompt a turn was started with.
+        var prompts: [String] {
+            lock.lock(); defer { lock.unlock() }
+            return promptsStorage
+        }
+
         func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+            lock.lock()
+            promptsStorage.append(prompt.text)
+            lock.unlock()
             held.wait()
         }
         func stop() { held.signal() }

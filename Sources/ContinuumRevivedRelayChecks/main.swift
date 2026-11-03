@@ -13,6 +13,16 @@ do { try runAgentNotifyPolicyChecks() }
 catch { fputs("FAIL: agent notify policy: \(error)\n", stderr); exit(1) }
 do { try await runTaskBatchRetentionChecks() }
 catch { fputs("FAIL: task batch retention: \(error)\n", stderr); exit(1) }
+do { try await runCompanionCommandDeliveryChecks() }
+catch { fputs("FAIL: companion command delivery: \(error)\n", stderr); exit(1) }
+do { try await runCompanionTranscriptDeliveryChecks() }
+catch { fputs("FAIL: companion transcript delivery: \(error)\n", stderr); exit(1) }
+do { try await runCompanionReplyDeliveryChecks() }
+catch { fputs("FAIL: companion reply delivery: \(error)\n", stderr); exit(1) }
+do { try await runCompanionMessageJournalChecks() }
+catch { fputs("FAIL: companion message journal: \(error)\n", stderr); exit(1) }
+do { try runPhoneMessageDraftChecks() }
+catch { fputs("FAIL: phone message draft: \(error)\n", stderr); exit(1) }
 
 func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     if !condition() {

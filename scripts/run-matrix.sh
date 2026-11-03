@@ -747,9 +747,11 @@ if [[ "$COMPANION_TASKS_ONLY" -eq 1 ]]; then
   run_leg .build/debug/ContinuumRevivedSyncChecks --companion-task-publication-check
   run_app_check .build/debug/Array --companion-task-host-check
   run_app_check .build/debug/Array --agent-notify-check
+  run_app_check .build/debug/Array --companion-command-check
   run_app_check .build/debug/Array --agent-supervisor-check
   run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
-  # agent.notify end to end: host ledger -> published wire -> relay task policy.
+  # agent.notify end to end: host ledger -> published wire -> relay task policy;
+  # phone Stop/Approve: phone client -> relay command queue -> Mac sync service.
   run_leg swift run --skip-build ContinuumRevivedRelayChecks
   MATRIX_NOTES+=("Task ownership is source only; no deployment, prod state, phone push or exact-task phone navigation is exercised.")
   matrix_report 'Companion tasks matrix (targeted)'
@@ -1270,6 +1272,7 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-ch
 run_leg .build/debug/ContinuumRevivedSyncChecks --companion-task-publication-check
 run_app_check .build/debug/Array --companion-task-host-check
 run_app_check .build/debug/Array --agent-notify-check
+run_app_check .build/debug/Array --companion-command-check
 # TR-04: the completion/dispatch seam driven through the REAL composer, popover
 # and synthetic key events — a typed payload (command, file, directory) must
 # never degrade into literal text in the draft. This check has existed since it

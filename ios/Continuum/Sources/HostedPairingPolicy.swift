@@ -37,8 +37,13 @@ enum HostedPairingPolicy {
     /// adds or removes authority instead of silently projecting it to a broader
     /// local Scope.
     static func companionScope(capabilities: Set<RelayCapability>, credential: String) -> Scope? {
-        guard !credential.isEmpty, capabilities == RelayWire.companionCapabilities else { return nil }
-        return .companionControl
+        guard !credential.isEmpty else { return nil }
+        switch capabilities {
+        case RelayWire.companionCapabilities: return .companionControl
+        // Granted only when this phone asked for it at pairing (plan 104 step 3).
+        case RelayWire.companionMessagingCapabilities: return Scope.companionControl.union(.agentMessage)
+        default: return nil
+        }
     }
 
     /// Production no longer has a provisioned CloudKit desktop peer. A saved

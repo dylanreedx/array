@@ -242,6 +242,16 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
             if head.method == .POST, head.uri == "/v2/commands" {
                 return .json(.ok, try await store.acceptCommand(auth: auth, request: JSONDecoder.relay.decode(RelayCommandRequest.self, from: body)))
             }
+            if head.method == .GET, head.uri == "/v2/commands/pending" { return .json(.ok, try await store.pendingCommands(auth: auth)) }
+            if head.uri.hasPrefix("/v2/commands/") {
+                let parts = head.uri.dropFirst("/v2/commands/".count).split(separator: "/", omittingEmptySubsequences: false)
+                if let key = parts.first.flatMap({ UUID(uuidString: String($0)) }) {
+                    if head.method == .GET, parts.count == 1 { return .json(.ok, try await store.commandStatus(auth: auth, key: key)) }
+                    if head.method == .POST, parts.count == 2, parts[1] == "result" {
+                        return .json(.ok, try await store.completeCommand(auth: auth, key: key, result: JSONDecoder.relay.decode(RelayCommandResult.self, from: body)))
+                    }
+                }
+            }
             if head.method == .POST, head.uri == "/v2/push-registrations" {
                 let registration = try JSONDecoder.relay.decode(RelayPushRegistrationRequest.self, from: body)
                 try await store.savePushToken(auth: auth, kind: registration.kind, token: registration.token)
@@ -255,6 +265,9 @@ private final class RelayHTTPHandler: ChannelInboundHandler, RemovableChannelHan
         } catch RelayStoreError.forbidden { return .error(.forbidden, "forbidden") }
         catch RelayStoreError.invalidOrExpiredCode { return .error(.gone, "invalidOrExpiredCode") }
         catch RelayStoreError.payloadTooLarge { return .error(.payloadTooLarge, "payloadTooLarge") }
+        catch RelayStoreError.commandNotFound { return .error(.notFound, "commandNotFound") }
+        catch RelayStoreError.commandConflict { return .error(.conflict, "commandConflict") }
+        catch RelayStoreError.invalidCommand { return .error(.badRequest, "invalidCommand") }
         catch RelayStoreError.notificationOwnerRequired { return .error(.conflict, "notificationOwnerRequired") }
         catch RelayStoreError.notificationOwnerMismatch { return .error(.conflict, "notificationOwnerMismatch") }
         catch RelayStoreError.notificationRevisionConflict { return .error(.conflict, "notificationRevisionConflict") }

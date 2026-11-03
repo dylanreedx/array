@@ -44,6 +44,19 @@ public actor TranscriptProjectionReceiver {
             knownDocumentVersions: versions)))
     }
 
+    /// Hosted relay (plan 104 step 2): accept envelopes for these agents
+    /// without publishing `transcriptSubscribe`, which the relay refuses from a
+    /// phone. The request goes through the command queue instead.
+    public func follow(agentIDs: [UUID]) async {
+        subscribedAgentIDs.formUnion(agentIDs)
+        if receiveTask == nil {
+            let stream = await demux.subscribe()
+            receiveTask = Task { [weak self] in
+                await self?.receiveLoop(stream)
+            }
+        }
+    }
+
     public func installChannelKey(_ key: SymmetricKey, keyID: UUID) {
         channelKeys[keyID] = key
     }

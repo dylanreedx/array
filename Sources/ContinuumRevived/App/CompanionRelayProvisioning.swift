@@ -13,6 +13,14 @@ struct CompanionRelayPairingGrant: Codable, Equatable, Sendable {
     var expiresAt: Date
 }
 
+/// Plan 104 step 2: the secret in one hosted pairing link. Kept in the
+/// Keychain, never sent to the relay.
+struct CompanionRelayPairingSecret: Codable, Equatable, Sendable {
+    var grantID: UUID
+    var secret: Data
+    var createdAt: Date
+}
+
 struct CompanionRelayDevice: Codable, Equatable, Sendable {
     var id: UUID
     var label: String
@@ -39,6 +47,11 @@ struct CompanionRelayProvisioning {
         AppChannel.liveKeychainService("dev.arrayapp.companion.relay")
     }
     private static let keychainAccount = "desktop-instance"
+    private static let pairingSecretsAccount = "pairing-secrets"
+    /// The Mac cannot tell which phone redeemed which link, so it keeps a
+    /// secret per link it issued. Each costs nothing until a phone asks with
+    /// its key; the oldest beyond this many are dropped.
+    static let pairingSecretLimit = 16
 
     var httpOrigin: URL {
         guard let raw = ProcessInfo.processInfo.environment["ARRAY_RELAY_HTTP_ORIGIN"],
@@ -71,6 +84,22 @@ struct CompanionRelayProvisioning {
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = item as? Data else { throw CompanionRelayProvisioningError.keychain(status) }
         return try JSONDecoder().decode(CompanionRelayDesktopIdentity.self, from: data)
+    }
+
+    func pairingSecrets() -> [CompanionRelayPairingSecret] {
+        guard let data = try? readKeychain(account: Self.pairingSecretsAccount) else { return [] }
+        return (try? JSONDecoder().decode([CompanionRelayPairingSecret].self, from: data)) ?? []
+    }
+
+    func addPairingSecret(_ secret: CompanionRelayPairingSecret) throws {
+        let kept = Array((pairingSecrets().filter { $0.grantID != secret.grantID } + [secret]).suffix(Self.pairingSecretLimit))
+        try writeKeychain(account: Self.pairingSecretsAccount, data: JSONEncoder().encode(kept))
+    }
+
+    /// Only for a link the relay confirmed cancelled: no phone can hold it.
+    func removePairingSecret(grantID: UUID) throws {
+        let kept = pairingSecrets().filter { $0.grantID != grantID }
+        try writeKeychain(account: Self.pairingSecretsAccount, data: JSONEncoder().encode(kept))
     }
 
     func redeem(invite: String, deviceLabel: String) async throws -> CompanionRelayDesktopIdentity {
@@ -127,11 +156,29 @@ struct CompanionRelayProvisioning {
     }
 
     private func saveIdentity(_ identity: CompanionRelayDesktopIdentity) throws {
-        let data = try JSONEncoder().encode(identity)
+        try writeKeychain(account: Self.keychainAccount, data: JSONEncoder().encode(identity))
+    }
+
+    private func readKeychain(account: String) throws -> Data? {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: Self.keychainService,
+            kSecAttrAccount: account,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = item as? Data else { throw CompanionRelayProvisioningError.keychain(status) }
+        return data
+    }
+
+    private func writeKeychain(account: String, data: Data) throws {
         let key: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: Self.keychainService,
-            kSecAttrAccount: Self.keychainAccount,
+            kSecAttrAccount: account,
         ]
         SecItemDelete(key as CFDictionary)
         var item = key

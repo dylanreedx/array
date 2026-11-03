@@ -22,6 +22,33 @@ public enum PairingAlphabet: Sendable {
     }
 }
 
+/// Plan 104 step 2: a random secret the Mac puts in the hosted pairing link.
+/// Only the phone that scans the code learns it; the relay never sees it. Both
+/// ends derive the transcript key from it, so the relay carries ciphertext it
+/// cannot open.
+public enum PairingSecret: Sendable {
+    public static let byteCount = 32
+
+    public static func generate() throws -> Data {
+        Data(try AuthRandom.bytes(count: byteCount))
+    }
+
+    /// base64url without padding, so it survives a URL fragment unescaped.
+    public static func encode(_ secret: Data) -> String {
+        secret.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    public static func decode(_ text: String) -> Data? {
+        var base64 = text.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64), data.count == byteCount else { return nil }
+        return data
+    }
+}
+
 public enum PairingURL: Sendable {
     public static let scheme = "array"
     public static let legacyScheme = "continuum"
@@ -37,13 +64,16 @@ public enum PairingURL: Sendable {
         /// advertised in a form reachable from the phone. Pairing is the
         /// configuration handoff — the phone never types a URL.
         public var relay: URL?
+        /// Hosted pairing only; nil in links from older Macs.
+        public var secret: Data?
 
-        public init(token: String, endpoint: URL?, scopes: Scope?, instanceId: UUID?, relay: URL? = nil) {
+        public init(token: String, endpoint: URL?, scopes: Scope?, instanceId: UUID?, relay: URL? = nil, secret: Data? = nil) {
             self.token = token
             self.endpoint = endpoint
             self.scopes = scopes
             self.instanceId = instanceId
             self.relay = relay
+            self.secret = secret
         }
     }
 
@@ -74,13 +104,16 @@ public enum PairingURL: Sendable {
 
     /// Produces the Camera-friendly production journey. Pairing material stays
     /// in the fragment so it is not sent to Vercel, access logs, or referrers.
-    public static func hostedIssue(credential: String, relay: URL? = nil) -> URL {
+    public static func hostedIssue(credential: String, relay: URL? = nil, secret: Data? = nil) -> URL {
         var components = URLComponents(url: hostedOrigin, resolvingAgainstBaseURL: false)!
         components.path = "/pair"
         var fragmentComponents = URLComponents()
         var items = [URLQueryItem(name: "token", value: credential)]
         if let relay {
             items.append(URLQueryItem(name: "relay", value: relay.absoluteString))
+        }
+        if let secret {
+            items.append(URLQueryItem(name: "secret", value: PairingSecret.encode(secret)))
         }
         fragmentComponents.queryItems = items
         components.fragment = String(fragmentComponents.url!.absoluteString.dropFirst())
@@ -143,7 +176,8 @@ public enum PairingURL: Sendable {
             .value
             .flatMap(UUID.init(uuidString:))
         let relay = items.first(where: { $0.name == "relay" })?.value.flatMap(URL.init(string:))
-        return Payload(token: token, endpoint: endpoint, scopes: scopes, instanceId: instanceId, relay: relay)
+        let secret = items.first(where: { $0.name == "secret" })?.value.flatMap(PairingSecret.decode)
+        return Payload(token: token, endpoint: endpoint, scopes: scopes, instanceId: instanceId, relay: relay, secret: secret)
     }
 
     private static func fragmentItems(in url: URL) -> [URLQueryItem]? {

@@ -136,6 +136,8 @@ public struct AgentStopRequest: Codable, Sendable, Equatable {
 
 public enum AgentStopOutcome: String, Codable, Sendable, Equatable {
     case stopped, unsupported, unauthorized, notFound, stale
+    /// The agent exists but has no turn running, so there was nothing to stop.
+    case notRunning
 }
 
 public struct AgentStopAck: Codable, Sendable, Equatable {

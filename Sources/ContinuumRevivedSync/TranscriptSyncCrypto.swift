@@ -104,6 +104,59 @@ public enum TranscriptSyncCrypto {
         return TranscriptChannelKey(keyID: UUID(uuidString: uuidText)!, key: key)
     }
 
+    /// Plan 104 step 2. The Mac and the phone both hold the pairing secret from
+    /// the QR; the relay holds only a hash of the phone's credential, which is
+    /// why `derivePairedSessionChannel` never matched for hosted pairings. The
+    /// key id is derived too, so it names the secret without revealing it.
+    public static func derivePairingSecretChannel(
+        secret: Data,
+        instanceID: UUID
+    ) -> TranscriptChannelKey {
+        let input = SymmetricKey(data: secret)
+        let salt = Data(instanceID.uuidString.utf8)
+        let key = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: input, salt: salt,
+            info: Data("array.transcript.pairing-secret.v1".utf8), outputByteCount: 32)
+        let idBytes = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: input, salt: salt,
+            info: Data("array.transcript.pairing-secret.key-id.v1".utf8), outputByteCount: 16
+        ).withUnsafeBytes { Array($0) }
+        let keyID = UUID(uuid: (idBytes[0], idBytes[1], idBytes[2], idBytes[3], idBytes[4], idBytes[5], idBytes[6], idBytes[7],
+                                idBytes[8], idBytes[9], idBytes[10], idBytes[11], idBytes[12], idBytes[13], idBytes[14], idBytes[15]))
+        return TranscriptChannelKey(keyID: keyID, key: key)
+    }
+
+    /// Plan 104 step 3: the phone's message to an agent, sealed under a key
+    /// derived from the transcript channel (so from the pairing secret) with
+    /// its own label. The command's idempotency key and agent are bound in, so
+    /// the relay cannot replay the ciphertext as another command or to another
+    /// agent: it would no longer open.
+    public static func sealMessage(_ text: String, channel: TranscriptChannelKey, idempotencyKey: UUID, agentID: UUID) throws -> CompanionSealedMessage {
+        let sealed = try ChaChaPoly.seal(Data(text.utf8), using: messageKey(channel.key),
+                                         authenticating: messageAAD(keyID: channel.keyID, idempotencyKey: idempotencyKey, agentID: agentID))
+        return CompanionSealedMessage(keyID: channel.keyID, combined: sealed.combined)
+    }
+
+    public static func openMessage(_ message: CompanionSealedMessage, key: SymmetricKey, idempotencyKey: UUID, agentID: UUID) throws -> String {
+        do {
+            let box = try ChaChaPoly.SealedBox(combined: message.combined)
+            let opened = try ChaChaPoly.open(box, using: messageKey(key),
+                                             authenticating: messageAAD(keyID: message.keyID, idempotencyKey: idempotencyKey, agentID: agentID))
+            guard let text = String(data: opened, encoding: .utf8) else { throw TranscriptCryptoError.invalidCiphertext }
+            return text
+        } catch {
+            throw TranscriptCryptoError.invalidCiphertext
+        }
+    }
+
+    private static func messageKey(_ channelKey: SymmetricKey) -> SymmetricKey {
+        HKDF<SHA256>.deriveKey(inputKeyMaterial: channelKey, info: Data("array.companion.message.v1".utf8), outputByteCount: 32)
+    }
+
+    private static func messageAAD(keyID: UUID, idempotencyKey: UUID, agentID: UUID) -> Data {
+        Data("array.companion.message|\(keyID.uuidString)|\(idempotencyKey.uuidString)|\(agentID.uuidString)".utf8)
+    }
+
     public static func generatePrivateKey() -> Data {
         Curve25519.KeyAgreement.PrivateKey().rawRepresentation
     }

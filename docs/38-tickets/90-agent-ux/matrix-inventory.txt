@@ -113,6 +113,7 @@ check --collaboration-native-check
 check --collaboration-usage-telemetry-check
 check --command-center-check
 check --companion-agent-destination-check
+check --companion-command-check
 check --companion-sync-health-check
 check --companion-task-host-check
 check --companion-task-ledger-check
@@ -544,6 +545,7 @@ leg run_app_check .build/debug/Array --cli-update-settings-check
 leg run_app_check .build/debug/Array --collaboration-cursor-motion-check
 leg run_app_check .build/debug/Array --collaboration-full-access-check
 leg run_app_check .build/debug/Array --collaboration-native-check
+leg run_app_check .build/debug/Array --companion-command-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --companion-task-host-check
 leg run_app_check .build/debug/Array --completion-awareness-check
@@ -946,8 +948,8 @@ count ContinuumRevivedCoreChecks 199
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
-count ContinuumRevivedRelayChecks 2
-count ContinuumRevivedRelayCoreChecks 2
+count ContinuumRevivedRelayChecks 3
+count ContinuumRevivedRelayCoreChecks 3
 count ContinuumRevivedRelayIntegrationChecks 4
 count ContinuumRevivedRelayProtocolChecks 0
 count ContinuumRevivedSyncChecks 12

@@ -298,6 +298,15 @@ private final class AgentsBoardModel: ObservableObject {
     @Published var lastApprovalAck: ApprovalResponseAck?
     @Published var lastStopAck: AgentStopAck?
     @Published var transcripts: [UUID: AgentDocument] = [:]
+    /// Paired through the hosted relay before the pairing secret existed: the
+    /// Mac holds no key this phone can open, so transcripts need a re-pair.
+    @Published var transcriptsNeedRepair = false
+    /// Why an open agent shows no transcript, in the Mac's words; nil while
+    /// it is loading or shown.
+    @Published var transcriptNotes: [UUID: String] = [:]
+    /// Phone message drafts per agent, kept while the app runs so leaving an
+    /// agent's screen keeps the text and the same sealed request (plan 104).
+    @Published var messageDrafts = PhoneMessageDrafts()
     @Published var parentByChild: [UUID: UUID] = [:]
     @Published var apnsDeviceToken: String?
     @Published var freshnessNow = Date()
@@ -381,6 +390,10 @@ private final class AgentsBoardModel: ObservableObject {
     private var fetchTask: Task<Void, Never>?
     /// Set in relay mode (D4-R1, ticket 86); the transport owns its poll loop.
     private var relayTransport: RelaySyncTransport?
+    /// Hosted relay only. Stop and Approve go through the relay's command
+    /// queue: it refuses events published by a phone, so the sync-message path
+    /// below never reached the Mac there.
+    private var commandChannel: RelayCommandChannel?
     private var relayStateTask: Task<Void, Never>?
     private var transcriptControlTask: Task<Void, Never>?
     private var transcriptReceiver: TranscriptProjectionReceiver?
@@ -510,6 +523,8 @@ private final class AgentsBoardModel: ObservableObject {
                 credential: pairedSession.token
             )
             relayTransport = relay
+            commandChannel = relayConfig.baseURL.scheme == "https"
+                ? RelayCommandChannel(baseURL: relayConfig.baseURL, bearerToken: pairedSession.token) : nil
             taskObservationTask = Task { [weak self] in
                 for await observation in relay.taskObservations {
                     guard !Task.isCancelled, let self else { return }
@@ -582,13 +597,11 @@ private final class AgentsBoardModel: ObservableObject {
             }
         }
 
+        transcriptsNeedRepair = false
         if relayTransport != nil,
            capability.scope.contains(.transcriptRead),
-           case .paired(let pairedSession) = pairedSessionState {
-            let channel = TranscriptSyncCrypto.derivePairedSessionChannel(
-                token: pairedSession.token,
-                pairingID: pairedSession.instanceId
-            )
+           case .paired(let pairedSession) = pairedSessionState,
+           let channel = transcriptChannel(for: pairedSession) {
             let transcriptReceiver = TranscriptProjectionReceiver(
                 demux: demux,
                 scope: capability.scope,
@@ -740,6 +753,7 @@ private final class AgentsBoardModel: ObservableObject {
         transcriptControlTask = nil
         transcriptTask = nil
         relayTransport = nil
+        commandChannel = nil
         receiver = nil
         self.spatialReceiver = nil
         let transcript = transcriptReceiver
@@ -772,6 +786,15 @@ private final class AgentsBoardModel: ObservableObject {
     func respondToApproval(agentId: UUID, requestId: String, decision: ApprovalDecision) async throws -> ApprovalResponseOutcome {
         guard canMutateFromFreshness else {
             throw ApprovalSendError.freshnessBlocked(freshness.actionBlocker ?? "Reconnect to act")
+        }
+        if let commandChannel {
+            let payload = try JSONEncoder().encode(CompanionApprovalCommand(requestId: requestId, decision: decision))
+            let status = try await Self.relayCommand { try await commandChannel.send(
+                .init(idempotencyKey: UUID(), kind: RelayCommandKind.approvalRespond, agentID: agentId, payload: payload),
+                waitingUpTo: Self.approvalAckTimeout) }
+            let outcome = try Self.commandOutcome(status, as: ApprovalResponseOutcome.self)
+            lastApprovalAck = ApprovalResponseAck(requestId: requestId, outcome: outcome)
+            return outcome
         }
         guard let demux else {
             throw ApprovalSendError.unavailable
@@ -808,9 +831,157 @@ private final class AgentsBoardModel: ObservableObject {
         }
     }
 
+    /// Hosted pairings key transcripts from the secret in the pairing link
+    /// (plan 104 step 2); the relay never sees it. A hosted phone paired before
+    /// that has no key the Mac can match. Local pairings keep the session token.
+    private func transcriptChannel(for session: PairedCompanionSession) -> TranscriptChannelKey? {
+        guard commandChannel != nil else {
+            return TranscriptSyncCrypto.derivePairedSessionChannel(token: session.token, pairingID: session.instanceId)
+        }
+        guard let secret = session.pairingSecret else {
+            transcriptsNeedRepair = true
+            return nil
+        }
+        return TranscriptSyncCrypto.derivePairingSecretChannel(secret: secret, instanceID: session.instanceId)
+    }
+
+    /// Hosted relay: ask the Mac for one agent's transcript through the command
+    /// queue (the relay refuses phone-published events). The Mac answers with
+    /// an encrypted event the receiver opens; only changed versions are sent.
+    /// The Mac's answer becomes the card's sentence when nothing can be shown.
+    func requestTranscript(agentId: UUID) async {
+        guard let commandChannel, let transcriptReceiver,
+              case .paired(let session) = pairedSessionState,
+              let channel = transcriptChannel(for: session) else { return }
+        await transcriptReceiver.follow(agentIDs: [agentId])
+        let known = await transcriptReceiver.currentDocument(agentID: agentId)?.version
+        guard let payload = try? JSONEncoder().encode(CompanionTranscriptRequest(keyID: channel.keyID, knownVersion: known)) else { return }
+        let status: RelayCommandStatus
+        do {
+            status = try await commandChannel.send(
+                .init(idempotencyKey: UUID(), kind: RelayCommandKind.transcriptRequest, agentID: agentId, payload: payload),
+                waitingUpTo: .seconds(4))
+        } catch RelayCommandChannel.Failure.http(let code, _) where code == 400 || code == 404 {
+            // A relay from before transcript requests: unknown kind or no status route.
+            transcriptNotes[agentId] = "The relay needs an update before your phone can show transcripts."
+            return
+        } catch {
+            return
+        }
+        switch (status.state, status.outcome.flatMap(CompanionTranscriptOutcome.init(rawValue:))) {
+        case (.pending, _):
+            transcriptNotes[agentId] = "Waiting for your Mac. The transcript appears when it is online."
+        case (.completed, .published?), (.completed, .unchanged?), (.expired, _):
+            transcriptNotes[agentId] = nil
+        case (.completed, .unavailable?):
+            transcriptNotes[agentId] = "Your Mac has no transcript for this agent yet."
+        case (.completed, .unknownKey?):
+            transcriptsNeedRepair = true
+            transcriptNotes[agentId] = nil
+        case (.completed, .unauthorized?):
+            transcriptNotes[agentId] = "This iPhone is not allowed to read transcripts. Pair it again from your Mac."
+        case (.completed, .failed?):
+            transcriptNotes[agentId] = "Your Mac could not send this transcript."
+        case (.completed, nil):
+            // "unsupported": a Mac from before transcript requests.
+            transcriptNotes[agentId] = "Update Array on your Mac to read transcripts here."
+        }
+    }
+
+    /// Sends this agent's draft (or re-sends its sealed request) and records
+    /// the Mac's answer here, so it lands even if the composer has gone.
+    func sendMessage(agentId: UUID) async {
+        guard let request = messageDrafts[agentId].beginSend(seal: { makeMessage(agentId: agentId, text: $0) }) else { return }
+        let result = await deliver(request)
+        messageDrafts[agentId].finish(result, for: request.idempotencyKey)
+    }
+
+    /// A message the Mac has not answered yet: keep asking until it does.
+    func pollMessage(agentId: UUID) async {
+        while !Task.isCancelled, let key = messageDrafts[agentId].pollKey {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            messageDrafts[agentId].finish(await messageStatus(key), for: key)
+        }
+    }
+
+    /// Whether this phone can message agents: the relay granted it and the
+    /// pairing carries the secret the text is sealed with.
+    var canMessageAgents: Bool {
+        guard grantedScope.contains(.agentMessage), commandChannel != nil,
+              case .paired(let session) = pairedSessionState else { return false }
+        return session.pairingSecret != nil
+    }
+
+    /// One draft's message, sealed once. Retrying must resend these exact
+    /// bytes: a new seal has a new nonce, and the relay refuses a known key
+    /// carrying different bytes.
+    func makeMessage(agentId: UUID, text: String) -> RelayCommandRequest? {
+        guard case .paired(let session) = pairedSessionState,
+              let channel = transcriptChannel(for: session) else { return nil }
+        let key = UUID()
+        guard let sealed = try? TranscriptSyncCrypto.sealMessage(text, channel: channel, idempotencyKey: key, agentID: agentId),
+              let payload = try? JSONEncoder().encode(sealed) else { return nil }
+        return RelayCommandRequest(idempotencyKey: key, kind: RelayCommandKind.agentMessage, agentID: agentId, payload: payload)
+    }
+
+    /// Sends (or re-sends) the message and waits briefly for the Mac's answer.
+    func deliver(_ request: RelayCommandRequest) async -> PhoneMessageDelivery {
+        guard let commandChannel else { return .unreachable("Messaging needs the hosted relay.") }
+        do {
+            return Self.messageDelivery(try await commandChannel.send(request, waitingUpTo: Self.approvalAckTimeout))
+        } catch {
+            return Self.messageDelivery(error)
+        }
+    }
+
+    /// What became of a message already sent, without sending it again.
+    func messageStatus(_ key: UUID) async -> PhoneMessageDelivery {
+        guard let commandChannel else { return .unreachable("Messaging needs the hosted relay.") }
+        do { return Self.messageDelivery(try await commandChannel.status(key)) } catch { return Self.messageDelivery(error) }
+    }
+
+    private static func messageDelivery(_ status: RelayCommandStatus) -> PhoneMessageDelivery {
+        switch status.state {
+        case .pending: return .waiting
+        case .expired: return .refused("Your Mac didn't pick this up within 10 minutes, so nothing was sent.")
+        case .completed: break
+        }
+        switch status.outcome.flatMap(AgentMessageOutcome.init(rawValue:)) {
+        case .accepted?: return .accepted
+        case .busy?: return .refused("The agent is working. Send this when it finishes.")
+        case .notReady?: return .refused("The agent's CLI can't take a message right now. Check it on your Mac.")
+        case .notFound?: return .refused("Your Mac no longer has this agent.")
+        case .empty?: return .refused("Type a message first.")
+        case .unauthorized?: return .refused("This iPhone isn't allowed to message agents. Pair it again from your Mac.")
+        case .unknownKey?, .invalid?: return .refused("Your Mac couldn't open this message. Pair this iPhone again from your Mac.")
+        case .unsupported?, nil: return .refused("Update Array on your Mac to send messages from your phone.")
+        case .refused?: return .refused("Your Mac didn't take this message. The agent may be in use somewhere else.")
+        case .interrupted?: return .refused("Your Mac restarted while sending this. Check the agent before sending it again.")
+        }
+    }
+
+    private static func messageDelivery(_ error: Error) -> PhoneMessageDelivery {
+        switch error {
+        case RelayCommandChannel.Failure.http(let code, _) where code == 400 || code == 404:
+            return .refused("The relay needs an update before your phone can send messages.")
+        case RelayCommandChannel.Failure.http(403, _):
+            return .refused("This iPhone isn't allowed to message agents. Pair it again from your Mac.")
+        default:
+            return .unreachable("Couldn't reach the relay. Try again.")
+        }
+    }
+
     func stopAgent(agentId: UUID) async throws -> AgentStopOutcome {
         guard grantedScope.contains(.agentStop) else { return .unauthorized }
-        guard canMutateFromFreshness, let demux else { return .stale }
+        guard canMutateFromFreshness else { return .stale }
+        if let commandChannel {
+            let status = try await Self.relayCommand { try await commandChannel.send(
+                .init(idempotencyKey: UUID(), kind: RelayCommandKind.agentStop, agentID: agentId),
+                waitingUpTo: Self.approvalAckTimeout) }
+            return try Self.commandOutcome(status, as: AgentStopOutcome.self)
+        }
+        guard let demux else { return .stale }
         let request = AgentStopRequest(agentID: agentId)
         let stream = await demux.subscribe()
         let ackTask = Task<AgentStopOutcome, Error> {
@@ -833,6 +1004,22 @@ private final class AgentsBoardModel: ObservableObject {
             guard let result = try await group.next() else { return .stale }
             group.cancelAll()
             return result
+        }
+    }
+
+    /// A relay older than the command queue has no status route (404).
+    private static func relayCommand(_ body: () async throws -> RelayCommandStatus) async throws -> RelayCommandStatus {
+        do { return try await body() } catch RelayCommandChannel.Failure.http(404, _) { throw ApprovalSendError.relayTooOld }
+    }
+
+    /// The Mac's word for what it did, or why there is none yet.
+    private static func commandOutcome<Outcome: RawRepresentable>(_ status: RelayCommandStatus, as: Outcome.Type) throws -> Outcome where Outcome.RawValue == String {
+        switch status.state {
+        case .pending: throw ApprovalSendError.awaitingMac
+        case .expired: throw ApprovalSendError.expired
+        case .completed:
+            guard let raw = status.outcome, let outcome = Outcome(rawValue: raw) else { throw ApprovalSendError.unavailable }
+            return outcome
         }
     }
 
@@ -902,7 +1089,8 @@ private final class AgentsBoardModel: ObservableObject {
                     token: exchange.credential,
                     scopes: companionScope,
                     issuedAt: .now,
-                    expiresAt: .distantFuture
+                    expiresAt: .distantFuture,
+                    pairingSecret: payload.secret
                 )
                 relayHTTPOrigin = HostedPairingPolicy.relayHTTPOrigin(
                     advertisedURL: payload.relay,
@@ -953,9 +1141,12 @@ private final class AgentsBoardModel: ObservableObject {
             throw LocalPairingUIError.exchangeRejected("invalid_relay")
         }
         Self.appendFetchLog("pairing: exchanging with hosted Array Relay")
+        // Messaging needs the pairing secret to seal the text, so only a link
+        // that carries one asks for it.
         return try await HostedRelayAPI(baseURL: origin).exchangePairingGrant(
             code: payload.token,
-            deviceLabel: UIDevice.current.name
+            deviceLabel: UIDevice.current.name,
+            wantsMessages: payload.secret != nil ? true : nil
         )
     }
 
@@ -1094,7 +1285,7 @@ private final class AgentsBoardModel: ObservableObject {
                 instanceID: pairedInstanceID
             )
         }
-        if let transcriptReceiver {
+        if let transcriptReceiver, commandChannel == nil {
             let agentIDs = rows.map(\.agentId)
             Task { await transcriptReceiver.connect(agentIDs: agentIDs) }
         }
@@ -1175,7 +1366,7 @@ private final class AgentsBoardModel: ObservableObject {
                 await MainActor.run {
                     guard let self else { return }
                     self.freshnessNow = Date()
-                    if let transcriptReceiver = self.transcriptReceiver {
+                    if let transcriptReceiver = self.transcriptReceiver, self.commandChannel == nil {
                         let agentIDs = self.rows.map(\.agentId)
                         Task { await transcriptReceiver.connect(agentIDs: agentIDs) }
                     }
@@ -1218,9 +1409,13 @@ private final class AgentsBoardModel: ObservableObject {
     }
 }
 
+/// Where a phone message stands.
 private enum ApprovalSendError: LocalizedError {
     case unavailable
     case ackTimedOut
+    case awaitingMac
+    case expired
+    case relayTooOld
     case freshnessBlocked(String)
 
     var errorDescription: String? {
@@ -1229,6 +1424,12 @@ private enum ApprovalSendError: LocalizedError {
             "Approval channel is not connected."
         case .ackTimedOut:
             "Approval response timed out."
+        case .awaitingMac:
+            "Sent. Your Mac hasn't picked it up yet; it will if it comes online in the next 10 minutes."
+        case .expired:
+            "Your Mac didn't pick this up in time, so nothing happened."
+        case .relayTooOld:
+            "The relay needs an update before your phone can do this."
         case .freshnessBlocked(let message):
             message
         }
@@ -1396,7 +1597,12 @@ private struct AgentDetailView: View {
                         MobileSemanticTranscriptView(document: document)
                     } else {
                         TranscriptAvailabilityCard(
-                            hasPermission: model.grantedScope.contains(.transcriptRead))
+                            hasPermission: model.grantedScope.contains(.transcriptRead),
+                            needsRepair: model.transcriptsNeedRepair,
+                            note: model.transcriptNotes[agentId])
+                    }
+                    if model.canMessageAgents {
+                        PhoneMessageComposer(agentId: agentId)
                     }
                     if row.status == .needsAttention {
                         PendingAttentionCard(activity: activity, grantedScope: model.grantedScope, freshness: model.freshness) { target, decision in
@@ -1427,7 +1633,14 @@ private struct AgentDetailView: View {
                             Task {
                                 do {
                                     let outcome = try await model.stopAgent(agentId: agentId)
-                                    stopNote = outcome == .stopped ? "Stopped this agent." : "Stop unavailable: \(outcome.rawValue)."
+                                    switch outcome {
+                                    case .stopped: stopNote = "Stopped this agent."
+                                    case .notRunning: stopNote = "Nothing to stop: this agent isn't working on anything."
+                                    case .notFound: stopNote = "Your Mac doesn't have this agent any more."
+                                    case .unauthorized: stopNote = "This phone isn't allowed to stop agents."
+                                    case .stale: stopNote = "Reconnect to your Mac to stop this agent."
+                                    case .unsupported: stopNote = "This agent can't be stopped from the phone right now."
+                                    }
                                 } catch {
                                     stopNote = error.localizedDescription
                                 }
@@ -1461,6 +1674,15 @@ private struct AgentDetailView: View {
         .navigationTitle("Agent")
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) { FreshnessFooter(freshness: model.freshness) }
+        // Hosted relay: ask for this agent's transcript while it is open. A
+        // quiet agent costs one small command per cycle; the Mac sends the
+        // transcript only when its version changed.
+        .task(id: agentId) {
+            while !Task.isCancelled {
+                await model.requestTranscript(agentId: agentId)
+                try? await Task.sleep(for: .seconds(5))
+            }
+        }
     }
 
     @ViewBuilder
@@ -1497,14 +1719,68 @@ private struct AgentDetailView: View {
     }
 }
 
+/// Message an agent from the phone (plan 104 step 3). The draft and its
+/// sealed request live in the model (`PhoneMessageDraft`), so leaving the
+/// agent and coming back keeps the text, the waiting state and the same key.
+private struct PhoneMessageComposer: View {
+    @EnvironmentObject private var model: AgentsBoardModel
+    let agentId: UUID
+
+    private var draft: PhoneMessageDraft { model.messageDrafts[agentId] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField("Message this agent", text: Binding(
+                    get: { draft.text },
+                    set: { model.messageDrafts[agentId].edit($0) }
+                ), axis: .vertical)
+                    .lineLimit(1...6)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(draft.locked)
+                Button {
+                    Task { await model.sendMessage(agentId: agentId) }
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.title2)
+                }
+                .disabled(draft.locked || draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityLabel("Send message")
+            }
+            if let line = statusLine {
+                Text(line).font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .tokenBackground(.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        // Restarts on return to this agent while the Mac has not answered.
+        .task(id: draft.pollKey) {
+            await model.pollMessage(agentId: agentId)
+        }
+    }
+
+    private var statusLine: String? {
+        switch draft.delivery {
+        case nil: return draft.sending ? "Sending…" : nil
+        case .accepted?: return "Sent to the agent."
+        case .waiting?: return "Waiting for your Mac. It sends this when it comes online in the next 10 minutes."
+        case .refused(let line)?, .unreachable(let line)?: return line
+        }
+    }
+}
+
 private struct TranscriptAvailabilityCard: View {
     let hasPermission: Bool
+    let needsRepair: Bool
+    let note: String?
 
     var body: some View {
         Label(
-            hasPermission
-                ? "Full transcript is waiting for encrypted channel negotiation. Activity remains available."
-                : "This paired device has activity-only access. Re-pair with transcript permission to read conversations.",
+            !hasPermission
+                ? "This paired device has activity-only access. Re-pair with transcript permission to read conversations."
+                : needsRepair
+                    ? "Pair this iPhone again from your Mac to read transcripts. Activity remains available."
+                    : note ?? "Loading the transcript from your Mac…",
             systemImage: hasPermission ? "lock.rotation" : "lock"
         )
         .font(.subheadline)
@@ -1726,6 +2002,10 @@ private struct PendingAttentionCard: View {
             switch outcome {
             case .resolved:
                 note = nil
+                settled = true
+            case .sent:
+                note = "Sent to the agent"
+                isError = false
                 settled = true
             case .stale:
                 note = "Already resolved"

@@ -10,6 +10,9 @@ public struct PairedCompanionSession: Codable, Equatable, Sendable {
     public var scopes: Scope
     public var issuedAt: Date
     public var expiresAt: Date
+    /// The hosted pairing secret from the QR (plan 104 step 2). Nil for local
+    /// pairings and for phones paired before it existed.
+    public var pairingSecret: Data?
 
     public init(
         instanceId: UUID,
@@ -19,7 +22,8 @@ public struct PairedCompanionSession: Codable, Equatable, Sendable {
         token: String,
         scopes: Scope,
         issuedAt: Date,
-        expiresAt: Date
+        expiresAt: Date,
+        pairingSecret: Data? = nil
     ) {
         self.instanceId = instanceId
         self.userId = userId
@@ -29,6 +33,7 @@ public struct PairedCompanionSession: Codable, Equatable, Sendable {
         self.scopes = scopes
         self.issuedAt = issuedAt
         self.expiresAt = expiresAt
+        self.pairingSecret = pairingSecret
     }
 }
 

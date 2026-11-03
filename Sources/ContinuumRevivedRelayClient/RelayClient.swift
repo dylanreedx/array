@@ -55,8 +55,8 @@ public struct HostedRelayAPI: Sendable {
     public func cancelPairingGrant(id: UUID, credential: String) async throws -> RelayPairingCancellationResponse {
         try await request("/v2/pairing-grants/\(id.uuidString)", method: "DELETE", body: Optional<RelayErrorResponse>.none, token: credential)
     }
-    public func exchangePairingGrant(code: String, deviceLabel: String) async throws -> RelayCompanionProvisioning {
-        try await request("/v2/pairing/exchange", method: "POST", body: RelayPairingExchange(code: code, deviceLabel: deviceLabel), token: nil)
+    public func exchangePairingGrant(code: String, deviceLabel: String, wantsMessages: Bool? = nil) async throws -> RelayCompanionProvisioning {
+        try await request("/v2/pairing/exchange", method: "POST", body: RelayPairingExchange(code: code, deviceLabel: deviceLabel, wantsMessages: wantsMessages), token: nil)
     }
     public func devices(credential: String) async throws -> [RelayDevice] {
         try await request("/v2/devices", method: "GET", body: Optional<RelayErrorResponse>.none, token: credential)

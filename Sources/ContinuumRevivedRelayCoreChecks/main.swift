@@ -7,6 +7,8 @@ do { try await runRelayNotificationChecks() }
 catch { print("FAIL relay notification behavior: \(error)"); exit(1) }
 do { try await runRelayOutboxChecks() }
 catch { print("FAIL relay outbox behavior: \(error)"); exit(1) }
+do { try await runRelayCommandChecks() }
+catch { print("FAIL relay command delivery: \(error)"); exit(1) }
 
 func expect(_ value: @autoclosure () -> Bool, _ message: String) { if !value() { fatalError(message) } }
 let directory = FileManager.default.temporaryDirectory.appendingPathComponent("array-relay-check-\(UUID())", isDirectory: true)

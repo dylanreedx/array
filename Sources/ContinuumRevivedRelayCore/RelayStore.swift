@@ -4,7 +4,7 @@ import GRDB
 import ContinuumRevivedRelayProtocol
 
 public enum RelayStoreError: Error, Equatable {
-    case unauthorized, forbidden, invalidOrExpiredCode, payloadTooLarge, invalidCommand
+    case unauthorized, forbidden, invalidOrExpiredCode, payloadTooLarge, invalidCommand, commandNotFound, commandConflict
     case invalidNotificationBatch, notificationOwnerRequired, notificationOwnerMismatch, notificationRevisionConflict
 }
 
@@ -22,7 +22,7 @@ public struct RelayStoredPushRegistration: Sendable, Equatable {
 /// Durable, per-Mac relay state. All mutations are transactions and all externally
 /// supplied secrets are reduced to SHA-256 digests before storage.
 public actor RelayStore {
-    public static let schemaVersion = 5
+    public static let schemaVersion = 6
     // Module-owned helpers implement the outbox transaction in a separate file.
     let database: DatabaseQueue
     let encryptionKey: SymmetricKey
@@ -160,6 +160,19 @@ public actor RelayStore {
                 UPDATE relay_metadata SET value='5' WHERE key='schema_version';
                 """)
         }
+        migrator.registerMigration("relay-command-delivery") { db in
+            // Commands were accepted and never delivered. Now they carry a
+            // payload and wait for the Mac's result. Additive only: an older
+            // relay still inserts by column name and ignores the rest.
+            try db.execute(sql: """
+                ALTER TABLE commands ADD COLUMN payload BLOB;
+                ALTER TABLE commands ADD COLUMN outcome TEXT;
+                ALTER TABLE commands ADD COLUMN detail TEXT;
+                ALTER TABLE commands ADD COLUMN completed_at DOUBLE;
+                CREATE INDEX commands_pending ON commands(instance_id,completed_at,created_at);
+                UPDATE relay_metadata SET value='6' WHERE key='schema_version';
+                """)
+        }
         return migrator
     }
 
@@ -260,8 +273,9 @@ public actor RelayStore {
             let grantID: String = row["id"]
             try db.execute(sql: "UPDATE pairing_grants SET consumed_at=? WHERE id=? AND consumed_at IS NULL", arguments: [now.timeIntervalSince1970, grantID])
             guard db.changesCount == 1 else { throw RelayStoreError.invalidOrExpiredCode }
-            try Self.insertCredential(db, id: credentialID, instanceID: instanceID, token: token, role: .companion, capabilities: RelayWire.companionCapabilities, deviceID: deviceID, label: request.deviceLabel, now: now)
-            return RelayCompanionProvisioning(instanceID: instanceID, deviceID: deviceID, credential: token, capabilities: RelayWire.companionCapabilities)
+            let capabilities = request.wantsMessages == true ? RelayWire.companionMessagingCapabilities : RelayWire.companionCapabilities
+            try Self.insertCredential(db, id: credentialID, instanceID: instanceID, token: token, role: .companion, capabilities: capabilities, deviceID: deviceID, label: request.deviceLabel, now: now)
+            return RelayCompanionProvisioning(instanceID: instanceID, deviceID: deviceID, credential: token, capabilities: capabilities)
         }
     }
 
@@ -315,15 +329,77 @@ public actor RelayStore {
 
     public func acceptCommand(auth: RelayCredentialContext, request: RelayCommandRequest, now: Date = .init()) throws -> RelayCommandReceipt {
         let required: RelayCapability
-        switch request.kind { case "approval.respond": required = .respondToApprovals; case "agent.stop": required = .stopAgents; default: throw RelayStoreError.invalidCommand }
-        guard auth.capabilities.contains(required) else { throw RelayStoreError.forbidden }
+        switch request.kind { case RelayCommandKind.approvalRespond: required = .respondToApprovals; case RelayCommandKind.agentStop: required = .stopAgents; case RelayCommandKind.transcriptRequest: required = .readTranscripts; case RelayCommandKind.agentMessage: required = .sendMessages; default: throw RelayStoreError.invalidCommand }
+        guard auth.role == .companion, auth.capabilities.contains(required), let deviceID = auth.deviceID else { throw RelayStoreError.forbidden }
+        guard (request.payload?.count ?? 0) <= RelayCommandLimits.maximumPayloadBytes else { throw RelayStoreError.payloadTooLarge }
         return try database.write { db in
-            if let row = try Row.fetchOne(db, sql: "SELECT accepted,created_at FROM commands WHERE instance_id=? AND idempotency_key=?", arguments: [auth.instanceID.uuidString, request.idempotencyKey.uuidString]) {
+            if let row = try Row.fetchOne(db, sql: "SELECT device_id,kind,agent_id,payload,accepted,created_at FROM commands WHERE instance_id=? AND idempotency_key=?", arguments: [auth.instanceID.uuidString, request.idempotencyKey.uuidString]) {
+                // A retry gets the original receipt; the same key carrying a
+                // different command is refused rather than silently merged.
+                let storedDevice: String? = row["device_id"], storedKind: String = row["kind"], storedAgent: String = row["agent_id"], storedPayload: Data? = row["payload"]
+                guard storedDevice == deviceID.uuidString, storedKind == request.kind, storedAgent == request.agentID.uuidString, storedPayload == request.payload else {
+                    throw RelayStoreError.commandConflict
+                }
                 return RelayCommandReceipt(idempotencyKey: request.idempotencyKey, accepted: row["accepted"], createdAt: Date(timeIntervalSince1970: row["created_at"]))
             }
-            try db.execute(sql: "INSERT INTO commands(instance_id,idempotency_key,device_id,kind,agent_id,accepted,created_at) VALUES (?,?,?,?,?,?,?)", arguments: [auth.instanceID.uuidString, request.idempotencyKey.uuidString, auth.deviceID?.uuidString, request.kind, request.agentID.uuidString, true, now.timeIntervalSince1970])
+            try db.execute(sql: "DELETE FROM commands WHERE instance_id=? AND created_at<?", arguments: [auth.instanceID.uuidString, now.addingTimeInterval(-RelayCommandLimits.retention).timeIntervalSince1970])
+            try db.execute(sql: "INSERT INTO commands(instance_id,idempotency_key,device_id,kind,agent_id,payload,accepted,created_at) VALUES (?,?,?,?,?,?,?,?)", arguments: [auth.instanceID.uuidString, request.idempotencyKey.uuidString, deviceID.uuidString, request.kind, request.agentID.uuidString, request.payload, true, now.timeIntervalSince1970])
             return RelayCommandReceipt(idempotencyKey: request.idempotencyKey, accepted: true, createdAt: now)
         }
+    }
+
+    /// The Mac collects what its phones asked for, oldest first. Only commands
+    /// still inside their lifetime and from a phone that is still paired: a
+    /// revoked phone's queued Stop must not run after the revocation.
+    public func pendingCommands(auth: RelayCredentialContext, now: Date = .init()) throws -> RelayCommandPage {
+        guard auth.role == .desktop, auth.capabilities.contains(.publishState) else { throw RelayStoreError.forbidden }
+        return try database.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT m.idempotency_key,m.kind,m.agent_id,m.device_id,m.payload,m.created_at
+                FROM commands m JOIN credentials c ON c.instance_id=m.instance_id AND c.device_id=m.device_id
+                WHERE m.instance_id=? AND m.completed_at IS NULL AND m.created_at>?
+                  AND c.role='companion' AND c.revoked_at IS NULL
+                ORDER BY m.created_at, m.rowid LIMIT ?
+                """, arguments: [auth.instanceID.uuidString, now.timeIntervalSince1970 - RelayCommandLimits.lifetime, RelayCommandLimits.pageSize])
+            return RelayCommandPage(commands: rows.compactMap { row in
+                guard let key = UUID(uuidString: row["idempotency_key"]), let agent = UUID(uuidString: row["agent_id"]) else { return nil }
+                let device: String? = row["device_id"]
+                return RelayCommand(idempotencyKey: key, kind: row["kind"], agentID: agent, deviceID: device.flatMap(UUID.init(uuidString:)),
+                                    payload: row["payload"], createdAt: Date(timeIntervalSince1970: row["created_at"]))
+            })
+        }
+    }
+
+    /// The Mac's result. The first one wins; a repeat (the Mac retrying after a
+    /// lost reply) returns the stored status unchanged.
+    public func completeCommand(auth: RelayCredentialContext, key: UUID, result: RelayCommandResult, now: Date = .init()) throws -> RelayCommandStatus {
+        guard auth.role == .desktop, auth.capabilities.contains(.publishState) else { throw RelayStoreError.forbidden }
+        guard !result.outcome.isEmpty, result.outcome.utf8.count <= RelayCommandLimits.maximumOutcomeBytes,
+              (result.detail?.utf8.count ?? 0) <= RelayCommandLimits.maximumDetailBytes else { throw RelayStoreError.invalidCommand }
+        return try database.write { db in
+            try db.execute(sql: "UPDATE commands SET outcome=?,detail=?,completed_at=? WHERE instance_id=? AND idempotency_key=? AND completed_at IS NULL AND created_at>?",
+                           arguments: [result.outcome, result.detail, now.timeIntervalSince1970, auth.instanceID.uuidString, key.uuidString, now.timeIntervalSince1970 - RelayCommandLimits.lifetime])
+            return try Self.commandStatus(db, instanceID: auth.instanceID, key: key, deviceID: nil, now: now)
+        }
+    }
+
+    /// The sending phone reads what became of its command. Another phone of
+    /// the same Mac cannot.
+    public func commandStatus(auth: RelayCredentialContext, key: UUID, now: Date = .init()) throws -> RelayCommandStatus {
+        guard auth.role == .companion, let deviceID = auth.deviceID else { throw RelayStoreError.forbidden }
+        return try database.read { db in try Self.commandStatus(db, instanceID: auth.instanceID, key: key, deviceID: deviceID, now: now) }
+    }
+
+    private static func commandStatus(_ db: Database, instanceID: UUID, key: UUID, deviceID: UUID?, now: Date) throws -> RelayCommandStatus {
+        guard let row = try Row.fetchOne(db, sql: "SELECT device_id,kind,agent_id,outcome,detail,created_at,completed_at FROM commands WHERE instance_id=? AND idempotency_key=?",
+                                         arguments: [instanceID.uuidString, key.uuidString]),
+              let agent = UUID(uuidString: row["agent_id"]) else { throw RelayStoreError.commandNotFound }
+        if let deviceID, (row["device_id"] as String?) != deviceID.uuidString { throw RelayStoreError.commandNotFound }
+        let created: Double = row["created_at"], completed: Double? = row["completed_at"]
+        let state: RelayCommandStatus.State = completed != nil ? .completed
+            : now.timeIntervalSince1970 - created >= RelayCommandLimits.lifetime ? .expired : .pending
+        return RelayCommandStatus(idempotencyKey: key, kind: row["kind"], agentID: agent, state: state, outcome: row["outcome"], detail: row["detail"],
+                                  createdAt: Date(timeIntervalSince1970: created), completedAt: completed.map(Date.init(timeIntervalSince1970:)))
     }
 
     public func revokeCredential(auth: RelayCredentialContext, credentialID: UUID, now: Date = .init()) throws {

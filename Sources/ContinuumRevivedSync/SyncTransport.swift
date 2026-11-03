@@ -102,6 +102,9 @@ public struct ApprovalResponseRequest: Codable, Sendable, Equatable {
 
 public enum ApprovalResponseOutcome: String, Codable, Sendable, Equatable {
     case resolved
+    /// Handed to the agent's CLI. Whether the CLI accepted it shows up later,
+    /// as the request leaving the agent's activity; Array does not decide that.
+    case sent
     case stale
     case unauthorized
     case unknownRequest

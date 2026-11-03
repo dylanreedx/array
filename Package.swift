@@ -225,7 +225,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "ContinuumRevivedRelayChecks",
-            dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore", "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore"]
+            dependencies: ["ContinuumRevivedSync", "ContinuumRevivedCore", "ContinuumRevivedAgentContent", "ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore", "ContinuumRevivedRelayNIO", "ContinuumRevivedRelayClient"]
         ),
         .executableTarget(name: "ContinuumRevivedRelayProtocolChecks", dependencies: ["ContinuumRevivedRelayProtocol"]),
         .executableTarget(name: "ContinuumRevivedRelayCoreChecks", dependencies: ["ContinuumRevivedRelayProtocol", "ContinuumRevivedRelayCore"]),

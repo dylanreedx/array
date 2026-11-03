@@ -2955,6 +2955,16 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--companion-command-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await CompanionCommandChecks.run())
+                    Foundation.exit(0)
+                } catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--agent-notify-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -13717,7 +13727,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let grantID = self.companionRelayPairingGrantID else { return }
             self.companionRelayPairingGrantID = nil
             Task {
-                try? await self.companionRelayProvisioning.cancelPairingGrant(id: grantID)
+                if (try? await self.companionRelayProvisioning.cancelPairingGrant(id: grantID)) != nil {
+                    try? self.companionRelayProvisioning.removePairingSecret(grantID: grantID)
+                }
             }
         }
         view.onRefresh = { [weak self] in
@@ -13823,14 +13835,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         Task { @MainActor in
             do {
                 if let previousGrantID = companionRelayPairingGrantID {
-                    try? await companionRelayProvisioning.cancelPairingGrant(id: previousGrantID)
+                    // Cancelled means no phone redeemed it, so its secret can go.
+                    if (try? await companionRelayProvisioning.cancelPairingGrant(id: previousGrantID)) != nil {
+                        try? companionRelayProvisioning.removePairingSecret(grantID: previousGrantID)
+                    }
                     companionRelayPairingGrantID = nil
                 }
                 let knownDeviceIDs = Set((try? await companionRelayProvisioning.devices().map(\.id)) ?? [])
                 let grant = try await companionRelayProvisioning.createPairingGrant(deviceLabel: "Array for iPhone")
+                // Plan 104 step 2: the transcript key comes from this secret,
+                // which only the scanning phone learns. Saved before the code
+                // is shown, so a phone can never hold a secret the Mac lost.
+                let secret = try PairingSecret.generate()
+                try companionRelayProvisioning.addPairingSecret(.init(grantID: grant.id, secret: secret, createdAt: Date()))
                 let url = PairingURL.hostedIssue(
                     credential: grant.code,
-                    relay: companionRelayProvisioning.webSocketEndpoint
+                    relay: companionRelayProvisioning.webSocketEndpoint,
+                    secret: secret
                 )
                 copyPairingURLToPasteboard(url)
                 guard let image = makePairingQRCode(for: url) else { throw CompanionRelayProvisioningError.invalidResponse }
@@ -13995,6 +14016,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     signedWithICloudEntitlement: false
                 ),
                 transport: transport,
+                // Phone commands have their own queue on the hosted relay; the
+                // event feed cannot carry them (the relay refuses phone events).
+                commandChannel: hostedIdentity.map { RelayCommandChannel(baseURL: relayConfig.baseURL, bearerToken: $0.credential) },
                 fetchChanges: {},        // the relay transport polls continuously
                 ensureSubscription: {}   // no CK subscription in relay mode
             )
@@ -14027,6 +14051,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func makeDesktopCompanionSyncService(
         configuration: DesktopCompanionSyncConfiguration,
         transport: any ContinuumRevivedSync.SyncTransport,
+        commandChannel: RelayCommandChannel? = nil,
         fetchChanges: @escaping @Sendable () async throws -> Void,
         ensureSubscription: @escaping @Sendable () async throws -> Void
     ) -> DesktopCompanionSyncService {
@@ -14081,16 +14106,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             taskSnapshot: { floor in
                 try await MainActor.run { try supervisor.companionTaskSnapshot(revisionFloor: floor) }
             },
-            transcriptChannels: {
+            transcriptChannels: { [companionRelayProvisioning] in
+                // Hosted pairings: one key per link secret (plan 104 step 2).
+                var channels: [TranscriptChannelKey] = []
+                if let hosted = try? companionRelayProvisioning.loadIdentity() {
+                    channels = companionRelayProvisioning.pairingSecrets().map {
+                        TranscriptSyncCrypto.derivePairingSecretChannel(secret: $0.secret, instanceID: hosted.instanceID)
+                    }
+                }
                 guard let auth = authService,
-                      let instance = try? await auth.instance() else { return [] }
-                return await auth.activeSessionTokens().compactMap { session in
+                      let instance = try? await auth.instance() else { return channels }
+                return channels + (await auth.activeSessionTokens().compactMap { session in
                     guard session.scopes.contains(.transcriptRead) else { return nil }
                     return TranscriptSyncCrypto.derivePairedSessionChannel(
                         token: session.token,
                         pairingID: instance.id
                     )
-                }
+                })
             },
             transcriptDocument: { rawAgentID in
                 let agentID = AgentID(rawValue: rawAgentID)
@@ -14105,13 +14137,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 return (sessionID: sessionID, document: document)
             },
             stopAgent: { rawAgentID in
-                await MainActor.run {
-                    let agentID = AgentID(rawValue: rawAgentID)
-                    guard supervisor.records[agentID] != nil else { return .notFound }
-                    supervisor.stop(agentID)
-                    return .stopped
-                }
+                await CompanionCommandActions.stop(rawAgentID, supervisor: supervisor)
             },
+            sendMessage: { rawAgentID, text in
+                await CompanionCommandActions.send(rawAgentID, text: text, supervisor: supervisor)
+            },
+            approvals: CompanionSupervisorApprovals(supervisor: supervisor),
+            commandChannel: commandChannel,
+            // A phone message is never handed to an agent twice, even across
+            // a crash (plan 104 step 3). Channel-split app support.
+            commandJournal: CompanionCommandJournal(fileURL: WorkspaceStore.defaultApplicationSupportDirectory()
+                .appendingPathComponent("companion-command-journal.json", isDirectory: false)),
+            commandDiagnostic: { Self.appendCompanionSyncLog("commands: \($0)") },
             freshnessPublisher: DesktopCompanionLogFreshnessPublisher(),
             fetchChanges: fetchChanges,
             ensureSubscription: ensureSubscription

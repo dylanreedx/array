@@ -3,6 +3,7 @@ import Foundation
 
 public enum ApprovalRespondResult: Sendable, Equatable {
     case resolved
+    case sent
     case stale
     case unknownRequest
 }
@@ -57,6 +58,9 @@ public actor ApprovalResponder {
                     case .resolved:
                         completedRequestIds.insert(request.requestId)
                         outcome = .resolved
+                    case .sent:
+                        completedRequestIds.insert(request.requestId)
+                        outcome = .sent
                     case .stale:
                         completedRequestIds.insert(request.requestId)
                         outcome = .stale
