@@ -959,3 +959,5 @@ check --auto-layout-fanout-check
 leg run_app_check .build/debug/Array --auto-layout-fanout-app-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --auto-layout-fanout-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
+check --live-compaction-replay-check
+leg run_app_check .build/debug/Array --live-compaction-replay-check

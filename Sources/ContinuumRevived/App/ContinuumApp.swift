@@ -1800,6 +1800,22 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // The opt-in live compaction leg's seed turn, replayed with a scripted
+        // runner: provider failure vs Array not finishing or showing the turn.
+        if CommandLine.arguments.contains("--live-compaction-replay-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(120))
+                fputs("FAIL: live compaction replay check exceeded its 120-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await LiveCompactionReplayChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // What saving managed agents' transcripts costs the main thread during
         // and after a burst of finished turns, and that the saved file is the
         // supervisor's document.

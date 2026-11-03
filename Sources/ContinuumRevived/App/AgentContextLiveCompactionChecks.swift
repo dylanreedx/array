@@ -279,21 +279,6 @@ func runAgentContextLiveCompactionChecks() async throws {
         }
     }
 
-    func makeAttachedTile(supervisor: AgentSupervisor, id: AgentID, tileID: UUID, scratch: URL) -> ManagedAgentTileNSView {
-        let tile = ManagedAgentTileNSView(tile: Tile(
-            id: tileID, kind: .managedAgent, title: "live-context-compaction",
-            frame: TileFrame(x: 0, y: 0, width: 640, height: 480),
-            zPosition: .fromLegacyRank(1), runtimeRef: nil,
-            metadata: TileMetadata(launchProfileId: "managed")))
-        tile.frame = NSRect(x: 0, y: 0, width: 640, height: 480)
-        tile.bindV2ComposerState(
-            draftStore: AgentComposerDraftStore(
-                applicationSupportDirectory: scratch.appendingPathComponent("drafts", isDirectory: true),
-                debounceInterval: 0),
-            promptHistory: AgentPromptHistory())
-        tile.attach(agentID: id, supervisor: supervisor)
-        return tile
-    }
 
     func runProvider(
         _ selection: LiveSelection,
@@ -337,8 +322,10 @@ func runAgentContextLiveCompactionChecks() async throws {
         let id = supervisor.spawn(
             role: nil, prompt: nil, cwd: scratchProject, harness: harness,
             model: selection.model, thinking: selection.thinking, tileId: tileID)
-        let tile = makeAttachedTile(supervisor: supervisor, id: id, tileID: tileID, scratch: scratch)
+        let fixture = AgentContextCompactionTileFixture.makeAttachedTile(supervisor: supervisor, id: id, tileID: tileID, scratch: scratch)
+        let tile = fixture.tile
         defer {
+            fixture.window.orderOut(nil)
             tile.detach()
             supervisor.stop(id)
         }
@@ -423,7 +410,8 @@ func runAgentContextLiveCompactionChecks() async throws {
             try await expectEventually(
                 "live compaction \(harness.rawValue): \(label) did not finish and render before the 600-second provider deadline",
                 until: deadline) {
-                    observed.failedTurn != nil || (!supervisor.isRunning(id)
+                    tile.layoutSubtreeIfNeeded()
+                    return observed.failedTurn != nil || (!supervisor.isRunning(id)
                         && tile.qaRenderedCardCount > priorCardCount
                         && tile.qaLastAssistantCardBody?.trimmingCharacters(in: .whitespacesAndNewlines) == expectedReply)
                 }

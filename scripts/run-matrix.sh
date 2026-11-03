@@ -1309,6 +1309,8 @@ run_app_check .build/debug/Array --agent-tile-reference-check
 # that direct `mouseDown` calls skipped while all four regressed in 0.7.31.
 run_app_check .build/debug/Array --canvas-pointer-path-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
+# Offline seed replay shares the live acceptance tile fixture, without CLI usage.
+run_app_check .build/debug/Array --live-compaction-replay-check
 run_app_check .build/debug/Array --agent-account-usage-check
 run_app_check .build/debug/Array --agent-account-manage-check
 # Real installed-provider warning/compaction/task-retention acceptance spends
