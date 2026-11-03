@@ -4467,8 +4467,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // current edit, not an implicit commit-and-switch. Returning here is what
         // lets the active field keep the text the human is typing.
         guard renameField == nil, renamingRowId == nil else { return false }
-        // Another app's session is named by that app.
-        guard rows.indices.contains(index), rows[index].externalSession == nil else { return false }
+        // Another app's session is named by that app; a shared agent by its owner.
+        guard rows.indices.contains(index), rows[index].externalSession == nil,
+              rows[index].sharedAgent == nil else { return false }
         guard let field = installRenameField(rowAt: index) else { return false }
         isOpeningRename = true
         defer { isOpeningRename = false }
@@ -4827,7 +4828,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// P3.15's capability gate. One function so the bar it draws and the action it
     /// performs cannot come apart.
     private func offeredBulkActions(for selected: [AgentInboxRow]) -> [InboxBulkAction] {
-        guard onBulkAction != nil, !selected.contains(where: { $0.externalSession != nil }) else { return [] }
+        guard onBulkAction != nil,
+              !selected.contains(where: { $0.externalSession != nil || $0.sharedAgent != nil }) else { return [] }
         return InboxBulkAction.available(for: selected, rollups: rollupsByParent)
             .filter { wiredBulkActions.contains($0) }
     }
@@ -8996,6 +8998,8 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     /// context menu's enablement is specified as "the same capability rules as bulk" —
     /// a Settle the bar withholds from a parent must be a Settle the menu greys too.
     func isAvailable(for row: AgentInboxRow, rollups: [UUID: ChildRollup] = [:]) -> Bool {
+        // Someone else's shared agent runs on their Mac: this one only opens it.
+        if row.sharedAgent != nil { return self == .openInTile }
         switch self {
         // Every row on screen names an agent, and P3.9's reveal attaches a view to one
         // that has none — so there is no row this cannot be asked of. What it cannot take
@@ -9049,6 +9053,8 @@ enum InboxRowAction: String, CaseIterable, Equatable {
     /// swapping this pair too, which took the preset list away from exactly the rows most
     /// likely to want a different one.)
     private func belongsInMenu(for rows: [AgentInboxRow]) -> Bool {
+        // A shared agent's menu is Open alone, rather than a column of greyed verbs.
+        if rows.contains(where: { $0.sharedAgent != nil }) { return self == .openInTile }
         switch self {
         case .settle: return !rows.allSatisfy(InboxBulkAction.isSettled)
         case .unsettle: return rows.allSatisfy(InboxBulkAction.isSettled)

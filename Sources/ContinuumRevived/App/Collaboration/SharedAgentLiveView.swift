@@ -45,6 +45,10 @@ final class SharedAgentLiveView: NSView {
     private(set) var openedHelper: UUID?
     private var helperTask: Task<Void, Never>?
     static let helperHeaderHeight: CGFloat = 28
+    /// After every read this view applied or failed: the guest sidebar reads the
+    /// lead's phase and roster from here (`SharedAgentSidebarRows`) and pushes
+    /// only when they changed.
+    var onRead: (() -> Void)?
     private(set) var reads = 0
     private(set) var resnapshots = 0
     private var task: Task<Void, Never>?
@@ -325,6 +329,7 @@ final class SharedAgentLiveView: NSView {
         await followDelivery()
         guard generation == ticket else { return false }
         render()
+        onRead?()
         return more
     }
 

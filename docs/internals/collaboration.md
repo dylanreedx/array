@@ -528,6 +528,19 @@ its own stream (`child:<id>`), published by the host session for every helper
 in the roster; a chip's reveal opens it in place on the guest, drawn by the same
 renderer, with a Back control. Witness: `--shared-agent-helpers-check`.
 
+On the guest, every `.sharedAgent` tile is a row in the sidebar, built by
+`SharedAgentSidebarRows`, and its roster supplies the child rows. These are
+ordinary `AgentInboxRow`s, so the sidebar's own sort, filter, fold, rollup,
+outline and working glyph apply. The row id is the tile id; a helper's row id
+is name-based from tile plus host agent id. The row carries `sharedAgent`
+(owner name, tile) and the where marker "Shared by <name>". A click opens the
+tile, and Open is the only verb offered. The row's clocks are the guest's, not
+the host's. The session reports connection, phase and roster after every read
+(`noteSharedAgentSidebar`), and the sidebar pushes only on change. Only the
+sidebar takes these rows (`sidebarInboxRows`); the palette, companion and
+lifecycle verbs never see them. The lead's own identity colour and character
+are not on the wire yet. Witness: `--shared-agent-sidebar-check`.
+
 Every frame carries host, object, a host generation persisted per object and a
 sequence. The host, the service and each viewer apply the same reducer
 (`Collaboration.AgentProjection`). A late join gets the head snapshot. A cursor

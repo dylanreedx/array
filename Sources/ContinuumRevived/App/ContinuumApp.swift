@@ -1833,6 +1833,23 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // Guest sidebar: a shared lead and its helpers as real sidebar rows.
+        if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-sidebar-check") {
+            setbuf(stdout, nil); setbuf(stderr, nil)
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
+            let directory = next.flatMap { $0.hasPrefix("-") ? nil : URL(fileURLWithPath: $0) }
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(90))
+                fputs("FAIL: shared agent sidebar check exceeded its 90-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await SharedAgentSidebarChecks.run(stills: directory); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // A shared lead's helpers on the guest: roster, chip status, rollup.
         if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-helpers-check") {
             setbuf(stdout, nil)
@@ -7128,6 +7145,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Mode A (`SharedAgentShare.swift`): the shared agent tiles this canvas
     /// shows, by tile, and the agents this Mac shares, with who has access.
     var sharedAgentTileSessions: [UUID: SharedAgentTileSession] = [:]
+    /// Guest sidebar: what each shared tile last reported, kept past its
+    /// session, and which tile a shared helper's row opens.
+    let sharedAgentSidebar = SharedAgentSidebarRows.Tracker()
+    /// Every shared row's tile, from the last build: a lead's row is its own
+    /// tile; a helper's is its lead's, because the helper's tile is on the host.
+    var sharedAgentRowTiles: [UUID: UUID] = [:]
+    /// The tile the last shared row's click went to (the check reads it).
+    var qaSharedAgentRevealTile: UUID?
     /// Mode B (`Portal/`): the portal tiles this canvas shows, by tile, and
     /// the portals this Mac shares, by account and area.
     var sharedPortalTileSessions: [UUID: SharedPortalTileSession] = [:]
@@ -14908,7 +14933,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // and is populated only after readiness". `applyInbox([])` here would be the
         // "no agents" lie with a rendered empty state behind it.
         if agentActivity.isReconciled {
-            sidebar.applyInbox(rows: buildAgentInboxRows(inputs: inputs), changed: agentActivity.lastChange)
+            sidebar.applyInbox(rows: sidebarInboxRows(inputs: inputs), changed: agentActivity.lastChange)
         }
         // The workspace tree is never shown (`isWorkspaceTreeVisibleForQA`) and an
         // agent event cannot change its shape — only a structural reload rebuilds it.
@@ -15019,7 +15044,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @discardableResult
     func previewAgentFromInbox(_ rowId: UUID) -> Bool {
         let record = agentSupervisor.records[AgentID(rawValue: rowId)]
-        let tileId = record?.tileId ?? (record == nil ? rowId : nil)
+        let tileId = sharedAgentRowTiles[rowId] ?? record?.tileId ?? (record == nil ? rowId : nil)
         guard let tileId, let canvasView,
               canvasView.navigationTileSnapshot(for: tileId) != nil else { return false }
         canvasView.centerOnTile(tileId)
@@ -15041,6 +15066,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     @discardableResult
     func revealAgentFromInbox(_ rowId: UUID) -> Bool {
         canvasView?.clearContextualAgentLineage()
+        // Someone else's shared agent opens the tile that shows it here; a helper's
+        // row opens its lead's, because the helper runs on its owner's Mac.
+        if let tile = sharedAgentRowTiles[rowId] {
+            qaSharedAgentRevealTile = tile
+            return revealTileFromInbox(tile)
+        }
         let agentId = AgentID(rawValue: rowId)
         guard let record = agentSupervisor.records[agentId] else {
             // A terminal-session agent: the row's id IS its tile. `focusTile` resolves
@@ -16005,10 +16036,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return owners
     }
 
+    // MARK: - Shared agents as sidebar rows (guest sidebar, 0.7.40)
+
+    /// What the sidebar lists: this Mac's agents and other apps' sessions, then
+    /// the shared agents its canvases show. Only the sidebar takes the shared
+    /// rows: the palette, the companion and the lifecycle verbs read
+    /// `buildAgentInboxRows`, which never holds someone else's agent.
+    func sidebarInboxRows(now: Date = AgentElapsedClock.now(), inputs: SidebarModelInputs? = nil) -> [AgentInboxRow] {
+        let inputs = inputs ?? currentSidebarModelInputs()
+        return buildAgentInboxRows(now: now, inputs: inputs) + sharedAgentSidebarRows(inputs: inputs, now: now)
+    }
+
+    /// One lead row per `.sharedAgent` tile in any project's canvas, whether or
+    /// not its zone is hydrated or its workspace on screen, and a child row per
+    /// helper its owner publishes.
+    func sharedAgentSidebarRows(inputs: SidebarModelInputs, now: Date) -> [AgentInboxRow] {
+        let registry = inputs.registry
+        var leads: [SharedAgentSidebarRows.Lead] = []
+        var seen: Set<UUID> = []
+        for (projectId, canvas) in inputs.projectCanvases.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            let project = registry.projects.first { $0.id == projectId }
+            let workspace = project?.workspaceId.flatMap { id in registry.workspaces.first { $0.id == id } }
+            for tile in canvas.tiles where tile.kind == .sharedAgent && seen.insert(tile.id).inserted {
+                guard let reference = tile.metadata.sharedAgent else { continue }
+                // No session (a parked tile, or another account's): what was last
+                // heard stays, unconfirmed, unless sharing had stopped.
+                var facts = sharedAgentSidebar.facts[tile.id] ?? .init()
+                if sharedAgentTileSessions[tile.id] == nil, facts.connection != .stopped { facts.connection = .connecting }
+                leads.append(.init(
+                    tileId: tile.id, title: tile.title,
+                    hostName: sharedAgentTileSessions[tile.id]?.hostName ?? reference.hostName,
+                    projectId: projectId, projectName: project?.name,
+                    workspaceId: workspace?.id, workspaceName: workspace?.name,
+                    facts: facts,
+                    clocks: sharedAgentSidebar.clocks(for: tile.id, now: now)))
+            }
+        }
+        let rows = SharedAgentSidebarRows.rows(leads, now: now)
+        sharedAgentRowTiles = Dictionary(
+            rows.compactMap { row in row.sharedAgent.map { (row.id, $0.tileId) } },
+            uniquingKeysWith: { first, _ in first })
+        return rows
+    }
+
+    /// A shared tile's read: rows are pushed only when they would change.
+    func noteSharedAgentSidebar(tile: UUID, _ facts: SharedAgentSidebarRows.Facts) {
+        guard sharedAgentSidebar.note(tile: tile, facts, now: AgentElapsedClock.now()) else { return }
+        guard let sidebar = workspaceSidebarView, agentActivity.isReconciled else { return }
+        sidebar.applyInbox(rows: sidebarInboxRows(), changed: .empty)
+    }
+
     /// The monitor's push: the inbox rows alone, not the sidebar tree.
     func pushExternalSessionRows() {
         guard let sidebar = workspaceSidebarView, agentActivity.isReconciled else { return }
-        sidebar.applyInbox(rows: buildAgentInboxRows(), changed: .empty)
+        sidebar.applyInbox(rows: sidebarInboxRows(), changed: .empty)
     }
 
     /// The one seam every external row's action goes through.
@@ -37696,6 +37777,64 @@ private final class AgentInboxCheckHarnessState {
 }
 
 extension AppDelegate {
+    /// `--shared-agent-sidebar-check`: a real app on real on-disk stores, with
+    /// its production sidebar mounted and wired (`configureWorkspaceSidebar`)
+    /// against an isolated settings suite. One workspace, one project; the
+    /// project's canvas holds `tiles`. The check drives everything else through
+    /// production seams: `registerSharedAgentSession`, `refreshAgentSurfaces`.
+    struct SharedAgentSidebarWorld {
+        let app: AppDelegate
+        let sidebar: WorkspaceSidebarView
+        let window: NSWindow
+        let projectId: UUID
+        let workspaceId: UUID
+        let refresh: () -> Void
+    }
+
+    static func makeSharedAgentSidebarWorldForQA(
+        root: URL, defaults: UserDefaults, tiles: [Tile], projectId: UUID, zoneId: UUID,
+        supervisor: AgentSupervisor, now: Date
+    ) throws -> SharedAgentSidebarWorld {
+        let appSupport = root.appendingPathComponent("AppSupport", isDirectory: true)
+        let projectRoot = root.appendingPathComponent("guest-project", isDirectory: true)
+        for dir in [appSupport, projectRoot] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let workspaceId = UUID()
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Personal", projectIds: [projectId],
+                                              createdAt: now, updatedAt: now)]
+        registry.projects = [ProjectEntry(id: projectId, name: "Checkout", rootPath: projectRoot.path,
+                                          workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+        let placement = ZonePlacement(zoneId: zoneId, projectId: projectId, origin: ZonePoint(x: 0, y: 0),
+                                      size: ZoneSize(width: 1600, height: 900), color: "blue", collapsed: false,
+                                      hydrationPolicy: .automatic)
+        try WorkspaceStore(workspaceId: workspaceId, applicationSupportDirectory: appSupport)
+            .save(WorkspaceDocument(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), zones: [placement],
+                                    zoneZOrder: [zoneId], lastActiveZoneId: zoneId))
+        try ProjectStore(projectRoot: projectRoot).saveCanvas(CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: tiles, groups: [], lastActiveTileId: nil))
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        app.qaSettingsDefaults = defaults
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+        app.agentSupervisor = supervisor
+        supervisor.restore()
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 520))
+        app.workspaceSidebarView = sidebar
+        app.configureWorkspaceSidebar(sidebar)
+        let window = NSWindow(contentRect: sidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = sidebar
+        window.orderFrontOffscreenForChecks()
+        return SharedAgentSidebarWorld(app: app, sidebar: sidebar, window: window, projectId: projectId,
+                                       workspaceId: workspaceId, refresh: { app.refreshAgentSurfaces(notify: false) })
+    }
+
     /// Program 96/P0.1: wires a real app against real on-disk stores and hands back
     /// the narrow handle `SidebarProductionCorpus` drives.
     ///

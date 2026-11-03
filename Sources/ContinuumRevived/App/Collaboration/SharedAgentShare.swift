@@ -67,6 +67,21 @@ final class SharedAgentTileSession {
     private(set) var isClosed = false
     private struct Applied: Equatable { let state: SharedAgentTileNSView.State; let hostName: String; let colour: NSColor }
     private var lastApplied: Applied?
+    /// The guest sidebar's feed: this tile's connection, the lead's phase and
+    /// its helpers, after every read and every liveness change. The receiver
+    /// pushes rows only when they changed (`SharedAgentSidebarRows.Tracker`).
+    var onSidebarFacts: ((UUID, SharedAgentSidebarRows.Facts) -> Void)?
+    private var tileState: SharedAgentTileNSView.State = .connecting
+    var sidebarFacts: SharedAgentSidebarRows.Facts {
+        let connection: SharedAgentSidebarRows.Connection
+        switch tileState {
+        case .live: connection = live.replica.state == nil ? .connecting : .live
+        case .offline: connection = .offline
+        case .stopped: connection = .stopped
+        case .connecting, .placeholder: connection = .connecting
+        }
+        return .init(connection: connection, phase: live.replica.state?.phase, helpers: live.helpers.helpers)
+    }
 
     init(view: SharedAgentTileNSView, reference: SharedAgentTileReference, controller: SharedAreaController,
          prompter: SharedAgentHandoffController) {
@@ -76,6 +91,12 @@ final class SharedAgentTileSession {
         live.prompter = prompter
         view.install(live: live)
         view.session = self
+        live.onRead = { [weak self] in self?.reportSidebar() }
+    }
+
+    private func reportSidebar() {
+        guard !isClosed else { return }
+        onSidebarFacts?(tileId, sidebarFacts)
     }
 
     func start() {
@@ -150,6 +171,8 @@ final class SharedAgentTileSession {
             if live.ended != nil { live.ended = nil }
             if let item, live.object != item.id || !live.isPolling { live.show(object: item.id, in: controller.document) }
         }
+        tileState = next
+        reportSidebar()
         // Only a change repaints: the controller reports every presence frame.
         let applied = Applied(state: next, hostName: hostName, colour: colour)
         guard applied != lastApplied else { return }
@@ -447,14 +470,23 @@ extension AppDelegate {
                                          model: CollaborationAccountController, controller: SharedAreaController) {
         guard let prompter = try? model.makeAgentHandoffController(area: reference.areaId) else { return }
         sharedAgentTileSessions.removeValue(forKey: view.tile.id)?.close()
-        let session = SharedAgentTileSession(view: view, reference: reference, controller: controller, prompter: prompter)
-        sharedAgentTileSessions[view.tile.id] = session
+        registerSharedAgentSession(SharedAgentTileSession(view: view, reference: reference, controller: controller,
+                                                          prompter: prompter))
+    }
+
+    /// Every guest tile session starts here: kept by tile, and feeding the
+    /// sidebar's row for it (`noteSharedAgentSidebar`).
+    func registerSharedAgentSession(_ session: SharedAgentTileSession) {
+        sharedAgentTileSessions.removeValue(forKey: session.tileId)?.close()
+        session.onSidebarFacts = { [weak self] tile, facts in self?.noteSharedAgentSidebar(tile: tile, facts) }
+        sharedAgentTileSessions[session.tileId] = session
         session.start()
     }
 
     /// The tile was closed on this canvas: only this canvas forgets it.
     func sharedAgentTileClosed(_ tileId: UUID) {
         sharedAgentTileSessions.removeValue(forKey: tileId)?.close()
+        sharedAgentSidebar.forget(tile: tileId)
     }
 
     /// "Dylan shared an agent with you. It runs on Dylan's Mac." with Show,

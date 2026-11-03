@@ -836,6 +836,24 @@ public struct InboxExternalSession: Equatable, Sendable {
     }
 }
 
+/// What makes a row someone else's shared agent, or one of its helpers, as
+/// this Mac watches it (`SharedAgentSidebarRows`). The agent runs on its
+/// owner's Mac, so such a row opens the tile that shows it here and offers no
+/// verb that would act on the agent: no rename, colour, stop, settle, snooze,
+/// share, pop out or delete.
+public struct InboxSharedAgent: Equatable, Sendable {
+    /// The owner's display name, for "Shared by Dylan".
+    public let hostName: String
+    /// The `.sharedAgent` tile on this canvas that shows the agent. A helper's
+    /// row names its lead's tile: the helper's own tile lives on the host.
+    public let tileId: UUID
+
+    public init(hostName: String, tileId: UUID) {
+        self.hostName = hostName
+        self.tileId = tileId
+    }
+}
+
 /// The three things an external row does. Clicking it watches.
 public enum InboxExternalSessionAction: String, CaseIterable, Equatable, Sendable {
     case watch
@@ -1023,6 +1041,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// Move here and Copy, and none of an Array agent's verbs.
     public var externalSession: InboxExternalSession?
     // Plan: .plans/106-sidebar-ownership (helpers live in their lead's card)
+    /// Set on a row that is someone else's shared agent or one of its helpers.
+    /// Such a row opens its tile and offers none of an agent's verbs.
+    public var sharedAgent: InboxSharedAgent?
     /// Whether the agent has a canvas tile. A tile-less helper is drawn only as
     /// its row inside its lead's card; popping it out gives it one.
     public let hasTile: Bool
@@ -1229,6 +1250,13 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             identityColor: identityColor, selfReport: selfReport, whereMarker: whereMarker,
             externalSession: externalSession, hasTile: hasTile, isPinned: isPinned,
             characterActivity: characterActivity, characterName: characterName)
+            .carryingSharedAgent(sharedAgent)
+    }
+
+    private func carryingSharedAgent(_ value: InboxSharedAgent?) -> AgentInboxRow {
+        var row = self
+        row.sharedAgent = value
+        return row
     }
 
     /// The line under the name for `selfReport`, by the row's state: a declared
@@ -1294,6 +1322,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             identityColor: identityColor, selfReport: selfReport,
             hasTile: hasTile, isPinned: isPinned, characterActivity: characterActivity,
             characterName: characterName)
+            .carryingSharedAgent(sharedAgent)
     }
 
     /// Equal but for `elapsed`, when both rows carry the same live turn start: the
