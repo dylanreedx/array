@@ -7659,7 +7659,10 @@ final class AgentSupervisor {
             let text = "Helper turn updates\n" + batch.updates.map(\.1).joined(separator: "\n\n")
             let accepted: Bool
             if isRunning(parent) {
-                let result = await accept(.queue(AgentPrompt(agentMessageText(text, from: sender))), for: parent)
+                // Host-authored attribution must bypass typed-envelope neutralization.
+                // Keep the normal queue admission, persistence and sharing checks.
+                let result = await accept(.queue(AgentPrompt(agentMessageText(text, from: sender))),
+                                          for: parent, sharedAdmission: nil)
                 if case .accepted = result { accepted = true } else { accepted = false }
             } else {
                 accepted = sendAgentMessage(text, from: sender, to: parent)
@@ -8166,7 +8169,7 @@ final class AgentSupervisor {
     /// same main-actor turn, so an accepted send/stop cannot be refused by a second
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
-        await accept(intent, for: agentID, sharedAdmission: nil)
+        await accept(intent.neutralizingTypedEnvelopes, for: agentID, sharedAdmission: nil)
     }
 
     /// Whether a teammate's send-now prompt would start at once. When it would
@@ -8212,12 +8215,9 @@ final class AgentSupervisor {
         } catch { return nil }
     }
     private func accept(_ intent: AgentComposerIntent, for agentID: AgentID, sharedAdmission: SharedAgentControlAdmission?) async -> IntentAcceptance {
-        // What a person typed is never Array's envelope (`sendAgentMessage`
-        // does not come through here). A shared admission's text IS Array's
-        // own attribution envelope (`AgentDispatchCommand.promptText`), built
-        // by the host around what the teammate typed: neutralizing it would
-        // make the teammate's prompt read as the owner's.
-        let intent = sharedAdmission == nil ? intent.neutralizingTypedEnvelopes : intent
+        // The composer entry point neutralizes typed envelopes. Shared prompts
+        // and helper completions arrive here with host-authored attribution;
+        // retain it while applying the same admission and queue behavior.
         guard records[agentID] != nil else { return .refused(.unknownAgent) }
         if case .stop = intent {} else {
             guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }

@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
@@ -200,6 +201,17 @@ enum HelperCompletionChecks {
         await s.flushHelperCompletions()
         let updates = s.queuedMessages(for: parent).filter { $0.text.contains("Helper turn updates") }
         try HelperGuardChecks.expect(updates.count == 1 && children.allSatisfy { updates[0].text.contains($0.rawValue.uuidString) }, "busy lead did not queue one grouped update")
+        // Regressed in 4fa6e039: composer admission inserted U+200B inside
+        // the host envelope. Check the actual queued payload, then the live
+        // document after the queue drains, rather than just matching its body.
+        guard case let .agentMessage(queuedPayload) = AgentMessageEnvelope.classify(updates[0].text) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "busy helper completion lost structured agent attribution")
+        }
+        try HelperGuardChecks.expect(queuedPayload.senderAgentID == children[0].rawValue && queuedPayload.text.hasPrefix("Helper turn updates\n"),
+            "queued completion lost sender or body")
+        let typed = AgentMessageEnvelope.neutralizedUserText(updates[0].text)
+        try HelperGuardChecks.expect(AgentMessageEnvelope.classify(typed) == .prompt,
+            "typed envelope spoof protection was weakened")
         await s.flushHelperCompletions()
         try HelperGuardChecks.expect(s.queuedMessages(for: parent).filter { $0.text.contains("Helper turn updates") }.count == 1, "queued update repeated")
         let end = Date().addingTimeInterval(20)
@@ -208,6 +220,87 @@ enum HelperCompletionChecks {
             try await Task.sleep(nanoseconds: 50_000_000)
         }
         try HelperGuardChecks.expect(wakeCount() == 2, "group did not deliver once after busy turn; queued=\(s.queuedMessages(for: parent).count), running=\(s.isRunning(parent)), log=\(log())")
+        let wakeBlocks = s.transcriptDocumentProjection(for: parent)?.entries.flatMap(\.blocks).filter { block in
+            if case let .agentMessage(payload) = block.payload { return payload.text.hasPrefix("Helper turn updates\n") }
+            return false
+        } ?? []
+        try HelperGuardChecks.expect(wakeBlocks.count == 2,
+            "idle and busy completion updates must both project as agent-message cards")
+        for block in s.transcriptDocumentProjection(for: parent)?.entries.flatMap(\.blocks) ?? [] {
+            if case let .paragraph(inlines) = block.payload {
+                try HelperGuardChecks.expect(!String(describing: inlines).contains("array-agent-message"),
+                    "raw completion envelope reached user prose")
+            }
+        }
+        // Session restores must retain the same attribution across all three
+        // harness formats, using the actual host-queued completion text.
+        func jsonLine(_ object: [String: Any]) throws -> String {
+            String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+        }
+        let restored: [(String, RehydratedTranscript)] = [
+            ("claude", ClaudeSessionTranscriptReader.parse(lines: [try jsonLine([
+                "type": "user", "isSidechain": false,
+                "message": ["role": "user", "content": updates[0].text]])], threadId: "completion-claude")),
+            ("codex", CodexSessionTranscriptReader.parse(lines: [try jsonLine([
+                "type": "event_msg", "payload": ["type": "user_message", "message": updates[0].text]])], threadId: "completion-codex")),
+            ("pi", PiSessionTranscriptReader.parse(lines: [try jsonLine([
+                "type": "message", "message": ["role": "user", "content": [["type": "text", "text": updates[0].text]]]])], threadId: "completion-pi")),
+        ]
+        for (harness, transcript) in restored {
+            var projection = AgentTranscriptProjection(threadId: "completion-restore-\(harness)")
+            for step in transcript.steps {
+                if case let .userPrompt(text) = step { projection.appendUserPrompt(text) }
+            }
+            let blocks = projection.document.entries.flatMap(\.blocks)
+            try HelperGuardChecks.expect(blocks.count == 1 && blocks[0].payload == .agentMessage(queuedPayload),
+                "\(harness) completion restore lost its structured message")
+        }
+        // Use the established renderer for the blocks emitted by real queue
+        // delivery. Both appearances must name the helper and show its body.
+        for theme in [TokenTheme.light, .dark] {
+            let context = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: theme)
+            let renderer = AgentMessageRenderer()
+            for (index, block) in wakeBlocks.enumerated() {
+                let view = renderer.makeView()
+                let height = renderer.measure(block: block, width: 560, context: context)
+                view.frame = NSRect(x: 0, y: 0, width: 560, height: height)
+                view.appearance = NSAppearance(named: theme == .light ? .aqua : .darkAqua)
+                renderer.update(view: view, block: block, context: context)
+                view.layoutSubtreeIfNeeded()
+                guard let card = view as? AgentMessageCardView,
+                      case let .agentMessage(payload) = block.payload else {
+                    throw WorkspaceAgentReportChecks.Failure(description: "completion did not render an agent-message card")
+                }
+                try HelperGuardChecks.expect(height > 0 && card.payload == payload
+                    && card.senderButton.nameLabel.stringValue.contains(payload.senderName)
+                    && card.bodyLabel.stringValue == payload.text,
+                    "completion card lost sender or body in \(theme)")
+                if let directory = ProcessInfo.processInfo.environment["CONTINUUM_AGENT_MESSAGE_CAPTURE"], !directory.isEmpty {
+                    let out = URL(fileURLWithPath: directory, isDirectory: true)
+                    try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+                    let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.appearance = view.appearance
+                    window.backgroundColor = context.tokens.bodySurface.color.nsColor(for: theme)
+                    view.wantsLayer = true
+                    view.layer?.backgroundColor = context.tokens.bodySurface.color.cgColor(for: theme)
+                    window.contentView = view
+                    window.orderFrontOffscreenForChecks()
+                    defer { window.orderOut(nil) }
+                    view.layoutSubtreeIfNeeded()
+                    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                        throw WorkspaceAgentReportChecks.Failure(description: "completion card capture unavailable")
+                    }
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                        throw WorkspaceAgentReportChecks.Failure(description: "completion card PNG unavailable")
+                    }
+                    let name = "helper-completion-\(index == 0 ? "idle" : "busy")-\(theme == .light ? "light" : "dark").png"
+                    let destination = out.appendingPathComponent(name)
+                    try png.write(to: destination)
+                    print("helper-completion-check: capture \(destination.path)")
+                }
+            }
+        }
         let stopped = try bench.delegate("HOLD-stop")
         s.stop(stopped)
         now.addTimeInterval(9)
