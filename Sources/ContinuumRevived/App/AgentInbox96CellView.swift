@@ -686,7 +686,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private lazy var ownershipChrome = InboxOwnershipChrome(sheet: groupBackground)
     private(set) var ownership = InboxOwnershipSlice()
     /// A subagent: one line inside its lead's card, under the lead's title.
-    var isSubagentRow: Bool { proposal.isTwoLine && (shown?.row.depth ?? 0) > 0 }
+    var isSubagentRow: Bool {
+        proposal.isTwoLine && shown.map { $0.row.depth > 0 || $0.row.parentId != nil } == true
+    }
     private let titleShimmer = InboxShimmerOverlay()
     private let pulseDots = InboxPulseDotsView()
     /// A lead's second line after its project — what it needs from you, what it
@@ -1488,7 +1490,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     private func updateStateLabel(for row: AgentInboxRow, now: Date) {
         if proposal.isTwoLine {
-            stateLabel.stringValue = Self.ownershipClock(row, isSubagent: row.depth > 0, now: now) ?? ""
+            stateLabel.stringValue = Self.ownershipClock(row, isSubagent: row.depth > 0 || row.parentId != nil, now: now) ?? ""
             stateLabel.isHidden = stateLabel.stringValue.isEmpty || reportPillText != nil
             return
         }
@@ -1829,7 +1831,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Everything the ownership layout derives from the row and its slice:
     /// fonts, the clock, the tail, the shimmer and the dots.
     private func applyOwnershipContent(_ row: AgentInboxRow, now: Date) {
-        let sub = row.depth > 0
+        let sub = row.depth > 0 || row.parentId != nil
         titleLabel.font = sub ? Self.subagentTitleFont : .token(.title)
         placementLabel.font = .token(.label)
         // A report with failed checks is a small pill in the clock's place.
@@ -1864,7 +1866,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// title. nil leaves a lead its branch.
     private func ownershipTail(_ row: AgentInboxRow) -> NSAttributedString? {
         let secondary = TextToken.textSecondary.color.nsColor(in: self)
-        let font: NSFont = row.depth > 0 ? Self.subagentTitleFont : .token(.label)
+        let font: NSFont = (row.depth > 0 || row.parentId != nil) ? Self.subagentTitleFont : .token(.label)
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         func run(_ text: String, _ colour: NSColor, _ font: NSFont = font) -> NSAttributedString {

@@ -175,6 +175,13 @@ enum SubagentSidebarOpenChecks {
         delegate.qaRefreshAgentSurfaces()
 
         try click(row: child.rawValue, parent: lead.rawValue, in: sidebar, window: window, label: label)
+        delegate.qaRefreshAgentSurfaces()
+        sidebar.layoutSubtreeIfNeeded()
+        sidebar.agentInbox.layoutForQA()
+        let poppedRow = sidebar.agentInbox.qaMaterializedRowCells.compactMap { $0 as? AgentInbox96CellView }
+            .first { $0.qaAgentID == child.rawValue }
+        try expect(poppedRow?.isSubagentRow == true,
+                   "popped-out helper lost its normal one-line row (height \(poppedRow?.frame.height ?? -1))")
 
         guard let tile = supervisor.records[child]?.tileId else {
             throw Failure(description: "clicking the subagent's row opened no tile for it"
@@ -214,6 +221,29 @@ enum SubagentSidebarOpenChecks {
             try expect(!rect.intersects(leadRect) && max(gapX, gapY) >= 0 && max(gapX, gapY) <= 200,
                        "the subagent's WORLD frame \(rect) is not beside its lead \(leadRect)")
             where_ = "beside its lead"
+        }
+        // A scoped list may omit the lead. Keep the helper's normal typography
+        // and pitch even when the sorter places it at the root of that list.
+        if condition == .nativeSubagent && !tmuxPersistence {
+            let inbox = sidebar.agentInbox
+            let all = inbox.qaAllRowsForQA
+            inbox.reload(rows: all.filter { $0.id == child.rawValue })
+            inbox.layoutForQA()
+            let scoped = inbox.qaMaterializedRowCells.compactMap { $0 as? AgentInbox96CellView }
+                .first { $0.qaAgentID == child.rawValue }
+            if let capture = ProcessInfo.processInfo.environment["CONTINUUM_QA_CAPTURE"] {
+                let directory = URL(fileURLWithPath: capture)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                    sidebar.appearance = NSAppearance(named: appearance)
+                    try SidebarOwnershipChecks.write(sidebar, to: directory.appendingPathComponent("popped-helper-\(name).png"))
+                }
+            }
+            try expect(scoped?.isSubagentRow == true
+                       && (scoped?.frame.height ?? .infinity) < 40,
+                       "scoped popped-out helper enlarged to lead styling (height \(scoped?.frame.height ?? -1))")
+            inbox.reload(rows: all)
+            inbox.layoutForQA()
         }
         // Positive control: the same click on the lead's row reaches the host.
         if condition == .nativeSubagent {

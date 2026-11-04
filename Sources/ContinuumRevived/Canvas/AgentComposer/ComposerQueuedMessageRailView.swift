@@ -589,7 +589,18 @@ final class QueueRailItemRow: NSView, QueueRailRow, TokenThemed {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.addSublayer(rule)
-        let oneLine = item.text.components(separatedBy: .newlines)
+        // Preview the same authorship the delivered transcript recognizes.
+        // The durable item stays verbatim for dispatch, editing and recovery.
+        let displayText: String
+        switch AgentMessageEnvelope.classify(item.text) {
+        case .agentMessage(let message):
+            let summary = message.text.split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? "Message"
+            displayText = "\(message.senderName) · \(summary)"
+        case .hostNote(let note): displayText = note
+        case .prompt: displayText = item.text
+        }
+        let oneLine = displayText.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
         let preview = oneLine.isEmpty ? (item.attachmentCount > 0 ? "Attachment" : "Empty message") : oneLine
         textLabel.stringValue = preview
@@ -636,7 +647,7 @@ final class QueueRailItemRow: NSView, QueueRailRow, TokenThemed {
             addSubview(button)
         }
 
-        toolTip = item.text.isEmpty ? preview : item.text
+        toolTip = displayText.isEmpty ? preview : displayText
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("\(what): \(preview)\(attachments)")

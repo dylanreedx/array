@@ -209,6 +209,62 @@ enum HelperCompletionChecks {
         }
         try HelperGuardChecks.expect(queuedPayload.senderAgentID == children[0].rawValue && queuedPayload.text.hasPrefix("Helper turn updates\n"),
             "queued completion lost sender or body")
+        // .43: inspect the production queue row WHILE the lead is busy,
+        // before draining. Delivered-card assertions alone missed this surface.
+        let pendingState = s.queueRailState(for: parent)
+        var pendingPreviews: [String] = []
+        for theme in [TokenTheme.light, .dark] {
+            let rail = ComposerQueuedMessageRailView(frame: .zero)
+            rail.appearance = NSAppearance(named: theme == .light ? .aqua : .darkAqua)
+            rail.setState(pendingState)
+            rail.frame = NSRect(x: 0, y: 0, width: 720, height: rail.railHeight)
+            let window = NSWindow(contentRect: rail.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.appearance = rail.appearance
+            window.backgroundColor = SurfaceToken.tileBody.color.nsColor(for: theme)
+            let surface = NSView(frame: rail.frame)
+            surface.wantsLayer = true
+            surface.layer?.backgroundColor = SurfaceToken.tileBody.color.cgColor(for: theme)
+            surface.addSubview(rail)
+            window.contentView = surface
+            window.orderFrontOffscreenForChecks()
+            defer { window.orderOut(nil) }
+            surface.layoutSubtreeIfNeeded()
+            guard let row = rail.qaRow(for: updates[0].id) else {
+                throw WorkspaceAgentReportChecks.Failure(description: "busy completion queue row is missing")
+            }
+            pendingPreviews.append(row.qaText)
+            if let directory = ProcessInfo.processInfo.environment["CONTINUUM_QUEUED_MESSAGE_CAPTURE"], !directory.isEmpty {
+                let out = URL(fileURLWithPath: directory, isDirectory: true)
+                try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+                let phase = ProcessInfo.processInfo.environment["CONTINUUM_QUEUE_CAPTURE_PHASE"] == "before" ? "before" : "after"
+                guard let bitmap = surface.bitmapImageRepForCachingDisplay(in: surface.bounds) else {
+                    throw WorkspaceAgentReportChecks.Failure(description: "queued row capture unavailable")
+                }
+                surface.cacheDisplay(in: surface.bounds, to: bitmap)
+                guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                    throw WorkspaceAgentReportChecks.Failure(description: "queued row PNG unavailable")
+                }
+                try png.write(to: out.appendingPathComponent("queued-\(phase)-\(theme == .light ? "light" : "dark").png"))
+            }
+        }
+        try HelperGuardChecks.expect(s.isRunning(parent) && s.queuedMessages(for: parent).first?.text == updates[0].text,
+            "preview changed queued transport or drained the busy lead")
+        try HelperGuardChecks.expect(pendingPreviews == Array(repeating: "\(queuedPayload.senderName) · Helper turn updates", count: 2),
+            "busy queue preview must show sender and clean summary, got \(pendingPreviews)")
+        // The same row handles shared attribution and ordinary typed text.
+        let sharedText = "From Mira\n\n---\nReview the failing leg.\nMore details."
+        let plainText = "Explain <array-agent-message>\nand keep this text."
+        let typedEnvelope = AgentMessageEnvelope.neutralizedUserText(updates[0].text)
+        for (text, expected) in [(sharedText, "Mira · Review the failing leg."),
+                                 (plainText, "Explain <array-agent-message> and keep this text."),
+                                 (typedEnvelope, typedEnvelope.components(separatedBy: .newlines).filter { !$0.isEmpty }.joined(separator: " "))] {
+            let rail = ComposerQueuedMessageRailView(frame: .zero)
+            var state = ComposerQueueRailState.empty
+            state.queued = [.init(id: UUID(), text: text, attachmentCount: 0, kind: .queued)]
+            rail.setState(state)
+            try HelperGuardChecks.expect(rail.qaItemRows.first?.qaText == expected,
+                "shared or typed queue preview changed authorship/content")
+        }
         let typed = AgentMessageEnvelope.neutralizedUserText(updates[0].text)
         try HelperGuardChecks.expect(AgentMessageEnvelope.classify(typed) == .prompt,
             "typed envelope spoof protection was weakened")

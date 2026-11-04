@@ -754,6 +754,7 @@ if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --sidebar-fold-expand-check
   run_app_check .build/debug/Array --hide-external-rows-check
   run_app_check .build/debug/Array --sidebar-truth-check
+  run_app_check .build/debug/Array --subagent-sidebar-open-check
   matrix_report 'Sidebar refinements matrix (targeted)'
   exit $?
 fi

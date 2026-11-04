@@ -1,6 +1,6 @@
 # Helper completion message attribution
 
-0.7.42 fixes helper completion updates that appeared as raw
+0.7.42 fixes delivered helper completion updates that appeared as raw
 `<array-agent-message>` markup when the receiving lead was busy. Idle-lead
 updates already used the established attributed message card.
 
@@ -42,3 +42,31 @@ JSON remains unchanged inside its attributed card. Completion ingestion is
 witnessed with the fake Pi runner; the other harnesses use their production
 session readers. No live provider, full-canvas or previous-install update test
 is claimed. Production app/state was not used for QA.
+
+
+## Queued preview follow-up (0.7.43)
+
+The 0.7.42 verification covered delivered transcript blocks and cards, not the
+pending queue rail. Dylan's live screenshot after updating showed that the
+separate `QueueRailItemRow` still flattened raw transport text. The earlier
+confidence did not establish pending-preview behavior.
+
+0.7.43 changes only queue-row presentation: the existing semantic envelope
+parser supplies the sender and first nonempty body line, displayed using the
+existing single-line row styling. Recognized shared-teammate attribution uses
+the same path. Tooltips and accessibility labels use clean display text.
+Ordinary typed text, including neutralized envelope examples, retains its
+existing presentation. Durable queue bytes, transport, admissions, editing,
+recovery and the 0.7.42 fix remain unchanged.
+
+The existing matrix-reported `--helper-completion-check` now mounts the actual
+production queue rail from a real busy lead's queue state before draining.
+It asserts displayed sender/summary strings in light/dark and unchanged queued
+transport and running state. It separately checks shared attribution and plain
+or neutralized typed prompts. Test-only changes fail against 0.7.42 at `busy
+queue preview must show sender and clean summary`; the preview fix passes.
+`CONTINUUM_QUEUED_MESSAGE_CAPTURE=<directory>` and optional
+`CONTINUUM_QUEUE_CAPTURE_PHASE=before` save actual queued-row PNGs in both
+appearances. Before/after images are under the canonical project's
+`output/raw-helper-message-previews/queued-{before,after}-{light,dark}.png`,
+with logs retained in gitignored `releases/0.7.43-evidence/`.

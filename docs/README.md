@@ -31,7 +31,9 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
 - [Agent providers (pi, claude, codex)](./internals/providers.md)
 - [QA: the matrix, self-checks, witnesses](./internals/qa.md)
 - [Helper completion message attribution](./internals/helper-completion-attribution.md) —
-  the 0.7.42 hotfix, behavioral witnesses and historical-transcript limit
+  the 0.7.42/0.7.43 hotfixes, behavioral witnesses and historical-transcript limit
+- [Subagent sidebar row identity](./internals/subagent-sidebar-row-identity.md) —
+  compact helper styling when a scoped list omits its lead
 - [Notification paths](./internals/notification-paths.md) — maintained trigger,
   policy, delivery and action map; all notification changes update this contract
 - [Tile selection and group transforms](./internals/tile-multiselect.md) — interaction

@@ -352,7 +352,9 @@ struct AgentInboxCardStyleOverride {
             },
             // Plan 106: a subagent is a one-line row inside its lead's card.
             cardHeight: { row in
-                proposal.isTwoLine && row.depth > 0
+                // Scope can omit the lead and promote a helper to depth zero.
+                // Its parent identity still owns the normal one-line styling.
+                proposal.isTwoLine && (row.depth > 0 || row.parentId != nil)
                     ? Double(InboxOwnershipChrome.subagentHeight)
                     : AgentInbox96CellView.rowHeight(for: proposal)
                         + Double(AgentInbox96CellView.characterLineExtra(for: proposal))
