@@ -25,6 +25,7 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
     case covered(target: String, by: String)
     case notEditable(String)
     case focusRefused(String)
+    case focusChanged
     case userTyping
     case unknownKey(String)
     case timedOut(String, throttled: Bool)
@@ -45,6 +46,8 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
             return "\(what) is not a text field. Type into a textbox, or use press_key."
         case .focusRefused(let what):
             return "Clicking \(what) did not focus it, so nothing was typed. Take a fresh snapshot and check what took focus."
+        case .focusChanged:
+            return "Keyboard focus moved outside this browser. Typing stopped before delivering more keys; a prefix may already be on the page. Take a snapshot before deciding what remains."
         case .userTyping:
             return "The user is typing or took control of this browser. Wait, then take a fresh snapshot."
         case .unknownKey(let key):
@@ -252,8 +255,7 @@ final class BrowserAutomation {
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
-            let responder = window.firstResponder
-            defer { if self.userInputCount == inputAtStart { self.restore(responder, in: window) } }
+            // Never carry an obsolete responder across asynchronous page work.
             var what = "the focused element"
             if let ref {
                 let target = try await self.world("target", ["ref": ref], deadline: deadline)
@@ -274,6 +276,10 @@ final class BrowserAutomation {
             try self.requireInputControl(inputAtStart, deadline: deadline)
             if clear && text.isEmpty { self.deliverKey(Self.namedKeys["Backspace"]!, flags: [], window: window) }
             for character in text {
+                guard let current = window.firstResponder as? NSView,
+                      current === self.webView || current.isDescendant(of: self.webView) else {
+                    throw BrowserAutomationError.focusChanged
+                }
                 try self.requireInputControl(inputAtStart, deadline: deadline)
                 self.deliverCharacter(character, window: window)
                 // WebKit consumes trusted input asynchronously. A small yield
@@ -281,7 +287,11 @@ final class BrowserAutomation {
                 try await self.pause(0.005, deadline: deadline)
             }
             try self.requireInputControl(inputAtStart, deadline: deadline)
-            if submit { self.deliverKey(Self.namedKeys["Enter"]!, flags: [], window: window) }
+            if submit {
+                guard let current = window.firstResponder as? NSView,
+                      current === self.webView || current.isDescendant(of: self.webView) else { throw BrowserAutomationError.focusChanged }
+                self.deliverKey(Self.namedKeys["Enter"]!, flags: [], window: window)
+            }
             var value: String?
             if let ref {
                 try await self.pause(0.1, deadline: deadline)
@@ -321,7 +331,8 @@ final class BrowserAutomation {
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
             let responder = window.firstResponder
-            defer { self.restore(responder, in: window) }
+            let focusInput = Self.focusInputGeneration
+            defer { self.restore(responder, in: window, inputGeneration: focusInput) }
             try self.requireInputControl(inputAtStart, deadline: deadline)
             // A Cmd+A key event selects nothing in a web view (probe p2); the
             // responder action does.
@@ -487,17 +498,23 @@ final class BrowserAutomation {
         let local = NSPoint(x: cssX * zoom, y: webView.isFlipped ? cssY * zoom : webView.bounds.height - cssY * zoom)
         let point = webView.convert(local, to: nil)
         let responder = window.firstResponder
+        let focusInput = Self.focusInputGeneration
         for clickCount in 1...count {
             let down = Self.mouseEvent(.leftMouseDown, at: point, window: window, clickCount: clickCount)
             rememberAgentInput(down)
             webView.mouseDown(with: down)
             webView.mouseUp(with: Self.mouseEvent(.leftMouseUp, at: point, window: window, clickCount: clickCount))
         }
-        restore(responder, in: window)
+        restore(responder, in: window, inputGeneration: focusInput)
         onAgentClick?(local)
     }
 
-    private func restore(_ responder: NSResponder?, in window: NSWindow) {
+    private func restore(_ responder: NSResponder?, in window: NSWindow, inputGeneration: UInt64) {
+        // Nested native tracking can deliver input anywhere in Array. Browser
+        // takeover is deliberately local; restoration invalidation is global.
+        guard Self.focusInputGeneration == inputGeneration,
+              let current = window.firstResponder as? NSView,
+              current === webView || current.isDescendant(of: webView) else { return }
         if window.firstResponder !== responder { window.makeFirstResponder(responder) }
     }
 
@@ -613,6 +630,7 @@ final class BrowserAutomation {
     private struct WeakEngine { weak var engine: BrowserAutomation? }
     private static var registry: [ObjectIdentifier: WeakEngine] = [:]
     private static var syntheticInputs: [AgentInputFingerprint: WeakEngine] = [:]
+    private static var focusInputGeneration: UInt64 = 0
     private static var monitor: Any?
 
     private static func register(_ engine: BrowserAutomation) {
@@ -629,6 +647,7 @@ final class BrowserAutomation {
     private static func noteUserEvent(_ event: NSEvent) {
         guard !registry.isEmpty else { return }
         if consumeAgentInput(event) { return }
+        focusInputGeneration &+= 1
         guard let window = event.window else { return }
         var view: NSView?
         if event.type == .keyDown {

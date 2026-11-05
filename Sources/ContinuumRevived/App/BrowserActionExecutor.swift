@@ -98,7 +98,7 @@ enum BrowserActionExecutor {
             case .notLive: code = .browserNotLive
             case .timedOut: code = .outcomeUnknown
             case .userTyping: code = .busy
-            case .staleRef, .notVisible, .covered, .notEditable, .focusRefused: code = .targetConflict
+            case .staleRef, .notVisible, .covered, .notEditable, .focusRefused, .focusChanged: code = .targetConflict
             case .unknownKey, .script: code = .invalidRequest
             }
             return .error(WorkspaceAPIError(code: code, message: String(error.description.prefix(2048))))
