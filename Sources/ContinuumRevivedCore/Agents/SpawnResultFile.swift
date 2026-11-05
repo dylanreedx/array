@@ -183,6 +183,64 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         }
         try AtomicWriter(retainedBackups: 0).write(delivery, to: url)
     }
+    /// A lead's subscription to a helper it reached only by `agent.message`:
+    /// durable beside the delivery records, so a relaunch still knows where
+    /// that helper's result goes. Removed when the message settles.
+    public struct MessageSubscription: Codable, Equatable, Sendable {
+        public var helper: UUID
+        public var recipient: UUID
+        public var handle: String
+        public var baseline: Date
+        public init(helper: UUID, recipient: UUID, handle: String, baseline: Date) {
+            self.helper = helper; self.recipient = recipient; self.handle = handle; self.baseline = baseline
+        }
+    }
+    private static func subscriptionsDirectory(parentCwd: String) -> URL {
+        directory(parentCwd: parentCwd).appendingPathComponent(".deliveries", isDirectory: true)
+            .appendingPathComponent("subscriptions", isDirectory: true)
+    }
+    private static func subscriptionURL(parentCwd: String, helper: UUID, recipient: UUID, handle: String) -> URL? {
+        guard validatedHandle(handle) != nil else { return nil }
+        return subscriptionsDirectory(parentCwd: parentCwd)
+            .appendingPathComponent("\(helper.uuidString)-\(recipient.uuidString)-\(handle).json")
+    }
+    public static func saveSubscription(_ subscription: MessageSubscription, parentCwd: String) throws {
+        guard let url = subscriptionURL(parentCwd: parentCwd, helper: subscription.helper,
+                                        recipient: subscription.recipient, handle: subscription.handle) else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        try AtomicWriter(retainedBackups: 0).write(subscription, to: url)
+    }
+    public static func removeSubscription(parentCwd: String, helper: UUID, recipient: UUID, handle: String) {
+        guard let url = subscriptionURL(parentCwd: parentCwd, helper: helper, recipient: recipient, handle: handle) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+    /// This lead's own subscriptions only (the file name carries its id).
+    public static func subscriptions(parentCwd: String, recipient: UUID) -> [MessageSubscription] {
+        let urls = (try? FileManager.default.contentsOfDirectory(at: subscriptionsDirectory(parentCwd: parentCwd),
+                                                                 includingPropertiesForKeys: nil)) ?? []
+        return urls.filter { $0.lastPathComponent.contains("-\(recipient.uuidString)-") }.compactMap {
+            try? JSONCodec.makeDecoder().decode(MessageSubscription.self, from: Data(contentsOf: $0))
+        }.filter { $0.recipient == recipient }
+    }
+
+    /// Drops DELIVERED rows only (a pending row is a result nobody has had):
+    /// those for `helper` or `recipient` when given, and any older than
+    /// `before`. File names carry both ids, so unmatched rows are not decoded.
+    public static func pruneDeliveredRows(parentCwd: String, helper: UUID? = nil, recipient: UUID? = nil,
+                                          before: Date? = nil) {
+        let dir = directory(parentCwd: parentCwd).appendingPathComponent(".deliveries")
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
+        for url in urls where url.pathExtension == "json" {
+            let name = url.lastPathComponent
+            let named = (helper.map { name.hasPrefix($0.uuidString + "-") } ?? false)
+                || (recipient.map { name.hasSuffix("-\($0.uuidString).json") } ?? false)
+            guard named || before != nil,
+                  let row = try? JSONCodec.makeDecoder().decode(Delivery.self, from: Data(contentsOf: url)),
+                  row.phase == .delivered, named || (before.map { row.completedAt < $0 } ?? false) else { continue }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
     public static func removeDelivery(parentCwd: String, helper: UUID, turn: String, recipient: UUID) {
         guard let url = deliveryURL(parentCwd: parentCwd, helper: helper, turn: turn, recipient: recipient) else { return }
         try? FileManager.default.removeItem(at: url)

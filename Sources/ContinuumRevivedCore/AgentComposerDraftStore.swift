@@ -891,6 +891,17 @@ public actor AgentComposerDraftStore {
         loadQueue(for: agentID).contains { if case .prompt(let m) = $0 { return m.steerUncertain }; return false }
     }
 
+    /// A user's held steer that `beginSteerHandoff(for:)` would take now: the
+    /// same predicate, so a caller giving user steers priority never waits on
+    /// one the handoff will not hand over (an uncertain or in-flight steer).
+    public func hasTakeableUserSteer(for agentID: AgentID) -> Bool {
+        let current = loadQueue(for: agentID)
+        return current.prefix(Self.leadingSteerCount(current)).contains { item in
+            guard case .prompt(let m) = item else { return false }
+            return m.isSteer && !m.helperCompletion && !m.steerInFlight && !m.steerUncertain
+        }
+    }
+
     /// The full queue file is the write-ahead handoff journal. Never remove a
     /// prompt on transport acceptance; application or explicit recovery owns it.
     public func beginSteerHandoff(for agentID: AgentID, only: UUID? = nil,

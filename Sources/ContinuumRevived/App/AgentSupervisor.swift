@@ -2898,8 +2898,10 @@ final class AgentSupervisor {
         // parent.
         reconcileObservedRunsAfterRestore()
         reconcileManagedMode()
-        recoverHelperCompletionBatches()
-        scheduleHelperCompletionFlush()
+        restoreHelperMessageSubscriptions()
+        settleHelpersCutOffByRestart()
+        // The first flush reads each lead's journal once: staged and held rows
+        // from the previous launch are rebuilt there.
         Task { @MainActor [weak self] in await self?.flushHelperCompletions() }
         return report
     }
@@ -6048,7 +6050,7 @@ final class AgentSupervisor {
     }
 
     private func noteHelperProgress(_ id: AgentID, last: String) {
-        guard records[id]?.parentAgentID != nil else { return }
+        guard !helperParents(id).isEmpty else { return }
         helperProgress[id] = HelperProgress(at: helperWatchdogNow(), last: last, status: presenceRowStatus(for: id))
         pendingHelperAlerts[id] = nil
         if records[id]?.helperWatchdogNeedsYou != nil {
@@ -6063,7 +6065,8 @@ final class AgentSupervisor {
     func sweepHelperWatchdog() async {
         let now = helperWatchdogNow()
         for id in Array(records.keys) {
-            guard let record = records[id], let parent = record.parentAgentID else { continue }
+            // Delegated or messaged: a stuck helper alerts whoever waits on it.
+            guard let record = records[id], let parent = record.parentAgentID ?? helperMessageSubscriptions[id]?.first?.parent else { continue }
             let status = presenceRowStatus(for: id)
             guard status == .working || status == .needsAttention else {
                 helperProgress[id] = nil
@@ -6702,6 +6705,12 @@ final class AgentSupervisor {
             try? FileManager.default.removeItem(
                 at: SpawnResultFile.url(parentCwd: parent.cwd, handle: handle))
         }
+        // Delivered rows naming this agent, as lead or as helper, go with it:
+        // in its own cwd and its parent's, the journals it can appear in.
+        for cwd in Set([record.cwd] + [record.parentAgentID.flatMap { records[$0]?.cwd }].compactMap { $0 }) {
+            SpawnResultFile.pruneDeliveredRows(parentCwd: cwd, helper: id.rawValue, recipient: id.rawValue)
+        }
+        helperCompletionBatches[id] = nil
 
         records.removeValue(forKey: id)
         pendingModeRestarts.remove(id)
@@ -7699,8 +7708,33 @@ final class AgentSupervisor {
     static let helperBackgroundRunningStatus = "ended its turn with background work still running"
 
     private func helperHasBackgroundWork(_ id: AgentID) -> Bool {
-        guard let runner = (runners[id] ?? idleSessionRunners[id]) as? AgentSteeringRunning else { return false }
-        return runner.hasBackgroundWork || runner.hasRunningSubagents
+        if let runner = (runners[id] ?? idleSessionRunners[id]) as? AgentSteeringRunning,
+           runner.hasBackgroundWork || runner.hasRunningSubagents { return true }
+        return hasPendingArrayHelpers(id)
+    }
+
+    /// A lead that is itself a helper waits on its OWN Array helpers just as on
+    /// a shell job: any still running or held, or a result of theirs not yet in
+    /// its hands (batched, queued, or in custody), will start its next turn.
+    private func hasPendingArrayHelpers(_ id: AgentID) -> Bool {
+        if helperCompletionBatches[id]?.updates.isEmpty == false { return true }
+        if !(deliveringSteers[id] ?? []).filter({ $0.message.helperCompletion && !$0.message.helperNote }).isEmpty { return true }
+        if (queuedWorkItemsCache[id] ?? []).contains(where: { item in
+            if case .prompt(let message) = item { return message.helperCompletion && !message.helperNote }
+            return false
+        }) { return true }
+        return records.values.contains { child in
+            child.id != id && child.capabilities.locallyManaged
+                && (child.parentAgentID == id || (helperMessageSubscriptions[child.id] ?? []).contains { $0.parent == id })
+                && (isRunning(child.id) || heldHelperCompletions[child.id] != nil)
+        }
+    }
+
+    /// A helper that says it is blocked or needs someone: action, never progress.
+    private func helperIsBlocked(_ child: AgentRecord) -> Bool {
+        child.declaredStatus?.needsYou != nil || child.helperWatchdogNeedsYou != nil
+            || (helperFiledReportThisTurn(child.id)
+                && child.lastReport?.report.findings.contains(where: { $0.level == .blocker }) == true)
     }
 
     /// The report baseline `noteHelperCompletion` uses: a report counts for
@@ -7718,7 +7752,7 @@ final class AgentSupervisor {
         guard outcome == .completed, let child = records[id], child.capabilities.locallyManaged,
               !helperParents(id).isEmpty, helperHasBackgroundWork(id), !helperFiledReportThisTurn(id),
               // A helper that says it is blocked is action, not progress.
-              child.declaredStatus?.needsYou == nil, child.helperWatchdogNeedsYou == nil else { return false }
+              !helperIsBlocked(child) else { return false }
         guard let held = heldHelperCompletions[id] else { return true }
         // A message that arrived after the hold asked for this turn's answer.
         if (helperMessageSubscriptions[id] ?? []).contains(where: { $0.baseline >= held.heldAt }) { return false }
@@ -7903,9 +7937,15 @@ final class AgentSupervisor {
     /// later turn. A refused send never registers a subscription.
     func trackHelperMessage(_ child: AgentID, from parent: AgentID, handle: String,
                             queueContext: AgentMessageQueueContext? = nil) {
-        helperMessageSubscriptions[child, default: []].append(.init(parent: parent, handle: handle, baseline: Date(), queueContext: queueContext))
+        let baseline = Date()
+        helperMessageSubscriptions[child, default: []].append(.init(parent: parent, handle: handle, baseline: baseline, queueContext: queueContext))
         if let cwd = records[parent]?.cwd {
             SpawnResultFile.write(.init(toolCallId: handle, status: .spawned, agentId: child.rawValue, recipientId: parent.rawValue), parentCwd: cwd, warn: warn)
+            // Durable: after a crash the result still knows its lead (P1/P6).
+            do {
+                try SpawnResultFile.saveSubscription(.init(helper: child.rawValue, recipient: parent.rawValue,
+                    handle: handle, baseline: baseline), parentCwd: cwd)
+            } catch { warn("Helper message subscription could not be journaled; it lives in memory only") }
         }
     }
 
@@ -7913,6 +7953,8 @@ final class AgentSupervisor {
         let subscriptions = helperMessageSubscriptions.removeValue(forKey: child) ?? []
         for subscription in subscriptions {
             guard let cwd = records[subscription.parent]?.cwd else { continue }
+            defer { SpawnResultFile.removeSubscription(parentCwd: cwd, helper: child.rawValue,
+                                                       recipient: subscription.parent.rawValue, handle: subscription.handle) }
             let status: SpawnResultFile.Status
             switch outcome {
             case .completed: status = .completed
@@ -7948,6 +7990,8 @@ final class AgentSupervisor {
         var deadline: Date
         var updates: [(AgentID, String, String)]
         var retryAfter: Date? = nil
+        /// A blocked or asking helper: delivered at once, never held for siblings.
+        var urgent = false
     }
     var qaBeforeHelperWakeAdmission: (() throws -> Void)?
     var qaAfterHelperWakeStage: (() throws -> Void)?
@@ -7998,7 +8042,14 @@ final class AgentSupervisor {
         switch outcome {
         // A turn end without a report is not "succeeded": the lead should
         // know the helper stopped short, not read its last words as a result.
-        case .completed: status = filedThisTurn ? "succeeded" : (statusOverride ?? Self.helperNoReportStatus)
+        case .completed:
+            if let needs = child.declaredStatus?.needsYou ?? child.helperWatchdogNeedsYou {
+                status = "needs you: \(String(needs.prefix(200)))"
+            } else if helperIsBlocked(child) {
+                status = "blocked"
+            } else {
+                status = filedThisTurn ? "succeeded" : (statusOverride ?? Self.helperNoReportStatus)
+            }
         case .failed: status = (helperProviderRetryCounts[id] ?? 0) > 0 ? "failed after \(helperProviderRetryCounts[id]!) retries" : "failed"
         case .interrupted, .cancelled: status = "stopped"
         }
@@ -8036,6 +8087,7 @@ final class AgentSupervisor {
                 } catch { warn("Helper completion journal unavailable; retaining in-memory retry") }
             }
             batch.updates.append((id, text, identity))
+            if outcome == .completed && helperIsBlocked(child) { batch.urgent = true }
             helperCompletionBatches[parent] = batch
         }
         scheduleHelperCompletionFlush()
@@ -8045,6 +8097,7 @@ final class AgentSupervisor {
     /// ownership remain in flushHelperCompletions and the durable delivery journal.
     private func helperCompletionDeliveryDate(_ batch: HelperCompletionBatch, parent: AgentID, now: Date) -> Date {
         if let retryAfter = batch.retryAfter, retryAfter > now { return retryAfter }
+        if batch.urgent { return now }
         let finished = Set(batch.updates.map(\.0))
         let othersRunning = records.values.contains { child in
             !finished.contains(child.id) && (isRunning(child.id) || heldHelperCompletions[child.id] != nil)
@@ -8076,9 +8129,18 @@ final class AgentSupervisor {
 
     /// Rebuild pending batches from the durable outbox. A staging record is
     /// never evidence of delivery; enqueue retries the SAME durable queue id.
-    private func recoverHelperCompletionBatches() {
-        for parent in records.keys where wakesForHelperCompletion(parent) {
+    /// Leads whose journal this process has read once. Recovery (a relaunch's
+    /// staged and held rows) needs one read per lead per launch; reading every
+    /// lead's journal on every flush cost the main thread for nothing.
+    private var helperDeliveryJournalsRead: Set<AgentID> = []
+    static let deliveredRowRetention: TimeInterval = 7 * 86_400
+
+    private func recoverHelperCompletionBatches(for leads: [AgentID]) {
+        for parent in leads {
             guard let cwd = records[parent]?.cwd else { continue }
+            // Delivered rows only serve a lookup's pointer: a week is plenty.
+            SpawnResultFile.pruneDeliveredRows(parentCwd: cwd,
+                before: helperCompletionNow().addingTimeInterval(-Self.deliveredRowRetention))
             do {
                 let states = try SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue)
                 for state in states.sorted(by: { $0.completedAt < $1.completedAt }) where state.phase != .delivered {
@@ -8095,12 +8157,25 @@ final class AgentSupervisor {
         }
     }
 
+    /// Witness counters: flushes run and steer handoff passes begun.
+    private(set) var qaHelperFlushCount = 0
+    private(set) var qaSteerHandoffPasses = 0
+
     func flushHelperCompletions() async {
+        qaHelperFlushCount += 1
         guard !helperCompletionFlushInFlight else { return }
         helperCompletionFlushInFlight = true
         defer { helperCompletionFlushInFlight = false; scheduleHelperCompletionFlush() }
-        recoverHelperCompletionBatches()
+        let recovering = records.keys.filter { wakesForHelperCompletion($0) && !helperDeliveryJournalsRead.contains($0) }
+        recoverHelperCompletionBatches(for: recovering)
         for parent in Array(helperCompletionBatches.keys) {
+            // A deleted lead, or one Array can no longer push into: nothing will
+            // ever take this batch, and keeping it re-armed the timer every
+            // 0.1 s. Its rows stay on disk for a lookup or a relaunch.
+            guard records[parent] != nil, wakesForHelperCompletion(parent) else {
+                helperCompletionBatches[parent] = nil
+                continue
+            }
             guard var batch = helperCompletionBatches[parent],
                   helperCompletionDeliveryDate(batch, parent: parent, now: helperCompletionNow()) <= helperCompletionNow(),
                   let cwd = records[parent]?.cwd, wakesForHelperCompletion(parent) else { continue }
@@ -8180,7 +8255,9 @@ final class AgentSupervisor {
         }
         // Crash after commit but before queue release: resume only queue ids
         // whose entire journal group committed, using the existing relaunch gate.
-        for parent in records.keys where wakesForHelperCompletion(parent) {
+        // Once per lead per launch, like the recovery read above.
+        for parent in recovering {
+            helperDeliveryJournalsRead.insert(parent)
             guard let cwd = records[parent]?.cwd,
                   let states = try? SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue) else { continue }
             let ids = Set(states.compactMap(\.wakeID)).filter { id in
@@ -8192,6 +8269,35 @@ final class AgentSupervisor {
     }
 
     func qaForgetHelperCompletionBatches() { helperCompletionBatches = [:] }
+
+    /// The durable half of `trackHelperMessage`, read back at restore.
+    private func restoreHelperMessageSubscriptions() {
+        for lead in records.values where lead.capabilities.locallyManaged {
+            for row in SpawnResultFile.subscriptions(parentCwd: lead.cwd, recipient: lead.id.rawValue) {
+                let helper = AgentID(rawValue: row.helper)
+                guard records[helper] != nil,
+                      !(helperMessageSubscriptions[helper] ?? []).contains(where: { $0.parent == lead.id && $0.handle == row.handle })
+                else { continue }
+                helperMessageSubscriptions[helper, default: []].append(.init(parent: lead.id, handle: row.handle, baseline: row.baseline))
+            }
+        }
+    }
+
+    /// A delegated or messaged helper whose turn was still running when the
+    /// previous launch ended: nothing will finish that turn, so its lead gets
+    /// ONE delivery saying so instead of waiting on it in silence. The turn
+    /// end is recorded, so a later relaunch does not say it again.
+    private func settleHelpersCutOffByRestart() {
+        for child in Array(records.values) where child.capabilities.locallyManaged {
+            guard let turnAt = child.latestTurnAt,
+                  (child.latestTerminalEvent?.endedAt).map({ $0 < turnAt }) ?? true,
+                  !helperParents(child.id).isEmpty else { continue }
+            let turn = "restart-\(Int(turnAt.timeIntervalSince1970 * 1000))"
+            deliver(.turnCompleted(threadId: Self.threadId(for: child.id), turnId: turn, outcome: .interrupted,
+                errorMessage: "Array restarted while this helper was working, so its turn did not finish. Message it to continue."),
+                to: child.id)
+        }
+    }
 
     private var managedModeDefaults: UserDefaults = .standard
     private var managedModeObserver: NSObjectProtocol?
@@ -10897,6 +11003,7 @@ final class AgentSupervisor {
             if let previous { await previous.value }
             guard let self else { return }
             defer { self.steerHandoffsInFlight.remove(id) }
+            self.qaSteerHandoffPasses += 1
             guard self.runners[id] === runner, runner.acceptsSteerNow else { return }
             let steers: [AgentComposerQueuedMessage]
             do {
@@ -10909,8 +11016,10 @@ final class AgentSupervisor {
             var notTaken: [AgentComposerQueuedMessage] = []
             var retryUserPriority = false
             for message in steers {
-                if message.helperCompletion,
-                   await store.queuedMessages(for: id).contains(where: { $0.isSteer && !$0.helperCompletion }) {
+                // User steers first, but only ones a handoff would take: an
+                // uncertain steer waits for explicit recovery, and counting it
+                // here spun take/return/retry for the whole tool call.
+                if message.helperCompletion, await store.hasTakeableUserSteer(for: id) {
                     notTaken.append(message); retryUserPriority = true; continue
                 }
                 guard self.runners[id] === runner, self.runnerGenerationTokens[id] == generation else {
