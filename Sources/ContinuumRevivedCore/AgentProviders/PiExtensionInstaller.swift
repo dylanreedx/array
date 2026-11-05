@@ -64,6 +64,8 @@ public enum PiExtensionInstaller {
         "3e536320b6c99957255bb26b7709acdf838b075c99212c57211cf5f34831bd5a",
         // The wait_agents-era copy, before its descriptions said "Array".
         "369697d2298cdef5a5b04ccb58005df665bc696db1270c7bce0b9c4ec8caa95c",
+        // The release-candidate copy that offered wait_agents to Array-run pi.
+        "1eadd4db72f43c631c224e8c2ffd14b040735767f4a147e1fb192e3e8ab8fbb0",
     ]
 
     public static func sha256Hex(_ data: Data) -> String {

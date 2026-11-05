@@ -67,6 +67,8 @@ struct ArrayWorkspaceMCP {
         let endpoint: URL
         let agentID: String
         let token: String
+        /// One channel per recipient: `push` lists no `wait_agents`.
+        let delivery: WorkspaceResultDelivery
         let session: URLSession
         let writer = ResponseWriter()
         let requests = RequestTasks()
@@ -84,6 +86,7 @@ struct ArrayWorkspaceMCP {
                 throw MCPError.usage("ARRAY_WORKSPACE_AGENT_ID and ARRAY_WORKSPACE_MCP_TOKEN_FILE are required")
             }
             self.endpoint = endpoint; self.agentID = agentID; self.token = token
+            self.delivery = WorkspaceResultDelivery(environmentValue: environment[WorkspaceResultDelivery.environmentKey])
             // URLSession's default request timeout is 60 s. The host answers a
             // delegation only after the user answers its approval alert, so a
             // slow answer used to read "bridge unavailable" here while the
@@ -134,16 +137,19 @@ struct ArrayWorkspaceMCP {
                     "protocolVersion": .string("2024-11-05"),
                     "capabilities": .object(["tools": .object([:])]),
                     "serverInfo": .object(["name": .string("array-workspace"), "version": .string("0.1")]),
-                    "instructions": .string(WorkspaceMCPToolCatalog.serverInstructions)
+                    "instructions": .string(WorkspaceMCPToolCatalog.serverInstructions(for: delivery))
                 ])]))
             case "tools/list":
                 var tools = WorkspaceMCPToolCatalog.tools.map { tool in
-                    WorkspaceMCPJSON.object(["name": .string(tool.name), "description": .string(tool.mcpDescription),
+                    WorkspaceMCPJSON.object(["name": .string(tool.name),
+                                             "description": .string(WorkspaceMCPToolCatalog.mcpDescription(tool, for: delivery)),
                                              "inputSchema": .object(tool.inputSchema)])
                 }
-                tools.append(.object(["name": .string(WorkspaceMCPToolCatalog.waitAgentsName),
-                                      "description": .string(WorkspaceMCPToolCatalog.waitAgentsDescription),
-                                      "inputSchema": .object(WorkspaceMCPToolCatalog.waitAgentsInputSchema)]))
+                if delivery == .collect {
+                    tools.append(.object(["name": .string(WorkspaceMCPToolCatalog.waitAgentsName),
+                                          "description": .string(WorkspaceMCPToolCatalog.waitAgentsDescription),
+                                          "inputSchema": .object(WorkspaceMCPToolCatalog.waitAgentsInputSchema)]))
+                }
                 return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null,
                                        "result": .object(["tools": .array(tools)])]))
             case "tools/call":
@@ -165,7 +171,7 @@ struct ArrayWorkspaceMCP {
             let arguments: [String: WorkspaceMCPJSON]
             if case .object(let value)? = params["arguments"] { arguments = value } else { arguments = [:] }
             let reply: WorkspaceMCPJSON
-            if name == WorkspaceMCPToolCatalog.waitAgentsName {
+            if name == WorkspaceMCPToolCatalog.waitAgentsName, delivery == .collect {
                 reply = await waitAgents(arguments)
             } else if let tool = WorkspaceMCPToolCatalog.tool(named: name) {
                 do {

@@ -14,7 +14,8 @@ import Foundation
 ///   child and nowhere else; the parent's token cannot write the child's; the
 ///   status comes back and is stored labelled `declared`, and the observed
 ///   status does not move.
-/// - `wait_agents` over the parent's registration: setting off, today's entry
+/// - `wait_agents` over the parent's collect-channel registration (an agent
+///   Array does not run): setting off, today's entry
 ///   plus `report`; setting on, the report in the final text's place; a later
 ///   turn that filed nothing carries no report.
 /// - Relaunch: a fresh supervisor restored from the same store has the report
@@ -108,6 +109,19 @@ enum WorkspaceAgentReportChecks {
 
         func configuration(for agent: AgentID) throws -> WorkspaceMCPConfiguration {
             guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper) else {
+                throw Failure(description: "the production MCP host issued no registration for \(agent)")
+            }
+            try config.materialize()
+            return config
+        }
+
+        /// The collect channel: `wait_agents` exists only for an agent Array
+        /// does not run. Pair it with the supervisor's capability stand-in
+        /// (`helperCompletionEnabled` false) so the host agrees: no wakes,
+        /// and lookups hand out bodies under leases.
+        func collectConfiguration(for agent: AgentID) throws -> WorkspaceMCPConfiguration {
+            f.delegate.agentSupervisor.helperCompletionEnabled = { _ in false }
+            guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper, resultDelivery: .collect) else {
                 throw Failure(description: "the production MCP host issued no registration for \(agent)")
             }
             try config.materialize()
@@ -242,7 +256,9 @@ enum WorkspaceAgentReportChecks {
         let holding = await waitUntil(timeout: 30, pollInterval: 0.05) { promptLog().contains("REPORT-CHILD-HOLD") && supervisor.isRunning(child) }
         try expect(holding, "the child's runner must receive its task and still be running")
         let childConfig = try bench.configuration(for: child)
-        let parentConfig = try bench.configuration(for: parent)
+        // This lead stands in for an agent Array does not run: it collects
+        // with wait_agents and is never woken (one channel per recipient).
+        let parentConfig = try bench.collectConfiguration(for: parent)
 
         // Both tools are listed, and their descriptions stay short: they cost
         // context in every session.

@@ -112,16 +112,15 @@ public enum WorkspaceMCPToolCatalog {
 
     /// Served by `array-workspace-mcp` itself, never by the host: it polls
     /// `operation.get` until each child settles, so a long wait never parks the
-    /// app's main thread. Pi's twin is `wait_agents` in
-    /// `continuum-spawn-agent.ts`, which polls the same spawn-result courier the
-    /// host reads for `operation.get`'s `childResult`; the shared name keeps the
-    /// dependency waits available for every harness.
+    /// app's main thread. Offered ONLY on the `collect` channel
+    /// (`WorkspaceResultDelivery`): an agent Array runs gets every result
+    /// delivered and is never offered a second way to read it.
     public static let waitAgentsName = "wait_agents"
     public static let waitAgentsDefaultTimeoutSeconds = 60
     public static let waitAgentsTimeoutRange = 5...60
     public static let waitAgentsMaxHandles = 16
     public static let waitAgentsDescription =
-        "Wait for children you created with array_delegate to finish their current turn, and return each child's final answer, failure or refusal. Pass the operationId values array_delegate returned as handles. Returns early on user steering or queued inbox input (interrupted: user_steer or inbox). Otherwise blocks until every child is idle or the timeout passes (default 60 s, max 60 s), then reports any child still running as running. Read-only.\n\nGuidelines:\n- After delegating, continue independent work or end your turn. With helper completion wakes enabled (the Managed default), Array delivers results automatically. Use wait_agents only when progress truly depends on a result; prefer timeoutSeconds: 5. Never sleep, loop or message a child to poll.\n- A child marked running when the wait ends is still working in its own tile; continue independent work or end your turn for a completion wake. Never repeat waits or delegate again to poll."
+        "Wait for children you created with array_delegate to finish their current turn, and return each child's final answer, failure or refusal. Pass the operationId values array_delegate returned as handles. Returns early on user steering or queued inbox input (interrupted: user_steer or inbox). Otherwise blocks until every child is idle or the timeout passes (default 60 s, max 60 s), then reports any child still running as running. Read-only.\n\nGuidelines:\n- Array does not run this agent, so it delivers no helper results to it: wait_agents is how you collect them. Use it when progress depends on a result; prefer short timeouts. Never sleep, loop or message a child to poll.\n- A child marked running when the wait ends is still working in its own tile; continue independent work and wait again later."
     public static let waitAgentsInputSchema: [String: WorkspaceMCPJSON] = [
         "type": .string("object"),
         "properties": .object([
@@ -141,10 +140,29 @@ public enum WorkspaceMCPToolCatalog {
         "required": .array([.string("handles")])
     ]
 
+    /// The `collect` channel's replacement for the delivery sentence above.
+    public static let collectDeliveryNote =
+        "Array does not run this agent, so it delivers no helper results to it: collect them with wait_agents, with short timeouts, when progress depends on one."
+
+    /// The instructions and tool text for one channel. `push` is the catalogue
+    /// as written; `collect` says how results are collected instead.
+    public static func serverInstructions(for delivery: WorkspaceResultDelivery) -> String {
+        guard delivery == .collect else { return serverInstructions }
+        return serverInstructions.replacingOccurrences(of: pushDeliverySentence, with: collectDeliveryNote)
+    }
+
+    public static func mcpDescription(_ tool: Tool, for delivery: WorkspaceResultDelivery) -> String {
+        guard delivery == .collect, tool.operation == .agentDelegate || tool.operation == .agentMessage else { return tool.mcpDescription }
+        return tool.mcpDescription + "\n\n" + collectDeliveryNote
+    }
+
+    static let pushDeliverySentence =
+        "Array delivers each helper's result to you by itself, as a message when you are idle or inside the turn you are running: after delegating, continue independent work or end your turn, and never poll, sleep or message a helper to check on it."
+
     /// MCP `initialize` instructions. Claude Code shows server instructions to
     /// the model even while it defers the tools themselves behind tool search.
     public static let serverInstructions =
-        "This agent runs in a tile on the user's Array canvas. These array_* tools see and manage that canvas: array_workspace_context (who and where you are, what you may do), array_canvas_query, array_open_document, array_find_agent and array_inspect_agent. To run work in another visible tile, call array_delegate — a built-in subagent tool (Agent/Task) runs inside this tile and never creates one. array_delegate accepts optional harness (Claude Code, Codex or Pi) and exact catalogue model; omitted fields inherit, except a different harness uses its own catalogue default. array_message_agent starts a turn on another agent in your project, and Array wakes leads with helper results when helper completion wakes are enabled. After delegating, continue independent work or end your turn; use a short wait_agents only for a dependency. To reach an agent by where it sits (\"the agent to your right\"), match array_canvas_query's tile rectangles with array_find_agent's tileIds. What needs the user's OK depends on their Agent permissions setting: under Free, nothing inside your project asks; under Ask first, the first delegation, message or canvas move asks the user in Array. array_workspace_context lists what you may do now. If your title is wrong or your task has clearly changed, retitle yourself with array_update_agent (nameIntent proactive), but never replace a name the user typed (nameSource user or requested in array_workspace_context); when the user or another agent asks for a rename, use nameIntent requested. For a browser, take a snapshot first and act by ref. Use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell. Remote domains and user-owned browsers require separate approval."
+        "This agent runs in a tile on the user's Array canvas. These array_* tools see and manage that canvas: array_workspace_context (who and where you are, what you may do), array_canvas_query, array_open_document, array_find_agent and array_inspect_agent. To run work in another visible tile, call array_delegate — a built-in subagent tool (Agent/Task) runs inside this tile and never creates one. array_delegate accepts optional harness (Claude Code, Codex or Pi) and exact catalogue model; omitted fields inherit, except a different harness uses its own catalogue default. array_message_agent starts a turn on another agent in your project. Array delivers each helper's result to you by itself, as a message when you are idle or inside the turn you are running: after delegating, continue independent work or end your turn, and never poll, sleep or message a helper to check on it. To reach an agent by where it sits (\"the agent to your right\"), match array_canvas_query's tile rectangles with array_find_agent's tileIds. What needs the user's OK depends on their Agent permissions setting: under Free, nothing inside your project asks; under Ask first, the first delegation, message or canvas move asks the user in Array. array_workspace_context lists what you may do now. If your title is wrong or your task has clearly changed, retitle yourself with array_update_agent (nameIntent proactive), but never replace a name the user typed (nameSource user or requested in array_workspace_context); when the user or another agent asks for a rename, use nameIntent requested. For a browser, take a snapshot first and act by ref. Use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell. Remote domains and user-owned browsers require separate approval."
 }
 
 /// How one host reply becomes an MCP `tools/call` result

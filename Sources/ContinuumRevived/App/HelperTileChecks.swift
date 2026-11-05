@@ -99,7 +99,8 @@ enum HelperTileChecks {
         let inspected = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "array_inspect_agent", ["agentId": id.rawValue.uuidString])
         try expect(!inspected.isError, "tile-less helper cannot be inspected")
         let handle = s.records[id]!.spawnResultHandle!
-        let waited = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "wait_agents", ["handles": [handle], "timeoutSeconds": 5])
+        // Collected as an agent Array does not run would (the collect channel).
+        let waited = try await WorkspaceAgentReportChecks.call(b.collectConfiguration(for: b.f.agentId), "wait_agents", ["handles": [handle], "timeoutSeconds": 5])
         let agents = (waited.reply["result"] as? [String: Any])?["agents"] as? [[String: Any]]
         try expect(!waited.isError && agents?.first?["status"] as? String == "completed", "folded helper lost wait_agents result")
         try expect(agents?.first?["finalText"] as? String == WorkspaceAgentReportChecks.childFinalText, "folded transcript did not reach wait_agents")

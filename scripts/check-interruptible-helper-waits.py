@@ -39,8 +39,10 @@ host = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Host)
 threading.Thread(target=host.serve_forever, daemon=True).start()
 with tempfile.TemporaryDirectory(prefix='array-wait-check-') as root:
     token = pathlib.Path(root)/'token'; token.write_text('fixture')
+    # wait_agents exists only on the collect channel: an agent Array does not run.
     env = dict(os.environ, ARRAY_WORKSPACE_MCP_ENDPOINT=f'http://127.0.0.1:{host.server_port}',
-               ARRAY_WORKSPACE_AGENT_ID='fixture-lead', ARRAY_WORKSPACE_MCP_TOKEN_FILE=str(token))
+               ARRAY_WORKSPACE_AGENT_ID='fixture-lead', ARRAY_WORKSPACE_MCP_TOKEN_FILE=str(token),
+               ARRAY_WORKSPACE_RESULT_DELIVERY='collect')
     proc = subprocess.Popen([os.environ.get('ARRAY_WAIT_CHECK_EXECUTABLE', '.build/debug/array-workspace-mcp')], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     replies = queue.Queue()
     def read():
@@ -128,5 +130,19 @@ with tempfile.TemporaryDirectory(prefix='array-wait-check-') as root:
         wait = next(t for t in catalog if t['name']=='wait_agents')
         assert wait['inputSchema']['properties']['timeoutSeconds']['maximum'] == 60
         print('PASS wait timeout cap advertised as 60s')
+        # The push channel (an agent Array runs, and the default) has no second
+        # way to read a result: wait_agents is neither listed nor served.
+        for delivery in ['push', None]:
+            push_env = {k: v for k, v in env.items() if k != 'ARRAY_WORKSPACE_RESULT_DELIVERY'}
+            if delivery: push_env['ARRAY_WORKSPACE_RESULT_DELIVERY'] = delivery
+            push = subprocess.run([os.environ.get('ARRAY_WAIT_CHECK_EXECUTABLE', '.build/debug/array-workspace-mcp')], env=push_env,
+                input='\n'.join(json.dumps(dict(jsonrpc='2.0', id=i, method=m, params=p)) for i, m, p in
+                    [(1, 'tools/list', {}), (2, 'tools/call', {'name': 'wait_agents', 'arguments': {'handles': ['helper']}})]) + '\n',
+                capture_output=True, text=True, timeout=10)
+            answers = {r['id']: r for r in map(json.loads, push.stdout.splitlines())}
+            names = [t['name'] for t in answers[1]['result']['tools']]
+            assert 'wait_agents' not in names and 'array_delegate' in names, names
+            assert 'error' in answers[2], answers[2]
+            print(f'PASS push channel ({delivery or "default"}) lists and serves no wait_agents')
     finally:
         proc.terminate(); proc.wait(timeout=5); state['release'].set(); host.shutdown()

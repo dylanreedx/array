@@ -269,15 +269,15 @@ func runRoleRegistryHarnessConvergenceChecks() throws {
     // first silently denied the other — which is what made pi delegation look
     // broken while Array's own extension was installed and loading correctly.
     expect(pi.toolsArguments(roleId: "pi-orchestrator", allowingSpawn: true)
-            == ["--tools", "read, grep, spawn_agent, wait_agents, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_board_manage, array_delegate, array_reveal_agent, array_get_operation, array_message_agent, array_update_agent, array_device_list, array_device_open, array_device_observe, array_device_act, array_device_close, array_device_build_run, array_browser_open, array_browser_navigate, array_browser_snapshot, array_browser_click, array_browser_type, array_browser_press_key, array_browser_scroll, array_browser_wait_for, array_browser_take_screenshot, array_browser_evaluate, array_browser_console, array_notify, array_report, array_status, array_schedule_agent"],
-           "T5.2: a roled pi agent allowed to spawn must be offered BOTH pi delegation verbs plus spawn_agent's wait_agents collection half (and CX-01's host tools)")
+            == ["--tools", "read, grep, spawn_agent, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_board_manage, array_delegate, array_reveal_agent, array_get_operation, array_message_agent, array_update_agent, array_device_list, array_device_open, array_device_observe, array_device_act, array_device_close, array_device_build_run, array_browser_open, array_browser_navigate, array_browser_snapshot, array_browser_click, array_browser_type, array_browser_press_key, array_browser_scroll, array_browser_wait_for, array_browser_take_screenshot, array_browser_evaluate, array_browser_console, array_notify, array_report, array_status, array_schedule_agent"],
+           "T5.2: a roled pi agent allowed to spawn must be offered BOTH pi delegation verbs and no wait_agents, since Array delivers results (and CX-01's host tools)")
 
     // Idempotent, per verb: a role that already lists ONE is given only the other,
     // and keeps its own ordering.
     try writeRole(.pi, name: "pi-spawner", tools: "read, spawn_agent")
     let respawned = RoleRegistry(projectRoot: temp, harness: .pi)
     expect(respawned.toolsArguments(roleId: "pi-spawner", allowingSpawn: true)
-            == ["--tools", "read, spawn_agent, wait_agents, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_board_manage, array_delegate, array_reveal_agent, array_get_operation, array_message_agent, array_update_agent, array_device_list, array_device_open, array_device_observe, array_device_act, array_device_close, array_device_build_run, array_browser_open, array_browser_navigate, array_browser_snapshot, array_browser_click, array_browser_type, array_browser_press_key, array_browser_scroll, array_browser_wait_for, array_browser_take_screenshot, array_browser_evaluate, array_browser_console, array_notify, array_report, array_status, array_schedule_agent"],
+            == ["--tools", "read, spawn_agent, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_board_manage, array_delegate, array_reveal_agent, array_get_operation, array_message_agent, array_update_agent, array_device_list, array_device_open, array_device_observe, array_device_act, array_device_close, array_device_build_run, array_browser_open, array_browser_navigate, array_browser_snapshot, array_browser_click, array_browser_type, array_browser_press_key, array_browser_scroll, array_browser_wait_for, array_browser_take_screenshot, array_browser_evaluate, array_browser_console, array_notify, array_report, array_status, array_schedule_agent"],
            "T5.2: a role already declaring one spawn verb must gain the missing ones and not repeat the declared one")
     try writeRole(.pi, name: "pi-both", tools: "read, delegate_agent, spawn_agent, wait_agents")
     let both = RoleRegistry(projectRoot: temp, harness: .pi)
@@ -292,8 +292,8 @@ func runRoleRegistryHarnessConvergenceChecks() throws {
 
     expect(RoleRegistry.spawnToolNames(for: .claudeCode) == ["Agent", "Task"],
            "C0b: claude's spawn verb must be detected under BOTH its current and former name")
-    expect(RoleRegistry.spawnToolNames(for: .pi) == ["spawn_agent", "wait_agents", "delegate_agent"],
-           "T5.2: pi's spawn verbs are Array's own extension (spawn + its wait_agents collection half) AND the third-party delegate_agent")
+    expect(RoleRegistry.spawnToolNames(for: .pi) == ["spawn_agent", "delegate_agent"],
+           "T5.2: pi's spawn verbs are Array's own extension's spawn_agent AND the third-party delegate_agent; no wait_agents for an Array-run agent")
 
     print("RoleRegistry harness convergence checks passed: three roots read independently, pi default preserved, and Array's depth cap withholds the spawn verb instead of refusing it")
 }

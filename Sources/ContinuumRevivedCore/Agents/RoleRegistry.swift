@@ -57,12 +57,11 @@ public struct RoleRegistry: Sendable {
         // validation pass over the list. Confirmed live too: the same invocation
         // with and without a bogus tool name exits 0 both times with zero bytes on
         // stderr and an otherwise identical event stream.
-        // `wait_agents` is spawn_agent's collection half (same bundled
-        // extension): a roled agent allowed to spawn must also be allowed to
-        // collect, or delegation degrades back to fire-and-forget. It is gated
-        // by the same `allowingSpawn` depth check — an agent AT the cap cannot
-        // spawn, so it has nothing to wait on.
-        case .pi: return ["spawn_agent", "wait_agents", "delegate_agent"]
+        // No `wait_agents`: these are Array-run agents, and Array delivers
+        // every spawn_agent result into the session itself (one channel per
+        // recipient, `WorkspaceResultDelivery`); the bundled extension does not
+        // register it for them.
+        case .pi: return ["spawn_agent", "delegate_agent"]
         case .claudeCode: return ["Agent", "Task"]
         case .codex: return ["spawn_agent"]
         }

@@ -30,10 +30,12 @@ final class WorkspaceMCPHost {
         self.handler = handler
     }
 
-    func configuration(for agentID: AgentID, serverExecutable: String) -> WorkspaceMCPConfiguration? {
+    func configuration(for agentID: AgentID, serverExecutable: String,
+                       resultDelivery: WorkspaceResultDelivery = .push) -> WorkspaceMCPConfiguration? {
         if let registration = registrations[agentID] {
             return WorkspaceMCPConfiguration(serverExecutable: serverExecutable, endpoint: registration.endpoint,
-                                             agentID: agentID.rawValue.uuidString, token: registration.token)
+                                             agentID: agentID.rawValue.uuidString, token: registration.token,
+                                             resultDelivery: resultDelivery)
         }
         do {
             if listener == nil {
@@ -59,7 +61,8 @@ final class WorkspaceMCPHost {
             let registration = Registration(token: token, endpoint: listener!.endpoint)
             registrations[agentID] = registration
             return WorkspaceMCPConfiguration(serverExecutable: serverExecutable, endpoint: registration.endpoint,
-                                             agentID: agentID.rawValue.uuidString, token: token)
+                                             agentID: agentID.rawValue.uuidString, token: token,
+                                             resultDelivery: resultDelivery)
         } catch {
             fputs("Workspace MCP listener unavailable: \(error)\n", stderr)
             return nil

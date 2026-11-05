@@ -23,7 +23,7 @@ enum HelperGuardChecks {
         let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-command-evidence")
         defer { bench.tearDown() }
         let supervisor = bench.supervisor
-        let parentConfig = try bench.configuration(for: bench.f.agentId)
+        let parentConfig = try bench.collectConfiguration(for: bench.f.agentId)  // wait_agents: the collect channel
         let cases: [(String, AgentCommandEvidence.Outcome)] = [
             ("fresh", .observed), ("stale", .stale), ("failed", .observedFailed),
             ("absent", .notObserved), ("unknown", .notObserved), ("shell-edit", .stale),

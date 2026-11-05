@@ -147,7 +147,7 @@ func runManagedModeLiveChecks() async throws {
 
     // Turn 1: two independent jobs at once; job B stalls on purpose.
     let prompt1 = """
-    Live Array test of Managed mode in this repo (it has a Makefile). Two independent jobs. Run both helpers at the same time, then collect their reports with wait_agents (timeoutSeconds 240).
+    Live Array test of Managed mode in this repo (it has a Makefile). Two independent jobs. Run both helpers at the same time, then end your turn: Array delivers their reports to you.
     Job A: create greeting.txt containing exactly the line ALPHA, run `make test`, and report the result.
     Job B: create notes.txt containing exactly the line BETA, then run the shell command `sleep 100`, then report.
     Pick each helper's model to fit its job. If a helper is stopped, say so and do not retry it yet. End with one short line per job.
@@ -232,7 +232,7 @@ func runManagedModeLiveChecks() async throws {
 
     // Turn 2: retry the stopped helper; its first prompt must carry the old work.
     if let jobB {
-        let prompt2 = "I stopped the helper for job B (agent id \(jobB.rawValue.uuidString)). Retry it with array_delegate and retryOf set to that id so it continues the earlier work, but tell it to skip the sleep. Collect its report with wait_agents (timeoutSeconds 180), then answer in one line."
+        let prompt2 = "I stopped the helper for job B (agent id \(jobB.rawValue.uuidString)). Retry it with array_delegate and retryOf set to that id so it continues the earlier work, but tell it to skip the sleep. End your turn; when Array delivers its report, answer in one line."
         guard mounted.send(prompt2, to: lead) else { throw Failure(description: "Lead retry send refused") }
         let retried = await waitUntil(timeout: 240, pollInterval: 0.2) {
             mounted.children(of: lead).contains { mounted.records[$0]?.delegationContext?.retryOf == jobB }

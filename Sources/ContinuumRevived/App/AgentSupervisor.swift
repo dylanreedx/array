@@ -1669,8 +1669,13 @@ final class AgentSupervisor {
         queuedWorkItemsCache[id] = items
         // Only our own durable wakeups auto-resume after relaunch. An ordinary
         // user follow-up or an explicitly stopped queue keeps its existing hold.
+        // A helper note is host-owned too, and never runs a turn of its own.
         if pausedQueues.contains(id), queuePauseReasons[id] == .afterRelaunch,
-           items.allSatisfy({ knownIDs.contains($0.id) }),
+           items.allSatisfy({ item in
+               if knownIDs.contains(item.id) { return true }
+               if case .prompt(let message) = item { return message.helperNote }
+               return false
+           }),
            !(await queue.hasUncertainSteers(for: id)) {
             pausedQueues.remove(id); queuePauseReasons[id] = nil
         }
@@ -4525,7 +4530,7 @@ final class AgentSupervisor {
         if hadRunner {
             deliver(.turnCompleted(threadId: Self.threadId(for: id), turnId: "stopped:\(Self.threadId(for: id))",
                 outcome: .interrupted, errorMessage: nil), to: id)
-        }
+        } else { releaseHeldHelperCompletion(id) }
     }
 
     /// Stops every agent with a prompt in flight. The app calls this when it quits
@@ -5136,6 +5141,7 @@ final class AgentSupervisor {
             idle.stop()
             interruptWorkingClaudeMirroredChildren(of: id)
             returnDeliveringSteers(for: id)
+            releaseHeldHelperCompletion(id)
             notifyTurnCapabilitiesChanged(id)
             stopped += 1
         }
@@ -6171,6 +6177,12 @@ final class AgentSupervisor {
         record.lastReport = AgentFiledReport(report: report, filedAt: date)
         guard persist(record) else { return false }
         onSelfReportChanged?(id)
+        // A report filed between turns is a result: it releases a turn held
+        // as progress, or follows a result already delivered as a note.
+        if !isRunning(id) {
+            if heldHelperCompletions[id] != nil { releaseHeldHelperCompletion(id) }
+            else { noteLateHelperOutput(id, text: Self.helperCompletionReportText(report)) }
+        }
         return true
     }
 
@@ -7648,6 +7660,244 @@ final class AgentSupervisor {
     }
     private var helperMessageSubscriptions: [AgentID: [HelperMessageSubscription]] = [:]
 
+    /// A helper turn that ended while its session still runs background work
+    /// (a claude shell job, subagent or native schedule) and filed no report
+    /// is progress, not a result: the helper will resume on its own. Only
+    /// action starts a lead turn, so its wake, its message settlement and its
+    /// spawn-result write are held together: the lead is not woken,
+    /// collection keeps reading running, and a message-only lead's
+    /// subscription survives to receive the real result. Its text rides
+    /// along as a progress note meanwhile (`upsertHelperNote`).
+    ///
+    /// No result may be lost, so a hold always ends: at the helper's next
+    /// turn end (which decides again), when its background work has been
+    /// gone `heldBackgroundGrace` with no new turn, at session exit, reap,
+    /// Stop or CLI retirement, when a report is filed between turns, or at
+    /// `heldHelperCompletionCap`, which delivers ONE result saying background
+    /// work is still running. Each hold is also a durable delivery record
+    /// flagged `held`, so a relaunch, which no longer holds it, replays it once.
+    private struct HeldHelperCompletion {
+        var turn: String
+        var outcome: TurnOutcome
+        var error: String?
+        /// The first hold of this run of held turns, on the wall clock that
+        /// message subscriptions are stamped with.
+        var heldAt: Date
+        /// The same moment on `helperCompletionNow`, which the cap counts from.
+        var since: Date
+        /// The runner generation the held turn ran in: its delivery records' key.
+        var identity: String
+        var recipients: Set<AgentID>
+        var backgroundEndedAt: Date? = nil
+        var turnInFlight = false
+    }
+    private var heldHelperCompletions: [AgentID: HeldHelperCompletion] = [:]
+    private var heldSweepTask: Task<Void, Never>?
+    var heldHelperCompletionCap: TimeInterval = 600
+    var heldBackgroundGrace: TimeInterval = 30
+    static let helperNoReportStatus = "ended its turn without filing a report"
+    static let helperBackgroundRunningStatus = "ended its turn with background work still running"
+
+    private func helperHasBackgroundWork(_ id: AgentID) -> Bool {
+        guard let runner = (runners[id] ?? idleSessionRunners[id]) as? AgentSteeringRunning else { return false }
+        return runner.hasBackgroundWork || runner.hasRunningSubagents
+    }
+
+    /// The report baseline `noteHelperCompletion` uses: a report counts for
+    /// this turn only if filed after it.
+    private func helperFiledReportThisTurn(_ id: AgentID) -> Bool {
+        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
+        return records[id]?.lastReport.map { $0.filedAt > baseline } ?? false
+    }
+
+    private func helperParents(_ id: AgentID) -> Set<AgentID> {
+        Set([records[id]?.parentAgentID].compactMap { $0 } + (helperMessageSubscriptions[id] ?? []).map(\.parent))
+    }
+
+    private func holdsHelperCompletion(_ id: AgentID, outcome: TurnOutcome) -> Bool {
+        guard outcome == .completed, let child = records[id], child.capabilities.locallyManaged,
+              !helperParents(id).isEmpty, helperHasBackgroundWork(id), !helperFiledReportThisTurn(id),
+              // A helper that says it is blocked is action, not progress.
+              child.declaredStatus?.needsYou == nil, child.helperWatchdogNeedsYou == nil else { return false }
+        guard let held = heldHelperCompletions[id] else { return true }
+        // A message that arrived after the hold asked for this turn's answer.
+        if (helperMessageSubscriptions[id] ?? []).contains(where: { $0.baseline >= held.heldAt }) { return false }
+        return helperCompletionNow().timeIntervalSince(held.since) < heldHelperCompletionCap
+    }
+
+    private func settleHelperTurn(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?,
+                                  statusOverride: String? = nil) {
+        noteHelperCompletion(id, turn: turn, outcome: outcome, error: error, statusOverride: statusOverride)
+        settleHelperMessages(id, outcome: outcome, error: error)
+        writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: error)
+    }
+
+    private func helperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {
+        let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
+        let previous = heldHelperCompletions[id]
+        if let previous, previous.identity != identity { removeHeldRecords(previous, helper: id) }
+        if holdsHelperCompletion(id, outcome: outcome) {
+            let recipients = helperParents(id).filter { records[$0] != nil && wakesForHelperCompletion($0) }
+            let held = HeldHelperCompletion(turn: turn, outcome: outcome, error: error,
+                heldAt: previous?.heldAt ?? Date(), since: previous?.since ?? helperCompletionNow(),
+                identity: identity, recipients: recipients)
+            heldHelperCompletions[id] = held
+            persistHeldRecords(held, helper: id)
+            if let text = transcriptProjections[id]?.finalAssistantText, !text.isEmpty {
+                for parent in recipients { upsertHelperNote(.progress, helper: id, lead: parent, text: text) }
+            }
+            startHeldSweep()
+            return
+        }
+        heldHelperCompletions[id] = nil
+        settleHelperTurn(id, turn: turn, outcome: outcome, error: error)
+    }
+
+    /// The held turn is delivered as it stands. A held turn whose helper has
+    /// started another turn is that turn's to decide. Its records are
+    /// overwritten by the delivery itself (same helper, turn and recipient).
+    private func releaseHeldHelperCompletion(_ id: AgentID, statusOverride: String? = nil) {
+        guard let held = heldHelperCompletions[id], !held.turnInFlight else { return }
+        heldHelperCompletions[id] = nil
+        settleHelperTurn(id, turn: held.turn, outcome: held.outcome, error: held.error, statusOverride: statusOverride)
+    }
+
+    /// The durable half of a hold: a delivery record carrying the text a
+    /// relaunch delivers (the session it waited on is gone by then).
+    private func persistHeldRecords(_ held: HeldHelperCompletion, helper id: AgentID) {
+        guard let child = records[id] else { return }
+        let text = helperCompletionText(id, child: child, outcome: held.outcome, error: held.error, statusOverride: nil).text
+        for parent in held.recipients {
+            guard let cwd = records[parent]?.cwd else { continue }
+            var record = SpawnResultFile.Delivery(helper: id.rawValue, turn: held.identity, recipient: parent.rawValue,
+                wakeID: UUID(), text: text, now: helperCompletionNow())
+            record.held = true
+            do { try SpawnResultFile.saveDelivery(record, parentCwd: cwd) }
+            catch { warn("Held helper turn could not be journaled; it is held in memory only") }
+        }
+    }
+
+    /// A superseded hold: the later turn owns the result now.
+    private func removeHeldRecords(_ held: HeldHelperCompletion, helper id: AgentID) {
+        for parent in held.recipients {
+            guard let cwd = records[parent]?.cwd,
+                  let record = try? SpawnResultFile.delivery(parentCwd: cwd, helper: id.rawValue, turn: held.identity, recipient: parent.rawValue),
+                  record.held == true else { continue }
+            SpawnResultFile.removeDelivery(parentCwd: cwd, helper: id.rawValue, turn: held.identity, recipient: parent.rawValue)
+        }
+    }
+
+    private func startHeldSweep() {
+        guard heldSweepTask == nil else { return }
+        heldSweepTask = Task { @MainActor [weak self] in
+            while true {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                self.sweepHeldHelperCompletions()
+                if self.heldHelperCompletions.isEmpty { self.heldSweepTask = nil; return }
+            }
+        }
+    }
+
+    /// Ends holds that nothing else will: the cap, and background work that
+    /// finished without the helper starting another turn. On
+    /// `helperCompletionNow`'s clock; the production sweep runs every 5 s.
+    func sweepHeldHelperCompletions() {
+        let now = helperCompletionNow()
+        for (id, held) in heldHelperCompletions where !held.turnInFlight {
+            if now.timeIntervalSince(held.since) >= heldHelperCompletionCap {
+                releaseHeldHelperCompletion(id, statusOverride: helperHasBackgroundWork(id) ? Self.helperBackgroundRunningStatus : nil)
+            } else if helperHasBackgroundWork(id) {
+                heldHelperCompletions[id]?.backgroundEndedAt = nil
+            } else if let ended = held.backgroundEndedAt {
+                if now.timeIntervalSince(ended) >= heldBackgroundGrace { releaseHeldHelperCompletion(id) }
+            } else {
+                heldHelperCompletions[id]?.backgroundEndedAt = now
+            }
+        }
+    }
+
+    func isHelperCompletionHeld(_ id: AgentID) -> Bool { heldHelperCompletions[id] != nil }
+
+    // MARK: Helper notes
+
+    enum HelperNoteKind: String { case progress, followUp }
+    private var helperNoteIDs: [String: UUID] = [:]
+    /// Leads that received this helper's latest delivered turn, so output it
+    /// emits afterwards still finds them once its subscription is settled.
+    private var lastHelperDeliveryParents: [AgentID: Set<AgentID>] = [:]
+    private var lateHelperText: [AgentID: String] = [:]
+
+    private func helperNoteID(_ kind: HelperNoteKind, helper: AgentID, lead: AgentID) -> UUID {
+        let key = "\(kind.rawValue)|\(lead.rawValue.uuidString)|\(helper.rawValue.uuidString)"
+        if let id = helperNoteIDs[key] { return id }
+        let id = UUID(); helperNoteIDs[key] = id
+        return id
+    }
+
+    /// Progress and late output never start a lead turn. Each becomes one
+    /// durable note per helper, lead and kind, replaced while it waits: it
+    /// joins the lead's running turn at a tool boundary, or rides along with
+    /// the next helper delivery, and is gone once used.
+    private func upsertHelperNote(_ kind: HelperNoteKind, helper: AgentID, lead: AgentID, text: String) {
+        guard let store = submissionRecoveryStore, wakesForHelperCompletion(lead), records[lead] != nil,
+              let child = records[helper] else { return }
+        let name = String(child.humanDisplayName.prefix(80))
+        let line = kind == .progress
+            ? "\(name) progress note (no action needed; its result follows): "
+            : "\(name) added after its result was delivered: "
+        let body = AgentMessageEnvelope.wrap(line + String(text.prefix(600)), senderID: helper.rawValue, senderName: child.humanDisplayName)
+        let key = "\(kind.rawValue)|\(lead.rawValue.uuidString)|\(helper.rawValue.uuidString)"
+        let previous = queueOpTasks[lead]
+        queueOpTasks[lead] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self else { return }
+            do {
+                if !(try await store.upsertHelperNote(id: self.helperNoteID(kind, helper: helper, lead: lead), text: body, for: lead)) {
+                    // The previous note is being handed over: this one is new.
+                    let fresh = UUID()
+                    self.helperNoteIDs[key] = fresh
+                    try await store.upsertHelperNote(id: fresh, text: body, for: lead)
+                }
+            } catch { self.warn("Helper note could not be queued durably.") }
+            self.queuedWorkItemsCache[lead] = await store.queuedWorkItems(for: lead)
+            self.notifyTurnCapabilitiesChanged(lead)
+            if self.runners[lead] != nil { self.handOverHeldSteers(for: lead) }
+        }
+    }
+
+    /// A helper's own result supersedes its progress note.
+    private func dropHelperProgressNote(helper: AgentID, lead: AgentID) {
+        guard let store = submissionRecoveryStore,
+              let noteID = helperNoteIDs.removeValue(forKey: "\(HelperNoteKind.progress.rawValue)|\(lead.rawValue.uuidString)|\(helper.rawValue.uuidString)") else { return }
+        let previous = queueOpTasks[lead]
+        queueOpTasks[lead] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            if await store.queuedWorkItems(for: lead).contains(where: { $0.id == noteID }) {
+                _ = await store.removeQueuedMessage(id: noteID, for: lead)
+            }
+            guard let self else { return }
+            self.queuedWorkItemsCache[lead] = await store.queuedWorkItems(for: lead)
+            self.notifyTurnCapabilitiesChanged(lead)
+        }
+    }
+
+    /// Output a helper emits after its result was delivered: a follow-up
+    /// note, never a second full result. Before delivery, the flush already
+    /// refreshes the pending result with it.
+    private func noteLateHelperOutput(_ id: AgentID, text: String) {
+        guard !isRunning(id), heldHelperCompletions[id] == nil,
+              let identity = helperCompletionTurns[id], identity == runnerGenerationTokens[id]?.rawValue.uuidString,
+              !text.isEmpty else { return }
+        for lead in lastHelperDeliveryParents[id] ?? [] {
+            guard let cwd = records[lead]?.cwd,
+                  let state = try? SpawnResultFile.delivery(parentCwd: cwd, helper: id.rawValue, turn: identity, recipient: lead.rawValue),
+                  state.phase == .stagingWake || state.phase == .delivered else { continue }
+            upsertHelperNote(.followUp, helper: id, lead: lead, text: text)
+        }
+    }
+
+
     /// Called only after send accepted, on the same actor before runner events
     /// can arrive. Each handle owns its result even after the helper starts a
     /// later turn. A refused send never registers a subscription.
@@ -7706,35 +7956,16 @@ final class AgentSupervisor {
     private var helperCompletionTurns: [AgentID: String] = [:]
     private var helperCompletionTimer: Task<Void, Never>?
 
-    private func helperWakePreferenceKey(_ id: AgentID) -> String {
-        "array.agent.helperCompletionWake.\(id.rawValue.uuidString.lowercased())"
+    /// One channel per recipient, chosen by capability: Array can start a turn
+    /// in an agent it runs itself, so every result is pushed to it and it is
+    /// offered no `wait_agents`. Anything else collects and is never woken.
+    /// `helperCompletionEnabled` stands in for the capability in checks.
+    func resultDelivery(for id: AgentID) -> WorkspaceResultDelivery {
+        if let helperCompletionEnabled { return helperCompletionEnabled(id) ? .push : .collect }
+        return records[id]?.capabilities.locallyManaged == true ? .push : .collect
     }
 
-    @discardableResult
-    func setHelperCompletionWake(_ enabled: Bool, for id: AgentID) -> Bool {
-        guard let record = records[id], record.capabilities.locallyManaged, record.parentAgentID == nil else { return false }
-        managedModeDefaults.set(enabled, forKey: helperWakePreferenceKey(id))
-        if !enabled { helperCompletionBatches[id] = nil }
-        return true
-    }
-
-    func configureHelperWakeMenu(_ inbox: AgentInboxView) {
-        inbox.helperCompletionPreference = { [weak self] rawID in
-            guard let self else { return nil }
-            let id = AgentID(rawValue: rawID)
-            guard let record = self.records[id], record.capabilities.locallyManaged, record.parentAgentID == nil else { return nil }
-            return self.wakesForHelperCompletion(id)
-        }
-        inbox.onHelperCompletionPreferenceChanged = { [weak self] rawID, enabled in
-            _ = self?.setHelperCompletionWake(enabled, for: AgentID(rawValue: rawID))
-        }
-    }
-
-    func wakesForHelperCompletion(_ parent: AgentID) -> Bool {
-        if let helperCompletionEnabled { return helperCompletionEnabled(parent) }
-        if let enabled = managedModeDefaults.object(forKey: helperWakePreferenceKey(parent)) as? Bool { return enabled }
-        return effectiveMode(for: parent) == .managed
-    }
+    func wakesForHelperCompletion(_ parent: AgentID) -> Bool { resultDelivery(for: parent) == .push }
 
     /// Format at the write boundary: this body is persisted and sent to the
     /// lead's model as well as displayed. Keep the full report on the record.
@@ -7757,28 +7988,43 @@ final class AgentSupervisor {
         return lines.joined(separator: "\n")
     }
 
-    private func noteHelperCompletion(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {
-        let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
-        guard let child = records[id], child.capabilities.locallyManaged,
-              helperCompletionTurns[id] != identity else { return }
-        helperCompletionTurns[id] = identity
+    /// The plain-line wake body for a helper's turn, and whether it carries a
+    /// report filed this turn. `statusOverride` replaces the no-report status.
+    private func helperCompletionText(_ id: AgentID, child: AgentRecord, outcome: TurnOutcome, error: String?,
+                                      statusOverride: String?) -> (text: String, capturedReport: Bool) {
+        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
+        let filedThisTurn = child.lastReport.map({ $0.filedAt > baseline }) == true
         let status: String
         switch outcome {
-        case .completed: status = "succeeded"
+        // A turn end without a report is not "succeeded": the lead should
+        // know the helper stopped short, not read its last words as a result.
+        case .completed: status = filedThisTurn ? "succeeded" : (statusOverride ?? Self.helperNoReportStatus)
         case .failed: status = (helperProviderRetryCounts[id] ?? 0) > 0 ? "failed after \(helperProviderRetryCounts[id]!) retries" : "failed"
         case .interrupted, .cancelled: status = "stopped"
         }
-        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let report: String
         if let filed = child.lastReport, filed.filedAt > baseline {
             report = Self.helperCompletionReportText(filed.report)
         } else {
             report = String((transcriptProjections[id]?.finalAssistantText ?? "").prefix(2400))
         }
-        let text = "\(String(child.humanDisplayName.prefix(80))) finished: \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(report)"
+        return ("\(String(child.humanDisplayName.prefix(80))) finished: \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(report)", filedThisTurn)
+    }
+
+    private func noteHelperCompletion(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?,
+                                      statusOverride: String? = nil) {
+        let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
+        guard let child = records[id], child.capabilities.locallyManaged,
+              helperCompletionTurns[id] != identity else { return }
+        helperCompletionTurns[id] = identity
+        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
+        let text = helperCompletionText(id, child: child, outcome: outcome, error: error, statusOverride: statusOverride).text
         let parents = Set([child.parentAgentID].compactMap { $0 }
             + (helperMessageSubscriptions[id] ?? []).map(\.parent))
+        lastHelperDeliveryParents[id] = parents
+        lateHelperText[id] = nil
         for parent in parents where records[parent] != nil && wakesForHelperCompletion(parent) {
+            dropHelperProgressNote(helper: id, lead: parent)
             var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(
                 deadline: helperCompletionNow().addingTimeInterval(8), updates: [])
             if let cwd = records[parent]?.cwd {
@@ -7801,7 +8047,7 @@ final class AgentSupervisor {
         if let retryAfter = batch.retryAfter, retryAfter > now { return retryAfter }
         let finished = Set(batch.updates.map(\.0))
         let othersRunning = records.values.contains { child in
-            !finished.contains(child.id) && isRunning(child.id)
+            !finished.contains(child.id) && (isRunning(child.id) || heldHelperCompletions[child.id] != nil)
                 && (child.parentAgentID == parent || (helperMessageSubscriptions[child.id] ?? []).contains { $0.parent == parent })
         }
         return !isRunning(parent) && othersRunning ? batch.deadline : now
@@ -7837,6 +8083,9 @@ final class AgentSupervisor {
                 let states = try SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue)
                 for state in states.sorted(by: { $0.completedAt < $1.completedAt }) where state.phase != .delivered {
                     guard let wakeID = state.wakeID, let text = state.text else { continue }
+                    // Held here and now: its release delivers it. A relaunch,
+                    // which holds nothing, replays it once (P1).
+                    if state.held == true, heldHelperCompletions[AgentID(rawValue: state.helper)]?.identity == state.turn { continue }
                     var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(id: wakeID, deadline: state.dueAt, updates: [])
                     guard !batch.updates.contains(where: { $0.0.rawValue == state.helper && $0.2 == state.turn }) else { continue }
                     batch.updates.append((AgentID(rawValue: state.helper), text, state.turn))
@@ -7873,13 +8122,17 @@ final class AgentSupervisor {
                         state.wakeID = batch.id
                         if !isRunning(update.0), runnerGenerationTokens[update.0]?.rawValue.uuidString == state.turn {
                             let body: String
+                            var header = (state.text ?? update.1).components(separatedBy: "\n").first ?? "Helper"
                             if let report = records[update.0]?.lastReport, report.filedAt >= state.completedAt {
                                 body = Self.helperCompletionReportText(report.report); state.result?.report = report.report
+                                // The late report is this turn's: it no longer ended without one.
+                                for noReport in [Self.helperNoReportStatus, Self.helperBackgroundRunningStatus] where header.hasSuffix(" finished: " + noReport) {
+                                    header = String(header.dropLast(noReport.count)) + "succeeded"
+                                }
                             }
                             else if state.capturedReport == true {
                                 body = (state.text ?? update.1).components(separatedBy: "\n").dropFirst().joined(separator: "\n")
                             } else { body = String((transcriptProjections[update.0]?.finalAssistantText ?? "").prefix(2400)) }
-                            let header = (state.text ?? update.1).components(separatedBy: "\n").first ?? "Helper"
                             state.text = header + "\n" + body
                         }
                         // Persist prompt eligibility with staging so restart
@@ -7901,7 +8154,9 @@ final class AgentSupervisor {
                                 senderName: records[AgentID(rawValue: state.helper)]?.humanDisplayName ?? "Agent") }
                         })
                         try qaBeforeHelperWakeAdmission?()
-                        try await stageScheduledWakeup(queueID, text: text, for: parent, helperSteer: isRunning(parent))
+                        // Always a helper item, idle lead or busy: it queues after
+                        // user input and drains with every other pending result.
+                        try await stageScheduledWakeup(queueID, text: text, for: parent, helperSteer: true)
                         try qaAfterHelperWakeStage?()
                         for var state in group {
                             state.phase = .delivered; state.via = "wake"; state.leaseUntil = nil
@@ -10125,9 +10380,17 @@ final class AgentSupervisor {
             await self.qaBeforeQueueDrain?()
             do { try await self.recoverAgentMessageQueue(for: id) }
             catch { self.pauseQueue(id, .held); self.warn("Durable agent message awaits queue storage recovery."); return }
-            guard self.canDrainQueue(for: id),
-                  let next = await store.nextWorkItem(for: id),
-                  !self.scheduledQueueAdmissions.contains(next.id),
+            guard self.canDrainQueue(for: id), var next = await store.nextWorkItem(for: id) else { return }
+            // A helper note never starts a turn: it rides along with the next
+            // result, or joins a running turn. Notes alone leave the lead idle.
+            if case .prompt(let first) = next, first.helperNote {
+                guard let other = await store.queuedWorkItems(for: id).first(where: { item in
+                    if case .prompt(let message) = item { return !message.helperNote }
+                    return true
+                }) else { return }
+                next = other
+            }
+            guard !self.scheduledQueueAdmissions.contains(next.id),
                   self.wakeupScheduler?.store.entries.contains(where: { $0.agent == id && $0.pendingDelivery == next.id }) != true,
                   self.canDrainQueue(for: id) else { return }
             if case .compaction(let compact) = next {
@@ -10195,17 +10458,43 @@ final class AgentSupervisor {
                 self.pauseQueue(id, .held); self.notifyTurnCapabilitiesChanged(id)
                 return
             }
-            if message.helperCompletion {
-                self.helperFallbackIDs[id, default: []].insert(message.id)
-                self.deliveringSteers[id, default: []].append((message.id, message, prompt))
+            // Helper results queued behind one another reach the lead as ONE
+            // turn, not one turn per batch: the rest ride the first's prompt.
+            var turnPrompt = prompt
+            var merged: [AgentComposerQueuedMessage] = []
+            if message.helperCompletion, sharedPermit == nil {
+                merged = await self.beginMergedHelperWakes(after: message, for: id, store: store)
+                if !merged.isEmpty {
+                    if self.canDrainQueue(for: id), let text = Self.mergedHelperWakeText(([message] + merged).map(\.text)) {
+                        turnPrompt = AgentPrompt(text)
+                    } else {
+                        for extra in merged { await self.restoreDrainedWorkItem(.prompt(extra), for: id, store: store) }
+                        merged = []
+                        guard self.canDrainQueue(for: id) else {
+                            await self.restoreDrainedWorkItem(workItem, for: id, store: store)
+                            return
+                        }
+                    }
+                }
             }
-            guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id, queuedSource: message), to: id, queuedItemID: message.id,
+            if message.helperCompletion {
+                for member in [message] + merged {
+                    self.helperFallbackIDs[id, default: []].insert(member.id)
+                    self.deliveringSteers[id, default: []].append((member.id, member, turnPrompt))
+                }
+                self.mergedHelperFallbackIDs[id, default: []].formUnion(merged.map(\.id))
+            }
+            guard self.sendPrepared(PreparedAgentPrompt(prompt: turnPrompt, expectedAgentID: id, queuedSource: message), to: id, queuedItemID: message.id,
                                     sharedInputPermit: sharedPermit) else {
                 // The runner became busy again in the same beat (a fresh
                 // interactive send won the race) — put the message back rather
                 // than lose it.
-                self.helperFallbackIDs[id]?.remove(message.id)
-                self.deliveringSteers[id]?.removeAll { $0.id == message.id }
+                for member in [message] + merged {
+                    self.helperFallbackIDs[id]?.remove(member.id)
+                    self.mergedHelperFallbackIDs[id]?.remove(member.id)
+                    self.deliveringSteers[id]?.removeAll { $0.id == member.id }
+                }
+                for extra in merged { await self.restoreDrainedWorkItem(.prompt(extra), for: id, store: store) }
                 await self.restoreDrainedWorkItem(workItem, for: id, store: store)
                 self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
                 self.notifyTurnCapabilitiesChanged(id)
@@ -10224,6 +10513,42 @@ final class AgentSupervisor {
             && (deliveringSteers[id]?.isEmpty ?? true)
             && pendingForceSends[id] == nil && deferredForceSends[id] == nil
             && !contextRecoveryInFlight.contains(id)
+    }
+
+    /// Takes custody of every other pending helper item (results and notes,
+    /// in queue order, which is completion order) so they reach the lead in
+    /// the ONE turn `first` starts. User input is always queued ahead of
+    /// helper items, so nothing a person sent is overtaken.
+    private func beginMergedHelperWakes(after first: AgentComposerQueuedMessage, for id: AgentID,
+                                        store: AgentComposerDraftStore) async -> [AgentComposerQueuedMessage] {
+        let queued = await store.queuedWorkItems(for: id)
+        var merged: [AgentComposerQueuedMessage] = []
+        for item in queued {
+            guard case .prompt(let candidate) = item, candidate.id != first.id, candidate.helperCompletion,
+                  !candidate.steerUncertain, !scheduledQueueAdmissions.contains(candidate.id) else { continue }
+            guard let taken = (try? await store.beginSteerHandoff(for: id, only: candidate.id))?.first else { continue }
+            merged.append(taken)
+        }
+        return merged
+    }
+
+    /// One attributed batch from several queued helper-result prompts, or nil
+    /// if any of them is not a helper envelope.
+    static func mergedHelperWakeText(_ texts: [String]) -> String? {
+        var members: [(text: String, senderID: UUID, senderName: String)] = []
+        for text in texts {
+            let payloads: [AgentMessagePayload]
+            switch AgentMessageEnvelope.classify(text) {
+            case .agentMessage(let payload): payloads = [payload]
+            case .agentMessages(let batch): payloads = batch
+            default: return nil
+            }
+            for payload in payloads {
+                guard let sender = payload.senderAgentID else { return nil }
+                members.append((payload.text, sender, payload.senderName))
+            }
+        }
+        return AgentMessageEnvelope.wrapBatch(members)
     }
 
     private func restoreDrainedWorkItem(_ item: AgentComposerQueuedWorkItem, for id: AgentID, store: AgentComposerDraftStore) async {
@@ -10264,6 +10589,9 @@ final class AgentSupervisor {
     private var deliveringSteers: [AgentID: [(id: UUID, message: AgentComposerQueuedMessage, prompt: AgentPrompt)]] = [:]
     private var steerHandoffsInFlight: Set<AgentID> = []
     private var helperFallbackIDs: [AgentID: Set<UUID>] = [:]
+    /// Helper results that rode another queued result's prompt: consumed with
+    /// it, never echoed as a prompt of their own.
+    private var mergedHelperFallbackIDs: [AgentID: Set<UUID>] = [:]
     private var interruptingAgents: Set<AgentID> = []
     /// `echo`: no composer painted this prompt (a rail send-now), so the tile
     /// is told when it runs.
@@ -10556,7 +10884,9 @@ final class AgentSupervisor {
               let runner = runners[id] as? AgentSteeringRunning,
               !activeCompactionOperations.contains(id),
               !interruptingAgents.contains(id),
-              !pausedQueues.contains(id),
+              // A paused queue holds its next TURN, never steering into the
+              // running one: a user's steer must always reach it (P5). An
+              // uncertain steer stays out through beginSteerHandoff's own rule.
               pendingForceSends[id] == nil,
               only != nil || !(openToolItems[id]?.isEmpty ?? true),
               !steerHandoffsInFlight.contains(id) else { return }
@@ -10637,9 +10967,14 @@ final class AgentSupervisor {
                 return
             }
             let isFallback = self.helperFallbackIDs[id]?.contains(steerID) ?? false
+            let isMerged = self.mergedHelperFallbackIDs[id]?.remove(steerID) != nil
             self.deliveringSteers[id]?.removeAll { $0.id == steerID }
             self.helperFallbackIDs[id]?.remove(steerID)
             switch disposition {
+            case .consumed where isMerged:
+                // Its text was in the turn its batch-mate started; that turn's
+                // run carries the work, so this queued run is settled.
+                self.updateCompanionTasks { try $0.beginHostWork(steerID); try $0.settleHostWork(steerID, state: .succeeded) }
             case .consumed:
                 // sendPrepared already records/publishes an ordinary next-turn
                 // prompt. Only a current-turn steer needs that transcript event.
@@ -10682,10 +11017,14 @@ final class AgentSupervisor {
         sendOrRecoverForcedPrompt((forced.prompt, forced.echo), to: id)
     }
 
-    /// Steers a session that died never confirmed go back to being held.
+    /// Steers a session that died or was stopped never confirmed go back to
+    /// being held, ahead of the queue, paused after Stop. Not uncertain: the
+    /// process is gone, so nothing more of them can be applied, and any
+    /// application would have produced its receipt first. (Uncertainty is for
+    /// a relaunch that finds a handoff unfinished: the store marks those.)
     private func returnDeliveringSteers(for id: AgentID) {
         for entry in deliveringSteers[id] ?? [] {
-            settleDeliveringSteer(entry.id, disposition: .uncertain, for: id)
+            settleDeliveringSteer(entry.id, disposition: .returned, for: id)
         }
     }
 
@@ -10742,6 +11081,8 @@ final class AgentSupervisor {
             interruptWorkingClaudeMirroredChildren(of: id)
         }
         guard wasPooled || idleSessionRunners[id] == nil else { return }
+        // Whatever the held turn was waiting on has ended with the session.
+        releaseHeldHelperCompletion(id)
         let harness = records[id]?.harness?.rawValue ?? "The agent"
         var body = "\(harness)'s session process exited while idle (code \(code))"
         if let stderrTail { body += ": \(stderrTail)" } else { body += "." }
@@ -10770,6 +11111,7 @@ final class AgentSupervisor {
             runner.stop()
             self.interruptWorkingClaudeMirroredChildren(of: id)
             self.returnDeliveringSteers(for: id)
+            self.releaseHeldHelperCompletion(id)
             self.notifyTurnCapabilitiesChanged(id)
         }
     }
@@ -11175,12 +11517,16 @@ final class AgentSupervisor {
             for item in helperFallbackIDs[id] ?? [] {
                 settleDeliveringSteer(item, disposition: .consumed, for: id)
             }
+            heldHelperCompletions[id]?.turnInFlight = true
+            lateHelperText[id] = nil
             scheduleHelperCompletionFlush()
         }
         if case let .turnCompleted(_, turn, outcome, errorMessage) = event {
-            noteHelperCompletion(id, turn: turn, outcome: outcome, error: errorMessage)
-            settleHelperMessages(id, outcome: outcome, error: errorMessage)
-            writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: errorMessage)
+            helperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage)
+        }
+        if case let .contentDelta(_, _, .assistant, delta) = event, !isRunning(id), helperCompletionTurns[id] != nil {
+            lateHelperText[id, default: ""] += delta
+            noteLateHelperOutput(id, text: lateHelperText[id] ?? "")
         }
 
         // P2D.6: the agent finished the work its item was fanned out for, so the

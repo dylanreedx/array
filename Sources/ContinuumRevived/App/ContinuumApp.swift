@@ -14976,7 +14976,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // P6.3: the inbox resolves a preset at menu-open time and hands the
         // selected absolute wake to the supervisor; the supervisor writes both
         // snooze dates atomically.
-        agentSupervisor.configureHelperWakeMenu(sidebar.agentInbox)
         sidebar.agentInbox.onSnoozeSelection = { [weak self] rowIds, wakeAt in
             _ = self?.snoozeAgentsFromInbox(rowIds, wakeAt: wakeAt)
         }
@@ -23429,6 +23428,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     /// `--sidebar-truth-check` (confidence pass): install a sidebar exactly as boot
     /// does, and run the structural refresh boot and every tile change run.
+    /// The MCP server config a runner launches with. Its result channel is
+    /// the supervisor's, by capability, so the server and the host agree on
+    /// whether `wait_agents` exists for this agent.
+    func workspaceMCPConfiguration(for agentID: AgentID, harness: AgentHarness) -> WorkspaceMCPConfiguration? {
+        guard harness == .claudeCode || harness == .codex,
+              let executable = Self.workspaceMCPExecutablePath() else { return nil }
+        return workspaceMCPHost.configuration(for: agentID, serverExecutable: executable,
+                                              resultDelivery: agentSupervisor.resultDelivery(for: agentID))
+    }
+
     func qaInstallWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
         workspaceSidebarView = sidebar
         configureWorkspaceSidebar(sidebar)
@@ -23594,10 +23603,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self.workspaceAPI.handleMCPRequest(request, completion: reply)
         }
         agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness in
-            guard harness == .claudeCode || harness == .codex,
-                  let self,
-                  let executable = Self.workspaceMCPExecutablePath() else { return nil }
-            return self.workspaceMCPHost.configuration(for: agentID, serverExecutable: executable)
+            self?.workspaceMCPConfiguration(for: agentID, harness: harness)
         }
         agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in
             self?.workspaceAPI.policyChanged(agentId: agentId, enabled: enabled)
