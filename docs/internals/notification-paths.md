@@ -717,3 +717,15 @@ unassignment, visible owner names in both appearances, assigned delivery, busy q
 self suppression, three-owner unmentioned agent comments producing zero turns/queue
 entries, explicit co-owner mention delivery, mention-chain suppression,
 persistence/Undo and guest rendering.
+
+
+For **SRC-01**, delegate-and-move-on guidance and the host's delegation-result
+`coordinationNote` tell a lead to continue independent work or end its turn,
+with short dependency waits only. With wakes enabled, the completion batch
+holds up to eight seconds only while the lead is idle and another associated
+helper is running. Busy leads queue promptly and the last helper is eligible
+immediately. A refused admission retains the batch for an eight-second retry;
+disabling wakes stays quiet and the result remains collectable. Helper report
+content is unchanged. This prepares a timing/payload change only; activation
+and final turn/message-count acceptance require the repaired exactly-once
+foundation at integration. No new alert sender, recipient or tap behavior.

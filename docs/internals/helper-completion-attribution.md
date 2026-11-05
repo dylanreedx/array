@@ -116,3 +116,45 @@ plain-text report retention and typed-envelope protection remain covered.
 Unicode, literal envelope examples and malformed byte counts exercise batch
 framing. Full matrix and live provider acceptance remain integration work;
 no production-state or live Claude verification is claimed.
+
+
+## Delegate and move on (card 4 merged with recoverable delivery)
+
+Managed leads delegate, continue independent work, or end their turn. Array
+wakes them with results when their helper-wake preference is enabled. A short,
+interruptible `wait_agents` remains available only when progress depends on a
+result; tool guidance recommends `timeoutSeconds: 5` rather than a poll loop.
+Existing timeout bounds and interruption mechanics are unchanged.
+
+The startup brief and shared MCP/Pi catalog guidance describe that policy.
+Delegation acknowledgements gain an additive `coordinationNote` describing
+whether result wakes are enabled. This is host advice in the tool result;
+helper-authored report/final text is not rewritten or decorated. If wakes are
+disabled, the note explicitly directs the lead to collect results when needed.
+
+Completion coalescing holds a batch for up to eight seconds only while the
+lead is idle and other associated helpers are still running. A busy lead gets
+its result queued promptly; the last helper's result is eligible immediately.
+Already pending terminal helpers do not count as running, even before their
+runner teardown completes. Lead turn starts re-evaluate an idle batch's delay.
+Once a batch becomes prompt-eligible it is not held again if the lead quickly
+settles. Refused admission retains the whole batch with the existing eight-
+second retry backoff. Attribution, report text and queue durability stay on
+the established paths. Notification policy is recorded under SRC-01.
+
+The existing matrix-registered `--helper-completion-check` includes an actual
+Managed Codex runner launched against a local fixture executable. That CLI
+uses the authenticated MCP binary to delegate three helpers and file their
+reports; the lead ends its turn and resumes through production completion
+handling. The fixture follows the returned coordination note, not an inferred
+model response to English. It observes no wait calls, an eight-second idle
+coalescing window, prompt busy inbox delivery and final-helper delivery,
+expected lead turns/messages, and steer readiness. The baseline witness fails
+on a still-running `wait_agents` poll. This is a deterministic runtime witness,
+not a claim that a live model will follow the revised brief.
+
+Card 4 is merged on the retained five-card checkpoint. Its scheduler preserves
+recipient/turn custody, offered leases, staging queue IDs, commit-before-release,
+restart and receipt recovery. Prompt eligibility is persisted with staging;
+failed admission retains the retry backoff. Full gate and live-model acceptance
+limits remain as documented above; the scoped six-card report records results.

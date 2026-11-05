@@ -188,6 +188,9 @@ enum HelperCompletionChecks {
         s.helperCompletionNow = { now }
         s.helperCompletionEnabled = { _ in true }
         let config = try bench.configuration(for: parent)
+        let coalescingPeer = try bench.delegate("HOLD-coalescing-peer")
+        let peerReady = await waitUntil(timeout: 15, pollInterval: 0.02) { s.isRunning(coalescingPeer) }
+        try HelperGuardChecks.expect(peerReady, "idle coalescing peer did not start")
         func settle(_ marker: String) async throws -> AgentID {
             let child = try bench.delegate(marker)
             let idle = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) && s.records[child]?.latestTerminalEvent != nil }
@@ -293,6 +296,9 @@ enum HelperCompletionChecks {
         let cwd = s.records[parent]!.cwd
         var now = Date()
         s.helperCompletionNow = { now }; s.helperCompletionEnabled = { _ in true }
+        let coalescingPeer = try bench.delegate("HOLD-coalescing-peer")
+        let peerReady = await waitUntil(timeout: 15, pollInterval: 0.02) { s.isRunning(coalescingPeer) }
+        try HelperGuardChecks.expect(peerReady, "idle coalescing peer did not start")
         func settle(_ marker: String) async throws -> AgentID {
             let child = try bench.delegate(marker)
             let idle = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) && s.records[child]?.latestTerminalEvent != nil }
@@ -419,7 +425,92 @@ enum HelperCompletionChecks {
         print("helper-completion-check: restart after durable queue stage reuses one occurrence PASS")
     }
 
+    /// Real managed Codex lead -> fixture CLI -> authenticated MCP delegation
+    /// and reports -> production terminal ingestion and completion wake delivery.
+    static func runDelegateAndMoveOn() async throws {
+        let b = try ManagedCodexChecks.bench()
+        let restore = ManagedCodexChecks.runEnvironment(b)
+        defer {
+            if let path = ProcessInfo.processInfo.environment["CONTINUUM_DELEGATE_MOVE_ON_CAPTURE"],
+               let data = try? Data(contentsOf: ManagedCodexChecks.log(b)) {
+                try? data.write(to: URL(fileURLWithPath: path))
+            }
+            b.tearDown(); restore()
+        }
+        let cli = b.binDir.appendingPathComponent("codex")
+        try FileManager.default.removeItem(at: cli)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "scripts/fixtures/codex-delegate-move-on-cli.py"), to: cli)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "scripts/fixtures/codex-hook-cli.py"),
+            to: b.binDir.appendingPathComponent("codex-hook-cli.py"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        let s = b.supervisor, lead = b.f.agentId
+        try HelperGuardChecks.expect(s.setProviderSettings(agentID: lead, harness: .codex, model: ManagedCodexChecks.model)
+            && s.setMode(.managed, for: lead), "could not configure managed Codex lead")
+        var now = Date(), starts = 0, steerReady = false
+        s.helperCompletionNow = { now }
+        let observer = s.addDeliveredEventObserver { id, event in
+            if id == lead, case .turnStarted = event { starts += 1 }
+        }
+        let readiness = s.addTurnCapabilitiesObserver { id in
+            if id == lead, s.turnSnapshot(for: lead)?.capabilities.canSteer == true { steerReady = true }
+        }
+        defer { s.removeDeliveredEventObserver(observer); s.removeTurnCapabilitiesObserver(readiness) }
+        try HelperGuardChecks.expect(s.wakesForHelperCompletion(lead), "managed lead default did not enable result wakes")
+        try HelperGuardChecks.expect(s.send("CARD4-DELEGATE", to: lead), "lead did not start")
+        let delegated = await waitUntil(timeout: 25, pollInterval: 0.02) {
+            !ManagedCodexChecks.rows(b, kind: "card4-delegated").isEmpty && !s.isRunning(lead)
+        }
+        try HelperGuardChecks.expect(delegated, "managed fixture did not delegate and end its turn")
+        let calls = ManagedCodexChecks.rows(b, kind: "card4-call")
+        try HelperGuardChecks.expect(!calls.contains { $0["tool"] as? String == "wait_agents" },
+            "managed lead made a still-running wait_agents poll instead of delegating and moving on")
+        try HelperGuardChecks.expect(steerReady && starts == 1, "delegating lead lost steer readiness or added turns")
+        let children = s.records.values.filter { $0.parentAgentID == lead }.sorted { $0.humanDisplayName < $1.humanDisplayName }
+        try HelperGuardChecks.expect(children.count == 3, "fixture did not create three helpers")
+        let ready = await waitUntil(timeout: 15, pollInterval: 0.02) { ManagedCodexChecks.rows(b, kind: "card4-helper-ready").count == 3 }
+        try HelperGuardChecks.expect(ready, "helpers did not reach their fixture barriers")
+        func release(_ index: Int) throws {
+            try Data().write(to: URL(fileURLWithPath: ManagedCodexChecks.log(b).path + ".helper-\(index)"))
+        }
+        func settled(_ index: Int) async throws {
+            let done = await waitUntil(timeout: 15, pollInterval: 0.02) {
+                !s.isRunning(children[index].id) && s.records[children[index].id]?.lastReport != nil
+            }
+            try HelperGuardChecks.expect(done, "helper did not file and settle")
+        }
+        func woke(_ count: Int) async throws {
+            let done = await waitUntil(timeout: 15, pollInterval: 0.02) {
+                ManagedCodexChecks.rows(b, kind: "card4-wake").count == count && !s.isRunning(lead)
+            }
+            try HelperGuardChecks.expect(done, "lead did not wake with helper result")
+        }
+        try release(0); try await settled(0)
+        now.addTimeInterval(7); await s.flushHelperCompletions()
+        try HelperGuardChecks.expect(ManagedCodexChecks.rows(b, kind: "card4-wake").isEmpty,
+            "idle lead with running helpers did not coalesce for eight seconds")
+        now.addTimeInterval(2); await s.flushHelperCompletions(); try await woke(1)
+        try HelperGuardChecks.expect(s.send("CARD4-BUSY", to: lead), "independent lead work refused")
+        let busy = await waitUntil(timeout: 15, pollInterval: 0.02) { !ManagedCodexChecks.rows(b, kind: "card4-busy").isEmpty }
+        try HelperGuardChecks.expect(busy && s.turnSnapshot(for: lead)?.capabilities.canSteer == true, "working lead not steer-ready")
+        try release(1); try await settled(1); await s.flushHelperCompletions()
+        try HelperGuardChecks.expect(s.queuedMessages(for: lead).count == 1,
+            "busy lead result waited eight seconds instead of entering inbox promptly")
+        try Data().write(to: URL(fileURLWithPath: ManagedCodexChecks.log(b).path + ".lead-release"))
+        try await woke(2)
+        try release(2); try await settled(2); await s.flushHelperCompletions(); try await woke(3)
+        try HelperGuardChecks.expect(starts == 5, "expected initial delegation, independent work and three result turns")
+        let wakes = ManagedCodexChecks.rows(b, kind: "card4-wake")
+        for index in 0..<3 {
+            try HelperGuardChecks.expect((wakes[index]["text"] as? String)?.contains("CARD4-RESULT-\(index)") == true,
+                "helper completion lost its report content")
+        }
+        try HelperGuardChecks.expect(!ManagedCodexChecks.rows(b, kind: "card4-call").contains { $0["tool"] as? String == "wait_agents" },
+            "completion wake polled still-running helpers")
+        print("Delegate-and-move-on passed: production managed Codex fixture, three helpers, five lead turns, zero waits, steer-ready")
+    }
+
     static func run() async throws {
+        try await runDelegateAndMoveOn()
         try await runDeliveryLedger()
         try await runDeliveryFailures()
         let fixtureRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -469,10 +560,7 @@ enum HelperCompletionChecks {
         try HelperGuardChecks.expect(storedReport?.checks.contains(where: { $0.what == "PASS-OMITTED" }) == true
             && storedReport?.commandEvidence?.first?.outcome == .notObserved
             && resultReport == storedReport, "wake formatting changed the structured record or result file")
-        now.addTimeInterval(7)
-        await s.flushHelperCompletions()
-        try HelperGuardChecks.expect(!s.isRunning(parent), "completion fired before eight seconds")
-        now.addTimeInterval(2)
+        // Final-helper results are eligible promptly under card 4.
         await s.flushHelperCompletions()
         let cwd = URL(fileURLWithPath: s.records[parent]!.cwd)
         func log() -> String { (try? String(contentsOf: cwd.appendingPathComponent("prompts.log"), encoding: .utf8)) ?? "" }

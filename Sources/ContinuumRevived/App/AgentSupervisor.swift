@@ -7691,6 +7691,7 @@ final class AgentSupervisor {
         var id = UUID()
         var deadline: Date
         var updates: [(AgentID, String, String)]
+        var retryAfter: Date? = nil
     }
     var qaBeforeHelperWakeAdmission: (() throws -> Void)?
     var qaAfterHelperWakeStage: (() throws -> Void)?
@@ -7788,10 +7789,30 @@ final class AgentSupervisor {
         scheduleHelperCompletionFlush()
     }
 
+    /// Timing policy only: custody, offer leases and staged queue occurrence
+    /// ownership remain in flushHelperCompletions and the durable delivery journal.
+    private func helperCompletionDeliveryDate(_ batch: HelperCompletionBatch, parent: AgentID, now: Date) -> Date {
+        if let retryAfter = batch.retryAfter, retryAfter > now { return retryAfter }
+        let finished = Set(batch.updates.map(\.0))
+        let othersRunning = records.values.contains { child in
+            !finished.contains(child.id) && isRunning(child.id)
+                && (child.parentAgentID == parent || (helperMessageSubscriptions[child.id] ?? []).contains { $0.parent == parent })
+        }
+        return !isRunning(parent) && othersRunning ? batch.deadline : now
+    }
+
     private func scheduleHelperCompletionFlush() {
-        guard helperCompletionTimer == nil, !helperCompletionBatches.isEmpty else { return }
-        let deadline = helperCompletionBatches.values.map(\.deadline).min()!
-        let delay = max(0.1, deadline.timeIntervalSince(helperCompletionNow()))
+        helperCompletionTimer?.cancel()
+        helperCompletionTimer = nil
+        guard !helperCompletionBatches.isEmpty else { return }
+        let now = helperCompletionNow()
+        var deadlines: [Date] = []
+        for (parent, batch) in helperCompletionBatches {
+            let delivery = helperCompletionDeliveryDate(batch, parent: parent, now: now)
+            if delivery <= now { helperCompletionBatches[parent]?.deadline = min(batch.deadline, now) }
+            deadlines.append(delivery)
+        }
+        let delay = max(0.1, deadlines.min()!.timeIntervalSince(now))
         helperCompletionTimer = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
@@ -7825,7 +7846,8 @@ final class AgentSupervisor {
         defer { helperCompletionFlushInFlight = false; scheduleHelperCompletionFlush() }
         recoverHelperCompletionBatches()
         for parent in Array(helperCompletionBatches.keys) {
-            guard var batch = helperCompletionBatches[parent], batch.deadline <= helperCompletionNow(),
+            guard var batch = helperCompletionBatches[parent],
+                  helperCompletionDeliveryDate(batch, parent: parent, now: helperCompletionNow()) <= helperCompletionNow(),
                   let cwd = records[parent]?.cwd, wakesForHelperCompletion(parent) else { continue }
             helperCompletionBatches[parent] = nil
             var states: [SpawnResultFile.Delivery] = []
@@ -7854,6 +7876,9 @@ final class AgentSupervisor {
                             let header = (state.text ?? update.1).components(separatedBy: "\n").first ?? "Helper"
                             state.text = header + "\n" + body
                         }
+                        // Persist prompt eligibility with staging so restart
+                        // does not re-hold an occurrence admitted before +8 s.
+                        state.dueAt = min(state.dueAt, helperCompletionNow())
                         state.phase = .stagingWake; state.via = nil
                         try SpawnResultFile.saveDelivery(state, parentCwd: cwd)
                     }
@@ -7888,7 +7913,7 @@ final class AgentSupervisor {
                 deferred = batch.updates
             }
             if !deferred.isEmpty {
-                batch.updates = deferred; batch.deadline = helperCompletionNow().addingTimeInterval(8)
+                batch.updates = deferred; batch.retryAfter = helperCompletionNow().addingTimeInterval(8)
                 helperCompletionBatches[parent] = batch
             }
         }
@@ -11093,6 +11118,7 @@ final class AgentSupervisor {
         // `spawned` to a terminal status, carrying the child's final assistant
         // text. After `ingestTranscriptEvent` above on purpose — the projection
         // must already hold this turn's last assistant entry.
+        if case .turnStarted = event { scheduleHelperCompletionFlush() }
         if case let .turnCompleted(_, turn, outcome, errorMessage) = event {
             noteHelperCompletion(id, turn: turn, outcome: outcome, error: errorMessage)
             settleHelperMessages(id, outcome: outcome, error: errorMessage)

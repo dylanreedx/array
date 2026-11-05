@@ -162,6 +162,8 @@ public struct AgentDelegateResult: Codable, Equatable, Sendable {
     public var checkoutRoot: String?
     public var worktreeBranch: String?
     public var checkoutNotice: String?
+    /// Host coordination advice, separate from any helper-authored content.
+    public var coordinationNote: String?
 
     public init(
         operationId: String,

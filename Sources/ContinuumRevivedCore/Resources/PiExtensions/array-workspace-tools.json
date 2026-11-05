@@ -591,7 +591,7 @@
         "If the result is partial with retryOp 'agent.reveal', the child EXISTS: call array_reveal_agent with its childAgentId; do not delegate again.",
         "On cancelled or outcome_unknown, call array_get_operation with the operationId (or your idempotencyKey) before doing anything else.",
         "Optionally pass harness (Claude Code, Codex or Pi) and an exact fully qualified model from that harness's live catalogue. Omit both to inherit; a different harness without model uses its own catalogue default. Unready or exhausted harnesses and unknown models are refused; no silent CLI fallback.",
-        "Collect the child's answer with wait_agents, passing the operationId array_delegate returned as its handle."
+        "Continue independent work or end your turn. With helper completion wakes enabled (the Managed default), Array delivers results automatically. Use wait_agents with the operationId handle and a short timeout only when progress depends on the result."
       ],
       "parameters": {
         "type": "object",

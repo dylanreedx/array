@@ -235,6 +235,9 @@ extension WorkspaceAPIService {
             childRunning: supervisor.isRunning(childId),
             partial: false)
 
+        result.coordinationNote = supervisor.wakesForHelperCompletion(agentId)
+            ? "Continue independent work or end this turn. Array will wake you with helper results. Use a short wait_agents only when progress depends on a result."
+            : "Helper completion wakes are disabled. Continue independent work, then collect the result with a short wait_agents when needed; do not poll."
         result.checkoutRoot = child?.checkoutRoot
         result.worktreeBranch = child?.worktreeBranch
         result.checkoutNotice = child?.delegationContext?.checkoutNotice

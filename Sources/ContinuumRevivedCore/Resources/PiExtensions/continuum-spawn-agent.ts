@@ -177,14 +177,14 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
     name: "spawn_agent",
     label: "Spawn Agent",
     description:
-      "Delegate work to a new Array agent. Returns immediately with a handle; the agent runs in parallel. Collect its result with wait_agents(handles) — never by sleeping or polling.",
+      "Delegate work to a new Array agent. Returns immediately with a handle; the agent runs in parallel. Continue independent work or end your turn for a completion wake when enabled. Use a short wait_agents(handles) only for a dependency; never sleep or poll.",
     // Without promptSnippet a custom tool is left out of the system prompt's "Available tools"
     // section entirely — an orchestrator would have to infer the tool exists from its schema alone.
     promptSnippet: "Delegate a self-contained task to a new Array agent",
     promptGuidelines: [
       // Guidelines are appended flat to the shared Guidelines section with no tool-name prefix,
       // so each bullet has to name spawn_agent itself.
-      "spawn_agent returns an acknowledgement with a [handle: ...]; collect the agent's result by calling wait_agents with that handle. Never sleep, loop, or re-call spawn_agent to poll.",
+      "spawn_agent returns an acknowledgement with a [handle: ...]. Continue independent work or end your turn. When completion wakes are disabled or progress depends on a result, use a short wait_agents with that handle. Never sleep, loop or re-call spawn_agent to poll.",
       "A spawn_agent agent does not see this conversation, so put everything it needs in prompt.",
       "Pass isolated: true to spawn_agent when the new agent will edit files, so it works in its own git worktree.",
     ],
@@ -199,7 +199,7 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: `spawned: ${role} [handle: ${toolCallId}] — collect the result with wait_agents`,
+            text: `spawned: ${role} [handle: ${toolCallId}] — continue independent work; wait only for a dependency`,
           },
         ],
         details: { role, isolated: params.isolated ?? false, handle: toolCallId },
@@ -214,7 +214,7 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
       "Wait for spawn_agent agents to finish and return their results. Pass the [handle: ...] values spawn_agent returned; with no handles it waits on every spawn from this turn (best-effort). Returns early on user steering or inbox input; otherwise blocks until every requested agent is done or the timeout passes (maximum 60 s), then returns each agent's final message, refusal reason, or failure.",
     promptSnippet: "Collect the results of spawn_agent agents",
     promptGuidelines: [
-      "After delegating with spawn_agent, call wait_agents with the handles to collect the results. It blocks for you — do not run sleep commands while agents work.",
+      "After delegating, continue independent work or end your turn for a completion wake when enabled. Use wait_agents only when progress depends on a result; prefer timeoutSeconds: 5. Do not sleep, loop or poll while agents work.",
     ],
     parameters: Type.Object({
       handles: Type.Optional(
