@@ -390,10 +390,13 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
 public struct OperationGetRequest: Codable, Equatable, Sendable {
     public var operationId: String?
     public var idempotencyKey: String?
+    /// Read only the authenticated caller's pending-input reason, without an operation selector.
+    public var pendingInputOnly: Bool?
 
-    public init(operationId: String? = nil, idempotencyKey: String? = nil) {
+    public init(operationId: String? = nil, idempotencyKey: String? = nil, pendingInputOnly: Bool? = nil) {
         self.operationId = operationId
         self.idempotencyKey = idempotencyKey
+        self.pendingInputOnly = pendingInputOnly
     }
 }
 

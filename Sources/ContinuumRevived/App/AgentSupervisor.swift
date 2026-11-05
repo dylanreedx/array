@@ -9981,6 +9981,9 @@ final class AgentSupervisor {
     /// Tool items open in the bound runner's turn — the boundary a held steer
     /// waits for.
     private var openToolItems: [AgentID: Set<String>] = [:]
+    // A provider acceptance receipt (notably Codex turn/steer) can precede
+    // sampling the input. Keep the wake signal until the blocking tools finish.
+    private var helperWaitSteerTools: [AgentID: Set<String>] = [:]
     /// Steers handed to the provider and not yet confirmed. In memory only:
     /// once handed over they are the provider's, no longer Array's to edit.
     private var deliveringSteers: [AgentID: [(id: UUID, message: AgentComposerQueuedMessage, prompt: AgentPrompt)]] = [:]
@@ -10018,6 +10021,15 @@ final class AgentSupervisor {
             PendingSteer(id: $0.id, text: $0.message.text, state: .delivering)
         }
         return held + delivering
+    }
+
+    /// Read-only wake signal for helper waits. Include unconfirmed handoffs:
+    /// the provider may have accepted stdin while still blocked inside a tool.
+    func helperWaitPendingInput(for id: AgentID) -> String? {
+        if !(helperWaitSteerTools[id] ?? []).isDisjoint(with: openToolItems[id] ?? [])
+            || !pendingSteers(for: id).isEmpty { return "user_steer" }
+        if !queuedMessages(for: id).isEmpty { return "inbox" }
+        return nil
     }
 
     /// T5b — the steering/queue rail: held then delivering steers, then the
@@ -10290,6 +10302,7 @@ final class AgentSupervisor {
                     notTaken.append(message)
                     continue
                 }
+                self.helperWaitSteerTools[id, default: []].formUnion(self.openToolItems[id] ?? [])
                 self.deliveringSteers[id, default: []].append((message.id, message, prompt))
                 self.notifyTurnCapabilitiesChanged(id)
                 let accepted = await Task.detached(priority: .userInitiated) {
@@ -10539,6 +10552,7 @@ final class AgentSupervisor {
             openToolItems[id]?.remove(itemID)
         case .turnCompleted:
             openToolItems[id] = nil
+            helperWaitSteerTools[id] = nil
             // A persistent Claude session can keep its mirrored children running
             // after the parent's result. Their own result or the session's actual
             // exit closes them; a result with no running child closes orphans. A

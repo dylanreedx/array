@@ -800,6 +800,11 @@ extension WorkspaceAPIService {
             grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not read operations."))
         }
+        // Authenticated, grant-checked read of the caller only; no queue content
+        // or other agent's pending input crosses the bridge.
+        if request.pendingInputOnly == true {
+            return .result(["pendingInput": AnyHashableJSON(any: supervisor.helperWaitPendingInput(for: agentId).map { $0 as Any } ?? NSNull())])
+        }
         let lookup: WorkspaceOperationStore.Lookup
         if let operationId = request.operationId, !operationId.isEmpty {
             lookup = operations.lookup(agentId: agentId, operationId: operationId)

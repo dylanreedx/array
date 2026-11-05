@@ -1845,6 +1845,9 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # a presentation failure repaired by agent.reveal, operation.get per step, and
 # cancellation reporting the child truthfully.
 run_app_check .build/debug/Array --workspace-api-delegation-check
+run_app_check .build/debug/Array --helper-wait-input-check
+run_leg python3 scripts/check-interruptible-helper-waits.py
+run_leg node --experimental-strip-types --no-warnings scripts/check-pi-helper-waits.mjs
 run_app_check .build/debug/Array --workspace-api-cross-harness-delegation-check
 # .plans/79: a parent delegates and messages a child over the real API and pi
 # bridge. The child draws both as cards from the parent (name, colour, a reveal

@@ -586,6 +586,9 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
 
     // MARK: F — operation.get reflects each step
 
+    let pendingInput = try result(dispatch("operation.get", ["pendingInputOnly": true]), "pending input query")
+    try expect(pendingInput["pendingInput"]?.value is NSNull,
+               "an empty caller inbox returns null without requiring an operation selector")
     let committedOp = try result(dispatch("operation.get", ["operationId": "op-create"]), "operation.get committed")
     try expect(committedOp["status"]?.string == "committed" && committedOp["childAgentId"]?.string == childIdString
                && committedOp["tileId"]?.string == tileIdString && committedOp["op"]?.string == "agent.delegate",

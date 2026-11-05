@@ -1,3 +1,4 @@
+import { bridge } from "./continuum-workspace-tools.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readFile, readdir, stat } from "node:fs/promises";
@@ -17,9 +18,9 @@ const RESULTS_DIR = join(".array", "spawn-results");
 const TERMINAL = new Set(["refused", "completed", "failed", "interrupted"]);
 const POLL_MS = 500;
 const UNREGISTERED_AFTER_MS = 15_000;
-const DEFAULT_TIMEOUT_S = 600;
+const DEFAULT_TIMEOUT_S = 60;
 const MIN_TIMEOUT_S = 5;
-const MAX_TIMEOUT_S = 3600;
+const MAX_TIMEOUT_S = 60;
 // Best-effort discovery baseline for a no-handles wait: files older than this
 // process belong to a previous turn.
 const PROCESS_START_MS = Date.now() - process.uptime() * 1000;
@@ -101,6 +102,7 @@ function describe(handle: string, result: SpawnResult | undefined, note?: string
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(done, ms);
+    if (signal?.aborted) { done(); return; }
     function done() {
       signal?.removeEventListener("abort", done);
       clearTimeout(timer);
@@ -149,7 +151,7 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
     name: "wait_agents",
     label: "Wait for Agents",
     description:
-      "Wait for spawn_agent agents to finish and return their results. Pass the [handle: ...] values spawn_agent returned; with no handles it waits on every spawn from this turn (best-effort). Blocks until every requested agent is done or the timeout passes, then returns each agent's final message, refusal reason, or failure.",
+      "Wait for spawn_agent agents to finish and return their results. Pass the [handle: ...] values spawn_agent returned; with no handles it waits on every spawn from this turn (best-effort). Returns early on user steering or inbox input; otherwise blocks until every requested agent is done or the timeout passes (maximum 60 s), then returns each agent's final message, refusal reason, or failure.",
     promptSnippet: "Collect the results of spawn_agent agents",
     promptGuidelines: [
       "After delegating with spawn_agent, call wait_agents with the handles to collect the results. It blocks for you — do not run sleep commands while agents work.",
@@ -161,7 +163,7 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
         }),
       ),
       timeoutSeconds: Type.Optional(
-        Type.Number({ description: "How long to wait before returning partial results. Default 600." }),
+        Type.Number({ description: "How long to wait before returning partial results. Default and maximum 60." }),
       ),
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -178,7 +180,14 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
       const notes = new Map<string, string>();
       for (const bad of badHandles) notes.set(bad, "not a valid spawn_agent handle");
 
+      let interrupted: string | undefined;
       for (;;) {
+        if (!signal?.aborted) {
+          const reply = await bridge(ctx, `wait-${crypto.randomUUID()}`, "operation.get",
+            { pendingInputOnly: true }, signal, 1_000);
+          const reason = (reply.result as { pendingInput?: string } | undefined)?.pendingInput;
+          if (reason === "user_steer" || reason === "inbox") interrupted = reason;
+        }
         if (discovering) {
           for (const handle of await discoverHandles(cwd)) {
             if (!finished.has(handle) && !notes.has(handle)) pending.add(handle);
@@ -208,7 +217,7 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
           (discovering && pending.size === 0 &&
             (finished.size > 0 || Date.now() - startedAt > UNREGISTERED_AFTER_MS));
         const timedOut = Date.now() >= deadline;
-        if (doneWaiting || timedOut || signal?.aborted) {
+        if (doneWaiting || timedOut || signal?.aborted || interrupted) {
           const lines: string[] = [];
           const report = new Set<string>([...explicit, ...badHandles, ...finished.keys(), ...notes.keys(), ...pending]);
           if (report.size === 0) {
@@ -233,7 +242,12 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
           if (signal?.aborted && pending.size > 0) {
             lines.push("(wait aborted; partial results above)");
           }
-          return { content: [{ type: "text", text: lines.join("\n\n") }] };
+          if (interrupted) lines.push(`(interrupted: ${interrupted}; you may end your turn while helpers continue)`);
+          return { content: [{ type: "text", text: lines.join("\n\n") }],
+            details: { interrupted: interrupted ?? (signal?.aborted ? "cancelled" : undefined),
+              timedOut: !interrupted && !signal?.aborted && timedOut,
+              agents: [...report].map(handle => ({ handle,
+                status: finished.get(handle)?.status ?? (notes.has(handle) ? "unknown" : "running") })) } };
         }
         await sleep(POLL_MS, signal);
       }

@@ -43,7 +43,7 @@ function errorReply(requestId: string, code: string, message: string): Reply {
   return { schema: SCHEMA, requestId, status: "error", error: { code, message } };
 }
 
-async function bridge(
+export async function bridge(
   ctx: ExtensionContext,
   requestId: string,
   op: string,

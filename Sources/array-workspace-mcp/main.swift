@@ -16,11 +16,13 @@ private enum MCPError: Error, CustomStringConvertible {
     case usage(String)
     case invalidRequest
     case unavailable(String)
+    case pollTimedOut
 
     var description: String {
         switch self {
         case .usage(let message), .unavailable(let message): return message
         case .invalidRequest: return "invalid MCP request"
+        case .pollTimedOut: return "workspace poll timed out"
         }
     }
 }
@@ -33,6 +35,15 @@ private actor ResponseWriter {
         guard !data.isEmpty else { return }
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+}
+
+private actor RequestTasks {
+    private var tasks: [String: (token: UUID, task: Task<Void, Never>)] = [:]
+    func insert(_ task: Task<Void, Never>, id: String, token: UUID) { tasks[id] = (token, task) }
+    func cancel(_ id: String) { tasks[id]?.task.cancel() }
+    func remove(_ id: String, token: UUID) {
+        if tasks[id]?.token == token { tasks[id] = nil }
     }
 }
 
@@ -58,6 +69,7 @@ struct ArrayWorkspaceMCP {
         let token: String
         let session: URLSession
         let writer = ResponseWriter()
+        let requests = RequestTasks()
 
         init(arguments: [String]) throws {
             let environment = ProcessInfo.processInfo.environment
@@ -86,9 +98,23 @@ struct ArrayWorkspaceMCP {
             await withTaskGroup(of: Void.self) { group in
                 while let line = readLine(strippingNewline: true) {
                     guard let data = line.data(using: .utf8) else { continue }
-                    group.addTask {
+                    let request = try? JSONDecoder().decode(JSONRPCRequest.self, from: data)
+                    if request?.id == nil, request?.method == "notifications/cancelled" {
+                        if case .object(let params)? = request?.params, let id = params["requestId"] {
+                            await requests.cancel(id.jsonString)
+                        }
+                        continue
+                    }
+                    let task = Task {
                         let response = await handle(data)
                         await writer.write(response)
+                    }
+                    let key = request?.id?.jsonString
+                    let token = UUID()
+                    if let key { await requests.insert(task, id: key, token: token) }
+                    group.addTask {
+                        await task.value
+                        if let key { await requests.remove(key, token: token) }
                     }
                 }
             }
@@ -173,7 +199,7 @@ struct ArrayWorkspaceMCP {
             return nil
         }
 
-        func post(op: String, payload: WorkspaceMCPJSON, requestId: String? = nil) async throws -> WorkspaceMCPJSON {
+        func post(op: String, payload: WorkspaceMCPJSON, requestId: String? = nil, timeout: TimeInterval? = nil) async throws -> WorkspaceMCPJSON {
             let body: [String: WorkspaceMCPJSON] = [
                 "schema": .string(WorkspaceAPISchema.v1),
                 "kind": .string("request"),
@@ -187,7 +213,27 @@ struct ArrayWorkspaceMCP {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = Data(WorkspaceMCPJSON.object(body).jsonString.utf8)
-            let (data, response) = try await session.data(for: request)
+            let data: Data
+            let response: URLResponse
+            if let timeout {
+                try Task.checkCancellation()
+                guard timeout > 0 else { throw MCPError.pollTimedOut }
+                request.timeoutInterval = timeout
+                let boundedRequest = request
+                // URLRequest's timeout is an idle timeout. Race an absolute
+                // deadline too, so trickled bytes cannot extend a helper wait.
+                (data, response) = try await withThrowingTaskGroup(of: (Data, URLResponse).self) { group in
+                    defer { group.cancelAll() }
+                    group.addTask { try await session.data(for: boundedRequest) }
+                    group.addTask {
+                        try await Task.sleep(for: .seconds(timeout))
+                        throw MCPError.pollTimedOut
+                    }
+                    return try await group.next()!
+                }
+            } else {
+                (data, response) = try await session.data(for: request)
+            }
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw MCPError.unavailable("Array workspace bridge unavailable") }
             return try JSONDecoder().decode(WorkspaceMCPJSON.self, from: data)
         }
@@ -216,25 +262,45 @@ struct ArrayWorkspaceMCP {
             let deadline = Date().addingTimeInterval(timeout)
             var settled: [String: WorkspaceMCPJSON] = [:]
             var latest: [String: WorkspaceMCPJSON] = [:]
-            while true {
+            var interrupted: String?
+            polling: while true {
                 for handle in handles where settled[handle] == nil {
-                    let reply: WorkspaceMCPJSON
+                    if Task.isCancelled { interrupted = "cancelled"; break polling }
+                    if Date() >= deadline { break polling }
                     do {
-                        reply = try await post(op: WorkspaceAPIOp.operationGet.rawValue, payload: .object(["operationId": .string(handle)]))
+                        // Recheck before EVERY lookup. One slow helper must not
+                        // hide input behind the remaining handles in the batch.
+                        let input = try await post(op: WorkspaceAPIOp.operationGet.rawValue,
+                            payload: .object(["pendingInputOnly": .bool(true)]),
+                            timeout: min(0.5, deadline.timeIntervalSinceNow))
+                        if case .object(let fields) = input, case .object(let result)? = fields["result"],
+                           case .string(let reason)? = result["pendingInput"],
+                           reason == "user_steer" || reason == "inbox" {
+                            interrupted = reason
+                            break polling // Return cached results; never start another lookup.
+                        }
+                        let reply = try await post(op: WorkspaceAPIOp.operationGet.rawValue,
+                            payload: .object(["operationId": .string(handle)]),
+                            timeout: min(0.5, deadline.timeIntervalSinceNow))
+                        guard case .object(let fields) = reply else { continue }
+                        if fields["status"] == .string("error") {
+                            settled[handle] = .object(["handle": .string(handle), "status": .string("error"), "error": fields["error"] ?? .null])
+                            continue
+                        }
+                        guard case .object(let operation)? = fields["result"] else { continue }
+                        latest[handle] = .object(operation)
+                        if let entry = Self.settledEntry(handle: handle, operation: operation) { settled[handle] = entry }
                     } catch {
+                        if Task.isCancelled { interrupted = "cancelled"; break polling }
+                        // A read can be retried. Return partial results at the
+                        // overall deadline instead of the general tool horizon.
+                        if case MCPError.pollTimedOut = error { continue }
+                        if (error as? URLError)?.code == .timedOut { continue }
                         return Self.errorReply(code: "outcome_unknown", message: "\(error)")
                     }
-                    guard case .object(let fields) = reply else { continue }
-                    if fields["status"] == .string("error") {
-                        settled[handle] = .object(["handle": .string(handle), "status": .string("error"), "error": fields["error"] ?? .null])
-                        continue
-                    }
-                    guard case .object(let operation)? = fields["result"] else { continue }
-                    latest[handle] = .object(operation)
-                    if let entry = Self.settledEntry(handle: handle, operation: operation) { settled[handle] = entry }
                 }
-                if settled.count == handles.count || Date() >= deadline || Task.isCancelled { break }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if settled.count == handles.count || Date() >= deadline { break }
+                try? await Task.sleep(for: .seconds(min(0.25, max(0, deadline.timeIntervalSinceNow))))
             }
             let agents: [WorkspaceMCPJSON] = handles.map { handle in
                 if let entry = settled[handle] { return entry }
@@ -242,11 +308,11 @@ struct ArrayWorkspaceMCP {
                 if case .object(let operation)? = latest[handle], let child = operation["childAgentId"] { entry["childAgentId"] = child }
                 return .object(entry)
             }
-            return .object([
-                "schema": .string(WorkspaceAPISchema.v1),
-                "status": .string("ok"),
-                "result": .object(["agents": .array(agents), "timedOut": .bool(settled.count < handles.count)])
-            ])
+            var result: [String: WorkspaceMCPJSON] = ["agents": .array(agents),
+                "timedOut": .bool(interrupted == nil && settled.count < handles.count)]
+            if let interrupted { result["interrupted"] = .string(interrupted) }
+            return .object(["schema": .string(WorkspaceAPISchema.v1), "status": .string("ok"),
+                            "result": .object(result)])
         }
 
         /// A child has settled when Array says it is idle AND reports the turn

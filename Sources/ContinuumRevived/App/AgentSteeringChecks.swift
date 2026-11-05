@@ -9,7 +9,7 @@ import Foundation
 // stands in for each CLI on PATH and records exactly what reached it. Runs as
 // part of `--agent-compaction-ui-check`.
 @MainActor
-func runAgentSteeringChecks() async throws {
+func runAgentSteeringChecks(waitInputOnly: Bool = false) async throws {
     struct Failure: Error, CustomStringConvertible { let description: String }
     func expect(_ condition: Bool, _ message: String) throws {
         if !condition { throw Failure(description: "steering: " + message) }
@@ -95,6 +95,38 @@ func runAgentSteeringChecks() async throws {
         else { unsetenv("CONTINUUM_CODEX_TRANSPORT") }
     }
     func onPath(_ harness: Harness) { setenv("PATH", "\(harness.bin.path):\(originalPath)", 1) }
+
+    if waitInputOnly {
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let h = try Harness(kind)
+            defer { h.tearDown() }
+            onPath(h)
+            try expect(h.supervisor.helperWaitPendingInput(for: h.id) == nil, "empty queue wakes no wait")
+            try expect(h.supervisor.send("PLAIN text", to: h.id), "seed refused")
+            try await eventually("runner bound") { h.supervisor.turnSnapshot(for: h.id)?.capabilities.canSteer == true }
+            try expect(await h.supervisor.accept(.queue(AgentPrompt("inbox")), for: h.id) == .accepted, "queue refused")
+            try expect(h.supervisor.helperWaitPendingInput(for: h.id) == "inbox", "\(kind): inbox must wake wait")
+            try expect(await h.supervisor.accept(.steer(AgentPrompt("steer")), for: h.id) == .accepted, "steer refused")
+            try expect(h.supervisor.helperWaitPendingInput(for: h.id) == "user_steer", "\(kind): held steer must wake wait")
+            try expect(!h.supervisor.pendingSteers(for: h.id).isEmpty, "query must not consume steer")
+        }
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let h = try Harness(kind)
+            defer { h.tearDown() }
+            onPath(h)
+            try expect(h.supervisor.send(kind == .pi ? "SLOW job" : "HOLD job", to: h.id), "handoff seed refused")
+            try await eventually("handoff runner bound") { h.supervisor.turnSnapshot(for: h.id)?.capabilities.canSteer == true }
+            try expect(await h.supervisor.accept(.steer(AgentPrompt("handed steer")), for: h.id) == .accepted, "handoff steer refused")
+            try await eventually("handoff reaches provider") {
+                kind == .codex ? h.echoes == ["handed steer"]
+                    : h.supervisor.pendingSteers(for: h.id).map(\.state) == [.delivering]
+            }
+            try expect(h.supervisor.helperWaitPendingInput(for: h.id) == "user_steer",
+                       "\(kind): accepted but unsampled steer must still wake a blocking tool")
+        }
+        print("Helper wait input checks passed: production Claude, Codex and Pi runners with offline CLI fixtures")
+        return
+    }
 
     // 1. Enter-to-steer reaches every harness: accept(.steer) on a bound
     //    production runner is accepted, held to the tool boundary, written in

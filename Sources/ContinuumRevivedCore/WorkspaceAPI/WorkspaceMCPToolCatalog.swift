@@ -117,11 +117,11 @@ public enum WorkspaceMCPToolCatalog {
     /// host reads for `operation.get`'s `childResult`; the shared name keeps the
     /// shared catalog text ("collect it with wait_agents") true for every harness.
     public static let waitAgentsName = "wait_agents"
-    public static let waitAgentsDefaultTimeoutSeconds = 600
-    public static let waitAgentsTimeoutRange = 5...3600
+    public static let waitAgentsDefaultTimeoutSeconds = 60
+    public static let waitAgentsTimeoutRange = 5...60
     public static let waitAgentsMaxHandles = 16
     public static let waitAgentsDescription =
-        "Wait for children you created with array_delegate to finish their current turn, and return each child's final answer, failure or refusal. Pass the operationId values array_delegate returned as handles. Blocks until every child is idle or the timeout passes (default 600 s, max 3600 s), then reports any child still running as running. Read-only.\n\nGuidelines:\n- After array_delegate (or array_message_agent), call wait_agents to collect the result. It blocks for you: never sleep, loop, or message the child to poll.\n- A child marked running when the wait ends is still working in its own tile; wait again rather than delegating again."
+        "Wait for children you created with array_delegate to finish their current turn, and return each child's final answer, failure or refusal. Pass the operationId values array_delegate returned as handles. Returns early on user steering or queued inbox input (interrupted: user_steer or inbox). Otherwise blocks until every child is idle or the timeout passes (default 60 s, max 60 s), then reports any child still running as running. Read-only.\n\nGuidelines:\n- After array_delegate (or array_message_agent), call wait_agents to collect the result. It blocks for you: never sleep, loop, or message the child to poll.\n- A child marked running when the wait ends is still working in its own tile; you may end your turn or wait again. Never delegate again to poll."
     public static let waitAgentsInputSchema: [String: WorkspaceMCPJSON] = [
         "type": .string("object"),
         "properties": .object([
@@ -134,7 +134,8 @@ public enum WorkspaceMCPToolCatalog {
             ]),
             "timeoutSeconds": .object([
                 "type": .string("number"),
-                "description": .string("How long to wait before returning partial results. Default 600, max 3600.")
+                "description": .string("How long to wait before returning partial results. Default 60, max 60."),
+                "minimum": .int(5), "maximum": .int(60), "default": .int(60)
             ])
         ]),
         "required": .array([.string("handles")])

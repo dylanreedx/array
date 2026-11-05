@@ -1004,3 +1004,7 @@ count ContinuumRevivedRelayIntegrationChecks 4
 count ContinuumRevivedRelayProtocolChecks 0
 count ContinuumRevivedSyncChecks 12
 count ContinuumRevivedSyncIntegrationChecks 1
+check --helper-wait-input-check
+leg run_app_check .build/debug/Array --helper-wait-input-check
+leg run_leg python3 scripts/check-interruptible-helper-waits.py
+leg run_leg node --experimental-strip-types --no-warnings scripts/check-pi-helper-waits.mjs
