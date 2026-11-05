@@ -13,6 +13,7 @@ enum BrowserActionExecutor {
         }
         let approvalAtStart = runtime.approvalTime
         let engine = runtime.automation
+        engine.beginActionTracking()
         func reply(_ fields: [String: Any]) -> WorkspaceAPIService.Reply {
             .result(fields.mapValues { AnyHashableJSON(any: $0) })
         }
@@ -102,9 +103,20 @@ enum BrowserActionExecutor {
             case .focusChanged, .selectionNotRetained, .timedOut: code = .outcomeUnknown
             case .userTyping: code = .busy
             case .staleRef, .notVisible, .covered, .notEditable, .focusRefused: code = .targetConflict
-            case .unknownKey, .script: code = .invalidRequest
+            case .invalidSelection, .unknownKey, .script: code = .invalidRequest
             }
-            return .error(WorkspaceAPIError(code: code, message: String(error.description.prefix(2048))))
+            let effects: BrowserActionResult.Effects
+            if case .selectionNotRetained = error { effects = .unknown }
+            else if case .timedOut = error { effects = .unknown }
+            else if case .script = error { effects = .unknown }
+            else { effects = engine.actionInputEvents > 0 ? .partial : .none }
+            let state: BrowserActionResult.State
+            if case .userTyping = error { state = .takeover }
+            else { state = effects == .unknown ? .outcomeUnknown : (effects == .partial ? .partial : .rejected) }
+            return .error(WorkspaceAPIError(code: code, message: String(error.description.prefix(2048)),
+                action: BrowserActionResult(state: state, effects: effects,
+                    retry: state == .takeover ? .waitForHandback : (effects == .unknown ? .sameKeyOnly : .observeBeforeNewAction),
+                    freshSnapshotRequired: true, deliveredCharacters: engine.actionDeliveredCharacters)))
         } catch {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "The browser action could not produce a JSON result."))
         }

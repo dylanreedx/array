@@ -27,6 +27,7 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
     case focusRefused(String)
     case nativeSelectUnsupported
     case uninspectableFrame
+    case invalidSelection(String)
     case selectionNotRetained
     case focusChanged
     case userTyping
@@ -53,6 +54,8 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
             return "Native HTML SELECT activation is unsupported for agent clicks and keys. Use array_browser_select to list and pick options without opening a native menu."
         case .uninspectableFrame:
             return "This frame cannot be inspected before native input, so picker safety cannot be established. Use array_browser_select on an accessible HTML select; this frame requires manual interaction."
+        case .invalidSelection(let message):
+            return message
         case .selectionNotRetained:
             return "The requested selection could not be verified after page events and reconciliation. Application handlers may have changed it; inspect the page before another action."
         case .focusChanged:
@@ -134,6 +137,35 @@ final class BrowserAutomation {
         let keyCode: UInt16?
     }
     private var agentInputFingerprints: [AgentInputFingerprint] = []
+    private struct ComparisonBaseline {
+        var outline: Set<String>?
+        var url: String?
+        var consoleMark: Int
+    }
+    private var comparisonPrincipal: AgentID?
+    private var comparisonBaselines: [AgentID: ComparisonBaseline] = [:]
+    func selectComparisonPrincipal(_ principal: AgentID) {
+        guard principal != comparisonPrincipal else { return }
+        if let previous = comparisonPrincipal {
+            comparisonBaselines[previous] = ComparisonBaseline(outline: lastOutline, url: outlineURL, consoleMark: snapshotConsoleMark)
+        }
+        comparisonPrincipal = principal
+        let baseline = comparisonBaselines[principal]
+        lastOutline = baseline?.outline
+        outlineURL = baseline?.url
+        snapshotConsoleMark = baseline?.consoleMark ?? 0
+    }
+    private(set) var actionInputEvents = 0
+    private(set) var actionDeliveredCharacters = 0
+    private var actionDocumentIdentity: String?
+    func beginActionTracking() { actionInputEvents = 0; actionDeliveredCharacters = 0; actionDocumentIdentity = documentIdentity }
+    private(set) var documentIdentity = UUID().uuidString
+    func invalidateDocumentIdentity() {
+        documentIdentity = UUID().uuidString
+        comparisonBaselines.removeAll()
+        lastOutline = nil
+        outlineURL = nil
+    }
     private var lastOutline: Set<String>?
     private var outlineURL: String?
     private var dialogs: [String] = []
@@ -173,7 +205,9 @@ final class BrowserAutomation {
     // MARK: - Reading the page
 
     func snapshot(deadline: Date) async throws -> BrowserAutomationSnapshot {
+        let identity = documentIdentity
         let raw = try await world("outline", [:], deadline: deadline)
+        guard identity == documentIdentity else { throw BrowserAutomationError.staleRef("document") }
         let lines = Self.outlineLines(raw)
         generation += 1
         lastOutline = Set(lines.map(\.text))
@@ -236,13 +270,14 @@ final class BrowserAutomation {
     // MARK: - Acting
 
     func click(ref: String, doubleClick: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
+            try await self.settleIfRevealed()
             let target = try await self.world("target", ["ref": ref], deadline: deadline)
             try Self.requireTarget(target, ref: ref, mustLand: true)
             try Self.requireNativeInputTarget(target)
-            try await self.settleIfRevealed()
             try self.requireInputControl(inputAtStart, deadline: deadline)
             try self.deliverClick(cssX: Self.double(target["x"]), cssY: Self.double(target["y"]), window: window, count: doubleClick ? 2 : 1)
             return ("Clicked \(target["what"] as? String ?? ref)", nil)
@@ -250,12 +285,13 @@ final class BrowserAutomation {
     }
 
     func click(x: Double, y: Double, doubleClick: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
+            try await self.settleIfRevealed()
             let hit = try await self.world("at", ["x": x, "y": y], deadline: deadline)
             try Self.requireNativeInputTarget(hit)
-            try await self.settleIfRevealed()
             try self.requireInputControl(inputAtStart, deadline: deadline)
             try self.deliverClick(cssX: x, cssY: y, window: window, count: doubleClick ? 2 : 1)
             return ("Clicked at \(Int(x)),\(Int(y)), on \(hit["what"] as? String ?? "nothing")", nil)
@@ -266,6 +302,7 @@ final class BrowserAutomation {
     /// when `ref` is nil. `clear` replaces the field's contents; `submit`
     /// presses Enter afterwards.
     func type(_ text: String, ref: String?, clear: Bool = false, submit: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         try await waitForUserQuiet(deadline: deadline)
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
@@ -296,18 +333,27 @@ final class BrowserAutomation {
                     _ = try await self.world("select", ["ref": ref], deadline: deadline)
                 }
             }
+            let focusRef: String
+            if let ref { focusRef = ref }
+            else { focusRef = try await self.world("activeRef", [:], deadline: deadline)["ref"] as? String ?? "" }
             try self.requireInputControl(inputAtStart, deadline: deadline)
             try await self.preflightKeyboard(deadline: deadline)
             try self.requireInputControl(inputAtStart, deadline: deadline)
             if clear && text.isEmpty {
+                let focus = try await self.world("focusedIs", ["ref": focusRef], deadline: deadline)
+                try self.requireInputControl(inputAtStart, deadline: deadline)
                 try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
+                guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
                 self.deliverKey(Self.namedKeys["Backspace"]!, flags: [], window: window)
             }
             for character in text {
                 try await self.preflightKeyboard(deadline: deadline)
-                try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
+                let focus = try await self.world("focusedIs", ["ref": focusRef], deadline: deadline)
                 try self.requireInputControl(inputAtStart, deadline: deadline)
+                try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
+                guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
                 self.deliverCharacter(character, window: window)
+                self.actionDeliveredCharacters += 1
                 self._afterAgentCharacterForChecks?()
                 // WebKit consumes trusted input asynchronously. A small yield
                 // keeps long bursts from losing keys and lets user input win.
@@ -316,8 +362,10 @@ final class BrowserAutomation {
             try self.requireInputControl(inputAtStart, deadline: deadline)
             if submit {
                 try await self.preflightKeyboard(deadline: deadline)
+                let focus = try await self.world("focusedIs", ["ref": focusRef], deadline: deadline)
                 try self.requireInputControl(inputAtStart, deadline: deadline)
                 try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
+                guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
                 self.deliverKey(Self.namedKeys["Enter"]!, flags: [], window: window)
             }
             var value: String?
@@ -333,6 +381,7 @@ final class BrowserAutomation {
     /// `combo` is a key name or one character, optionally with modifiers:
     /// `Enter`, `Shift+Tab`, `ArrowDown`, `Control+a`.
     func pressKey(_ combo: String, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         var parts = combo.split(separator: "+", omittingEmptySubsequences: false).map(String.init)
         if combo.hasSuffix("++") || combo == "+" { parts = Array(parts.dropLast(2)) + ["+"] }
         guard let keyName = parts.last, !keyName.isEmpty else { throw BrowserAutomationError.unknownKey(combo) }
@@ -379,6 +428,7 @@ final class BrowserAutomation {
     /// Semantic HTML SELECT operation. Validation and selectedness writes happen
     /// in one JavaScript turn. Page listeners receive untrusted input/change.
     func selectOptions(ref: String, options: [BrowserSelectOption]?, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             try self.requireInputControl(inputAtStart, deadline: deadline)
@@ -390,11 +440,17 @@ final class BrowserAutomation {
             } }
             let selected = try await self.world("selectOptions", args, deadline: deadline)
             if selected["stale"] as? Bool == true { throw BrowserAutomationError.staleRef(ref) }
-            if let error = selected["error"] as? String { throw BrowserAutomationError.script(error) }
+            if let error = selected["error"] as? String { throw BrowserAutomationError.invalidSelection(error) }
+            // A successful mutating JavaScript turn crossed the dispatch boundary.
+            // Validation errors above made no writes; later reconciliation can
+            // fail after this selection has already reached the application.
+            if options != nil { self.actionInputEvents += 1 }
+            try self.requireInputControl(inputAtStart, deadline: deadline)
             var readback = selected
             if options != nil {
                 try await self.pause(0.1, deadline: deadline)
                 readback = try await self.world("selectOptions", ["ref": ref], deadline: deadline)
+                try self.requireInputControl(inputAtStart, deadline: deadline)
                 guard readback["stale"] as? Bool != true,
                       (readback["selectedIndices"] as? [Int]) == (selected["requestedIndices"] as? [Int]),
                       (readback["selectedValues"] as? [String]) == (selected["requestedValues"] as? [String]) else {
@@ -411,6 +467,7 @@ final class BrowserAutomation {
     }
 
     func scroll(ref: String? = nil, dx: Double = 0, dy: Double = 0, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             try self.requireInputControl(inputAtStart, deadline: deadline)
@@ -539,7 +596,9 @@ final class BrowserAutomation {
     // MARK: - Input delivery
 
     private func requireInputControl(_ inputAtStart: Int, deadline: Date) throws {
+        guard runtime?.isTerminated == false else { throw BrowserAutomationError.notLive }
         guard userInputCount == inputAtStart else { throw BrowserAutomationError.userTyping }
+        if let expected = actionDocumentIdentity, expected != documentIdentity { throw BrowserAutomationError.staleRef("document") }
         guard Date() < deadline else { throw BrowserAutomationError.timedOut("before sending browser input", throttled: isThrottled) }
     }
 
@@ -580,6 +639,7 @@ final class BrowserAutomation {
 
     private func deliverClick(cssX: Double, cssY: Double, window: NSWindow, count: Int, restoreFocus: Bool = true) throws {
         try _beforeNativeInputForChecks?()
+        actionInputEvents += 1
         agentDeliveryDepth += 1
         defer { agentDeliveryDepth -= 1 }
         let zoom = webView.pageZoom
@@ -615,6 +675,7 @@ final class BrowserAutomation {
     }
 
     private func deliverKey(_ key: Key, flags: NSEvent.ModifierFlags, window: NSWindow) {
+        actionInputEvents += 1
         agentDeliveryDepth += 1
         defer { agentDeliveryDepth -= 1 }
         var flags = flags.union(key.flags)
@@ -774,7 +835,7 @@ final class BrowserAutomation {
 
     private func world(_ op: String, _ arguments: [String: Any], deadline: Date) async throws -> [String: Any] {
         let value = try await callJavaScript(
-            BrowserAutomationScript.call, arguments: ["op": op, "a": arguments],
+            BrowserAutomationScript.call, arguments: ["op": op, "a": arguments, "identity": documentIdentity],
             world: Self.world, deadline: deadline, what: "waiting for the page to answer"
         )
         return value as? [String: Any] ?? [:]
@@ -849,7 +910,7 @@ final class BrowserAutomation {
         url: String, title: String, generation: Int, lines: [OutlineLine],
         elementCapHit: Bool, console: [String], dialogs: [String]
     ) -> BrowserAutomationSnapshot {
-        let header = "Page: \(title.isEmpty ? "(untitled)" : "\"\(clip(title, 120))\"") at \(url)\nSnapshot \(generation). A tag like [ref=e5] stays valid while its element stays on the page.\n"
+        let header = "Page: \(title.isEmpty ? "(untitled)" : "\"\(clip(title, 120))\"") at \(url)\nSnapshot \(generation). Refs are opaque and belong to this document. Take a fresh snapshot after navigation or a tab change.\n"
         var outline = lines
         var console = console
         var cut: [String] = []

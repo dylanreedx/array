@@ -647,12 +647,19 @@ if [[ "$FOCUS_SAFE_INPUT_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --browser-native-select-preflight-check
   run_app_check .build/debug/Array --browser-automation-engine-check
   run_app_check .build/debug/Array --workspace-api-browser-check
+  run_app_check .build/debug/Array --browser-unrelated-input-check
+  run_app_check .build/debug/Array --browser-ref-identity-check
+  run_app_check .build/debug/Array --browser-action-results-check
+  run_app_check .build/debug/Array --browser-writer-transfer-check
+  run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --browser-action-queue-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
   run git diff --check
-  matrix_report 'Focus safe input matrix (targeted)'
+  matrix_report 'Stage 1 browser input matrix (targeted)'
   exit $?
 fi
 if [[ "$PERMISSION_UX_ONLY" -eq 1 ]]; then
@@ -1304,6 +1311,11 @@ run_app_check .build/debug/Array --browser-focus-restoration-check
 run_app_check .build/debug/Array --browser-select-check
 run_app_check .build/debug/Array --browser-native-select-preflight-check
 run_app_check .build/debug/Array --agent-browser-spawn-check
+run_app_check .build/debug/Array --browser-unrelated-input-check
+run_app_check .build/debug/Array --browser-ref-identity-check
+run_app_check .build/debug/Array --browser-action-results-check
+run_app_check .build/debug/Array --browser-writer-transfer-check
+run_app_check .build/debug/Array --browser-durable-takeover-check
 run_app_check .build/debug/Array --browser-action-queue-check
 run_app_check .build/debug/Array --browser-lease-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check

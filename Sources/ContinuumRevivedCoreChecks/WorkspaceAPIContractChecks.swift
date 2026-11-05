@@ -22,6 +22,9 @@ func runWorkspaceAPIContractChecks() {
 }
 
 private func checkBrowserNotLiveError() {
+    let actionReport = BrowserActionResult(actionId: "action", retrySessionId: "session", state: .outcomeUnknown, effects: .unknown, retry: .sameKeyOnly, freshSnapshotRequired: true)
+    let reportedError = WorkspaceAPIError(code: .outcomeUnknown, message: "Effects may have happened", action: actionReport)
+    expect((try? JSONDecoder().decode(WorkspaceAPIError.self, from: JSONEncoder().encode(reportedError))) == reportedError, "browser error action metadata round-trips")
     let error = WorkspaceAPIError(code: .browserNotLive, message: "Reload the tile.")
     let encoded = try? JSONEncoder().encode(error)
     let decoded = encoded.flatMap { try? JSONDecoder().decode(WorkspaceAPIError.self, from: $0) }
@@ -328,11 +331,14 @@ private func checkBrowserRequests() {
         return try? BrowserToolRequest.decode(operation: op, data: data)
     }
     let id = tile.uuidString
+    let qualified = "e00000000-0000-0000-0000-000000000001_3"
+    expect(decode("browser.select", ["tileId": id, "ref": qualified]) == .select(tile: tile, ref: qualified, options: nil, key: nil), "select preserves opaque qualified refs")
     expect(decode("browser.select", ["tileId": id, "ref": "e1"]) == .select(tile: tile, ref: "e1", options: nil, key: nil), "select listing decodes")
     expect(decode("browser.select", ["tileId": id, "ref": "e1", "options": [["value": "b", "index": 2]]]) == .select(tile: tile, ref: "e1", options: [BrowserSelectOption(value: "b", index: 2)], key: nil), "select duplicate disambiguation decodes")
     expect(decode("browser.select", ["tileId": id, "ref": "e1", "options": [["value": "b", "index": -1]]]) == nil, "negative select index is rejected")
     expect(WorkspaceAPIOp.approvalGatedOperations.contains(.browserSelect) && !WorkspaceAPIOp.sessionPresetOperations.contains(.browserSelect), "select requires browser-control grants")
     expect(decode("browser.open", ["url": "http://localhost:3000"]) == .open(url: "http://localhost:3000", key: nil), "browser open decodes")
+    expect(decode("browser.click", ["tileId": id, "ref": "e-document-epoch_1"]) == .click(tile: tile, target: .ref("e-document-epoch_1"), key: nil), "browser refs carry opaque identity")
     expect(decode("browser.click", ["tileId": id, "ref": "e1"]) == .click(tile: tile, target: .ref("e1"), key: nil), "browser click ref decodes")
     expect(decode("browser.click", ["tileId": id, "x": 12, "y": 4]) == .click(tile: tile, target: .point(12, 4), key: nil), "browser click coordinates decode")
     expect(decode("browser.click", ["tileId": id, "ref": "e1", "x": 12, "y": 4]) == nil, "ambiguous click is rejected")

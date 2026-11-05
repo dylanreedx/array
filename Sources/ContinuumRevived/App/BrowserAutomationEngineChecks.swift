@@ -143,7 +143,7 @@ private final class BrowserAutomationEngineCheck {
 
     private func ref(_ name: String, in text: String) throws -> String {
         guard let line = text.split(separator: "\n").first(where: { $0.contains("\"\(name)\"") }),
-              let range = line.range(of: #"\[ref=(e\d+)\]"#, options: .regularExpression) else {
+              let range = line.range(of: #"\[ref=(e[A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
             throw BrowserAutomationEngineCheckError("no tag for \"\(name)\" in the outline:\n\(text)")
         }
         return String(line[range].dropFirst(5).dropLast())

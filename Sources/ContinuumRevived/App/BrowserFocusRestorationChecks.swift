@@ -7,6 +7,12 @@ private final class BrowserFocusCheckWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override var isKeyWindow: Bool { true }
+    var responderTrace: ((NSResponder?) -> Void)?
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let accepted = super.makeFirstResponder(responder)
+        if accepted { responderTrace?(firstResponder) }
+        return accepted
+    }
 }
 
 @MainActor
@@ -36,7 +42,23 @@ func runBrowserFocusRestorationCheck() throws {
         while response == nil && Date() < limit { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
         if ["browser.type", "browser.press_key"].contains(op), response?["status"] as? String == "error",
            let error = response?["error"] as? [String: Any], error["code"] as? String == "outcome_unknown",
-           (error["message"] as? String)?.contains("Keyboard focus moved") == true { return [:] }
+           (error["message"] as? String)?.contains("Keyboard focus moved") == true {
+            guard let action = (error["details"] as? [String: Any])?["action"] as? [String: Any],
+                  !(action["actionId"] as? String ?? "").isEmpty,
+                  !(action["retrySessionId"] as? String ?? "").isEmpty,
+                  action["freshSnapshotRequired"] as? Bool == true,
+                  action["retry"] as? String == "observe_before_new_action" else {
+                throw WorkspaceAPIChecks.Failure(message: "focus loss must use the shared action contract: \(error)")
+            }
+            if op == "browser.type" {
+                guard action["effects"] as? String == "partial", action["state"] as? String == "partial",
+                      action["deliveredCharacters"] as? Int == 5 else {
+                    throw WorkspaceAPIChecks.Failure(message: "typing focus loss must report its prefix: \(action)")
+                }
+                print("Typing interrupted: state=partial effects=partial deliveredCharacters=5 retry=observe_before_new_action freshSnapshotRequired=true")
+            }
+            return [:]
+        }
         guard response?["status"] as? String == "ok", let result = response?["result"] as? [String: Any] else {
             throw WorkspaceAPIChecks.Failure(message: "\(op): \(String(describing: response))")
         }
@@ -48,7 +70,7 @@ func runBrowserFocusRestorationCheck() throws {
     _ = try call("browser.evaluate", ["tileId": tile, "script": "() => { document.body.innerHTML='<input aria-label=Field>'; return true }"])
     let outline = try call("browser.snapshot", ["tileId": tile])["text"] as! String
     guard let field = outline.split(separator: "\n").first(where: { $0.contains("Field") }),
-          let range = field.range(of: #"\[ref=(e\d+)\]"#, options: .regularExpression) else {
+          let range = field.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression) else {
         throw WorkspaceAPIChecks.Failure(message: "missing field ref")
     }
     let ref = String(field[range].dropFirst(5).dropLast())
@@ -80,9 +102,20 @@ func runBrowserFocusRestorationCheck() throws {
     }
     window.makeFirstResponder(old)
     var sent = false
-    guard let engine = f.runtime.liveControllers.flatMap(\.browserRuntimes).first(where: { $0.tileId.uuidString == tile })?.automation else {
+    guard let browser = f.runtime.liveControllers.flatMap(\.browserRuntimes).first(where: { $0.tileId.uuidString == tile }) else {
         throw WorkspaceAPIChecks.Failure(message: "missing browser engine")
     }
+    let engine = browser.automation
+    var borrowedDuringOrdinaryClick = false
+    window.responderTrace = { responder in
+        if let view = responder as? NSView, view === browser.webView || view.isDescendant(of: browser.webView) {
+            borrowedDuringOrdinaryClick = true
+        }
+    }
+    _ = try call("browser.click", ["tileId": tile, "ref": ref])
+    window.responderTrace = nil
+    print("Ordinary agent click: responderBorrowObserved=\(borrowedDuringOrdinaryClick), originalResponderAfterAction=\(window.firstResponder === old)")
+    window.makeFirstResponder(old)
     var delivered = 0
     engine._afterAgentCharacterForChecks = {
         delivered += 1

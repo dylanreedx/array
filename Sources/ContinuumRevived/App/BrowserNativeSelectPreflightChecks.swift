@@ -36,6 +36,11 @@ func runBrowserNativeSelectPreflightCheck() throws {
         let before = nativeAttempts
         let response = try c.raw(op, payload)
         let error = response["error"] as? [String: Any]
+        let action = c.action(response)
+        try c.expect(action?["effects"] as? String == "none" && action?["state"] as? String == "rejected" &&
+            action?["freshSnapshotRequired"] as? Bool == true && action?["retry"] as? String == "observe_before_new_action" &&
+            !(action?["actionId"] as? String ?? "").isEmpty && !(action?["retrySessionId"] as? String ?? "").isEmpty,
+            "native select refusal must use the structured no-effects result: \(response)")
         try c.expect(nativeAttempts == before && error?["code"] as? String == "unsupported" &&
             (error?["message"] as? String)?.contains("array_browser_select") == true,
             "native select must fail before dispatch and name select action: attempts=\(nativeAttempts - before), reply=\(response)")

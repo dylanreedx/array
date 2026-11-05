@@ -1021,3 +1021,13 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-che
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
+check --browser-unrelated-input-check
+leg run_app_check .build/debug/Array --browser-unrelated-input-check
+check --browser-ref-identity-check
+leg run_app_check .build/debug/Array --browser-ref-identity-check
+check --browser-action-results-check
+leg run_app_check .build/debug/Array --browser-action-results-check
+check --browser-writer-transfer-check
+leg run_app_check .build/debug/Array --browser-writer-transfer-check
+check --browser-durable-takeover-check
+leg run_app_check .build/debug/Array --browser-durable-takeover-check

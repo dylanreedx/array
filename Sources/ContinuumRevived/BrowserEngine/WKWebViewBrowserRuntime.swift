@@ -1017,6 +1017,7 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
 
     nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         MainActor.assumeIsolated {
+            self.automation.invalidateDocumentIdentity()
             if let url = webView.url { self.onMainFrameCommit?(url) }
         }
         Task { @MainActor in

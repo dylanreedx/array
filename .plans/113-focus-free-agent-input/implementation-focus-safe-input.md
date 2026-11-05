@@ -259,3 +259,107 @@ Changed files (for integration; BrowserActionQueue is intentionally absent):
 - `Sources/ContinuumRevivedCoreChecks/WorkspaceMCPChecks.swift`
 - `docs/38-tickets/90-agent-ux/matrix-inventory.txt`
 - `scripts/run-matrix.sh`
+
+## Combined Stage 1 branch: array/focus-free-input
+
+This section supersedes the branch-only integration notes and gate receipt
+above. The local branch merges `array/focus-safe-input` at `99e30b04` with
+`array/tile-sharing-contract` through `f777a433`. Main checkout and
+`array/integration` are untouched; there is no push or version bump.
+
+Reconciled behavior:
+
+- SELECT metadata, listing, mutation and native activation refusal use opaque,
+  document-qualified refs and the shared document epoch. Navigation rejects old
+  refs. Typing checks both host responder and DOM ref focus across awaits.
+- All select paths use the common action identity/retry session and structured
+  result. Listings have effects `none`; successful selection is `committed`;
+  atomic validation failures and native SELECT refusal are rejected with effects
+  `none`. Selection reconciliation failure is `unknown`, requires a fresh
+  snapshot and permits only the same retry key.
+- Focus loss during typing reports code `outcome_unknown` with structured state
+  and effects `partial`, the delivered prefix count, retry
+  `observe_before_new_action`, and `freshSnapshotRequired=true`.
+- SELECT listing and picking both respect durable user takeover. Inspecting a
+  paused tile cannot reacquire its lease or hide Return to agent. Return to agent
+  must be followed by a fresh snapshot before selection can resume.
+- Workspace API contract and exposure checks explicitly include browser.select.
+  BrowserActionQueue.swift has three small integration changes: the shared
+  effects classifier treats a SELECT listing as a read for retry persistence and
+  result decoration. The service still requires control for this operation.
+
+The combined targeted matrix ran once, not the full matrix. Its 17 reported
+legs were inventory, eleven app witnesses and five CoreChecks arms. Fifteen
+passed initially; select and workspace-api-browser failed. The select failure
+exposed a production integration bug: a reader snapshot touched the paused
+agent's lease and hid Return to agent. WorkspaceAPIService+Browser.swift now
+keeps a user-held read from rearming that gate or clearing handback state. The
+select witness was red then green across this correction.
+
+The API fixture had retained a deliberate user takeover into its separate
+renderer-recovery scenario. It now returns control through the real tile action
+and obtains a fresh snapshot first. A further fixture-only failure came from
+snapshotting a directly spawned user browser across its initial about:blank
+commit. The new epoch check correctly rejected that snapshot (effects none);
+the fixture waits for this initial navigation to finish instead of weakening
+the production epoch guard. The call helper includes the fixture line in errors.
+
+Focus observed through public makeFirstResponder tracing and production tools:
+`Ordinary agent click: responderBorrowObserved=true,
+originalResponderAfterAction=false`. The ordinary click still takes first
+responder, and this fixture's original composer was not restored by completion.
+Stage 1 is not focus-free native input. During typing, the sibling managed-agent
+composer received all five user keystrokes and persisted them in its draft;
+the page retained only five agent characters. The sibling retained focus. The
+agent saw `outcome_unknown`, `state=partial`, `effects=partial`,
+`deliveredCharacters=5`, `retry=observe_before_new_action`, and a required fresh
+snapshot. The count is an observed prefix, not a promise of total application
+side effects.
+
+Universal popup lifetime remains open. Known HTML SELECT activation paths are
+refused before native dispatch, and semantic selection avoids the native popup.
+Public APIs do not enforce suppression for arbitrary page handlers, immediate
+or delayed/cached showPicker calls, closed shadow trees, the check/dispatch race,
+or already-open native popup cancellation. No universal guarantee is claimed.
+
+Combined run leg receipt (`/tmp/focus-combined-stage1.log`):
+
+| Leg | Initial result |
+| --- | --- |
+| scripts/check-matrix-inventory.sh | pass |
+| --browser-focus-restoration-check | pass |
+| --browser-select-check | fail, then pass after paused-read fix |
+| --browser-native-select-preflight-check | pass |
+| --browser-automation-engine-check | pass |
+| --workspace-api-browser-check | fail; fixture corrections described above |
+| --browser-unrelated-input-check | pass |
+| --browser-ref-identity-check | pass |
+| --browser-action-results-check | pass |
+| --browser-writer-transfer-check | pass |
+| --browser-durable-takeover-check | pass; affected-neighbor rerun also exit 0 |
+| --browser-action-queue-check | pass |
+| --workspace-api-exposure-check | pass |
+| --workspace-api-contract-check | pass |
+| --workspace-api-agents-contract-check | pass |
+| --workspace-mcp-check | pass |
+| --role-registry-check | pass |
+
+Debug Array and CoreChecks builds in the combined run succeeded. The subsequent
+Array rebuilds also exited 0 before using their binaries. Select rerun log:
+`/tmp/combined--browser-select-check.log`; takeover neighbor:
+`/tmp/focus-durable-rerun.log`. Only affected legs were rerun. Shell syntax and
+`git diff --check` passed. `scripts/benches.sh` ran without reclaiming other
+benches; this bench remains for local integration review.
+
+Final affected API rerun: exit 0, with
+`Workspace browser API: MCP browser operations, ownership, permissions,
+residency, caps, restart and popup passed` in `/tmp/focus-api-final.log`. This
+also completed the fifteen embedded browser hardening scenarios. A sample
+while it was running showed the deliberate queued site-approval wait, not a
+blocked chrome sendEvent; no change was made for that wait.
+
+All 17 combined legs now have passing results: fifteen on the single combined
+run, the two failures on affected reruns after their fixes. The takeover
+neighbor also passed its affected rerun. No second combined matrix or full
+matrix was run. Final debug Array build exited 0 (`/tmp/focus-integration-final-build.log`);
+CoreChecks was unchanged after its successful combined-run build and arms.
