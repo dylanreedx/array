@@ -30,7 +30,9 @@ func runWorkspaceMCPChecks() {
     // That pi really reads it is the REAL pi's to witness: `--pi-extension-load-check`
     // loads the extension without its catalog and requires pi to reject it.
 
-    let mcpNames = Set(tools.map(\.name) + [WorkspaceMCPToolCatalog.waitAgentsName])
+    // The push channel's catalogue (every agent Array runs, pi included);
+    // wait_agents is the collect channel's alone and pi has no collect channel.
+    let mcpNames = Set(tools.map(\.name))
     let piNames = Set(RoleRegistry.hostToolNames(for: .pi) + RoleRegistry.spawnToolNames(for: .pi))
     let expected = piNames.subtracting(piOnlyToolNames.keys)
     // RED before T3: the MCP catalog held six tools and no wait.
@@ -112,9 +114,21 @@ func runWorkspaceMCPChecks() {
     expect(!WorkspaceMCPToolCatalog.serverInstructions.isEmpty
            && WorkspaceMCPToolCatalog.serverInstructions.contains("array_workspace_context")
            && WorkspaceMCPToolCatalog.serverInstructions.contains("array_delegate")
-           && WorkspaceMCPToolCatalog.serverInstructions.contains(WorkspaceMCPToolCatalog.waitAgentsName)
+           && !WorkspaceMCPToolCatalog.serverInstructions.contains(WorkspaceMCPToolCatalog.waitAgentsName)
+           && WorkspaceMCPToolCatalog.serverInstructions.contains("Array delivers each helper's result to you by itself")
            && WorkspaceMCPToolCatalog.serverInstructions.contains("first delegation"),
-           "MCP initialize instructions must carry Array tile, delegation, approval, and wait guidance")
+           "MCP initialize instructions must carry Array tile, delegation, delivery and approval guidance, and no wait_agents")
+    expect(WorkspaceMCPToolCatalog.serverInstructions(for: .collect).contains(WorkspaceMCPToolCatalog.waitAgentsName)
+           && !WorkspaceMCPToolCatalog.serverInstructions(for: .collect).contains("Array delivers each helper's result to you by itself")
+           && WorkspaceMCPToolCatalog.serverInstructions(for: .push) == WorkspaceMCPToolCatalog.serverInstructions,
+           "the collect channel's instructions must say to collect with wait_agents, and only they")
+    let pushEnvironment = WorkspaceMCPConfiguration(serverExecutable: "/x", endpoint: "http://127.0.0.1:1", agentID: "a", token: "t").environment
+    let collectEnvironment = WorkspaceMCPConfiguration(serverExecutable: "/x", endpoint: "http://127.0.0.1:1", agentID: "a", token: "t",
+                                                       resultDelivery: .collect).environment
+    expect(pushEnvironment[WorkspaceResultDelivery.environmentKey] == "push"
+           && collectEnvironment[WorkspaceResultDelivery.environmentKey] == "collect"
+           && WorkspaceResultDelivery(environmentValue: nil) == .push,
+           "the MCP server's environment must carry the recipient's one result channel, push by default")
     for (surface, text) in [("MCP initialize instructions", WorkspaceMCPToolCatalog.serverInstructions),
                             ("Claude's appended prompt", WorkspaceMCPConfiguration.agentGuidance)] {
         expect(text.contains("array_update_agent") && text.contains("nameIntent proactive")
@@ -218,7 +232,7 @@ func runWorkspaceMCPChecks() {
     }
     runMCPConfigMaterializeFailureCheck()
     runToolResultImageChecks()
-    print("Workspace MCP checks passed: \(tools.count) shared tools + \(WorkspaceMCPToolCatalog.waitAgentsName) match pi minus \(piOnlyToolNames.keys.sorted()), Claude/Codex guidance, allowances and timeouts, and the token out of argv, config and agent env")
+    print("Workspace MCP checks passed: \(tools.count) shared tools (+ \(WorkspaceMCPToolCatalog.waitAgentsName) on the collect channel) match pi minus \(piOnlyToolNames.keys.sorted()), Claude/Codex guidance, allowances and timeouts, and the token out of argv, config and agent env")
 }
 
 /// A config file Array cannot write must stop the launch with the real reason.

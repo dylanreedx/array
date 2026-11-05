@@ -164,6 +164,9 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
     public var steerInFlight: Bool = false
     public var steerUncertain: Bool = false
     public var helperCompletion: Bool = false
+    /// A helper's progress or late-output note: never a turn of its own. It
+    /// rides along with the next helper delivery or joins a running turn.
+    public var helperNote: Bool = false
     public var agentMessageHops: Int?
     public var agentMessageContext: AgentMessageQueueContext?
 
@@ -191,7 +194,7 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, text, imageAttachments, fileReferences, agentReferences, boardReferences, queuedAt, isSteer, agentMessageHops, agentMessageContext, steerInFlight, steerUncertain, helperCompletion
+        case id, text, imageAttachments, fileReferences, agentReferences, boardReferences, queuedAt, isSteer, agentMessageHops, agentMessageContext, steerInFlight, steerUncertain, helperCompletion, helperNote
     }
 
     public init(from decoder: Decoder) throws {
@@ -209,6 +212,7 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         steerInFlight = try values.decodeIfPresent(Bool.self, forKey: .steerInFlight) ?? false
         steerUncertain = try values.decodeIfPresent(Bool.self, forKey: .steerUncertain) ?? false
         helperCompletion = try values.decodeIfPresent(Bool.self, forKey: .helperCompletion) ?? false
+        helperNote = try values.decodeIfPresent(Bool.self, forKey: .helperNote) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -226,6 +230,7 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         if steerInFlight { try values.encode(true, forKey: .steerInFlight) }
         if steerUncertain { try values.encode(true, forKey: .steerUncertain) }
         if helperCompletion { try values.encode(true, forKey: .helperCompletion) }
+        if helperNote { try values.encode(true, forKey: .helperNote) }
     }
 }
 
@@ -813,7 +818,8 @@ public actor AgentComposerDraftStore {
             queuedAt: queuedAt ?? clock.now()
         )
         var current = loadQueue(for: agentID)
-        current.append(.prompt(message))
+        // A person's follow-up is never queued behind helper results.
+        current.insert(.prompt(message), at: Self.firstHelperIndex(current) ?? current.count)
         persistQueue(current, for: agentID)
         return message
     }
@@ -837,8 +843,9 @@ public actor AgentComposerDraftStore {
         if current.contains(where: { $0.id == id }) { return }
         var message = AgentComposerQueuedMessage(id: id, text: text, queuedAt: clock.now(), isSteer: asHelperSteer)
         message.helperCompletion = asHelperSteer
-        if asHelperSteer { current.insert(.prompt(message), at: Self.leadingSteerCount(current)) }
-        else { current.append(.prompt(message)) }
+        // Helper results queue last, in the order they were admitted, so user
+        // input is always ahead of them and they drain together.
+        current.append(.prompt(message))
         try FileManager.default.createDirectory(at: layout.queuedMessagesDirectory,
             withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: layout.queuedMessagesDirectory.path)
@@ -891,7 +898,9 @@ public actor AgentComposerDraftStore {
         var current = loadQueue(for: agentID)
         var result: [AgentComposerQueuedMessage] = []
         for index in current.indices {
-            if only == nil && index >= Self.leadingSteerCount(current) { break }
+            // Beyond the leading steers only helper items (results and notes,
+            // always at the tail) may join a running turn.
+            if only == nil && index >= Self.leadingSteerCount(current) && !Self.isHelperItem(current[index]) { continue }
             guard case .prompt(var m) = current[index], m.isSteer || only == m.id,
                   !m.steerInFlight, (!m.steerUncertain || only != nil), !excluding.contains(m.id),
                   only == nil || only == m.id else { continue }
@@ -939,7 +948,7 @@ public actor AgentComposerDraftStore {
             focus: focus,
             queuedAt: queuedAt ?? clock.now())
         var current = loadQueue(for: agentID)
-        current.append(.compaction(item))
+        current.insert(.compaction(item), at: Self.firstHelperIndex(current) ?? current.count)
         persistQueue(current, for: agentID)
         return item
     }
@@ -1091,6 +1100,31 @@ public actor AgentComposerDraftStore {
         let target = steers + min(max(index, 0), current.count - steers)
         current.insert(item, at: target)
         persistQueue(current, for: agentID)
+        return true
+    }
+
+    private static func isHelperItem(_ item: AgentComposerQueuedWorkItem) -> Bool {
+        if case .prompt(let message) = item { return message.helperCompletion }
+        return false
+    }
+
+    private static func firstHelperIndex(_ items: [AgentComposerQueuedWorkItem]) -> Int? {
+        items.firstIndex(where: isHelperItem)
+    }
+
+    /// One durable note per id: replaced in place while it waits, appended
+    /// after every other item otherwise. Returns false, writing nothing, when
+    /// that id is already in a handoff's custody.
+    @discardableResult
+    public func upsertHelperNote(id: UUID, text: String, for agentID: AgentID) throws -> Bool {
+        var current = loadQueue(for: agentID)
+        var note = AgentComposerQueuedMessage(id: id, text: text, queuedAt: clock.now(), isSteer: true)
+        note.helperCompletion = true; note.helperNote = true
+        if let index = current.firstIndex(where: { $0.id == id }) {
+            guard case .prompt(let existing) = current[index], !existing.steerInFlight else { return false }
+            current[index] = .prompt(note)
+        } else { current.append(.prompt(note)) }
+        try writeQueueDurably(current, for: agentID)
         return true
     }
 

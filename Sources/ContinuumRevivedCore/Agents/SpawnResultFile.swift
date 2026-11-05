@@ -11,10 +11,12 @@ import Foundation
 //
 // The channel is deliberately a FILE, not IPC: production pi is one process
 // per turn (`PiAgentRunner`), the extension is re-instantiated every turn and
-// keeps no memory across turns, and pi enforces no tool timeout — so the
-// extension's `wait_agents` tool simply polls
+// keeps no memory across turns, and pi enforces no tool timeout — so
+// collection simply polls
 // `<parent cwd>/.array/spawn-results/<toolCallId>.json` until every requested
-// handle reaches a terminal status. `.array/` is project-local scratch, keyed
+// handle reaches a terminal status. Collection is now the collect channel's
+// alone (`array-workspace-mcp`'s `wait_agents`, for an agent Array does not
+// run); an agent Array runs, pi included, has every result delivered. `.array/` is project-local scratch, keyed
 // by the parent's working directory — the same directory `ctx.cwd` names
 // inside the extension.
 //
@@ -198,21 +200,27 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
             write(file, parentCwd: parentCwd)
         }
     }
-    public func compactDeliveryResult(_ delivery: Delivery, pending: Bool = false) -> SpawnResultFile {
+    public func compactDeliveryResult(_ delivery: Delivery, pending: Bool = false, pushed: Bool = false) -> SpawnResultFile {
         var result = self
         result.status = pending ? .deliveryPending : .alreadyDelivered
         result.finalText = nil; result.finalTextTruncated = nil; result.report = nil
-        result.deliveryReceipt = delivery.receipt
-        result.reason = pending
+        result.deliveryReceipt = pushed && pending ? nil : delivery.receipt
+        result.reason = pushed && pending
+            ? "Array delivers this result to you as a message: end your turn or keep working, and it arrives by itself. Do not collect it."
+            : pending
             ? "Helper delivery pending; retry after its bounded collection lease."
             : "Helper turn already delivered; see the earlier helper update or collected result. To recover a lost response, repeat operation.get with deliveryReceipt \(delivery.receipt)."
         return result
     }
     /// Host-only: caller identity comes from the authenticated HTTP/stdio bridge,
     /// never from a courier or extension environment variable. Actor-serialized.
+    /// `pushed`: the recipient is on the push channel (`WorkspaceResultDelivery`).
+    /// Its results reach it only by delivery, so a lookup before that delivery
+    /// reports the status and offers no body or lease; afterwards it gets the
+    /// compact pointer, and a matching receipt still recovers a lost response.
     public static func collect(parentCwd: String, handle: String, recipient: UUID, requestId: String,
                                receipt: String? = nil, acknowledge: Bool = false, now: Date = Date(),
-                               snapshot: SpawnResultFile? = nil) throws -> SpawnResultFile? {
+                               snapshot: SpawnResultFile? = nil, pushed: Bool = false) throws -> SpawnResultFile? {
         let saved = try deliveries(parentCwd: parentCwd, recipient: recipient).first {
             $0.result?.toolCallId == handle && ((receipt != nil && $0.receipt == receipt) || $0.requestId == requestId)
         }
@@ -228,6 +236,11 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         guard file.status != .spawned, let helper = file.agentId, let turn = file.turnIdentity else { return file }
         var state = try saved ?? delivery(parentCwd: parentCwd, helper: helper, turn: turn, recipient: recipient)
             ?? Delivery(helper: helper, turn: turn, recipient: recipient, now: now)
+        if pushed {
+            guard state.phase == .delivered else { return file.compactDeliveryResult(state, pending: true, pushed: true) }
+            if let receipt, receipt == state.receipt { var replay = file; replay.deliveryReceipt = state.receipt; return replay }
+            return file.compactDeliveryResult(state)
+        }
         if acknowledge {
             guard receipt == state.receipt, state.phase == .offered || state.phase == .delivered else {
                 throw CocoaError(.fileReadCorruptFile)

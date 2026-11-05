@@ -614,7 +614,7 @@ func runWorkspaceAPIDemo() async throws {
     let messaged = object(messageReply)
     note("approval prompt raised for agent.message: \(prompts.last?.op.rawValue ?? "—") · target “\(prompts.last?.targetAgentDisplayName ?? "—")” (\(prompts.count) prompts total)")
     note("delivery=\(messaged["delivery"]?.string ?? "—") · child=\(short(uuid(messaged["childAgentId"]))) · parent=\(short(uuid(messaged["parentAgentId"]))) · childRunning=\(messaged["childRunning"]?.bool.map(String.init) ?? "—") · queuePosition=\(messaged["queuePosition"]?.int.map(String.init) ?? "absent")")
-    note("the result carries NO answer from the child — collect that with wait_agents or array_inspect_agent: reply/response/text absent = \(messaged["reply"] == nil && messaged["response"] == nil && messaged["text"] == nil)")
+    note("the result carries NO answer from the child — Array delivers that to the caller as a message: reply/response/text absent = \(messaged["reply"] == nil && messaged["response"] == nil && messaged["text"] == nil)")
     check(messaged["delivery"]?.string == "delivered", "the message must be delivered through the supervisor's own send path")
     check(messaged["reply"] == nil && messaged["response"] == nil && messaged["text"] == nil,
           "a delivery result must never carry the child's answer")

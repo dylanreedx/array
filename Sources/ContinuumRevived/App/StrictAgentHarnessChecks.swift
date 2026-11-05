@@ -96,9 +96,9 @@ func runStrictAgentHarnessChecks() throws {
     // what it cannot have — better than refusing after the fact.
     for depth in [0, 1] {
         let args = AgentSupervisor.runnerConfig(for: roled, spawnDepth: depth).extraArgs
-        try expect(args == ["--tools", "read, grep, spawn_agent, wait_agents, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_board_manage, array_delegate, array_reveal_agent, array_get_operation, array_message_agent, array_update_agent, array_device_list, array_device_open, array_device_observe, array_device_act, array_device_close, array_device_build_run, array_browser_open, array_browser_navigate, array_browser_snapshot, array_browser_click, array_browser_type, array_browser_press_key, array_browser_scroll, array_browser_wait_for, array_browser_take_screenshot, array_browser_evaluate, array_browser_console, array_notify, array_report, array_status, array_schedule_agent"],
+        try expect(args == ["--tools", "read, grep, spawn_agent, delegate_agent, array_workspace_context, array_open_document, array_find_agent, array_inspect_agent, array_canvas_query, array_canvas_apply, array_board_query, array_board_apply, array_board_manage, array_delegate, array_reveal_agent, array_get_operation, array_message_agent, array_update_agent, array_device_list, array_device_open, array_device_observe, array_device_act, array_device_close, array_device_build_run, array_browser_open, array_browser_navigate, array_browser_snapshot, array_browser_click, array_browser_type, array_browser_press_key, array_browser_scroll, array_browser_wait_for, array_browser_take_screenshot, array_browser_evaluate, array_browser_console, array_notify, array_report, array_status, array_schedule_agent"],
                    "a roled pi agent at depth \(depth) must be offered the complete delegation set "
-                   + "(Array's spawn_agent + wait_agents collection pair and the third-party delegate_agent) "
+                   + "(Array's spawn_agent, no wait_agents since Array delivers results, and the third-party delegate_agent) "
                    + "plus the CX-01 host bridge tools — got \(args)")
     }
     // At the cap, withheld — Array's own limit, enforced by omission.

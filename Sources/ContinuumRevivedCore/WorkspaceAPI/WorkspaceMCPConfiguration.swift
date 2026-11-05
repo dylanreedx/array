@@ -1,5 +1,27 @@
 import Foundation
 
+/// How delegated helpers' results reach one agent. Exactly one channel per
+/// recipient, chosen by capability (can Array start a turn in it?), never by
+/// provider: the two must never both be live, or a lead reads every result
+/// twice.
+public enum WorkspaceResultDelivery: String, Equatable, Sendable {
+    /// Array runs the agent and delivers each result into it: a wake when it
+    /// is idle, or joining the turn it is running. It is offered no
+    /// `wait_agents`, and `operation.get` hands it no result body first.
+    case push
+    /// Array cannot start a turn in the agent (a CLI it does not run). It
+    /// collects with `wait_agents` and is never woken.
+    case collect
+
+    /// Set in the MCP server's environment by the host. Absent means `push`,
+    /// the host's own default, so the two sides cannot disagree.
+    public static let environmentKey = "ARRAY_WORKSPACE_RESULT_DELIVERY"
+
+    public init(environmentValue: String?) {
+        self = environmentValue == WorkspaceResultDelivery.collect.rawValue ? .collect : .push
+    }
+}
+
 public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     public let serverExecutable: String
     public let endpoint: String
@@ -14,6 +36,7 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     /// command it runs would inherit it, and `env` printed it into a
     /// transcript), Claude's config file, or Codex's argv (`ps` shows argv).
     public let tokenFilePath: String
+    public let resultDelivery: WorkspaceResultDelivery
 
     /// How long a client waits for one workspace tool call. An approval alert
     /// has no deadline of its own, and `wait_agents` blocks for up to an hour:
@@ -26,15 +49,17 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     /// server's `initialize` instructions: Claude defers MCP tools behind tool
     /// search, so without it the model never learns Array's tools exist.
     public static let agentGuidance =
-        "You are running in a tile on the user's Array canvas. Use the array_* tools of the array_workspace MCP server (in Claude Code, mcp__array_workspace__*; load them with tool search if they are deferred) to see and manage the canvas. To run work in a visible tile, use array_delegate: your built-in subagent tool runs inside this tile and never creates one. array_delegate accepts optional harness (Claude Code, Codex or Pi) and exact catalogue model; omitted fields inherit, except a different harness uses its own catalogue default. Use array_message_agent to start a turn on another agent in your project, and collect delegated children's results with wait_agents. If your title is wrong or your task has clearly changed, retitle yourself with array_update_agent (nameIntent proactive), but never replace a name the user typed (nameSource user or requested in array_workspace_context); when the user or another agent asks for a rename, use nameIntent requested."
+        "You are running in a tile on the user's Array canvas. Use the array_* tools of the array_workspace MCP server (in Claude Code, mcp__array_workspace__*; load them with tool search if they are deferred) to see and manage the canvas. To run work in a visible tile, use array_delegate: your built-in subagent tool runs inside this tile and never creates one. array_delegate accepts optional harness (Claude Code, Codex or Pi) and exact catalogue model; omitted fields inherit, except a different harness uses its own catalogue default. Use array_message_agent to start a turn on another agent in your project, and end your turn after delegating: Array delivers each helper's result to you by itself. If your title is wrong or your task has clearly changed, retitle yourself with array_update_agent (nameIntent proactive), but never replace a name the user typed (nameSource user or requested in array_workspace_context); when the user or another agent asks for a rename, use nameIntent requested."
 
     public init(
         serverExecutable: String,
         endpoint: String,
         agentID: String,
         token: String,
+        resultDelivery: WorkspaceResultDelivery = .push,
         directory: URL = FileManager.default.temporaryDirectory
     ) {
+        self.resultDelivery = resultDelivery
         self.serverExecutable = serverExecutable
         self.endpoint = endpoint
         self.agentID = agentID
@@ -78,7 +103,8 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     public var environment: [String: String] {
         ["ARRAY_WORKSPACE_MCP_ENDPOINT": endpoint,
          "ARRAY_WORKSPACE_AGENT_ID": agentID,
-         "ARRAY_WORKSPACE_MCP_TOKEN_FILE": tokenFilePath]
+         "ARRAY_WORKSPACE_MCP_TOKEN_FILE": tokenFilePath,
+         WorkspaceResultDelivery.environmentKey: resultDelivery.rawValue]
     }
 
     public var claudeMCPConfigJSON: String {

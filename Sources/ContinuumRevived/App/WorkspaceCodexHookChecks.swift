@@ -9,6 +9,11 @@ enum WorkspaceCodexHookChecks {
         defer { bench.tearDown() }
         let supervisor = bench.supervisor
         let parent = bench.f.agentId
+        // This leg watches hook routing, not delivery. An Array-run lead would
+        // now be woken with the child's result and run its own turn on the same
+        // Codex fixture, whose receipts are the lead's own, not a leak. Stand
+        // the lead in as a collect recipient so it runs no turn here.
+        supervisor.helperCompletionEnabled = { _ in false }
         let child = try bench.delegate("CODEX-HOOK-CHILD")
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .ready,
             models: [WorkspaceAgentReportChecks.model]))

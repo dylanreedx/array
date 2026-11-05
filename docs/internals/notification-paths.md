@@ -85,8 +85,8 @@ bounded compatibility fix; arbitrary event clients still need cursor-gap recover
 
 Helper completion wakes (0.7.41) are internal agent messages, using the existing
 supervisor send/composer queue. They add no direct Mac banner, sound, badge,
-phone push, widget or Live Activity sender. Disabling the per-lead setting is
-quiet for this model-message path; result files remain collectable. A refused
+phone push, widget or Live Activity sender. The per-lead setting that once disabled
+this path is removed in 0.7.44 (one channel per recipient, below). A refused
 lead send remains pending for another flush rather than creating a user alert.
 The no-progress watchdog remains independent. Under **SRC-01**, the stored
 helper-wake message uses plain lines: helper status, summary, findings, nonpassing
@@ -100,8 +100,8 @@ completion batches carry independently attributed helper envelopes together in
 one lead prompt; each result becomes its own existing transcript card. The
 busy preview names the helper count rather than claiming the first helper
 sent every result. Single-result wakes retain their existing attribution.
-Rejected admission retains the whole batch for retry; disabled wakes remain
-quiet. Timing, alert suppression and recipient policies are unchanged.
+Rejected admission retains the whole batch for retry; a collect-channel
+recipient (0.7.44) is never woken. Timing, alert suppression and recipient policies are unchanged.
 
 For **SRC-01**, each helper runner
 turn plus authenticated recipient has a persistent delivery record in the
@@ -142,30 +142,56 @@ report is refreshed (fixture: +6 seconds). Output arriving after that durable
 admission still misses the earlier wake (fixture: +16 logical seconds); recovering
 such late output requires another delivery policy and is outside this interim fix.
 
-For **SRC-01** (0.7.44), a helper turn that ends while its runner reports
-background work (`hasBackgroundWork` or `hasRunningSubagents`: a claude shell job,
-subagent or native schedule) and files no report is held, not delivered. Its wake,
-its message-subscription settlement and its spawn-result write are held together:
-the lead is not woken, `wait_agents` and `operation.get` keep reading `spawned`,
-and a lead that reached the helper only by `array_message_agent` keeps its
-subscription, so the helper's later result reaches it. The helper's next turn end
-decides again; a turn answering a message sent after the hold is never held. A held
-turn is released as it stands when its session exits or is reaped, on Stop, on a
-CLI-update retirement, or 600 s after the first hold (`heldHelperCompletionCap`,
-on the helper-completion clock). A completed turn without a report, held or not,
-is headed `<name> finished: ended its turn without filing a report` (plus `; its
-background work is still running` when the cap releases it) instead of
-`finished: succeeded`; a same-turn report refreshed before admission restores
-`succeeded`. Codex and Pi runners report no background work and are never held.
-Helper results queued in separate batches behind a busy lead are taken together
-when it goes idle: the drain merges the consecutive queued helper results into
-one attributed batch prompt and one lead turn, stopping at any user steer or
-follow-up. Each merged queue entry keeps its own durable custody and settles with
-the turn that carried it; only the first is echoed as the prompt. Quiet outcomes:
-a held turn sends nothing until released; held results never alert the user. No new
-alert sender, recipient, sound or tap action. Witnesses: `--helper-completion-check`
-(scripted Claude-shaped runner: positive control, no-report header, background
-hold then one wake, cap release, message-only result, two batches as one turn).
+For **SRC-01** (0.7.44), helper results reach each recipient by exactly ONE
+channel, chosen by capability (`AgentSupervisor.resultDelivery(for:)`,
+`WorkspaceResultDelivery`), never by provider or mode. **Push**: an agent Array
+runs (`capabilities.locallyManaged`; Claude Code, Codex or Pi, Free or Managed)
+receives every result by delivery: a wake when idle, or joining its running turn
+at a tool boundary. It is offered no `wait_agents` (the MCP server lists and
+serves none when its environment carries `ARRAY_WORKSPACE_RESULT_DELIVERY=push`,
+the default; the bundled Pi extension registers only `spawn_agent`; the Pi role
+allowlist omits it), and `operation.get` hands it no body or lease before
+delivery (`delivery_pending`), only the compact pointer after. **Collect**: an
+agent Array cannot start a turn in collects with `wait_agents` and is never
+woken. The per-lead "Wake me when helpers finish" switch is removed: switching
+off a push recipient's only channel would lose every result. Tool, MCP and brief
+text say: delegate, end your turn, results arrive by themselves.
+
+Only action starts a lead turn. A completed turn with a report, a failure or
+interruption, a helper that declared `needsYou` or tripped the watchdog, and a
+turn after which nothing will resume the helper all deliver. A turn that ends
+while its runner reports background work (`hasBackgroundWork` or
+`hasRunningSubagents`) and files no report is progress: its wake, its
+message-subscription settlement and its spawn-result write are held together, so
+collection keeps reading `spawned` and a lead that reached the helper only by
+`array_message_agent` keeps its subscription for the real result. The helper's
+next turn end decides again (a turn answering a message sent after the hold is
+never held); session exit, reap, Stop, CLI retirement or a report filed between
+turns releases a held turn as it stands. There is no time cap: a cap release
+would start a lead turn for a non-result. A completed turn without a report is
+headed `<name> finished: ended its turn without filing a report`; a same-turn
+report refreshed before admission restores `succeeded`.
+
+Progress text and output emitted after a result was delivered (the +16 s case,
+or a report filed after the turn) become durable queue NOTES (`helperNote`), one
+per helper, lead and kind, replaced while they wait. A note never starts a turn:
+it joins the lead's running turn at a tool boundary, or rides along with the next
+helper delivery, and is gone once used; a helper's own result supersedes its
+progress note. Every helper item (results and notes) is staged as a helper item
+at the TAIL of the lead's queue, in completion order; user steers, follow-ups and
+compactions are always queued ahead of helper items. When the lead goes idle the
+drain takes every pending helper item into ONE attributed batch prompt and one
+turn. Each merged queue entry keeps its own durable custody and settles with the
+turn that carried it; only the first is echoed. Quiet outcomes: a held turn and a
+note send nothing on their own; nothing here alerts the user. No new alert
+sender, recipient, sound or tap action. Witnesses: `--helper-completion-check`
+(scripted Claude-shaped runner: P1, P3, P4, P5, P6, P7 cases),
+`--helper-wake-setting-check` (P2 one channel: no switch, no `wait_agents` on the
+production Claude/Codex MCP config, no body before delivery, collect control),
+`scripts/check-helper-delivery-pi.mjs` and `check-pi-helper-waits.mjs` (Pi
+registers no `wait_agents`), `scripts/check-interruptible-helper-waits.py` (push
+lists and serves none; collect keeps the interruptible wait) and CoreChecks
+`--workspace-mcp-check` / `--role-registry-check`.
 
 For **SRC-01**, a transient helper provider failure reserved for a host
 retry is withheld from terminal delivery. **SRC-02** retains existing runtime-error
@@ -754,7 +780,7 @@ with short dependency waits only. With wakes enabled, the completion batch
 holds up to eight seconds only while the lead is idle and another associated
 helper is running. Busy leads queue promptly and the last helper is eligible
 immediately. A refused admission retains the batch for an eight-second retry;
-disabling wakes stays quiet and the result remains collectable. Helper report
+a collect-channel recipient (0.7.44) is never woken and collects. Helper report
 content is unchanged. This prepares a timing/payload change only; activation
 and final turn/message-count acceptance require the repaired exactly-once
 foundation at integration. No new alert sender, recipient or tap behavior.
@@ -783,8 +809,8 @@ Stop, lost application evidence, process exit or relaunch with an unfinished
 handoff expose held uncertain work and pause automatic execution. The existing
 queue rail says “Unconfirmed; retry may repeat”; explicit Resume/Send-now permits
 retry and may repeat provider work if the missing receipt hid application.
-There is no silent exactly-once model-consumption claim. Disabling completion
-wakes remains quiet; collection retains its existing arbitration and receipts.
+There is no silent exactly-once model-consumption claim. A collect-channel
+recipient (0.7.44) is never woken; its collection keeps the leases and receipts.
 No new alert sender, recipient, sound or tap action. Behavioral witnesses are
 in the matrix-registered `--helper-completion-check`, with correlated Codex
 receipt parsing in the existing Core `--codex-appserver-runner-check` arm.

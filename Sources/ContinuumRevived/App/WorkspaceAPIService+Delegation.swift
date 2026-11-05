@@ -235,9 +235,9 @@ extension WorkspaceAPIService {
             childRunning: supervisor.isRunning(childId),
             partial: false)
 
-        result.coordinationNote = supervisor.wakesForHelperCompletion(agentId)
-            ? "Continue independent work or end this turn. Array will wake you with helper results. Use a short wait_agents only when progress depends on a result."
-            : "Helper completion wakes are disabled. Continue independent work, then collect the result with a short wait_agents when needed; do not poll."
+        result.coordinationNote = supervisor.resultDelivery(for: agentId) == .push
+            ? "Continue independent work or end this turn. Array delivers this helper's result to you by itself; do not poll, wait or message it to check."
+            : "Array does not run this agent, so it delivers no helper results to it. Continue independent work, then collect the result with a short wait_agents when needed; do not poll."
         result.checkoutRoot = child?.checkoutRoot
         result.worktreeBranch = child?.worktreeBranch
         result.checkoutNotice = child?.delegationContext?.checkoutNotice
@@ -859,7 +859,8 @@ extension WorkspaceAPIService {
         func collect(_ cwd: String, _ handle: String) throws -> OperationChildResult? {
             try SpawnResultFile.collect(parentCwd: cwd, handle: handle, recipient: agentId.rawValue,
                 requestId: requestId, receipt: request.deliveryReceipt, acknowledge: request.acknowledgeDelivery == true,
-                now: supervisor.helperCompletionNow()).map(childResultForParent)
+                now: supervisor.helperCompletionNow(),
+                pushed: supervisor.resultDelivery(for: agentId) == .push).map(childResultForParent)
         }
         do {
         let result: OperationGetResult
