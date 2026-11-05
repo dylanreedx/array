@@ -725,6 +725,13 @@ func runBrowserActionResultsCheck() throws {
     try expect(action(restarted)?["effects"] as? String == "unknown", "restart must retain uncertain retry history")
     let observed = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => window.actionCount"])
     try expect(observed["value"] as? Int == 1, "same-key timeout retry dispatched input twice")
+    let settledScript = "() => { window.settledDispatches=(window.settledDispatches||0)+1; return true; }"
+    for n in 0..<70 {
+        _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": settledScript, "idempotencyKey": "settled-\(n)"])
+    }
+    _ = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": settledScript, "idempotencyKey": "settled-0"])
+    let settled = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => window.settledDispatches"])
+    try expect(settled["value"] as? Int == 70, "evicting a settled result must not permit a same-key input replay")
     let (typingTile, page) = try h.ownedBrowser()
     try Data("<html><body><input aria-label='Field'></body></html>".utf8).write(to: page)
     _ = try h.ok("browser.navigate", ["tileId": typingTile.uuidString, "action": "reload"])

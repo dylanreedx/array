@@ -1378,7 +1378,7 @@
       "name": "array_browser_open",
       "label": "Array Browser Open",
       "op": "browser.open",
-      "description": "Open an agent-owned browser tile beside you at a URL. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
+      "description": "Open an agent-owned browser tile beside you at a URL.",
       "promptSnippet": "Open an agent-owned browser tile beside you at a URL.",
       "promptGuidelines": [
         "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."

@@ -101,6 +101,27 @@ final class BrowserActionQueue {
         catch { tombstones[id] = nil; return WorkspaceAPIError(code: .durabilityFailed, message: "Browser retry identity could not be saved, so no input was dispatched. Repair storage before retrying.") }
     }
 
+    private struct RetiredResult {
+        var tombstone: Tombstone
+        var authorizationGeneration: UInt64
+        var authorizationContext: String
+    }
+    // The response cache is bounded; lightweight used-key identities live for
+    // the whole declared retry session so eviction never replays settled input.
+    private var retiredResults: [Key: RetiredResult] = [:]
+    private func retireSettledResult(_ key: Key) {
+        guard let entry = entries[key], case .result(let fields)? = entry.reply else { return }
+        var report = BrowserActionResult(actionId: actionIdentity(agentId: key.agent, key: key.key), retrySessionId: retrySessionId,
+            state: .completed, effects: .committed, retry: .observeBeforeNewAction, freshSnapshotRequired: true)
+        if let object = fields["action"]?.object,
+           let data = try? JSONSerialization.data(withJSONObject: WorkspaceAPIService.plain(object)),
+           let decoded = try? JSONDecoder().decode(BrowserActionResult.self, from: data) { report = decoded }
+        report.retry = .observeBeforeNewAction
+        report.freshSnapshotRequired = true
+        retiredResults[key] = RetiredResult(tombstone: Tombstone(tile: entry.tile, operation: entry.operation,
+            payloadDigest: digest(entry.payload), action: report), authorizationGeneration: entry.authorizationGeneration,
+            authorizationContext: entry.authorizationContext)
+    }
     private var entries: [Key: Entry] = [:]
     private var pending: [UUID: [Key]] = [:]
     private var active: [UUID: Key] = [:]
@@ -145,7 +166,10 @@ final class BrowserActionQueue {
     }
 
     /// Whether a retry of this key would be answered from the queue's history.
-    func holds(agentId: AgentID, key: String) -> Bool { entries[Key(agent: agentId, key: key)] != nil }
+    func holds(agentId: AgentID, key: String) -> Bool {
+        let identity = Key(agent: agentId, key: key)
+        return entries[identity] != nil || retiredResults[identity] != nil
+    }
 
     func submit(tileId: UUID, agentId: AgentID, key: String, operation: String, payload: String,
                 deadline: Date, inputCount: Int, authorizationGeneration: UInt64 = 0, authorizationContext: String = "",
@@ -186,6 +210,19 @@ final class BrowserActionQueue {
             }
             if let reply = existing.reply { completion(reply) }
             else { existing.waiters.append(Waiter(authorize: authorize, completion: completion)) }
+            return
+        }
+        if let retired = retiredResults[identity] {
+            if let error = authorize() { completion(.error(error)); return }
+            guard retired.authorizationGeneration == authorizationGeneration, retired.authorizationContext == authorizationContext else {
+                completion(.error(WorkspaceAPIError(code: .permissionDenied, message: "Browser access changed since this completed action."))); return
+            }
+            let prior = retired.tombstone
+            guard prior.tile == tileId, prior.operation == operation, prior.payloadDigest == digest(payload) else {
+                completion(.error(WorkspaceAPIError(code: .idempotencyConflict, message: "This key already identifies a different completed browser action."))); return
+            }
+            completion(.error(WorkspaceAPIError(code: .outcomeUnknown,
+                message: "This action completed, but its cached result expired. No input was replayed. Take a fresh snapshot before deciding on a new action.", action: prior.action)))
             return
         }
         if let prior = tombstones[actionIdentity(agentId: agentId, key: key)] {
@@ -375,6 +412,7 @@ final class BrowserActionQueue {
         while entries.keys.lazy.filter({ $0.agent == agent }).count >= capacity {
             guard let index = completed[agent]?.firstIndex(where: mayEvict) else { return false }
             let key = completed[agent]!.remove(at: index)
+            retireSettledResult(key)
             entries[key] = nil
         }
         return true
@@ -384,6 +422,7 @@ final class BrowserActionQueue {
         while (completed[agent]?.count ?? 0) > capacity {
             guard let index = completed[agent]?.firstIndex(where: mayEvict) else { break }
             let key = completed[agent]!.remove(at: index)
+            retireSettledResult(key)
             entries[key] = nil
         }
         if completed[agent]?.isEmpty == true { completed[agent] = nil }
