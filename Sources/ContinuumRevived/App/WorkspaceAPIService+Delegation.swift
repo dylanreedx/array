@@ -837,7 +837,9 @@ extension WorkspaceAPIService {
                     childResult = try SpawnResultFile.collect(parentCwd: cwd, handle: entry.context.operationId,
                         recipient: agentId.rawValue, requestId: requestId, receipt: request.deliveryReceipt,
                         acknowledge: request.acknowledgeDelivery == true, now: supervisor.helperCompletionNow(),
-                        snapshot: snapshot).map(childResultForParent)
+                        snapshot: snapshot,
+                        // One channel: a push lead gets a pointer here, never the body.
+                        pushed: supervisor.resultDelivery(for: agentId) == .push).map(childResultForParent)
                 } else { childResult = nil }
                 let result = OperationGetResult(operationId: entry.context.operationId, op: .agentMessage,
                     status: .committed, steps: nil, childAgentId: entry.context.recipient, tileId: nil,

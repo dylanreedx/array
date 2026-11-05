@@ -178,8 +178,35 @@ enum HelperCompletionChecks {
         verdict(delivered && wakes()[0].contains(WorkspaceAgentReportChecks.childFinalText),
             "the same result then arrives once, by delivery")
 
+        // R3-4: a message the lead sent while its helper was busy (the queued
+        // path) is looked up through the same one channel: a pointer, never
+        // the result body.
+        let busy = try bench.delegate("HOLD-channel-busy")
+        let busyStarted = await waitUntil(timeout: 15, pollInterval: 0.02) { s.isRunning(busy) }
+        try HelperGuardChecks.expect(busyStarted, "busy helper did not start")
+        let queuedReply = bench.f.api.dispatch(agentId: lead, requestId: "channel-queued", op: "agent.message", payload: [
+            "agentId": busy.rawValue.uuidString, "text": "CHANNEL-QUEUED follow-up", "idempotencyKey": "channel-queued"])
+        guard case let .result(queuedFields) = queuedReply, queuedFields["delivery"]?.string == "queued",
+              let queuedOperation = queuedFields["operationId"]?.string else {
+            throw WorkspaceAgentReportChecks.Failure(description: "message was not queued: \(queuedReply)")
+        }
+        try Data().write(to: URL(fileURLWithPath: s.records[busy]!.cwd).appendingPathComponent("release.flag"))
+        let queuedSettled = await waitUntil(timeout: 20, pollInterval: 0.05) {
+            !s.isRunning(busy) && (try? s.queuedAgentMessage(caller: lead, operationId: queuedOperation))??.result != nil
+        }
+        let queuedLook = bench.f.api.dispatch(agentId: lead, requestId: "channel-queued-get", op: "operation.get",
+            payload: ["operationId": queuedOperation])
+        guard case let .result(queuedLookFields) = queuedLook else {
+            throw WorkspaceAgentReportChecks.Failure(description: "queued lookup refused: \(queuedLook)")
+        }
+        let queuedChild = queuedLookFields["childResult"]?.object
+        verdict(queuedSettled && queuedChild != nil && queuedChild?["finalText"] == nil && queuedChild?["report"] == nil,
+            "operation.get on a queued message gives a push lead a pointer, never the body")
+
         // Positive control: an agent Array cannot push into (the stand-in
         // replaces the capability) collects, and is never woken.
+        _ = await waitUntil(timeout: 15, pollInterval: 0.05) { !s.isRunning(lead) && s.queuedMessages(for: lead).isEmpty }
+        let wakesBeforeCollect = wakes().count
         s.helperCompletionEnabled = { _ in false }
         let collected = try await settle("CHANNEL-COLLECT")
         now.addTimeInterval(9)
@@ -190,7 +217,7 @@ enum HelperCompletionChecks {
         guard case let .result(gotFields) = got, let gotChild = gotFields["childResult"]?.object else {
             throw WorkspaceAgentReportChecks.Failure(description: "collect lookup refused: \(got)")
         }
-        verdict(wakes().count == 1 && gotChild["finalText"]?.string?.contains(WorkspaceAgentReportChecks.childFinalText) == true,
+        verdict(wakes().count == wakesBeforeCollect && gotChild["finalText"]?.string?.contains(WorkspaceAgentReportChecks.childFinalText) == true,
             "an agent Array does not run collects its result and is not woken")
         try HelperGuardChecks.expect(failures.isEmpty, "one channel: " + failures.joined(separator: "; "))
     }
@@ -749,14 +776,16 @@ enum HelperCompletionChecks {
         leadRecord.workspaceToolsEnabled = true
         try store.upsert(leadRecord)
         var runners: [AgentID: HeldWakeRunner] = [lead: HeldWakeRunner(autoEnd: true)]
-        func helper(_ name: String, spawned: Bool = true) throws -> AgentID {
+        func helper(_ name: String, spawned: Bool = true, parent: AgentID? = nil, tools: Bool = false) throws -> AgentID {
             let id = AgentID(rawValue: UUID())
+            let owner = parent ?? lead
             var record = AgentRecord(id: id, displayName: name, harness: .pi, model: model, thinking: "medium",
-                cwd: root.path, parentAgentID: spawned ? lead : nil, createdAt: Date(), lastActivityAt: Date())
+                cwd: root.path, parentAgentID: spawned ? owner : nil, createdAt: Date(), lastActivityAt: Date())
+            record.workspaceToolsEnabled = tools
             if spawned {
                 record.spawnResultHandle = "held-\(name)"
                 SpawnResultFile.write(.init(toolCallId: "held-\(name)", status: .spawned, agentId: id.rawValue,
-                    recipientId: lead.rawValue), parentCwd: root.path, warn: { _ in })
+                    recipientId: owner.rawValue), parentCwd: root.path, warn: { _ in })
             }
             try store.upsert(record)
             runners[id] = HeldWakeRunner(autoEnd: false)
@@ -766,6 +795,14 @@ enum HelperCompletionChecks {
         let blocked = try helper("Blocked"), server = try helper("Server"), messenger = try helper("Messenger", spawned: false)
         let alpha = try helper("Alpha"), beta = try helper("Beta"), gamma = try helper("Gamma"), delta = try helper("Delta")
         let restarter = try helper("Restarter")
+        // Round 3 cast.
+        let coordinator = try helper("Coordinator", tools: true)
+        let worker = try helper("Worker", parent: coordinator)
+        let sibling = try helper("Sibling"), asker = try helper("Asker", spawned: false), stuck = try helper("Stuck", spawned: false)
+        let epsilon = try helper("Epsilon")
+        let doomed = try helper("Doomed", spawned: false)
+        let orphan = try helper("Orphan", parent: doomed)
+        let midway = try helper("Midway"), messagedMidway = try helper("MessagedMidway", spawned: false)
         let pool = runners
         let drafts = AgentComposerDraftStore(applicationSupportDirectory: root.appendingPathComponent("drafts"))
         let s = AgentSupervisor(store: store, makeRunner: { pool[$0.record.id]! }, warn: { _ in },
@@ -1024,6 +1061,121 @@ enum HelperCompletionChecks {
         verdict(followUp == .accepted && steer == .accepted && userOrder == ["steer", "follow-up", "result"],
             "P5/P7 user steers and follow-ups go ahead of queued helper results (order \(userOrder))")
 
+        // R3-1: a lead that is itself a helper waits on its OWN Array helper.
+        // No wake for its "waiting" turn end; ONE when it reports after its
+        // helper's result arrives.
+        try await start(coordinator, "Coordinate the work.")
+        try await start(worker, "Do the work.")
+        try await end(coordinator, "Waiting on my helper.")
+        await flushToLead()
+        let coordinatorQuiet = results(coordinator).isEmpty && s.isHelperCompletionHeld(coordinator)
+        try report(worker, "WORKER-REPORT")
+        try await end(worker, "Work done.")
+        now.addTimeInterval(9)
+        await s.flushHelperCompletions()
+        let coordinatorWoken = await waitUntil(timeout: 10, pollInterval: 0.05) { pool[coordinator]!.openTurns == 1 }
+        if coordinatorWoken {
+            try report(coordinator, "COORDINATOR-REPORT")
+            try await end(coordinator, "All done.")
+        }
+        await flushToLead()
+        verdict(coordinatorQuiet && coordinatorWoken && results(coordinator).count == 1
+            && results(coordinator)[0].contains("COORDINATOR-REPORT"),
+            "R3-1 a nested lead's waiting turn is held while its own helper runs; one wake with its result")
+
+        // R3-6 + R3-7: a blocked or asking helper (here message-only) wakes its
+        // lead AT ONCE, even with a sibling still running, through the
+        // production flush timer: no explicit flush, the injected clock frozen.
+        try await start(sibling, "Keep working.")
+        let askContext = AgentMessageQueueContext(caller: lead, recipient: asker, operationId: "ask-message",
+            idempotencyKey: "ask-message", payloadHash: "ask-message")
+        _ = s.deliverAgentMessage("Set up the store.", from: lead, to: asker, hops: 0, context: askContext)
+        _ = await waitUntil(timeout: 5, pollInterval: 0.02) { pool[asker]!.openTurns == 1 }
+        try HelperGuardChecks.expect(s.declareStatus(.init(now: "choosing a database", needsYou: "Which database should I use?",
+            declaredAt: Date()), for: asker), "status refused")
+        try await end(asker, "Which database should I use?")
+        let askedAtOnce = await waitUntil(timeout: 5, pollInterval: 0.05) { !results(asker).isEmpty }
+        verdict(askedAtOnce && results(asker).count == 1
+            && results(asker)[0].hasPrefix("Asker finished: needs you: Which database should I use?"),
+            "R3-6/7 an asking message-only helper wakes its lead at once by the production timer, headed needs you")
+        try report(sibling, "SIBLING-REPORT")
+        try await end(sibling, "Done.")
+        await flushToLead()
+
+        // R3-6: the no-progress watchdog covers a message-only helper too.
+        var watchdogNow = Date()
+        s.helperWatchdogNow = { watchdogNow }
+        let stuckContext = AgentMessageQueueContext(caller: lead, recipient: stuck, operationId: "stuck-message",
+            idempotencyKey: "stuck-message", payloadHash: "stuck-message")
+        _ = s.deliverAgentMessage("Do the slow thing.", from: lead, to: stuck, hops: 0, context: stuckContext)
+        // The watchdog reads presence, which the turn's start event sets.
+        _ = await waitUntil(timeout: 5, pollInterval: 0.02) { pool[stuck]!.openTurns == 1 && s.presenceRowStatus(for: stuck) == .working }
+        await s.sweepHelperWatchdog()
+        watchdogNow.addTimeInterval(s.helperWatchdogThreshold + 1)
+        await s.sweepHelperWatchdog()
+        let alerted = await waitUntil(timeout: 5, pollInterval: 0.05) {
+            from(stuck).contains { $0.contains("has shown no progress") }
+        }
+        verdict(alerted, "R3-6 a stuck message-only helper alerts its lead through the watchdog")
+        try report(stuck, "STUCK-REPORT")
+        try await end(stuck, "Finally done.")
+        await settle()
+        await flushToLead()
+
+        // R3-3: an uncertain user steer the handoff will not take must not
+        // block a helper result from joining the running turn, nor spin.
+        try await busyLead("Lead tool work again.")
+        let uncertain = await drafts.enqueueSteer(text: "USER-UNCERTAIN", for: lead)
+        _ = try await drafts.beginSteerHandoff(for: lead, only: uncertain.id)
+        try await drafts.finishSteerHandoff(uncertain.id, applied: false, uncertain: true, for: lead)
+        leadRunner.emit(.itemStarted(threadId: AgentSupervisor.threadId(for: lead), itemId: "tool-2", kind: .commandExecution, title: "ls"))
+        try await start(epsilon, "Do your part.")
+        try report(epsilon, "EPSILON-REPORT")
+        try await end(epsilon, "Part done.")
+        now.addTimeInterval(9)
+        await s.flushHelperCompletions()
+        let passesBefore = s.qaSteerHandoffPasses
+        let epsilonJoined = await waitUntil(timeout: 3, pollInterval: 0.05) { leadRunner.steers.contains { $0.contains("EPSILON-REPORT") } }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let passes = s.qaSteerHandoffPasses - passesBefore
+        _ = await drafts.removeQueuedMessage(id: uncertain.id, for: lead)
+        await freeLead()
+        verdict(epsilonJoined && passes < 10,
+            "R3-3 an uncertain user steer neither blocks a helper result nor spins the handoff (passes \(passes))")
+
+        // R3-5: a batch for a lead that is deleted is dropped, so the production
+        // timer stops; deleted agents' delivered rows go with them.
+        try await start(orphan, "Do the doomed work.")
+        try report(orphan, "ORPHAN-REPORT")
+        try await end(orphan, "Done.")
+        now.addTimeInterval(9)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let plainRowsBefore = ((try? SpawnResultFile.deliveries(parentCwd: root.path, recipient: lead.rawValue)) ?? [])
+            .filter { $0.helper == plain.rawValue && $0.phase == .delivered }.count
+        _ = s.archive(doomed)
+        _ = s.archive(plain)
+        now.addTimeInterval(9)
+        await s.flushHelperCompletions()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let flushesBefore = s.qaHelperFlushCount
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        let flushesPerSecond = s.qaHelperFlushCount - flushesBefore
+        let plainRowsAfter = ((try? SpawnResultFile.deliveries(parentCwd: root.path, recipient: lead.rawValue)) ?? [])
+            .filter { $0.helper == plain.rawValue && $0.phase == .delivered }.count
+        verdict(flushesPerSecond <= 1 && plainRowsBefore > 0 && plainRowsAfter == 0,
+            "R3-5 a deleted lead's batch stops the timer (\(flushesPerSecond) flushes/s) and deleted agents' delivered rows are pruned (\(plainRowsBefore) -> \(plainRowsAfter))")
+
+        // R3-2 setup: one delegated and one messaged helper are mid-turn when
+        // the "crash" below happens; an old delivered row awaits pruning.
+        try await start(midway, "Long task.")
+        let midwayContext = AgentMessageQueueContext(caller: lead, recipient: messagedMidway, operationId: "midway-message",
+            idempotencyKey: "midway-message", payloadHash: "midway-message")
+        _ = s.deliverAgentMessage("Long messaged task.", from: lead, to: messagedMidway, hops: 0, context: midwayContext)
+        _ = await waitUntil(timeout: 5, pollInterval: 0.02) { pool[messagedMidway]!.openTurns == 1 }
+        var stale = SpawnResultFile.Delivery(helper: UUID(), turn: "stale-turn", recipient: lead.rawValue, now: now.addingTimeInterval(-8 * 86_400))
+        stale.phase = .delivered
+        try SpawnResultFile.saveDelivery(stale, parentCwd: root.path)
+
         // B: a hold survives a restart. Hold, then a fresh supervisor on the
         // same stores (this one never releases it): exactly one delivery.
         try await start(restarter, "Run the long compile.")
@@ -1057,6 +1209,33 @@ enum HelperCompletionChecks {
         verdict(heldRecord && quietBeforeRestart && relaunchedResults().count == 1
             && relaunchedResults()[0].contains("Still compiling.") && results(restarter).isEmpty,
             "B a held turn is journaled and a relaunch delivers it exactly once (relaunched \(relaunchedResults().count))")
+        func relaunchedFrom(_ child: AgentID, _ runner: HeldWakeRunner) -> [String] {
+            (runner.prompts + runner.steers).flatMap(payloads)
+                .filter { $0.senderAgentID == child.rawValue && $0.text.split(separator: "\n").first?.contains(" finished: ") == true }
+                .map(\.text)
+        }
+        let cutOff = [midway, messagedMidway].map { relaunchedFrom($0, relaunchedLead) }
+        let staleGone = (try? SpawnResultFile.delivery(parentCwd: root.path, helper: stale.helper, turn: "stale-turn", recipient: lead.rawValue)) == nil
+        // A second relaunch must not say it again.
+        let secondLead = HeldWakeRunner(autoEnd: true)
+        relaunched.stopAll()
+        let second = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents")),
+            makeRunner: { $0.record.id == lead ? secondLead : HeldWakeRunner(autoEnd: true) }, warn: { _ in },
+            nameTitlerCommand: { _ in nil },
+            submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root.appendingPathComponent("drafts")),
+            transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)),
+            maximumActiveManagedChildren: { nil })
+        defer { second.stopAll() }
+        _ = second.restore()
+        second.helperCompletionNow = { now }
+        now.addTimeInterval(9)
+        await second.flushHelperCompletions()
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let repeated = [midway, messagedMidway, restarter].flatMap { relaunchedFrom($0, secondLead) }
+        verdict(cutOff.allSatisfy { $0.count == 1 && $0[0].contains("Array restarted while this helper was working") }
+            && SpawnResultFile.read(parentCwd: root.path, handle: "midway-message")?.status == .interrupted && repeated.isEmpty,
+            "R3-2 a delegated and a messaged helper cut off by a restart each give their lead ONE delivery, never repeated (\(cutOff.map(\.count)), again \(repeated.count))")
+        verdict(staleGone, "R3-5 a delivered row older than 7 days is pruned on the first flush")
 
         try HelperGuardChecks.expect(failures.isEmpty, "held completions: " + failures.joined(separator: "; "))
     }

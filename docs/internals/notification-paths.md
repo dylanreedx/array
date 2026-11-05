@@ -179,6 +179,33 @@ turn without a report is headed `<name> finished: ended its turn without filing 
 report`; a same-turn report refreshed before admission restores `succeeded`. A
 helper note left in a queue does not keep a relaunched lead's queue paused.
 
+Round 3 of the same change (0.7.44). A lead that is itself a helper counts its
+own Array helpers as background work: while any is running or held, or one of
+their results is batched, queued or in custody, its "waiting" turn end is held
+under the same release rules and cap. A helper that ends its turn blocked or
+asking (a declared `needsYou`, a watchdog flag, or a report with a blocker
+finding) is never held: its wake is headed `finished: needs you: <what>` (or
+`finished: blocked`) and skips the eight-second sibling batching, for
+delegated and message-only helpers alike; the no-progress watchdog alerts a
+message-only helper's lead too. Message subscriptions are durable rows beside
+the delivery records (`.deliveries/subscriptions/`), removed when the message
+settles and read back at restore. A delegated or messaged helper whose turn
+was still running when the previous launch ended gets ONE recorded
+`.turnCompleted(interrupted)` at restore, so its lead receives one delivery
+headed `finished: stopped: Array restarted while this helper was working…`;
+that terminal event is persisted, so a later relaunch does not repeat it, and it
+reaches **SRC-01** as an ordinary interrupted turn (quiet for Mac sounds). A
+pending batch for a deleted lead, or one Array can no longer push into, is
+dropped instead of re-arming the flush timer every 0.1 s. Each lead's journal is
+read once per launch (staged and held rows), where delivered rows older than
+seven days are pruned; archiving an agent prunes delivered rows naming it as
+lead or helper. `operation.get` on a queued message gives a push lead the same
+pointer-only answer as any other lookup. The steer handoff gives user steers
+priority only for steers it would actually take, so an uncertain one no longer
+spins the take-and-return loop. Witnesses: `--helper-completion-check` (R3
+cases, including one driven by the production flush timer on a frozen clock)
+and `--helper-wake-setting-check` (queued-message lookup).
+
 Progress text and output emitted after a result was delivered (the +16 s case,
 or a report filed after the turn) become durable queue NOTES (`helperNote`), one
 per helper, lead and kind, replaced while they wait. A note never starts a turn:

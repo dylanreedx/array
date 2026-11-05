@@ -962,7 +962,10 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
     _ = supervisor.setWorkspaceToolsEnabled(agentID: caller2, true)
     var deliveryClock = Date()
     supervisor.helperCompletionNow = { deliveryClock }
-    supervisor.helperCompletionEnabled = { $0 == parentId || $0 == caller2 }
+    // One channel per recipient: caller A stands in for an agent Array does
+    // not run (it collects, with a leased offer and an acknowledgment); caller
+    // B is Array-run and is pushed its answer by wake. Never both for one.
+    supervisor.helperCompletionEnabled = { $0 == caller2 }
     var routingWakesA: [String] = [], routingWakesB: [String] = []
     let routingObserverA = supervisor.addPromptEchoObserver(for: parentId) { routingWakesA.append($0.text) }
     let routingObserverB = supervisor.addPromptEchoObserver(for: caller2) { routingWakesB.append($0.text) }
@@ -1002,7 +1005,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
             && !routingWakesB.isEmpty
     }
     try expect(routingWakesDrained, "queued B wake reaches its caller")
-    try expect(!routingWakesA.contains { $0.contains("QCALL-A") }, "collection-first queued A must suppress its wake")
+    try expect(!routingWakesA.contains { $0.contains("QCALL-A") }, "collect-channel caller A is never woken with its queued answer")
     try expect(routingWakesB.filter { $0.contains("QCALL-B") }.count == 1, "wake-first queued B reaches its caller once")
     let compactA = try result(dispatch("operation.get", ["operationId": "route-op-a"]), "queued A duplicate read")
     try expect(compactA["childResult"]?.object?["status"]?.string == "already_delivered"
@@ -1124,7 +1127,13 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
     try expect(restartedDelivered, "restored queue delivers once after explicit resume")
     let restartResult = try result(restartAPI.dispatch(agentId: parentId, requestId: "restart-result", op: "operation.get",
         payload: ["operationId": "restart-op"]), "restart result association")
-    try expect((restartResult["childResult"]?.value as? [String: Any])?["status"] as? String == "completed", "restored operation settles")
+    // The restored item settles under its own durable operation. This lead is
+    // Array-run (no stand-in on the restarted supervisor), so its lookup is a
+    // pointer and the answer itself is delivered, never collected.
+    let restartChild = restartResult["childResult"]?.value as? [String: Any]
+    try expect((try? restarted.queuedAgentMessage(caller: parentId, operationId: "restart-op"))??.result?.status == .completed
+               && ["delivery_pending", "already_delivered"].contains(restartChild?["status"] as? String ?? "")
+               && restartChild?["finalText"] == nil, "restored operation settles: \(restartResult)")
     // Return the shared fake session to the original supervisor's later fixture steps.
     restarted.stopAll()
     supervisor.workspaceToolsPermission = { .off }
