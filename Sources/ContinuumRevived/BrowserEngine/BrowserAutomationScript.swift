@@ -134,6 +134,18 @@ enum BrowserAutomationScript {
         const ref = state.refOf.get(el);
         return role + (name ? ' "' + name + '"' : '') + (ref ? ' [ref=' + ref + ']' : '');
       }
+      function selectState(el) {
+        return { multiple: el.multiple, disabled: el.matches(':disabled'),
+          selectedIndices: Array.from(el.options).flatMap((o, index) => o.selected ? [index] : []),
+          selectedValues: Array.from(el.selectedOptions).map(o => o.value),
+          optionsTruncated: el.options.length > 500,
+          options: Array.from(el.options).slice(0, 500).map((o, index) => ({
+            index, value: o.value, label: o.label, selected: o.selected,
+            disabled: el.matches(':disabled') || o.matches(':disabled'),
+            group: o.parentElement.tagName === 'OPTGROUP' ? o.parentElement.label : null,
+            groupDisabled: o.parentElement.tagName === 'OPTGROUP' && o.parentElement.disabled
+          })) };
+      }
       function line(el, role, depth, lines, active) {
         const name = nameOf(el, role);
         let s = role + (name ? ' "' + name.replace(/"/g, '\\"') + '"' : '') + ' [ref=' + refFor(el) + ']';
@@ -147,6 +159,7 @@ enum BrowserAutomationScript {
         if (el.tagName === 'A' && el.getAttribute('href')) s += ' [url=' + collapse(el.getAttribute('href'), 120) + ']';
         const value = valueOf(el);
         if (value !== null && value !== '' && role !== 'button') s += ' value="' + collapse(value, 200).replace(/"/g, '\\"') + '"';
+        if (el.tagName === 'SELECT') s += ' htmlSelect=' + JSON.stringify(selectState(el));
         lines.push({ d: depth, k: 'e', s: s });
       }
       function walk(node, depth, lines, counter, active) {
@@ -263,6 +276,42 @@ enum BrowserAutomationScript {
           if (typeof el.select === 'function') el.select();
           else { const sel = el.ownerDocument.getSelection(); sel.selectAllChildren(el); }
           return { ok: true };
+        },
+        selectOptions(a) {
+          const el = element(a.ref);
+          if (!el) return { stale: true };
+          if (el.tagName !== 'SELECT' || el.namespaceURI !== 'http://www.w3.org/1999/xhtml') return { error: 'Use select only on HTML SELECT elements. Custom ARIA widgets use their normal widget actions.' };
+          if (el.options.length > 500) return { error: 'This select has more than 500 options; selection is unsupported.' };
+          const before = selectState(el);
+          if (new TextEncoder().encode(JSON.stringify(before)).byteLength > 55000) return { error: 'Select listing exceeds the size limit.' };
+          if (a.options === undefined) return before;
+          if (before.disabled) return { error: 'This select is disabled.' };
+          if (!el.multiple && a.options.length !== 1) return { error: 'A single select requires exactly one option.' };
+          const indices = [];
+          for (const requested of a.options) {
+            const matches = before.options.filter(o => o.value === requested.value && (requested.index === undefined || o.index === requested.index));
+            if (matches.length !== 1) return { error: 'Option value is missing or ambiguous. List options and specify an index for duplicate values.' };
+            if (matches[0].disabled) return { error: 'The requested option or its group is disabled.' };
+            if (indices.includes(matches[0].index)) return { error: 'The same option was requested twice.' };
+            indices.push(matches[0].index);
+          }
+          indices.sort((a, b) => a - b);
+          const requestedValues = indices.map(index => before.options[index].value);
+          const projected = { ...before, selectedIndices: indices, selectedValues: requestedValues,
+            options: before.options.map(o => ({ ...o, selected: indices.includes(o.index) })) };
+          if (new TextEncoder().encode(JSON.stringify(projected)).byteLength > 55000) return { error: 'The requested selection exceeds the result size limit.' };
+          // Every validation above precedes the first DOM write.
+          const setter = Object.getOwnPropertyDescriptor(el.ownerDocument.defaultView.HTMLOptionElement.prototype, 'selected').set;
+          // Clear first: setting a later option on a single select deselects
+          // earlier ones as part of the platform's selectedness algorithm.
+          for (const option of el.options) setter.call(option, false);
+          for (const index of indices) setter.call(el.options[index], true);
+          if (JSON.stringify(before.selectedIndices) !== JSON.stringify(indices)) {
+            const EventType = el.ownerDocument.defaultView.Event;
+            el.dispatchEvent(new EventType('input', { bubbles: true }));
+            el.dispatchEvent(new EventType('change', { bubbles: true }));
+          }
+          return { ...selectState(el), requestedIndices: indices, requestedValues };
         },
         scroll(a) {
           if (a.ref) {

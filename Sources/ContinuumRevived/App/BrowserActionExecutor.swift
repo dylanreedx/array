@@ -37,6 +37,8 @@ enum BrowserActionExecutor {
                 }
             case let .type(tile, text, ref, clear, submit, _) where tile == runtime.tileId:
                 return outcome(try await engine.type(text, ref: ref, clear: clear, submit: submit, deadline: deadline))
+            case let .select(tile, ref, options, _) where tile == runtime.tileId:
+                return outcome(try await engine.selectOptions(ref: ref, options: options, deadline: deadline))
             case let .pressKey(tile, name, _) where tile == runtime.tileId:
                 return outcome(try await engine.pressKey(name, deadline: deadline))
             case let .scroll(tile, ref, dx, dy, _) where tile == runtime.tileId:
@@ -96,7 +98,7 @@ enum BrowserActionExecutor {
             let code: WorkspaceAPIError.Code
             switch error {
             case .notLive: code = .browserNotLive
-            case .timedOut: code = .outcomeUnknown
+            case .selectionNotRetained, .timedOut: code = .outcomeUnknown
             case .userTyping: code = .busy
             case .staleRef, .notVisible, .covered, .notEditable, .focusRefused, .focusChanged: code = .targetConflict
             case .unknownKey, .script: code = .invalidRequest

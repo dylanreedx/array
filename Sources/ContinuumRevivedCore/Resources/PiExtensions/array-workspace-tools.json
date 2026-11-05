@@ -1818,6 +1818,63 @@
       }
     },
     {
+      "name": "array_browser_select",
+      "label": "Array Browser Select",
+      "op": "browser.select",
+      "description": "List or select options on a native HTML SELECT without opening its popup. Omit options to list; pass options to replace selection. The result value is JSON with multiple, disabled, and option index/value/label/group/selected/disabled fields. Duplicate values require an explicit index. Emits untrusted input/change events and reads back after reconciliation; inspect application state before proceeding. Custom ARIA widgets use their normal widget actions.",
+      "promptSnippet": "List or select native HTML options without opening a popup.",
+      "promptGuidelines": [
+        "Use a snapshot ref. List first, then select by exact value; provide index when values repeat. Do not use click or keys to open native select menus."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Element ref from the latest snapshot."
+          },
+          "options": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId",
+          "ref"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "array_notify",
       "label": "Array Notify",
       "op": "agent.notify",

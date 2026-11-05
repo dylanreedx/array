@@ -328,6 +328,10 @@ private func checkBrowserRequests() {
         return try? BrowserToolRequest.decode(operation: op, data: data)
     }
     let id = tile.uuidString
+    expect(decode("browser.select", ["tileId": id, "ref": "e1"]) == .select(tile: tile, ref: "e1", options: nil, key: nil), "select listing decodes")
+    expect(decode("browser.select", ["tileId": id, "ref": "e1", "options": [["value": "b", "index": 2]]]) == .select(tile: tile, ref: "e1", options: [BrowserSelectOption(value: "b", index: 2)], key: nil), "select duplicate disambiguation decodes")
+    expect(decode("browser.select", ["tileId": id, "ref": "e1", "options": [["value": "b", "index": -1]]]) == nil, "negative select index is rejected")
+    expect(WorkspaceAPIOp.approvalGatedOperations.contains(.browserSelect) && !WorkspaceAPIOp.sessionPresetOperations.contains(.browserSelect), "select requires browser-control grants")
     expect(decode("browser.open", ["url": "http://localhost:3000"]) == .open(url: "http://localhost:3000", key: nil), "browser open decodes")
     expect(decode("browser.click", ["tileId": id, "ref": "e1"]) == .click(tile: tile, target: .ref("e1"), key: nil), "browser click ref decodes")
     expect(decode("browser.click", ["tileId": id, "x": 12, "y": 4]) == .click(tile: tile, target: .point(12, 4), key: nil), "browser click coordinates decode")

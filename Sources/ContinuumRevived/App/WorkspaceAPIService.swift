@@ -426,7 +426,7 @@ final class WorkspaceAPIService {
             return
         }
         if let operation = WorkspaceAPIOp(rawValue: op), [.browserNavigate, .browserSnapshot, .browserClick, .browserType,
-            .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole].contains(operation) {
+            .browserSelect, .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole].contains(operation) {
             dispatchBrowserAction(agentId: agentId, requestId: requestId, operation: operation, payload: payload,
                                   isCancelled: isCancelled, completion: completion)
             return
@@ -507,7 +507,7 @@ final class WorkspaceAPIService {
                                requestId: requestId, payload: payload, runtime: runtime,
                                canvas: canvas, isCancelled: isCancelled)
         case .browserOpen, .browserNavigate, .browserSnapshot, .browserClick, .browserType,
-             .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole:
+             .browserSelect, .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole:
             return .error(WorkspaceAPIError(code: .unsupported, message: "Browser tools are not available yet."))
         case .agentReport:
             return fileReport(agentId: agentId, ownHandle: ownHandle, payload: payload)

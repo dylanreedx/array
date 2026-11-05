@@ -25,6 +25,7 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
     case covered(target: String, by: String)
     case notEditable(String)
     case focusRefused(String)
+    case selectionNotRetained
     case focusChanged
     case userTyping
     case unknownKey(String)
@@ -46,6 +47,8 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
             return "\(what) is not a text field. Type into a textbox, or use press_key."
         case .focusRefused(let what):
             return "Clicking \(what) did not focus it, so nothing was typed. Take a fresh snapshot and check what took focus."
+        case .selectionNotRetained:
+            return "The requested selection could not be verified after page events and reconciliation. Application handlers may have changed it; inspect the page before another action."
         case .focusChanged:
             return "Keyboard focus moved outside this browser. Typing stopped before delivering more keys; a prefix may already be on the page. Take a snapshot before deciding what remains."
         case .userTyping:
@@ -342,6 +345,40 @@ final class BrowserAutomation {
                 self.deliverKey(key, flags: flags, window: window)
             }
             return ("Pressed \(combo)", nil)
+        }
+    }
+
+    /// Semantic HTML SELECT operation. Validation and selectedness writes happen
+    /// in one JavaScript turn. Page listeners receive untrusted input/change.
+    func selectOptions(ref: String, options: [BrowserSelectOption]?, deadline: Date) async throws -> BrowserAutomationOutcome {
+        let inputAtStart = userInputCount
+        return try await act(deadline: deadline) {
+            try self.requireInputControl(inputAtStart, deadline: deadline)
+            var args: [String: Any] = ["ref": ref]
+            if let options { args["options"] = options.map { option -> [String: Any] in
+                var row: [String: Any] = ["value": option.value]
+                if let index = option.index { row["index"] = index }
+                return row
+            } }
+            let selected = try await self.world("selectOptions", args, deadline: deadline)
+            if selected["stale"] as? Bool == true { throw BrowserAutomationError.staleRef(ref) }
+            if let error = selected["error"] as? String { throw BrowserAutomationError.script(error) }
+            var readback = selected
+            if options != nil {
+                try await self.pause(0.1, deadline: deadline)
+                readback = try await self.world("selectOptions", ["ref": ref], deadline: deadline)
+                guard readback["stale"] as? Bool != true,
+                      (readback["selectedIndices"] as? [Int]) == (selected["requestedIndices"] as? [Int]),
+                      (readback["selectedValues"] as? [String]) == (selected["requestedValues"] as? [String]) else {
+                    throw BrowserAutomationError.selectionNotRetained
+                }
+            }
+            let data = try JSONSerialization.data(withJSONObject: readback, options: [.sortedKeys, .withoutEscapingSlashes])
+            guard data.count <= 60_000 else {
+                if options != nil { throw BrowserAutomationError.selectionNotRetained }
+                throw BrowserAutomationError.script("Select listing exceeds 60 KB.")
+            }
+            return (options == nil ? "Listed HTML select options" : "Selected HTML options; inspect application state", String(decoding: data, as: UTF8.self))
         }
     }
 

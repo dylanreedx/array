@@ -397,7 +397,7 @@ extension WorkspaceAPIService {
         }
         if decision != .allowOnce {
             let operations: Set<WorkspaceAPIOp> = [.browserOpen, .browserNavigate, .browserClick, .browserType,
-                .browserPressKey, .browserScroll, .browserWaitFor, .browserEvaluate]
+                .browserSelect, .browserPressKey, .browserScroll, .browserWaitFor, .browserEvaluate]
             mint(WorkspaceToolGrant(agentId: agentId, checkoutHandles: [handle], operations: operations,
                 presentationCeiling: .preserveAll, issuer: Self.sessionIssuer(decision, requestId: promptId),
                 revocationGeneration: generation))
@@ -415,7 +415,7 @@ extension WorkspaceAPIService {
         var timeout: TimeInterval = 15
         switch request {
         case let .navigate(tile, _, key), let .snapshot(tile, key), let .click(tile, _, key), let .type(tile, _, _, _, _, key),
-             let .pressKey(tile, _, key), let .scroll(tile, _, _, _, key), let .screenshot(tile, _, key),
+             let .select(tile, _, _, key), let .pressKey(tile, _, key), let .scroll(tile, _, _, _, key), let .screenshot(tile, _, key),
              let .evaluate(tile, _, key), let .console(tile, _, key): tileId = tile; suppliedKey = key
         case let .waitFor(tile, _, seconds, key): tileId = tile; suppliedKey = key; timeout = max(15, seconds + 5)
         default: completion(.error(WorkspaceAPIError(code: .unsupported, message: "That browser action is not available yet."))); return

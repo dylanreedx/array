@@ -72,6 +72,7 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     // rename or delete a whole board. Appended last.
     case boardManage = "board.manage"
     case agentSchedule = "agent.schedule"
+    case browserSelect = "browser.select"
 }
 
 // MARK: - Identity
