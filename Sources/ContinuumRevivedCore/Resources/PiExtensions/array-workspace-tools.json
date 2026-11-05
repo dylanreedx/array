@@ -1492,7 +1492,8 @@
       "description": "Click an element ref or CSS coordinates.",
       "promptSnippet": "Click an element ref or CSS coordinates.",
       "promptGuidelines": [
-        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell.",
+        "HTML SELECT activation is refused; use array_browser_select. This preflight does not universally prevent native pickers opened by arbitrary page scripts or delayed showPicker calls."
       ],
       "parameters": {
         "type": "object",
@@ -1546,7 +1547,8 @@
       "description": "Type text into an element or the focused field.",
       "promptSnippet": "Type text into an element or the focused field.",
       "promptGuidelines": [
-        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell.",
+        "Typing stops if external input invalidates its target. A prefix may already be on the page; inspect before retrying."
       ],
       "parameters": {
         "type": "object",
@@ -1592,7 +1594,9 @@
       "description": "Send a named key or shortcut.",
       "promptSnippet": "Send a named key or shortcut.",
       "promptGuidelines": [
-        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell.",
+        "HTML SELECT activation is refused; use array_browser_select. This preflight does not universally prevent native pickers opened by arbitrary page scripts or delayed showPicker calls.",
+        "If keyboard focus belongs to another tile, keys are refused to protect its text. Inspect before retrying."
       ],
       "parameters": {
         "type": "object",

@@ -307,6 +307,7 @@ func runWorkspaceAPIBrowserCheck() throws {
         throw WorkspaceAPIChecks.Failure(message: "user browser control must ask even under Free")
     }
     handOverAllowed = true
+    window.makeFirstResponder(userBrowser.webView)
     let reapprovalInputs = userBrowser.automation.userInputCount
     let reapproval = try rawCall("browser.press_key", ["tileId": userTile, "keyName": "Enter"])
     guard reapproval["status"] as? String == "ok" else {
@@ -314,6 +315,11 @@ func runWorkspaceAPIBrowserCheck() throws {
     }
     window.makeFirstResponder(userBrowser.webView)
     let otherBrowserInputCount = userBrowser.automation.userInputCount
+    let foreignKey = try rawCall("browser.press_key", ["tileId": target, "keyName": "Enter"])
+    guard (foreignKey["error"] as? [String: Any])?["code"] as? String == "outcome_unknown" else {
+        throw WorkspaceAPIChecks.Failure(message: "a native key must not be forwarded into another browser's responder")
+    }
+    window.makeFirstResponder(restarted.webView)
     _ = try call("browser.press_key", ["tileId": target, "keyName": "Enter"])
     guard userBrowser.automation.userInputCount == otherBrowserInputCount && userBrowser.automation.isEngaged else {
         throw WorkspaceAPIChecks.Failure(message: "agent input in another tile must not masquerade as user takeover here")

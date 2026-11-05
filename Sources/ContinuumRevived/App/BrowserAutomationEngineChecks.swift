@@ -210,6 +210,13 @@ private final class BrowserAutomationEngineCheck {
         try expect(window.firstResponder === userField && userField.string.isEmpty, "typing disturbed the user's field: \(String(describing: window.firstResponder)) '\(userField.string)'")
         let replaced = try await engine.type("x", ref: email, clear: true, deadline: soon)
         try expect(replaced.value == "x", "clear did not replace the field: \(String(describing: replaced.value))")
+        try await expectError({ $0 == .focusChanged }, "native key while the sibling owns the responder") {
+            _ = try await self.engine.pressKey("Backspace", deadline: self.soon)
+        }
+        let modelAfterRefusedKey = try await page("() => window.model") as? String
+        try expect(userField.string.isEmpty && modelAfterRefusedKey == "x",
+                   "refused key must change neither the sibling nor the page")
+        window.makeFirstResponder(runtime.webView)
         _ = try await engine.pressKey("Backspace", deadline: soon)
         try expect(try await page("() => window.model") as? String == "", "Backspace did not reach the field")
 

@@ -25,6 +25,8 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
     case covered(target: String, by: String)
     case notEditable(String)
     case focusRefused(String)
+    case nativeSelectUnsupported
+    case uninspectableFrame
     case selectionNotRetained
     case focusChanged
     case userTyping
@@ -47,6 +49,10 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
             return "\(what) is not a text field. Type into a textbox, or use press_key."
         case .focusRefused(let what):
             return "Clicking \(what) did not focus it, so nothing was typed. Take a fresh snapshot and check what took focus."
+        case .nativeSelectUnsupported:
+            return "Native HTML SELECT activation is unsupported for agent clicks and keys. Use array_browser_select to list and pick options without opening a native menu."
+        case .uninspectableFrame:
+            return "This frame cannot be inspected before native input, so picker safety cannot be established. Use array_browser_select on an accessible HTML select; this frame requires manual interaction."
         case .selectionNotRetained:
             return "The requested selection could not be verified after page events and reconciliation. Application handlers may have changed it; inspect the page before another action."
         case .focusChanged:
@@ -116,6 +122,8 @@ final class BrowserAutomation {
     var onUserInput: (() -> Void)?
     var onAgentClick: ((NSPoint) -> Void)?
     var _screenshotStarted: (() -> Void)?
+    var _beforeNativeInputForChecks: (() throws -> Void)?
+    var _afterAgentCharacterForChecks: (() -> Void)?
     private(set) var lastUserKeyAt: Date?
     private var inputSurfaceIds: Set<ObjectIdentifier> = []
     private var agentDeliveryDepth = 0
@@ -146,6 +154,8 @@ final class BrowserAutomation {
         onUserInput = nil
         onAgentClick = nil
         _screenshotStarted = nil
+        _beforeNativeInputForChecks = nil
+        _afterAgentCharacterForChecks = nil
         for fingerprint in agentInputFingerprints where Self.syntheticInputs[fingerprint]?.engine === self {
             Self.syntheticInputs[fingerprint] = nil
         }
@@ -231,9 +241,10 @@ final class BrowserAutomation {
             let window = try self.liveWindow()
             let target = try await self.world("target", ["ref": ref], deadline: deadline)
             try Self.requireTarget(target, ref: ref, mustLand: true)
+            try Self.requireNativeInputTarget(target)
             try await self.settleIfRevealed()
             try self.requireInputControl(inputAtStart, deadline: deadline)
-            self.deliverClick(cssX: Self.double(target["x"]), cssY: Self.double(target["y"]), window: window, count: doubleClick ? 2 : 1)
+            try self.deliverClick(cssX: Self.double(target["x"]), cssY: Self.double(target["y"]), window: window, count: doubleClick ? 2 : 1)
             return ("Clicked \(target["what"] as? String ?? ref)", nil)
         }
     }
@@ -243,9 +254,10 @@ final class BrowserAutomation {
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
             let hit = try await self.world("at", ["x": x, "y": y], deadline: deadline)
+            try Self.requireNativeInputTarget(hit)
             try await self.settleIfRevealed()
             try self.requireInputControl(inputAtStart, deadline: deadline)
-            self.deliverClick(cssX: x, cssY: y, window: window, count: doubleClick ? 2 : 1)
+            try self.deliverClick(cssX: x, cssY: y, window: window, count: doubleClick ? 2 : 1)
             return ("Clicked at \(Int(x)),\(Int(y)), on \(hit["what"] as? String ?? "nothing")", nil)
         }
     }
@@ -258,16 +270,24 @@ final class BrowserAutomation {
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
-            // Never carry an obsolete responder across asynchronous page work.
+            // Keep restoration across every yield conditional on no external
+            // input anywhere in Array, and on our browser still owning focus.
+            let responder = window.firstResponder
+            let focusInput = Self.focusInputGeneration
+            defer { self.restore(responder, in: window, inputGeneration: focusInput) }
             var what = "the focused element"
             if let ref {
                 let target = try await self.world("target", ["ref": ref], deadline: deadline)
                 try Self.requireTarget(target, ref: ref, mustLand: true)
+                try Self.requireNativeInputTarget(target)
                 what = target["what"] as? String ?? ref
                 guard target["editable"] as? Bool == true else { throw BrowserAutomationError.notEditable(what) }
                 try await self.settleIfRevealed()
                 try self.requireInputControl(inputAtStart, deadline: deadline)
-                self.deliverClick(cssX: Self.double(target["x"]), cssY: Self.double(target["y"]), window: window, count: 1)
+                guard window.firstResponder === responder else { throw BrowserAutomationError.focusChanged }
+                // The type action owns this borrow until its guarded defer.
+                // Restoring inside this click blurs the target before its keys.
+                try self.deliverClick(cssX: Self.double(target["x"]), cssY: Self.double(target["y"]), window: window, count: 1, restoreFocus: false)
                 try await self.pause(0.05, deadline: deadline)
                 let focus = try await self.world("focusedIs", ["ref": ref], deadline: deadline)
                 guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
@@ -277,22 +297,27 @@ final class BrowserAutomation {
                 }
             }
             try self.requireInputControl(inputAtStart, deadline: deadline)
-            if clear && text.isEmpty { self.deliverKey(Self.namedKeys["Backspace"]!, flags: [], window: window) }
+            try await self.preflightKeyboard(deadline: deadline)
+            try self.requireInputControl(inputAtStart, deadline: deadline)
+            if clear && text.isEmpty {
+                try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
+                self.deliverKey(Self.namedKeys["Backspace"]!, flags: [], window: window)
+            }
             for character in text {
-                guard let current = window.firstResponder as? NSView,
-                      current === self.webView || current.isDescendant(of: self.webView) else {
-                    throw BrowserAutomationError.focusChanged
-                }
+                try await self.preflightKeyboard(deadline: deadline)
+                try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
                 try self.requireInputControl(inputAtStart, deadline: deadline)
                 self.deliverCharacter(character, window: window)
+                self._afterAgentCharacterForChecks?()
                 // WebKit consumes trusted input asynchronously. A small yield
                 // keeps long bursts from losing keys and lets user input win.
                 try await self.pause(0.005, deadline: deadline)
             }
             try self.requireInputControl(inputAtStart, deadline: deadline)
             if submit {
-                guard let current = window.firstResponder as? NSView,
-                      current === self.webView || current.isDescendant(of: self.webView) else { throw BrowserAutomationError.focusChanged }
+                try await self.preflightKeyboard(deadline: deadline)
+                try self.requireInputControl(inputAtStart, deadline: deadline)
+                try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
                 self.deliverKey(Self.namedKeys["Enter"]!, flags: [], window: window)
             }
             var value: String?
@@ -333,10 +358,13 @@ final class BrowserAutomation {
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
+            try await self.preflightKeyboard(deadline: deadline)
+            try self.requireKeyboardResponder(in: window)
             let responder = window.firstResponder
             let focusInput = Self.focusInputGeneration
             defer { self.restore(responder, in: window, inputGeneration: focusInput) }
             try self.requireInputControl(inputAtStart, deadline: deadline)
+            try self._beforeNativeInputForChecks?()
             // A Cmd+A key event selects nothing in a web view (probe p2); the
             // responder action does.
             if flags == .command, keyName.lowercased() == "a" {
@@ -515,6 +543,28 @@ final class BrowserAutomation {
         guard Date() < deadline else { throw BrowserAutomationError.timedOut("before sending browser input", throttled: isThrottled) }
     }
 
+    private static func requireNativeInputTarget(_ target: [String: Any]) throws {
+        if target["uninspectableFrame"] as? Bool == true { throw BrowserAutomationError.uninspectableFrame }
+        if target["nativeSelect"] as? Bool == true { throw BrowserAutomationError.nativeSelectUnsupported }
+    }
+
+    private func preflightKeyboard(deadline: Date) async throws {
+        try Self.requireNativeInputTarget(try await world("keyboardTarget", [:], deadline: deadline))
+    }
+
+    private func requireKeyboardResponder(in window: NSWindow) throws {
+        guard let current = window.firstResponder as? NSView,
+              current === webView || current.isDescendant(of: webView) else { throw BrowserAutomationError.focusChanged }
+    }
+
+    private func requireTypingResponder(in window: NSWindow, original: NSResponder?, inputGeneration: UInt64) throws {
+        // In inactive windows WebKit can consume trusted typing while leaving
+        // the original host responder alone. Preserve that supported path only
+        // while no external input or responder change has invalidated it.
+        if Self.focusInputGeneration == inputGeneration, window.firstResponder === original { return }
+        try requireKeyboardResponder(in: window)
+    }
+
     private func liveWindow() throws -> NSWindow {
         guard let runtime, !runtime.isTerminated, let window = webView.window else { throw BrowserAutomationError.notLive }
         return window
@@ -528,7 +578,8 @@ final class BrowserAutomation {
         if wasHidden && !hidden { try await Task.sleep(nanoseconds: 50_000_000) }
     }
 
-    private func deliverClick(cssX: Double, cssY: Double, window: NSWindow, count: Int) {
+    private func deliverClick(cssX: Double, cssY: Double, window: NSWindow, count: Int, restoreFocus: Bool = true) throws {
+        try _beforeNativeInputForChecks?()
         agentDeliveryDepth += 1
         defer { agentDeliveryDepth -= 1 }
         let zoom = webView.pageZoom
@@ -542,7 +593,7 @@ final class BrowserAutomation {
             webView.mouseDown(with: down)
             webView.mouseUp(with: Self.mouseEvent(.leftMouseUp, at: point, window: window, clickCount: clickCount))
         }
-        restore(responder, in: window, inputGeneration: focusInput)
+        if restoreFocus { restore(responder, in: window, inputGeneration: focusInput) }
         onAgentClick?(local)
     }
 

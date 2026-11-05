@@ -209,18 +209,66 @@ enum BrowserAutomationScript {
         if (el.shadowRoot) walk(el.shadowRoot, depth, lines, counter, active);
         walk(el, depth, lines, counter, active);
       }
+      function frameInputSafe(frame) {
+        for (let node = frame; node; node = node.assignedSlot || node.parentElement || node.getRootNode().host) {
+          const style = node.ownerDocument.defaultView.getComputedStyle(node);
+          for (const property of ['transform', 'perspective', 'translate', 'rotate', 'scale']) {
+            if (style[property] && style[property] !== 'none') return false;
+          }
+          if (style.zoom && style.zoom !== '1' && style.zoom !== 'normal') return false;
+        }
+        return true;
+      }
       function frameOffset(el) {
         let x = 0, y = 0;
         let win = el.ownerDocument.defaultView;
         while (win && win !== window) {
           const frame = win.frameElement;
           if (!frame) break;
+          if (!frameInputSafe(frame)) return { x, y, uninspectableFrame: true };
           const r = frame.getBoundingClientRect();
           x += r.left + frame.clientLeft;
           y += r.top + frame.clientTop;
           win = win.parent;
         }
         return { x, y };
+      }
+      function isNativeSelect(el) {
+        if (!el) return false;
+        const select = el.tagName === 'SELECT' ? el : el.closest('select');
+        if (select && select.namespaceURI === 'http://www.w3.org/1999/xhtml') return true;
+        const label = el.tagName === 'LABEL' ? el : el.closest('label');
+        return !!label && !!label.control && label.control.tagName === 'SELECT' && label.control.namespaceURI === 'http://www.w3.org/1999/xhtml';
+      }
+      function inspectPoint(doc, x, y) {
+        let hit = doc.elementFromPoint(x, y);
+        while (hit) {
+          if (hit.shadowRoot) {
+            const inner = hit.shadowRoot.elementFromPoint(x, y);
+            if (inner && inner !== hit) { hit = inner; continue; }
+          }
+          if (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') {
+            try {
+              const child = hit.contentDocument;
+              if (!child || child.readyState !== 'complete' || !frameInputSafe(hit)) return { uninspectableFrame: true };
+              const r = hit.getBoundingClientRect();
+              x -= r.left + hit.clientLeft; y -= r.top + hit.clientTop;
+              doc = child; hit = doc.elementFromPoint(x, y); continue;
+            } catch (_) { return { uninspectableFrame: true }; }
+          }
+          break;
+        }
+        return { hit, nativeSelect: isNativeSelect(hit) };
+      }
+      function keyboardTarget() {
+        let active = deepActive(document);
+        while (active && (active.tagName === 'IFRAME' || active.tagName === 'FRAME')) {
+          try {
+            if (!active.contentDocument) return { uninspectableFrame: true };
+            active = deepActive(active.contentDocument);
+          } catch (_) { return { uninspectableFrame: true }; }
+        }
+        return { nativeSelect: isNativeSelect(active) };
       }
       function element(ref) {
         const weak = state.byRef.get(ref);
@@ -250,21 +298,26 @@ enum BrowserAutomationScript {
           const cx = Math.min(Math.max(rect.left + rect.width / 2, 0), view.innerWidth - 1);
           const cy = Math.min(Math.max(rect.top + rect.height / 2, 0), view.innerHeight - 1);
           const hit = el.ownerDocument.elementFromPoint(cx, cy);
+          const inspected = inspectPoint(el.ownerDocument, cx, cy);
           let lands = !!hit && (hit === el || el.contains(hit) || (hit.tagName === 'LABEL' && hit.control === el));
           if (!lands && hit && el.getRootNode() instanceof ShadowRoot) lands = hit.contains(el);
           const offset = frameOffset(el);
+          const topInspection = offset.uninspectableFrame ? { uninspectableFrame: true } : inspectPoint(document, cx + offset.x, cy + offset.y);
           return {
             x: cx + offset.x, y: cy + offset.y,
             rect: { x: rect.left + offset.x, y: rect.top + offset.y, w: rect.width, h: rect.height },
             lands, cover: lands ? null : describe(hit), what: describe(el),
+            nativeSelect: isNativeSelect(el) || inspected.nativeSelect || topInspection.nativeSelect,
+            uninspectableFrame: inspected.uninspectableFrame || offset.uninspectableFrame || topInspection.uninspectableFrame,
             editable: el.tagName === 'TEXTAREA' || el.isContentEditable ||
               (el.tagName === 'INPUT' && !['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'range', 'file', 'color', 'hidden'].includes((el.type || '').toLowerCase())),
           };
         },
         at(a) {
-          const hit = document.elementFromPoint(a.x, a.y);
-          return { what: describe(hit) };
+          const inspected = inspectPoint(document, a.x, a.y);
+          return { what: describe(inspected.hit), nativeSelect: inspected.nativeSelect, uninspectableFrame: inspected.uninspectableFrame };
         },
+        keyboardTarget() { return keyboardTarget(); },
         focusedIs(a) {
           const el = element(a.ref);
           const active = deepActive(document);

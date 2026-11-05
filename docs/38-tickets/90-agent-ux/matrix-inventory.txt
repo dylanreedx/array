@@ -1010,3 +1010,14 @@ check --helper-wait-input-check
 leg run_app_check .build/debug/Array --helper-wait-input-check
 leg run_leg python3 scripts/check-interruptible-helper-waits.py
 leg run_leg node --experimental-strip-types --no-warnings scripts/check-pi-helper-waits.mjs
+check --browser-focus-restoration-check
+leg run_app_check .build/debug/Array --browser-focus-restoration-check
+check --browser-select-check
+leg run_app_check .build/debug/Array --browser-select-check
+check --browser-native-select-preflight-check
+leg run_app_check .build/debug/Array --browser-native-select-preflight-check
+check --workspace-api-agents-contract-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check

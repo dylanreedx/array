@@ -6189,6 +6189,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-native-select-preflight-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserNativeSelectPreflightCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-select-check") {
             do {
                 _ = NSApplication.shared

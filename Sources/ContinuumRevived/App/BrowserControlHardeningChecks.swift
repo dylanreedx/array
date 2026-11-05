@@ -242,7 +242,7 @@ private func runProductionSheetScenario() throws {
     h.pump(3) { user.title == "Billing dashboard" }
     var response: [String: Any]?
     h.f.api.handleMCPRequest(["agentId": h.f.agentId.rawValue.uuidString, "requestId": UUID().uuidString,
-                              "op": "browser.press_key", "payload": ["tileId": user.tileId.uuidString, "keyName": "Enter"]]) { response = $0 }
+                              "op": "browser.scroll", "payload": ["tileId": user.tileId.uuidString, "dy": 0]]) { response = $0 }
     h.pump(3) { h.window.attachedSheet != nil }
     let text = h.sheetText() ?? ""
     try expect(text.contains("Billing dashboard") && text.contains("Default"),
@@ -282,7 +282,7 @@ private func runRevocationReleaseScenario() throws {
     defer { h.tearDown() }
     let user = try h.userBrowser()
     h.f.api.browserHandOverApprovalHandler = { _, _, _, reply in reply(true); return {} }
-    _ = try h.ok("browser.press_key", ["tileId": user.tileId.uuidString, "keyName": "Enter"])
+    _ = try h.ok("browser.scroll", ["tileId": user.tileId.uuidString, "dy": 0])
     try expect(user.agentNavigationDecision != nil, "a handed-over tile carries the agent gate while it acts")
     h.f.api.revoke(agentId: h.f.agentId)
     try expect(user.agentNavigationDecision == nil && !user.automation.isEngaged,
