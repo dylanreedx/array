@@ -31,12 +31,19 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
     public static let finalTextByteCap = 32 * 1024
 
     public enum Status: String, Codable, Sendable {
+        case deliveryPending = "delivery_pending"
+        case alreadyDelivered = "already_delivered"
         case spawned
         case refused
         case completed
         case failed
         case interrupted
     }
+
+    public var turnIdentity: String?
+    public var recipientId: UUID?
+    public var deliveredVia: String?
+    public var deliveryReceipt: String?
 
     public var schema: Int
     public var toolCallId: String
@@ -63,8 +70,16 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         finalText: String? = nil,
         finalTextTruncated: Bool? = nil,
         endedAt: Date? = nil,
-        report: AgentReport? = nil
+        report: AgentReport? = nil,
+        turnIdentity: String? = nil,
+        recipientId: UUID? = nil,
+        deliveredVia: String? = nil,
+        deliveryReceipt: String? = nil
     ) {
+        self.turnIdentity = turnIdentity
+        self.recipientId = recipientId
+        self.deliveredVia = deliveredVia
+        self.deliveryReceipt = deliveryReceipt
         self.schema = schema
         self.toolCallId = toolCallId
         self.status = status
@@ -123,6 +138,123 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         return try? JSONCodec.makeDecoder().decode(SpawnResultFile.self, from: data)
     }
 
+    public struct Delivery: Codable, Equatable, Sendable {
+        public enum Phase: String, Codable, Sendable { case available, offered, stagingWake, delivered }
+        public var phase: Phase = .available
+        public var helper: UUID
+        public var turn: String
+        public var recipient: UUID
+        public var receipt = UUID().uuidString
+        public var requestId: String?
+        public var leaseUntil: Date?
+        public var wakeID: UUID?
+        public var text: String?
+        public var capturedReport: Bool?
+        public var result: SpawnResultFile?
+        public var dueAt: Date
+        public var completedAt: Date
+        public var via: String?
+        public init(helper: UUID, turn: String, recipient: UUID, wakeID: UUID? = nil, text: String? = nil, now: Date) {
+            self.helper = helper; self.turn = turn; self.recipient = recipient
+            self.wakeID = wakeID; self.text = text; self.dueAt = now.addingTimeInterval(8); self.completedAt = now
+        }
+    }
+    public static func deliveryURL(parentCwd: String, helper: UUID, turn: String, recipient: UUID) -> URL? {
+        guard validatedHandle(turn) != nil else { return nil }
+        return directory(parentCwd: parentCwd).appendingPathComponent(".deliveries", isDirectory: true)
+            .appendingPathComponent("\(helper.uuidString)-\(turn)-\(recipient.uuidString).json")
+    }
+    public static func delivery(parentCwd: String, helper: UUID, turn: String, recipient: UUID) throws -> Delivery? {
+        guard let url = deliveryURL(parentCwd: parentCwd, helper: helper, turn: turn, recipient: recipient) else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+        do { return try JSONCodec.makeDecoder().decode(Delivery.self, from: Data(contentsOf: url)) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
+    }
+    public static func saveDelivery(_ delivery: Delivery, parentCwd: String) throws {
+        guard let url = deliveryURL(parentCwd: parentCwd, helper: delivery.helper, turn: delivery.turn, recipient: delivery.recipient) else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        try AtomicWriter(retainedBackups: 0).write(delivery, to: url)
+    }
+    public static func deliveries(parentCwd: String, recipient: UUID) throws -> [Delivery] {
+        let dir = directory(parentCwd: parentCwd).appendingPathComponent(".deliveries")
+        let urls: [URL]
+        do { urls = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
+        return try urls.filter { $0.pathExtension == "json" }.map {
+            try JSONCodec.makeDecoder().decode(Delivery.self, from: Data(contentsOf: $0))
+        }.filter { $0.recipient == recipient }
+    }
+    public static func markDelivered(_ delivery: Delivery, parentCwd: String) {
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory(parentCwd: parentCwd), includingPropertiesForKeys: nil)) ?? []
+        for url in files where url.pathExtension == "json" {
+            guard var file = read(parentCwd: parentCwd, handle: url.deletingPathExtension().lastPathComponent),
+                  file.agentId == delivery.helper, file.turnIdentity == delivery.turn, file.recipientId == delivery.recipient else { continue }
+            file.deliveredVia = delivery.via; file.deliveryReceipt = delivery.receipt
+            write(file, parentCwd: parentCwd)
+        }
+    }
+    public func compactDeliveryResult(_ delivery: Delivery, pending: Bool = false) -> SpawnResultFile {
+        var result = self
+        result.status = pending ? .deliveryPending : .alreadyDelivered
+        result.finalText = nil; result.finalTextTruncated = nil; result.report = nil
+        result.deliveryReceipt = delivery.receipt
+        result.reason = pending
+            ? "Helper delivery pending; retry after its bounded collection lease."
+            : "Helper turn already delivered; see the earlier helper update or collected result. To recover a lost response, repeat operation.get with deliveryReceipt \(delivery.receipt)."
+        return result
+    }
+    /// Host-only: caller identity comes from the authenticated HTTP/stdio bridge,
+    /// never from a courier or extension environment variable. Actor-serialized.
+    public static func collect(parentCwd: String, handle: String, recipient: UUID, requestId: String,
+                               receipt: String? = nil, acknowledge: Bool = false, now: Date = Date(),
+                               snapshot: SpawnResultFile? = nil) throws -> SpawnResultFile? {
+        let saved = try deliveries(parentCwd: parentCwd, recipient: recipient).first {
+            $0.result?.toolCallId == handle && ((receipt != nil && $0.receipt == receipt) || $0.requestId == requestId)
+        }
+        let file: SpawnResultFile
+        if let savedSnapshot = saved?.result { file = savedSnapshot }
+        else if let snapshot { file = snapshot }
+        else {
+            guard let handle = validatedHandle(handle) else { throw CocoaError(.fileReadInvalidFileName) }
+            do { file = try JSONCodec.makeDecoder().decode(SpawnResultFile.self, from: Data(contentsOf: url(parentCwd: parentCwd, handle: handle))) }
+            catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
+        }
+        guard file.recipientId == recipient else { throw CocoaError(.fileReadNoPermission) }
+        guard file.status != .spawned, let helper = file.agentId, let turn = file.turnIdentity else { return file }
+        var state = try saved ?? delivery(parentCwd: parentCwd, helper: helper, turn: turn, recipient: recipient)
+            ?? Delivery(helper: helper, turn: turn, recipient: recipient, now: now)
+        if acknowledge {
+            guard receipt == state.receipt, state.phase == .offered || state.phase == .delivered else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            state.phase = .delivered; state.via = state.via ?? "collection"; state.leaseUntil = nil
+            try saveDelivery(state, parentCwd: parentCwd)
+            markDelivered(state, parentCwd: parentCwd)
+            return file.compactDeliveryResult(state)
+        }
+        if state.phase == .stagingWake { return file.compactDeliveryResult(state, pending: true) }
+        if state.phase == .delivered {
+            if receipt == state.receipt || state.requestId == requestId {
+                var replay = file; replay.deliveryReceipt = state.receipt; return replay
+            }
+            return file.compactDeliveryResult(state)
+        }
+        if state.phase == .offered, (state.leaseUntil ?? .distantPast) > now {
+            if state.requestId == requestId || receipt == state.receipt {
+                var replay = file; replay.deliveryReceipt = state.receipt; return replay
+            }
+            return file.compactDeliveryResult(state, pending: true)
+        }
+        state.phase = .offered; state.requestId = requestId; state.receipt = UUID().uuidString
+        state.result = file
+        state.leaseUntil = now.addingTimeInterval(30)
+        try saveDelivery(state, parentCwd: parentCwd)
+        var offered = file; offered.deliveryReceipt = state.receipt
+        return offered
+    }
+
     /// Atomic write via the records' own idiom (no backups: one file per call,
     /// last status wins). Failures are reported, not thrown — a result file is
     /// best-effort courier state and must never fail a spawn.
@@ -133,6 +265,15 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         warn: (String) -> Void = { _ in }
     ) -> Bool {
         guard let handle = validatedHandle(result.toolCallId) else { return false }
+        var result = result
+        if let helper = result.agentId, let turn = result.turnIdentity, let recipient = result.recipientId {
+            do {
+                if var state = try delivery(parentCwd: parentCwd, helper: helper, turn: turn, recipient: recipient) {
+                    if state.phase == .available { state.result = result; try saveDelivery(state, parentCwd: parentCwd) }
+                    if state.phase == .delivered { result.deliveredVia = state.via; result.deliveryReceipt = state.receipt }
+                }
+            } catch { warn("Helper courier journal unavailable; result remains retryable") }
+        }
         do {
             try AtomicWriter(retainedBackups: 0).write(result, to: url(parentCwd: parentCwd, handle: handle))
             return true

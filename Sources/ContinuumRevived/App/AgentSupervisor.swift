@@ -1115,6 +1115,7 @@ final class AgentSupervisor {
     /// subscriptions so launch failures and provider rejection restore drafts
     /// even when no tile remains bound.
     private let submissionRecoveryStore: AgentComposerDraftStore?
+    let agentMessageOutbox: AgentMessageOutbox
     /// C4: persistence must not require a tile. `nil` in every check that does
     /// not pass one (the overwhelming majority), so building/ingesting the
     /// per-agent projection below is skipped entirely rather than adding
@@ -1726,6 +1727,9 @@ final class AgentSupervisor {
         let prompt: AgentPrompt
         let expectedAgentID: AgentID
         var companionQueuedItemID: UUID? = nil
+        // Retain accepted queue metadata across interrupt/Stop without a second
+        // fallible disk read. The durable journal remains the restart authority.
+        var queuedSource: AgentComposerQueuedMessage? = nil
     }
 
     private struct TurnFacts {
@@ -1821,6 +1825,7 @@ final class AgentSupervisor {
             applicationSupportDirectory: store.layout.applicationSupportDirectory
         )
         self.submissionRecoveryStore = submissionRecoveryStore
+        self.agentMessageOutbox = AgentMessageOutbox(applicationSupportDirectory: store.layout.applicationSupportDirectory)
         self.transcriptStore = transcriptStore
         self.maximumActiveManagedChildren = maximumActiveManagedChildren
         self.codexRestoredContextSnapshot = codexRestoredContextSnapshot ?? { record in
@@ -2863,8 +2868,9 @@ final class AgentSupervisor {
             staleAgentsByTile = staleAgentsByTile.filter { $0.value != record.id }
             // T5 — a queue (or held steer) a previous launch left behind waits for
             // the user: it never auto-resumes into a turn nobody is watching.
-            if let queueFile = submissionRecoveryStore?.layout.queuedMessagesFile(for: record.id),
-               ((try? Data(contentsOf: queueFile))?.count ?? 0) > 2 {
+            if submissionRecoveryStore != nil,
+               (((try? agentMessageOutbox.entries().contains { $0.context.recipient == record.id && $0.phase == .queued }) ?? false)
+                || ((try? Data(contentsOf: submissionRecoveryStore!.layout.queuedMessagesFile(for: record.id)))?.count ?? 0) > 2) {
                 pauseQueue(record.id, .afterRelaunch)
                 companionQueueHydrationPending.insert(record.id)
                 updateCompanionTasks { ledger in _ = try ledger.ensureUnknown(agentID: record.id.rawValue) }
@@ -2881,6 +2887,9 @@ final class AgentSupervisor {
         // parent.
         reconcileObservedRunsAfterRestore()
         reconcileManagedMode()
+        recoverHelperCompletionBatches()
+        scheduleHelperCompletionFlush()
+        Task { @MainActor [weak self] in await self?.flushHelperCompletions() }
         return report
     }
 
@@ -3555,6 +3564,17 @@ final class AgentSupervisor {
             warn("AgentSupervisor.send: \(refusal)")
             return false
         }
+        var queuedAdmission: AgentMessageOutbox.Entry?
+        if let itemID = queuedItemID ?? prepared.companionQueuedItemID {
+            do {
+                if var entry = try agentMessageOutbox.entries().first(where: { $0.message.id == itemID && $0.context.recipient == id }) {
+                    guard entry.phase == .queued else { return false }
+                    entry.phase = .started
+                    try agentMessageOutbox.save(entry)
+                    queuedAdmission = entry
+                }
+            } catch { warn("Queued message start could not be journaled; no runner started."); return false }
+        }
         if !continuingHelperRetry.contains(id) {
             helperProviderRetryCounts[id] = nil
             updateCompanionTasks { ledger in
@@ -3667,6 +3687,13 @@ final class AgentSupervisor {
         // detached and never blocks the turn; `.turnCompleted` stays the retry,
         // inside the same attempt budget. Last, after every write-back above,
         // so no local copy of the record can clobber the naming marker.
+        if continuingHelperRetry.contains(id), let chain = startedMessageChains[id] {
+            startedMessageChains[id] = (chain.hops, records[id]?.latestPromptAt)
+        }
+        if let entry = queuedAdmission {
+            startedMessageChains[id] = (entry.message.agentMessageHops ?? 1, records[id]?.latestPromptAt)
+            trackHelperMessage(id, from: entry.context.caller, handle: entry.context.operationId, queueContext: entry.context)
+        }
         if capturesFirstPrompt { refreshDerivedName(for: id) }
         return true
     }
@@ -4271,13 +4298,93 @@ final class AgentSupervisor {
     /// composer's own path, wrapped so the receiving model, its session file
     /// and its transcript all know who wrote them, and shown at once in a tile
     /// attached to `id`: no composer painted this prompt.
+    private var startedMessageChains: [AgentID: (hops: Int, promptAt: Date?)] = [:]
+
+    func startedMessageHops(for id: AgentID) -> Int? {
+        guard let chain = startedMessageChains[id], chain.promptAt == records[id]?.latestPromptAt else { return nil }
+        return chain.hops
+    }
+
     @discardableResult
     func sendAgentMessage(_ text: String, from senderID: AgentID, to id: AgentID) -> Bool {
+        deliverAgentMessage(text, from: senderID, to: id, hops: 1).delivery != .refused
+    }
+
+    /// Admit busy recipients to Array's own follow-up queue. Never write into
+    /// the provider's queue or replace its current runner.
+    func deliverAgentMessage(_ text: String, from senderID: AgentID, to id: AgentID,
+                             hops: Int, context: AgentMessageQueueContext? = nil)
+        -> (delivery: AgentMessageDelivery, position: Int?, error: String?) {
         let prompt = AgentPrompt(agentMessageText(text, from: senderID))
+        guard records[id] != nil, sendRefusal(for: id) == nil,
+              !contextRecoveryInFlight.contains(id), sharedAgentControlGates[id]?.isEmpty != false
+        else { return (.refused, nil, nil) }
+        if runners[id] != nil || pausedQueues.contains(id) || !(queuedWorkItemsCache[id] ?? []).isEmpty {
+            guard let store = submissionRecoveryStore else { return (.refused, nil, nil) }
+            let item = AgentComposerQueuedMessage(text: prompt.text, queuedAt: Date(),
+                agentMessageHops: hops, agentMessageContext: context)
+            var reservation: CompanionTaskRunHandle?
+            updateCompanionTasks { reservation = try $0.reserveQueued(agentID: id.rawValue, itemID: item.id) }
+            do {
+                if let context { try agentMessageOutbox.save(.init(context: context, message: item, queuePosition: (queuedWorkItemsCache[id] ?? []).count + 1)) }
+            } catch {
+                let committed = context.flatMap { try? agentMessageOutbox.lookup(caller: $0.caller, key: $0.idempotencyKey) }
+                guard committed?.message.id == item.id else {
+                    if let reservation { updateCompanionTasks { try $0.resolveQueuedReservation(reservation, accepted: false) } }
+                    return (.refused, nil, "The message could not be admitted durably; nothing was delivered.")
+                }
+            }
+            queuedWorkItemsCache[id, default: []].append(.prompt(item))
+            let position = queuedWorkItemsCache[id]!.count
+            notifyTurnCapabilitiesChanged(id)
+            if let reservation { updateCompanionTasks { try $0.resolveQueuedReservation(reservation, accepted: true) } }
+            runQueueOp(for: id) { [weak self] in
+                do { try await store.enqueueAgentMessage(item, for: id) }
+                catch { await MainActor.run { self?.warn("Agent message queue mirror failed; durable admission retained.") } }
+            }
+            if runners[id] == nil && !pausedQueues.contains(id) { drainQueue(for: id) }
+            return (.queued, position, nil)
+        }
         let parent = companionParentRun(for: senderID)
-        guard sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, taskParent: parent) else { return false }
+        guard sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, taskParent: parent) else {
+            return (.refused, nil, nil)
+        }
+        startedMessageChains[id] = (hops, records[id]?.latestPromptAt)
+        if let context { trackHelperMessage(id, from: senderID, handle: context.operationId) }
         echoPrompt(prompt, for: id)
-        return true
+        return (.delivered, nil, nil)
+    }
+
+    func queuedAgentMessage(caller: AgentID, key: String? = nil, operationId: String? = nil) throws -> AgentMessageOutbox.Entry? {
+        if let key { return try agentMessageOutbox.lookup(caller: caller, key: key) }
+        return try agentMessageOutbox.entries().first { $0.context.caller == caller && $0.context.operationId == operationId }
+    }
+
+    func isQueuedAgentMessageActive(_ context: AgentMessageQueueContext) -> Bool {
+        isRunning(context.recipient)
+            && (helperMessageSubscriptions[context.recipient] ?? []).contains { $0.queueContext == context }
+    }
+
+    private func recoverAgentMessageQueue(for id: AgentID) async throws {
+        guard let queue = submissionRecoveryStore else { return }
+        for entry in try agentMessageOutbox.entries() where entry.context.recipient == id {
+            if entry.phase == .queued { try await queue.enqueueAgentMessage(entry.message, for: id) }
+            else { await queue.removeQueuedMessage(id: entry.message.id, for: id) }
+        }
+    }
+
+    private func cancelAgentMessage(_ message: AgentComposerQueuedMessage, for id: AgentID) -> Bool {
+        guard let context = message.agentMessageContext else { return true }
+        do {
+            guard var entry = try agentMessageOutbox.lookup(caller: context.caller, key: context.idempotencyKey) else { return false }
+            entry.phase = .cancelled
+            entry.result = .init(toolCallId: context.operationId, status: .interrupted, agentId: id.rawValue,
+                reason: "Message cancelled before its queued turn started.", endedAt: Date(),
+                turnIdentity: "cancelled:\(message.id.uuidString)", recipientId: context.caller.rawValue)
+            try agentMessageOutbox.save(entry)
+            if let cwd = records[context.caller]?.cwd { SpawnResultFile.write(entry.result!, parentCwd: cwd, warn: warn) }
+            return true
+        } catch { warn("Queued message cancellation could not be persisted."); return false }
     }
 
     /// `text` as `senderID` hands it to another agent: `AgentMessageEnvelope`,
@@ -4373,6 +4480,7 @@ final class AgentSupervisor {
         interruptingAgents.remove(id)
         deferredForceSends[id] = nil
         openToolItems[id] = nil
+        helperWaitSteerTools[id] = nil
         returnDeliveringSteers(for: id)
         if pauseAfterStop { pauseQueue(id, .afterStop) }
         // M1.7: recorded BEFORE the runner is told, so the unwinding `run()` can
@@ -5808,7 +5916,7 @@ final class AgentSupervisor {
                         toolCallId: handle,
                         status: .spawned,
                         agentId: childID.rawValue,
-                        role: request.role
+                        role: request.role, recipientId: parentId.rawValue
                     ),
                     parentCwd: parent.cwd,
                     warn: warn
@@ -5880,7 +5988,7 @@ final class AgentSupervisor {
                     status: .refused,
                     role: requestedRole,
                     reason: refusal.reason,
-                    endedAt: Date()
+                    endedAt: Date(), recipientId: parentId.rawValue
                 ),
                 parentCwd: parent.cwd,
                 warn: warn
@@ -7530,16 +7638,18 @@ final class AgentSupervisor {
         var parent: AgentID
         var handle: String
         var baseline: Date
+        var queueContext: AgentMessageQueueContext? = nil
     }
     private var helperMessageSubscriptions: [AgentID: [HelperMessageSubscription]] = [:]
 
     /// Called only after send accepted, on the same actor before runner events
     /// can arrive. Each handle owns its result even after the helper starts a
     /// later turn. A refused send never registers a subscription.
-    func trackHelperMessage(_ child: AgentID, from parent: AgentID, handle: String) {
-        helperMessageSubscriptions[child, default: []].append(.init(parent: parent, handle: handle, baseline: Date()))
+    func trackHelperMessage(_ child: AgentID, from parent: AgentID, handle: String,
+                            queueContext: AgentMessageQueueContext? = nil) {
+        helperMessageSubscriptions[child, default: []].append(.init(parent: parent, handle: handle, baseline: Date(), queueContext: queueContext))
         if let cwd = records[parent]?.cwd {
-            SpawnResultFile.write(.init(toolCallId: handle, status: .spawned, agentId: child.rawValue), parentCwd: cwd, warn: warn)
+            SpawnResultFile.write(.init(toolCallId: handle, status: .spawned, agentId: child.rawValue, recipientId: parent.rawValue), parentCwd: cwd, warn: warn)
         }
     }
 
@@ -7556,10 +7666,19 @@ final class AgentSupervisor {
             let finalText: String? = transcriptProjections[child]?.finalAssistantText
             let text = finalText.map { SpawnResultFile.cappedFinalText($0) }
             let report = records[child]?.lastReport.flatMap { $0.filedAt > subscription.baseline ? $0.report : nil }
-            SpawnResultFile.write(.init(toolCallId: subscription.handle, status: status,
+            let result = SpawnResultFile(toolCallId: subscription.handle, status: status,
                 agentId: child.rawValue, reason: error, finalText: text?.text,
-                finalTextTruncated: text?.truncated == true ? true : nil, endedAt: Date(), report: report),
-                parentCwd: cwd, warn: warn)
+                finalTextTruncated: text?.truncated == true ? true : nil, endedAt: Date(), report: report,
+                turnIdentity: helperCompletionTurns[child], recipientId: subscription.parent.rawValue)
+            if let context = subscription.queueContext {
+                do {
+                    if var entry = try agentMessageOutbox.lookup(caller: context.caller, key: context.idempotencyKey) {
+                        entry.phase = .settled; entry.result = result
+                        try agentMessageOutbox.save(entry)
+                    }
+                } catch { warn("Agent message terminal journal could not be persisted; result courier retained.") }
+            }
+            SpawnResultFile.write(result, parentCwd: cwd, warn: warn)
         }
     }
 
@@ -7569,9 +7688,13 @@ final class AgentSupervisor {
     var helperCompletionNow: () -> Date = Date.init
     var helperCompletionEnabled: ((AgentID) -> Bool)?
     private struct HelperCompletionBatch {
+        var id = UUID()
         var deadline: Date
-        var updates: [(AgentID, String)]
+        var updates: [(AgentID, String, String)]
     }
+    var qaBeforeHelperWakeAdmission: (() throws -> Void)?
+    var qaAfterHelperWakeStage: (() throws -> Void)?
+    private var helperCompletionFlushInFlight = false
     private var helperCompletionBatches: [AgentID: HelperCompletionBatch] = [:]
     private var helperCompletionTurns: [AgentID: String] = [:]
     private var helperCompletionTimer: Task<Void, Never>?
@@ -7651,7 +7774,15 @@ final class AgentSupervisor {
         for parent in parents where records[parent] != nil && wakesForHelperCompletion(parent) {
             var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(
                 deadline: helperCompletionNow().addingTimeInterval(8), updates: [])
-            batch.updates.append((id, text))
+            if let cwd = records[parent]?.cwd {
+                do {
+                    var pending = SpawnResultFile.Delivery(helper: id.rawValue, turn: identity,
+                        recipient: parent.rawValue, wakeID: batch.id, text: text, now: helperCompletionNow())
+                    pending.capturedReport = child.lastReport.map { $0.filedAt > baseline } ?? false
+                    try SpawnResultFile.saveDelivery(pending, parentCwd: cwd)
+                } catch { warn("Helper completion journal unavailable; retaining in-memory retry") }
+            }
+            batch.updates.append((id, text, identity))
             helperCompletionBatches[parent] = batch
         }
         scheduleHelperCompletionFlush()
@@ -7670,37 +7801,111 @@ final class AgentSupervisor {
         }
     }
 
-    func flushHelperCompletions() async {
-        for parent in Array(helperCompletionBatches.keys) {
-            guard let batch = helperCompletionBatches[parent], batch.deadline <= helperCompletionNow() else { continue }
-            helperCompletionBatches[parent] = nil
-            guard records[parent] != nil, wakesForHelperCompletion(parent),
-                  let first = batch.updates.first else { continue }
-            let prompt = AgentPrompt(AgentMessageEnvelope.wrapBatch(batch.updates.map { id, text in
-                (text: text, senderID: id.rawValue, senderName: records[id]?.humanDisplayName ?? "Agent")
-            }))
-            let accepted: Bool
-            if isRunning(parent) {
-                // Host-authored attribution must bypass typed-envelope neutralization.
-                // Keep the normal queue admission, persistence and sharing checks.
-                let result = await accept(.queue(prompt),
-                                          for: parent, sharedAdmission: nil)
-                if case .accepted = result { accepted = true } else { accepted = false }
-            } else {
-                // Preserve the existing companion task lineage; attribution is
-                // carried independently by every member of the prompt.
-                accepted = sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: parent),
-                    to: parent, taskParent: companionParentRun(for: first.0))
-                if accepted { echoPrompt(prompt, for: parent) }
-            }
-            if !accepted {
-                var pending = helperCompletionBatches[parent] ?? HelperCompletionBatch(deadline: helperCompletionNow(), updates: [])
-                pending.updates.insert(contentsOf: batch.updates, at: 0)
-                pending.deadline = helperCompletionNow().addingTimeInterval(8)
-                helperCompletionBatches[parent] = pending
-            }
+    /// Rebuild pending batches from the durable outbox. A staging record is
+    /// never evidence of delivery; enqueue retries the SAME durable queue id.
+    private func recoverHelperCompletionBatches() {
+        for parent in records.keys where wakesForHelperCompletion(parent) {
+            guard let cwd = records[parent]?.cwd else { continue }
+            do {
+                let states = try SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue)
+                for state in states.sorted(by: { $0.completedAt < $1.completedAt }) where state.phase != .delivered {
+                    guard let wakeID = state.wakeID, let text = state.text else { continue }
+                    var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(id: wakeID, deadline: state.dueAt, updates: [])
+                    guard !batch.updates.contains(where: { $0.0.rawValue == state.helper && $0.2 == state.turn }) else { continue }
+                    batch.updates.append((AgentID(rawValue: state.helper), text, state.turn))
+                    helperCompletionBatches[parent] = batch
+                }
+            } catch { warn("Helper completion journal unreadable; retry remains available") }
         }
     }
+
+    func flushHelperCompletions() async {
+        guard !helperCompletionFlushInFlight else { return }
+        helperCompletionFlushInFlight = true
+        defer { helperCompletionFlushInFlight = false; scheduleHelperCompletionFlush() }
+        recoverHelperCompletionBatches()
+        for parent in Array(helperCompletionBatches.keys) {
+            guard var batch = helperCompletionBatches[parent], batch.deadline <= helperCompletionNow(),
+                  let cwd = records[parent]?.cwd, wakesForHelperCompletion(parent) else { continue }
+            helperCompletionBatches[parent] = nil
+            var states: [SpawnResultFile.Delivery] = []
+            var deferred: [(AgentID, String, String)] = []
+            do {
+                for update in batch.updates {
+                    var state = try SpawnResultFile.delivery(parentCwd: cwd, helper: update.0.rawValue, turn: update.2, recipient: parent.rawValue)
+                        ?? SpawnResultFile.Delivery(helper: update.0.rawValue, turn: update.2, recipient: parent.rawValue,
+                            wakeID: batch.id, text: update.1, now: helperCompletionNow())
+                    if state.phase == .delivered { continue }
+                    if state.phase == .offered, (state.leaseUntil ?? .distantPast) > helperCompletionNow() {
+                        deferred.append(update); continue
+                    }
+                    // A staged batch owns its old queue id and payload across
+                    // restart. Ordinary batches can refresh late same-turn text.
+                    if state.phase != .stagingWake {
+                        state.wakeID = batch.id
+                        if !isRunning(update.0), runnerGenerationTokens[update.0]?.rawValue.uuidString == state.turn {
+                            let body: String
+                            if let report = records[update.0]?.lastReport, report.filedAt >= state.completedAt {
+                                body = Self.helperCompletionReportText(report.report); state.result?.report = report.report
+                            }
+                            else if state.capturedReport == true {
+                                body = (state.text ?? update.1).components(separatedBy: "\n").dropFirst().joined(separator: "\n")
+                            } else { body = String((transcriptProjections[update.0]?.finalAssistantText ?? "").prefix(2400)) }
+                            let header = (state.text ?? update.1).components(separatedBy: "\n").first ?? "Helper"
+                            state.text = header + "\n" + body
+                        }
+                        state.phase = .stagingWake; state.via = nil
+                        try SpawnResultFile.saveDelivery(state, parentCwd: cwd)
+                    }
+                    states.append(state)
+                }
+                if !states.isEmpty {
+                    // A recovered staging batch may differ from the new batch.
+                    // Stage each durable occurrence separately, retaining grouping.
+                    for queueID in Set(states.compactMap(\.wakeID)) {
+                        let group = states.filter { $0.wakeID == queueID }
+                        guard !group.isEmpty else { continue }
+                        let text = AgentMessageEnvelope.wrapBatch(group.compactMap { state in
+                            state.text.map { ($0, senderID: state.helper,
+                                senderName: records[AgentID(rawValue: state.helper)]?.humanDisplayName ?? "Agent") }
+                        })
+                        try qaBeforeHelperWakeAdmission?()
+                        try await stageScheduledWakeup(queueID, text: text, for: parent)
+                        try qaAfterHelperWakeStage?()
+                        for var state in group {
+                            state.phase = .delivered; state.via = "wake"; state.leaseUntil = nil
+                            try SpawnResultFile.saveDelivery(state, parentCwd: cwd)
+                            SpawnResultFile.markDelivered(state, parentCwd: cwd)
+                        }
+                        finishScheduledAdmission(queueID)
+                        await releaseScheduledWakeups(for: parent, knownIDs: [queueID])
+                    }
+                }
+            } catch {
+                // Neither a failed write nor a staging record means delivered.
+                // Durable queue ids make retry/restart safe before queue release.
+                warn("Helper wake admission deferred; durable outbox will retry")
+                deferred = batch.updates
+            }
+            if !deferred.isEmpty {
+                batch.updates = deferred; batch.deadline = helperCompletionNow().addingTimeInterval(8)
+                helperCompletionBatches[parent] = batch
+            }
+        }
+        // Crash after commit but before queue release: resume only queue ids
+        // whose entire journal group committed, using the existing relaunch gate.
+        for parent in records.keys where wakesForHelperCompletion(parent) {
+            guard let cwd = records[parent]?.cwd,
+                  let states = try? SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue) else { continue }
+            let ids = Set(states.compactMap(\.wakeID)).filter { id in
+                states.filter { $0.wakeID == id }.allSatisfy { $0.phase == .delivered }
+            }
+            for id in ids { finishScheduledAdmission(id) }
+            if !ids.isEmpty { await releaseScheduledWakeups(for: parent, knownIDs: Set(ids)) }
+        }
+    }
+
+    func qaForgetHelperCompletionBatches() { helperCompletionBatches = [:] }
 
     private var managedModeDefaults: UserDefaults = .standard
     private var managedModeObserver: NSObjectProtocol?
@@ -9786,9 +9991,11 @@ final class AgentSupervisor {
         guard let store = submissionRecoveryStore else { return }
         queuedWorkItemsCache[id] = []
         Task { @MainActor [weak self] in
-            let messages = await store.queuedWorkItems(for: id)
             guard let self else { return }
-            self.queuedWorkItemsCache[id] = messages
+            do { try await self.recoverAgentMessageQueue(for: id) }
+            catch { self.warn("Agent message queue recovery could not complete.") }
+            let messages = await store.queuedWorkItems(for: id)
+            self.queuedWorkItemsCache[id] = self.agentMessageQueueCache(messages, for: id)
             self.companionQueueHydrationPending.remove(id)
             if !messages.isEmpty { self.notifyTurnCapabilitiesChanged(id) }
         }
@@ -9799,6 +10006,8 @@ final class AgentSupervisor {
     /// primary control still means only "interrupt the current turn".
     func cancelQueuedMessage(_ messageID: UUID, for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
+        if let item = queuedWorkItemsCache[id]?.first(where: { $0.id == messageID }),
+           case .prompt(let message) = item, !cancelAgentMessage(message, for: id) { return }
         updateCompanionTasks { try $0.cancelQueued(messageID) }
         queuedWorkItemsCache[id]?.removeAll { $0.id == messageID }
         notifyTurnCapabilitiesChanged(id)
@@ -9811,6 +10020,9 @@ final class AgentSupervisor {
         guard let store = submissionRecoveryStore else { return }
         let followUps = (queuedWorkItemsCache[id] ?? []).filter {
             if case .prompt(let message) = $0 { return !message.isSteer }
+            return true
+        }.filter { item in
+            if case .prompt(let message) = item { return cancelAgentMessage(message, for: id) }
             return true
         }.map(\.id)
         updateCompanionTasks { ledger in for itemID in followUps { try ledger.cancelQueued(itemID) } }
@@ -9831,6 +10043,17 @@ final class AgentSupervisor {
         if runners[id] == nil { drainQueue(for: id) }
     }
 
+    private func agentMessageQueueCache(_ items: [AgentComposerQueuedWorkItem], for id: AgentID) -> [AgentComposerQueuedWorkItem] {
+        var result = items
+        if let entries = try? agentMessageOutbox.entries() {
+            for entry in entries where entry.phase == .queued && entry.context.recipient == id
+                && !result.contains(where: { $0.id == entry.message.id }) {
+                result.append(.prompt(entry.message))
+            }
+        }
+        return result
+    }
+
     private func runQueueOp(for id: AgentID, _ operation: @escaping @Sendable () async -> Void) {
         guard let store = submissionRecoveryStore else { return }
         let previous = queueOpTasks[id]
@@ -9838,7 +10061,7 @@ final class AgentSupervisor {
             if let previous { await previous.value }
             await operation()
             guard let self else { return }
-            self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            self.queuedWorkItemsCache[id] = self.agentMessageQueueCache(await store.queuedWorkItems(for: id), for: id)
             self.notifyTurnCapabilitiesChanged(id)
         }
     }
@@ -9865,6 +10088,8 @@ final class AgentSupervisor {
             if let previous { await previous.value }
             guard let self else { return }
             await self.qaBeforeQueueDrain?()
+            do { try await self.recoverAgentMessageQueue(for: id) }
+            catch { self.pauseQueue(id, .held); self.warn("Durable agent message awaits queue storage recovery."); return }
             guard self.canDrainQueue(for: id),
                   let next = await store.nextWorkItem(for: id),
                   !self.scheduledQueueAdmissions.contains(next.id),
@@ -10095,6 +10320,8 @@ final class AgentSupervisor {
     /// the queue, and the caller loads it into the composer.
     func takeQueuedItemForEditing(_ itemID: UUID, for id: AgentID) async -> AgentComposerQueuedMessage? {
         guard let store = submissionRecoveryStore else { return nil }
+        if let item = queuedWorkItemsCache[id]?.first(where: { $0.id == itemID }),
+           case .prompt(let message) = item, !cancelAgentMessage(message, for: id) { return nil }
         let item = await store.takeQueuedWorkItem(id: itemID, for: id)
         queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
         notifyTurnCapabilitiesChanged(id)
@@ -10106,6 +10333,13 @@ final class AgentSupervisor {
     /// item to its original agent, including its id and attachments.
     func restoreQueuedItemAfterFailedEdit(_ message: AgentComposerQueuedMessage, for id: AgentID) async {
         guard records[id] != nil, let store = submissionRecoveryStore else { return }
+        if let context = message.agentMessageContext {
+            do {
+                if var entry = try agentMessageOutbox.lookup(caller: context.caller, key: context.idempotencyKey) {
+                    entry.phase = .queued; entry.result = nil; try agentMessageOutbox.save(entry)
+                }
+            } catch { warn("Queue edit recovery could not be persisted."); return }
+        }
         await store.requeueWorkItemAtFront(.prompt(message), for: id)
         queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
         notifyTurnCapabilitiesChanged(id)
@@ -10141,7 +10375,7 @@ final class AgentSupervisor {
             return false
         }
         let sharedPermit = await queuedSharedAdmission(id, item: itemID, prompt: prompt)
-        guard forceSend(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id, companionQueuedItemID: itemID), to: id, echo: true,
+        guard forceSend(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id, companionQueuedItemID: itemID, queuedSource: message), to: id, echo: true,
                         sharedInputPermit: sharedPermit) else {
             await store.requeueWorkItemAtFront(item, for: id)
             queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
@@ -10241,7 +10475,8 @@ final class AgentSupervisor {
         }
         guard !pending.isEmpty, let store = submissionRecoveryStore else { return }
         let messages = pending.map { entry in
-            AgentComposerQueuedMessage(id: entry.prompt.companionQueuedItemID ?? UUID(), text: entry.prompt.prompt.text,
+            if let original = entry.prompt.queuedSource { return original }
+            return AgentComposerQueuedMessage(id: entry.prompt.companionQueuedItemID ?? UUID(), text: entry.prompt.prompt.text,
                 imageAttachments: entry.prompt.prompt.imageAttachments.map { AgentComposerDraftImageAttachment(metadata: $0.metadata) },
                 fileReferences: entry.prompt.prompt.fileReferences.map {
                     AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
@@ -10935,7 +11170,9 @@ final class AgentSupervisor {
                 finalText: finalText,
                 finalTextTruncated: finalTextTruncated,
                 endedAt: settledAt,
-                report: report
+                report: report,
+                turnIdentity: helperCompletionTurns[id],
+                recipientId: parentID.rawValue
             ),
             parentCwd: parent.cwd,
             warn: warn
@@ -11069,6 +11306,7 @@ final class AgentSupervisor {
             markOwnClaudeTurn(for: id)
             interruptingAgents.remove(id)
             openToolItems[id] = nil
+            helperWaitSteerTools[id] = nil
             // A CLI update landed while this turn ran: its session process is the
             // old binary, so it ends here instead of serving the next turn.
             let retire = retireSessionAfterTurn.remove(id) != nil

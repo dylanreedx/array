@@ -103,6 +103,41 @@ sent every result. Single-result wakes retain their existing attribution.
 Rejected admission retains the whole batch for retry; disabled wakes remain
 quiet. Timing, alert suppression and recipient policies are unchanged.
 
+For **SRC-01**, each helper runner
+turn plus authenticated recipient has a persistent delivery record in the
+recipient's `.array/spawn-results/.deliveries/`. Result couriers retain its
+identity and committed delivery mark. All collection, including legacy Pi
+explicit/discovered handles, goes through the recipient-authenticated host;
+Pi reads directory metadata for discovery, never courier bodies for authority.
+
+Collection first creates a 30-second offer, not a delivered mark. The same
+lookup request replays its persisted snapshot after a lost response; another
+lookup gets `delivery_pending` until acknowledgment or lease expiry. MCP and
+Pi acknowledge client custody before returning the report. After acknowledgment,
+normal collection returns `already_delivered` and a one-line pointer; its
+`deliveryReceipt` permits explicit recovery through `operation.get`, including
+when the client died before the model saw the answer. Unacknowledged offers
+expire and permit collection or wake retry. Other recipients/turns are independent.
+Storage errors return retryable errors and never imply delivery. The durable API message-result journal uses this same offer/acknowledgment/receipt protocol, so collection-first and wake-first cannot bypass each other.
+
+Wake batching uses a durable outbox and a stable queue occurrence id. A staging
+record is not delivered: commit follows the existing throwing durable queue
+admission, and queue release follows commit. Queue/storage failures retain the
+outbox for retry. Relaunch reuses the staged occurrence and releases committed
+queue entries; it does not create a second queue row. This is recoverable delivery
+with replay, not distributed exactly-once consumption: a consumer crash before
+ack can allow a later duplicate; after ack but before model consumption, recovery
+requires the receipt from the compact pointer. No transport proves that a model
+consumed stdout. No additional user alert is sent for these quiet/error outcomes.
+
+`--helper-completion-check` covers delivery order, a never-waiting recipient,
+expired/interrupted collection, journal and queue write failures, restart between
+queue persistence and commit, host authentication, and dropped lookup replies in
+actual Pi/MCP clients. Before queue admission, a still-current generation's
+report is refreshed (fixture: +6 seconds). Output arriving after that durable
+admission still misses the earlier wake (fixture: +16 logical seconds); recovering
+such late output requires another delivery policy and is outside this interim fix.
+
 For **SRC-01**, a transient helper provider failure reserved for a host
 retry is withheld from terminal delivery. **SRC-02** retains existing runtime-error
 handling; there is no new direct alert sender. Success, exhausted retries,
@@ -226,8 +261,8 @@ flowchart TD
 | --- | --- | --- |
 | HOST-01 | Accepted ordinary user send, including headless agent | Persist new task/root run before starting runner; later sends do not inherit lifetime agent ancestry; stream content is never serialized |
 | HOST-02 | Explicit agent delegation/new child, or provider-observed child | Bind actual parent run; provider source replay reuses original child membership, including after parent starts a new task |
-| HOST-03 | Accepted queue/steer/queued compaction/readiness hold | Commit admission barrier and reserved run before storage await; durable item UUID follows normal drain, forced send and consumed steer; accepted queued work prevents completion; helper waits query only their caller’s pending-input reason and return within the polling interval on held/unconfirmed steer (`user_steer`) or queued message (`inbox`), without consuming either or emitting a notification; waits have a 60-second cap, deadline-bounded HTTP polls and return cached helper states immediately on pending input |
-| HOST-04 | Matching provider lifecycle/request, cancellation/queue clear | Current runner generation plus provider turn fence; cancelled queue stays cancelled; consumed steer settles with parent; child result settles its own run only; MCP `notifications/cancelled` cancels only its matching in-flight call and returns partial helper status, without stopping helpers or emitting a notification |
+| HOST-03 | Accepted queue/steer/queued compaction/readiness hold, including busy agent messages | Commit admission barrier and reserved run before storage await; durable item UUID follows normal drain, forced send and consumed steer; accepted queued work prevents completion; busy API messages commit a durable caller/key/item outbox before acknowledgement, activate result subscriptions only at actual turn start, restore queued work paused, and report storage failure without admission; helper waits query only their caller’s pending-input reason and return within the polling interval on held/unconfirmed steer (`user_steer`) or queued message (`inbox`), without consuming either or emitting a notification; waits have a 60-second cap, deadline-bounded HTTP polls and return cached helper states immediately on pending input |
+| HOST-04 | Matching provider lifecycle/request, cancellation/queue clear | Current runner generation plus provider turn fence; cancelled queue stays cancelled; cancelling a durable agent message records its terminal result before removing the item; consumed steer settles with parent; child result settles its own run only; MCP `notifications/cancelled` cancels only its matching in-flight call and returns partial helper status, without stopping helpers or emitting a notification |
 | HOST-05 | Restart, restored backup, imported legacy queue, missing result, invalid request identity, unknown background work (including acknowledged native Claude schedules) or unrouted provider descendants | Persist/retain unknown or incomplete membership; no guessed success. Restored queues hydrate without a tile. A newer relay revision fences an older local backup. Buffered provider events withhold membership until their announcement supplies a valid parent route; invalid announcements keep it incomplete |
 | HOST-06 | Task metadata changes; continuous activity; paired service running | App uses bounded 0.5s coalescing, service serializes/join-repeats latest task publication before inventory, periodic 10s task refresh; missing canvas/inventory cannot block task metadata |
 | HOST-07 | Relay lacks advertised task.batch.v1 capability | Keep legacy inventory/publication; do not activate task ownership. Owner mismatch, ledger failure or wire capacity failure withholds task publication with redacted diagnostics; inventory remains useful |

@@ -69,11 +69,26 @@ enum HelperCompletionChecks {
             try HelperGuardChecks.expect(s.records[child]?.latestTerminalEvent?.outcome == expectedOutcome, "\(marker): wrong final outcome")
             now.addTimeInterval(9)
             await s.flushHelperCompletions()
-            let idle = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(parent) }
-            try HelperGuardChecks.expect(idle, "lead did not finish update")
-            let log = try String(contentsOf: URL(fileURLWithPath: s.records[parent]!.cwd).appendingPathComponent("prompts.log"), encoding: .utf8)
-            let updates = log.split(separator: "\n").compactMap { try? JSONDecoder().decode(String.self, from: Data($0.utf8)) }.filter { isCompletionMessage($0) && $0.contains(s.records[child]!.humanDisplayName) }
-            try HelperGuardChecks.expect(updates.count == 1, "intermediate failure leaked or final wake repeated")
+            func receivedUpdates() -> [String] {
+                let log = (try? String(contentsOf: URL(fileURLWithPath: s.records[parent]!.cwd)
+                    .appendingPathComponent("prompts.log"), encoding: .utf8)) ?? ""
+                return log.split(separator: "\n").compactMap {
+                    try? JSONDecoder().decode(String.self, from: Data($0.utf8))
+                }.filter { text in
+                    guard isCompletionMessage(text) else { return false }
+                    switch AgentMessageEnvelope.classify(text) {
+                    case .agentMessage(let message): return message.senderAgentID == child.rawValue
+                    case .agentMessages(let messages): return messages.contains { $0.senderAgentID == child.rawValue }
+                    default: return false
+                    }
+                }
+            }
+            let received = await waitUntil(timeout: 15, pollInterval: 0.02) {
+                !s.isRunning(parent) && s.queuedMessages(for: parent).isEmpty && receivedUpdates().count == 1
+            }
+            let updates = receivedUpdates()
+            try HelperGuardChecks.expect(received && updates.count == 1,
+                "retry completion must arrive once and finish draining; received \(updates.count)")
             if marker == "RETRY-EXHAUST" { try HelperGuardChecks.expect(updates[0].contains("failed after 2 retries: serverOverloaded"), "exhausted retries missing from report") }
             if marker == "RETRY-SUCCESS" { try HelperGuardChecks.expect(updates[0].contains("succeeded") && !updates[0].contains("failed:"), "successful retry was reported failed") }
         }
@@ -164,7 +179,267 @@ enum HelperCompletionChecks {
             try HelperGuardChecks.expect(file?.status.rawValue == expected, "later terminal overwrote a message handle")
         }
     }
+    static func runDeliveryLedger() async throws {
+        let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-delivery-ledger")
+        defer { bench.tearDown() }
+        let s = bench.supervisor, parent = bench.f.agentId
+        let cwd = s.records[parent]!.cwd
+        var now = Date()
+        s.helperCompletionNow = { now }
+        s.helperCompletionEnabled = { _ in true }
+        let config = try bench.configuration(for: parent)
+        func settle(_ marker: String) async throws -> AgentID {
+            let child = try bench.delegate(marker)
+            let idle = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) && s.records[child]?.latestTerminalEvent != nil }
+            try HelperGuardChecks.expect(idle, "ledger helper did not settle")
+            return child
+        }
+        func wakes() -> [String] {
+            let log = (try? String(contentsOf: URL(fileURLWithPath: cwd).appendingPathComponent("prompts.log"), encoding: .utf8)) ?? ""
+            return log.split(separator: "\n").compactMap { try? JSONDecoder().decode(String.self, from: Data($0.utf8)) }
+                .filter { isCompletionMessage($0) }
+        }
+        var failures: [String] = []
+        // Collect via production operation.get, then flush beyond eight seconds.
+        let collected = try await settle("ledger-collected")
+        let handle = s.records[collected]!.spawnResultHandle!
+        let reply = bench.f.api.dispatch(agentId: parent, requestId: "ledger-get", op: "operation.get", payload: ["operationId": handle])
+        guard case let .result(result) = reply else { throw WorkspaceAgentReportChecks.Failure(description: "ledger get refused") }
+        guard let first = result["childResult"]?.object else {
+            throw WorkspaceAgentReportChecks.Failure(description: "collection omitted result")
+        }
+        try HelperGuardChecks.expect(first["status"]?.string == "completed"
+            && first["finalText"]?.string?.contains(WorkspaceAgentReportChecks.childFinalText) == true,
+            "first collection must carry the full result")
+        guard let receipt = first["deliveryReceipt"]?.string else {
+            throw WorkspaceAgentReportChecks.Failure(description: "collection receipt missing")
+        }
+        let ack = bench.f.api.dispatch(agentId: parent, requestId: "ledger-get-ack", op: "operation.get",
+            payload: ["operationId": handle, "deliveryReceipt": receipt, "acknowledgeDelivery": true])
+        guard case .result = ack else { throw WorkspaceAgentReportChecks.Failure(description: "collection ack refused") }
+        now.addTimeInterval(9)
+        await s.flushHelperCompletions()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        if !wakes().isEmpty || !s.queuedMessages(for: parent).isEmpty {
+            failures.append("collection-first: collected helper was delivered again by wake")
+            print("helper-completion-check: collection-first FAIL")
+        } else { print("helper-completion-check: collection-first PASS") }
+        _ = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(parent) }
+        let beforeWake = wakes().count
+
+        // Never-waited positive control: one wake, followed by a compact MCP answer.
+        let woken = try await settle("ledger-woken")
+        let wakeHandle = s.records[woken]!.spawnResultHandle!
+        now.addTimeInterval(9)
+        await s.flushHelperCompletions()
+        let delivered = await waitUntil(timeout: 15, pollInterval: 0.02) { wakes().count == beforeWake + 1 && !s.isRunning(parent) }
+        try HelperGuardChecks.expect(delivered, "uncollected helper did not wake once")
+        await s.flushHelperCompletions()
+        try HelperGuardChecks.expect(wakes().count == beforeWake + 1, "positive-control wake repeated")
+        let waited = try await WorkspaceAgentReportChecks.call(config, "wait_agents", ["handles": [wakeHandle], "timeoutSeconds": 1])
+        let entries = (waited.reply["result"] as? [String: Any])?["agents"] as? [[String: Any]]
+        let entry = entries?.first
+        if entry?["status"] as? String != "already_delivered" || entry?["report"] != nil || entry?["finalText"] != nil {
+            failures.append("wake-first: wait_agents repeated full result")
+            print("helper-completion-check: wake-first FAIL")
+        } else { print("helper-completion-check: wake-first PASS") }
+        print("helper-completion-check: never-waits positive control PASS")
+        try HelperGuardChecks.expect(failures.isEmpty, failures.joined(separator: "; "))
+        let file = SpawnResultFile.read(parentCwd: cwd, handle: wakeHandle)
+        try HelperGuardChecks.expect(file?.deliveredVia != nil, "wake mark missing in spawn-result file")
+        print("helper-completion-check: wake-first MCP already_delivered and never-waits positive control PASS")
+
+        // Refresh same-turn content up to durable admission. This catches a
+        // report at +6 seconds without leaking a subsequent turn into an old wake.
+        let refreshed = try await settle("ledger-flush-refresh")
+        now.addTimeInterval(6)
+        try HelperGuardChecks.expect(s.fileReport(.init(summary: "FLUSH-REFRESH-REPORT"), for: refreshed, at: now), "flush-refresh report refused")
+        now.addTimeInterval(3)
+        await s.flushHelperCompletions()
+        let refreshWake = await waitUntil(timeout: 15, pollInterval: 0.02) { wakes().count == beforeWake + 2 && !s.isRunning(parent) }
+        try HelperGuardChecks.expect(refreshWake && wakes().last?.contains("FLUSH-REFRESH-REPORT") == true,
+            "flush used stale completion report")
+        print("helper-completion-check: same-turn report at +6 seconds refreshed at admission PASS")
+
+        // Output arriving after durable admission cannot enter that earlier wake.
+        let late = try await settle("ledger-late")
+        now.addTimeInterval(9)
+        await s.flushHelperCompletions()
+        let lateWake = await waitUntil(timeout: 15, pollInterval: 0.02) { wakes().count == beforeWake + 3 && !s.isRunning(parent) }
+        try HelperGuardChecks.expect(lateWake, "late-output fixture wake missing")
+        now.addTimeInterval(7)
+        s.qaDeliver(.contentDelta(threadId: AgentSupervisor.threadId(for: late), turnId: "late-turn", streamKind: .assistant, delta: "LATE-OUTPUT-16s"), to: late)
+        try HelperGuardChecks.expect(s.qaFinalAssistantText(for: late)?.contains("LATE-OUTPUT-16s") == true,
+            "late assistant output did not reach the production projection")
+        try HelperGuardChecks.expect(s.fileReport(.init(summary: "LATE-REPORT-16s"), for: late, at: now), "late report fixture was refused")
+        await s.flushHelperCompletions()
+        try HelperGuardChecks.expect(wakes().count == beforeWake + 3 && !wakes().joined().contains("LATE-REPORT-16s") && !wakes().joined().contains("LATE-OUTPUT-16s"),
+            "late report behavior changed; update documented limitation")
+        print("helper-completion-check: late report at +16 logical seconds is absent from captured wake (known limitation)")
+        let node = Process()
+        node.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        let script = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/check-helper-delivery-pi.mjs")
+        node.arguments = ["node", script.path]
+        try node.run()
+        node.waitUntilExit()
+        try HelperGuardChecks.expect(node.terminationStatus == 0, "Pi file-reader delivery witness failed")
+    }
+
+    static func runDeliveryFailures() async throws {
+        let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-delivery-failures")
+        defer { bench.tearDown() }
+        let s = bench.supervisor, parent = bench.f.agentId
+        let cwd = s.records[parent]!.cwd
+        var now = Date()
+        s.helperCompletionNow = { now }; s.helperCompletionEnabled = { _ in true }
+        func settle(_ marker: String) async throws -> AgentID {
+            let child = try bench.delegate(marker)
+            let idle = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) && s.records[child]?.latestTerminalEvent != nil }
+            try HelperGuardChecks.expect(idle, "failure-fixture helper did not settle")
+            return child
+        }
+        func get(_ child: AgentID, _ id: String, receipt: String? = nil, ack: Bool = false) -> WorkspaceAPIService.Reply {
+            var payload: [String: Any] = ["operationId": s.records[child]!.spawnResultHandle!]
+            if let receipt { payload["deliveryReceipt"] = receipt }
+            if ack { payload["acknowledgeDelivery"] = true }
+            return bench.f.api.dispatch(agentId: parent, requestId: id, op: "operation.get", payload: payload)
+        }
+        func childResult(_ reply: WorkspaceAPIService.Reply) throws -> [String: AnyHashableJSON] {
+            guard case let .result(fields) = reply, let child = fields["childResult"]?.object else {
+                throw WorkspaceAgentReportChecks.Failure(description: "missing child result: \(reply)")
+            }
+            return child
+        }
+        func wakes() -> [String] {
+            let log = (try? String(contentsOf: URL(fileURLWithPath: cwd).appendingPathComponent("prompts.log"), encoding: .utf8)) ?? ""
+            return log.split(separator: "\n").compactMap { try? JSONDecoder().decode(String.self, from: Data($0.utf8)) }
+                .filter { isCompletionMessage($0) }
+        }
+        // Drop the first host reply, then retry the identical request. It must
+        // replay the durable full offer; a new caller waits for its lease.
+        let dropped = try await settle("failure-dropped")
+        let first = try childResult(get(dropped, "dropped-response"))
+        let replayed = try childResult(get(dropped, "dropped-response"))
+        try HelperGuardChecks.expect(first == replayed && first["finalText"] != nil, "dropped lookup response was stranded")
+        let pending = try childResult(get(dropped, "different-lookup"))
+        try HelperGuardChecks.expect(pending["status"]?.string == "delivery_pending" && pending["finalText"] == nil,
+            "unacknowledged lookup masqueraded as delivered")
+        now.addTimeInterval(31)
+        let recovered = try childResult(get(dropped, "restarted-lookup"))
+        try HelperGuardChecks.expect(recovered["finalText"] != nil && recovered["deliveryReceipt"] != first["deliveryReceipt"],
+            "interrupted collection lease did not recover")
+        let receipt = recovered["deliveryReceipt"]!.string!
+        _ = get(dropped, "restarted-ack", receipt: receipt, ack: true)
+        let duplicate = try childResult(get(dropped, "later-lookup"))
+        try HelperGuardChecks.expect(duplicate["status"]?.string == "already_delivered" && duplicate["finalText"] == nil, "ack did not suppress duplicate")
+        let explicitReplay = try childResult(get(dropped, "explicit-recovery", receipt: receipt))
+        try HelperGuardChecks.expect(explicitReplay["finalText"] != nil, "explicit lost-response recovery failed")
+        print("helper-completion-check: dropped-response replay, expired collection lease, acknowledgment PASS")
+
+        // Real host authentication: the helper's own MCP token cannot collect
+        // the parent's handle, including the legacy-file fallback.
+        let foreignConfig = try bench.configuration(for: dropped)
+        let foreign = try await WorkspaceAgentReportChecks.call(foreignConfig, "array_get_operation",
+            ["operationId": s.records[dropped]!.spawnResultHandle!])
+        try HelperGuardChecks.expect(foreign.isError && (foreign.reply["result"] as? [String: Any])?["childResult"] == nil,
+            "foreign authenticated recipient collected another lead's result")
+        // A forged courier recipient must not defeat registry ownership in
+        // the legacy-file fallback either.
+        let originalCourier = SpawnResultFile.read(parentCwd: cwd, handle: s.records[dropped]!.spawnResultHandle!)!
+        var forgedCourier = originalCourier; forgedCourier.recipientId = dropped.rawValue
+        try HelperGuardChecks.expect(SpawnResultFile.write(forgedCourier, parentCwd: cwd), "forged recipient fixture write failed")
+        let forged = try await WorkspaceAgentReportChecks.call(foreignConfig, "array_get_operation",
+            ["operationId": s.records[dropped]!.spawnResultHandle!])
+        try HelperGuardChecks.expect(forged.isError && (forged.reply["error"] as? [String: Any])?["code"] as? String == "not_found",
+            "forged courier recipient bypassed host registry ownership")
+        try HelperGuardChecks.expect(SpawnResultFile.write(originalCourier, parentCwd: cwd), "courier restoration failed")
+        print("helper-completion-check: authenticated foreign-recipient and forged-courier lookup refused PASS")
+
+        // An unreadable journal is a retryable error, never already_delivered.
+        let io = try await settle("failure-storage")
+        let ioFile = SpawnResultFile.read(parentCwd: cwd, handle: s.records[io]!.spawnResultHandle!)!
+        let url = SpawnResultFile.deliveryURL(parentCwd: cwd, helper: io.rawValue, turn: ioFile.turnIdentity!, recipient: parent.rawValue)!
+        let saved = url.appendingPathExtension("saved")
+        try FileManager.default.moveItem(at: url, to: saved)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        let broken = get(io, "storage-error")
+        guard case let .error(error) = broken else { throw WorkspaceAgentReportChecks.Failure(description: "storage failure pretended delivery: \(broken)") }
+        try HelperGuardChecks.expect(error.code == .outcomeUnknown, "storage failure lost retryable error")
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: saved, to: url)
+        let repaired = try childResult(get(io, "storage-error"))
+        try HelperGuardChecks.expect(repaired["finalText"] != nil, "repair did not recover the lookup")
+        _ = get(io, "storage-ack", receipt: repaired["deliveryReceipt"]!.string!, ack: true)
+        print("helper-completion-check: journal I/O failure stays retryable PASS")
+
+        // Fail the ACTUAL throwing queue write by replacing only this fixture's
+        // queue directory with a regular file. No delivery commit may survive.
+        let queued = try await settle("failure-queue")
+        let support = AgentStore(smokeTest: false).layout.applicationSupportDirectory
+        let layout = AgentComposerDraftStoreLayout(applicationSupportDirectory: support)
+        let queueDir = layout.queuedMessagesDirectory
+        try FileManager.default.createDirectory(at: queueDir, withIntermediateDirectories: true)
+        let queueSaved = queueDir.appendingPathExtension("saved")
+        try FileManager.default.moveItem(at: queueDir, to: queueSaved)
+        try Data("block queue admission".utf8).write(to: queueDir)
+        now.addTimeInterval(9)
+        await s.flushHelperCompletions()
+        let queuedFile = SpawnResultFile.read(parentCwd: cwd, handle: s.records[queued]!.spawnResultHandle!)!
+        let staging = try SpawnResultFile.delivery(parentCwd: cwd, helper: queued.rawValue, turn: queuedFile.turnIdentity!, recipient: parent.rawValue)
+        try HelperGuardChecks.expect(staging?.phase == .stagingWake && wakes().isEmpty, "failed queue admission committed a wake")
+        try FileManager.default.removeItem(at: queueDir)
+        try FileManager.default.moveItem(at: queueSaved, to: queueDir)
+        now.addTimeInterval(9)
+        await s.flushHelperCompletions()
+        let retried = await waitUntil(timeout: 15, pollInterval: 0.02) { wakes().count == 1 && !s.isRunning(parent) }
+        try HelperGuardChecks.expect(retried, "queue admission failure did not retry")
+        print("helper-completion-check: failed durable queue admission retries once PASS")
+
+        // Interrupt after queue persistence but before delivery commit. A fresh
+        // supervisor and fresh queue store must reuse the durable occurrence id.
+        let interrupted = try await settle("failure-interrupted")
+        s.qaAfterHelperWakeStage = { throw WorkspaceAgentReportChecks.Failure(description: "fixture interrupted before commit") }
+        now.addTimeInterval(9)
+        await s.flushHelperCompletions()
+        try HelperGuardChecks.expect(wakes().count == 1 && s.queuedMessages(for: parent).count == 1, "staging did not retain exactly one durable queue row")
+        s.helperCompletionEnabled = { _ in false }
+        s.qaForgetHelperCompletionBatches(); s.stopAll()
+        let freshQueue = AgentComposerDraftStore(applicationSupportDirectory: support)
+        let restored = AgentSupervisor(store: AgentStore(smokeTest: false), submissionRecoveryStore: freshQueue)
+        defer { restored.stopAll() }
+        restored.helperCompletionNow = { now }; restored.helperCompletionEnabled = { _ in true }
+        _ = restored.restore()
+        await restored.flushHelperCompletions()
+        let resumed = await waitUntil(timeout: 15, pollInterval: 0.02) { wakes().count == 2 && !restored.isRunning(parent) }
+        try HelperGuardChecks.expect(resumed, "fresh supervisor did not finish interrupted admission")
+        let final = SpawnResultFile.read(parentCwd: cwd, handle: restored.records[interrupted]!.spawnResultHandle!)!
+        let committed = try SpawnResultFile.delivery(parentCwd: cwd, helper: interrupted.rawValue, turn: final.turnIdentity!, recipient: parent.rawValue)
+        try HelperGuardChecks.expect(committed?.phase == .delivered && wakes().count == 2, "interrupted wake duplicated or lost commit")
+        print("helper-completion-check: restart after durable queue stage reuses one occurrence PASS")
+    }
+
     static func run() async throws {
+        try await runDeliveryLedger()
+        try await runDeliveryFailures()
+        let fixtureRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let priorPi = try Data(contentsOf: fixtureRoot.appendingPathComponent("scripts/fixtures/pi-spawn-before-delivery.ts"))
+        let installDir = FileManager.default.temporaryDirectory.appendingPathComponent("helper-pi-upgrade-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: installDir) }
+        try FileManager.default.createDirectory(at: installDir, withIntermediateDirectories: true)
+        let installed = installDir.appendingPathComponent(PiExtensionInstaller.extensionFileName)
+        try priorPi.write(to: installed)
+        let replacement = PiExtensionInstaller.bundledExtensionContent()!
+        try HelperGuardChecks.expect(PiExtensionInstaller.install(sourceContent: replacement, destinationDirectory: installDir) == .installed,
+            "shipped Pi file reader did not upgrade to authenticated collector")
+        let upgraded = try Data(contentsOf: installed)
+        try HelperGuardChecks.expect(upgraded == replacement, "Pi upgrade wrote incorrect bytes")
+        let userEdited = priorPi + Data("\n// user edit\n".utf8)
+        try userEdited.write(to: installed)
+        try HelperGuardChecks.expect(PiExtensionInstaller.install(sourceContent: replacement, destinationDirectory: installDir) == .leftUserModifiedCopy,
+            "Pi upgrade overwrote a user-modified extension")
+        print("helper-completion-check: shipped Pi extension upgrades; user edits preserved PASS")
         let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "helper completion check")
         defer { ProcessInfo.processInfo.endActivity(activity) }
         let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-completion")

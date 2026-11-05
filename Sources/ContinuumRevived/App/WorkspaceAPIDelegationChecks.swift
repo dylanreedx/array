@@ -71,6 +71,15 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
             emit({"type": "response", "id": cmd.get("id"), "command": "prompt", "success": True})
             emit({"type": "agent_start"})
             emit({"type": "turn_start"})
+            if "BUSY-HOLD" in (cmd.get("message") or cmd.get("prompt") or ""):
+                while not os.path.exists(os.path.join(cwd, "release-busy")):
+                    time.sleep(0.01)
+            prompt_text = cmd.get("message") or cmd.get("prompt") or ""
+            for marker, flag in [("QCALL-A", "release-q-a"), ("QCALL-B", "release-q-b")]:
+                if marker in prompt_text:
+                    while not os.path.exists(os.path.join(cwd, flag)):
+                        time.sleep(0.01)
+            emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "ANSWER: " + prompt_text}})
             emit({"type": "turn_end"})
             emit({"type": "agent_end", "willRetry": False})
             emit({"type": "agent_settled"})
@@ -196,7 +205,8 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
             let runner = ScriptedAgentRunner(script: [.turnCompleted(threadId: "fixture", turnId: "done", outcome: .completed, errorMessage: nil)])
             fixtureRunners[launch.record.id] = runner
             return runner
-        })
+        }, submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: URL(fileURLWithPath: appSupportPath)),
+        transcriptStore: AgentTranscriptStore(root: appSupport.appendingPathComponent("transcripts")))
     delegate.agentSupervisor = supervisor
     // Agent permissions Off: new agents start without workspace tools and every
     // gated request asks — the world this leg was written against. The user's
@@ -873,6 +883,209 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
     try expect(afterRecovery["delivery"]?.string == "delivered", "a retry after a no-op failure delivers: \(afterRecovery)")
     let recoveredDelivery = await childReceived("MSG-NOTREADY-91")
     try expect(recoveredDelivery == 1, "and delivers exactly once, got \(recoveredDelivery)")
+
+    // Busy delivery: hold the current provider turn until the API has admitted
+    // and replayed its queued message. No timing race decides whether it is busy.
+    try await waitChildIdle()
+    try expect(supervisor.send("BUSY-HOLD", to: childId), "start held current turn")
+    _ = await childReceived("BUSY-HOLD")
+    api.recordMessageChain(target: parentId, hops: WorkspaceAPIService.messageHopLimit - 1)
+    let queuedPayload: [String: Any] = ["agentId": childIdString, "text": "BUSY-QUEUED-ONCE", "idempotencyKey": "busy-queue"]
+    let queued = try result(dispatch("agent.message", queuedPayload, requestId: "busy-queue-op"), "busy message")
+    try expect(queued["delivery"]?.string == "queued" && queued["queuePosition"]?.int == 1, "busy target queues at position 1: \(queued)")
+    let replayQueued = try result(dispatch("agent.message", queuedPayload, requestId: "busy-queue-replay"), "queued replay")
+    try expect(replayQueued["delivery"]?.string == "queued" && replayQueued["queuePosition"]?.int == 1, "same key replays queued admission and original position")
+    try expect(occurrences("BUSY-QUEUED-ONCE", in: childPromptLog()) == 0, "queued message cannot enter current turn")
+    let railReady = await waitUntil(timeout: 5, pollInterval: 0.02) { supervisor.queuedMessages(for: childId).count == 1 }
+    try expect(railReady && supervisor.queuedMessages(for: childId)[0].text.contains(parentId.rawValue.uuidString.lowercased()), "composer rail retains sender envelope")
+    try Data().write(to: msgChildCwd.appendingPathComponent("release-busy"))
+    _ = await childReceived("BUSY-QUEUED-ONCE")
+    try await waitChildIdle()
+    try expect(occurrences("BUSY-QUEUED-ONCE", in: childPromptLog()) == 1, "queued message delivered once after current turn")
+    try expect(childPromptLog().split(separator: "\n").contains { $0.contains("BUSY-QUEUED-ONCE") && $0.contains(parentId.rawValue.uuidString.lowercased()) }, "delivered prompt retains sender identity")
+    try expect(supervisor.queuedMessages(for: childId).isEmpty, "drained rail is empty")
+    try expect(api.messageChainHops(for: childId) == WorkspaceAPIService.messageHopLimit, "queue drain retains chain depth")
+    api.recordMessageChain(target: parentId, hops: WorkspaceAPIService.messageHopLimit)
+    _ = try failure(dispatch("agent.message", ["agentId": childIdString, "text": "BUSY-OVER-LIMIT", "idempotencyKey": "busy-limit"]), .unsupported, "hop limit after queued delivery")
+    try expect(occurrences("BUSY-OVER-LIMIT", in: childPromptLog()) == 0, "hop refusal delivers nothing")
+    api.messageChains.removeAll()
+
+
+    // Integration witness: authenticated callers share a busy recipient, while
+    // subscriptions and durable replay remain scoped to the item that starts.
+    supervisor.workspaceToolsPermission = { .free }
+    let caller2 = supervisor.spawn(role: nil, prompt: nil, cwd: pbRoot, harness: .pi,
+        model: "fixture-model", thinking: "low", projectId: projectPb, projectRoot: pbRoot)
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: caller2, true)
+    var deliveryClock = Date()
+    supervisor.helperCompletionNow = { deliveryClock }
+    supervisor.helperCompletionEnabled = { $0 == parentId || $0 == caller2 }
+    var routingWakesA: [String] = [], routingWakesB: [String] = []
+    let routingObserverA = supervisor.addPromptEchoObserver(for: parentId) { routingWakesA.append($0.text) }
+    let routingObserverB = supervisor.addPromptEchoObserver(for: caller2) { routingWakesB.append($0.text) }
+    try? FileManager.default.removeItem(at: msgChildCwd.appendingPathComponent("release-busy"))
+    try expect(supervisor.send("BUSY-HOLD-routing", to: childId), "start routing hold")
+    _ = await childReceived("BUSY-HOLD-routing")
+    let payloadA: [String: Any] = ["agentId": childIdString, "text": "QCALL-A", "idempotencyKey": "route-a"]
+    let payloadB: [String: Any] = ["agentId": childIdString, "text": "QCALL-B", "idempotencyKey": "route-b"]
+    let admissionA = try result(dispatch("agent.message", payloadA, requestId: "route-op-a"), "queue A")
+    let admissionB = try result(api.dispatch(agentId: caller2, requestId: "route-op-b", op: "agent.message", payload: payloadB), "queue B")
+    try expect(admissionA["delivery"]?.string == "queued" && admissionB["delivery"]?.string == "queued", "both callers queue")
+    let beforeStart = try result(dispatch("operation.get", ["operationId": "route-op-a"]), "queued result")
+    try expect(beforeStart["childResult"] == nil, "old active turn cannot settle queued request")
+    let persisted = try AgentMessageOutbox(applicationSupportDirectory: URL(fileURLWithPath: appSupportPath)
+        .appendingPathComponent("workspace-api-delegation-check")).entries()
+    try expect(persisted.contains { $0.context.caller == caller2 && $0.context.operationId == "route-op-b"
+        && $0.message.agentMessageContext == $0.context && $0.phase == .queued }, "caller/operation/key/hash persist on queue admission")
+    try Data().write(to: msgChildCwd.appendingPathComponent("release-busy"))
+    _ = await childReceived("QCALL-A")
+    let waitingB = try result(api.dispatch(agentId: caller2, requestId: "read-b-waiting", op: "operation.get",
+        payload: ["operationId": "route-op-b"]), "B waiting while A runs")
+    try expect(waitingB["childResult"] == nil, "B cannot settle with previous hold or A")
+    try Data().write(to: msgChildCwd.appendingPathComponent("release-q-a"))
+    _ = await childReceived("QCALL-B")
+    let resultA = try result(dispatch("operation.get", ["operationId": "route-op-a"]), "A settled while B runs")
+    let bodyA = (resultA["childResult"]?.value as? [String: Any])?["finalText"] as? String ?? ""
+    try expect(bodyA.contains("QCALL-A") && !bodyA.contains("QCALL-B"), "A's handle owns A's answer: \(bodyA); result=\(resultA); projection=\(String(describing: supervisor.qaFinalAssistantText(for: childId)))")
+    guard let receiptA = resultA["childResult"]?.object?["deliveryReceipt"]?.string else { throw Failure(message: "queued A has no leased offer receipt") }
+    _ = try result(dispatch("operation.get", ["operationId": "route-op-a", "deliveryReceipt": receiptA, "acknowledgeDelivery": true]), "ack A custody")
+
+    try Data().write(to: msgChildCwd.appendingPathComponent("release-q-b"))
+    try await waitChildIdle()
+    deliveryClock.addTimeInterval(12)
+    await supervisor.flushHelperCompletions()
+    let routingWakesDrained = await waitUntil(timeout: 15, pollInterval: 0.02) {
+        !supervisor.isRunning(parentId) && !supervisor.isRunning(caller2)
+            && !routingWakesB.isEmpty
+    }
+    try expect(routingWakesDrained, "queued B wake reaches its caller")
+    try expect(!routingWakesA.contains { $0.contains("QCALL-A") }, "collection-first queued A must suppress its wake")
+    try expect(routingWakesB.filter { $0.contains("QCALL-B") }.count == 1, "wake-first queued B reaches its caller once")
+    let compactA = try result(dispatch("operation.get", ["operationId": "route-op-a"]), "queued A duplicate read")
+    try expect(compactA["childResult"]?.object?["status"]?.string == "already_delivered"
+        && compactA["childResult"]?.object?["finalText"] == nil, "journal path suppresses collection-first duplicate")
+    let compactB = try result(api.dispatch(agentId: caller2, requestId: "read-b-done", op: "operation.get",
+        payload: ["operationId": "route-op-b"]), "B wake-first read")
+    try expect(compactB["childResult"]?.object?["status"]?.string == "already_delivered"
+        && compactB["childResult"]?.object?["finalText"] == nil, "journal path cannot bypass wake delivery")
+    guard let receiptB = compactB["childResult"]?.object?["deliveryReceipt"]?.string else { throw Failure(message: "queued B has no recovery receipt") }
+    let resultB = try result(api.dispatch(agentId: caller2, requestId: "read-b-recovery", op: "operation.get",
+        payload: ["operationId": "route-op-b", "deliveryReceipt": receiptB]), "B explicit receipt recovery")
+    let bodyB = (resultB["childResult"]?.value as? [String: Any])?["finalText"] as? String ?? ""
+    try expect(bodyB.contains("QCALL-B") && !bodyB.contains("QCALL-A"), "B's handle owns B's answer: \(bodyB)")
+    _ = try failure(dispatch("operation.get", ["operationId": "route-op-b"]), .notFound, "foreign caller cannot read B")
+    let routingCount = routingWakesA.count + routingWakesB.count
+    deliveryClock.addTimeInterval(12)
+    await supervisor.flushHelperCompletions()
+    try expect(routingWakesA.count + routingWakesB.count == routingCount, "repeated flush never repeats queued results")
+    supervisor.removePromptEchoObserver(routingObserverA, for: parentId)
+    supervisor.removePromptEchoObserver(routingObserverB, for: caller2)
+    supervisor.helperCompletionEnabled = { _ in false }
+    supervisor.helperCompletionNow = Date.init
+    print("Transport queued collection-first/wake-first and receipt recovery checks passed")
+
+
+    try? FileManager.default.removeItem(at: msgChildCwd.appendingPathComponent("release-busy"))
+    try expect(supervisor.send("BUSY-HOLD-cancel", to: childId), "start cancellation hold")
+    _ = await childReceived("BUSY-HOLD-cancel")
+    _ = try result(dispatch("agent.message", ["agentId": childIdString, "text": "CANCEL-BEFORE-START", "idempotencyKey": "cancel-queued"],
+        requestId: "cancel-queued-op"), "queue cancellation candidate")
+    guard let cancelItem = supervisor.queuedMessages(for: childId).first(where: { $0.agentMessageContext?.operationId == "cancel-queued-op" }) else {
+        throw Failure(message: "missing queued cancellation item")
+    }
+    supervisor.cancelQueuedMessage(cancelItem.id, for: childId)
+    let cancelledResult = try result(dispatch("operation.get", ["operationId": "cancel-queued-op"]), "cancelled queue result")
+    try expect(cancelledResult["childResult"]?.object?["status"]?.string == "interrupted", "cancellation settles the pending operation")
+    try Data().write(to: msgChildCwd.appendingPathComponent("release-busy"))
+    try await waitChildIdle()
+    try expect(!childPromptLog().contains("CANCEL-BEFORE-START"), "cancelled item never starts")
+
+    try? FileManager.default.removeItem(at: msgChildCwd.appendingPathComponent("release-busy"))
+    try expect(supervisor.send("BUSY-HOLD-force-cancel", to: childId), "start force-cancel hold")
+    _ = await childReceived("BUSY-HOLD-force-cancel")
+    _ = try result(dispatch("agent.message", ["agentId": childIdString, "text": "FORCE-CANCEL-METADATA", "idempotencyKey": "force-cancel"],
+        requestId: "force-cancel-op"), "queue force-cancel candidate")
+    guard let forcedItem = supervisor.queuedMessages(for: childId).first(where: { $0.agentMessageContext?.operationId == "force-cancel-op" }) else {
+        throw Failure(message: "missing force-cancel item")
+    }
+    let forceMirrorDeadline = Date().addingTimeInterval(5)
+    while !(await supervisor.hasQueuedWakeup(forcedItem.id, for: childId)) && Date() < forceMirrorDeadline {
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    let forceAccepted = await supervisor.sendQueuedItemNow(forcedItem.id, for: childId)
+    try expect(forceAccepted, "queued force-send admission")
+    // Stop recovery must retain admission metadata even while journal reads fail.
+    let forceJournal = supervisor.agentMessageOutbox.directory
+    let forceJournalSaved = forceJournal.appendingPathExtension("force-saved")
+    try FileManager.default.moveItem(at: forceJournal, to: forceJournalSaved)
+    try Data("blocked".utf8).write(to: forceJournal)
+    supervisor.stop(childId)
+    try FileManager.default.removeItem(at: forceJournal)
+    try FileManager.default.moveItem(at: forceJournalSaved, to: forceJournal)
+    try await waitChildIdle()
+    let forceRestored = await waitUntil(timeout: 10, pollInterval: 0.02) {
+        supervisor.queuedMessages(for: childId).contains { $0.id == forcedItem.id }
+    }
+    let forceRecovered = supervisor.queuedMessages(for: childId).first { $0.id == forcedItem.id }
+    try expect(forceRestored && forceRecovered?.agentMessageContext == forcedItem.agentMessageContext
+        && forceRecovered?.agentMessageHops == forcedItem.agentMessageHops,
+        "Stop must preserve caller/operation/key/hops when it restores an unsent forced message")
+    supervisor.cancelQueuedMessage(forcedItem.id, for: childId)
+    let forceCancelled = try result(dispatch("operation.get", ["operationId": "force-cancel-op"]), "force cancellation result")
+    try expect(forceCancelled["childResult"]?.object?["status"]?.string == "interrupted", "recovered force cancellation settles its own operation")
+    supervisor.resumeQueue(for: childId)
+    try expect(!childPromptLog().contains("FORCE-CANCEL-METADATA"), "stopped force-send never reaches the provider")
+    print("Transport force/Stop preserves queued metadata through unavailable journal PASS")
+
+    // Failure is observable before queued acknowledgement; the same key is retryable.
+    try? FileManager.default.removeItem(at: msgChildCwd.appendingPathComponent("release-busy"))
+    try expect(supervisor.send("BUSY-HOLD-storage", to: childId), "start storage hold")
+    _ = await childReceived("BUSY-HOLD-storage")
+    let journal = supervisor.agentMessageOutbox.directory
+    let savedJournal = journal.appendingPathExtension("saved")
+    try FileManager.default.moveItem(at: journal, to: savedJournal)
+    try Data("blocked".utf8).write(to: journal)
+    let retryPayload: [String: Any] = ["agentId": childIdString, "text": "AFTER-RESTART", "idempotencyKey": "restart-key"]
+    let storageReply = dispatch("agent.message", retryPayload, requestId: "storage-failed")
+    try FileManager.default.removeItem(at: journal)
+    try FileManager.default.moveItem(at: savedJournal, to: journal)
+    _ = try failure(storageReply, .durabilityFailed, "storage failure cannot acknowledge queued success")
+    try expect(!supervisor.queuedMessages(for: childId).contains { $0.text.contains("AFTER-RESTART") }, "failed admission changes no rail")
+    let retryAdmission = try result(dispatch("agent.message", retryPayload, requestId: "restart-op"), "retry after storage recovery")
+    try expect(retryAdmission["delivery"]?.string == "queued", "same failed key can be admitted after storage recovery")
+    supervisor.stop(childId)
+    try await waitChildIdle()
+
+    // Recreate supervisor AND API: no in-memory operation/replay map can help.
+    let restarted = AgentSupervisor(store: AgentStore(applicationSupportDirectory: URL(fileURLWithPath: appSupportPath)
+        .appendingPathComponent("workspace-api-delegation-check")),
+        submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: URL(fileURLWithPath: appSupportPath)),
+        transcriptStore: AgentTranscriptStore(root: appSupport.appendingPathComponent("transcripts")))
+    defer { restarted.stopAll() }
+    restarted.workspaceToolsPermission = { .free }
+    _ = restarted.restore()
+    let restartAPI = WorkspaceAPIService(runtime: { runtime }, canvas: { canvas }, focusBroker: { delegate.qaFocusBroker },
+        supervisor: restarted, registryStore: { registryStore }, epoch: "restart-fixture", approvalHandler: { _ in .allowForSession })
+    let restoredQueueReady = await waitUntil(timeout: 10, pollInterval: 0.02) {
+        restarted.queuedMessages(for: childId).contains { $0.agentMessageContext?.operationId == "restart-op" }
+    }
+    try expect(restoredQueueReady && restarted.isQueuePaused(for: childId), "restart restores durable admission paused")
+    let replayAfterRestart = try result(restartAPI.dispatch(agentId: parentId, requestId: "restart-replay", op: "agent.message",
+        payload: retryPayload), "restart replay")
+    try expect(replayAfterRestart["operationId"]?.string == "restart-op" && replayAfterRestart["queuePosition"]?.int == retryAdmission["queuePosition"]?.int, "restart reuses durable key and original position rather than adding another message")
+    try expect(restarted.queuedMessages(for: childId).filter { $0.text.contains("AFTER-RESTART") }.count == 1, "one item after restart retry")
+    restarted.resumeQueue(for: childId)
+    let restartedDelivered = await waitUntil(timeout: 20, pollInterval: 0.02) {
+        occurrences("AFTER-RESTART", in: childPromptLog()) == 1 && !restarted.isRunning(childId)
+    }
+    try expect(restartedDelivered, "restored queue delivers once after explicit resume")
+    let restartResult = try result(restartAPI.dispatch(agentId: parentId, requestId: "restart-result", op: "operation.get",
+        payload: ["operationId": "restart-op"]), "restart result association")
+    try expect((restartResult["childResult"]?.value as? [String: Any])?["status"] as? String == "completed", "restored operation settles")
+    // Return the shared fake session to the original supervisor's later fixture steps.
+    restarted.stopAll()
+    supervisor.workspaceToolsPermission = { .off }
+    print("Transport integration queue checks passed: two callers, turn association, storage failure and restart")
 
     // MARK: O — the same host over MCP (T3): the real `array-workspace-mcp`
     // binary, through the production listener `mountWorkspaceSceneAtBoot` wired

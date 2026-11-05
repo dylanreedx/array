@@ -57,6 +57,8 @@ public enum PiExtensionInstaller {
     /// .ts, append the hash of the version it replaces
     /// (`git show HEAD:Sources/ContinuumRevivedCore/Resources/PiExtensions/continuum-spawn-agent.ts | shasum -a 256`).
     public static let knownPriorContentHashes: Set<String> = [
+        // Shipped file-reader version before authenticated/recoverable delivery.
+        "c28d9768ccf019745f03538a13c3138b8e06fff97328656568d779ebcc6ef065",
         // The original fire-and-forget spawn_agent (a8ab0b40, shipped by
         // 5e4ac132; both commits carry byte-identical content).
         "3e536320b6c99957255bb26b7709acdf838b075c99212c57211cf5f34831bd5a",

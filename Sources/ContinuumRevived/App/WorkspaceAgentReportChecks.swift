@@ -359,7 +359,7 @@ enum WorkspaceAgentReportChecks {
             }
             return (waited.reply, agents[0])
         }
-        let todaysKeys: Set<String> = ["handle", "childAgentId", "status", "finalText", "endedAt"]
+        let todaysKeys: Set<String> = ["deliveryReceipt", "handle", "childAgentId", "status", "finalText", "endedAt"]
         let off = try await waitEntry()
         try expect(Set(off.whole.keys) == ["schema", "status", "result"]
                    && Set((off.whole["result"] as? [String: Any] ?? [:]).keys) == ["agents", "timedOut"],
@@ -376,12 +376,26 @@ enum WorkspaceAgentReportChecks {
         // (f) Setting ON: the report takes the final text's place.
         settings.set(true, forKey: AgentShortReportConfig.enabledKey)
         try expect(f.api.shortReportsEnabled(), "the mount must read the setting live")
+        // A collected turn is single-delivery. Exercise the changed setting
+        // on a fresh turn instead of asking for the previous report twice.
+        try expect(supervisor.send("HOLD-REPORT-ON: setting changed", to: child), "short-report turn did not start")
+        try expect(supervisor.fileReport(stored, for: child), "short-report turn could not file report")
+        try Data().write(to: URL(fileURLWithPath: supervisor.records[child]!.cwd).appendingPathComponent("release.flag"))
+        let onSettled = await waitUntil(timeout: 30, pollInterval: 0.05) {
+            promptLog().contains("HOLD-REPORT-ON") && !supervisor.isRunning(child)
+        }
+        try expect(onSettled, "short-report turn did not settle")
         let on = try await waitEntry()
         var offWithoutText = off.entry
         offWithoutText.removeValue(forKey: "finalText")
+        offWithoutText.removeValue(forKey: "endedAt")
+        offWithoutText.removeValue(forKey: "deliveryReceipt")
         try expect(on.entry["finalText"] == nil && on.entry["finalTextTruncated"] == nil && jsonEqual(on.entry["report"], offReport),
                    "setting on, the report must replace finalText: \(on.entry)")
-        try expect(jsonEqual(on.entry, offWithoutText), "setting on, nothing but finalText may change: \(on.entry) vs \(off.entry)")
+        var onWithoutTime = on.entry
+        onWithoutTime.removeValue(forKey: "endedAt")
+        onWithoutTime.removeValue(forKey: "deliveryReceipt")
+        try expect(jsonEqual(onWithoutTime, offWithoutText), "setting on, only finalText and turn end time may change: \(on.entry) vs \(off.entry)")
 
         // (g) A later turn that files nothing: no report, and the final text
         // comes back, setting on or not. The earlier turn's report is stale.
@@ -396,7 +410,9 @@ enum WorkspaceAgentReportChecks {
                    && Set(second.entry.keys) == todaysKeys, "a turn that filed no report must carry none: \(second.entry)")
         settings.removeObject(forKey: AgentShortReportConfig.enabledKey)
         let secondOff = try await waitEntry()
-        try expect(jsonEqual(secondOff.entry, second.entry), "with no report, the setting must change nothing: \(secondOff.entry)")
+        try expect(secondOff.entry["status"] as? String == "already_delivered"
+                   && secondOff.entry["report"] == nil && secondOff.entry["finalText"] == nil,
+                   "changing the setting must not re-deliver a collected turn: \(secondOff.entry)")
 
         // (h) Relaunch: quit this supervisor's runners and restore a fresh one
         // from the same app-support store, as the app does at launch. The

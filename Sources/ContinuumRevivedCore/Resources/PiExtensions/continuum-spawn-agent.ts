@@ -1,7 +1,6 @@
-import { bridge } from "./continuum-workspace-tools.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 // Continuum observes every tool call in the Pi event stream, so the spawn CALL
@@ -15,7 +14,7 @@ import { join } from "node:path";
 // delegation collectable instead of fire-and-forget.
 
 const RESULTS_DIR = join(".array", "spawn-results");
-const TERMINAL = new Set(["refused", "completed", "failed", "interrupted"]);
+const TERMINAL = new Set(["error", "already_delivered", "refused", "completed", "failed", "interrupted"]);
 const POLL_MS = 500;
 const UNREGISTERED_AFTER_MS = 15_000;
 const DEFAULT_TIMEOUT_S = 60;
@@ -35,6 +34,11 @@ interface SpawnResult {
   finalText?: string;
   finalTextTruncated?: boolean;
   endedAt?: string;
+  turnIdentity?: string;
+  recipientId?: string;
+  deliveredVia?: string;
+  deliveryReceipt?: string;
+  report?: unknown;
 }
 
 function safeHandle(handle: string): boolean {
@@ -47,13 +51,65 @@ function safeHandle(handle: string): boolean {
   );
 }
 
-async function readResult(cwd: string, handle: string): Promise<SpawnResult | undefined> {
+async function hostOperation(ctx: any, id: string, payload: unknown,
+                             signal: AbortSignal | undefined, deadline: number): Promise<any> {
+  if (process.env.CONTINUUM_ARRAY_MANAGED_AGENT !== "1" || !ctx.hasUI) return undefined;
+  if (signal?.aborted || Date.now() >= deadline) return undefined;
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let raw: string | undefined;
   try {
-    const raw = await readFile(join(cwd, RESULTS_DIR, `${handle}.json`), "utf8");
-    return JSON.parse(raw) as SpawnResult;
-  } catch {
-    return undefined;
+    raw = await Promise.race([
+      ctx.ui.input(JSON.stringify({ schema: "array.workspace.v1", kind: "request",
+        requestId: id, op: "operation.get", payload }), undefined,
+        { signal: controller.signal, timeout: Math.min(500, Math.max(1, deadline - Date.now())) }),
+      new Promise<undefined>(resolve => {
+        timer = setTimeout(() => { controller.abort(); resolve(undefined); },
+          Math.min(500, Math.max(1, deadline - Date.now())));
+        controller.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
+  if (raw === undefined) return undefined;
+  try {
+    const reply = JSON.parse(raw);
+    if (reply.schema === "array.workspace.v1" && reply.requestId === id) return reply;
+  } catch { /* retry same durable lookup id */ }
+  return undefined;
+}
+
+async function pendingInput(ctx: any, signal: AbortSignal | undefined, deadline: number): Promise<string | undefined> {
+  const reply = await hostOperation(ctx, `wait-${crypto.randomUUID()}`, { pendingInputOnly: true }, signal, deadline);
+  return reply?.result?.pendingInput;
+}
+
+// The runner's stdio bridge supplies the caller identity. Never authorize
+// against courier recipientId, environment agent ids, or file contents.
+async function hostLookup(ctx: any, handle: string, requestId: string, signal?: AbortSignal, deadline = Date.now() + 60_000): Promise<SpawnResult | undefined> {
+  if (process.env.CONTINUUM_ARRAY_MANAGED_AGENT !== "1" || !ctx.hasUI) {
+    return { status: "error", reason: "Authenticated Array host bridge unavailable" };
+  }
+  const post = (id: string, payload: unknown) => hostOperation(ctx, id, payload, signal, deadline);
+  const reply = await post(requestId, { operationId: handle });
+  if (!reply) return { status: "spawned" };
+  if (reply.status !== "ok") {
+    if (reply.error?.code === "not_found") return undefined;
+    return { status: "error", reason: reply.error?.code ?? "host lookup failed" };
+  }
+  const result = reply.result?.childResult as SpawnResult | undefined;
+  if (!result) return { status: "spawned" };
+  if (result.deliveryReceipt && !["already_delivered", "delivery_pending"].includes(result.status ?? "")) {
+    const ack = await post(requestId + "-ack", { operationId: handle,
+      deliveryReceipt: result.deliveryReceipt, acknowledgeDelivery: true });
+    if (!ack) return { status: "spawned" };
+    if (ack.status !== "ok") throw new Error("Helper acknowledgment failed; recover with deliveryReceipt " + result.deliveryReceipt);
+  }
+  return result;
 }
 
 /** Handles of result files written since this process started (no-handles mode). */
@@ -82,6 +138,10 @@ function describe(handle: string, result: SpawnResult | undefined, note?: string
   if (!result) return `${handle}: no result yet`;
   const role = result.role ?? "agent";
   switch (result.status) {
+    case "error":
+      return `${handle}: helper delivery error — ${result.reason}`;
+    case "already_delivered":
+      return `${handle} (${role}): already_delivered — ${result.reason}`;
     case "refused":
       return `${handle} (${role}): REFUSED — ${result.reason ?? "no reason recorded"}`;
     case "spawned":
@@ -176,6 +236,7 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
       const badHandles = (params.handles ?? []).filter((h) => !safeHandle(h));
       const discovering = explicit.length === 0;
       const pending = new Set<string>(explicit);
+      const lookupIDs = new Map<string, string>();
       const finished = new Map<string, SpawnResult>();
       const notes = new Map<string, string>();
       for (const bad of badHandles) notes.set(bad, "not a valid spawn_agent handle");
@@ -183,9 +244,7 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
       let interrupted: string | undefined;
       for (;;) {
         if (!signal?.aborted) {
-          const reply = await bridge(ctx, `wait-${crypto.randomUUID()}`, "operation.get",
-            { pendingInputOnly: true }, signal, 1_000);
-          const reason = (reply.result as { pendingInput?: string } | undefined)?.pendingInput;
+          const reason = await pendingInput(ctx, signal, deadline);
           if (reason === "user_steer" || reason === "inbox") interrupted = reason;
         }
         if (discovering) {
@@ -194,7 +253,11 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
           }
         }
         for (const handle of [...pending]) {
-          const result = await readResult(cwd, handle);
+          if (interrupted || signal?.aborted || Date.now() >= deadline) break;
+          const reason = await pendingInput(ctx, signal, deadline);
+          if (reason === "user_steer" || reason === "inbox") { interrupted = reason; break; }
+          if (!lookupIDs.has(handle)) lookupIDs.set(handle, `${_toolCallId}-${crypto.randomUUID()}`);
+          const result = await hostLookup(ctx, handle, lookupIDs.get(handle)!, signal, deadline);
           if (result?.status && TERMINAL.has(result.status)) {
             finished.set(handle, result);
             pending.delete(handle);
@@ -233,7 +296,7 @@ export default function continuumSpawnAgent(pi: ExtensionAPI) {
             } else if (finished.has(handle)) {
               lines.push(describe(handle, finished.get(handle)));
             } else {
-              lines.push(describe(handle, await readResult(cwd, handle)));
+              lines.push(describe(handle, { status: "spawned" }));
             }
           }
           if (timedOut && pending.size > 0) {

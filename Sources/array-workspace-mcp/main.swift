@@ -169,8 +169,12 @@ struct ArrayWorkspaceMCP {
                 reply = await waitAgents(arguments)
             } else if let tool = WorkspaceMCPToolCatalog.tool(named: name) {
                 do {
-                    reply = try await post(op: tool.operation.rawValue, payload: .object(arguments),
-                                           requestId: Self.providerCallID(params))
+                    let lookupID = Self.providerCallID(params) ?? UUID().uuidString
+                    let raw = tool.operation == .operationGet
+                        ? try await lookup(arguments, requestId: lookupID)
+                        : try await post(op: tool.operation.rawValue, payload: .object(arguments), requestId: lookupID)
+                    reply = tool.operation == .operationGet
+                        ? try await acknowledgeLookup(raw, payload: arguments, requestId: lookupID) : raw
                 } catch {
                     reply = Self.errorReply(code: "outcome_unknown", message: "\(error). Do not repeat the effect blindly; call array_workspace_context and read recentOperations.")
                 }
@@ -238,6 +242,37 @@ struct ArrayWorkspaceMCP {
             return try JSONDecoder().decode(WorkspaceMCPJSON.self, from: data)
         }
 
+        /// Retries preserve the lookup id: a lost response replays the same
+        /// durable offer, including after the host restarted. Acknowledgment
+        /// means client custody, not proof that a model consumed stdout.
+        func lookup(_ payload: [String: WorkspaceMCPJSON], requestId: String, deadline: Date? = nil) async throws -> WorkspaceMCPJSON {
+            var failure: Error = MCPError.unavailable("Helper lookup unavailable")
+            for _ in 0..<3 {
+                do {
+                    try Task.checkCancellation()
+                    return try await post(op: WorkspaceAPIOp.operationGet.rawValue, payload: .object(payload),
+                        requestId: requestId, timeout: deadline.map { min(0.5, $0.timeIntervalSinceNow) })
+                } catch {
+                    if Task.isCancelled { throw error }
+                    if let deadline, Date() >= deadline { throw MCPError.pollTimedOut }
+                    failure = error
+                }
+            }
+            throw failure
+        }
+        func acknowledgeLookup(_ reply: WorkspaceMCPJSON, payload: [String: WorkspaceMCPJSON], requestId: String, deadline: Date? = nil) async throws -> WorkspaceMCPJSON {
+            guard case .object(let fields) = reply, case .object(let operation)? = fields["result"],
+                  case .object(let child)? = operation["childResult"],
+                  case .string(let receipt)? = child["deliveryReceipt"],
+                  child["status"] != .string("already_delivered"), child["status"] != .string("delivery_pending") else { return reply }
+            var ack = payload; ack["deliveryReceipt"] = .string(receipt); ack["acknowledgeDelivery"] = .bool(true)
+            let response = try await lookup(ack, requestId: requestId + "-ack", deadline: deadline)
+            guard case .object(let result) = response, result["status"] == .string("ok") else {
+                throw MCPError.unavailable("Helper acknowledgment failed; replay operation.get with deliveryReceipt \(receipt)")
+            }
+            return reply
+        }
+
         // MARK: wait_agents
 
         /// Polls `operation.get` for each handle until its child is idle with a
@@ -260,6 +295,7 @@ struct ArrayWorkspaceMCP {
             let range = WorkspaceMCPToolCatalog.waitAgentsTimeoutRange
             let timeout = min(max(requested, Double(range.lowerBound)), Double(range.upperBound))
             let deadline = Date().addingTimeInterval(timeout)
+            let lookupIDs = Dictionary(uniqueKeysWithValues: handles.map { ($0, UUID().uuidString) })
             var settled: [String: WorkspaceMCPJSON] = [:]
             var latest: [String: WorkspaceMCPJSON] = [:]
             var interrupted: String?
@@ -279,9 +315,10 @@ struct ArrayWorkspaceMCP {
                             interrupted = reason
                             break polling // Return cached results; never start another lookup.
                         }
-                        let reply = try await post(op: WorkspaceAPIOp.operationGet.rawValue,
-                            payload: .object(["operationId": .string(handle)]),
-                            timeout: min(0.5, deadline.timeIntervalSinceNow))
+                        let payload: [String: WorkspaceMCPJSON] = ["operationId": .string(handle)]
+                        let raw = try await lookup(payload, requestId: lookupIDs[handle]!, deadline: deadline)
+                        let reply = try await acknowledgeLookup(raw, payload: payload,
+                            requestId: lookupIDs[handle]!, deadline: deadline)
                         guard case .object(let fields) = reply else { continue }
                         if fields["status"] == .string("error") {
                             settled[handle] = .object(["handle": .string(handle), "status": .string("error"), "error": fields["error"] ?? .null])
@@ -327,9 +364,9 @@ struct ArrayWorkspaceMCP {
             }
             guard operation["childRunning"] == .bool(false),
                   case .object(let result)? = operation["childResult"],
-                  case .string(let status)? = result["status"], status != "spawned" else { return nil }
+                  case .string(let status)? = result["status"], status != "spawned", status != "delivery_pending" else { return nil }
             entry["status"] = .string(status)
-            for key in ["finalText", "finalTextTruncated", "reason", "endedAt", "report"] {
+            for key in ["deliveryReceipt", "finalText", "finalTextTruncated", "reason", "endedAt", "report"] {
                 if let value = result[key] { entry[key] = value }
             }
             return .object(entry)

@@ -158,6 +158,8 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
     /// boundary and the supervisor hands them to the provider; a turn that ends
     /// first runs them next, ahead of every follow-up, by ordinary draining.
     public var isSteer: Bool
+    public var agentMessageHops: Int?
+    public var agentMessageContext: AgentMessageQueueContext?
 
     public init(
         id: UUID = UUID(),
@@ -166,7 +168,9 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         fileReferences: [AgentComposerDraftFileReference] = [],
         agentReferences: [AgentPromptReference] = [], boardReferences: [BoardPromptReference] = [],
         queuedAt: Date,
-        isSteer: Bool = false
+        isSteer: Bool = false,
+        agentMessageHops: Int? = nil,
+        agentMessageContext: AgentMessageQueueContext? = nil
     ) {
         self.id = id
         self.text = text
@@ -176,10 +180,12 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         self.boardReferences = BoardPromptReference.unique(boardReferences)
         self.queuedAt = queuedAt
         self.isSteer = isSteer
+        self.agentMessageHops = agentMessageHops
+        self.agentMessageContext = agentMessageContext
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, text, imageAttachments, fileReferences, agentReferences, boardReferences, queuedAt, isSteer
+        case id, text, imageAttachments, fileReferences, agentReferences, boardReferences, queuedAt, isSteer, agentMessageHops, agentMessageContext
     }
 
     public init(from decoder: Decoder) throws {
@@ -191,6 +197,8 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         agentReferences = try values.decodeIfPresent([AgentPromptReference].self, forKey: .agentReferences) ?? []
         boardReferences = try values.decodeIfPresent([BoardPromptReference].self, forKey: .boardReferences) ?? []
         queuedAt = try values.decode(Date.self, forKey: .queuedAt)
+        agentMessageHops = try values.decodeIfPresent(Int.self, forKey: .agentMessageHops)
+        agentMessageContext = try values.decodeIfPresent(AgentMessageQueueContext.self, forKey: .agentMessageContext)
         isSteer = try values.decodeIfPresent(Bool.self, forKey: .isSteer) ?? false
     }
 
@@ -203,6 +211,8 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         try values.encode(imageAttachments, forKey: .imageAttachments)
         try values.encode(fileReferences, forKey: .fileReferences)
         try values.encode(queuedAt, forKey: .queuedAt)
+        try values.encodeIfPresent(agentMessageHops, forKey: .agentMessageHops)
+        try values.encodeIfPresent(agentMessageContext, forKey: .agentMessageContext)
         if isSteer { try values.encode(isSteer, forKey: .isSteer) }
     }
 }
@@ -794,6 +804,18 @@ public actor AgentComposerDraftStore {
         current.append(.prompt(message))
         persistQueue(current, for: agentID)
         return message
+    }
+
+    /// A host outbox already owns admission. Mirror its stable item without
+    /// duplicating it; failure leaves the outbox available for recovery.
+    public func enqueueAgentMessage(_ message: AgentComposerQueuedMessage, for agentID: AgentID) throws {
+        var current = loadQueue(for: agentID)
+        if current.contains(where: { $0.id == message.id }) { return }
+        current.append(.prompt(message))
+        try FileManager.default.createDirectory(at: layout.queuedMessagesDirectory,
+            withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try writer.write(current, to: layout.queuedMessagesFile(for: agentID))
+        queues[agentID] = current
     }
 
     /// The scheduler's outbox retries a stable id after restart. A successful

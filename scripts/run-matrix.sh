@@ -28,7 +28,14 @@ fi
 MATRIX_TMUX_TMPDIR=$(mktemp -d /tmp/array-matrix-tmux.XXXXXX)
 export TMUX_TMPDIR="$MATRIX_TMUX_TMPDIR"
 unset TMUX TMUX_PANE
-trap 'rm -rf "$MATRIX_TMUX_TMPDIR"' EXIT
+MATRIX_TMUX_VERIFIED=0
+matrix_cleanup_tmux() {
+  if [[ "$MATRIX_TMUX_VERIFIED" == 1 && -n "${MATRIX_TMUX_BIN:-}" ]]; then
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$MATRIX_TMUX_TMPDIR" "$MATRIX_TMUX_BIN" kill-server >/dev/null 2>&1 || true
+  fi
+  rm -rf "$MATRIX_TMUX_TMPDIR"
+}
+trap matrix_cleanup_tmux EXIT
 
 # Verify the server tmux actually selected before any matrix leg can drive it.
 # Canonicalize /tmp on macOS, where tmux can report /private/tmp.
@@ -38,7 +45,7 @@ if [[ -n "$MATRIX_TMUX_BIN" ]]; then
   MATRIX_TMUX_ROOT=$(cd "$MATRIX_TMUX_TMPDIR" && pwd -P)
   MATRIX_TMUX_SOCKET_DIR=$(cd "$(dirname "$MATRIX_TMUX_SOCKET")" && pwd -P)
   case "$MATRIX_TMUX_SOCKET_DIR/" in
-    "$MATRIX_TMUX_ROOT"/*) ;;
+    "$MATRIX_TMUX_ROOT"/*) MATRIX_TMUX_VERIFIED=1 ;;
     *) printf 'Refusing matrix: tmux socket is outside the disposable namespace.\n' >&2; exit 1 ;;
   esac
 fi
@@ -1844,6 +1851,8 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # once under retry, idempotency conflict, the child tile inside the parent's zone,
 # a presentation failure repaired by agent.reveal, operation.get per step, and
 # cancellation reporting the child truthfully.
+# Busy messages: position/replay, sender/hops, two callers with turn-specific
+# results, caller-scoped restart replay, paused recovery and storage refusal.
 run_app_check .build/debug/Array --workspace-api-delegation-check
 run_app_check .build/debug/Array --helper-wait-input-check
 run_leg python3 scripts/check-interruptible-helper-waits.py

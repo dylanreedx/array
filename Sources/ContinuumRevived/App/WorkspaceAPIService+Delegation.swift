@@ -565,6 +565,19 @@ extension WorkspaceAPIService {
         //    the same key with the same text replays the first outcome and sends
         //    nothing; the same key with different text is a conflict.
         let payloadHash = Self.messagePayloadHash(request)
+        do {
+            if let entry = try supervisor.queuedAgentMessage(caller: agentId, key: idempotencyKey) {
+                guard entry.context.payloadHash == payloadHash else {
+                    return .error(WorkspaceAPIError(code: .idempotencyConflict, message: "This key already admitted a different message."))
+                }
+                let replay = AgentMessageResult(operationId: entry.context.operationId, delivery: .queued,
+                    childAgentId: entry.context.recipient, parentAgentId: agentId,
+                    childName: target.humanDisplayName, childRunning: supervisor.isRunning(childId), queuePosition: entry.queuePosition)
+                return .result(Self.jsonObject(replay) ?? [:])
+            }
+        } catch {
+            return .error(WorkspaceAPIError(code: .durabilityFailed, message: "The durable message admission could not be read; nothing was repeated."))
+        }
         switch operations.reserve(
             agentId: agentId, op: .agentMessage, idempotencyKey: idempotencyKey,
             payloadHash: payloadHash, operationId: requestId) {
@@ -686,19 +699,20 @@ extension WorkspaceAPIService {
             return failNothingDelivered(.unsupported, "Array did not deliver the message: \(refusal)", approvalRequestId: approvalRequestId)
         }
 
-        // 7. Delivery, through the composer's own path. `send` starts the turn on
-        //    the child's OWN runner; it never queues, so a child that is mid-turn
-        //    declines rather than being double-prompted. The text arrives wrapped
-        //    as a message from the caller (`AgentMessageEnvelope`), so the child
-        //    and its tile both know who wrote it.
+        // 7. Busy delivery is admitted durably before it becomes a queued result.
         var result = AgentMessageResult(
             operationId: requestId, delivery: .refused, childAgentId: childId, parentAgentId: agentId,
             childName: current.humanDisplayName, childRunning: supervisor.isRunning(childId))
         let childWasRunning = supervisor.isRunning(childId)
-        if supervisor.sendAgentMessage(text, from: agentId, to: childId) {
-            supervisor.trackHelperMessage(childId, from: agentId, handle: requestId)
-            recordMessageChain(target: childId, hops: hops)
-            result.delivery = .delivered
+        let context = AgentMessageQueueContext(caller: agentId, recipient: childId,
+            operationId: requestId, idempotencyKey: idempotencyKey, payloadHash: payloadHash)
+        let delivery = supervisor.deliverAgentMessage(text, from: agentId, to: childId, hops: hops, context: context)
+        if let error = delivery.error {
+            return failNothingDelivered(.durabilityFailed, error)
+        }
+        if delivery.delivery != .refused {
+            result.delivery = delivery.delivery
+            result.queuePosition = delivery.position
             result.childRunning = supervisor.isRunning(childId)
             operations.update(operationId: requestId) { op in
                 op.status = .committed
@@ -708,7 +722,7 @@ extension WorkspaceAPIService {
         } else {
             let reason = supervisor.sendRefusal(for: childId)
                 ?? (childWasRunning
-                    ? "the child is mid-turn, and Array never interrupts or double-prompts a running agent. Collect its current answer first (wait_agents, or agent.inspect), then message it again with a NEW idempotencyKey."
+                    ? "the child is mid-turn and its follow-up queue is unavailable."
                     : "the child's send path declined the message.")
             result.refusalReason = reason
             result.childRunning = supervisor.isRunning(childId)
@@ -774,6 +788,7 @@ extension WorkspaceAPIService {
     /// How many agent-started turns led to this agent's CURRENT turn: zero once
     /// anything else (the user, a queued draft) has prompted it since.
     func messageChainHops(for agentId: AgentID) -> Int {
+        if let hops = supervisor.startedMessageHops(for: agentId) { return hops }
         guard let chain = messageChains[agentId],
               chain.promptAt == supervisor.records[agentId]?.latestPromptAt else { return 0 }
         return chain.hops
@@ -805,6 +820,31 @@ extension WorkspaceAPIService {
         if request.pendingInputOnly == true {
             return .result(["pendingInput": AnyHashableJSON(any: supervisor.helperWaitPendingInput(for: agentId).map { $0 as Any } ?? NSNull())])
         }
+        do {
+            if let entry = try supervisor.queuedAgentMessage(caller: agentId, key: request.idempotencyKey, operationId: request.operationId) {
+                var snapshot = entry.result
+                if entry.phase == .started && !supervisor.isQueuedAgentMessageActive(entry.context) && snapshot == nil {
+                    snapshot = SpawnResultFile(toolCallId: entry.context.operationId,
+                        status: .interrupted, agentId: entry.context.recipient.rawValue,
+                        reason: "The app restarted after message start; delivery outcome is unknown and will not be replayed.",
+                        turnIdentity: "uncertain:\(entry.message.id.uuidString)", recipientId: agentId.rawValue)
+                }
+                let childResult: OperationChildResult?
+                if let snapshot, let cwd = supervisor.records[agentId]?.cwd {
+                    childResult = try SpawnResultFile.collect(parentCwd: cwd, handle: entry.context.operationId,
+                        recipient: agentId.rawValue, requestId: requestId, receipt: request.deliveryReceipt,
+                        acknowledge: request.acknowledgeDelivery == true, now: supervisor.helperCompletionNow(),
+                        snapshot: snapshot).map(childResultForParent)
+                } else { childResult = nil }
+                let result = OperationGetResult(operationId: entry.context.operationId, op: .agentMessage,
+                    status: .committed, steps: nil, childAgentId: entry.context.recipient, tileId: nil,
+                    childRunning: entry.phase == .queued || (entry.phase == .started && childResult == nil),
+                    createdAt: entry.message.queuedAt, childResult: childResult)
+                return .result(Self.jsonObject(result) ?? [:])
+            }
+        } catch {
+            return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "Helper delivery storage or receipt unavailable; retry the same lookup request."))
+        }
         let lookup: WorkspaceOperationStore.Lookup
         if let operationId = request.operationId, !operationId.isEmpty {
             lookup = operations.lookup(agentId: agentId, operationId: operationId)
@@ -813,6 +853,12 @@ extension WorkspaceAPIService {
         } else {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "operationId or idempotencyKey is required."))
         }
+        func collect(_ cwd: String, _ handle: String) throws -> OperationChildResult? {
+            try SpawnResultFile.collect(parentCwd: cwd, handle: handle, recipient: agentId.rawValue,
+                requestId: requestId, receipt: request.deliveryReceipt, acknowledge: request.acknowledgeDelivery == true,
+                now: supervisor.helperCompletionNow()).map(childResultForParent)
+        }
+        do {
         let result: OperationGetResult
         switch lookup {
         case let .found(record):
@@ -823,11 +869,11 @@ extension WorkspaceAPIService {
             // `wait_agents` reads; the MCP `wait_agents` polls this instead.
             var childResult: OperationChildResult?
             if record.op == .agentDelegate, childRunning == false, let parentCwd = supervisor.records[agentId]?.cwd {
-                childResult = SpawnResultFile.read(parentCwd: parentCwd, handle: record.operationId).map(childResultForParent)
+                childResult = try collect(parentCwd, record.operationId)
             }
             if record.op == .agentMessage, let cwd = supervisor.records[agentId]?.cwd,
                let file = SpawnResultFile.read(parentCwd: cwd, handle: record.operationId), file.status != .spawned {
-                childResult = childResultForParent(file)
+                childResult = try collect(cwd, record.operationId)
                 childRunning = false
             }
             result = OperationGetResult(
@@ -845,12 +891,33 @@ extension WorkspaceAPIService {
                 failureCode: "expired",
                 failureMessage: "This operation was evicted from the host's bounded store. Its outcome is unknown here; do not repeat the request.")
         case .unknown:
-            return .error(WorkspaceAPIError(code: .notFound, message: "No operation of yours matches that id."))
+            // Legacy Pi spawn handles have no operation-store record. The host
+            // still authenticates their recipient before exposing any courier.
+            guard let handle = request.operationId, let cwd = supervisor.records[agentId]?.cwd,
+                  let file = SpawnResultFile.read(parentCwd: cwd, handle: handle),
+                  file.recipientId == agentId.rawValue else {
+                return .error(WorkspaceAPIError(code: .notFound, message: "No operation of yours matches that id."))
+            }
+            if let helper = file.agentId {
+                guard let child = supervisor.records[AgentID(rawValue: helper)],
+                      child.parentAgentID == agentId, child.spawnResultHandle == handle else {
+                    return .error(WorkspaceAPIError(code: .notFound, message: "No operation of yours matches that id."))
+                }
+            } else if file.status != .refused {
+                return .error(WorkspaceAPIError(code: .notFound, message: "No operation of yours matches that id."))
+            }
+            result = OperationGetResult(operationId: handle, op: .agentDelegate, status: .committed, steps: nil,
+                childAgentId: file.agentId.map(AgentID.init(rawValue:)), tileId: nil,
+                childRunning: file.status == .spawned, failureCode: nil, failureMessage: nil, createdAt: nil,
+                childResult: try collect(cwd, handle))
         }
         guard let object = Self.jsonObject(result) else {
             return .error(WorkspaceAPIError(code: .unsupported, message: "Result could not be encoded."))
         }
         return .result(object)
+        } catch {
+            return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "Helper delivery storage or receipt unavailable; retry the same lookup request."))
+        }
     }
 
     // MARK: - Helpers

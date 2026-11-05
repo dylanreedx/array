@@ -287,6 +287,22 @@ project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-project.XXXXXX")
 app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-appsupport.XXXXXX")
 isolated_home=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-home.XXXXXX")
 isolated_tmux=$(mktemp -d "${TMPDIR:-/tmp}/continuum-bundle-tmux.XXXXXX")
+bundle_tmux_verified=0
+cleanup_bundle_tmux() {
+  if [[ "$bundle_tmux_verified" == 1 ]]; then
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$isolated_tmux" tmux kill-server >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_bundle_tmux EXIT
+if command -v tmux >/dev/null 2>&1; then
+  bundle_socket=$(env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$isolated_tmux" tmux start-server \; display-message -p '#{socket_path}')
+  bundle_tmux_root=$(cd "$isolated_tmux" && pwd -P)
+  bundle_socket_dir=$(cd "$(dirname "$bundle_socket")" && pwd -P)
+  case "$bundle_socket_dir/" in
+    "$bundle_tmux_root"/*) bundle_tmux_verified=1 ;;
+    *) printf 'Refusing bundle check: tmux socket is outside its disposable namespace.\n' >&2; exit 1 ;;
+  esac
+fi
 : > "$SELF_CHECK_LOG"
 self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check --tool-path-bootstrap-check --app-support-channel-check --agent-awareness-check --terminal-theme-fidelity-check)
 if [[ -n "${CONTINUUM_BUNDLE_CHECK_FORCE_FAIL:-}" ]]; then
@@ -358,6 +374,8 @@ launch_status=$open_status
 if [[ "$sentinel_status" != "0" ]]; then
   launch_status=$sentinel_status
 fi
+cleanup_bundle_tmux
+bundle_tmux_verified=0
 rm -rf "$project_root" "$app_support" "$isolated_home" "$isolated_tmux" "$launch_project_root" "$launch_app_support" "$launch_home"
 after_support=$(find "$REAL_SUPPORT" -maxdepth 1 \( -iname '*continuum*' -o -name 'Array' -o -name 'Array Dev' \) -print 2>/dev/null | sort || true)
 cleanup_empty_created_plist "$before_new_defaults" "$NEW_DEFAULTS_PLIST"

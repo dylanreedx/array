@@ -28,7 +28,8 @@ try {
     const ctx = {cwd:root, hasUI:true, ui:{input:async title => {
       const request = JSON.parse(title);
       assert.equal(request.op, 'operation.get');
-      assert.equal(request.payload.pendingInputOnly, true);
+      if (!request.payload.pendingInputOnly) return JSON.stringify({schema:'array.workspace.v1', requestId:request.requestId,
+        status:'ok', result:{childRunning:true}});
       polls++;
       if (polls === 2 && reason === 'cancelled') controller.abort();
       if (polls === 2 && reason === 'timeout') Date.now = () => now()+61000;
@@ -47,6 +48,31 @@ try {
     assert.equal(result.details.agents[0].status, 'running');
     console.log(`PASS pi: 600s requested wait returns on ${reason}, preserves running helper`);
   }
+  // New authenticated courier reads must preserve wait interruption even
+  // when many helper lookups stall. The UI fixture deliberately ignores abort.
+  let queuedReason;
+  const inputTimer = setTimeout(() => { queuedReason = 'inbox'; }, 50);
+  const stalledCtx = {cwd:root,hasUI:true,ui:{input:async title => {
+    const request=JSON.parse(title);
+    if (request.payload.pendingInputOnly) return JSON.stringify({schema:'array.workspace.v1',requestId:request.requestId,
+      status:'ok',result:{pendingInput:queuedReason ?? null}});
+    return await new Promise(() => {});
+  }}};
+  let deadlineTimer;
+  try {
+    const started=performance.now();
+    const result=await Promise.race([
+      wait.execute('stalled-many-fixture',{handles:Array.from({length:16},(_,i)=>`stalled-${i}`),timeoutSeconds:60},
+        undefined,undefined,stalledCtx),
+      new Promise((_,reject)=>{deadlineTimer=setTimeout(()=>reject(Error('stalled Pi wait hid inbox input for more than 2s')),2000);})
+    ]);
+    assert(performance.now()-started<2000);
+    assert.equal(result.details.interrupted,'inbox');
+    assert.equal(result.details.timedOut,false);
+    assert.equal(result.details.agents.length,16);
+    assert(result.details.agents.every(agent=>agent.status==='running'));
+    console.log('PASS pi: 16 stalled authenticated lookups cannot hide inbox input beyond 2s');
+  } finally {clearTimeout(inputTimer);clearTimeout(deadlineTimer);}
 } finally {
   if (prior === undefined) delete process.env.CONTINUUM_ARRAY_MANAGED_AGENT;
   else process.env.CONTINUUM_ARRAY_MANAGED_AGENT = prior;

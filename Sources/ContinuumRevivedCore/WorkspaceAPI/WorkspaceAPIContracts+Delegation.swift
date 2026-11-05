@@ -388,6 +388,8 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
 // MARK: - operation.get
 
 public struct OperationGetRequest: Codable, Equatable, Sendable {
+    public var deliveryReceipt: String?
+    public var acknowledgeDelivery: Bool?
     public var operationId: String?
     public var idempotencyKey: String?
     /// Read only the authenticated caller's pending-input reason, without an operation selector.
@@ -452,6 +454,7 @@ public struct OperationGetResult: Codable, Equatable, Sendable {
 public struct OperationChildResult: Codable, Equatable, Sendable {
     /// `spawned`, `refused`, `completed`, `failed` or `interrupted`.
     public var status: String
+    public var deliveryReceipt: String?
     public var finalText: String?
     public var finalTextTruncated: Bool?
     public var reason: String?
@@ -461,6 +464,7 @@ public struct OperationChildResult: Codable, Equatable, Sendable {
 
     public init(_ file: SpawnResultFile) {
         status = file.status.rawValue
+        deliveryReceipt = file.deliveryReceipt
         finalText = file.finalText
         finalTextTruncated = file.finalTextTruncated
         reason = file.reason

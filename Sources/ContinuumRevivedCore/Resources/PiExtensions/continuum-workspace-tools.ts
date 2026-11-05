@@ -125,7 +125,14 @@ export default function continuumWorkspaceTools(pi: ExtensionAPI) {
       // Plain JSON Schema: pi validates non-TypeBox parameters itself.
       parameters: tool.parameters as any,
       async execute(toolCallId, params, signal, _onUpdate, ctx) {
-        return asToolResult(await bridge(ctx, toolCallId, tool.op, params, signal, TOOL_TIMEOUT_MS));
+        const reply = await bridge(ctx, toolCallId, tool.op, params, signal, TOOL_TIMEOUT_MS);
+        const child = (reply.result as any)?.childResult;
+        if (tool.op === "operation.get" && child?.deliveryReceipt && !["already_delivered", "delivery_pending"].includes(child.status)) {
+          const ack = await bridge(ctx, toolCallId + "-ack", tool.op,
+            { ...(params as object), deliveryReceipt: child.deliveryReceipt, acknowledgeDelivery: true }, signal, TOOL_TIMEOUT_MS);
+          if (ack.status !== "ok") return asToolResult(errorReply(toolCallId, "outcome_unknown", "Helper acknowledgment failed; recover with deliveryReceipt " + child.deliveryReceipt));
+        }
+        return asToolResult(reply);
       },
     });
   }

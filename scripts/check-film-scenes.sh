@@ -22,7 +22,14 @@ swift build --product Array --scratch-path .build-film -Xswiftc -DARRAY_FILM
 built=$SECONDS
 
 iso=$(mktemp -d /tmp/array-film-scenes.XXXXXX)
-trap 'rm -rf "$iso"' EXIT
+film_tmux_verified=0
+cleanup_film_tmux() {
+  if [[ "$film_tmux_verified" == 1 ]]; then
+    env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$iso/tmux" tmux kill-server >/dev/null 2>&1 || true
+  fi
+  rm -rf "$iso"
+}
+trap cleanup_film_tmux EXIT
 mkdir -p "$iso/support" "$iso/root" "$iso/tmux"
 # This leg creates its own namespace instead of inheriting the matrix's.
 # Verify tmux honored it before any staged terminal can start.
@@ -31,7 +38,7 @@ if command -v tmux >/dev/null 2>&1; then
   film_root=$(cd "$iso/tmux" && pwd -P)
   film_socket_dir=$(cd "$(dirname "$film_socket")" && pwd -P)
   case "$film_socket_dir/" in
-    "$film_root"/*) ;;
+    "$film_root"/*) film_tmux_verified=1 ;;
     *) printf 'Refusing Film check: tmux socket is outside its disposable namespace.\n' >&2; exit 1 ;;
   esac
 fi
