@@ -156,6 +156,10 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         public var dueAt: Date
         public var completedAt: Date
         public var via: String?
+        /// A helper turn held as progress (background work still running, no
+        /// report). The process that holds it delivers it on release; a
+        /// relaunch, which no longer holds it, replays it once.
+        public var held: Bool?
         public init(helper: UUID, turn: String, recipient: UUID, wakeID: UUID? = nil, text: String? = nil, now: Date) {
             self.helper = helper; self.turn = turn; self.recipient = recipient
             self.wakeID = wakeID; self.text = text; self.dueAt = now.addingTimeInterval(8); self.completedAt = now
@@ -178,6 +182,10 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
             throw CocoaError(.fileWriteInvalidFileName)
         }
         try AtomicWriter(retainedBackups: 0).write(delivery, to: url)
+    }
+    public static func removeDelivery(parentCwd: String, helper: UUID, turn: String, recipient: UUID) {
+        guard let url = deliveryURL(parentCwd: parentCwd, helper: helper, turn: turn, recipient: recipient) else { return }
+        try? FileManager.default.removeItem(at: url)
     }
     public static func deliveries(parentCwd: String, recipient: UUID) throws -> [Delivery] {
         let dir = directory(parentCwd: parentCwd).appendingPathComponent(".deliveries")

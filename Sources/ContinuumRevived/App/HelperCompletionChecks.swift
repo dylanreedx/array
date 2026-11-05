@@ -717,6 +717,18 @@ enum HelperCompletionChecks {
         }
     }
 
+    /// Polls `condition`, running `refresh` before each poll.
+    static func waitRefreshing(timeout: TimeInterval, pollInterval: TimeInterval, _ condition: @MainActor () -> Bool,
+                               refresh: @MainActor () async -> Void) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            await refresh()
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+        } while Date() < deadline
+        return condition()
+    }
+
     /// Only action starts a lead turn, once, in completion order, behind user
     /// input; progress and late output ride along as notes; a message-only
     /// lead still gets its result. Through the production supervisor: its
@@ -753,6 +765,7 @@ enum HelperCompletionChecks {
         let plain = try helper("Plain"), quitter = try helper("Quitter"), builder = try helper("Builder")
         let blocked = try helper("Blocked"), server = try helper("Server"), messenger = try helper("Messenger", spawned: false)
         let alpha = try helper("Alpha"), beta = try helper("Beta"), gamma = try helper("Gamma"), delta = try helper("Delta")
+        let restarter = try helper("Restarter")
         let pool = runners
         let drafts = AgentComposerDraftStore(applicationSupportDirectory: root.appendingPathComponent("drafts"))
         let s = AgentSupervisor(store: store, makeRunner: { pool[$0.record.id]! }, warn: { _ in },
@@ -908,6 +921,7 @@ enum HelperCompletionChecks {
         try await start(server, "Start the dev server.")
         pool[server]!.background = true
         try await end(server, "Dev server is up; waiting.")
+        let serverHeldAt = now
         await flushToLead()
         let serverQuiet = results(server).isEmpty && notes(server).isEmpty
             && queuedNotes().contains { $0.text.contains("Dev server is up") }
@@ -935,16 +949,41 @@ enum HelperCompletionChecks {
             && !queuedNotes().contains { $0.text.contains("Dev server is up") },
             "P3 a progress note rides along with the next delivery and is dropped once used")
 
+        // A: endless background work and a final answer in prose, no report.
+        // No wake before the cap; exactly ONE at it, saying the work still runs.
+        now = serverHeldAt.addingTimeInterval(s.heldHelperCompletionCap - 10)
+        s.sweepHeldHelperCompletions()
+        await s.flushHelperCompletions()
+        await settle()
+        let quietBeforeCap = results(server).isEmpty && s.isHelperCompletionHeld(server)
+        now = serverHeldAt.addingTimeInterval(s.heldHelperCompletionCap + 1)
+        s.sweepHeldHelperCompletions()
+        await flushToLead()
+        s.sweepHeldHelperCompletions()
+        await flushToLead()
+        verdict(quietBeforeCap && results(server).count == 1
+            && results(server)[0].hasPrefix("Server finished: \(AgentSupervisor.helperBackgroundRunningStatus)\n")
+            && results(server)[0].contains("Dev server is up; waiting.") && status(server)?.status == .completed,
+            "A a held final answer is delivered once at the cap, none before, saying background work still runs")
+
         // P4/P7: results queued in separate batches behind a busy lead reach
         // it as ONE turn, in completion order (Beta finished first).
         try await busyLead("Lead busy work.")
         let promptsBefore = leadRunner.prompts.count
-        for (child, summary) in [(beta, "BETA-REPORT"), (alpha, "ALPHA-REPORT")] {
+        for (index, (child, summary)) in [(beta, "BETA-REPORT"), (alpha, "ALPHA-REPORT")].enumerated() {
             try await start(child, "Do your part.")
             try report(child, summary)
             try await end(child, "Part done.")
-            now.addTimeInterval(9)
-            await s.flushHelperCompletions()
+            // Separate batches: stage this one before the next helper ends. A
+            // flush already in flight (the production timer) returns at once,
+            // so flush until this batch is queued.
+            let staged = await waitRefreshing(timeout: 10, pollInterval: 0.05) {
+                s.queuedMessages(for: lead).filter { $0.helperCompletion && !$0.helperNote }.count == index + 1
+            } refresh: {
+                now.addTimeInterval(9)
+                await s.flushHelperCompletions()
+            }
+            try HelperGuardChecks.expect(staged, "batch \(index + 1) was not staged behind the busy lead")
         }
         let queuedBatches = s.queuedMessages(for: lead).filter { $0.helperCompletion && !$0.helperNote }.count
         await freeLead()
@@ -984,6 +1023,40 @@ enum HelperCompletionChecks {
         }
         verdict(followUp == .accepted && steer == .accepted && userOrder == ["steer", "follow-up", "result"],
             "P5/P7 user steers and follow-ups go ahead of queued helper results (order \(userOrder))")
+
+        // B: a hold survives a restart. Hold, then a fresh supervisor on the
+        // same stores (this one never releases it): exactly one delivery.
+        try await start(restarter, "Run the long compile.")
+        pool[restarter]!.background = true
+        try await end(restarter, "Still compiling.")
+        await flushToLead()
+        let heldRecord = (try? SpawnResultFile.deliveries(parentCwd: root.path, recipient: lead.rawValue))?
+            .contains { $0.helper == restarter.rawValue && $0.held == true } == true
+        let quietBeforeRestart = results(restarter).isEmpty
+        let relaunchedLead = HeldWakeRunner(autoEnd: true)
+        let relaunched = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents")),
+            makeRunner: { $0.record.id == lead ? relaunchedLead : HeldWakeRunner(autoEnd: true) }, warn: { _ in },
+            nameTitlerCommand: { _ in nil },
+            submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root.appendingPathComponent("drafts")),
+            transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)),
+            maximumActiveManagedChildren: { nil })
+        defer { relaunched.stopAll() }
+        _ = relaunched.restore()
+        relaunched.helperCompletionNow = { now }
+        func relaunchedResults() -> [String] {
+            (relaunchedLead.prompts + relaunchedLead.steers).flatMap(payloads)
+                .filter { $0.senderAgentID == restarter.rawValue && $0.text.split(separator: "\n").first?.contains(" finished: ") == true }
+                .map(\.text)
+        }
+        now.addTimeInterval(9)
+        await relaunched.flushHelperCompletions()
+        _ = await waitUntil(timeout: 5, pollInterval: 0.02) { !relaunchedResults().isEmpty }
+        now.addTimeInterval(9)
+        await relaunched.flushHelperCompletions()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        verdict(heldRecord && quietBeforeRestart && relaunchedResults().count == 1
+            && relaunchedResults()[0].contains("Still compiling.") && results(restarter).isEmpty,
+            "B a held turn is journaled and a relaunch delivers it exactly once (relaunched \(relaunchedResults().count))")
 
         try HelperGuardChecks.expect(failures.isEmpty, "held completions: " + failures.joined(separator: "; "))
     }

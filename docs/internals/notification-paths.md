@@ -166,11 +166,18 @@ message-subscription settlement and its spawn-result write are held together, so
 collection keeps reading `spawned` and a lead that reached the helper only by
 `array_message_agent` keeps its subscription for the real result. The helper's
 next turn end decides again (a turn answering a message sent after the hold is
-never held); session exit, reap, Stop, CLI retirement or a report filed between
-turns releases a held turn as it stands. There is no time cap: a cap release
-would start a lead turn for a non-result. A completed turn without a report is
-headed `<name> finished: ended its turn without filing a report`; a same-turn
-report refreshed before admission restores `succeeded`.
+never held). No result may be lost, so every hold ends: session exit, reap, Stop,
+CLI retirement, a report filed between turns, or background work gone for 30 s
+(`heldBackgroundGrace`) with no new turn releases it as it stands; and 10 minutes
+after the first hold (`heldHelperCompletionCap`, on the helper-completion clock)
+ONE result is delivered, headed `ended its turn with background work still
+running` and carrying the helper's last message (a dev-server helper that
+answers in prose without a report). Each hold is a durable delivery record
+flagged `held`: the holding process skips it during recovery and delivers it on
+release; a relaunch, which holds nothing, replays it exactly once. A completed
+turn without a report is headed `<name> finished: ended its turn without filing a
+report`; a same-turn report refreshed before admission restores `succeeded`. A
+helper note left in a queue does not keep a relaunched lead's queue paused.
 
 Progress text and output emitted after a result was delivered (the +16 s case,
 or a report filed after the turn) become durable queue NOTES (`helperNote`), one
@@ -805,8 +812,12 @@ until its runner starts the admitted next turn. Repeated/foreign/old-turn
 receipts cannot settle another input. Receipt storage failure retains custody
 and retries settlement. A refused handoff leaves the same entry held.
 
-Stop, lost application evidence, process exit or relaunch with an unfinished
-handoff expose held uncertain work and pause automatic execution. The existing
+A relaunch with an unfinished handoff exposes held uncertain work and pauses
+automatic execution. A Stop or a session that exits with a steer still in
+delivery returns it HELD and pauses after Stop (0.7.44): the process is gone, and
+any application would have produced its receipt first. A paused queue holds only
+its next turn; it never blocks handing a steer into a running turn, so a user's
+steer always reaches it (uncertain steers stay out through the store's own rule). The existing
 queue rail says “Unconfirmed; retry may repeat”; explicit Resume/Send-now permits
 retry and may repeat provider work if the missing receipt hid application.
 There is no silent exactly-once model-consumption claim. A collect-channel

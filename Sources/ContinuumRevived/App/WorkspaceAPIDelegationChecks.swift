@@ -198,12 +198,17 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
     // BEFORE anything touches `workspaceAPI` (lazy, and it binds this supervisor
     // for the life of the service): a real supervisor over an isolated store.
     var fixtureRunners: [AgentID: ScriptedAgentRunner] = [:]
+    // Every runner each agent was given, across turns: a one-shot runner is
+    // replaced per turn, and delivery is counted over all of them.
+    var fixtureRunnerHistory: [AgentID: [ScriptedAgentRunner]] = [:]
     let supervisor = AgentSupervisor(store: AgentStore(
         applicationSupportDirectory: URL(fileURLWithPath: appSupportPath, isDirectory: true)
             .appendingPathComponent("workspace-api-delegation-check", isDirectory: true)), makeRunner: { launch -> AgentRunning in
             if !crossHarness { return AgentSupervisor.productionRunner(for: launch) }
-            let runner = ScriptedAgentRunner(script: [.turnCompleted(threadId: "fixture", turnId: "done", outcome: .completed, errorMessage: nil)])
+            let runner = ScriptedAgentRunner(script: [.turnStarted(threadId: "fixture", turnId: "done"),
+                                                      .turnCompleted(threadId: "fixture", turnId: "done", outcome: .completed, errorMessage: nil)])
             fixtureRunners[launch.record.id] = runner
+            fixtureRunnerHistory[launch.record.id, default: []].append(runner)
             return runner
         }, submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: URL(fileURLWithPath: appSupportPath)),
         transcriptStore: AgentTranscriptStore(root: appSupport.appendingPathComponent("transcripts")))
@@ -314,11 +319,6 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
                 let expectedModel = source == .codex ? AgentCatalogQAFixture.claude.models.last! : (target == source ? model : AgentModelCatalog.shared.snapshot(for: target).seedModel!)
                 if source == .codex { payload["model"] = expectedModel }
                 let tilesBefore = agentTileCount()
-                // This lead collects with wait_agents below: the collect channel,
-                // for an agent Array does not run (the stand-in replaces the
-                // capability), set before its child can finish.
-                supervisor.helperCompletionEnabled = { _ in false }
-                defer { supervisor.helperCompletionEnabled = nil }
                 let created = try result(api.dispatch(agentId: parent, requestId: handle, op: "agent.delegate", payload: payload), "cross harness delegation")
                 let replay = try result(api.dispatch(agentId: parent, requestId: handle + "-retry", op: "agent.delegate", payload: payload), "cross retry")
                 try expect(replay["childAgentId"] == created["childAgentId"], "cross retry creates no duplicate")
@@ -375,13 +375,40 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
                 try expect(chipMatches == true, "parent transcript chip names child's actual provider and source")
                 let settled = await waitUntil(timeout: 5, pollInterval: 0.02) { !supervisor.isRunning(childId) }
                 try expect(settled && fixtureRunners[childId] != nil, "selected child runs and settles")
-                guard let helper = AppDelegate.workspaceMCPExecutablePath(), let config = delegate.workspaceMCPHost.configuration(for: parent, serverExecutable: helper, resultDelivery: .collect) else { throw Failure(message: "missing MCP helper") }
+                // One channel: this lead is Array-run (any harness), so the
+                // child's result is DELIVERED to it, exactly once, and it has no
+                // second way to read it.
+                func deliveredToLead() -> Int {
+                    (fixtureRunnerHistory[parent] ?? []).flatMap(\.prompts).filter { text in
+                        switch AgentMessageEnvelope.classify(text) {
+                        case .agentMessage(let payload): return payload.senderAgentID == childId.rawValue
+                        case .agentMessages(let batch): return batch.contains { $0.senderAgentID == childId.rawValue }
+                        default: return false
+                        }
+                    }.count
+                }
+                let arrived = await waitUntil(timeout: 15, pollInterval: 0.05) { deliveredToLead() == 1 && !supervisor.isRunning(parent) }
+                try await Task.sleep(nanoseconds: 300_000_000)
+                await supervisor.flushHelperCompletions()
+                try await Task.sleep(nanoseconds: 300_000_000)
+                try expect(arrived && deliveredToLead() == 1, "cross child's result reaches its \(source.rawValue) lead exactly once by delivery, got \(deliveredToLead())")
+                let looked = try result(api.dispatch(agentId: parent, requestId: handle + "-lookup", op: "operation.get", payload: ["operationId": handle]), "cross lookup")
+                let lookedChild = looked["childResult"]?.object
+                try expect(lookedChild?["status"]?.string == "already_delivered" && lookedChild?["finalText"] == nil,
+                           "a lookup after delivery gives the lead a pointer, never the result again: \(looked)")
+                guard let helper = AppDelegate.workspaceMCPExecutablePath(),
+                      let config = delegate.workspaceMCPHost.configuration(for: parent, serverExecutable: helper,
+                                                                           resultDelivery: supervisor.resultDelivery(for: parent)) else {
+                    throw Failure(message: "missing MCP helper")
+                }
                 let client = try WorkspaceMCPCheckClient(executable: helper, environment: config.environment)
                 defer { client.close() }
+                let listed = try await client.request("tools/list", [:])
+                let names = (((listed["result"] as? [String: Any])?["tools"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
                 let waited = try await client.request("tools/call", ["name": "wait_agents", "arguments": ["handles": [handle], "timeoutSeconds": 5]])
-                let content = (waited["result"] as? [String: Any])?["structuredContent"] as? [String: Any]
-                let agents = (content?["result"] as? [String: Any])?["agents"] as? [[String: Any]]
-                try expect(agents?.first?["status"] as? String == "completed", "wait_agents collects cross child: \(waited)")
+                try expect(supervisor.resultDelivery(for: parent) == .push && names.contains("array_delegate")
+                           && !names.contains("wait_agents") && waited["error"] != nil,
+                           "an Array-run \(source.rawValue) lead is offered no wait_agents: \(names), \(waited)")
                 _ = try result(api.dispatch(agentId: parent, requestId: handle + "-message", op: "agent.message", payload: ["agentId": childId.rawValue.uuidString, "text": "follow up", "idempotencyKey": handle + "-message"]), "cross child message")
                 let delivered = await waitUntil(timeout: 5, pollInterval: 0.02) { fixtureRunners[childId]?.prompts.contains(where: { $0.contains("follow up") }) == true }
                 try expect(delivered, "cross child's runner receives the message")
