@@ -206,8 +206,11 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
             try expect(h.supervisor.send("TOOL text", to: h.id), "lost receipt seed refused")
             try await eventually("lost receipt bound") { h.supervisor.turnSnapshot(for: h.id)?.capabilities.canSteer == true }
             try expect(await h.supervisor.accept(.steer(AgentPrompt("receipt probe")), for: h.id) == .accepted, "receipt probe refused")
+            // A consumed steer is shown at its receipt, before the durable write
+            // that retires its custody; wait for both before asserting either.
             try await eventually("lost receipt settles", timeout: 12) {
-                !h.supervisor.isRunning(h.id) && (missingReceipt ? h.supervisor.pendingSteers(for: h.id).map(\.state) == [.held] : h.echoes == ["receipt probe"])
+                !h.supervisor.isRunning(h.id) && (missingReceipt ? h.supervisor.pendingSteers(for: h.id).map(\.state) == [.held]
+                    : h.echoes == ["receipt probe"] && h.supervisor.pendingSteers(for: h.id).isEmpty)
             }
             try expect(h.completedTurns.count == 1 && h.promptTexts.count == 1, "lost receipt silently replayed work")
             if missingReceipt {
