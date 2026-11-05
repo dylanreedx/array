@@ -224,8 +224,10 @@ func runManagedModeLiveChecks() async throws {
     if let jobA {
         let report = mounted.records[jobA]?.lastReport?.report
         record("helperFiledReport", report != nil, report?.summary ?? "no array_report filed")
-        let observed = (report?.commandEvidence ?? []).contains { $0.outcome == .observed }
-        record("reportCommandEvidenceObserved", observed, (report?.commandEvidence ?? []).map { "\($0)" })
+        // Helpers now list only failed or unrun checks, and only observed
+        // failures reach the lead, so a passing `make test` forwards nothing.
+        let leadFacing = HelperCommandGuard.leadFacing(report?.commandEvidence)
+        record("reportForwardsNoCheckFlag", report != nil && leadFacing == nil, (report?.commandEvidence ?? []).map { "\($0)" })
         let greeting = URL(fileURLWithPath: mounted.records[jobA]!.checkoutRoot).appendingPathComponent("greeting.txt")
         record("jobAWorkOnDisk", (try? String(contentsOf: greeting, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) == "ALPHA")
     }
