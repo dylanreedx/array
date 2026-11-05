@@ -729,3 +729,33 @@ disabling wakes stays quiet and the result remains collectable. Helper report
 content is unchanged. This prepares a timing/payload change only; activation
 and final turn/message-count acceptance require the repaired exactly-once
 foundation at integration. No new alert sender, recipient or tap behavior.
+
+
+For **SRC-01**, busy helper results now enter the existing held-steer path
+under the same durable wake ID, after the recipient/turn collection lease and
+queue-before-commit transaction. Queue admission remains the custody handoff;
+`delivered/via=wake` in the helper journal does not mean model consumption.
+An open tool boundary admits the attributed plain text into the current turn;
+if that turn ends before handoff, the same queue entry starts one follow-up.
+User steers precede helper results, including a user steer arriving during the
+handoff actor hop. Idle leads retain the conditional eight-second batching.
+
+The queue file retains handed-off inputs with an in-flight marker. Claude's
+replay and Pi's queue drain remain their application receipts. Codex now uses
+`userMessage.clientId` matching the submitted `clientUserMessageId`, thread and
+turn from `item/started` or `item/completed`; its RPC response alone is inert.
+This observes insertion into provider conversation history, not model sampling
+or a provider disk-fsync guarantee. A helper follow-up retains queue custody
+until its runner starts the admitted next turn. Repeated/foreign/old-turn
+receipts cannot settle another input. Receipt storage failure retains custody
+and retries settlement. A refused handoff leaves the same entry held.
+
+Stop, lost application evidence, process exit or relaunch with an unfinished
+handoff expose held uncertain work and pause automatic execution. The existing
+queue rail says “Unconfirmed; retry may repeat”; explicit Resume/Send-now permits
+retry and may repeat provider work if the missing receipt hid application.
+There is no silent exactly-once model-consumption claim. Disabling completion
+wakes remains quiet; collection retains its existing arbitration and receipts.
+No new alert sender, recipient, sound or tap action. Behavioral witnesses are
+in the matrix-registered `--helper-completion-check`, with correlated Codex
+receipt parsing in the existing Core `--codex-appserver-runner-check` arm.

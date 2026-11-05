@@ -44,11 +44,10 @@ public struct AgentSteerNotAccepted: Error, CustomStringConvertible, Sendable {
     public var description: String { "steer not accepted (\(reason))" }
 }
 
-/// T5 — what became of a steer a runner accepted. `consumed` is the provider's
-/// own receipt (claude's replay, pi's queue drain, codex's `turn/steer`
-/// response); `returned` means the provider dropped it unread (pi's queue cleared
-/// at an interrupt), so the supervisor holds it again.
+/// Application is a provider transcript/custody receipt, not model sampling.
+/// Returned is known unread; uncertain retains host custody for explicit recovery.
 public enum AgentSteerDisposition: Equatable, Sendable {
     case consumed
     case returned
+    case uncertain
 }

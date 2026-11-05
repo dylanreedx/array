@@ -1,0 +1,1 @@
+{"method": "item/started", "params": {"threadId": "thread", "turnId": "turn", "startedAtMs": 1, "item": {"type": "userMessage", "id": "provider-generated-item-id", "clientId": "11111111-1111-1111-1111-111111111111", "content": [{"type": "text", "text": "result", "text_elements": []}]}}}

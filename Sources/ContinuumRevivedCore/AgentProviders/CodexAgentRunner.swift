@@ -354,6 +354,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
     private var providerSubagentActivityHandler: (@Sendable (ProviderSubagentActivity) -> Void)?
     /// Child threads with a turn open, by provider thread id → turn id.
     private var appServerChildTurns: [String: String] = [:]
+    private var steerReceipts = CodexSteerReceiptTracker()
     private var steerDispositionHandler: (@Sendable (UUID, AgentSteerDisposition) -> Void)?
 
     public init(config: Config) {
@@ -673,12 +674,18 @@ public final class CodexAgentRunner: @unchecked Sendable {
             guard let self else { return }
             self.queue.sync {
                 let providerThreadID = Self.appServerThreadID(in: line)
+                if let id = self.steerReceipts.applied(line: line) {
+                    self.steerDispositionHandler?(id, .consumed)
+                }
                 let events = self.appServerTranslator.translate(line: line)
                 for event in events {
                     if case .turnCompleted(let eventThreadId, let eventTurnId, _, _) = event {
                         if eventThreadId == self.appServerPrimaryThreadID,
                            self.appServerTurnCompletion?.turnId == nil
                             || eventTurnId == self.appServerTurnCompletion?.turnId {
+                            for id in self.steerReceipts.takeUnconfirmed(thread: eventThreadId, turn: eventTurnId) {
+                                self.steerDispositionHandler?(id, .uncertain)
+                            }
                             self.appServerTurnOutcome = event
                         } else {
                             self.appServerLiveChildThreads.remove(eventThreadId)
@@ -740,6 +747,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
                             outcome: .interrupted,
                             errorMessage: "The Codex session ended before this child finished.")))
                 }
+                for id in self.steerReceipts.takeUnconfirmed() { self.steerDispositionHandler?(id, .uncertain) }
                 self.appServerChildTurns.removeAll()
                 self.child = nil
                 self.appServerTransport = nil
@@ -926,13 +934,17 @@ public final class CodexAgentRunner: @unchecked Sendable {
 
     /// `turn/steer` into the active turn, pinned by `expectedTurnId` so a steer
     /// can never land in a turn other than the one the user watched. The
-    /// response IS the receipt. A turn that already ended, or a review/compact
-    /// turn codex will not steer, refuses — and the supervisor keeps the
-    /// message for the next turn instead.
+    /// response acknowledges acceptance only. A correlated userMessage item
+    /// confirms application to provider history. Missing receipts remain uncertain;
+    /// a known rejection leaves the same message held for the next turn.
     public func steer(_ prompt: AgentPrompt, id: UUID) throws {
-        let (transport, activeTurn, handler) = queue.sync {
-            () -> (CodexAppServerTransport?, (threadId: String, turnId: String)?, (@Sendable (UUID, AgentSteerDisposition) -> Void)?) in
-            (stopRequested ? nil : appServerTransport, appServerActiveTurn, steerDispositionHandler)
+        let (transport, activeTurn) = queue.sync {
+            () -> (CodexAppServerTransport?, (threadId: String, turnId: String)?) in
+            let transport = stopRequested ? nil : appServerTransport
+            if transport != nil, let turn = appServerActiveTurn {
+                steerReceipts.register(id, thread: turn.threadId, turn: turn.turnId)
+            }
+            return (transport, appServerActiveTurn)
         }
         guard let transport, let activeTurn else {
             throw AgentSteerNotAccepted("no codex app-server turn is in flight")
@@ -947,10 +959,13 @@ public final class CodexAgentRunner: @unchecked Sendable {
                     "clientUserMessageId": id.uuidString,
                 ],
                 timeout: 5)
-        } catch {
+        } catch let error as CodexAppServerTransport.RPCError {
+            queue.sync { steerReceipts.remove(id) }
             throw AgentSteerNotAccepted(String(describing: error))
+        } catch {
+            // A lost response cannot tell us whether the provider took the input.
+            // Keep observing its correlated item until teardown; never blindly resend.
         }
-        handler?(id, .consumed)
     }
 
     /// `turn/interrupt` and nothing else: the turn ends `interrupted` and

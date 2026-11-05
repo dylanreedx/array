@@ -158,3 +158,38 @@ recipient/turn custody, offered leases, staging queue IDs, commit-before-release
 restart and receipt recovery. Prompt eligibility is persisted with staging;
 failed admission retains the retry backoff. Full gate and live-model acceptance
 limits remain as documented above; the scoped six-card report records results.
+
+
+Card7 keeps the same per-helper envelope when steering a busy lead. Its
+stable wake ID identifies both the held steer and any boundaryless-turn
+fallback; the collection journal commits host queue custody before release.
+No new courier competes with `wait_agents`, and helper report text is unchanged.
+User steering stays ahead of helper messages. An open tool boundary can apply
+the result in the current turn; otherwise the same occurrence is delivered as
+one follow-up after that turn closes. Idle batching is unchanged.
+
+Handoff now retains a durable queue entry until the provider application
+receipt settles. Codex's RPC acknowledgment is insufficient. In installed
+app-server 0.165.0, `clientUserMessageId` maps to `userMessage.clientId`.
+Matching item, thread and turn evidence settles it once. Upstream
+`record_user_prompt_and_emit_turn_item` records prepared conversation items
+before emitting those item events. That boundary establishes provider history
+application, not model sampling or durable provider storage after a crash.
+The checked wire fixture follows the installed `ItemStartedNotification`
+schema, including `startedAtMs`; no invented application event is used.
+
+An interrupted or restarted handoff without application evidence is held as
+uncertain work on the existing queue rail, labeled “Unconfirmed; retry may repeat”. It does not auto-replay. Receipt
+write failure also retains custody and retries. Explicit recovery can repeat
+provider work after an unobserved application; distributed exactly-once
+execution is not promised. A helper fallback retains custody until its runner
+starts the admitted next turn. Stable occurrence identity prevents normal
+journal/queue double admission; collection arbitration remains recipient- and
+helper-turn-bound. SRC-01 records the quiet, failure and recovery outcomes.
+
+The offline production-runner witness exercises Claude, Codex and Pi current-
+turn delivery, per-helper attribution/plain text, one-turn fallback and Stop
+before input application. Additional cases cover lost Codex acknowledgment,
+missing application evidence, priority, custody I/O failure/retry and relaunch.
+The Core receipt arm covers repeated, foreign, missing and late item events.
+These fixtures do not establish live model compliance or inference acceptance.

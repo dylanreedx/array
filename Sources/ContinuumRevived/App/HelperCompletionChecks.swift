@@ -509,7 +509,67 @@ enum HelperCompletionChecks {
         print("Delegate-and-move-on passed: production managed Codex fixture, three helpers, five lead turns, zero waits, steer-ready")
     }
 
+    static func runSteerCustody() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("card7-custody-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = AgentID(rawValue: UUID()), wake = UUID()
+        let queue = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
+        try await queue.enqueueScheduledMessage(id: wake, text: "attributed helper result", for: id, asHelperSteer: true)
+        let user = await queue.enqueueSteer(text: "user priority", for: id)
+        let ordered = await queue.queuedMessages(for: id)
+        try HelperGuardChecks.expect(ordered.map(\.id) == [user.id, wake], "helper jumped ahead of user steer")
+        let staged = try await queue.beginSteerHandoff(for: id, excluding: [wake])
+        try HelperGuardChecks.expect(staged.map(\.id) == [user.id], "uncommitted helper wake escaped admission guard")
+        let recovered = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
+        let recoveredItems = await recovered.queuedMessages(for: id)
+        try HelperGuardChecks.expect(recoveredItems.first?.steerUncertain == true && recoveredItems.map(\.id) == [user.id, wake],
+            "restart lost uncertain steer or duplicated queue custody")
+        let uncertain = await recovered.hasUncertainSteers(for: id)
+        try HelperGuardChecks.expect(uncertain, "restart uncertainty not exposed")
+        let helper = try await recovered.beginSteerHandoff(for: id)
+        try HelperGuardChecks.expect(helper.map(\.id) == [wake], "uncertain input was blindly re-steered")
+        let layout = AgentComposerDraftStoreLayout(applicationSupportDirectory: root)
+        let file = layout.queuedMessagesFile(for: id), saved = root.appendingPathComponent("saved-queue.json")
+        try FileManager.default.moveItem(at: file, to: saved)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        var failed = false
+        do { try await recovered.finishSteerHandoff(wake, applied: true, for: id) } catch { failed = true }
+        try HelperGuardChecks.expect(failed, "receipt storage I/O failure did not propagate")
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.moveItem(at: saved, to: file)
+        let afterIO = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
+        let afterItems = await afterIO.queuedMessages(for: id)
+        try HelperGuardChecks.expect(afterItems.count == 2 && afterItems.allSatisfy(\.steerUncertain), "receipt I/O lost durable custody")
+        try await afterIO.finishSteerHandoff(wake, applied: true, for: id)
+        try await afterIO.finishSteerHandoff(wake, applied: true, for: id)
+        let final = AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0)
+        let finalItems = await final.queuedMessages(for: id)
+        try HelperGuardChecks.expect(finalItems.map(\.id) == [user.id], "application receipt duplicated or lost another input")
+        let rail = ComposerQueuedMessageRailView(frame: NSRect(x: 0, y: 0, width: 760, height: 100))
+        let window = NSWindow(contentRect: rail.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = rail
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            window.appearance = NSAppearance(named: appearance)
+            rail.setState(.init(steers: [.init(id: user.id, text: "User input with unconfirmed application", attachmentCount: 0, kind: .heldSteer)],
+                queued: [], pause: .unconfirmed))
+            rail.applyTokens(); rail.layoutSubtreeIfNeeded()
+            try HelperGuardChecks.expect(rail.qaSectionTitles.contains { $0.contains("Unconfirmed; retry may repeat") },
+                "uncertain recovery warning is not visible on the existing rail")
+            let bitmap = try UIProbe.bitmap(of: rail, id: "card7.uncertain.\(name)")
+            if let directory = ProcessInfo.processInfo.environment["CONTINUUM_AGENT_MESSAGE_CAPTURE"],
+               let data = bitmap.representation(using: .png, properties: [:]) {
+                let out = URL(fileURLWithPath: directory); try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+                try data.write(to: out.appendingPathComponent("card7-uncertain-\(name).png"))
+            }
+        }
+        print("card7 durable custody: user priority, admission exclusion, uncertainty/restart, receipt I/O/retry, visible recovery light/dark PASS")
+    }
+
     static func run() async throws {
+        try await runSteerCustody()
+        try await runAgentSteeringChecks(helperCompletionOnly: true)
         try await runDelegateAndMoveOn()
         try await runDeliveryLedger()
         try await runDeliveryFailures()

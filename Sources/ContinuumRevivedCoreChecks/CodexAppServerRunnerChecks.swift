@@ -32,6 +32,7 @@ import Foundation
 //      REAL `run()` — not a re-derivation of what it does — has no other way
 //      in. Restored via `defer` before the function returns.
 func runCodexAppServerRunnerChecks() {
+    runCodexSteerReceiptChecks()
     runCodexAppServerTransportChecks()
     runCodexAppServerDeclineChecks()
     runCodexAgentRunnerAppServerChecks()
@@ -1132,4 +1133,38 @@ private func runCodexAgentRunnerAppServerChecks() {
         }
         try? FileManager.default.removeItem(at: fakeRoot)
     }
+}
+
+// The receipt shape comes from app-server 0.165's ItemStartedNotification:
+// userMessage.clientId is the client's input id, distinct from item.id.
+private func runCodexSteerReceiptChecks() {
+    var tracker = CodexSteerReceiptTracker()
+    let fixtureID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+    let fixtureURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        .deletingLastPathComponent().appendingPathComponent("scripts/fixtures/codex-steer-application.jsonl")
+    let fixture = try! String(contentsOf: fixtureURL, encoding: .utf8)
+    tracker.register(fixtureID, thread: "thread", turn: "turn")
+    precondition(tracker.applied(line: fixture) == fixtureID)
+    let id = UUID(), other = UUID()
+    tracker.register(id, thread: "thread", turn: "turn")
+    func wire(_ client: String?, thread: String = "thread", turn: String = "turn", method: String = "item/started") -> String {
+        var item: [String: Any] = ["type": "userMessage", "id": "provider-generated-item-id", "content": [["type": "text", "text": "result"]]]
+        if let client { item["clientId"] = client }
+        let frame: [String: Any] = ["method": method, "params": ["threadId": thread, "turnId": turn, "item": item, "startedAtMs": 1]]
+        return String(data: try! JSONSerialization.data(withJSONObject: frame), encoding: .utf8)!
+    }
+    precondition(tracker.applied(line: "{\"id\":1,\"result\":{\"turnId\":\"turn\"}}") == nil)
+    precondition(tracker.applied(line: wire(nil)) == nil)
+    precondition(tracker.applied(line: wire(other.uuidString)) == nil)
+    precondition(tracker.applied(line: wire(id.uuidString, thread: "foreign")) == nil)
+    precondition(tracker.applied(line: wire(id.uuidString, turn: "old")) == nil)
+    precondition(tracker.applied(line: wire(id.uuidString)) == id)
+    precondition(tracker.applied(line: wire(id.uuidString, method: "item/completed")) == nil)
+    precondition(tracker.takeUnconfirmed().isEmpty)
+    tracker.register(id, thread: "thread", turn: "second")
+    precondition(tracker.applied(line: wire(id.uuidString)) == nil) // late old-turn receipt
+    precondition(tracker.takeUnconfirmed(thread: "thread", turn: "old").isEmpty)
+    precondition(tracker.takeUnconfirmed(thread: "thread", turn: "second") == [id])
+    precondition(tracker.applied(line: wire(id.uuidString, turn: "second")) == nil)
+    print("Codex correlated steer application receipts: ack/foreign/missing/duplicate/late/turn-end PASS")
 }

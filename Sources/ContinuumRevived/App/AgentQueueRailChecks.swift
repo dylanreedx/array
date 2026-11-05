@@ -390,27 +390,27 @@ func runAgentQueueRailChecks() async throws {
             composer.qaDraftText.isEmpty && row("late steer")?.kind == .heldSteer
         }
         row("late steer")?.qaPressSendNow()
-        if kind == .codex {
-            // codex's turn/steer reply is its receipt: straight to the transcript.
-            try await eventually("\(kind): a confirmed steer must leave the rail for the transcript, echoes \(log.echoes)") {
-                log.echoes.contains("late steer") && rail.qaSteerTexts.isEmpty
-            }
-        } else {
-            try await eventually("\(kind): a handed-over steer must show as delivering") {
-                row("late steer")?.kind == .deliveringSteer
-            }
-            guard let delivering = row("late steer") else { throw Failure(description: "queue rail: \(kind): row vanished") }
-            try expect(!delivering.qaOffersEdit && !delivering.qaOffersRemove && !delivering.qaOffersSendNow,
-                       "\(kind): a delivering steer must not be editable or deletable")
+        // An RPC acknowledgment alone leaves the native input delivering.
+        // The LONG fixture has not applied it to provider history yet.
+        try await eventually("\(kind): a handed-over steer must show as delivering") {
+            row("late steer")?.kind == .deliveringSteer
         }
+        guard let delivering = row("late steer") else { throw Failure(description: "queue rail: \(kind): row vanished") }
+        try expect(!delivering.qaOffersEdit && !delivering.qaOffersRemove && !delivering.qaOffersSendNow,
+                   "\(kind): a delivering steer must not be editable or deletable")
         composer.requestStop()
-        if kind != .codex {
+        do {
+            // Codex without an application item returns uncertain custody;
             // pi hands an unread steer back on abort, claude on an interrupt
             // that cancels what it holds (T5c — claude used to run it as its
             // own next turn after Stop): it is Array's again, held and deletable.
             try await eventually("\(kind): an aborted turn's unread steer must come back as held, got \(supervisor.pendingSteers(for: id))", timeout: 12) {
                 !supervisor.isRunning(id) && supervisor.pendingSteers(for: id).map(\.state) == [.held]
                     && row("late steer")?.qaOffersRemove == true
+            }
+            if kind == .codex {
+                try expect(rail.state.pause == .unconfirmed && log.echoes.contains("late steer") == false,
+                    "Codex's unsampled input must show unconfirmed recovery, never consumed")
             }
             row("late steer")?.qaPressRemove()
         }

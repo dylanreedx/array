@@ -393,6 +393,15 @@ def reply(obj, result=None, error=None):
     else:
         out({"id": obj["id"], "result": result or {}})
 
+def take_steer(turn_id, timeout=None):
+    text, client_id = steered.get(timeout=timeout)
+    if os.path.exists(os.path.join(HERE, "suppress-steer-receipts")):
+        return text
+    out({"method": "item/started", "params": {"threadId": THREAD, "turnId": turn_id, "startedAtMs": 1,
+         "item": {"type": "userMessage", "id": "input-" + str(client_id), "clientId": client_id,
+                  "content": [{"type": "text", "text": text}]}}})
+    return text
+
 def run_turn(turn_id, text):
     delay_start(text)
     out({"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": turn_id}}})
@@ -425,7 +434,7 @@ def run_turn(turn_id, text):
                 status = "interrupted"
                 break
             try:
-                steer = steered.get(timeout=0.05)
+                steer = take_steer(turn_id, timeout=0.05)
                 out({"method": "item/agentMessage/delta", "params": {"threadId": THREAD, "turnId": turn_id, "itemId": "msg-steer", "delta": "steered: " + steer}})
                 break
             except queue.Empty:
@@ -444,7 +453,7 @@ def run_turn(turn_id, text):
             status = "interrupted"
         else:
             while not steered.empty():
-                out({"method": "item/agentMessage/delta", "params": {"threadId": THREAD, "turnId": turn_id, "itemId": "msg-steer", "delta": "steered: " + steered.get()}})
+                out({"method": "item/agentMessage/delta", "params": {"threadId": THREAD, "turnId": turn_id, "itemId": "msg-steer", "delta": "steered: " + take_steer(turn_id)}})
     if kind == "PLAIN":
         time.sleep(0.6)
     if kind == "LONG":
@@ -482,8 +491,9 @@ for line in sys.stdin:
         if active is None or params.get("expectedTurnId") != active:
             reply(obj, error={"code": -32600, "message": "no active turn to steer"})
         else:
-            reply(obj, {"turnId": active})
-            steered.put("".join(i.get("text", "") for i in params.get("input", [])))
+            if not os.path.exists(os.path.join(HERE, "drop-steer-ack")):
+                reply(obj, {"turnId": active})
+            steered.put(("".join(i.get("text", "") for i in params.get("input", [])), params.get("clientUserMessageId")))
     elif method == "turn/interrupt":
         interrupted.set()
         reply(obj, {})

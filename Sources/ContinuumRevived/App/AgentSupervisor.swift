@@ -1638,7 +1638,7 @@ final class AgentSupervisor {
         await submissionRecoveryStore?.queuedWorkItems(for: id).contains(where: { $0.id == message }) == true
     }
 
-    func stageScheduledWakeup(_ occurrence: UUID, text: String, for id: AgentID) async throws {
+    func stageScheduledWakeup(_ occurrence: UUID, text: String, for id: AgentID, helperSteer: Bool = false) async throws {
         guard let queue = submissionRecoveryStore, canDeliverScheduledWakeup(to: id) else {
             throw WorkspaceAPIError(code: .permissionDenied, message: "The agent cannot receive a scheduled wakeup now.")
         }
@@ -1647,7 +1647,7 @@ final class AgentSupervisor {
         updateCompanionTasks { reservation = try $0.reserveQueued(agentID: id.rawValue, itemID: occurrence) }
         defer { if let reservation { updateCompanionTasks { try $0.resolveQueuedReservation(reservation, accepted: accepted) } } }
         scheduledQueueAdmissions.insert(occurrence)
-        try await queue.enqueueScheduledMessage(id: occurrence, text: text, for: id)
+        try await queue.enqueueScheduledMessage(id: occurrence, text: text, for: id, asHelperSteer: helperSteer)
         await qaAfterScheduledQueueWrite?()
         accepted = true
         queuedWorkItemsCache[id] = await queue.queuedWorkItems(for: id)
@@ -1670,11 +1670,15 @@ final class AgentSupervisor {
         // Only our own durable wakeups auto-resume after relaunch. An ordinary
         // user follow-up or an explicitly stopped queue keeps its existing hold.
         if pausedQueues.contains(id), queuePauseReasons[id] == .afterRelaunch,
-           items.allSatisfy({ knownIDs.contains($0.id) }) {
+           items.allSatisfy({ knownIDs.contains($0.id) }),
+           !(await queue.hasUncertainSteers(for: id)) {
             pausedQueues.remove(id); queuePauseReasons[id] = nil
         }
         notifyTurnCapabilitiesChanged(id)
-        if !pausedQueues.contains(id), runners[id] == nil { drainQueue(for: id) }
+        if !pausedQueues.contains(id) {
+            if runners[id] == nil { drainQueue(for: id) }
+            else { handOverHeldSteers(for: id) }
+        }
     }
 
     func scheduleDeliveryFailed(_ error: Error) {
@@ -1706,6 +1710,8 @@ final class AgentSupervisor {
     private var queuePauseReasons: [AgentID: ComposerQueueRailState.Pause] = [:]
 
     private func pauseQueue(_ id: AgentID, _ reason: ComposerQueueRailState.Pause) {
+        // An ordinary terminal outcome cannot hide uncertain input custody.
+        if pausedQueues.contains(id), queuePauseReasons[id] == .unconfirmed, reason != .unconfirmed { return }
         pausedQueues.insert(id)
         queuePauseReasons[id] = reason
     }
@@ -7895,7 +7901,7 @@ final class AgentSupervisor {
                                 senderName: records[AgentID(rawValue: state.helper)]?.humanDisplayName ?? "Agent") }
                         })
                         try qaBeforeHelperWakeAdmission?()
-                        try await stageScheduledWakeup(queueID, text: text, for: parent)
+                        try await stageScheduledWakeup(queueID, text: text, for: parent, helperSteer: isRunning(parent))
                         try qaAfterHelperWakeStage?()
                         for var state in group {
                             state.phase = .delivered; state.via = "wake"; state.leaseUntil = nil
@@ -10021,6 +10027,9 @@ final class AgentSupervisor {
             catch { self.warn("Agent message queue recovery could not complete.") }
             let messages = await store.queuedWorkItems(for: id)
             self.queuedWorkItemsCache[id] = self.agentMessageQueueCache(messages, for: id)
+            if messages.contains(where: { if case .prompt(let m) = $0 { return m.steerUncertain }; return false }) {
+                self.pauseQueue(id, .unconfirmed)
+            }
             self.companionQueueHydrationPending.remove(id)
             if !messages.isEmpty { self.notifyTurnCapabilitiesChanged(id) }
         }
@@ -10103,6 +10112,7 @@ final class AgentSupervisor {
             return
         }
         guard !pausedQueues.contains(id) else { return }
+        if !(deliveringSteers[id]?.isEmpty ?? true) { deferredQueueOutcomes[id] = outcome; return }
         drainQueue(for: id)
     }
 
@@ -10129,7 +10139,11 @@ final class AgentSupervisor {
                 self.records[id] = record
                 self.persist(record)
             }
-            guard let workItem = await store.dequeueNextWorkItem(ifID: next.id, for: id) else {
+            let selected: AgentComposerQueuedWorkItem?
+            if case .prompt(let message) = next, message.helperCompletion {
+                selected = (try? await store.beginSteerHandoff(for: id, only: next.id))?.first.map { .prompt($0) }
+            } else { selected = await store.dequeueNextWorkItem(ifID: next.id, for: id) }
+            guard let workItem = selected else {
                 if case .compaction = next, var record = self.records[id] {
                     record.inFlightCompaction = nil
                     self.records[id] = record
@@ -10176,23 +10190,30 @@ final class AgentSupervisor {
             }
             let sharedPermit = await self.queuedSharedAdmission(id, item: message.id, prompt: prompt)
             if self.sharedAgentControlGates[id]?.isEmpty == false, sharedPermit == nil {
-                await store.requeueWorkItemAtFront(workItem, for: id)
+                await self.restoreDrainedWorkItem(workItem, for: id, store: store)
                 self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
                 self.pauseQueue(id, .held); self.notifyTurnCapabilitiesChanged(id)
                 return
             }
-            guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, queuedItemID: message.id,
+            if message.helperCompletion {
+                self.helperFallbackIDs[id, default: []].insert(message.id)
+                self.deliveringSteers[id, default: []].append((message.id, message, prompt))
+            }
+            guard self.sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id, queuedSource: message), to: id, queuedItemID: message.id,
                                     sharedInputPermit: sharedPermit) else {
                 // The runner became busy again in the same beat (a fresh
                 // interactive send won the race) — put the message back rather
                 // than lose it.
-                await store.requeueWorkItemAtFront(workItem, for: id)
+                self.helperFallbackIDs[id]?.remove(message.id)
+                self.deliveringSteers[id]?.removeAll { $0.id == message.id }
+                await self.restoreDrainedWorkItem(workItem, for: id, store: store)
                 self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
-            // No composer painted this one; the tile learns of it here.
-            self.echoPrompt(prompt, for: id)
+            // Helper fallback remains in durable custody until the runner starts
+            // its next turn. Other queue entries keep their existing echo path.
+            if !message.helperCompletion { self.echoPrompt(prompt, for: id) }
         }
     }
 
@@ -10200,6 +10221,7 @@ final class AgentSupervisor {
     /// can change it while the durable queue/attachment store is awaited.
     private func canDrainQueue(for id: AgentID) -> Bool {
         runners[id] == nil && !pausedQueues.contains(id) && !isSessionHeld(id)
+            && (deliveringSteers[id]?.isEmpty ?? true)
             && pendingForceSends[id] == nil && deferredForceSends[id] == nil
             && !contextRecoveryInFlight.contains(id)
     }
@@ -10210,7 +10232,10 @@ final class AgentSupervisor {
             records[id] = record
             persist(record)
         }
-        await store.requeueWorkItemAtFront(item, for: id)
+        if case .prompt(let message) = item, message.helperCompletion {
+            do { try await store.finishSteerHandoff(message.id, applied: false, for: id) }
+            catch { pauseQueue(id, .held); warn("Helper fallback remains in durable recovery custody.") }
+        } else { await store.requeueWorkItemAtFront(item, for: id) }
         queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
         notifyTurnCapabilitiesChanged(id)
     }
@@ -10234,10 +10259,11 @@ final class AgentSupervisor {
     // A provider acceptance receipt (notably Codex turn/steer) can precede
     // sampling the input. Keep the wake signal until the blocking tools finish.
     private var helperWaitSteerTools: [AgentID: Set<String>] = [:]
-    /// Steers handed to the provider and not yet confirmed. In memory only:
-    /// once handed over they are the provider's, no longer Array's to edit.
+    /// Runtime projection of handed-off steers. The queue file retains their
+    /// custody until an application receipt is durably settled.
     private var deliveringSteers: [AgentID: [(id: UUID, message: AgentComposerQueuedMessage, prompt: AgentPrompt)]] = [:]
     private var steerHandoffsInFlight: Set<AgentID> = []
+    private var helperFallbackIDs: [AgentID: Set<UUID>] = [:]
     private var interruptingAgents: Set<AgentID> = []
     /// `echo`: no composer painted this prompt (a rail send-now), so the tile
     /// is told when it runs.
@@ -10530,6 +10556,7 @@ final class AgentSupervisor {
               let runner = runners[id] as? AgentSteeringRunning,
               !activeCompactionOperations.contains(id),
               !interruptingAgents.contains(id),
+              !pausedQueues.contains(id),
               pendingForceSends[id] == nil,
               only != nil || !(openToolItems[id]?.isEmpty ?? true),
               !steerHandoffsInFlight.contains(id) else { return }
@@ -10542,19 +10569,25 @@ final class AgentSupervisor {
             defer { self.steerHandoffsInFlight.remove(id) }
             guard self.runners[id] === runner, runner.acceptsSteerNow else { return }
             let steers: [AgentComposerQueuedMessage]
-            if let only {
-                guard case .prompt(let message) = await store.takeQueuedWorkItem(id: only, for: id) else { return }
-                steers = [message]
-            } else {
-                steers = await store.takeHeldSteers(for: id)
+            do {
+                steers = try await store.beginSteerHandoff(for: id, only: only,
+                    excluding: self.scheduledQueueAdmissions)
+            } catch {
+                self.warn("Steer handoff awaits durable queue storage; input remains held.")
+                return
             }
             var notTaken: [AgentComposerQueuedMessage] = []
+            var retryUserPriority = false
             for message in steers {
+                if message.helperCompletion,
+                   await store.queuedMessages(for: id).contains(where: { $0.isSteer && !$0.helperCompletion }) {
+                    notTaken.append(message); retryUserPriority = true; continue
+                }
                 guard self.runners[id] === runner, self.runnerGenerationTokens[id] == generation else {
                     notTaken.append(message)
                     continue
                 }
-                guard let prompt = await self.preparedQueuedPrompt(message, for: id) else { continue }
+                guard let prompt = await self.preparedQueuedPrompt(message, for: id) else { notTaken.append(message); continue }
                 self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
                 let sharedPermit = await self.queuedSharedAdmission(id, item: message.id, prompt: prompt)
                 guard self.runners[id] === runner, self.runnerGenerationTokens[id] == generation,
@@ -10573,38 +10606,64 @@ final class AgentSupervisor {
                     notTaken.append(message)
                 }
             }
-            if !notTaken.isEmpty { await store.requeueHeldSteersAtFront(notTaken, for: id) }
+            for message in notTaken {
+                do { try await store.finishSteerHandoff(message.id, applied: false, for: id) }
+                catch { self.pauseQueue(id, .held); self.warn("Unsent steer remains in durable recovery custody.") }
+            }
             self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
             self.notifyTurnCapabilitiesChanged(id)
+            if retryUserPriority {
+                DispatchQueue.main.async { [weak self] in self?.handOverHeldSteers(for: id) }
+            }
         }
     }
 
     /// The provider's receipt for one handed-over steer.
     private func settleDeliveringSteer(_ steerID: UUID, disposition: AgentSteerDisposition, for id: AgentID) {
-        guard let index = deliveringSteers[id]?.firstIndex(where: { $0.id == steerID }),
-              let entry = deliveringSteers[id]?.remove(at: index) else { return }
-        switch disposition {
-        case .consumed:
-            updateCompanionTasks { try $0.applyQueuedToParent(steerID) }
-            recordTranscriptUserPrompt(entry.prompt, for: id)
-            echoPrompt(entry.prompt, for: id)
-            publishSteer(entry.prompt, for: id)
-        case .returned:
-            if let store = submissionRecoveryStore {
-                runQueueOp(for: id) { await store.requeueHeldSteersAtFront([entry.message], for: id) }
+        guard let store = submissionRecoveryStore else { return }
+        let previous = queueOpTasks[id]
+        queueOpTasks[id] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self, let entry = self.deliveringSteers[id]?.first(where: { $0.id == steerID }) else { return }
+            do {
+                try await store.finishSteerHandoff(steerID, applied: disposition == .consumed,
+                    uncertain: disposition == .uncertain, for: id)
+            } catch {
+                self.pauseQueue(id, .held)
+                self.warn("Steer receipt awaits durable storage; input custody retained.")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.settleDeliveringSteer(steerID, disposition: disposition, for: id)
+                }
+                return
             }
-            // T5c — a provider hands a steer back only when a Stop or a force
-            // send interrupted the turn. It waits, held, ahead of the queue
-            // until the user acts; after a force send it must not run as soon
-            // as the forced message finishes.
-            if !pausedQueues.contains(id) { pauseQueue(id, .afterStop) }
+            let isFallback = self.helperFallbackIDs[id]?.contains(steerID) ?? false
+            self.deliveringSteers[id]?.removeAll { $0.id == steerID }
+            self.helperFallbackIDs[id]?.remove(steerID)
+            switch disposition {
+            case .consumed:
+                // sendPrepared already records/publishes an ordinary next-turn
+                // prompt. Only a current-turn steer needs that transcript event.
+                if !isFallback {
+                    self.updateCompanionTasks { try $0.applyQueuedToParent(steerID) }
+                    self.recordTranscriptUserPrompt(entry.prompt, for: id)
+                    self.publishSteer(entry.prompt, for: id)
+                }
+                self.echoPrompt(entry.prompt, for: id)
+            case .returned, .uncertain:
+                if disposition == .uncertain { self.pauseQueue(id, .unconfirmed) }
+                else if !self.pausedQueues.contains(id) { self.pauseQueue(id, .afterStop) }
+                if disposition == .uncertain {
+                    self.warn("Steer application unconfirmed. Input is held for explicit recovery; resending may repeat provider work.")
+                }
+            }
+            self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+            if self.deliveringSteers[id]?.isEmpty ?? true, self.runners[id] == nil,
+               let outcome = self.deferredQueueOutcomes.removeValue(forKey: id) {
+                self.handleQueueOnTurnCompleted(outcome: outcome, for: id)
+            }
+            if self.deliveringSteers[id]?.isEmpty ?? true { self.sendDeferredForceSend(for: id) }
         }
-        notifyTurnCapabilitiesChanged(id)
-        if deliveringSteers[id]?.isEmpty ?? true, runners[id] == nil,
-           let outcome = deferredQueueOutcomes.removeValue(forKey: id) {
-            handleQueueOnTurnCompleted(outcome: outcome, for: id)
-        }
-        if deliveringSteers[id]?.isEmpty ?? true { sendDeferredForceSend(for: id) }
     }
 
     /// A force-send race cannot consume the user's accepted prompt.
@@ -10625,26 +10684,20 @@ final class AgentSupervisor {
 
     /// Steers a session that died never confirmed go back to being held.
     private func returnDeliveringSteers(for id: AgentID) {
-        guard let entries = deliveringSteers.removeValue(forKey: id), !entries.isEmpty,
-              let store = submissionRecoveryStore else { return }
-        pauseQueue(id, .afterStop)
-        runQueueOp(for: id) { await store.requeueHeldSteersAtFront(entries.map(\.message), for: id) }
-    }
-
-    /// Steers still delivering when Array starts a new turn of the same session
-    /// were taken in a turn that has already closed.
-    private func settleStaleDeliveringSteers(for id: AgentID) {
-        deferredQueueOutcomes[id] = nil
-        for entry in deliveringSteers.removeValue(forKey: id) ?? [] {
-            recordTranscriptUserPrompt(entry.prompt, for: id)
-            echoPrompt(entry.prompt, for: id)
-            publishSteer(entry.prompt, for: id)
+        for entry in deliveringSteers[id] ?? [] {
+            settleDeliveringSteer(entry.id, disposition: .uncertain, for: id)
         }
     }
 
-    /// claude will run a steer it received after its last tool boundary as its
-    /// own next turn. Hold the queue for that turn; if it never shows, the
-    /// steers are settled as delivered and the queue moves on.
+    /// A later turn alone does not establish application of earlier input.
+    private func settleStaleDeliveringSteers(for id: AgentID) {
+        for entry in deliveringSteers[id] ?? [] where !(helperFallbackIDs[id]?.contains(entry.id) ?? false) {
+            settleDeliveringSteer(entry.id, disposition: .uncertain, for: id)
+        }
+    }
+
+    /// Claude may promote input after its final boundary. Wait for its replay;
+    /// if it never arrives, retain uncertain custody instead of assuming delivery.
     private func deferQueueBehindDeliveringSteers(
         _ outcome: TurnOutcome, runner: AgentUnsolicitedTurnReporting, for id: AgentID
     ) {
@@ -11118,7 +11171,12 @@ final class AgentSupervisor {
         // `spawned` to a terminal status, carrying the child's final assistant
         // text. After `ingestTranscriptEvent` above on purpose — the projection
         // must already hold this turn's last assistant entry.
-        if case .turnStarted = event { scheduleHelperCompletionFlush() }
+        if case .turnStarted = event {
+            for item in helperFallbackIDs[id] ?? [] {
+                settleDeliveringSteer(item, disposition: .consumed, for: id)
+            }
+            scheduleHelperCompletionFlush()
+        }
         if case let .turnCompleted(_, turn, outcome, errorMessage) = event {
             noteHelperCompletion(id, turn: turn, outcome: outcome, error: errorMessage)
             settleHelperMessages(id, outcome: outcome, error: errorMessage)

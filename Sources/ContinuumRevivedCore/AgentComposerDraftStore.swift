@@ -158,6 +158,12 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
     /// boundary and the supervisor hands them to the provider; a turn that ends
     /// first runs them next, ahead of every follow-up, by ordinary draining.
     public var isSteer: Bool
+    /// Host custody remains in this same durable queue while the provider is
+    /// deciding application. A fresh store exposes an unfinished handoff as
+    /// uncertain held work; it must never auto-replay it after relaunch.
+    public var steerInFlight: Bool = false
+    public var steerUncertain: Bool = false
+    public var helperCompletion: Bool = false
     public var agentMessageHops: Int?
     public var agentMessageContext: AgentMessageQueueContext?
 
@@ -185,7 +191,7 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, text, imageAttachments, fileReferences, agentReferences, boardReferences, queuedAt, isSteer, agentMessageHops, agentMessageContext
+        case id, text, imageAttachments, fileReferences, agentReferences, boardReferences, queuedAt, isSteer, agentMessageHops, agentMessageContext, steerInFlight, steerUncertain, helperCompletion
     }
 
     public init(from decoder: Decoder) throws {
@@ -200,6 +206,9 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         agentMessageHops = try values.decodeIfPresent(Int.self, forKey: .agentMessageHops)
         agentMessageContext = try values.decodeIfPresent(AgentMessageQueueContext.self, forKey: .agentMessageContext)
         isSteer = try values.decodeIfPresent(Bool.self, forKey: .isSteer) ?? false
+        steerInFlight = try values.decodeIfPresent(Bool.self, forKey: .steerInFlight) ?? false
+        steerUncertain = try values.decodeIfPresent(Bool.self, forKey: .steerUncertain) ?? false
+        helperCompletion = try values.decodeIfPresent(Bool.self, forKey: .helperCompletion) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -214,6 +223,9 @@ public struct AgentComposerQueuedMessage: Codable, Equatable, Sendable, Identifi
         try values.encodeIfPresent(agentMessageHops, forKey: .agentMessageHops)
         try values.encodeIfPresent(agentMessageContext, forKey: .agentMessageContext)
         if isSteer { try values.encode(isSteer, forKey: .isSteer) }
+        if steerInFlight { try values.encode(true, forKey: .steerInFlight) }
+        if steerUncertain { try values.encode(true, forKey: .steerUncertain) }
+        if helperCompletion { try values.encode(true, forKey: .helperCompletion) }
     }
 }
 
@@ -820,10 +832,13 @@ public actor AgentComposerDraftStore {
 
     /// The scheduler's outbox retries a stable id after restart. A successful
     /// return means the existing queue is durable; a write failure stays retryable.
-    public func enqueueScheduledMessage(id: UUID, text: String, for agentID: AgentID) throws {
+    public func enqueueScheduledMessage(id: UUID, text: String, for agentID: AgentID, asHelperSteer: Bool = false) throws {
         var current = loadQueue(for: agentID)
         if current.contains(where: { $0.id == id }) { return }
-        current.append(.prompt(.init(id: id, text: text, queuedAt: clock.now())))
+        var message = AgentComposerQueuedMessage(id: id, text: text, queuedAt: clock.now(), isSteer: asHelperSteer)
+        message.helperCompletion = asHelperSteer
+        if asHelperSteer { current.insert(.prompt(message), at: Self.leadingSteerCount(current)) }
+        else { current.append(.prompt(message)) }
         try FileManager.default.createDirectory(at: layout.queuedMessagesDirectory,
             withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: layout.queuedMessagesDirectory.path)
@@ -856,13 +871,54 @@ public actor AgentComposerDraftStore {
     /// Read-only, in submission order. Never mutates the queue.
     public func queuedMessages(for agentID: AgentID) -> [AgentComposerQueuedMessage] {
         loadQueue(for: agentID).compactMap {
-            guard case .prompt(let message) = $0 else { return nil }
+            guard case .prompt(let message) = $0, !message.steerInFlight else { return nil }
             return message
         }
     }
 
     public func queuedWorkItems(for agentID: AgentID) -> [AgentComposerQueuedWorkItem] {
-        loadQueue(for: agentID)
+        loadQueue(for: agentID).filter { if case .prompt(let m) = $0 { return !m.steerInFlight }; return true }
+    }
+
+    public func hasUncertainSteers(for agentID: AgentID) -> Bool {
+        loadQueue(for: agentID).contains { if case .prompt(let m) = $0 { return m.steerUncertain }; return false }
+    }
+
+    /// The full queue file is the write-ahead handoff journal. Never remove a
+    /// prompt on transport acceptance; application or explicit recovery owns it.
+    public func beginSteerHandoff(for agentID: AgentID, only: UUID? = nil,
+                                  excluding: Set<UUID> = []) throws -> [AgentComposerQueuedMessage] {
+        var current = loadQueue(for: agentID)
+        var result: [AgentComposerQueuedMessage] = []
+        for index in current.indices {
+            if only == nil && index >= Self.leadingSteerCount(current) { break }
+            guard case .prompt(var m) = current[index], m.isSteer || only == m.id,
+                  !m.steerInFlight, (!m.steerUncertain || only != nil), !excluding.contains(m.id),
+                  only == nil || only == m.id else { continue }
+            m.steerInFlight = true
+            current[index] = .prompt(m)
+            result.append(m)
+        }
+        if !result.isEmpty { try writeQueueDurably(current, for: agentID) }
+        return result
+    }
+
+    public func finishSteerHandoff(_ id: UUID, applied: Bool, uncertain: Bool = false, for agentID: AgentID) throws {
+        var current = loadQueue(for: agentID)
+        guard let index = current.firstIndex(where: { $0.id == id }), case .prompt(var m) = current[index] else { return }
+        if applied { current.remove(at: index) }
+        else {
+            m.steerInFlight = false; m.steerUncertain = uncertain; m.isSteer = true
+            current[index] = .prompt(m)
+        }
+        try writeQueueDurably(current, for: agentID)
+    }
+
+    private func writeQueueDurably(_ items: [AgentComposerQueuedWorkItem], for agentID: AgentID) throws {
+        try FileManager.default.createDirectory(at: layout.queuedMessagesDirectory,
+            withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try writer.write(items, to: layout.queuedMessagesFile(for: agentID))
+        queues[agentID] = items
     }
 
     public func nextWorkItem(for agentID: AgentID) -> AgentComposerQueuedWorkItem? {
@@ -907,7 +963,8 @@ public actor AgentComposerDraftStore {
         var current = loadQueue(for: agentID)
         guard current.first?.id == expectedID else { return nil }
         let next = current.removeFirst()
-        persistQueue(current, for: agentID)
+        do { try writeQueueDurably(current, for: agentID) }
+        catch { return nil }
         return next
     }
 
@@ -974,7 +1031,8 @@ public actor AgentComposerDraftStore {
             isSteer: true
         )
         var current = loadQueue(for: agentID)
-        current.insert(.prompt(message), at: Self.leadingSteerCount(current))
+        let firstHelper = current.firstIndex { if case .prompt(let m) = $0 { return m.helperCompletion }; return false }
+        current.insert(.prompt(message), at: min(firstHelper ?? current.count, Self.leadingSteerCount(current)))
         persistQueue(current, for: agentID)
         return message
     }
@@ -1004,7 +1062,9 @@ public actor AgentComposerDraftStore {
             return message
         }
         current.removeAll { if case .prompt(let message) = $0 { return message.isSteer }; return false }
-        held += messages.map { var steer = $0; steer.isSteer = true; return steer }
+        let returnedIDs = Set(messages.map(\.id))
+        held.removeAll { returnedIDs.contains($0.id) }
+        held += messages.map { var steer = $0; steer.isSteer = true; steer.steerInFlight = false; return steer }
         held.sort { $0.queuedAt < $1.queuedAt }
         current.insert(contentsOf: held.map { .prompt($0) }, at: 0)
         persistQueue(current, for: agentID)
@@ -1062,8 +1122,13 @@ public actor AgentComposerDraftStore {
                 let legacy: [AgentComposerQueuedMessage] = try writer.read(at: file)
                 loaded = legacy.map(AgentComposerQueuedWorkItem.prompt)
             }
-            queues[agentID] = loaded
-            return loaded
+            let recovered = loaded.map { item -> AgentComposerQueuedWorkItem in
+                guard case .prompt(var m) = item, m.steerInFlight else { return item }
+                m.steerInFlight = false; m.steerUncertain = true; m.isSteer = true
+                return .prompt(m)
+            }
+            queues[agentID] = recovered
+            return recovered
         } catch {
             warn("AgentComposerDraftStore.loadQueue: unreadable queue for agent \(agentID.rawValue)")
             queues[agentID] = []

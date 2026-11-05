@@ -9,7 +9,7 @@ import Foundation
 // stands in for each CLI on PATH and records exactly what reached it. Runs as
 // part of `--agent-compaction-ui-check`.
 @MainActor
-func runAgentSteeringChecks(waitInputOnly: Bool = false) async throws {
+func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: Bool = false) async throws {
     struct Failure: Error, CustomStringConvertible { let description: String }
     func expect(_ condition: Bool, _ message: String) throws {
         if !condition { throw Failure(description: "steering: " + message) }
@@ -96,6 +96,174 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false) async throws {
     }
     func onPath(_ harness: Harness) { setenv("PATH", "\(harness.bin.path):\(originalPath)", 1) }
 
+    // Card7: use production runners, offline CLIs and the production helper
+    // journal/flush. A boundary must consume the attributed result in this turn.
+    if helperCompletionOnly {
+        var failures: [String] = []
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let h = try Harness(kind)
+            defer { h.tearDown() }
+            onPath(h)
+            h.supervisor.helperCompletionEnabled = { _ in true }
+            _ = h.supervisor.setWorkspaceToolsEnabled(agentID: h.id, true)
+            try expect(h.supervisor.send("TOOL text", to: h.id), "helper seed refused")
+            try await eventually("helper lead must reach tool boundary") {
+                h.supervisor.turnSnapshot(for: h.id)?.capabilities.canSteer == true
+                    && h.events.contains { if case .itemStarted(_, _, .commandExecution, _) = $0 { return true }; return false }
+            }
+            let helper = UUID(), wake = UUID()
+            let cwd = h.supervisor.records[h.id]!.cwd
+            let text = "Fixture helper finished: succeeded\nCard7 plain helper result"
+            let delivery = SpawnResultFile.Delivery(helper: helper, turn: "card7-fixture",
+                recipient: h.id.rawValue, wakeID: wake, text: text, now: Date())
+            try SpawnResultFile.saveDelivery(delivery, parentCwd: cwd)
+            await h.supervisor.flushHelperCompletions()
+            try await Task.sleep(for: .milliseconds(250))
+            let sameTurn = h.frames.contains { frame in
+                if kind == .codex {
+                    guard frame["method"] as? String == "turn/steer",
+                          let params = frame["params"] as? [String: Any] else { return false }
+                    return ((params["input"] as? [[String: Any]])?.first?["text"] as? String)?.contains(text) == true
+                }
+                if kind == .pi { return frame["type"] as? String == "steer" && (frame["message"] as? String)?.contains(text) == true }
+                return frame["type"] as? String == "user"
+                    && ((frame["message"] as? [String: Any])?["content"] as? String)?.contains(text) == true
+            }
+            let passed = sameTurn && h.promptTexts.count == (kind == .claude ? 2 : 1) && h.completedTurns.count <= 1
+            print("card7 busy \(kind): same-turn steer=\(sameTurn), completed=\(h.completedTurns.count), prompts=\(h.promptTexts.count), queued=\(h.supervisor.queuedMessages(for: h.id).count)")
+            if !passed { failures.append("\(kind): helper result did not enter current turn") }
+            if passed {
+                try await eventually("\(kind): helper result applied in current turn") {
+                    h.echoes.contains { $0.contains(text) } && !h.supervisor.isRunning(h.id)
+                }
+                try expect(h.completedTurns == [.completed] && h.promptTexts.count == (kind == .claude ? 2 : 1),
+                    "\(kind): helper result created an extra turn")
+                switch AgentMessageEnvelope.classify(h.echoes.first { $0.contains(text) }!) {
+                case .agentMessage(let m): try expect(m.senderAgentID == helper && m.text == text, "helper attribution/plain text changed")
+                case .agentMessages(let ms): try expect(ms.count == 1 && ms[0].senderAgentID == helper && ms[0].text == text, "helper attribution/plain text changed")
+                default: throw Failure(description: "helper result envelope missing")
+                }
+            }
+        }
+        // The fake CLIs separate acknowledgment from sampling at a boundary.
+        // HOLD keeps the command open; Stop arrives before sampling the steer.
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let h = try Harness(kind)
+            defer { h.tearDown() }
+            onPath(h)
+            try expect(h.supervisor.send(kind == .pi ? "SLOW text" : "HOLD text", to: h.id), "receipt seed refused")
+            try await eventually("receipt lead must reach command") {
+                h.events.contains { if case .itemStarted = $0 { return true }; return false }
+            }
+            try expect(await h.supervisor.accept(.steer(AgentPrompt("Card7 unsampled helper result")), for: h.id) == .accepted,
+                "receipt steer refused")
+            try await eventually("receipt reaches native handoff") {
+                h.frames.contains { frame in
+                    kind == .codex ? frame["method"] as? String == "turn/steer"
+                        : kind == .pi ? frame["type"] as? String == "steer"
+                        : frame["type"] as? String == "user" && ((frame["message"] as? [String: Any])?["content"] as? String) == "Card7 unsampled helper result"
+                }
+            }
+            try await Task.sleep(for: .milliseconds(100))
+            let premature = !h.echoes.isEmpty
+            h.supervisor.stop(h.id)
+            try await eventually("receipt Stop must settle") { !h.supervisor.isRunning(h.id) }
+            try await Task.sleep(for: .milliseconds(250))
+            let retained = h.supervisor.pendingSteers(for: h.id).contains { $0.text == "Card7 unsampled helper result" }
+            print("card7 receipt \(kind): premature-consumed=\(premature), retained-after-stop=\(retained)")
+            if premature || !retained { failures.append("\(kind): acknowledged but unsampled input was marked consumed/lost after Stop") }
+        }
+        for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
+            let h = try Harness(kind)
+            defer { h.tearDown() }
+            onPath(h)
+            h.supervisor.helperCompletionEnabled = { _ in true }
+            _ = h.supervisor.setWorkspaceToolsEnabled(agentID: h.id, true)
+            try expect(h.supervisor.send("PLAIN text", to: h.id), "fallback seed refused")
+            try await eventually("fallback turn bound") { h.supervisor.turnSnapshot(for: h.id)?.capabilities.canSteer == true }
+            let helper = UUID(), wake = UUID(), text = "Fallback helper finished: succeeded\nplain result"
+            let cwd = h.supervisor.records[h.id]!.cwd
+            try SpawnResultFile.saveDelivery(.init(helper: helper, turn: "fallback-turn", recipient: h.id.rawValue,
+                wakeID: wake, text: text, now: Date()), parentCwd: cwd)
+            await h.supervisor.flushHelperCompletions()
+            await h.supervisor.flushHelperCompletions()
+            try await eventually("\(kind): one next-turn fallback", timeout: 10) {
+                h.completedTurns.count == 2 && !h.supervisor.isRunning(h.id)
+                    && h.supervisor.pendingSteers(for: h.id).isEmpty && h.supervisor.queuedMessages(for: h.id).isEmpty
+            }
+            try expect(h.promptTexts.count == 2 && h.promptTexts[1].contains(text), "fallback lost or duplicated result")
+            let state = try SpawnResultFile.delivery(parentCwd: cwd, helper: helper, turn: "fallback-turn", recipient: h.id.rawValue)
+            try expect(state?.wakeID == wake && state?.phase == .delivered, "fallback changed durable identity")
+            print("card7 fallback \(kind): two total turns, one result, stable wake ID PASS")
+        }
+        // Missing acknowledgment with an application item settles once;
+        // missing application evidence is visibly held instead of auto-replayed.
+        for missingReceipt in [false, true] {
+            let h = try Harness(.codex)
+            defer { h.tearDown() }
+            onPath(h)
+            try Data().write(to: h.bin.appendingPathComponent(missingReceipt ? "suppress-steer-receipts" : "drop-steer-ack"))
+            try expect(h.supervisor.send("TOOL text", to: h.id), "lost receipt seed refused")
+            try await eventually("lost receipt bound") { h.supervisor.turnSnapshot(for: h.id)?.capabilities.canSteer == true }
+            try expect(await h.supervisor.accept(.steer(AgentPrompt("receipt probe")), for: h.id) == .accepted, "receipt probe refused")
+            try await eventually("lost receipt settles", timeout: 12) {
+                !h.supervisor.isRunning(h.id) && (missingReceipt ? h.supervisor.pendingSteers(for: h.id).map(\.state) == [.held] : h.echoes == ["receipt probe"])
+            }
+            try expect(h.completedTurns.count == 1 && h.promptTexts.count == 1, "lost receipt silently replayed work")
+            if missingReceipt {
+                try expect(h.echoes.isEmpty && h.supervisor.queueRailState(for: h.id).pause != nil, "unknown application was reported consumed")
+            } else { try expect(h.supervisor.pendingSteers(for: h.id).isEmpty, "applied receipt did not release custody") }
+            print("card7 Codex \(missingReceipt ? "missing application held" : "lost acknowledgment correlated") PASS")
+        }
+        for collectionFirst in [true, false] {
+            let h = try Harness(.codex)
+            defer { h.tearDown() }
+            onPath(h)
+            h.supervisor.helperCompletionEnabled = { _ in true }
+            _ = h.supervisor.setWorkspaceToolsEnabled(agentID: h.id, true)
+            try expect(h.supervisor.send("SLOW text", to: h.id), "race seed refused")
+            try await eventually("race boundary") { h.events.contains { if case .itemStarted = $0 { return true }; return false } }
+            let helper = UUID(), wake = UUID(), cwd = h.supervisor.records[h.id]!.cwd
+            let courier = SpawnResultFile(toolCallId: "card7-race", status: .completed, agentId: helper,
+                finalText: "race result", turnIdentity: "race-turn", recipientId: h.id.rawValue)
+            var state = SpawnResultFile.Delivery(helper: helper, turn: "race-turn", recipient: h.id.rawValue,
+                wakeID: wake, text: "Race helper finished: succeeded\nrace result", now: Date())
+            state.result = courier
+            try SpawnResultFile.saveDelivery(state, parentCwd: cwd)
+            if collectionFirst {
+                let offered = try SpawnResultFile.collect(parentCwd: cwd, handle: "card7-race", recipient: h.id.rawValue,
+                    requestId: "race-offer", snapshot: courier)!
+                await h.supervisor.flushHelperCompletions()
+                try expect(!h.frames.contains { $0["method"] as? String == "turn/steer" }, "offered collection also steered")
+                _ = try SpawnResultFile.collect(parentCwd: cwd, handle: "card7-race", recipient: h.id.rawValue,
+                    requestId: "race-ack", receipt: offered.deliveryReceipt, acknowledge: true, snapshot: courier)
+                await h.supervisor.flushHelperCompletions()
+                try expect(h.supervisor.pendingSteers(for: h.id).isEmpty && h.supervisor.queuedMessages(for: h.id).isEmpty,
+                    "acknowledged collection was queued again")
+            } else {
+                var duringAdmission: SpawnResultFile.Status?
+                h.supervisor.qaBeforeHelperWakeAdmission = {
+                    duringAdmission = try SpawnResultFile.collect(parentCwd: cwd, handle: "card7-race", recipient: h.id.rawValue,
+                        requestId: "race-during-stage", snapshot: courier)?.status
+                }
+                await h.supervisor.flushHelperCompletions()
+                h.supervisor.qaBeforeHelperWakeAdmission = nil
+                let after = try SpawnResultFile.collect(parentCwd: cwd, handle: "card7-race", recipient: h.id.rawValue,
+                    requestId: "race-after-admission", snapshot: courier)
+                try expect(duringAdmission == .deliveryPending && after?.status == .alreadyDelivered,
+                    "collection raced steer custody admission")
+                try await eventually("race steer handed") { h.frames.contains { $0["method"] as? String == "turn/steer" } }
+            }
+            h.supervisor.stop(h.id)
+            try await eventually("race Stop releases runtime custody") {
+                !h.supervisor.isRunning(h.id) && !h.supervisor.pendingSteers(for: h.id).contains { $0.state == .delivering }
+            }
+            print("card7 collection/steer arbitration \(collectionFirst ? "collection-first" : "stage-first") PASS")
+        }
+        if !failures.isEmpty { throw Failure(description: failures.joined(separator: "; ")) }
+        return
+    }
+
     if waitInputOnly {
         for kind in [AgentSteeringQAFakes.Harness.claude, .codex, .pi] {
             let h = try Harness(kind)
@@ -118,8 +286,7 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false) async throws {
             try await eventually("handoff runner bound") { h.supervisor.turnSnapshot(for: h.id)?.capabilities.canSteer == true }
             try expect(await h.supervisor.accept(.steer(AgentPrompt("handed steer")), for: h.id) == .accepted, "handoff steer refused")
             try await eventually("handoff reaches provider") {
-                kind == .codex ? h.echoes == ["handed steer"]
-                    : h.supervisor.pendingSteers(for: h.id).map(\.state) == [.delivering]
+                h.supervisor.pendingSteers(for: h.id).map(\.state) == [.delivering]
             }
             try expect(h.supervisor.helperWaitPendingInput(for: h.id) == "user_steer",
                        "\(kind): accepted but unsampled steer must still wake a blocking tool")
@@ -322,7 +489,7 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false) async throws {
     // 9. T5c — Stop while a steer is HANDED to the provider but not consumed.
     //    After Stop nothing further runs until the user acts: claude and pi give
     //    the steer back, so it is held and editable at the front of the rail;
-    //    codex confirmed it on turn/steer and its app-server ends with the turn.
+    //    Codex acknowledgment alone is not an application receipt.
     //    The queue behind it shows "Paused after Stop".
     for kind in [AgentSteeringQAFakes.Harness.claude, .pi, .codex] {
         let h = try Harness(kind)
@@ -334,9 +501,7 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false) async throws {
         try expect(await h.supervisor.accept(.queue(AgentPrompt("queued one")), for: h.id) == .accepted, "\(kind) stop-handed: queue refused")
         try expect(await h.supervisor.accept(.steer(AgentPrompt("handed steer")), for: h.id) == .accepted, "\(kind) stop-handed: steer refused")
         try await eventually("\(kind) stop-handed: the steer must be handed to the provider at the tool boundary") {
-            kind == .codex
-                ? h.echoes == ["handed steer"]
-                : h.supervisor.pendingSteers(for: h.id).map(\.state) == [.delivering]
+            h.supervisor.pendingSteers(for: h.id).map(\.state) == [.delivering]
         }
         try await Task.sleep(for: .milliseconds(200))
         try expect(await h.supervisor.accept(.stop, for: h.id) == .accepted, "\(kind) stop-handed: accept(.stop) refused")
@@ -349,11 +514,9 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false) async throws {
         try expect(h.completedTurns == [.interrupted] && !h.supervisor.isRunning(h.id),
                    "\(kind) stop-handed: nothing may run after Stop, turns \(h.completedTurns), prompts \(h.promptTexts)")
         let rail = h.supervisor.queueRailState(for: h.id)
-        try expect(rail.pause == .afterStop && rail.queued.map(\.text) == ["queued one"],
+        try expect(rail.pause == (kind == .codex ? .unconfirmed : .afterStop) && rail.queued.map(\.text) == ["queued one"],
                    "\(kind) stop-handed: the queue must stay held, Paused after Stop, got \(rail)")
-        if kind == .codex {
-            try expect(rail.steers.isEmpty, "codex stop-handed: a confirmed steer is not Array's to hold, got \(rail.steers)")
-        } else {
+        do {
             try expect(rail.steers.map(\.text) == ["handed steer"] && rail.steers.map(\.kind) == [.heldSteer],
                        "\(kind) stop-handed: the unconsumed steer must come back held and editable at the front, got \(rail.steers)")
             try expect(h.echoes.isEmpty, "\(kind) stop-handed: a returned steer must not be shown as sent, echoes \(h.echoes)")
