@@ -88,7 +88,14 @@ supervisor send/composer queue. They add no direct Mac banner, sound, badge,
 phone push, widget or Live Activity sender. Disabling the per-lead setting is
 quiet for this model-message path; result files remain collectable. A refused
 lead send remains pending for another flush rather than creating a user alert.
-The no-progress watchdog remains independent.
+The no-progress watchdog remains independent. Under **SRC-01**, the stored
+helper-wake message uses plain lines: helper status, summary, findings, nonpassing
+checks and unobserved/failed/stale command evidence, next step and details path.
+Passing checks and observed command evidence stay out of the wake; the structured
+report remains on the record and result file. Idle sends and busy composer queues
+use that same text, without a batch heading. `--helper-completion-check` witnesses
+the model prompt, delivered cards, queue preview and all three offline session
+readers; there is no new notification sender or recipient policy.
 
 For **SRC-01**, a transient helper provider failure reserved for a host
 retry is withheld from terminal delivery. **SRC-02** retains existing runtime-error

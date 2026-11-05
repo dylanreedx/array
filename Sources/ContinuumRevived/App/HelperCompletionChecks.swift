@@ -5,6 +5,12 @@ import ContinuumRevivedCore
 
 @MainActor
 enum HelperCompletionChecks {
+    static func isCompletionMessage(_ text: String) -> Bool {
+        guard case let .agentMessage(payload) = AgentMessageEnvelope.classify(text),
+              let first = payload.text.split(whereSeparator: \.isNewline).first else { return false }
+        return first == "Helper turn updates" || first.contains(" finished: ")
+    }
+
     static func runRetries() async throws {
         let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "helper provider retry check")
         defer { ProcessInfo.processInfo.endActivity(activity) }
@@ -27,7 +33,7 @@ enum HelperCompletionChecks {
                 if os.path.exists(statefile):
                     with open(statefile) as saved:
                         mode, attempt = json.load(saved)
-                if not any(line == "Helper turn updates" for line in str(text).splitlines()):
+                if not any((" finished: " in line and not line.startswith("<")) or line == "Helper turn updates" for line in str(text).splitlines()):
                     for candidate in ["RETRY-SUCCESS", "RETRY-EXHAUST", "RETRY-WORK", "RETRY-RATE", "RETRY-HTTP", "RETRY-HTTP501", "RETRY-STREAM"]:
                         if candidate in str(text):
                             mode = candidate
@@ -59,7 +65,7 @@ enum HelperCompletionChecks {
             let idle = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(parent) }
             try HelperGuardChecks.expect(idle, "lead did not finish update")
             let log = try String(contentsOf: URL(fileURLWithPath: s.records[parent]!.cwd).appendingPathComponent("prompts.log"), encoding: .utf8)
-            let updates = log.split(separator: "\n").compactMap { try? JSONDecoder().decode(String.self, from: Data($0.utf8)) }.filter { $0.components(separatedBy: "\n").contains("Helper turn updates") && $0.contains(child.rawValue.uuidString) }
+            let updates = log.split(separator: "\n").compactMap { try? JSONDecoder().decode(String.self, from: Data($0.utf8)) }.filter { isCompletionMessage($0) && $0.contains(s.records[child]!.humanDisplayName) }
             try HelperGuardChecks.expect(updates.count == 1, "intermediate failure leaked or final wake repeated")
             if marker == "RETRY-EXHAUST" { try HelperGuardChecks.expect(updates[0].contains("failed after 2 retries: serverOverloaded"), "exhausted retries missing from report") }
             if marker == "RETRY-SUCCESS" { try HelperGuardChecks.expect(updates[0].contains("succeeded") && !updates[0].contains("failed:"), "successful retry was reported failed") }
@@ -158,7 +164,7 @@ enum HelperCompletionChecks {
         defer { bench.tearDown() }
         let script = WorkspaceAgentReportChecks.fakePi.replacingOccurrences(
             of: "if \"HOLD\" in json.dumps(text):",
-            with: "if \"HOLD\" in json.dumps(text) and not any(line == \"Helper turn updates\" for line in str(text).splitlines()):")
+            with: "if \"HOLD\" in json.dumps(text) and not any((\" finished: \" in line and not line.startswith(\"<\")) or line == \"Helper turn updates\" for line in str(text).splitlines()):")
         try script.write(to: bench.binDir.appendingPathComponent("pi"), atomically: true, encoding: .utf8)
         let s = bench.supervisor, parent = bench.f.agentId
         var now = Date()
@@ -171,9 +177,16 @@ enum HelperCompletionChecks {
         let started = await waitUntil(timeout: 15, pollInterval: 0.02) { s.isRunning(child) }
         try HelperGuardChecks.expect(started, "helper did not start")
         _ = s.fileReport(.init(summary: "WAKE-REPORT",
-            findings: Array(repeating: .init(level: .note, text: String(repeating: "detail ", count: 55)), count: 6),
-            detailsPath: "WAKE-DETAILS"), for: child)
+            checks: [.init(what: "PASS-OMITTED", result: .pass), .init(what: "swift test", result: .pass), .init(what: "FAIL-RETAINED", result: .fail), .init(what: "INFO-RETAINED", result: .info)],
+            findings: Array(repeating: .init(level: .note, text: String(repeating: "detail ", count: 55), location: "Sources/Wake.swift"), count: 6),
+            next: "WAKE-NEXT", detailsPath: "WAKE-DETAILS"), for: child)
         finish(child, "first")
+        let storedReport = s.records[child]?.lastReport?.report
+        let resultReport = SpawnResultFile.read(parentCwd: s.records[parent]!.cwd,
+            handle: s.records[child]!.spawnResultHandle!)?.report
+        try HelperGuardChecks.expect(storedReport?.checks.contains(where: { $0.what == "PASS-OMITTED" }) == true
+            && storedReport?.commandEvidence?.first?.outcome == .notObserved
+            && resultReport == storedReport, "wake formatting changed the structured record or result file")
         now.addTimeInterval(7)
         await s.flushHelperCompletions()
         try HelperGuardChecks.expect(!s.isRunning(parent), "completion fired before eight seconds")
@@ -184,7 +197,7 @@ enum HelperCompletionChecks {
         func wakeCount() -> Int {
             log().split(separator: "\n").compactMap { line -> String? in
                 try? JSONDecoder().decode(String.self, from: Data(line.utf8))
-            }.filter { $0.components(separatedBy: "\n").contains("Helper turn updates") }.count
+            }.filter { isCompletionMessage($0) }.count
         }
         let received = await waitUntil(timeout: 15, pollInterval: 0.02) { log().contains("WAKE-REPORT") && !s.isRunning(parent) }
         try HelperGuardChecks.expect(received, "idle lead did not receive helper report")
@@ -196,18 +209,24 @@ enum HelperCompletionChecks {
         try HelperGuardChecks.expect(log().components(separatedBy: "WAKE-REPORT").count - 1 == 1, "duplicate completion delivered")
         try HelperGuardChecks.expect(s.send("HOLD-parent", to: parent), "parent did not start")
         let children = try (0..<3).map { try bench.delegate("HOLD-group-\($0)") }
-        for (i, c) in children.enumerated() { finish(c, "group-\(i)", i == 0 ? .failed : .interrupted) }
+        for (i, c) in children.enumerated() {
+            _ = s.fileReport(.init(summary: "BUSY-REPORT-\(i)",
+                checks: [.init(what: "PASS-OMITTED", result: .pass), .init(what: "FAIL-RETAINED", result: .fail)],
+                findings: [.init(level: .issue, text: "BUSY-FINDING-\(i)", location: "Sources/Busy.swift")],
+                next: "BUSY-NEXT", detailsPath: "BUSY-DETAILS"), for: c)
+            finish(c, "group-\(i)", i == 0 ? .failed : .interrupted)
+        }
         now.addTimeInterval(9)
         await s.flushHelperCompletions()
-        let updates = s.queuedMessages(for: parent).filter { $0.text.contains("Helper turn updates") }
-        try HelperGuardChecks.expect(updates.count == 1 && children.allSatisfy { updates[0].text.contains($0.rawValue.uuidString) }, "busy lead did not queue one grouped update")
+        let updates = s.queuedMessages(for: parent).filter { isCompletionMessage($0.text) }
+        try HelperGuardChecks.expect(updates.count == 1 && children.allSatisfy { updates[0].text.contains(s.records[$0]!.humanDisplayName) }, "busy lead did not queue one grouped update")
         // Regressed in 4fa6e039: composer admission inserted U+200B inside
         // the host envelope. Check the actual queued payload, then the live
         // document after the queue drains, rather than just matching its body.
         guard case let .agentMessage(queuedPayload) = AgentMessageEnvelope.classify(updates[0].text) else {
             throw WorkspaceAgentReportChecks.Failure(description: "busy helper completion lost structured agent attribution")
         }
-        try HelperGuardChecks.expect(queuedPayload.senderAgentID == children[0].rawValue && queuedPayload.text.hasPrefix("Helper turn updates\n"),
+        try HelperGuardChecks.expect(queuedPayload.senderAgentID == children[0].rawValue && queuedPayload.text.hasPrefix("\(s.records[children[0]]!.humanDisplayName) finished: failed"),
             "queued completion lost sender or body")
         // .43: inspect the production queue row WHILE the lead is busy,
         // before draining. Delivered-card assertions alone missed this surface.
@@ -249,7 +268,7 @@ enum HelperCompletionChecks {
         }
         try HelperGuardChecks.expect(s.isRunning(parent) && s.queuedMessages(for: parent).first?.text == updates[0].text,
             "preview changed queued transport or drained the busy lead")
-        try HelperGuardChecks.expect(pendingPreviews == Array(repeating: "\(queuedPayload.senderName) · Helper turn updates", count: 2),
+        try HelperGuardChecks.expect(pendingPreviews == Array(repeating: "\(queuedPayload.senderName) · \(s.records[children[0]]!.humanDisplayName) finished: failed: work failed", count: 2),
             "busy queue preview must show sender and clean summary, got \(pendingPreviews)")
         // The same row handles shared attribution and ordinary typed text.
         let sharedText = "From Mira\n\n---\nReview the failing leg.\nMore details."
@@ -269,7 +288,7 @@ enum HelperCompletionChecks {
         try HelperGuardChecks.expect(AgentMessageEnvelope.classify(typed) == .prompt,
             "typed envelope spoof protection was weakened")
         await s.flushHelperCompletions()
-        try HelperGuardChecks.expect(s.queuedMessages(for: parent).filter { $0.text.contains("Helper turn updates") }.count == 1, "queued update repeated")
+        try HelperGuardChecks.expect(s.queuedMessages(for: parent).filter { isCompletionMessage($0.text) }.count == 1, "queued update repeated")
         let end = Date().addingTimeInterval(20)
         while Date() < end && (s.isRunning(parent) || !s.queuedMessages(for: parent).isEmpty) {
             try Data().write(to: cwd.appendingPathComponent("release.flag"))
@@ -277,15 +296,46 @@ enum HelperCompletionChecks {
         }
         try HelperGuardChecks.expect(wakeCount() == 2, "group did not deliver once after busy turn; queued=\(s.queuedMessages(for: parent).count), running=\(s.isRunning(parent)), log=\(log())")
         let wakeBlocks = s.transcriptDocumentProjection(for: parent)?.entries.flatMap(\.blocks).filter { block in
-            if case let .agentMessage(payload) = block.payload { return payload.text.hasPrefix("Helper turn updates\n") }
+            if case let .agentMessage(payload) = block.payload { return (payload.text.contains(" finished: ") || payload.text.hasPrefix("Helper turn updates\n")) }
             return false
         } ?? []
         try HelperGuardChecks.expect(wakeBlocks.count == 2,
             "idle and busy completion updates must both project as agent-message cards")
+        for (index, block) in wakeBlocks.enumerated() {
+            guard case let .agentMessage(payload) = block.payload else { continue }
+            try HelperGuardChecks.expect(!payload.text.contains("{\"") && !payload.text.contains("commandEvidence")
+                && !payload.text.contains("Helper turn updates") && !payload.text.contains("PASS-OMITTED"),
+                "helper completion must store plain lines without JSON, heading or passing checks")
+            try HelperGuardChecks.expect(payload.text.contains("FAIL-RETAINED"), "nonpassing check omitted")
+            if index == 0 {
+                try HelperGuardChecks.expect(payload.text.contains("WAKE-REPORT")
+                    && payload.text.contains("note · Sources/Wake.swift · detail ")
+                    && payload.text.contains("INFO-RETAINED") && payload.text.contains("Check evidence: not-observed · Array saw")
+                    && payload.text.contains("WAKE-NEXT")
+                    && payload.text.contains("WAKE-DETAILS"), "idle report lost plain report fields")
+            } else {
+                try HelperGuardChecks.expect(payload.text == queuedPayload.text
+                    && payload.text.contains("BUSY-REPORT-0")
+                    && payload.text.contains("issue · Sources/Busy.swift · BUSY-FINDING-0"),
+                    "busy delivered card differs from queued plain report")
+            }
+        }
         for block in s.transcriptDocumentProjection(for: parent)?.entries.flatMap(\.blocks) ?? [] {
             if case let .paragraph(inlines) = block.payload {
                 try HelperGuardChecks.expect(!String(describing: inlines).contains("array-agent-message"),
                     "raw completion envelope reached user prose")
+            }
+        }
+        let modelBodies = log().split(separator: "\n").compactMap {
+            try? JSONDecoder().decode(String.self, from: Data($0.utf8))
+        }.compactMap { text -> String? in
+            if case let .agentMessage(payload) = AgentMessageEnvelope.classify(text) { return payload.text }
+            return nil
+        }
+        for block in wakeBlocks {
+            if case let .agentMessage(payload) = block.payload {
+                try HelperGuardChecks.expect(modelBodies.contains(payload.text),
+                    "lead model prompt differs from the stored completion card")
             }
         }
         // Session restores must retain the same attribution across all three

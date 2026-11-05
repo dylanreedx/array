@@ -7606,6 +7606,27 @@ final class AgentSupervisor {
         return effectiveMode(for: parent) == .managed
     }
 
+    /// Format at the write boundary: this body is persisted and sent to the
+    /// lead's model as well as displayed. Keep the full report on the record.
+    static func helperCompletionReportText(_ report: AgentReport) -> String {
+        var lines = [report.summary]
+        lines += report.findings.map { finding in
+            ([finding.level.rawValue] + [finding.location].compactMap { $0 } + [finding.text])
+                .joined(separator: " · ")
+        }
+        lines += report.checks.filter { $0.result != .pass }.map {
+            "Check: \($0.result.rawValue) · \($0.what)"
+        }
+        // Match wait_agents: only command observations needing attention ride
+        // the wake. These are host observations, separate from declared checks.
+        lines += (report.commandEvidence ?? []).filter { $0.outcome != .observed }.map {
+            "Check evidence: \($0.outcome.rawValue) · \($0.detail)"
+        }
+        if let next = report.next { lines.append("Next: \(next)") }
+        if let path = report.detailsPath { lines.append("Details: \(path)") }
+        return lines.joined(separator: "\n")
+    }
+
     private func noteHelperCompletion(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {
         let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
         guard let child = records[id], child.capabilities.locallyManaged,
@@ -7619,13 +7640,12 @@ final class AgentSupervisor {
         }
         let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let report: String
-        if let filed = child.lastReport, filed.filedAt > baseline,
-           let encoded = try? JSONEncoder().encode(filed.report) {
-            report = String(decoding: encoded, as: UTF8.self)
+        if let filed = child.lastReport, filed.filedAt > baseline {
+            report = Self.helperCompletionReportText(filed.report)
         } else {
             report = String((transcriptProjections[id]?.finalAssistantText ?? "").prefix(2400))
         }
-        let text = "Helper \(String(child.humanDisplayName.prefix(80))) (\(id.rawValue.uuidString)): \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(report)"
+        let text = "\(String(child.humanDisplayName.prefix(80))) finished: \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(report)"
         let parents = Set([child.parentAgentID].compactMap { $0 }
             + (helperMessageSubscriptions[id] ?? []).map(\.parent))
         for parent in parents where records[parent] != nil && wakesForHelperCompletion(parent) {
@@ -7656,7 +7676,7 @@ final class AgentSupervisor {
             helperCompletionBatches[parent] = nil
             guard records[parent] != nil, wakesForHelperCompletion(parent),
                   let sender = batch.updates.first?.0 else { continue }
-            let text = "Helper turn updates\n" + batch.updates.map(\.1).joined(separator: "\n\n")
+            let text = batch.updates.map(\.1).joined(separator: "\n\n")
             let accepted: Bool
             if isRunning(parent) {
                 // Host-authored attribution must bypass typed-envelope neutralization.
