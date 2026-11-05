@@ -75,7 +75,7 @@ let package = Package(
             // directory, so this is Core's — the make-app-bundle.sh copy step
             // pulls it out of the generated resource bundle into the .app.
             resources: [.copy("Resources/PiExtensions"), .copy("Resources/ContextWindows.json"),
-                        .copy("Resources/TestedCLIVersions.json"),
+                        .copy("Resources/TestedCLIVersions.json"), .copy("Resources/PublicSuffixList.dat"),
                         // Plan 110: the built-in agent characters and their MIT notice.
                         .copy("Resources/AgentCharacters")]
         ),

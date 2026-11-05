@@ -175,6 +175,8 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
     private(set) var loadingState: BrowserLoadingState = .idle
 
     var onStateChange: (() -> Void)?
+    /// Fires for committed documents, including ordinary user navigation with no agent gate.
+    var onMainFrameCommit: ((URL) -> Void)?
 
     /// Invoked after `find(_:direction:)` resolves with `WKFindResult.matchFound`.
     var onFindResult: ((Bool) -> Void)?
@@ -198,10 +200,21 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         didSet { agentNavigationGeneration &+= 1 }
     }
     private var agentNavigationGeneration: UInt64 = 0
+    /// Only time reading an Array approval is excluded from action budgets.
+    private var approvalStarted: Date?
+    private var completedApprovalTime: TimeInterval = 0
+    var approvalTime: TimeInterval { completedApprovalTime + (approvalStarted.map { Date().timeIntervalSince($0) } ?? 0) }
+    func beginAgentApproval() { if approvalStarted == nil { approvalStarted = Date() } }
+    func endAgentApproval() {
+        if let start = approvalStarted { completedApprovalTime += Date().timeIntervalSince(start) }
+        approvalStarted = nil
+    }
+
     private struct AgentNavigationWaiter {
         let navigation: WKNavigation
         let continuation: CheckedContinuation<AgentBrowserNavigationResult, Never>
         let deadline: Date
+        let approvalTimeAtStart: TimeInterval
         var sentRequest = false
     }
     private var agentNavigationWaiter: AgentNavigationWaiter?
@@ -498,7 +511,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         }
         guard let navigation else { return .unavailable }
         return await withCheckedContinuation { continuation in
-            agentNavigationWaiter = AgentNavigationWaiter(navigation: navigation, continuation: continuation, deadline: deadline)
+            agentNavigationWaiter = AgentNavigationWaiter(navigation: navigation, continuation: continuation, deadline: deadline, approvalTimeAtStart: approvalTime)
             watchAgentNavigation(ObjectIdentifier(navigation), startURL: startURL, deadline: deadline)
         }
     }
@@ -516,7 +529,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
                 self.loadingState = .idle
                 self.onStateChange?()
                 self.finishAgentNavigation(navigationId, result: .completed)
-            } else if Date() >= deadline {
+            } else if Date() >= pending.deadline.addingTimeInterval(self.approvalTime - pending.approvalTimeAtStart) {
                 self.finishAgentNavigation(navigationId, result: .failed(self.webView.isLoading
                     ? "The page did not finish loading before the deadline"
                     : "The navigation did not start before the deadline"))
@@ -907,6 +920,7 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         webView.removeFromSuperview()
         hostView = nil
         onStateChange = nil
+        onMainFrameCommit = nil
         onConsoleLogBufferChange = nil
         onNetworkLiteEventBufferChange = nil
         onPasskeyUnavailable = nil
@@ -945,7 +959,7 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
     nonisolated func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         MainActor.assumeIsolated {
             let finish: @MainActor (Bool) -> Void = { allowed in
-                let withinDeadline = self.agentNavigationWaiter.map { $0.deadline > Date() } ?? true
+                let withinDeadline = self.agentNavigationWaiter.map { $0.deadline.addingTimeInterval(self.approvalTime - $0.approvalTimeAtStart) > Date() } ?? true
                 let admitted = self.agentNavigationDecision == nil || (self.agentNavigationAdmission?() ?? true)
                 guard allowed, withinDeadline, admitted, !self.isTerminated else {
                     if navigationAction.targetFrame?.isMainFrame == true {
@@ -1002,6 +1016,9 @@ extension WKWebViewBrowserRuntime: WKNavigationDelegate {
     }
 
     nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        MainActor.assumeIsolated {
+            if let url = webView.url { self.onMainFrameCommit?(url) }
+        }
         Task { @MainActor in
             if self.agentNavigationDecision != nil, let committed = self.webView.url?.absoluteString, !committed.isEmpty {
                 self.url = committed

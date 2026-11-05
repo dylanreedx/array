@@ -49,7 +49,7 @@ enum AgentBrowserSpawnChecks {
         var promptCount = 0
         var domainDecision: WorkspaceAPIService.BrowserDomainDecision = .allowForSession
         f.api.browserDomainApprovalHandler = { _, _, host, reply in
-            guard host == "example.com" else { reply(.deny); return {} }
+            guard host == "spawn-visit.invalid" else { reply(.deny); return {} }
             promptCount += 1
             reply(domainDecision)
             return {}
@@ -60,24 +60,42 @@ enum AgentBrowserSpawnChecks {
             return allowed
         }
         guard mayNavigate("http://localhost:3000") && promptCount == 0,
-              mayNavigate("https://example.com/first") && promptCount == 1,
-              mayNavigate("https://example.com/second") && promptCount == 1,
+              mayNavigate("https://spawn-visit.invalid/first") && promptCount == 1,
+              mayNavigate("https://spawn-visit.invalid/second") && promptCount == 1,
               !mayNavigate("javascript:alert(1)") else {
             throw WorkspaceAPIChecks.Failure(message: "domain gate must allow local, ask once for a remote host, and reject unsafe schemes")
         }
         f.api.revoke(agentId: f.agentId)
         domainDecision = .allowOnce
-        guard mayNavigate("https://example.com/once") && mayNavigate("https://example.com/once-again"), promptCount == 3 else {
-            throw WorkspaceAPIChecks.Failure(message: "allow once must not grant the domain for later visits")
+        // An authorization call is not a departure. Materialize real documents
+        // so this witness distinguishes pages in one visit from a new visit.
+        func commitVisit(_ raw: String) throws {
+            let url = URL(string: raw)!
+            let title = url.host ?? "Blank visit"
+            runtime.webView.loadHTMLString("<html><head><title>\(title)</title></head><body>Offline visit</body></html>", baseURL: url)
+            let deadline = Date().addingTimeInterval(4)
+            repeat {
+                _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            } while Date() < deadline && (runtime.webView.url != url || runtime.webView.isLoading || runtime.webView.title != title)
+            guard runtime.webView.url == url, !runtime.webView.isLoading, runtime.webView.title == title else {
+                throw WorkspaceAPIChecks.Failure(message: "browser visit fixture did not commit: \(raw)")
+            }
         }
+        try commitVisit("https://spawn-visit.invalid/")
+        guard mayNavigate("https://spawn-visit.invalid/once") && mayNavigate("https://spawn-visit.invalid/once-again"), promptCount == 2 else {
+            throw WorkspaceAPIChecks.Failure(message: "allow once must cover pages in the same live browser visit")
+        }
+        try commitVisit("https://departed.invalid/")
+        try commitVisit("https://spawn-visit.invalid/")
         domainDecision = .deny
-        guard !mayNavigate("https://example.com/third"), promptCount == 4 else {
-            throw WorkspaceAPIChecks.Failure(message: "revocation must discard session domain approval")
+        guard !mayNavigate("https://spawn-visit.invalid/third"), promptCount == 3 else {
+            throw WorkspaceAPIChecks.Failure(message: "leaving and returning must start a new visit without the previous Once consent")
         }
+        try commitVisit("about:blank")
         var pendingDomainReply: (@MainActor (WorkspaceAPIService.BrowserDomainDecision) -> Void)?
         f.api.browserDomainApprovalHandler = { _, _, _, reply in pendingDomainReply = reply; return {} }
         var staleAllowed = true
-        f.api.authorizeBrowserNavigation(tileId: runtime.tileId, agentId: f.agentId, url: URL(string: "https://example.com/stale")!) { staleAllowed = $0 }
+        f.api.authorizeBrowserNavigation(tileId: runtime.tileId, agentId: f.agentId, url: URL(string: "https://spawn-visit.invalid/stale")!) { staleAllowed = $0 }
         guard pendingDomainReply != nil else { throw WorkspaceAPIChecks.Failure(message: "remote domain approval must be requested") }
         f.api.revoke(agentId: f.agentId)
         pendingDomainReply?(.allowForSession)
@@ -175,6 +193,6 @@ enum AgentBrowserSpawnChecks {
               f.runtime.interactionGeneration == beforeGeneration else {
             throw WorkspaceAPIChecks.Failure(message: "agent browser spawn changed the user's navigation")
         }
-        print("Agent browser spawn: Agents profile, owner, project persistence, world frame and preserved navigation passed (auto-layout \(autoLayout))")
+        print("Agent browser spawn: same-visit Once reuse, actual departure/return denial, Agents profile, owner, project persistence, world frame and preserved navigation passed (auto-layout \(autoLayout))")
     }
 }

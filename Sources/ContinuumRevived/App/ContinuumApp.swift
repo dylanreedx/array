@@ -22689,7 +22689,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.runModal()
     }
 
-    /// The browser hand-over and per-call JavaScript approval. A sheet, never
+    /// The browser hand-over and session JavaScript approval. A sheet, never
     /// `runModal`: the request waits asynchronously. The model can neither
     /// answer it nor choose its wording, and the sheet names the page and
     /// profile so the user knows which browser they are handing over.
@@ -22698,10 +22698,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let window = canvasView?.window, let agent = agentSupervisor.records[agentId],
               let subject = browserApprovalSubject(tileId: tileId) else { completion(false); return {} }
         let alert = NSAlert()
-        alert.messageText = evaluate ? "Allow \(agent.displayName) to run JavaScript in this browser?" : "Hand this browser over to \(agent.displayName)?"
-        alert.informativeText = subject + "\n\n" + (evaluate
-            ? "JavaScript can read and change this page using its signed-in session. This approval is for one action."
-            : "The agent can read and interact with this browser using its existing signed-in accounts. Click or type in the browser to take it back.")
+        alert.messageText = "Allow agents in this project to use your browsers?"
+        alert.informativeText = subject + "\n\nAgents in this project can read, interact with, and run JavaScript in your browser tiles using their signed-in accounts until Array quits. Click or type in a browser to take it back."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow")
         alert.addButton(withTitle: "Deny")
@@ -22715,15 +22713,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let alert = NSAlert()
         alert.messageText = "Allow \(agent.displayName) to visit \(String(host.prefix(253)))?"
         alert.informativeText = (browserApprovalSubject(tileId: tileId).map { "Asked from " + $0 + ".\n\n" } ?? "")
-            + "The agent can read and interact with this site in its browser. Session approval lasts until Array quits or this agent's Workspace Tools are turned off."
+            + "The agent can read and interact with this site, including its subdomains. Allow Once covers this browser visit. Agent Session covers this agent; Project Session covers agents in this project until Array quits."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow Once")
         alert.addButton(withTitle: "Allow for This Agent Session")
+        alert.addButton(withTitle: "Allow for This Project Session")
         alert.addButton(withTitle: "Deny")
         alert.beginSheetModal(for: window) { response in
             switch response {
             case .alertFirstButtonReturn: completion(.allowOnce)
             case .alertSecondButtonReturn: completion(.allowForSession)
+            case .alertThirdButtonReturn: completion(.allowForProjectSession)
             default: completion(.deny)
             }
         }

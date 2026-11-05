@@ -17,7 +17,7 @@ func runWorkspaceAPIBrowserCheck() throws {
     var permission: WorkspaceToolsPermission = .free
     f.delegate.qaAgentSupervisor.workspaceToolsPermission = { permission }
     var scopePrompts = 0
-    var scopeDecision: WorkspaceAPIService.ScopeApprovalDecision = .allowForSession
+    var scopeDecision: WorkspaceAPIService.ScopeApprovalDecision = .allowOnce
     f.api.approvalHandler = { _ in scopePrompts += 1; return scopeDecision }
     let window = NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
     window.contentView = f.canvas
@@ -230,6 +230,14 @@ func runWorkspaceAPIBrowserCheck() throws {
           f.runtime.interactionGeneration == interactionBeforeNavigation else {
         throw WorkspaceAPIChecks.Failure(message: "browser navigation must preserve the user's camera, armed zone, tile frame and interaction generation")
     }
+    var freeDomainPrompts = 0
+    var freeDomainAllowed = false
+    f.api.browserDomainApprovalHandler = { _, _, _, reply in freeDomainPrompts += 1; reply(.deny); return {} }
+    f.api.authorizeBrowserNavigation(tileId: tileId, agentId: f.agentId, url: URL(string: "https://example.invalid/")!) { freeDomainAllowed = $0 }
+    guard freeDomainAllowed, freeDomainPrompts == 0 else {
+        throw WorkspaceAPIChecks.Failure(message: "Free agent-owned Agents-profile browser must skip site prompts")
+    }
+    permission = .askFirst
     var domainPrompts = 0
     f.api.browserDomainApprovalHandler = { _, _, _, reply in domainPrompts += 1; reply(.deny); return {} }
     let denied = try rawCall("browser.navigate", ["tileId": target, "url": "https://example.invalid/"])
@@ -237,6 +245,9 @@ func runWorkspaceAPIBrowserCheck() throws {
           domainPrompts == 1, f.canvas.tileRecord(for: tileId)?.metadata.url == localPage.absoluteString else {
         throw WorkspaceAPIChecks.Failure(message: "a denied remote navigation must ask once and leave the saved URL unchanged: \(denied)")
     }
+    permission = .free
+    scopePrompts = 0
+    f.api.revoke(agentId: f.agentId)
     let takeoverPayload: [String: Any] = ["tileId": target, "idempotencyKey": "takeover-snapshot"]
     _ = try call("browser.snapshot", takeoverPayload)
     guard let browser = f.runtime.liveControllers.flatMap(\.browserRuntimes).first(where: { $0.tileId == tileId }) else {
@@ -308,10 +319,9 @@ func runWorkspaceAPIBrowserCheck() throws {
         throw WorkspaceAPIChecks.Failure(message: "agent input in another tile must not masquerade as user takeover here")
     }
     handOverAllowed = false
-    let refusedEvaluation = try rawCall("browser.evaluate", ["tileId": userTile, "script": "() => 1"])
-    guard (refusedEvaluation["error"] as? [String: Any])?["code"] as? String == "scope_approval_required", evaluatePrompts == 1 else {
-        throw WorkspaceAPIChecks.Failure(message: "evaluation on a handed-over browser must ask every time")
-    }
+    _ = try call("browser.evaluate", ["tileId": userTile, "script": "() => 1"])
+    _ = try call("browser.evaluate", ["tileId": userTile, "script": "() => 2"])
+    guard evaluatePrompts == 0 else { throw WorkspaceAPIChecks.Failure(message: "takeover consent must already include JavaScript") }
     window.makeFirstResponder(userBrowser.webView)
     let userBrowserInputs = userBrowser.automation.userInputCount
     let takeBackKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
@@ -319,9 +329,9 @@ func runWorkspaceAPIBrowserCheck() throws {
         context: nil, characters: "x", charactersIgnoringModifiers: "x", isARepeat: false, keyCode: 7)!
     NSApp.sendEvent(takeBackKey)
     let afterTakeBack = try rawCall("browser.press_key", ["tileId": userTile, "keyName": "Enter"])
-    guard userBrowser.automation.userInputCount == userBrowserInputs + 1, !userBrowser.automation.isEngaged,
-          userBrowser.agentNavigationDecision == nil, handOverPrompts == 3,
-          (afterTakeBack["error"] as? [String: Any])?["code"] as? String == "scope_approval_required" else {
+    guard userBrowser.automation.userInputCount == userBrowserInputs + 1,
+          handOverPrompts == 2,
+          afterTakeBack["status"] as? String == "ok" else {
         throw WorkspaceAPIChecks.Failure(message: "user input must take the browser back and release its agent lease: inputs=\(userBrowserInputs)->\(userBrowser.automation.userInputCount), engaged=\(userBrowser.automation.isEngaged), gate=\(userBrowser.agentNavigationDecision != nil), prompts=\(handOverPrompts), reply=\(afterTakeBack)")
     }
     handOverAllowed = true
@@ -409,14 +419,16 @@ func runWorkspaceAPIBrowserCheck() throws {
     }
     guard scopePrompts == 0 else { throw WorkspaceAPIChecks.Failure(message: "Free must not show the general browser permission prompt") }
     permission = .askFirst
-    _ = try call("browser.evaluate", ["tileId": target, "script": "() => 1"])
-    _ = try call("browser.evaluate", ["tileId": target, "script": "() => 2"])
-    guard scopePrompts == 1 else { throw WorkspaceAPIChecks.Failure(message: "Ask first session approval must prompt once") }
-    f.api.revoke(agentId: f.agentId)
     scopeDecision = .allowOnce
     _ = try call("browser.evaluate", ["tileId": target, "script": "() => 3"])
     _ = try call("browser.evaluate", ["tileId": target, "script": "() => 4"])
-    guard scopePrompts == 3 else { throw WorkspaceAPIChecks.Failure(message: "allow once must not grant later browser actions") }
+    guard scopePrompts == 2 else { throw WorkspaceAPIChecks.Failure(message: "allow once must not grant later browser actions") }
+    scopeDecision = .allowForProjectSession
+    _ = try call("browser.evaluate", ["tileId": target, "script": "() => 1"])
+    _ = try call("browser.evaluate", ["tileId": target, "script": "() => 2"])
+    f.api.revoke(agentId: f.agentId)
+    _ = try call("browser.evaluate", ["tileId": target, "script": "() => 5"])
+    guard scopePrompts == 3 else { throw WorkspaceAPIChecks.Failure(message: "Ask first session approval must prompt once until Array quits") }
     try runAgentBrowserPopupCheck()
     try runBrowserControlHardeningChecks()
     print("Workspace browser API: MCP browser operations, ownership, permissions, residency, caps, restart and popup passed")
@@ -428,7 +440,9 @@ private func runAgentBrowserPopupCheck() throws {
     let f = try WorkspaceAPIChecks.makeFixture()
     defer { f.tearDown() }
     _ = f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
-    f.delegate.qaAgentSupervisor.workspaceToolsPermission = { .free }
+    var permission: WorkspaceToolsPermission = .free
+    f.delegate.qaAgentSupervisor.workspaceToolsPermission = { permission }
+    f.api.approvalHandler = { _ in .allowForSession }
     let window = NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
     window.contentView = f.canvas
     window.orderFrontOffscreenForChecks()
@@ -468,6 +482,7 @@ private func runAgentBrowserPopupCheck() throws {
           child.agentNavigationDecision != nil else {
         throw WorkspaceAPIChecks.Failure(message: "agent popup must create a live owned and gated Agents-profile browser")
     }
+    permission = .askFirst
     var pendingApproval: (@MainActor (WorkspaceAPIService.BrowserDomainDecision) -> Void)?
     f.api.browserDomainApprovalHandler = { _, _, _, reply in pendingApproval = reply; return {} }
     _ = try call("browser.evaluate", ["tileId": source,

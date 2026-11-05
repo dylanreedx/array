@@ -11,6 +11,7 @@ enum BrowserActionExecutor {
         guard !runtime.isTerminated else {
             return .error(WorkspaceAPIError(code: .browserNotLive, message: "This browser is not live. Reload the tile."))
         }
+        let approvalAtStart = runtime.approvalTime
         let engine = runtime.automation
         func reply(_ fields: [String: Any]) -> WorkspaceAPIService.Reply {
             .result(fields.mapValues { AnyHashableJSON(any: $0) })
@@ -77,7 +78,8 @@ enum BrowserActionExecutor {
                 }
                 switch await runtime.navigateForAgent(destination, checkoutRoot: checkoutRoot, deadline: deadline) {
                 case .completed:
-                    return outcome(try await engine.waitFor(.idle, timeout: max(0, deadline.timeIntervalSinceNow), deadline: deadline))
+                    let resumedDeadline = deadline.addingTimeInterval(runtime.approvalTime - approvalAtStart)
+                    return outcome(try await engine.waitFor(.idle, timeout: max(0, resumedDeadline.timeIntervalSinceNow), deadline: resumedDeadline))
                 case .denied:
                     return .error(WorkspaceAPIError(code: .scopeApprovalRequired, message: "The user did not approve that browser destination."))
                 case .notLive:

@@ -173,7 +173,7 @@ final class WorkspaceAPIService {
     }
     var browserHandOvers: [UUID: BrowserHandOver] = [:]
     var browserUserTakenOver: Set<UUID> = []
-    enum BrowserDomainDecision { case deny, allowOnce, allowForSession }
+    enum BrowserDomainDecision { case deny, allowOnce, allowForSession, allowForProjectSession }
     /// Closes a browser approval that is still on screen. Its request answers
     /// "denied" on its own; this only removes the stale sheet.
     typealias BrowserApprovalDismissal = @MainActor () -> Void
@@ -183,6 +183,10 @@ final class WorkspaceAPIService {
     typealias BrowserHandOverApprovalHandler = (AgentID, UUID, Bool, @escaping @MainActor (Bool) -> Void) -> BrowserApprovalDismissal
     var browserHandOverApprovalHandler: BrowserHandOverApprovalHandler = { _, _, _, reply in reply(false); return {} }
     var browserDomainApprovals: [AgentID: Set<String>] = [:]
+    var browserProjectDomainApprovals: [UUID: Set<String>] = [:]
+    var browserSessionConsents: [UUID: Set<String>] = [:]
+    struct BrowserVisitApproval { let runtimeId: UUID; let site: String; let inputCount: Int }
+    var browserVisitApprovals: [UUID: BrowserVisitApproval] = [:]
     /// Tiles with a browser approval on screen. One per tile: page script
     /// must not be able to stack a sheet per navigation.
     var browserPromptsPending: Set<UUID> = []
