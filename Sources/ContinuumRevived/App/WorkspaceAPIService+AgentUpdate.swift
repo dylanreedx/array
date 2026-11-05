@@ -56,13 +56,13 @@ extension WorkspaceAPIService {
         let isSelf = request.agentId == agentId
         // Resolve scope before an approval prompt or any target metadata can leak.
         func targetInScope() -> AgentRecord? {
-            guard let target = supervisor.records[request.agentId] else { return nil }
+            guard let target = supervisor.records[request.agentId].map(resolvedRecord) else { return nil }
             if isSelf { return target }
             // As in canvas.apply, legacy project stamps resolve through the
             // explicitly bound checkout, never the active project/controller.
             let knownProject = knownCheckouts()[ownHandle]?.projectId
             guard let ownProject = record.projectId ?? knownProject,
-                  (target.projectId ?? knownProject) == ownProject,
+                  target.projectId == ownProject,
                   Self.ownCheckoutHandle(target) == ownHandle else { return nil }
             if let tile = target.tileId,
                canvas.installedZoneIds(containing: tile).contains(where: { canvas.projectId(forZone: $0) != ownProject }) {

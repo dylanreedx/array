@@ -616,6 +616,8 @@ public struct WorkspaceToolGrant: Codable, Equatable, Sendable {
         case sessionPolicy
         case userApprovalOnce(requestId: String)
         case userApprovalSession(requestId: String)
+        /// Explicit sharing with other agents in the same caller project.
+        case userApprovalProjectSession(requestId: String)
         /// Approved without a prompt because Agent permissions is `free` and
         /// the request stayed inside the caller's project. Dropped as soon as
         /// the setting is anything else.

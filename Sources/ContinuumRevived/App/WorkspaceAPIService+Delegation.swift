@@ -148,7 +148,7 @@ extension WorkspaceAPIService {
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
-            case .allowForSession, .allowByPolicy:
+            case .allowForSession, .allowForProjectSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentDelegate],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
@@ -459,7 +459,7 @@ extension WorkspaceAPIService {
         }
         // Own children (and itself) only. Anything else is refused without
         // confirming whether the id exists.
-        guard let target = supervisor.records[request.agentId],
+        guard let target = supervisor.records[request.agentId].map(resolvedRecord),
               request.agentId == agentId || target.parentAgentID == agentId else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may only reveal itself or its own children."))
         }
@@ -557,7 +557,7 @@ extension WorkspaceAPIService {
             message: permission == .free
                 ? "This agent may message only agents in its own project. An agent in another project is out of scope."
                 : "This agent may message only the children it created and the agent that created it, because Agent permissions is set to Ask first. A sibling, an unrelated agent and an agent in another project are out of scope.")
-        guard let target = supervisor.records[request.agentId],
+        guard let target = supervisor.records[request.agentId].map(resolvedRecord),
               Self.mayMessage(from: record, to: target, permission: permission) else {
             return .error(notYours)
         }
@@ -653,7 +653,7 @@ extension WorkspaceAPIService {
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
-            case .allowForSession, .allowByPolicy:
+            case .allowForSession, .allowForProjectSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentMessage],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,

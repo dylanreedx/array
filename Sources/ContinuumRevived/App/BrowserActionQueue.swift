@@ -22,12 +22,16 @@ final class BrowserActionQueue {
         let key: String
     }
 
+    @MainActor
     private final class Entry {
         let key: Key
         let tile: UUID
         let operation: String
         let payload: String
         let deadline: Date
+        var approvalTime: (@MainActor () -> TimeInterval)?
+        var initialApprovalTime: TimeInterval = 0
+        var effectiveDeadline: Date { deadline.addingTimeInterval((approvalTime?() ?? 0) - initialApprovalTime) }
         let inputCount: Int
         let authorizationGeneration: UInt64
         let authorizationContext: String
@@ -78,6 +82,7 @@ final class BrowserActionQueue {
 
     func submit(tileId: UUID, agentId: AgentID, key: String, operation: String, payload: String,
                 deadline: Date, inputCount: Int, authorizationGeneration: UInt64 = 0, authorizationContext: String = "",
+                approvalTime: (@MainActor () -> TimeInterval)? = nil,
                 currentInputCount: @escaping @MainActor () -> Int?,
                 authorize: @escaping @MainActor () -> WorkspaceAPIError?,
                 action: @escaping Action, completion: @escaping Completion) {
@@ -135,14 +140,20 @@ final class BrowserActionQueue {
         let entry = Entry(key: identity, tile: tileId, operation: operation, payload: payload, deadline: deadline,
                           inputCount: inputCount, authorizationGeneration: authorizationGeneration, authorizationContext: authorizationContext, currentInputCount: currentInputCount,
                           authorize: authorize, action: action, completion: completion)
+        entry.approvalTime = approvalTime
+        entry.initialApprovalTime = approvalTime?() ?? 0
         entries[identity] = entry
         pending[tileId, default: []].append(identity)
-        let delay = max(0, deadline.timeIntervalSinceNow)
+        watchDeadline(entry)
+        startNext(on: tileId)
+    }
+
+    private func watchDeadline(_ entry: Entry) {
+        let delay = max(0.05, entry.effectiveDeadline.timeIntervalSinceNow)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak entry] in
             guard let self, let entry, entry.reply == nil else { return }
+            if entry.effectiveDeadline > Date() { self.watchDeadline(entry); return }
             if self.active[entry.tile] == entry.key {
-                // The operation may already have taken effect. Reply at the
-                // deadline but retain the barrier until the operation returns.
                 self.finish(entry, .error(WorkspaceAPIError(code: .outcomeUnknown,
                     message: "The browser action timed out and may have taken effect. Take a fresh snapshot before deciding what to do.")))
             } else {
@@ -152,7 +163,6 @@ final class BrowserActionQueue {
                 self.startNext(on: entry.tile)
             }
         }
-        startNext(on: tileId)
     }
 
     private func startNext(on tile: UUID) {
@@ -172,7 +182,7 @@ final class BrowserActionQueue {
                         self.finish(entry, failure)
                     } else if let action = entry.action {
                         entry.actionStarted = true
-                        let reply = await action(entry.deadline)
+                        let reply = await action(entry.effectiveDeadline)
                         if entry.reply == nil { self.finish(entry, reply) }
                     }
                 }
@@ -186,7 +196,7 @@ final class BrowserActionQueue {
     }
 
     private func validationFailure(_ entry: Entry) -> Reply? {
-        guard entry.deadline > Date() else {
+        guard entry.effectiveDeadline > Date() else {
             return .error(WorkspaceAPIError(code: .busy,
                 message: "The browser action expired before it ran. Take a fresh snapshot and try again."))
         }

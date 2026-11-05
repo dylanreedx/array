@@ -2,6 +2,11 @@ import ContinuumRevivedCore
 import Foundation
 
 extension WorkspaceAPIService {
+    private func browserPermissionProject(_ agentId: AgentID) -> UUID? {
+        guard let record = supervisor.records[agentId] else { return nil }
+        return resolvedRecord(record).projectId
+    }
+
     @discardableResult
     func ensureBrowserLeaseLedger() -> Bool {
         if browserLeaseLedger != nil { return true }
@@ -33,7 +38,7 @@ extension WorkspaceAPIService {
     }
     /// Resolve from the mounted scene on every use, including at queue head.
     func browserScopeTarget(tileId: UUID, agentId: AgentID) -> Result<Tile, WorkspaceAPIError> {
-        guard let record = supervisor.records[agentId], record.workspaceToolsEnabled,
+        guard let rawRecord = supervisor.records[agentId], let record = Optional(resolvedRecord(rawRecord)), record.workspaceToolsEnabled,
               let runtime = runtimeProvider(), let canvas = canvasProvider() else {
             return .failure(WorkspaceAPIError(code: .permissionDenied, message: "Browser access is unavailable."))
         }
@@ -132,6 +137,7 @@ extension WorkspaceAPIService {
     func takeBackBrowser(tileId: UUID) {
         let owner = browserHandOvers[tileId]?.agentId ?? canvasProvider()?.tileRecord(for: tileId)?.metadata.browserOwnerAgentId
         browserUserTakenOver.insert(tileId)
+        browserVisitApprovals[tileId] = nil
         browserHandOvers[tileId] = nil
         browserLeaseLedger?.release(tileId: tileId)
         browserGateInstallations[tileId] = nil
@@ -149,42 +155,100 @@ extension WorkspaceAPIService {
     /// a second is denied at once.
     @discardableResult
     func authorizeBrowserNavigation(tileId: UUID, agentId: AgentID, url: URL, readOnly: Bool = false,
+                                    isCancelled: @escaping () -> Bool = { false },
                                     completion: @escaping @MainActor (Bool) -> Void) -> BrowserApprovalDismissal {
         let target = readOnly ? browserScopeTarget(tileId: tileId, agentId: agentId) : browserControlTarget(tileId: tileId, agentId: agentId)
         guard case .success = target,
-              let record = supervisor.records[agentId] else { completion(false); return {} }
+              let rawRecord = supervisor.records[agentId], let record = Optional(resolvedRecord(rawRecord)) else { completion(false); return {} }
+        guard !isCancelled() else { completion(false); return {} }
+        if let browser = liveBrowser(tileId: tileId) {
+            browser.onMainFrameCommit = { [weak self, weak browser] url in
+                guard let self, let browser, let visit = self.browserVisitApprovals[tileId],
+                      visit.runtimeId == browser.id else { return }
+                let site = url.host.map { BrowserSiteScope.site(for: $0) }
+                if visit.site != site { self.browserVisitApprovals[tileId] = nil }
+            }
+        }
         let generation = revocationGeneration(for: agentId)
         switch BrowserAgentNavigationPolicy.classify(url, checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)) {
         case .denied:
             completion(false)
             return {}
         case .local:
+            browserVisitApprovals[tileId] = nil
             completion(true)
             return {}
         case .approvalRequired(let host):
-            if browserDomainApprovals[agentId]?.contains(host) == true { completion(true); return {} }
+            let site = BrowserSiteScope.site(for: host)
+            let projectId = browserPermissionProject(agentId)
+            if browserVisitApprovals[tileId]?.site != site { browserVisitApprovals[tileId] = nil }
+            if supervisor.workspaceToolsPermission() == .free,
+               case let .success(tile) = target,
+               tile.metadata.browserControllingAgentId == agentId,
+               tile.metadata.browserProfileId == BrowserProfile.agentsProfileId { completion(true); return {} }
+            if browserDomainApprovals[agentId]?.contains(site) == true
+                || projectId.map({ browserProjectDomainApprovals[$0]?.contains(site) == true }) == true {
+                completion(true); return {}
+            }
+            if let visit = browserVisitApprovals[tileId], visit.runtimeId == liveBrowser(tileId: tileId)?.id, visit.site == site,
+               visit.inputCount == liveBrowser(tileId: tileId)?.automation.userInputCount {
+                completion(true); return {}
+            }
             guard browserPromptsPending.insert(tileId).inserted else { completion(false); return {} }
             var answered = false
-            return browserDomainApprovalHandler(agentId, tileId, host) { [weak self] decision in
+            let approvingBrowser = liveBrowser(tileId: tileId)
+            let approvingInput = approvingBrowser?.automation.userInputCount
+            approvingBrowser?.beginAgentApproval()
+            let dismiss = browserDomainApprovalHandler(agentId, tileId, site) { [weak self] decision in
                 guard !answered else { return }
                 answered = true
+                approvingBrowser?.endAgentApproval()
                 self?.browserPromptsPending.remove(tileId)
-                guard let self, self.revocationGeneration(for: agentId) == generation else {
+                guard let self, !isCancelled(), self.revocationGeneration(for: agentId) == generation else {
                     completion(false)
                     return
                 }
                 let target = readOnly ? self.browserScopeTarget(tileId: tileId, agentId: agentId) : self.browserControlTarget(tileId: tileId, agentId: agentId)
                 guard case .success = target,
-                      let browser = self.liveBrowser(tileId: tileId),
+                      let browser = self.liveBrowser(tileId: tileId), browser.id == approvingBrowser?.id,
+                      browser.automation.userInputCount == approvingInput,
                       browser.agentNavigationAdmission?() != false else { completion(false); return }
                 switch decision {
                 case .deny: completion(false)
-                case .allowOnce: completion(true)
+                case .allowOnce:
+                    self.browserVisitApprovals[tileId] = BrowserVisitApproval(runtimeId: browser.id, site: site, inputCount: browser.automation.userInputCount)
+                    completion(true)
                 case .allowForSession:
-                    self.browserDomainApprovals[agentId, default: []].insert(host)
+                    self.browserDomainApprovals[agentId, default: []].insert(site)
+                    completion(true)
+                case .allowForProjectSession:
+                    if let projectId { self.browserProjectDomainApprovals[projectId, default: []].insert(site) }
+                    self.browserDomainApprovals[agentId, default: []].insert(site)
                     completion(true)
                 }
             }
+            let cancel: BrowserApprovalDismissal = { [weak self] in
+                guard !answered else { return }
+                answered = true
+                approvingBrowser?.endAgentApproval()
+                self?.browserPromptsPending.remove(tileId)
+                dismiss()
+                completion(false)
+            }
+            Task { @MainActor [weak self, weak approvingBrowser] in
+                while !answered {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    guard !answered else { return }
+                    guard let self, let approvingBrowser, !approvingBrowser.isTerminated, !isCancelled(),
+                          self.revocationGeneration(for: agentId) == generation,
+                          approvingBrowser.automation.userInputCount == approvingInput,
+                          self.liveBrowser(tileId: tileId)?.id == approvingBrowser.id,
+                          approvingBrowser.agentNavigationAdmission?() != false else { cancel(); return }
+                    let target = readOnly ? self.browserScopeTarget(tileId: tileId, agentId: agentId) : self.browserControlTarget(tileId: tileId, agentId: agentId)
+                    if case .failure = target { cancel(); return }
+                }
+            }
+            return cancel
         }
     }
 
@@ -254,28 +318,54 @@ extension WorkspaceAPIService {
         }
     }
 
-    /// A request that times out closes its own sheet, so a late click cannot
-    /// answer a question nobody is waiting on.
-    private func browserDomainAllowed(tileId: UUID, agentId: AgentID, url: URL, deadline: Date, readOnly: Bool) async -> Bool {
+    /// User reading time pauses the runtime and queue budgets. Revocation,
+    /// cancellation and runtime loss still dismiss the pending question.
+    private func browserDomainAllowed(tileId: UUID, agentId: AgentID, url: URL, deadline: Date, readOnly: Bool,
+                                      isCancelled: @escaping () -> Bool) async -> Bool {
         await withCheckedContinuation { continuation in
             let waiter = BrowserDomainWaiter(continuation)
-            let dismiss = authorizeBrowserNavigation(tileId: tileId, agentId: agentId, url: url, readOnly: readOnly) { waiter.resolve($0) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) {
-                if waiter.resolve(false) { dismiss() }
-            }
+            authorizeBrowserNavigation(tileId: tileId, agentId: agentId, url: url, readOnly: readOnly, isCancelled: isCancelled) { waiter.resolve($0) }
         }
     }
 
-    private func askBrowserHandOver(tileId: UUID, agentId: AgentID, evaluate: Bool, deadline: Date) async -> Bool {
-        await withCheckedContinuation { continuation in
+    private func askBrowserHandOver(tileId: UUID, agentId: AgentID, evaluate: Bool, deadline: Date,
+                                   isCancelled: @escaping () -> Bool = { false }) async -> Bool {
+        let key = "takeover"
+        let project = browserPermissionProject(agentId)
+        if let project, browserSessionConsents[project]?.contains(key) == true { return true }
+        return await withCheckedContinuation { continuation in
             let waiter = BrowserDomainWaiter(continuation)
             guard browserPromptsPending.insert(tileId).inserted else { waiter.resolve(false); return }
-            let dismiss = browserHandOverApprovalHandler(agentId, tileId, evaluate) { [weak self] allowed in
+            let browser = liveBrowser(tileId: tileId)
+            let generation = revocationGeneration(for: agentId)
+            let input = browser?.automation.userInputCount
+            browser?.beginAgentApproval()
+            let dismiss = browserHandOverApprovalHandler(agentId, tileId, false) { [weak self] allowed in
+                guard waiter.isPending else { return }
+                browser?.endAgentApproval()
                 self?.browserPromptsPending.remove(tileId)
-                waiter.resolve(allowed)
+                let stillValid = !isCancelled() && self?.supervisor.records[agentId]?.workspaceToolsEnabled == true
+                    && self?.revocationGeneration(for: agentId) == generation
+                    && self?.liveBrowser(tileId: tileId)?.id == browser?.id
+                    && browser?.automation.userInputCount == input
+                if allowed && stillValid, let project { self?.browserSessionConsents[project, default: []].insert(key) }
+                waiter.resolve(allowed && stillValid)
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, deadline.timeIntervalSinceNow)) {
-                if waiter.resolve(false) { dismiss() }
+            Task { @MainActor [weak self, weak browser] in
+                while waiter.isPending {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    guard waiter.isPending else { return }
+                    guard let self, let browser, !browser.isTerminated, !isCancelled(),
+                          self.revocationGeneration(for: agentId) == generation,
+                          self.liveBrowser(tileId: tileId)?.id == browser.id,
+                          browser.automation.userInputCount == input else {
+                        browser?.endAgentApproval()
+                        self?.browserPromptsPending.remove(tileId)
+                        dismiss()
+                        waiter.resolve(false)
+                        return
+                    }
+                }
             }
         }
     }
@@ -286,8 +376,9 @@ extension WorkspaceAPIService {
     /// prompt: the queue replays or refuses it under its own rechecks.
     /// Returns whether the user was asked, so the caller restarts its clock.
     private func approveBrowserScope(agentId: AgentID, record: AgentRecord, handle: CheckoutHandle,
-                                     operation: WorkspaceAPIOp, key: String?) -> (error: WorkspaceAPIError?, asked: Bool) {
+                                     operation: WorkspaceAPIOp, key: String?, isCancelled: @escaping () -> Bool) -> (error: WorkspaceAPIError?, asked: Bool) {
         let generation = revocationGeneration(for: agentId)
+        let policy = supervisor.workspaceToolsPermission()
         if let key, browserActionQueue.holds(agentId: agentId, key: key) { return (nil, false) }
         if case .allowed = WorkspaceToolGrantEvaluator.evaluate(agentId: agentId, op: operation, checkout: handle,
             requested: .preserveAll, grants: grants[agentId] ?? [], currentGeneration: generation) { return (nil, false) }
@@ -296,6 +387,11 @@ extension WorkspaceAPIService {
             agentDisplayName: record.displayName, checkout: handle,
             checkoutDisplayName: knownCheckouts()[handle]?.displayName ?? record.displayName,
             op: operation, relativePath: nil), withinCallerProject: true)
+        guard !isCancelled(), revocationGeneration(for: agentId) == generation,
+              supervisor.records[agentId]?.workspaceToolsEnabled == true,
+              supervisor.workspaceToolsPermission() == policy else {
+            return (WorkspaceAPIError(code: .permissionDenied, message: "Browser access changed during approval."), true)
+        }
         guard decision != .deny else {
             return (WorkspaceAPIError(code: .scopeApprovalRequired, message: "The user has not allowed browser control.", approvalRequestId: promptId), true)
         }
@@ -325,7 +421,7 @@ extension WorkspaceAPIService {
         default: completion(.error(WorkspaceAPIError(code: .unsupported, message: "That browser action is not available yet."))); return
         }
         var deadline = arrived.addingTimeInterval(timeout)
-        guard let record = supervisor.records[agentId], record.workspaceToolsEnabled,
+        guard let rawRecord = supervisor.records[agentId], let record = Optional(resolvedRecord(rawRecord)), record.workspaceToolsEnabled,
               let runtime = runtimeProvider(), let canvas = canvasProvider() else {
             completion(.error(WorkspaceAPIError(code: .permissionDenied, message: "Browser access is unavailable."))); return
         }
@@ -351,8 +447,8 @@ extension WorkspaceAPIService {
             let box = BrowserOpenCompletionBox(completion)
             Task { @MainActor [weak self] in
                 guard let self else { box.callback(.error(WorkspaceAPIError(code: .permissionDenied, message: "Browser access is unavailable."))); return }
-                let allowed = await self.askBrowserHandOver(tileId: tileId, agentId: agentId, evaluate: false, deadline: deadline)
-                guard allowed, Date() < deadline, !isCancelled(), self.revocationGeneration(for: agentId) == generation,
+                let allowed = await self.askBrowserHandOver(tileId: tileId, agentId: agentId, evaluate: false, deadline: deadline, isCancelled: isCancelled)
+                guard allowed, !isCancelled(), self.revocationGeneration(for: agentId) == generation,
                       self.supervisor.workspaceToolsPermission() == policy,
                       let current = self.liveBrowser(tileId: tileId), current.id == browserId,
                       current.automation.userInputCount == input, self.recordUserBrowserHandOver(tileId: tileId, agentId: agentId) else {
@@ -377,7 +473,7 @@ extension WorkspaceAPIService {
         let handle = Self.ownCheckoutHandle(record)
         seedGrantsIfNeeded(agentId: agentId, checkout: handle)
         dropPolicyGrantsUnlessFree(agentId: agentId)
-        let approval = approveBrowserScope(agentId: agentId, record: record, handle: handle, operation: operation, key: suppliedKey)
+        let approval = approveBrowserScope(agentId: agentId, record: record, handle: handle, operation: operation, key: suppliedKey, isCancelled: isCancelled)
         if let error = approval.error { completion(.error(error)); return }
         if approval.asked { deadline = Date().addingTimeInterval(timeout) }
         let generation = revocationGeneration(for: agentId)
@@ -405,7 +501,7 @@ extension WorkspaceAPIService {
         let completionBox = BrowserOpenCompletionBox(completion)
         browserActionQueue.submit(tileId: tileId, agentId: agentId, key: suppliedKey ?? requestId,
             operation: operation.rawValue, payload: String(decoding: data, as: UTF8.self), deadline: deadline,
-            inputCount: inputCount, authorizationGeneration: generation, authorizationContext: permissionAtArrival.rawValue, currentInputCount: { [weak self] in
+            inputCount: inputCount, authorizationGeneration: generation, authorizationContext: permissionAtArrival.rawValue, approvalTime: { [weak browser] in browser?.approvalTime ?? 0 }, currentInputCount: { [weak self] in
                 guard let current = self?.liveBrowser(tileId: tileId), current.id == browserId else { return nil }
                 return current.automation.userInputCount
             }, authorize: authorize, action: { [weak self, weak browser] actionDeadline in
@@ -413,18 +509,26 @@ extension WorkspaceAPIService {
                 guard Date() < actionDeadline, browser.automation.userInputCount == inputCount else {
                     return .error(WorkspaceAPIError(code: .targetConflict, message: "The user took control or the request expired. Take a fresh snapshot."))
                 }
+                var actionDeadline = actionDeadline
+                let approvalAtStart = browser.approvalTime
+                // Admission follows the active queue entry only. Persistent page
+                // gates must not retain a completed request's cancellation flag.
+                let priorAdmission = browser.agentNavigationAdmission
+                browser.agentNavigationAdmission = { !isCancelled() }
+                defer { browser.agentNavigationAdmission = priorAdmission }
                 let owner = self.canvasProvider()?.tileRecord(for: tileId)?.metadata.browserControllingAgentId
                 let agentControls = !readOnly || owner == agentId
                 if agentControls { self.installBrowserNavigationGate(browser, agentId: agentId, generation: generation) }
                 guard let url = browser.webView.url ?? URL(string: browser.url),
-                      await self.browserDomainAllowed(tileId: tileId, agentId: agentId, url: url, deadline: actionDeadline, readOnly: readOnly) else {
+                      await self.browserDomainAllowed(tileId: tileId, agentId: agentId, url: url, deadline: actionDeadline, readOnly: readOnly, isCancelled: isCancelled) else {
                     return .error(WorkspaceAPIError(code: .scopeApprovalRequired, message: "The current page was not approved for this agent."))
                 }
                 if operation == .browserEvaluate && owner == nil {
-                    guard await self.askBrowserHandOver(tileId: tileId, agentId: agentId, evaluate: true, deadline: actionDeadline) else {
+                    guard await self.askBrowserHandOver(tileId: tileId, agentId: agentId, evaluate: true, deadline: actionDeadline, isCancelled: isCancelled) else {
                         return .error(WorkspaceAPIError(code: .scopeApprovalRequired, message: "The user has not approved JavaScript in this browser."))
                     }
                 }
+                actionDeadline = actionDeadline.addingTimeInterval(browser.approvalTime - approvalAtStart)
                 if let error = authorize() { return .error(error) }
                 guard Date() < actionDeadline, browser.automation.userInputCount == inputCount else {
                     return .error(WorkspaceAPIError(code: .targetConflict, message: "The user took control or the request expired. Take a fresh snapshot."))
@@ -508,7 +612,7 @@ extension WorkspaceAPIService {
                                         isCancelled: @escaping () -> Bool, completion: @escaping (Reply) -> Void) {
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               case let .navigate(tileId, .reload, suppliedKey)? = try? BrowserToolRequest.decode(operation: WorkspaceAPIOp.browserNavigate.rawValue, data: data),
-              let record = supervisor.records[agentId], record.workspaceToolsEnabled,
+              let rawRecord = supervisor.records[agentId], let record = Optional(resolvedRecord(rawRecord)), record.workspaceToolsEnabled,
               let runtime = runtimeProvider(), let canvas = canvasProvider(),
               let projectId = record.projectId ?? knownCheckouts()[Self.ownCheckoutHandle(record)]?.projectId,
               browserRuntimeWiring != nil else {
@@ -518,7 +622,7 @@ extension WorkspaceAPIService {
         let handle = Self.ownCheckoutHandle(record)
         seedGrantsIfNeeded(agentId: agentId, checkout: handle)
         dropPolicyGrantsUnlessFree(agentId: agentId)
-        let approval = approveBrowserScope(agentId: agentId, record: record, handle: handle, operation: .browserNavigate, key: suppliedKey)
+        let approval = approveBrowserScope(agentId: agentId, record: record, handle: handle, operation: .browserNavigate, key: suppliedKey, isCancelled: isCancelled)
         if let error = approval.error { completion(.error(error)); return }
         let generation = revocationGeneration(for: agentId)
         let policy = supervisor.workspaceToolsPermission()
@@ -540,7 +644,7 @@ extension WorkspaceAPIService {
         browserActionQueue.submit(tileId: tileId, agentId: agentId, key: suppliedKey ?? requestId,
             operation: WorkspaceAPIOp.browserNavigate.rawValue, payload: String(decoding: normalizedData, as: UTF8.self),
             deadline: deadline, inputCount: 0, authorizationGeneration: generation, authorizationContext: policy.rawValue,
-            currentInputCount: { [weak self] in self?.liveBrowser(tileId: tileId)?.automation.userInputCount ?? 0 },
+            approvalTime: { [weak self] in self?.liveBrowser(tileId: tileId)?.approvalTime ?? 0 }, currentInputCount: { [weak self] in self?.liveBrowser(tileId: tileId)?.automation.userInputCount ?? 0 },
             authorize: authorize, action: { [weak self, weak runtime, weak canvas] actionDeadline in
                 guard let self, let runtime, let canvas else { return .error(WorkspaceAPIError(code: .permissionDenied, message: "The workspace is unavailable.")) }
                 self._beforeCommitHook?()
@@ -571,6 +675,9 @@ extension WorkspaceAPIService {
                       BrowserAgentNavigationPolicy.classify(url, checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)) != .denied else {
                     return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "The browser restarted, but its saved destination is not allowed. Take a fresh snapshot."))
                 }
+                let priorAdmission = browser.agentNavigationAdmission
+                browser.agentNavigationAdmission = { !isCancelled() }
+                defer { browser.agentNavigationAdmission = priorAdmission }
                 let reply = await BrowserActionExecutor.perform(.navigate(tile: tileId, destination: .url(savedURL), key: nil), runtime: browser,
                     deadline: actionDeadline, checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
                 if let error = authorize() { return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "The browser restarted, but access changed: \(error.message)")) }
@@ -610,7 +717,7 @@ extension WorkspaceAPIService {
         guard case let .open(url, suppliedKey) = request else {
             completion(.error(WorkspaceAPIError(code: .invalidRequest, message: "Invalid browser open request."))); return
         }
-        guard let record = supervisor.records[agentId], record.workspaceToolsEnabled,
+        guard let rawRecord = supervisor.records[agentId], let record = Optional(resolvedRecord(rawRecord)), record.workspaceToolsEnabled,
               let runtime = runtimeProvider(), let canvas = canvasProvider(),
               let anchor = record.tileId, let projectId = record.projectId ?? knownCheckouts()[Self.ownCheckoutHandle(record)]?.projectId,
               let zone = canvas.installedZoneIds(containing: anchor).only,
@@ -626,7 +733,7 @@ extension WorkspaceAPIService {
         let handle = Self.ownCheckoutHandle(record)
         seedGrantsIfNeeded(agentId: agentId, checkout: handle)
         dropPolicyGrantsUnlessFree(agentId: agentId)
-        let approval = approveBrowserScope(agentId: agentId, record: record, handle: handle, operation: .browserOpen, key: suppliedKey)
+        let approval = approveBrowserScope(agentId: agentId, record: record, handle: handle, operation: .browserOpen, key: suppliedKey, isCancelled: isCancelled)
         if let error = approval.error { completion(.error(error)); return }
         if approval.asked { deadline = Date().addingTimeInterval(15) }
         let generation = revocationGeneration(for: agentId)
@@ -640,7 +747,7 @@ extension WorkspaceAPIService {
         let completionBox = BrowserOpenCompletionBox(completion)
         browserActionQueue.submit(tileId: anchor, agentId: agentId, key: key, operation: WorkspaceAPIOp.browserOpen.rawValue,
                                   payload: String(decoding: data, as: UTF8.self), deadline: deadline, inputCount: 0, authorizationGeneration: generation, authorizationContext: permissionAtArrival.rawValue,
-                                  currentInputCount: { 0 }, authorize: { [weak self, weak runtime, weak canvas] in
+                                  approvalTime: { completionBox.browser?.approvalTime ?? 0 }, currentInputCount: { 0 }, authorize: { [weak self, weak runtime, weak canvas] in
             guard let self, let runtime, let canvas, self.runtimeProvider() === runtime, self.canvasProvider() === canvas,
                   !isCancelled(), self.supervisor.records[agentId]?.workspaceToolsEnabled == true,
                   self.revocationGeneration(for: agentId) == generation,
@@ -704,6 +811,7 @@ extension WorkspaceAPIService {
                                                                            anchorTileId: anchor, targetZoneId: zone) else {
                 return .error(WorkspaceAPIError(code: .unsupported, message: "The browser could not be opened in the agent's zone."))
             }
+            completionBox.browser = browser
             self.browserRuntimeWiring?(browser, projectId)
             guard self.browserLeaseLedger?.touch(tileId: browser.tileId, owner: agentId, sweepEligible: true) == true else {
                 return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "The browser opened but its residency could not be protected. Re-query before retrying."))
@@ -760,12 +868,14 @@ private extension Array {
 @MainActor
 private final class BrowserOpenCompletionBox {
     let callback: (WorkspaceAPIService.Reply) -> Void
+    weak var browser: WKWebViewBrowserRuntime?
     init(_ callback: @escaping (WorkspaceAPIService.Reply) -> Void) { self.callback = callback }
 }
 
 @MainActor
 private final class BrowserDomainWaiter {
     private var continuation: CheckedContinuation<Bool, Never>?
+    var isPending: Bool { continuation != nil }
     init(_ continuation: CheckedContinuation<Bool, Never>) { self.continuation = continuation }
     /// True when this call settled the wait, false when it was already settled.
     @discardableResult

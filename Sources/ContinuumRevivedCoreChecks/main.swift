@@ -9079,9 +9079,11 @@ do {
     // are data tables Core reads at runtime; pinning them keeps a dropped or
     // renamed resource red alongside the dependency list.
     // AgentCharacters (plan 110) is the built-in character set and its MIT notice.
-    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions"),.copy("Resources/ContextWindows.json"),.copy("Resources/TestedCLIVersions.json"),.copy("Resources/AgentCharacters")]),"#
+    // PublicSuffixList.dat is an offline data table for BrowserSiteScope's
+    // Foundation-only site matching, not an additional module dependency.
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions"),.copy("Resources/ContextWindows.json"),.copy("Resources/TestedCLIVersions.json"),.copy("Resources/PublicSuffixList.dat"),.copy("Resources/AgentCharacters")]),"#
     expect(compactDeclaration == expectedDeclaration,
-           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the pinned PiExtensions, ContextWindows, TestedCLIVersions and AgentCharacters resources, found: \(declaration)")
+           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the pinned PiExtensions, ContextWindows, TestedCLIVersions, PublicSuffixList and AgentCharacters resources, found: \(declaration)")
     print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies, plus the pinned resources")
 }
 

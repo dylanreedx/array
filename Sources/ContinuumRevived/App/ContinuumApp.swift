@@ -3261,6 +3261,21 @@ enum ContinuumApp {
         // while cross-project reach still asks or is refused, the per-agent
         // switch still revokes, agent-to-agent chains stop, leaving Free takes
         // its grants back and Off creates agents without workspace tools.
+        if CommandLine.arguments.contains("--workspace-api-session-permissions-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try runWorkspaceAPISessionPermissionsChecks()
+                    print("ContinuumRevivedWorkspaceAPISessionPermissionsChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--workspace-api-free-permissions-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -22688,7 +22703,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         alert.runModal()
     }
 
-    /// The browser hand-over and per-call JavaScript approval. A sheet, never
+    /// The browser hand-over and session JavaScript approval. A sheet, never
     /// `runModal`: the request waits asynchronously. The model can neither
     /// answer it nor choose its wording, and the sheet names the page and
     /// profile so the user knows which browser they are handing over.
@@ -22697,10 +22712,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard let window = canvasView?.window, let agent = agentSupervisor.records[agentId],
               let subject = browserApprovalSubject(tileId: tileId) else { completion(false); return {} }
         let alert = NSAlert()
-        alert.messageText = evaluate ? "Allow \(agent.displayName) to run JavaScript in this browser?" : "Hand this browser over to \(agent.displayName)?"
-        alert.informativeText = subject + "\n\n" + (evaluate
-            ? "JavaScript can read and change this page using its signed-in session. This approval is for one action."
-            : "The agent can read and interact with this browser using its existing signed-in accounts. Click or type in the browser to take it back.")
+        alert.messageText = "Allow agents in this project to use your browsers?"
+        alert.informativeText = subject + "\n\nAgents in this project can read, interact with, and run JavaScript in your browser tiles using their signed-in accounts until Array quits. Click or type in a browser to take it back."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow")
         alert.addButton(withTitle: "Deny")
@@ -22714,15 +22727,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let alert = NSAlert()
         alert.messageText = "Allow \(agent.displayName) to visit \(String(host.prefix(253)))?"
         alert.informativeText = (browserApprovalSubject(tileId: tileId).map { "Asked from " + $0 + ".\n\n" } ?? "")
-            + "The agent can read and interact with this site in its browser. Session approval lasts until Array quits or this agent's Workspace Tools are turned off."
+            + "The agent can read and interact with this site, including its subdomains. Allow Once covers this browser visit. Agent Session covers this agent; Project Session covers agents in this project until Array quits."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow Once")
         alert.addButton(withTitle: "Allow for This Agent Session")
+        alert.addButton(withTitle: "Allow for This Project Session")
         alert.addButton(withTitle: "Deny")
         alert.beginSheetModal(for: window) { response in
             switch response {
             case .alertFirstButtonReturn: completion(.allowOnce)
             case .alertSecondButtonReturn: completion(.allowForSession)
+            case .alertThirdButtonReturn: completion(.allowForProjectSession)
             default: completion(.deny)
             }
         }
@@ -22748,6 +22763,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func presentWorkspaceToolApproval(_ prompt: WorkspaceAPIService.ScopeApprovalPrompt) -> WorkspaceAPIService.ScopeApprovalDecision {
+        switch workspaceToolApprovalAlert(prompt).runModal() {
+        case .alertFirstButtonReturn: return .allowOnce
+        case .alertSecondButtonReturn: return .allowForSession
+        case .alertThirdButtonReturn: return .allowForProjectSession
+        default: return .deny
+        }
+    }
+
+    /// The production alert factory is also used by the appearance witness.
+    func workspaceToolApprovalAlert(_ prompt: WorkspaceAPIService.ScopeApprovalPrompt) -> NSAlert {
         let alert = NSAlert()
         var detail: String
         if prompt.op == .agentInspect, let target = prompt.targetAgentDisplayName {
@@ -22768,6 +22793,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         } else if [.browserOpen, .browserNavigate, .browserClick, .browserType, .browserPressKey, .browserScroll, .browserWaitFor, .browserEvaluate].contains(prompt.op) {
             alert.messageText = "Allow \(prompt.agentDisplayName) to use a browser in \(prompt.checkoutDisplayName)?"
             detail = "The agent can open its own browser tiles, read pages, and interact with them. Your browser tiles require a separate hand-over, and other domains require separate approval."
+        } else if WorkspaceAPIOp.deviceOperations.contains(prompt.op) {
+            alert.messageText = "Allow \(prompt.agentDisplayName) to use simulator previews in \(prompt.checkoutDisplayName)?"
+            detail = "The agent can create disposable simulators, build and run this project, inspect the preview, and interact with it. Clicking or typing in a preview returns control to you."
         } else if prompt.op == .canvasApply {
             // CX-01 Phase 4: geometry is never in the session preset, so the first
             // move/resize of the agent's OWN checkout lands here.
@@ -22784,17 +22812,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let path = prompt.relativePath { detail += "\n\nFile: \(path)" }
             detail += "\n\nOpening never edits the file."
         }
-        detail += " \"Allow for This Agent Session\" lasts until Array quits or this agent's Workspace Tools are turned off. To stop being asked, choose Free in Settings ▸ Agents ▸ Agent permissions."
+        let onceScope = prompt.op == .deviceOpen
+            ? "Allow Once approves this simulator visit."
+            : "Allow Once approves only this request."
+        detail += " \"Allow for This Agent Session\" allows this agent until its Workspace Tools are turned off or Array quits. \"Allow for This Project Session\" shares this kind of action with agents in the same project until Array quits. \(onceScope) You can turn off an agent’s Workspace Tools at any time. To stop being asked, choose Free in Settings ▸ Agents ▸ Agent permissions."
         alert.informativeText = detail
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow Once")
         alert.addButton(withTitle: "Allow for This Agent Session")
+        alert.addButton(withTitle: "Allow for This Project Session")
         alert.addButton(withTitle: "Deny")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: return .allowOnce
-        case .alertSecondButtonReturn: return .allowForSession
-        default: return .deny
-        }
+        return alert
     }
 
     /// Resolves a local-file link an agent authored and opens it beside that agent.

@@ -26,9 +26,22 @@ public enum BrowserAgentNavigationPolicy {
         let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         let dnsHost = host.hasSuffix(".") ? String(host.dropLast()) : host
         guard !dnsHost.isEmpty, !dnsHost.contains("%") else { return .denied }
-        if CredentialOriginMatcher.isLoopbackHost(dnsHost) || dnsHost.hasSuffix(".localhost") {
+        if CredentialOriginMatcher.isLoopbackHost(dnsHost) || dnsHost.hasSuffix(".localhost") || isPrivateAddress(dnsHost) {
             return .local
         }
         return .approvalRequired(host: dnsHost)
+    }
+    private static func isPrivateAddress(_ host: String) -> Bool {
+        if host == "0.0.0.0" { return true }
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        if parts.count == 4, parts.allSatisfy({ UInt8($0) != nil }) {
+            let bytes = parts.compactMap { UInt8($0) }
+            return bytes[0] == 10 || (bytes[0] == 172 && (16...31).contains(bytes[1]))
+                || (bytes[0] == 192 && bytes[1] == 168) || (bytes[0] == 169 && bytes[1] == 254)
+        }
+        // Unique local and link-local IPv6 literals, never DNS names.
+        guard host.contains(":"), let first = host.split(separator: ":").first,
+              let prefix = UInt16(first, radix: 16) else { return false }
+        return prefix & 0xfe00 == 0xfc00 || prefix & 0xffc0 == 0xfe80
     }
 }

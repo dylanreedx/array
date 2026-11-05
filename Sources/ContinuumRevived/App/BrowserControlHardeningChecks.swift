@@ -14,7 +14,13 @@ func runBrowserControlHardeningChecks() throws {
         ("a taken-over tile rehydrates without the agent gate", runTakenOverRehydrationScenario),
         ("a same-document navigation finishes and frees the tile", runFragmentNavigationScenario),
         ("a page cannot stack domain prompts", runPromptFloodScenario),
-        ("the real hand-over sheet names the page and expires", runProductionSheetScenario),
+        ("the real hand-over sheet names the page and pauses its clock", runProductionSheetScenario),
+        ("site grants follow visits and public suffix boundaries", runSiteScopeScenario),
+        ("cancelled existing-browser navigation dismisses its site sheet", runCancelledNavigationScenario),
+        ("real navigation, reclaim and reopen end a browser visit", runActualVisitScenario),
+        ("one project takeover includes JavaScript across browser tiles", runBrowserSessionScenario),
+        ("queued site approval pauses the action budget", runQueuedDomainApprovalScenario),
+        ("cancelled scope approval cannot create session consent", runCancelledScopeScenario),
         ("Ask-first approval time does not spend the action deadline", runSlowApprovalScenario),
         ("revocation releases a handed-over user tile", runRevocationReleaseScenario),
         ("a reload in an unloaded zone leaves one runtime when the zone returns", runUnloadedZoneReloadScenario),
@@ -214,6 +220,7 @@ private func runPromptFloodScenario() throws {
     let h = try BrowserHardeningHarness()
     defer { h.tearDown() }
     let (tileId, _) = try h.ownedBrowser()
+    h.permission = .askFirst
     var pending: [(WorkspaceAPIService.BrowserDomainDecision) -> Void] = []
     h.f.api.browserDomainApprovalHandler = { _, _, _, reply in pending.append(reply); return {} }
     defer { pending.forEach { $0(.deny) } }
@@ -240,10 +247,13 @@ private func runProductionSheetScenario() throws {
     let text = h.sheetText() ?? ""
     try expect(text.contains("Billing dashboard") && text.contains("Default"),
                "the hand-over sheet must name the page and its profile: \(text)")
-    h.pump(20) { response != nil }
-    try expect(h.errorCode(response ?? [:]) == "scope_approval_required", "an unanswered hand-over must be refused: \(String(describing: response))")
-    h.pump(1) { h.window.attachedSheet == nil }
-    try expect(h.window.attachedSheet == nil, "the hand-over sheet must close when its request expires")
+    try captureBrowserPermissionSheet(h, name: "browser-handover")
+    h.pump(16)
+    try expect(response == nil && h.window.attachedSheet != nil, "reading an approval beyond 15 s must leave the request and sheet alive")
+    guard let sheet = h.window.attachedSheet else { throw WorkspaceAPIChecks.Failure(message: "approval disappeared") }
+    h.window.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+    h.pump(5) { response != nil }
+    try expect(response?["status"] as? String == "ok", "the approved action must run after the user finishes reading: \(String(describing: response))")
 }
 
 /// Finding 7: the prompt used to run inside the queued action, so its 15 s
@@ -306,4 +316,238 @@ private func runUnloadedZoneReloadScenario() throws {
     try controller.setTier(.live)
     let runtimes = h.f.runtime.liveControllers.flatMap(\.browserRuntimes).filter { $0.tileId == tileId && !$0.isTerminated }
     try expect(runtimes.count == 1, "reloading the zone must leave the tile exactly one live runtime, found \(runtimes.count)")
+}
+
+@MainActor
+private func runSiteScopeScenario() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    h.permission = .askFirst
+    let sites = [("www.example.co.uk", "example.co.uk"), ("other.co.uk", "other.co.uk"),
+        ("alice.github.io", "alice.github.io"), ("bob.github.io", "bob.github.io"),
+        ("www.city.kawasaki.jp", "city.kawasaki.jp"), ("a.b.kawasaki.jp", "a.b.kawasaki.jp")]
+    for (host, expected) in sites { try expect(BrowserSiteScope.site(for: host) == expected, "wrong permission site for \(host)") }
+    for host in ["localhost", "0.0.0.0", "10.1.2.3", "172.16.2.4", "192.168.1.2", "[fd00::1]", "[fe80::1]"] {
+        try expect(BrowserAgentNavigationPolicy.classify(URL(string: "http://" + host)!, checkoutRoot: h.f.pbRoot) == .local, "local address asked: \(host)")
+    }
+    let dismissDomain = h.f.delegate.presentBrowserDomainApproval(agentId: h.f.agentId, tileId: tile, host: "example.co.uk") { _ in }
+    h.pump(1) { h.window.attachedSheet != nil }
+    try captureBrowserPermissionSheet(h, name: "browser-domain")
+    dismissDomain()
+    h.pump(1) { h.window.attachedSheet == nil }
+    var prompts = 0
+    h.f.api.browserDomainApprovalHandler = { _, _, _, reply in prompts += 1; reply(.allowOnce); return {} }
+    func visit(_ url: String) throws {
+        var allowed = false
+        h.f.api.authorizeBrowserNavigation(tileId: tile, agentId: h.f.agentId, url: URL(string: url)!) { allowed = $0 }
+        try expect(allowed, "visit denied: \(url)")
+    }
+    try visit("https://www.example.co.uk")
+    try visit("https://api.example.co.uk/path")
+    try expect(prompts == 1, "Allow Once must cover a visit's pages and same-site subdomains")
+    try visit("https://unrelated.co.uk")
+    try expect(prompts == 2, "co.uk must not share grants")
+    try visit("http://localhost")
+    try visit("https://www.example.co.uk")
+    try expect(prompts == 3, "returning after leaving must start a new visit")
+}
+
+@MainActor
+private func runBrowserSessionScenario() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let first = try h.userBrowser()
+    let second = try h.userBrowser()
+    var takeover = 0
+    var javascript = 0
+    h.f.api.browserHandOverApprovalHandler = { _, _, evaluate, reply in
+        if evaluate {
+            javascript += 1
+            reply(true)
+        } else {
+            takeover += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 16) { reply(true) }
+        }
+        return {}
+    }
+    _ = try h.ok("browser.evaluate", ["tileId": first.tileId.uuidString, "script": "() => 7"], timeout: 40)
+    _ = try h.ok("browser.evaluate", ["tileId": second.tileId.uuidString, "script": "() => 8"])
+    let peer = h.f.delegate.qaAgentSupervisor.spawn(role: nil, prompt: nil, cwd: h.f.pbRoot,
+        harness: .pi, model: "openai-codex/gpt-5.6-sol", thinking: "high", projectId: h.f.projectPb, projectRoot: h.f.pbRoot)
+    _ = h.f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: peer, true)
+    let peerReply = try h.raw("browser.evaluate", ["tileId": second.tileId.uuidString, "script": "() => 9"], agent: peer)
+    try expect(peerReply["status"] as? String == "ok", "combined consent must cover another enabled agent in the same project")
+    try expect(takeover == 1 && javascript == 0, "ONE takeover must include JavaScript across project browser tiles; takeover=\(takeover) javascript=\(javascript)")
+}
+
+@MainActor
+private func runCancelledScopeScenario() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    h.permission = .askFirst
+    var cancelled = false
+    var prompts = 0
+    h.f.api.approvalHandler = { _ in prompts += 1; cancelled = true; return .allowForSession }
+    var response: WorkspaceAPIService.Reply?
+    h.f.api.dispatchBrowserAction(agentId: h.f.agentId, requestId: UUID().uuidString, operation: .browserEvaluate,
+        payload: ["tileId": tile.uuidString, "script": "() => 1"], isCancelled: { cancelled }) { response = $0 }
+    guard case let .error(error)? = response, error.code == .permissionDenied else {
+        throw WorkspaceAPIChecks.Failure(message: "cancellation during approval must reject before minting consent")
+    }
+    h.f.api.approvalHandler = { _ in prompts += 1; return .deny }
+    let next = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => 2"])
+    try expect(prompts == 2 && h.errorCode(next) == "scope_approval_required", "cancelled approval must not cache project session consent")
+}
+
+@MainActor
+private func captureBrowserPermissionSheet(_ h: BrowserHardeningHarness, name: String) throws {
+    guard let sheet = h.window.attachedSheet, let content = sheet.contentView else {
+        throw WorkspaceAPIChecks.Failure(message: "missing browser permission sheet for capture")
+    }
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("qa-runs/permission-ux", isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let previous = sheet.appearance
+    defer { sheet.appearance = previous }
+    for (label, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+        sheet.appearance = NSAppearance(named: appearance)
+        sheet.appearance?.performAsCurrentDrawingAppearance {
+            content.needsDisplay = true
+            content.layoutSubtreeIfNeeded()
+            content.displayIfNeeded()
+            sheet.displayIfNeeded()
+        }
+        CATransaction.flush()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
+            CGWindowID(sheet.windowNumber), [.boundsIgnoreFraming, .bestResolution]),
+            let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+            throw WorkspaceAPIChecks.Failure(message: "browser permission sheet could not render its compositor window")
+        }
+        try data.write(to: root.appendingPathComponent(name + "-" + label + ".png"))
+    }
+}
+
+
+/// Drives WebKit's real policy callback and production sheet, then cancellation.
+@MainActor
+private func runCancelledNavigationScenario() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, page) = try h.ownedBrowser()
+    h.permission = .askFirst
+    var cancelled = false
+    var response: WorkspaceAPIService.Reply?
+    var lateAnswer: ((WorkspaceAPIService.BrowserDomainDecision) -> Void)?
+    var dismissed = false
+    h.f.api.browserDomainApprovalHandler = { agent, tile, host, reply in
+        lateAnswer = reply
+        let dismiss = h.f.delegate.presentBrowserDomainApproval(agentId: agent, tileId: tile, host: host, completion: reply)
+        return { dismissed = true; dismiss() }
+    }
+    h.f.api.dispatchBrowserAction(agentId: h.f.agentId, requestId: UUID().uuidString, operation: .browserNavigate,
+        payload: ["tileId": tile.uuidString, "url": "https://cancel-navigation.invalid/"],
+        isCancelled: { cancelled }) { response = $0 }
+    h.pump(3) { h.window.attachedSheet != nil }
+    try expect(h.window.attachedSheet != nil && lateAnswer != nil, "navigation must reach the real site sheet")
+    cancelled = true
+    h.pump(2) { dismissed && h.window.attachedSheet == nil && response != nil }
+    // Settle even a broken implementation so the other scenarios still run.
+    let cancelledPrompt = dismissed && h.window.attachedSheet == nil && response != nil
+    if !dismissed { lateAnswer?(.deny); h.pump(1) }
+    lateAnswer?(.allowForProjectSession)
+    h.pump(0.2)
+    try expect(cancelledPrompt, "cancelled navigation must dismiss its sheet and settle without waiting for the user")
+    try expect(h.live(tile)?.webView.url == page, "cancelled destination must never load")
+    try expect(h.f.api.browserProjectDomainApprovals[h.f.projectPb]?.contains("cancel-navigation.invalid") != true
+               && h.f.api.browserDomainApprovals[h.f.agentId]?.contains("cancel-navigation.invalid") != true,
+               "late Allow must not cache consent for cancelled navigation")
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+}
+
+/// HTML loads commit real documents without network access; no authorization
+/// helper is called between the user's departure and return.
+@MainActor
+private func runActualVisitScenario() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let browser = try h.userBrowser()
+    let tile = browser.tileId
+    func load(_ browser: WKWebViewBrowserRuntime, _ site: String) throws {
+        browser.webView.loadHTMLString("<html><head><title>\(site)</title></head><body>Visit</body></html>",
+                                      baseURL: URL(string: "https://" + site + "/"))
+        h.pump(3) { browser.webView.url?.host == site && !browser.webView.isLoading && browser.title == site }
+        try expect(browser.webView.url?.host == site && !browser.webView.isLoading, "fixture document must really load")
+        h.pump(0.1)
+    }
+    var prompts = 0
+    h.f.api.browserDomainApprovalHandler = { _, _, _, reply in prompts += 1; reply(.allowOnce); return {} }
+    try load(browser, "visit-a.invalid")
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    try expect(prompts == 1, "same live visit must reuse Once")
+    try load(browser, "visit-b.invalid")
+    try load(browser, "visit-a.invalid")
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    let departureAsked = prompts == 2
+    h.userKey(into: browser)
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    let reclaimAsked = prompts == (departureAsked ? 3 : 2)
+    guard let controller = h.f.runtime.controller(for: h.f.projectPb) else {
+        throw WorkspaceAPIChecks.Failure(message: "missing project controller")
+    }
+    h.window.makeFirstResponder(nil)
+    try controller.setTier(.snapshot, allowDehydratingFocusedZone: true)
+    try controller.setTier(.live)
+    guard let reopened = h.live(tile), reopened.id != browser.id else {
+        throw WorkspaceAPIChecks.Failure(message: "browser must reopen with a new runtime")
+    }
+    try load(reopened, "visit-a.invalid")
+    let beforeReopenRead = prompts
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    try expect(prompts == beforeReopenRead + 1, "runtime reopen must ask for a new visit")
+    try expect(departureAsked && reclaimAsked,
+               "actual departure/return and user reclaim must each end Once: departure=\(departureAsked) reclaim=\(reclaimAsked)")
+}
+
+/// A real remote-origin document loaded from memory keeps this witness offline.
+/// Unlike takeover and scope approvals, this site prompt starts only after the
+/// action has entered BrowserActionQueue, so it guards the queue's pause too.
+@MainActor
+private func runQueuedDomainApprovalScenario() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    guard let browser = h.live(tile) else {
+        throw WorkspaceAPIChecks.Failure(message: "missing queued domain fixture browser")
+    }
+    browser.webView.loadHTMLString(
+        "<html><head><title>Queued approval</title></head><body>Offline origin fixture</body></html>",
+        baseURL: URL(string: "https://queued-approval.invalid/"))
+    h.pump(5) {
+        browser.webView.url?.host == "queued-approval.invalid" && !browser.webView.isLoading
+            && browser.webView.title == "Queued approval"
+    }
+    try expect(browser.webView.url?.host == "queued-approval.invalid" && !browser.webView.isLoading,
+               "the offline document must commit its real remote origin")
+    h.permission = .askFirst
+    var prompts = 0
+    var answered = false
+    h.f.api.browserDomainApprovalHandler = { _, _, site, reply in
+        prompts += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 16) {
+            answered = true
+            reply(site == "queued-approval.invalid" ? .allowOnce : .deny)
+        }
+        return {}
+    }
+    let started = Date()
+    let result = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => 42"], timeout: 40)
+    try expect(answered && prompts == 1 && Date().timeIntervalSince(started) >= 16
+        && (result["value"] as? Int) == 42,
+        "a queued action must run after 16 seconds reading its site prompt, beyond its 15-second action budget")
+    let next = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => 43"])
+    try expect(prompts == 1 && (next["value"] as? Int) == 43,
+               "after approval the queue must continue and Once must cover the same visit")
 }

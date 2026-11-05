@@ -10,6 +10,9 @@ final class IOSPreviewWorkspaceAPIState {
     let sessions = IOSPreviewAutomationSessions.shared
     var ledgers: [UUID: Ledger] = [:]
     var pendingOwners: Set<UUID> = []
+    // Allow Once on Open belongs to the actual live attachment, never the
+    // persisted tile or device. Closing/reclaiming/expiry removes its authority.
+    var approvedVisits: [UUID: UInt64] = [:]
     // Deterministic device catalogue seam; production probes the Xcode CLI.
     var devices: () async throws -> [IOSPreviewDevice] = { try await IOSPreviewTools.devices() }
     var createDevice: @MainActor (IOSPreviewDeviceTemplate, IOSPreviewAutomationSessions.Scope) async throws -> String = { @MainActor template, scope in
@@ -35,9 +38,10 @@ extension WorkspaceAPIService {
     func deviceDispatch(agentId: AgentID, requestId: String, op: WorkspaceAPIOp, payload: [String: Any],
                         isCancelled: @escaping () -> Bool) async -> Reply {
         do {
-            guard let record = supervisor.records[agentId], record.workspaceToolsEnabled else {
+            guard let rawRecord = supervisor.records[agentId], rawRecord.workspaceToolsEnabled else {
                 throw WorkspaceAPIError(code: .permissionDenied, message: "Workspace tools are not enabled for this caller.")
             }
+            let record = resolvedRecord(rawRecord)
             guard let checkoutText = payload["checkoutHandle"] as? String, CheckoutHandle(rawValue: checkoutText) != nil else {
                 throw WorkspaceAPIError(code: .invalidRequest, message: "checkoutHandle is required on every device call, including device.build_run. Copy your explicit Home checkoutHandle from array_workspace_context; sessionId does not replace it.")
             }
@@ -61,16 +65,55 @@ extension WorkspaceAPIService {
                     throw WorkspaceAPIError(code: .permissionDenied, message: "This device session expired or is not owned by this caller. Open an owned tile again.")
                 }
             }
-            if op == .deviceOpen, let tileID = request.tileId {
-                guard let tile = try deviceTiles(project: project).first(where: { $0.id == tileID }),
-                      tile.metadata.iosPreviewAutomationOwnership?.agentId == agentId.rawValue,
-                      tile.metadata.iosPreviewAutomationOwnership?.checkout == checkout else {
-                    throw WorkspaceAPIError(code: .permissionDenied, message: "That tile is human-owned or belongs to another agent. This version cannot adopt it; create a disposable agent preview instead.")
+            // Resolve the owned tile before asking so a creation-key retry
+            // reuses its live visit, and a reclaimed device never opens a prompt.
+            var requestedOpenTile: Tile?
+            if op == .deviceOpen {
+                let tiles = try deviceTiles(project: project)
+                if let tileID = request.tileId {
+                    guard let tile = tiles.first(where: { $0.id == tileID }),
+                          tile.metadata.iosPreviewAutomationOwnership?.agentId == agentId.rawValue,
+                          tile.metadata.iosPreviewAutomationOwnership?.checkout == checkout else {
+                        throw WorkspaceAPIError(code: .permissionDenied, message: "That tile is human-owned or belongs to another agent. This version cannot adopt it; create a disposable agent preview instead.")
+                    }
+                    requestedOpenTile = tile
+                } else if let key = request.idempotencyKey {
+                    let digest = IOSPreviewWorkspaceAPIState.digest(Data(key.utf8))
+                    let matches = tiles.filter {
+                        $0.metadata.iosPreviewAutomationOwnership?.agentId == agentId.rawValue &&
+                        $0.metadata.iosPreviewAutomationOwnership?.checkout == checkout &&
+                        $0.metadata.iosPreviewAutomationOwnership?.creationKeyDigest == digest
+                    }
+                    if matches.count == 1 { requestedOpenTile = matches[0] }
                 }
+            }
+            if !(op == .deviceBuildRun && request.kind == "cancel"),
+               let sessionID = request.sessionId, deviceAPI.sessions.takenOverScope(id: sessionID) == scope {
+                // Reclaim forbids new native input, but an exact completed
+                // retry must still report its recorded (possibly uncertain)
+                // outcome. It never mints authority or enters deviceAct.
+                if op == .deviceAct, let ledger = deviceAPI.ledgers[sessionID], ledger.scope == scope,
+                   let key = request.idempotencyKey, let cached = ledger.actions[key], let reply = cached.reply {
+                    var normalized = request; normalized.idempotencyKey = nil
+                    let hash = IOSPreviewWorkspaceAPIState.digest(try Self.encoder.encode(normalized))
+                    if cached.hash == hash {
+                        guard !isCancelled() else { throw CancellationError() }
+                        return reply
+                    }
+                }
+                throw IOSPreviewAutomationSessions.Failure.handoverRequired
+            }
+            if let tile = requestedOpenTile,
+               deviceAPI.sessions.isReclaimed(deviceID: tile.metadata.iosPreviewDeviceID) {
+                throw IOSPreviewAutomationSessions.Failure.handoverRequired
             }
             seedGrantsIfNeeded(agentId: agentId, checkout: checkout)
             dropPolicyGrantsUnlessFree(agentId: agentId)
             let generation = revocationGeneration(for: agentId)
+            deviceAPI.approvedVisits = deviceAPI.approvedVisits.filter { deviceAPI.sessions.attachments[$0.key] != nil }
+            // Admission is retained by an accepted asynchronous build. A Once
+            // grant is consumed at dispatch return, not at job completion.
+            var approvedOnce = false
             func allowed() -> Bool {
                 dropPolicyGrantsUnlessFree(agentId: agentId)
                 guard supervisor.records[agentId]?.workspaceToolsEnabled == true,
@@ -79,6 +122,16 @@ extension WorkspaceAPIService {
                       let currentRegistry = try? registryStoreProvider()?.loadOrEmpty(),
                       currentRegistry.projects.contains(where: { $0.id == project && !$0.missing }),
                       FileManager.default.fileExists(atPath: known.root.path) else { return false }
+                if approvedOnce { return true }
+                if let sessionID = request.sessionId,
+                   deviceAPI.approvedVisits[sessionID] == generation,
+                   deviceAPI.sessions.attachments[sessionID]?.scope == scope { return true }
+                if op == .deviceOpen, let tileID = requestedOpenTile?.id,
+                   deviceAPI.sessions.attachments.values.contains(where: {
+                       $0.scope == scope && $0.runtime.tileID == tileID && deviceAPI.approvedVisits[$0.id] == generation
+                   }) { return true }
+                if op == .deviceBuildRun, request.kind == "cancel", let id = payload["operationId"] as? String,
+                   deviceBuildJobs.lookup(id: id, scope: scope)?.authorized?() == true { return true }
                 if case .allowed = WorkspaceToolGrantEvaluator.evaluate(agentId: agentId, op: op, checkout: checkout,
                     requested: .preserveAll, grants: grants[agentId] ?? [], currentGeneration: generation) { return true }
                 return false
@@ -92,9 +145,10 @@ extension WorkspaceAPIService {
                       revocationGeneration(for: agentId) == generation else { throw CancellationError() }
                 guard decision != .deny else { throw WorkspaceAPIError(code: .scopeApprovalRequired, message: "The user did not allow this device operation.", approvalRequestId: prompt) }
                 mint(WorkspaceToolGrant(agentId: agentId, checkoutHandles: [checkout],
-                    operations: op == .deviceOpen ? WorkspaceAPIOp.deviceOperations.subtracting([.deviceBuildRun]) : [op], presentationCeiling: .preserveAll,
+                    operations: decision == .allowOnce ? [op] : WorkspaceAPIOp.deviceOperations, presentationCeiling: .preserveAll,
                     issuer: decision == .allowOnce ? .userApprovalOnce(requestId: prompt) : Self.sessionIssuer(decision, requestId: prompt),
                     revocationGeneration: generation, singleUse: decision == .allowOnce))
+                approvedOnce = decision == .allowOnce
             }
             defer {
                 if let index = grants[agentId]?.firstIndex(where: { $0.singleUse && $0.operations.contains(op) && $0.checkoutHandles.contains(checkout) }) {
@@ -123,7 +177,13 @@ extension WorkspaceAPIService {
                     "capabilities": ["fresh_screenshot", "tap", "swipe", "text", "key", "home", "rotate", "build_run"], "scope": "whole_simulator", "newDevicePolicy": "host_created_disposable"])
 
             case .deviceOpen:
-                return try await deviceOpen(request: request, requestId: requestId, scope: scope, authorized: authorized, isCancelled: isCancelled)
+                let reply = try await deviceOpen(request: request, requestId: requestId, scope: scope, authorized: authorized, isCancelled: isCancelled)
+                if case .result = reply, approvedOnce {
+                    for entry in deviceAPI.sessions.attachments.values where entry.scope == scope {
+                        deviceAPI.approvedVisits[entry.id] = generation
+                    }
+                }
+                return reply
             case .deviceObserve:
                 guard let id = request.sessionId else { throw IOSPreviewAutomationSessions.Failure.notOwned }
                 let (frameID, observation) = try await deviceAPI.sessions.observe(id: id, scope: scope, authorized: authorized)
@@ -150,6 +210,7 @@ extension WorkspaceAPIService {
             case .deviceClose:
                 guard let id = request.sessionId else { throw IOSPreviewAutomationSessions.Failure.notOwned }
                 try deviceAPI.sessions.close(id: id, scope: scope)
+                deviceAPI.approvedVisits[id] = nil
                 return deviceResult(["sessionId": id.uuidString, "closed": true, "simulatorLeftRunning": true])
             default: throw WorkspaceAPIError(code: .unsupported, message: "Unsupported device operation.")
             }

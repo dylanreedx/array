@@ -202,6 +202,37 @@ func runWorkspaceAPIFreePermissionsChecks() async throws {
                "under Free agent.find must list an agent in another checkout of the same project: \(foundIds)")
     try await delivered(parentId, otherCheckoutAgent, "FREE-OTHER-CHECKOUT", "to an agent in another checkout of the same project", in: otherCheckout)
 
+    // Legacy records may predate project stamps. Resolve their registered Home,
+    // never the active project: both caller and target must be proven separately.
+    let legacyCaller = supervisor.spawn(role: nil, prompt: nil, cwd: f.pbRoot,
+        harness: .pi, model: model, thinking: "high", projectRoot: f.pbRoot)
+    let legacyPeer = supervisor.spawn(role: nil, prompt: nil, cwd: f.pbRoot,
+        harness: .pi, model: model, thinking: "high", projectRoot: f.pbRoot)
+    let legacyForeign = supervisor.spawn(role: nil, prompt: nil, cwd: f.paRoot,
+        harness: .pi, model: model, thinking: "high", projectRoot: f.paRoot)
+    try expect(supervisor.records[legacyCaller]?.projectId == nil && supervisor.records[legacyPeer]?.projectId == nil,
+               "legacy witness must exercise genuinely unstamped records")
+    let legacyBefore = prompts.count
+    _ = try result(dispatch(legacyCaller, "agent.inspect", ["agentId": legacyPeer.rawValue.uuidString]),
+                   "legacy caller inspecting a proven same-project legacy peer")
+    try expect(prompts.count == legacyBefore, "Free must resolve both legacy project owners without prompting")
+    _ = try failure(dispatch(legacyCaller, "agent.inspect", ["agentId": legacyForeign.rawValue.uuidString]),
+                    .permissionDenied, "legacy foreign peer inspection remains gated")
+    try expect(prompts.count == legacyBefore + 1, "two nil stamps must not grant access to a foreign project")
+    _ = try result(dispatch(legacyCaller, "artifact.open", ["relativePath": "notes.md"]),
+                   "legacy caller opens a file in its registered Home")
+    try expect(prompts.count == legacyBefore + 1, "opening legacy Home files must not add a prompt")
+    let unregisteredHome = f.pbRoot.deletingLastPathComponent().appendingPathComponent("Unregistered", isDirectory: true)
+    try fileManager.createDirectory(at: unregisteredHome, withIntermediateDirectories: true)
+    let legacyUnregistered = supervisor.spawn(role: nil, prompt: nil, cwd: unregisteredHome,
+        harness: .pi, model: model, thinking: "high", projectRoot: unregisteredHome)
+    _ = try failure(dispatch(legacyCaller, "agent.inspect", ["agentId": legacyUnregistered.rawValue.uuidString]),
+                    .permissionDenied, "unregistered nil peer must not inherit the active project")
+    try expect(prompts.count == legacyBefore + 2, "unknown Home stays gated even while a project is active")
+    let legacyContext = try result(dispatch(legacyCaller, "workspace.context", [:]), "legacy context")
+    try expect(legacyContext["projectId"]?.string?.lowercased() == f.projectPb.uuidString.lowercased(),
+               "context must report the registered owner of legacy Home")
+
     // MARK: What Free must not loosen
 
     let promptsBefore = prompts.count

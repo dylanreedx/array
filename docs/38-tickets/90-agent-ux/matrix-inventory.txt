@@ -402,6 +402,7 @@ check --workspace-api-free-permissions-check
 check --workspace-api-grants-check
 check --workspace-api-open-check
 check --workspace-api-pi-bridge-check
+check --workspace-api-session-permissions-check
 check --workspace-boot-persistence-check
 check --workspace-chrome-polish-check
 check --workspace-codex-hook-check
@@ -826,6 +827,7 @@ leg run_app_check .build/debug/Array --workspace-api-free-permissions-check
 leg run_app_check .build/debug/Array --workspace-api-grants-check
 leg run_app_check .build/debug/Array --workspace-api-open-check
 leg run_app_check .build/debug/Array --workspace-api-pi-bridge-check
+leg run_app_check .build/debug/Array --workspace-api-session-permissions-check
 leg run_app_check .build/debug/Array --workspace-boot-persistence-check
 leg run_app_check .build/debug/Array --workspace-chrome-polish-check
 leg run_app_check .build/debug/Array --workspace-codex-hook-check

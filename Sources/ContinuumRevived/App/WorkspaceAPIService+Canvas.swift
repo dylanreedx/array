@@ -47,7 +47,7 @@ extension WorkspaceAPIService {
         }
 
         let projection: CanvasEntityIndexSnapshot
-        switch Self.snapshot(runtime: runtime, canvas: canvas, records: Array(supervisor.records.values)) {
+        switch Self.snapshot(runtime: runtime, canvas: canvas, records: supervisor.records.values.map(resolvedRecord)) {
         case let .success(value): projection = value
         case let .failure(error): return .error(error)
         }
@@ -198,7 +198,7 @@ extension WorkspaceAPIService {
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.canvasApply],
                     presentationCeiling: .preserveAll, issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
-            case .allowForSession, .allowByPolicy:
+            case .allowForSession, .allowForProjectSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.canvasApply],
                     presentationCeiling: .preserveAll, issuer: Self.sessionIssuer(decision, requestId: promptId),

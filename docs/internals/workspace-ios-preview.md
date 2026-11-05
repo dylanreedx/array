@@ -89,10 +89,14 @@ endpoints, grants, live connections and temporary attachments are never persiste
 there. Restoring the canvas does not boot a device automatically.
 
 Free within a project uses the existing permission policy without additional
-confirmation. Ask first uses the existing trusted approval seam; approving Open
-for the session covers its visual interaction operations. Build & Run requires
-its own approval under Ask first; Open does not silently grant building. A one-use approval
-remains one use. Access is checked at dispatch and again before input or image
+confirmation. Ask first uses one simulator approval for observation, input and
+Build & Run. Allow Once on Open covers that live simulator visit, ending when
+the attachment closes, expires, disconnects or is reclaimed. Agent Session
+approves simulator operations for the requesting agent; Project Session shares
+those operations with agents in the same project until Array quits. A one-time
+build approval covers the complete accepted job, including its asynchronous
+install and launch; returning its receipt does not cancel it. Access is checked
+at dispatch and again before input or image
 reply. Disabling tools or revoking a grant invalidates in-flight authority.
 
 A simulator grant covers the whole selected simulator, including system UI and
@@ -103,7 +107,8 @@ replies and no OS-wide screen-recording or Mac-input automation route.
 ## Human control
 
 The tile names the controlling agent and offers Take Control through the styled
-Preview menu. Actual pointer/key input wins too. The host increments a control
+Preview menu. Actual clicks and key input win too; hovering and scrolling do
+not reclaim the simulator. The host increments a control
 generation, releases the attachment and cancels pending automation. The reclaim
 is recorded by device for the running App process, so reopening a tile or
 changing tile IDs cannot bypass it. During that process only the user's Allow
