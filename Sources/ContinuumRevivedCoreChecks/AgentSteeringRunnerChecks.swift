@@ -550,8 +550,9 @@ private func runCodexSteeringRunnerChecks() {
         CodexAgentRunner(config: .init(model: "fake-model", cwd: root, threadId: nil))
     }
 
-    // turn/steer carries the active turn as expectedTurnId; the response is
-    // the receipt.
+    // turn/steer carries the active turn as expectedTurnId; the response only
+    // acknowledges it. The receipt is the userMessage item whose clientId echoes
+    // clientUserMessageId (a0b91c95).
     do {
         let root = steeringFakeRoot(.codex)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -574,7 +575,7 @@ private func runCodexSteeringRunnerChecks() {
                    && params?["clientUserMessageId"] as? String == steerID.uuidString
                    && ((params?["input"] as? [[String: Any]])?.first?["text"] as? String) == "change course",
                    "codex steer: turn/steer must pin expectedTurnId to the active turn, got \(String(describing: params))")
-            expect(dispositions.value.map(\.0) == [steerID], "codex steer: the response confirms the steer")
+            expect(dispositions.value.map(\.0) == [steerID], "codex steer: the correlated userMessage item confirms the steer")
             expect(outcomes(events.value) == [.completed], "codex steer: one turn, completed")
             // The turn has ended: a late steer is refused, never sent blind.
             var refused = false
@@ -605,10 +606,12 @@ private func runCodexSteeringRunnerChecks() {
     }
 
     // T5c — a steer codex accepted (turn/steer answered) but had not applied
-    // when the turn was interrupted. turn/steer's response is the only receipt
-    // codex gives and turn/interrupt has no cancel or receipt, so the steer
-    // stays confirmed; what makes Stop final is that the app-server lives only
-    // as long as its turn, so nothing it held can start another.
+    // when the turn was interrupted. The answer is an acknowledgement, not a
+    // receipt: only a userMessage item echoing its clientId shows the input
+    // entered provider history (a0b91c95). None arrived, so the steer closes
+    // `uncertain` and the supervisor keeps custody instead of counting it
+    // consumed. What makes Stop final is that the app-server lives only as long
+    // as its turn, so nothing it held can start another.
     do {
         let root = steeringFakeRoot(.codex)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -626,8 +629,9 @@ private func runCodexSteeringRunnerChecks() {
             }
             do { try runner.interrupt() } catch { expect(false, "codex stop-handed: turn/interrupt must succeed: \(error)") }
             expect(done.wait(timeout: .now() + 5) == .success, "codex stop-handed: the turn must end")
-            expect(outcomes(events.value) == [.interrupted] && dispositions.value.map(\.1) == [.consumed],
-                   "codex stop-handed: the turn closes .interrupted with the steer confirmed by turn/steer, got \(outcomes(events.value)) \(dispositions.value)")
+            expect(outcomes(events.value) == [.interrupted] && dispositions.value.map(\.0) == [steerID]
+                   && dispositions.value.map(\.1) == [.uncertain],
+                   "codex stop-handed: the turn closes .interrupted and the acknowledged but unapplied steer closes uncertain, never consumed, got \(outcomes(events.value)) \(dispositions.value)")
             let pid = AgentSteeringQAFakes.latestPid(in: root)
             expect(waitUntil(3) { pid.map { kill($0, 0) != 0 } ?? false },
                    "codex stop-handed: the app-server must end with its interrupted turn, so the unapplied steer cannot start another")
