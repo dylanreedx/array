@@ -270,6 +270,10 @@ final class BrowserAutomation {
     // MARK: - Acting
 
     func click(ref: String, doubleClick: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
+        let focusWindow = try liveWindow()
+        let priorResponder = focusWindow.firstResponder
+        let priorInput = Self.focusInputGeneration
+        defer { restore(priorResponder, in: focusWindow, inputGeneration: priorInput) }
         actionDocumentIdentity = documentIdentity
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
@@ -285,6 +289,10 @@ final class BrowserAutomation {
     }
 
     func click(x: Double, y: Double, doubleClick: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
+        let focusWindow = try liveWindow()
+        let priorResponder = focusWindow.firstResponder
+        let priorInput = Self.focusInputGeneration
+        defer { restore(priorResponder, in: focusWindow, inputGeneration: priorInput) }
         actionDocumentIdentity = documentIdentity
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {

@@ -139,7 +139,12 @@ func runBrowserFocusRestorationCheck() throws {
     _ = try call("browser.click", ["tileId": tile, "ref": ref])
     window.responderTrace = nil
     print("Ordinary agent click: responderBorrowObserved=\(borrowedDuringOrdinaryClick), originalResponderAfterAction=\(window.firstResponder === old)")
-    window.makeFirstResponder(old)
+    guard window.firstResponder === old else {
+        throw WorkspaceAPIChecks.Failure(message: "ordinary click lost composer: \(String(describing: window.firstResponder))")
+    }
+    NSApp.sendEvent(userKey)
+    guard old.string == "q" else { throw WorkspaceAPIChecks.Failure(message: "ordinary click lost next user key") }
+    old.string = ""
     var delivered = 0
     engine._afterAgentCharacterForChecks = {
         delivered += 1
