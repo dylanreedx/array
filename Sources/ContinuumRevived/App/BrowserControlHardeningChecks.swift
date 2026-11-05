@@ -591,3 +591,39 @@ func runBrowserDurableTakeoverCheck() throws {
     _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
     _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
 }
+
+@MainActor
+func runBrowserUnrelatedInputCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing browser") }
+    let count = browser.automation.userInputCount
+    let composer = NSTextView(frame: NSRect(x: 10, y: 10, width: 200, height: 80))
+    h.f.canvas.addSubview(composer)
+    h.window.makeFirstResponder(composer)
+    let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: h.window.windowNumber, context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12)!
+    NSApp.sendEvent(key)
+    try expect(browser.automation.userInputCount == count, "sibling typing must not take browser control")
+    func mouse(_ type: NSEvent.EventType, _ point: NSPoint, flags: NSEvent.ModifierFlags = []) {
+        let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: h.window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        NSApp.sendEvent(event)
+    }
+    let sibling = composer.convert(NSPoint(x: 20, y: 20), to: nil)
+    mouse(.leftMouseDown, sibling); mouse(.leftMouseUp, sibling)
+    try expect(browser.automation.userInputCount == count, "clicking a sibling surface must not take browser control")
+    composer.removeFromSuperview()
+    let start = NSPoint(x: 4, y: 4)
+    mouse(.leftMouseDown, start, flags: .command)
+    mouse(.leftMouseDragged, NSPoint(x: 24, y: 24), flags: .command)
+    mouse(.leftMouseUp, NSPoint(x: 24, y: 24), flags: .command)
+    try expect(browser.automation.userInputCount == count, "camera pan must not take browser control")
+    try h.f.runtime.switchWorkspace(to: h.f.workspaceWB)
+    try h.f.runtime.switchWorkspace(to: h.f.workspaceWA)
+    try expect(!h.f.api.browserUserTakenOver.contains(tile), "workspace navigation must not take browser control")
+    try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControlPaused != true, "unrelated user work must leave ownership intact")
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+}
