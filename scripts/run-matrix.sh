@@ -1279,6 +1279,7 @@ run_app_check .build/debug/Array --agent-browser-spawn-check
 run_app_check .build/debug/Array --browser-unrelated-input-check
 run_app_check .build/debug/Array --browser-ref-identity-check
 run_app_check .build/debug/Array --browser-action-results-check
+run_app_check .build/debug/Array --browser-writer-transfer-check
 run_app_check .build/debug/Array --browser-durable-takeover-check
 run_app_check .build/debug/Array --browser-action-queue-check
 run_app_check .build/debug/Array --browser-lease-check

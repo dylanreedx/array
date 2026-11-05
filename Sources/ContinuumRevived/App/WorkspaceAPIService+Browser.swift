@@ -144,14 +144,56 @@ extension WorkspaceAPIService {
         }
     }
 
+    /// Native tile-menu action only: the user explicitly picks the next writer.
+    @discardableResult
+    func transferBrowserWriter(tileId: UUID, from previous: AgentID, to next: AgentID) -> Bool {
+        guard previous != next, browserActionQueue.isQuiescent(tileId: tileId),
+              case .success = browserScopeTarget(tileId: tileId, agentId: previous),
+              case .success = browserScopeTarget(tileId: tileId, agentId: next),
+              let canvas = canvasProvider(), var tile = canvas.tileRecord(for: tileId),
+              tile.metadata.browserControllingAgentId == previous,
+              let browser = liveBrowser(tileId: tileId),
+              let zone = canvas.installedZoneIds(containing: tileId).first,
+              let project = canvas.projectId(forZone: zone), let controller = runtimeProvider()?.controller(for: project) else { return false }
+        let original = tile
+        tile.metadata.browserOwnerAgentId = next
+        tile.metadata.browserControlPaused = false
+        canvas.updateTile(tile, recalculateZoneBounds: false)
+        controller.scheduleCanvasSave()
+        do { try controller.flushCanvasSave() }
+        catch {
+            canvas.updateTile(original, recalculateZoneBounds: false)
+            controller.scheduleCanvasSave()
+            return false
+        }
+        browserLeaseLedger?.release(tileId: tileId)
+        browserHandOvers[tileId] = nil
+        browserGateInstallations[tileId] = nil
+        browserVisitApprovals[tileId] = nil
+        browser.agentNavigationDecision = nil
+        browser.automation.invalidateDocumentIdentity()
+        browser.automation.onUserInput = { [weak self] in self?.takeBackBrowser(tileId: tileId) }
+        browserUserTakenOver.remove(tileId)
+        browserNeedsHandbackSnapshot.insert(tileId)
+        browserControlPresentation?(tileId, next, false, false)
+        return true
+    }
+
     @discardableResult
     func returnBrowserToAgent(tileId: UUID, agentId: AgentID) -> Bool {
         guard !browserActionQueue.isActive(tileId: tileId),
               let canvas = canvasProvider(), var tile = canvas.tileRecord(for: tileId),
               tile.metadata.browserControllingAgentId == agentId,
-              let browser = liveBrowser(tileId: tileId) else { return false }
+              let browser = liveBrowser(tileId: tileId),
+              let zone = canvas.installedZoneIds(containing: tileId).first,
+              let project = canvas.projectId(forZone: zone), let controller = runtimeProvider()?.controller(for: project) else { return false }
+        let original = tile
         tile.metadata.browserControlPaused = false
         canvas.updateTile(tile, recalculateZoneBounds: false)
+        controller.scheduleCanvasSave()
+        do { try controller.flushCanvasSave() }
+        catch { canvas.updateTile(original, recalculateZoneBounds: false); return false }
+        browser.automation.invalidateDocumentIdentity()
         browserUserTakenOver.remove(tileId)
         browserNeedsHandbackSnapshot.insert(tileId)
         browser.automation.onUserInput = { [weak self] in self?.takeBackBrowser(tileId: tileId) }
@@ -163,6 +205,12 @@ extension WorkspaceAPIService {
         if let canvas = canvasProvider(), var tile = canvas.tileRecord(for: tileId) {
             tile.metadata.browserControlPaused = true
             canvas.updateTile(tile, recalculateZoneBounds: false)
+            if let zone = canvas.installedZoneIds(containing: tileId).first,
+               let project = canvas.projectId(forZone: zone), let controller = runtimeProvider()?.controller(for: project) {
+                controller.scheduleCanvasSave()
+                do { try controller.flushCanvasSave() }
+                catch { fputs("Browser takeover remains paused; its canvas save failed: \(error)\n", stderr) }
+            }
         }
         let owner = browserHandOvers[tileId]?.agentId ?? canvasProvider()?.tileRecord(for: tileId)?.metadata.browserOwnerAgentId
         browserUserTakenOver.insert(tileId)
@@ -172,6 +220,7 @@ extension WorkspaceAPIService {
         browserGateInstallations[tileId] = nil
         if let owner { browserControlPresentation?(tileId, owner, false, true) }
         if let browser = liveBrowser(tileId: tileId) {
+            browser.automation.invalidateDocumentIdentity()
             browser.automation.onUserInput = nil
             browser.automation.onAgentClick = nil
             browser.agentNavigationDecision = nil
@@ -587,6 +636,7 @@ extension WorkspaceAPIService {
                     }
                 }
 
+                browser.automation.selectComparisonPrincipal(agentId)
                 var reply = await BrowserActionExecutor.perform(request, runtime: browser, deadline: actionDeadline,
                                                                 checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
                 if operation == .browserScreenshot, case let .result(fields) = reply {

@@ -561,18 +561,19 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     /// The shared choice control exposes the current driver and explicit user
     /// actions without adding a second, platform-styled menu to the tile.
     func setAgentControl(name: String, colour: NSColor?, engaged: Bool, userDriving: Bool,
-                         takeControl: @escaping () -> Void, returnToAgent: (() -> Void)? = nil, revealAgent: @escaping () -> Void,
+                         takeControl: @escaping () -> Void, returnToAgent: (() -> Void)? = nil, writerChoices: [ChoiceItem] = [], transferWriter: ((String) -> Void)? = nil, revealAgent: @escaping () -> Void,
                          close: @escaping () -> Void) {
         let visible = engaged || userDriving || !browserActivityLines.isEmpty
         agentControlButton.isHidden = !visible
         guard visible else { agentControlTitleForQA = nil; return }
         let title = AgentControlChip.title(agentName: name, engaged: engaged, userDriving: userDriving) ?? "Browser activity"
         agentControlTitleForQA = title
-        agentControlActions = (userDriving ? (returnToAgent == nil ? [] : [ChoiceItem(id: "return", title: "Return to agent")]) : (!engaged ? [] : [AgentControlChip.takeControl])) + [
+        agentControlActions = (userDriving ? (returnToAgent == nil ? [] : [ChoiceItem(id: "return", title: "Return to agent")]) : (!engaged ? [] : [AgentControlChip.takeControl])) + writerChoices + [
             ChoiceItem(id: "reveal", title: "Reveal agent"), ChoiceItem(id: "close", title: "Close browser", destructive: true)
         ]
         agentControlButton.leadingSwatches = colour.map { [$0] } ?? []
         agentControlButton.onSelection = { item in
+            if item.id.hasPrefix("writer-") { transferWriter?(item.id); return }
             switch item.id {
             case "take": takeControl()
             case "return": returnToAgent?()

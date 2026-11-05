@@ -583,9 +583,14 @@ func runBrowserDurableTakeoverCheck() throws {
     view.qaChooseAgentControl("return")
     // Discard the old service cache as a restart does; only persisted tile state remains.
     h.f.api.browserNeedsHandbackSnapshot.removeAll()
-    let encoded = try JSONEncoder().encode(h.f.canvas.tileRecord(for: tile)!)
-    let restored = try JSONDecoder().decode(Tile.self, from: encoded)
-    h.f.canvas.updateTile(restored, recalculateZoneBounds: false)
+    let persisted = try h.f.storePb.loadCanvas()
+    guard let saved = persisted.tiles.first(where: { $0.id == tile }) else { throw WorkspaceAPIChecks.Failure(message: "handback did not persist its tile") }
+    try expect(saved.metadata.browserControlPaused == false, "handback must synchronously persist its snapshot requirement")
+    let encoded = try JSONEncoder().encode(saved)
+    let decoded = try JSONDecoder().decode(Tile.self, from: encoded)
+    guard var mounted = h.f.canvas.tileRecord(for: tile) else { throw WorkspaceAPIChecks.Failure(message: "missing mounted handback tile") }
+    mounted.metadata = decoded.metadata
+    h.f.canvas.updateTile(mounted, recalculateZoneBounds: false)
     let premature = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
     try expect(h.errorCode(premature) == "target_conflict", "handback must require a snapshot")
     _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
@@ -617,9 +622,11 @@ func runBrowserUnrelatedInputCheck() throws {
     try expect(browser.automation.userInputCount == count, "clicking a sibling surface must not take browser control")
     composer.removeFromSuperview()
     let start = NSPoint(x: 4, y: 4)
+    let cameraBefore = h.f.canvas.canvasState.viewport
     mouse(.leftMouseDown, start, flags: .command)
     mouse(.leftMouseDragged, NSPoint(x: 24, y: 24), flags: .command)
     mouse(.leftMouseUp, NSPoint(x: 24, y: 24), flags: .command)
+    try expect(h.f.canvas.canvasState.viewport != cameraBefore, "camera input did not reach the camera driver")
     try expect(browser.automation.userInputCount == count, "camera pan must not take browser control")
     try h.f.runtime.switchWorkspace(to: h.f.workspaceWB)
     try h.f.runtime.switchWorkspace(to: h.f.workspaceWA)
@@ -725,4 +732,50 @@ func runBrowserActionResultsCheck() throws {
     let partialRetry = try h.raw("browser.type", ["tileId": typingTile.uuidString, "ref": ref, "text": String(repeating: "x", count: 200), "idempotencyKey": "partial-type"])
     try expect(action(partialRetry)?["effects"] as? String == "partial", "partial retry must retain the original effect report")
     try expect(browser.automation.actionDeliveredCharacters == delivered, "same-key partial retry must not dispatch")
+}
+
+@MainActor
+func runBrowserWriterTransferCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let supervisor = h.f.delegate.qaAgentSupervisor
+    let reader = supervisor.spawn(role: nil, prompt: nil, cwd: h.f.pbRoot, harness: .pi,
+        model: "openai-codex/gpt-5.6-sol", thinking: "high", projectId: h.f.projectPb, projectRoot: h.f.pbRoot)
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: reader, true)
+    let (tile, page) = try h.ownedBrowser()
+    try Data("<html><body><button>Target</button></body></html>".utf8).write(to: page)
+    _ = try h.ok("browser.navigate", ["tileId": tile.uuidString, "action": "reload"])
+    let before = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let text = before["text"] as? String,
+          let line = text.split(separator: "\n").first(where: { $0.contains("- button \"Target\"") }),
+          let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression),
+          let view = h.f.canvas.tileView(for: tile) as? BrowserTileNSView else { throw WorkspaceAPIChecks.Failure(message: "no writer fixture") }
+    let ref = String(line[range].dropFirst(5).dropLast())
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { document.body.insertAdjacentHTML('beforeend','<button>Added</button>'); return true; }"])
+    let read = try h.raw("browser.snapshot", ["tileId": tile.uuidString], agent: reader)
+    try expect(read["status"] as? String == "ok", "a reader must be able to observe the tile")
+    try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControllingAgentId == h.f.agentId, "reader changed the writer")
+    let clicked = try h.ok("browser.click", ["tileId": tile.uuidString, "ref": ref])
+    try expect((clicked["changes"] as? [String])?.contains(where: { $0.contains("Added") }) == true, "reader snapshot replaced the writer's comparison baseline")
+    let transfer = "writer-" + reader.rawValue.uuidString
+    var stayedWithWriter = false
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+        view.qaChooseAgentControl(transfer)
+        stayedWithWriter = h.f.canvas.tileRecord(for: tile)?.metadata.browserControllingAgentId == h.f.agentId
+    }
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "async () => { await new Promise(r=>setTimeout(r,150)); return true; }"])
+    try expect(stayedWithWriter, "transfer must refuse while an action is running")
+    h.pump(0.1)
+    view.qaChooseAgentControl(transfer)
+    try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControllingAgentId == reader, "explicit quiescent transfer did not change writer")
+    let denied = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+    try expect(h.errorCode(denied) == "permission_denied" || h.errorCode(denied) == "target_conflict", "old writer must lose mutation access")
+    let premature = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"], agent: reader)
+    try expect(h.errorCode(premature) == "target_conflict", "new writer needs a fresh snapshot")
+    let snapshot = try h.raw("browser.snapshot", ["tileId": tile.uuidString], agent: reader)
+    try expect(snapshot["status"] as? String == "ok", "new writer snapshot failed")
+    let written = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"], agent: reader)
+    try expect(written["status"] as? String == "ok", "new writer cannot mutate after snapshot")
+    let oldWriter = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+    try expect(h.errorCode(oldWriter) == "permission_denied", "old writer regained access after the new writer's snapshot")
 }

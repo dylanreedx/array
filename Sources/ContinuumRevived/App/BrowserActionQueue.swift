@@ -119,6 +119,7 @@ final class BrowserActionQueue {
     }
 
     func isActive(tileId: UUID) -> Bool { active[tileId] != nil }
+    func isQuiescent(tileId: UUID) -> Bool { active[tileId] == nil && (pending[tileId]?.isEmpty ?? true) }
 
     /// Only effect metadata escapes here, never a cached page result. This lets a
     /// transport retry remain uncertain even while new mutations are paused.

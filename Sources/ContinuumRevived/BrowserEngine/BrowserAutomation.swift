@@ -120,12 +120,32 @@ final class BrowserAutomation {
         let keyCode: UInt16?
     }
     private var agentInputFingerprints: [AgentInputFingerprint] = []
+    private struct ComparisonBaseline {
+        var outline: Set<String>?
+        var url: String?
+        var consoleMark: Int
+    }
+    private var comparisonPrincipal: AgentID?
+    private var comparisonBaselines: [AgentID: ComparisonBaseline] = [:]
+    func selectComparisonPrincipal(_ principal: AgentID) {
+        guard principal != comparisonPrincipal else { return }
+        if let previous = comparisonPrincipal {
+            comparisonBaselines[previous] = ComparisonBaseline(outline: lastOutline, url: outlineURL, consoleMark: snapshotConsoleMark)
+        }
+        comparisonPrincipal = principal
+        let baseline = comparisonBaselines[principal]
+        lastOutline = baseline?.outline
+        outlineURL = baseline?.url
+        snapshotConsoleMark = baseline?.consoleMark ?? 0
+    }
     private(set) var actionInputEvents = 0
     private(set) var actionDeliveredCharacters = 0
-    func beginActionTracking() { actionInputEvents = 0; actionDeliveredCharacters = 0 }
+    private var actionDocumentIdentity: String?
+    func beginActionTracking() { actionInputEvents = 0; actionDeliveredCharacters = 0; actionDocumentIdentity = documentIdentity }
     private(set) var documentIdentity = UUID().uuidString
     func invalidateDocumentIdentity() {
         documentIdentity = UUID().uuidString
+        comparisonBaselines.removeAll()
         lastOutline = nil
         outlineURL = nil
     }
@@ -166,7 +186,9 @@ final class BrowserAutomation {
     // MARK: - Reading the page
 
     func snapshot(deadline: Date) async throws -> BrowserAutomationSnapshot {
+        let identity = documentIdentity
         let raw = try await world("outline", [:], deadline: deadline)
+        guard identity == documentIdentity else { throw BrowserAutomationError.staleRef("document") }
         let lines = Self.outlineLines(raw)
         generation += 1
         lastOutline = Set(lines.map(\.text))
@@ -229,14 +251,13 @@ final class BrowserAutomation {
     // MARK: - Acting
 
     func click(ref: String, doubleClick: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         let inputAtStart = userInputCount
-        let identityAtStart = documentIdentity
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
             try await self.settleIfRevealed()
             let target = try await self.world("target", ["ref": ref], deadline: deadline)
             try Self.requireTarget(target, ref: ref, mustLand: true)
-            guard self.documentIdentity == identityAtStart else { throw BrowserAutomationError.staleRef(ref) }
             try self.requireInputControl(inputAtStart, deadline: deadline)
             self.deliverClick(cssX: Self.double(target["x"]), cssY: Self.double(target["y"]), window: window, count: doubleClick ? 2 : 1)
             return ("Clicked \(target["what"] as? String ?? ref)", nil)
@@ -244,6 +265,7 @@ final class BrowserAutomation {
     }
 
     func click(x: Double, y: Double, doubleClick: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
@@ -259,9 +281,9 @@ final class BrowserAutomation {
     /// when `ref` is nil. `clear` replaces the field's contents; `submit`
     /// presses Enter afterwards.
     func type(_ text: String, ref: String?, clear: Bool = false, submit: Bool = false, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         try await waitForUserQuiet(deadline: deadline)
         let inputAtStart = userInputCount
-        let identityAtStart = documentIdentity
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
             let responder = window.firstResponder
@@ -273,7 +295,6 @@ final class BrowserAutomation {
                 try Self.requireTarget(target, ref: ref, mustLand: true)
                 what = target["what"] as? String ?? ref
                 guard target["editable"] as? Bool == true else { throw BrowserAutomationError.notEditable(what) }
-                guard self.documentIdentity == identityAtStart else { throw BrowserAutomationError.staleRef(ref) }
                 try self.requireInputControl(inputAtStart, deadline: deadline)
                 self.deliverClick(cssX: Self.double(target["x"]), cssY: Self.double(target["y"]), window: window, count: 1)
                 try await self.pause(0.05, deadline: deadline)
@@ -291,9 +312,8 @@ final class BrowserAutomation {
             else { focusRef = try await self.world("activeRef", [:], deadline: deadline)["ref"] as? String ?? "" }
             for character in text {
                 let focus = try await self.world("focusedIs", ["ref": focusRef], deadline: deadline)
-                guard self.documentIdentity == identityAtStart else { throw BrowserAutomationError.staleRef(focusRef) }
-                guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
                 try self.requireInputControl(inputAtStart, deadline: deadline)
+                guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
                 self.deliverCharacter(character, window: window)
                 self.actionDeliveredCharacters += 1
                 // WebKit consumes trusted input asynchronously. A small yield
@@ -315,6 +335,7 @@ final class BrowserAutomation {
     /// `combo` is a key name or one character, optionally with modifiers:
     /// `Enter`, `Shift+Tab`, `ArrowDown`, `Control+a`.
     func pressKey(_ combo: String, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         var parts = combo.split(separator: "+", omittingEmptySubsequences: false).map(String.init)
         if combo.hasSuffix("++") || combo == "+" { parts = Array(parts.dropLast(2)) + ["+"] }
         guard let keyName = parts.last, !keyName.isEmpty else { throw BrowserAutomationError.unknownKey(combo) }
@@ -355,6 +376,7 @@ final class BrowserAutomation {
     }
 
     func scroll(ref: String? = nil, dx: Double = 0, dy: Double = 0, deadline: Date) async throws -> BrowserAutomationOutcome {
+        actionDocumentIdentity = documentIdentity
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             try self.requireInputControl(inputAtStart, deadline: deadline)
@@ -485,6 +507,7 @@ final class BrowserAutomation {
     private func requireInputControl(_ inputAtStart: Int, deadline: Date) throws {
         guard runtime?.isTerminated == false else { throw BrowserAutomationError.notLive }
         guard userInputCount == inputAtStart else { throw BrowserAutomationError.userTyping }
+        if let expected = actionDocumentIdentity, expected != documentIdentity { throw BrowserAutomationError.staleRef("document") }
         guard Date() < deadline else { throw BrowserAutomationError.timedOut("before sending browser input", throttled: isThrottled) }
     }
 
