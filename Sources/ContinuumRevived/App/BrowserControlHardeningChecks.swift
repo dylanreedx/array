@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedCore
 import Foundation
+import WebKit
 
 /// Review findings on the agent browser API, each driven through the
 /// provider entry (`handleMCPRequest`) on the production-mounted fixture.
@@ -818,4 +819,40 @@ func runBrowserWriterTransferCheck() throws {
     try expect(written["status"] as? String == "ok", "new writer cannot mutate after snapshot")
     let oldWriter = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
     try expect(h.errorCode(oldWriter) == "permission_denied", "old writer regained access after the new writer's snapshot")
+}
+
+@MainActor
+func runBrowserBackgroundSchedulingCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing browser") }
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { window.timerTicks=0; window.animationTicks=0; window.timerID=setInterval(()=>timerTicks++,10); function frame(){ animationTicks++; requestAnimationFrame(frame) }; requestAnimationFrame(frame); return true }"])
+    func counters() throws -> [String: Any] {
+        let answer = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => ({timer:timerTicks, animation:animationTicks, visibility:document.visibilityState})"])
+        return answer["value"] as? [String: Any] ?? [:]
+    }
+    let before = try counters()
+    h.pump(1)
+    let after = try counters()
+    let ticks = (after["timer"] as? Int ?? 0) - (before["timer"] as? Int ?? 0)
+    try expect(ticks >= 20, "engaged hidden page timer remained throttled: \(ticks) ticks in one second; \(before) -> \(after)")
+    print("Engaged timers: \(ticks)/s; rAF delta=\((after["animation"] as? Int ?? 0) - (before["animation"] as? Int ?? 0)); visibility=\(after["visibility"] ?? "unknown")")
+    h.userKey(into: browser)
+    h.pump(0.1)
+    let prefs = browser.webView.configuration.preferences
+    let defaults = WKPreferences()
+    for name in ["_hiddenPageDOMTimerThrottlingEnabled", "_pageVisibilityBasedProcessSuppressionEnabled"] {
+        let selector = NSSelectorFromString(name)
+        try expect(prefs.responds(to: selector) && defaults.responds(to: selector), "missing scheduling getter \(name)")
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        let actual = unsafeBitCast(prefs.method(for: selector), to: Getter.self)(prefs, selector)
+        let original = unsafeBitCast(defaults.method(for: selector), to: Getter.self)(defaults, selector)
+        try expect(actual == original, "takeover did not restore \(name)")
+    }
+    try expect(prefs.inactiveSchedulingPolicy == defaults.inactiveSchedulingPolicy, "takeover did not restore inactive scheduling policy")
+    let snapshot = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    try expect((snapshot["backgroundScheduling"] as? String)?.contains("requestAnimationFrame") == true, "snapshot must name the hidden rAF limitation")
+    print("PASS: production lease accelerates timers and takeover restores scheduling; hidden rAF remains limited")
 }

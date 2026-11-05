@@ -1031,3 +1031,5 @@ check --browser-writer-transfer-check
 leg run_app_check .build/debug/Array --browser-writer-transfer-check
 check --browser-durable-takeover-check
 leg run_app_check .build/debug/Array --browser-durable-takeover-check
+check --browser-background-scheduling-check
+leg run_app_check .build/debug/Array --browser-background-scheduling-check

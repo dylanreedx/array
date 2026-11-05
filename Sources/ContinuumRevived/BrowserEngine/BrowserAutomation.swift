@@ -117,7 +117,45 @@ final class BrowserAutomation {
     /// Set by the owner while an agent drives this tile. Dialogs and file
     /// choosers are then answered here instead of opening a sheet nobody
     /// is watching.
-    var isEngaged = false
+    var isEngaged = false {
+        didSet { if oldValue != isEngaged { updateBackgroundScheduling() } }
+    }
+    private var originalScheduling: [(setter: String, value: Bool)] = []
+    private var originalInactivePolicy: WKPreferences.InactiveSchedulingPolicy?
+    var backgroundSchedulingCapability: String {
+        let state = !originalScheduling.isEmpty ? "background DOM timer acceleration enabled" : isEngaged ? "background DOM timer acceleration unavailable; standard scheduling retained" : "ownership inactive; standard scheduling restored"
+        return state + "; requestAnimationFrame can remain frozen on a hidden page; rAF-dependent work is not guaranteed."
+    }
+
+    private func updateBackgroundScheduling() {
+        let prefs = webView.configuration.preferences
+        typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        func set(_ name: String, _ value: Bool) {
+            let selector = NSSelectorFromString(name)
+            unsafeBitCast(prefs.method(for: selector), to: Setter.self)(prefs, selector, value)
+        }
+        if !isEngaged {
+            for entry in originalScheduling { set(entry.setter, entry.value) }
+            originalScheduling.removeAll()
+            if let policy = originalInactivePolicy { prefs.inactiveSchedulingPolicy = policy }
+            originalInactivePolicy = nil
+            return
+        }
+        let controls = [
+            ("_hiddenPageDOMTimerThrottlingEnabled", "_setHiddenPageDOMTimerThrottlingEnabled:"),
+            ("_pageVisibilityBasedProcessSuppressionEnabled", "_setPageVisibilityBasedProcessSuppressionEnabled:")
+        ]
+        guard controls.allSatisfy({ prefs.responds(to: NSSelectorFromString($0.0)) && prefs.responds(to: NSSelectorFromString($0.1)) }) else { return }
+        originalInactivePolicy = prefs.inactiveSchedulingPolicy
+        for (getter, setter) in controls {
+            let selector = NSSelectorFromString(getter)
+            let value = unsafeBitCast(prefs.method(for: selector), to: Getter.self)(prefs, selector)
+            originalScheduling.append((setter, value))
+        }
+        prefs.inactiveSchedulingPolicy = .none
+        for entry in originalScheduling { set(entry.setter, false) }
+    }
     private(set) var generation = 0
     /// Bumped by every real mouse-down or key-down the user makes in this
     /// tile. S3's takeover rule reads it.

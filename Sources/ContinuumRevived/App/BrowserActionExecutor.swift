@@ -30,7 +30,7 @@ enum BrowserActionExecutor {
             case let .snapshot(tile, _) where tile == runtime.tileId:
                 let value = try await engine.snapshot(deadline: deadline)
                 return reply(["text": value.text, "generation": value.generation, "url": value.url,
-                              "title": value.title, "cut": value.cut])
+                              "title": value.title, "cut": value.cut, "backgroundScheduling": engine.backgroundSchedulingCapability])
             case let .click(tile, target, _) where tile == runtime.tileId:
                 switch target {
                 case .ref(let ref): return outcome(try await engine.click(ref: ref, deadline: deadline))
