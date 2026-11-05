@@ -53,7 +53,7 @@ enum WorkspaceAPIDeviceBuildChecks {
         }
         let prompts = f.api.approvalPromptCount
         let started = try result(await call("device.build_run", target)), id = started["operationId"] as! String
-        try require(f.api.approvalPromptCount == prompts + 1, "device Open session grant must not silently authorize builds under Ask first")
+        try require(f.api.approvalPromptCount == prompts, "one simulator approval must cover open, observation, input and build operations")
         let completed = try await settled(id)
         let build = completed["deviceBuild"] as! [String: Any]
         try require(completed["status"] as? String == "committed" && build["kind"] as? String == "device_build" && build["state"] as? String == "succeeded" && completed["childResult"] == nil,
@@ -100,14 +100,33 @@ enum WorkspaceAPIDeviceBuildChecks {
         let nativeCalls = calls.count
         _ = try await mcp.call(tool: "array_device_build_run", arguments: nativeRequest)
         try require(calls.count == nativeCalls, "native MCP build retry must not repeat commands")
+        // A one-time build approval authorizes the accepted job until it settles,
+        // even though the request has already returned its operation receipt.
+        f.api.revoke(agentId: f.agentId)
+        let reopened = try result(await call("device.open", ["checkoutHandle": f.pbHandle.rawValue,
+            "tileId": f.canvas.allWorkspaceTiles().first { $0.kind == .iosPreview }!.id.uuidString]))
+        let onceSession = reopened["sessionId"] as! String
+        // Remove the session grant without invalidating the native attachment.
+        f.api.grants[f.agentId] = []
+        f.api.deviceAPI.approvedVisits.removeAll()
+        var onceApprovals = 0
+        f.api.approvalHandler = { _ in onceApprovals += 1; return .allowOnce }
+        var onceRequest = target; onceRequest["sessionId"] = onceSession
+        onceRequest["idempotencyKey"] = "allow-once-build"
+        let onceStart = try result(await call("device.build_run", onceRequest))
+        let onceResult = try await settled(onceStart["operationId"] as! String)
+        try require(onceApprovals == 1 && (onceResult["deviceBuild"] as? [String: Any])?["state"] as? String == "succeeded",
+            "Allow Once must survive the receipt and authorize the complete asynchronous build")
+        f.api.approvalHandler = { _ in .allowForSession }
         hold = true; calls = []
-        var revokedRequest = target; revokedRequest["idempotencyKey"] = "revoked-api-build"
+        var revokedRequest = target
+        revokedRequest["sessionId"] = onceSession; revokedRequest["idempotencyKey"] = "revoked-api-build"
         let revokedStart = try result(await call("device.build_run", revokedRequest))
         let revokedID = revokedStart["operationId"] as! String
         for _ in 0..<200 { if calls.contains(where: { $0.last == "build" }) { break }; try await Task.sleep(for: .milliseconds(5)) }
         f.api.revoke(agentId: f.agentId)
         for _ in 0..<500 { if f.api.deviceBuildJobs.jobs[revokedID]?.task == nil { break }; try await Task.sleep(for: .milliseconds(5)) }
         try require(f.api.deviceBuildJobs.jobs[revokedID]?.state == "cancelled" && !calls.contains { $0.contains("install") }, "production API revocation must cancel its owned build before install")
-        print("WorkspaceAPIDeviceBuildChecks passed: separate Ask-first build grant, accepted job identity, tagged operation polling, bounded log, same-key success/failure replay, payload conflict, path escape denial, failure/cancel no-install install uncertainty/no-launch, native MCP and revoke cancellation")
+        print("WorkspaceAPIDeviceBuildChecks passed: single simulator approval and retained Allow Once build admission, accepted job identity, tagged operation polling, bounded log, same-key success/failure replay, payload conflict, path escape denial, failure/cancel no-install install uncertainty/no-launch, native MCP and revoke cancellation")
     }
 }

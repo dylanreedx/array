@@ -1274,7 +1274,7 @@
       "promptGuidelines": [
         "Always include checkoutHandle from array_workspace_context in every build_run call. A sessionId never replaces this required checkout scope.",
         "Use your explicit Home checkout and an owned session. projectFile is a checkout-relative .xcodeproj or .xcworkspace path; scheme must exist in that exact container.",
-        "Under Ask first, visual preview approval does not authorize building. Use the existing build approval flow.",
+        "Under Ask first, one simulator approval covers visual control and building. Allow Once on Open lasts for the live simulator visit; a one-time build approval lasts until that accepted job settles.",
         "Start requires a stable idempotencyKey. Success, failure and cancellation retain the original operation identity; a changed payload conflicts. Never blindly repeat an uncertain installation with a new key.",
         "kind cancel requires your owned operationId and does not require a current preview lease. Cancellation settles asynchronously; poll until terminal.",
         "Native build completion is separate from app correctness. Observe the resulting screen. Logs are private project diagnostics: do not echo sensitive values.",

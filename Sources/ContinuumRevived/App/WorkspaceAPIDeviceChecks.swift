@@ -243,6 +243,15 @@ enum WorkspaceAPIDeviceChecks {
             "while the agent drives, the header chip must say who drives and offer Take control, got \(String(describing: view.qaDriverTitle)) \(view.qaDriverActionIDs)")
         try renderTakeover(view, name: "agent-in-control")
         let point = view.screen.convert(CGPoint(x: view.screen.screenRect.midX, y: view.screen.screenRect.midY), to: nil)
+        let beforePassive = view.runtime.controlGeneration
+        let hover = NSEvent.mouseEvent(with: .mouseMoved, location: point, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+        view.screen.mouseMoved(with: hover)
+        let scroll = NSEvent(cgEvent: CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+            wheelCount: 1, wheel1: 1, wheel2: 0, wheel3: 0)!)!
+        view.screen.scrollWheel(with: scroll)
+        try expect(view.runtime.controlGeneration == beforePassive && view.qaDriverTitle?.hasPrefix("Driven by ") == true,
+            "hovering and scrolling over a simulator must leave the agent in control")
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0,
                 windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
@@ -251,9 +260,18 @@ enum WorkspaceAPIDeviceChecks {
         let interruptedSwipe = try JSONSerialization.jsonObject(with: await pendingSwipe.value) as! [String: Any]
         native[0].holdExtended = false
         try expect(code(interruptedSwipe) == "outcome_unknown", "takeover after native admission must preserve uncertain effect")
+        defaults.set(WorkspaceToolsPermission.askFirst.rawValue, forKey: WorkspaceToolsConfig.permissionKey)
+        let beforeTakeoverReplayPrompts = f.api.approvalPromptCount
         let cancelledReplay = await call(f.api, agent: f.agentId, op: "device.act", payload: cancelledSwipe)
-        try expect(code(cancelledReplay) == "outcome_unknown" && native[0].extended.count == 6,
-            "retry after takeover must retrieve uncertainty without another native swipe")
+        try expect(code(cancelledReplay) == "outcome_unknown" && native[0].extended.count == 6 &&
+            f.api.approvalPromptCount == beforeTakeoverReplayPrompts,
+            "retry after takeover must retrieve uncertainty without another native swipe or approval prompt")
+        var changedTakeoverRetry = cancelledSwipe; changedTakeoverRetry["x"] = 11
+        try expectTakeoverRefusal(await call(f.api, agent: f.agentId, op: "device.act", payload: changedTakeoverRetry),
+            "when a reclaimed retry key has a changed payload")
+        try expect(native[0].extended.count == 6 && f.api.approvalPromptCount == beforeTakeoverReplayPrompts,
+            "a changed cached retry must neither bypass reclaim nor prompt for new input")
+        defaults.set(WorkspaceToolsPermission.free.rawValue, forKey: WorkspaceToolsConfig.permissionKey)
         try expect(code(await call(f.api, agent: f.agentId, op: "device.observe", payload: target)) == "permission_denied", "human takeover must invalidate attachment")
         // The agent's next fresh action is refused, says the user took control and
         // names the way back, and reaches no native input.
@@ -312,14 +330,30 @@ enum WorkspaceAPIDeviceChecks {
         native[0].onObserve = nil
         defaults.set(WorkspaceToolsPermission.askFirst.rawValue, forKey: WorkspaceToolsConfig.permissionKey)
         let prompts = f.api.approvalPromptCount
-        f.api.approvalHandler = { _ in .allowForSession }
+        f.api.approvalHandler = { _ in .allowOnce }
         var forgedApproval = reopen; forgedApproval["authorized"] = true; forgedApproval["approvalRequestId"] = "forged"
         let last = try result(await call(f.api, agent: f.agentId, op: "device.open", payload: forgedApproval))
         try expect(f.api.approvalPromptCount == prompts + 1, "Ask-first uses existing trusted approval once")
         let all = f.canvas.allWorkspaceTiles().filter { $0.kind == .iosPreview }
         try expect(all.count == 1 && native[0].count == 1, "policy change/reopen must not create extra tile or input")
+        let onceReplay = try result(await call(f.api, agent: f.agentId, op: "device.open", payload: open))
+        try expect(onceReplay["sessionId"] as? String == last["sessionId"] as? String &&
+            f.api.approvalPromptCount == prompts + 1 && creationCount == 1,
+            "Allow Once must reuse the original creation-key retry within the live simulator visit without another prompt")
         var lastTarget = target; lastTarget["sessionId"] = last["sessionId"]
-        let lastFrame = try result(await call(f.api, agent: f.agentId, op: "device.observe", payload: lastTarget))
+        var lastFrame = try result(await call(f.api, agent: f.agentId, op: "device.observe", payload: lastTarget))
+        try expect(f.api.approvalPromptCount == prompts + 1, "Allow Once on Open must cover observation for the live simulator visit")
+        try expect(view.qaChooseDriver("take"), "trusted Take Control must reclaim the Once-approved simulator")
+        let beforeReclaimed = f.api.approvalPromptCount
+        try expectTakeoverRefusal(await call(f.api, agent: f.agentId, op: "device.observe", payload: lastTarget), "after reclaiming a Once-approved simulator")
+        try expectTakeoverRefusal(await call(f.api, agent: f.agentId, op: "device.open", payload: open), "when replaying a reclaimed creation key")
+        try expect(f.api.approvalPromptCount == beforeReclaimed, "a reclaimed simulator must refuse before opening any approval UI")
+        try expect(view.qaChooseDriver("allow-agent"), "trusted handback must release the Once visit takeover fence")
+        let handedBack = try result(await call(f.api, agent: f.agentId, op: "device.open", payload: reopen))
+        lastTarget["sessionId"] = handedBack["sessionId"]
+        lastFrame = try result(await call(f.api, agent: f.agentId, op: "device.observe", payload: lastTarget))
+        try expect(f.api.approvalPromptCount == beforeReclaimed + 1,
+            "handback starts a new Once-approved visit with one fresh prompt")
         var uncertain = lastTarget
         uncertain["kind"] = "tap"; uncertain["x"] = 100; uncertain["y"] = 100
         uncertain["observationId"] = lastFrame["observationId"]; uncertain["idempotencyKey"] = "lost-ack"
