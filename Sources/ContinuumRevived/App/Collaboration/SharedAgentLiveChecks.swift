@@ -60,6 +60,10 @@ enum SharedAgentLiveChecks {
             submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0),
             transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)))
         defer { supervisor.stopAll() }
+        // A slow durable receipt write, deterministically: a consumed steer must
+        // still be visible before its turn is reported as ended (the race Pi's
+        // late confirmation exposed, 25 ms once in a release-candidate run).
+        supervisor.qaBeforeSteerReceiptWrite = { try? await Task.sleep(nanoseconds: 300_000_000) }
         let (harness, model): (AgentHarness, String) = switch kind {
         case .claude: (.claudeCode, "anthropic/claude-haiku-4-5-20251001")
         case .codex: (.codex, "openai-codex/gpt-5.6-sol")

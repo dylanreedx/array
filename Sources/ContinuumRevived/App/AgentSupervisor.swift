@@ -11057,13 +11057,50 @@ final class AgentSupervisor {
         }
     }
 
+    /// Witness seam: awaited before a steer receipt's durable write, so a
+    /// check can make that write slow and deterministic.
+    var qaBeforeSteerReceiptWrite: (() async -> Void)?
+
+    /// Consumed steers already made visible, awaiting their durable write.
+    private var publishedConsumedSteers: Set<UUID> = []
+
+    /// What a consumed steer shows: the transcript row, the shared-agent
+    /// publication and the echo (a merged helper item settles its queued run).
+    private func publishConsumedSteer(_ entry: (id: UUID, message: AgentComposerQueuedMessage, prompt: AgentPrompt), for id: AgentID) {
+        if mergedHelperFallbackIDs[id]?.contains(entry.id) == true {
+            // Its text was in the turn its batch-mate started; that turn's
+            // run carries the work, so this queued run is settled.
+            updateCompanionTasks { try $0.beginHostWork(entry.id); try $0.settleHostWork(entry.id, state: .succeeded) }
+            return
+        }
+        // sendPrepared already records/publishes an ordinary next-turn
+        // prompt. Only a current-turn steer needs that transcript event.
+        if !(helperFallbackIDs[id]?.contains(entry.id) ?? false) {
+            updateCompanionTasks { try $0.applyQueuedToParent(entry.id) }
+            recordTranscriptUserPrompt(entry.prompt, for: id)
+            publishSteer(entry.prompt, for: id)
+        }
+        echoPrompt(entry.prompt, for: id)
+    }
+
     /// The provider's receipt for one handed-over steer.
+    ///
+    /// A CONSUMED steer is made visible here, synchronously: the receipt comes
+    /// in the provider's own stream ahead of whatever follows it there, its
+    /// turn's end included, and the main queue keeps that order. Publishing
+    /// it only after the durable write below let the turn report done first
+    /// (pi confirms late, from `queue_update`). The write only retires custody.
     private func settleDeliveringSteer(_ steerID: UUID, disposition: AgentSteerDisposition, for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
+        if disposition == .consumed, let entry = deliveringSteers[id]?.first(where: { $0.id == steerID }),
+           publishedConsumedSteers.insert(steerID).inserted {
+            publishConsumedSteer(entry, for: id)
+        }
         let previous = queueOpTasks[id]
         queueOpTasks[id] = Task { @MainActor [weak self] in
             if let previous { await previous.value }
             guard let self, let entry = self.deliveringSteers[id]?.first(where: { $0.id == steerID }) else { return }
+            await self.qaBeforeSteerReceiptWrite?()
             do {
                 try await store.finishSteerHandoff(steerID, applied: disposition == .consumed,
                     uncertain: disposition == .uncertain, for: id)
@@ -11075,24 +11112,15 @@ final class AgentSupervisor {
                 }
                 return
             }
-            let isFallback = self.helperFallbackIDs[id]?.contains(steerID) ?? false
-            let isMerged = self.mergedHelperFallbackIDs[id]?.remove(steerID) != nil
+            if disposition == .consumed, self.publishedConsumedSteers.remove(steerID) == nil {
+                self.publishConsumedSteer(entry, for: id)  // never published above: publish once now
+            }
+            self.mergedHelperFallbackIDs[id]?.remove(steerID)
             self.deliveringSteers[id]?.removeAll { $0.id == steerID }
             self.helperFallbackIDs[id]?.remove(steerID)
             switch disposition {
-            case .consumed where isMerged:
-                // Its text was in the turn its batch-mate started; that turn's
-                // run carries the work, so this queued run is settled.
-                self.updateCompanionTasks { try $0.beginHostWork(steerID); try $0.settleHostWork(steerID, state: .succeeded) }
             case .consumed:
-                // sendPrepared already records/publishes an ordinary next-turn
-                // prompt. Only a current-turn steer needs that transcript event.
-                if !isFallback {
-                    self.updateCompanionTasks { try $0.applyQueuedToParent(steerID) }
-                    self.recordTranscriptUserPrompt(entry.prompt, for: id)
-                    self.publishSteer(entry.prompt, for: id)
-                }
-                self.echoPrompt(entry.prompt, for: id)
+                break  // made visible at the receipt, above
             case .returned, .uncertain:
                 if disposition == .uncertain { self.pauseQueue(id, .unconfirmed) }
                 else if !self.pausedQueues.contains(id) { self.pauseQueue(id, .afterStop) }
