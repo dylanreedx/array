@@ -9049,9 +9049,11 @@ do {
 
 // Mechanical CI guard: ContinuumRevivedCore's target declaration in
 // Package.swift carries only GRDB plus the two Foundation-only semantic and
-// presentation modules required by P1.1 and P1.5. The directions are
-// Core → AgentUI and Core → AgentContent, never the reverse; either reverse
-// import is a SwiftPM cycle. Exact equality keeps arbitrary dependencies red.
+// presentation modules required by P1.1 and P1.5, and the two collaboration
+// modules (protocol and client) added by the shared-workspace foundation in
+// 3bef5505. The directions are Core → AgentUI, Core → AgentContent and
+// Core → Collaboration*, never the reverse; any reverse import is a SwiftPM
+// cycle. Exact equality keeps arbitrary dependencies red.
 do {
     let path = "Package.swift"
     guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
@@ -9081,10 +9083,10 @@ do {
     // AgentCharacters (plan 110) is the built-in character set and its MIT notice.
     // PublicSuffixList.dat is an offline data table for BrowserSiteScope's
     // Foundation-only site matching, not an additional module dependency.
-    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions"),.copy("Resources/ContextWindows.json"),.copy("Resources/TestedCLIVersions.json"),.copy("Resources/PublicSuffixList.dat"),.copy("Resources/AgentCharacters")]),"#
+    let expectedDeclaration = #".target(name:"ContinuumRevivedCore",dependencies:["ContinuumRevivedCollaborationProtocol","ContinuumRevivedCollaborationClient","ContinuumRevivedAgentContent","ContinuumRevivedAgentUI",.product(name:"GRDB",package:"GRDB.swift")],resources:[.copy("Resources/PiExtensions"),.copy("Resources/ContextWindows.json"),.copy("Resources/TestedCLIVersions.json"),.copy("Resources/PublicSuffixList.dat"),.copy("Resources/AgentCharacters")]),"#
     expect(compactDeclaration == expectedDeclaration,
-           "dependencies guard: ContinuumRevivedCore target must include exactly AgentContent, AgentUI, GRDB, and the pinned PiExtensions, ContextWindows, TestedCLIVersions, PublicSuffixList and AgentCharacters resources, found: \(declaration)")
-    print("dependencies guard: ContinuumRevivedCore target has only AgentContent + AgentUI + GRDB dependencies, plus the pinned resources")
+           "dependencies guard: ContinuumRevivedCore target must include exactly CollaborationProtocol, CollaborationClient, AgentContent, AgentUI, GRDB, and the pinned PiExtensions, ContextWindows, TestedCLIVersions, PublicSuffixList and AgentCharacters resources, found: \(declaration)")
+    print("dependencies guard: ContinuumRevivedCore target has only CollaborationProtocol + CollaborationClient + AgentContent + AgentUI + GRDB dependencies, plus the pinned resources")
 }
 
 // MARK: - Ticket 08: Sync/observation type split (ActivityStore)
