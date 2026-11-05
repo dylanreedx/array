@@ -381,6 +381,10 @@ final class BrowserAutomation {
     /// `combo` is a key name or one character, optionally with modifiers:
     /// `Enter`, `Shift+Tab`, `ArrowDown`, `Control+a`.
     func pressKey(_ combo: String, deadline: Date) async throws -> BrowserAutomationOutcome {
+        let focusWindow = try liveWindow()
+        let priorResponder = focusWindow.firstResponder
+        let priorInput = Self.focusInputGeneration
+        defer { restore(priorResponder, in: focusWindow, inputGeneration: priorInput) }
         actionDocumentIdentity = documentIdentity
         var parts = combo.split(separator: "+", omittingEmptySubsequences: false).map(String.init)
         if combo.hasSuffix("++") || combo == "+" { parts = Array(parts.dropLast(2)) + ["+"] }
@@ -407,13 +411,20 @@ final class BrowserAutomation {
         let inputAtStart = userInputCount
         return try await act(deadline: deadline) {
             let window = try self.liveWindow()
-            try await self.preflightKeyboard(deadline: deadline)
-            try self.requireKeyboardResponder(in: window)
             let responder = window.firstResponder
             let focusInput = Self.focusInputGeneration
+            try await self.preflightKeyboard(deadline: deadline)
+            try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
             defer { self.restore(responder, in: window, inputGeneration: focusInput) }
             try self.requireInputControl(inputAtStart, deadline: deadline)
             try self._beforeNativeInputForChecks?()
+            let observation = "__arrayKey_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            _ = try await self.callJavaScript("window[token] = false; document.addEventListener('keydown', function observed(e) { if (e.isTrusted) window[token] = true; }, {capture:true, once:true}); return true", arguments: ["token": observation], world: Self.world, deadline: deadline, what: "observing keyboard delivery")
+            try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
+            try self.requireInputControl(inputAtStart, deadline: deadline)
+            // WebKit observes keydown without applying native editing commands
+            // when a host composer owns the responder. Borrow it for dispatch.
+            guard window.makeFirstResponder(self.webView) else { throw BrowserAutomationError.focusChanged }
             // A Cmd+A key event selects nothing in a web view (probe p2); the
             // responder action does.
             if flags == .command, keyName.lowercased() == "a" {
@@ -421,7 +432,11 @@ final class BrowserAutomation {
             } else {
                 self.deliverKey(key, flags: flags, window: window)
             }
-            return ("Pressed \(combo)", nil)
+            let observed = try await self.callJavaScript("const seen = window[token]; delete window[token]; return seen === true", arguments: ["token": observation], world: Self.world, deadline: deadline, what: "checking keyboard delivery") as? Bool == true
+            guard observed || (flags == .command && keyName.lowercased() == "a") else {
+                throw BrowserAutomationError.script("Keyboard dispatch was not observed in the page; its effect is unknown. Take a snapshot before retrying.")
+            }
+            return ("Delivered \(combo) to the page; inspect the page to confirm its effect", nil)
         }
     }
 

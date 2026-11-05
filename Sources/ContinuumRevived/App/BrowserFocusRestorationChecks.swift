@@ -40,7 +40,7 @@ func runBrowserFocusRestorationCheck() throws {
             "op": op, "payload": payload]) { response = $0 }
         let limit = Date().addingTimeInterval(20)
         while response == nil && Date() < limit { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
-        if ["browser.type", "browser.press_key"].contains(op), response?["status"] as? String == "error",
+        if op == "browser.type", response?["status"] as? String == "error",
            let error = response?["error"] as? [String: Any], error["code"] as? String == "outcome_unknown",
            (error["message"] as? String)?.contains("Keyboard focus moved") == true {
             guard let action = (error["details"] as? [String: Any])?["action"] as? [String: Any],
@@ -100,12 +100,36 @@ func runBrowserFocusRestorationCheck() throws {
     guard let next = siblingTile.qaComposerForChecks?.dictationTextView else {
         throw WorkspaceAPIChecks.Failure(message: "missing sibling agent composer")
     }
+    let composerPoint = old.convert(NSPoint(x: 5, y: 5), to: nil)
+    for kind in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+        NSApp.sendEvent(NSEvent.mouseEvent(with: kind, location: composerPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+    }
     window.makeFirstResponder(old)
     var sent = false
     guard let browser = f.runtime.liveControllers.flatMap(\.browserRuntimes).first(where: { $0.tileId.uuidString == tile }) else {
         throw WorkspaceAPIChecks.Failure(message: "missing browser engine")
     }
     let engine = browser.automation
+    // Replay the numeric input sequence while a host composer owns focus.
+    _ = try call("browser.evaluate", ["tileId": tile, "script": "() => { const e=document.querySelector('input'); e.type='number'; e.value='1'; return true }"])
+    _ = try call("browser.snapshot", ["tileId": tile])
+    _ = try call("browser.click", ["tileId": tile, "ref": ref])
+    window.makeFirstResponder(old)
+    _ = try call("browser.press_key", ["tileId": tile, "keyName": "Meta+a"])
+    _ = try call("browser.press_key", ["tileId": tile, "keyName": "3"])
+    _ = try call("browser.press_key", ["tileId": tile, "keyName": "Tab"])
+    let numeric = try call("browser.evaluate", ["tileId": tile, "script": "() => document.querySelector('input').value"])
+    guard numeric["value"] as? String == "3" else {
+        throw WorkspaceAPIChecks.Failure(message: "numeric replay did not commit 3: \(numeric)")
+    }
+    guard window.firstResponder === old && old.string.isEmpty else { throw WorkspaceAPIChecks.Failure(message: "agent key disturbed composer") }
+    let userKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber, context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12)!
+    NSApp.sendEvent(userKey)
+    guard old.string == "q" else { throw WorkspaceAPIChecks.Failure(message: "user key missed composer: value=\(old.string), responder=\(String(describing: window.firstResponder)), keyWindow=\(String(describing: NSApp.keyWindow))") }
+    old.string = ""
+    _ = try call("browser.evaluate", ["tileId": tile, "script": "() => { const e=document.querySelector('input'); e.type='text'; e.value=''; return true }"])
     var borrowedDuringOrdinaryClick = false
     window.responderTrace = { responder in
         if let view = responder as? NSView, view === browser.webView || view.isDescendant(of: browser.webView) {
@@ -137,7 +161,6 @@ func runBrowserFocusRestorationCheck() throws {
     }
     defer { engine._afterAgentCharacterForChecks = nil }
     _ = try call("browser.type", ["tileId": tile, "ref": ref, "text": String(repeating: "a", count: 100)])
-    _ = try call("browser.press_key", ["tileId": tile, "keyName": "Backspace"])
     let prefix = try call("browser.evaluate", ["tileId": tile, "script": "() => document.querySelector('input').value"])
     guard prefix["value"] as? String == "aaaaa", sent, delivered == 5, window.firstResponder === next, next.string == "zzzzz", siblingTile.qaComposerDraftText == "zzzzz", old.string.isEmpty else {
         throw WorkspaceAPIChecks.Failure(message: "typing restored obsolete focus or lost user keys: newResponder=\(window.firstResponder === next), delivered=\(delivered), next=\(next.string), old=\(old.string)")
