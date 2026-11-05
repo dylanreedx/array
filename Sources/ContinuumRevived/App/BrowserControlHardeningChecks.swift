@@ -569,7 +569,23 @@ func runBrowserDurableTakeoverCheck() throws {
         throw WorkspaceAPIChecks.Failure(message: "missing browser surface")
     }
     try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControlPaused == true, "pause must be stored in tile metadata")
+    for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+        view.appearance = NSAppearance(named: appearance)
+        view.layoutSubtreeIfNeeded()
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw WorkspaceAPIChecks.Failure(message: "no handback bitmap") }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        if let png = bitmap.representation(using: .png, properties: [:]) { try png.write(to: URL(fileURLWithPath: "/tmp/array-handback-\(name).png")) }
+        try expect(view.qaAgentControlItems.contains("return"), "handback missing in \(name)")
+    }
+    view.setAgentControl(name: "Reader", colour: nil, engaged: false, userDriving: true, takeControl: {}, revealAgent: {}, close: {})
+    try expect(!view.qaAgentControlItems.contains("return"), "unsupported handback must be hidden")
+    h.f.api.browserControlPresentation?(tile, h.f.agentId, false, true)
     view.qaChooseAgentControl("return")
+    // Discard the old service cache as a restart does; only persisted tile state remains.
+    h.f.api.browserNeedsHandbackSnapshot.removeAll()
+    let encoded = try JSONEncoder().encode(h.f.canvas.tileRecord(for: tile)!)
+    let restored = try JSONDecoder().decode(Tile.self, from: encoded)
+    h.f.canvas.updateTile(restored, recalculateZoneBounds: false)
     let premature = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
     try expect(h.errorCode(premature) == "target_conflict", "handback must require a snapshot")
     _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])

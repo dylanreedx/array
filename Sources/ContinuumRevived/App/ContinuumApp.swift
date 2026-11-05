@@ -7381,7 +7381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.setAgentControl(name: record?.displayName ?? "Agent",
             colour: record?.identityColor.map { ZoneChromeNSView.color(named: $0) }, engaged: engaged, userDriving: userDriving,
             takeControl: { [weak self] in self?.workspaceAPI.takeBackBrowser(tileId: tileId) },
-            returnToAgent: { [weak self] in _ = self?.workspaceAPI.returnBrowserToAgent(tileId: tileId, agentId: agentId) },
+            returnToAgent: canvasView?.tileRecord(for: tileId)?.metadata.browserControllingAgentId == agentId ? { [weak self] in _ = self?.workspaceAPI.returnBrowserToAgent(tileId: tileId, agentId: agentId) } : nil,
             revealAgent: { [weak self] in _ = self?.revealAgentFromInbox(agentId.rawValue) },
             close: { [weak self] in self?.deleteTile(id: tileId) })
     }

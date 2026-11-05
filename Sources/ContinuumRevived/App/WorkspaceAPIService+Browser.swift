@@ -463,7 +463,7 @@ extension WorkspaceAPIService {
         // project; Ask first reads only what the agent controls or was handed.
         let readOnly = [.browserSnapshot, .browserScreenshot, .browserConsole].contains(operation)
             && supervisor.workspaceToolsPermission() == .free
-        if !readOnly && operation != .browserSnapshot && browserNeedsHandbackSnapshot.contains(tileId) {
+        if !readOnly && operation != .browserSnapshot && (browserNeedsHandbackSnapshot.contains(tileId) || canvasProvider()?.tileRecord(for: tileId)?.metadata.browserControlPaused == false) {
             completion(.error(WorkspaceAPIError(code: .targetConflict, message: "Take a fresh snapshot after handback before sending a mutation."))); return
         }
         let target = readOnly ? browserScopeTarget(tileId: tileId, agentId: agentId) : browserControlTarget(tileId: tileId, agentId: agentId)
@@ -631,6 +631,10 @@ extension WorkspaceAPIService {
                 }
                 if operation == .browserSnapshot, owner == agentId, case .result = reply {
                     self.browserNeedsHandbackSnapshot.remove(tileId)
+                    if let canvas = self.canvasProvider(), var tile = canvas.tileRecord(for: tileId), tile.metadata.browserControlPaused == false {
+                        tile.metadata.browserControlPaused = nil
+                        canvas.updateTile(tile, recalculateZoneBounds: false)
+                    }
                 }
                 let status: String
                 switch reply { case .result: status = "ok"; case .error(let error): status = "error:\(error.code.rawValue)"; case .cancelled: status = "cancelled" }

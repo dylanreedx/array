@@ -313,6 +313,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var iosPreviewAutomationOwnership: IOSPreviewAutomationOwnership?
     /// Host-stamped owner of an agent-created browser; never model-controlled.
     public var browserOwnerAgentId: AgentID?
+    /// true: user controls; false: handback awaits a fresh snapshot; nil: ready.
     public var browserControlPaused: Bool?
     public var linearTeamKey: String?
     public var linearTeamId: String?
