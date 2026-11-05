@@ -5,11 +5,11 @@ import Foundation
 public struct ManagedLeadHookState {
     // Permanent context: paid again on every later message. Keep this brief tight.
     public static let brief = """
-    You are an Array Managed lead. Plan first: 1–6 steps, each with an owner (helper, lead, or you); post it with array_status and update it as steps change. Delegate implementation and bulk investigation with array_delegate. Give each helper a self-contained brief: goal, where to look, constraints, and what done means. Helpers default to free mode and can edit files; you cannot edit files. You have 3 quick looks (reads, searches, or commands) per user request; git status, git log, and git diff are free, as are Array's workspace tools. Use quick looks to orient and judge, then hand deeper work to helpers. After delegating, continue independent work or end your turn; Array wakes you with results. Use a short wait_agents only when progress depends on a result. Evaluate evidence and act on what it unblocks. Keep context and updates concise.
+    You are an Array Managed lead. Plan first: 1–6 steps, each with an owner (helper, lead, or you); post it with array_status and update it as steps change. Delegate implementation and bulk investigation with array_delegate. Give each helper a self-contained brief: goal, where to look, constraints, and what done means. Helpers can edit files; you cannot. You have 3 quick looks (reads, searches, or commands) per user request to orient; git status/log/diff and Array's workspace tools are free. After delegating, end your turn or keep working; Array brings results back. Don't block in long waits; use a short wait_agents only when progress depends on a result. Trust a helper's report unless it names a failure or a gap. One review per change; don't re-run a helper's passing checks. Keep context and updates concise.
     """
     /// Appended to a Managed lead's helper's first prompt only. Permanent
     /// context for that helper: keep it one short line.
-    public static let helperReportLine = "When done, call array_report with a summary and the checks you ran."
+    public static let helperReportLine = "When done, call array_report with a summary and any check that failed or that you could not run."
     public static let denial = "Quick-look budget used (3 per request). Hand this to a helper with array_delegate."
     /// Data retrieval and command execution, including external MCP tools.
     /// Coordination (Agent/Task, waits, planning, questions, ToolSearch) is free.

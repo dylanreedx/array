@@ -28,17 +28,28 @@ public enum HelperCommandGuard {
         let name = (name ?? "").lowercased().split(separator: ".").last.map(String.init) ?? ""
         return ["bash", "exec_command", "shell", "shell_command"].contains(name) ? "bash" : name
     }
+    /// Redirections that write no source: a stream merge (`2>&1`), the null
+    /// device or a `.log` file, and input from `/dev/null`. Agent shells add
+    /// these to most builds, so they neither block credit nor count as edits.
+    static func withoutHarmlessRedirects(_ command: String) -> String {
+        command.replacingOccurrences(
+            of: #"(\d*|&)>>?\s*(&\d+|/dev/null|[^\s;|&<>]+\.log)(?=$|[\s;|&])|\d*<\s*/dev/null(?=$|[\s;|&])"#,
+            with: " ", options: .regularExpression)
+    }
     static func isEdit(_ receipt: AgentHookReceipt) -> Bool {
         let tool = normalizedTool(receipt.toolName)
         if ["edit", "write", "multiedit", "notebookedit", "apply_patch"].contains(tool) { return true }
         guard tool == "bash", let command = receipt.command else { return false }
         // Best effort, intentionally errs toward invalidating evidence. Build
         // outputs are not source edits; redirects, patchers and script writers are.
-        return contains(command, #">|\b(tee|touch|cp|mv|rm|apply_patch|patch)\b|\bsed\s+-i|\b(perl|python[0-9.]*|ruby|node)\s+(-[ce]|-\s+<<|<<)"#)
+        return contains(withoutHarmlessRedirects(command), #">|\b(tee|touch|cp|mv|rm|apply_patch|patch)\b|\bsed\s+-i|\b(perl|python[0-9.]*|ruby|node)\s+(-[ce]|-\s+<<|<<)"#)
     }
     static func invocation(_ command: String) -> String? {
         guard !command.contains("\n") else { return nil }
-        let text = folded(command)
+        // A leading `VAR=value` only sets the runner's environment; the exit
+        // status is still the runner's own.
+        let text = folded(withoutHarmlessRedirects(command))
+            .replacingOccurrences(of: #"^([a-z_][a-z0-9_]*=\S*\s+)+"#, with: "", options: .regularExpression)
         // Do not credit quoted text, pipelines, conditional/failing wrappers or
         // multiple commands with a shell's aggregate exit status.
         guard !contains(text, #"[;|&\n`<>]|\$\("#) else { return nil }
@@ -46,6 +57,14 @@ public enum HelperCommandGuard {
         if runner == "run-matrix", text == "scripts/run-matrix.sh" || text.hasPrefix("scripts/run-matrix.sh ") { return text }
         guard text == runner || text.hasPrefix(runner + " ") else { return nil }
         return text
+    }
+    /// What reaches a lead (wake and wait_agents): only commands Array saw
+    /// fail. `stale` and `not-observed` stay on the stored report; Claude hooks
+    /// carry no exit code, so forwarding them flagged most passing checks and
+    /// leads re-ran them.
+    public static func leadFacing(_ evidence: [AgentCommandEvidence]?) -> [AgentCommandEvidence]? {
+        let failed = (evidence ?? []).filter { $0.outcome == .observedFailed }
+        return failed.isEmpty ? nil : failed
     }
     public static func evidence(for report: AgentReport, receipts: [AgentHookReceipt]) -> [AgentCommandEvidence]? {
         let lastEdit = receipts.lastIndex(where: isEdit) ?? -1

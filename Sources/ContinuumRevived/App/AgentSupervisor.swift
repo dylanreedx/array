@@ -7747,9 +7747,9 @@ final class AgentSupervisor {
         lines += report.checks.filter { $0.result != .pass }.map {
             "Check: \($0.result.rawValue) · \($0.what)"
         }
-        // Match wait_agents: only command observations needing attention ride
-        // the wake. These are host observations, separate from declared checks.
-        lines += (report.commandEvidence ?? []).filter { $0.outcome != .observed }.map {
+        // Match wait_agents: only observed command failures ride the wake.
+        // These are host observations, separate from declared checks.
+        lines += (HelperCommandGuard.leadFacing(report.commandEvidence) ?? []).map {
             "Check evidence: \($0.outcome.rawValue) · \($0.detail)"
         }
         if let next = report.next { lines.append("Next: \(next)") }
@@ -11239,8 +11239,7 @@ final class AgentSupervisor {
         var report: AgentReport?
         if let filed = child.lastReport, filed.filedAt > (lastSettledAt[id] ?? reportTurnBaseline) { report = filed.report }
         if var carried = report {
-            let flags = carried.commandEvidence?.filter { $0.outcome != .observed } ?? []
-            carried.commandEvidence = flags.isEmpty ? nil : flags
+            carried.commandEvidence = HelperCommandGuard.leadFacing(carried.commandEvidence)
             report = carried
         }
         lastSettledAt[id] = settledAt

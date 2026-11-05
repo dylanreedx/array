@@ -35,7 +35,7 @@ Every substantive change carries a deterministic witness: a `--*-check`
 self-check flag on the app binary, a CoreChecks section, or a bundle-harness
 assertion — RED before the fix, GREEN after, runnable offline. If a claim has
 no witness, it isn't verified. The matrix (`scripts/run-matrix.sh`) is the
-gate; the KNOWN-RED legs are listed in `MATRIX_KNOWN_RED` inside that script
+release gate; the KNOWN-RED legs are listed in `MATRIX_KNOWN_RED` inside that script
 (7 as of 0.4.13, explained in the go-live doc) — do not chase them as
 regressions and do not add new ones silently.
 
@@ -48,7 +48,17 @@ image pasted into a composer was silently discarded (fixed in `865b0d3`; read th
 summary the matrix now prints at the end, not the exit code alone). And a check
 that asserted the app's *source contained a string* stayed green while a reviewer
 inverted the exact behaviour it claimed to guard. Assert outcomes, and confirm a
-real matrix run prints your leg.
+real matrix run (the release gate) prints your leg.
+
+**Who runs a witness, and when to stop.**
+
+- The agent making a change writes its witness once, and while building runs
+  only the targeted legs that change touches.
+- Reviewers and leads read the report and the diff. They do not re-run checks
+  reported as passing; they act on a named failure or gap.
+- The full matrix runs once, before a release, by whoever runs the release
+  ([RELEASE.md](RELEASE.md)). Never mid-feature.
+- Cosmetic or text-only changes (copy, docs, comments) get no test run.
 
 ### 3. CLIs own their auth — never API keys
 
@@ -410,7 +420,8 @@ External terminal/CI runs do not carry the marker and retain the complete
 crash-witness gate. Never unset or override the marker from an Array-managed
 agent to force those witnesses; run them externally instead.
 
-- Full gate: `scripts/run-matrix.sh`. It runs every leg and ends with a report —
+- Full gate: `scripts/run-matrix.sh`, once per release (see non-negotiable #2
+  for who runs what). It runs every leg and ends with a report —
   legs run, expected KNOWN-RED (from `MATRIX_KNOWN_RED`), any KNOWN-RED that
   unexpectedly PASSED, and real failures. Judge a run by that summary. Builds
   still halt on purpose; a failed build makes later results meaningless.
@@ -420,7 +431,8 @@ agent to force those witnesses; run them externally instead.
   `grep -Fxc` (one also locks its first four lines), and the committed inventory
   records legs by literal invocation, so renaming a wrapper reads as deleted
   checks.
-- Targeted: `swift run ContinuumRevivedCoreChecks`, or a single app leg like
+- Targeted, the default while building: `swift run ContinuumRevivedCoreChecks`,
+  or a single app leg like
   `.build/debug/Array --onboarding-panel-check`. **Never guess a flag** — an
   unknown one falls through the cascade and boots the full app, hanging the
   shell. Enumerate:

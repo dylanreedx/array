@@ -348,7 +348,10 @@ enum WorkspaceAgentReportChecks {
               let courier = SpawnResultFile.read(parentCwd: supervisor.records[parent]?.cwd ?? "", handle: operation) else {
             throw Failure(description: "the child left no spawn-result courier")
         }
-        try expect(courier.report == stored && courier.finalText == childFinalText, "the courier must carry this turn's report and final text: \(courier)")
+        // The lead's copy keeps only observed command failures; the record keeps all.
+        var leadCopy = stored
+        leadCopy.commandEvidence = HelperCommandGuard.leadFacing(stored.commandEvidence)
+        try expect(courier.report == leadCopy && courier.finalText == childFinalText, "the courier must carry this turn's report and final text: \(courier)")
 
         // (e) wait_agents, setting OFF: today's entry, plus `report`.
         func waitEntry() async throws -> (whole: [String: Any], entry: [String: Any]) {
@@ -370,7 +373,7 @@ enum WorkspaceAgentReportChecks {
                    && offWithoutReport["status"] as? String == "completed" && offWithoutReport["handle"] as? String == operation
                    && offWithoutReport["childAgentId"] as? String == child.rawValue.uuidString,
                    "setting off, the entry minus report must be today's entry: \(off.entry)")
-        let storedJSON = try encoded(stored)
+        let storedJSON = try encoded(leadCopy)
         try expect(jsonEqual(offReport, storedJSON), "setting off, wait_agents must add the filed report: \(off.entry)")
 
         // (f) Setting ON: the report takes the final text's place.
