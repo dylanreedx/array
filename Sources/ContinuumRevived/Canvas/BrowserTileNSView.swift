@@ -385,6 +385,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     }
 
     private func loadOrRestoreActiveTab(focus: Bool = true) {
+        (runtime as? WKWebViewBrowserRuntime)?.automation.invalidateDocumentIdentity()
         let active = activeTabPreparedForNavigation()
         if let state = active.interactionState {
             lastTabActivationUsedInteractionStateForQA = true

@@ -164,7 +164,7 @@ func runWorkspaceAPIBrowserCheck() throws {
     }
     func ref(_ name: String) throws -> String {
         guard let line = outline.split(separator: "\n").first(where: { $0.contains("\"\(name)\"") }),
-              let range = line.range(of: #"\[ref=(e\d+)\]"#, options: .regularExpression) else {
+              let range = line.range(of: #"\[ref=(e[A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
             throw WorkspaceAPIChecks.Failure(message: "no ref for \(name): \(outline)")
         }
         return String(line[range].dropFirst(5).dropLast())
@@ -467,7 +467,7 @@ private func runAgentBrowserPopupCheck() throws {
     let snapshot = try call("browser.snapshot", ["tileId": source])
     guard let outline = snapshot["text"] as? String,
           let line = outline.split(separator: "\n").first(where: { $0.contains("Open popup") }),
-          let match = line.range(of: #"\[ref=(e\d+)\]"#, options: .regularExpression) else {
+          let match = line.range(of: #"\[ref=(e[A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
         throw WorkspaceAPIChecks.Failure(message: "popup link missing from snapshot")
     }
     let ref = String(line[match].dropFirst(5).dropLast())
@@ -490,7 +490,7 @@ private func runAgentBrowserPopupCheck() throws {
     let remoteSnapshot = try call("browser.snapshot", ["tileId": source])
     guard let remoteOutline = remoteSnapshot["text"] as? String,
           let remoteLine = remoteOutline.split(separator: "\n").first(where: { $0.contains("Remote popup") }),
-          let remoteMatch = remoteLine.range(of: #"\[ref=(e\d+)\]"#, options: .regularExpression) else {
+          let remoteMatch = remoteLine.range(of: #"\[ref=(e[A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
         throw WorkspaceAPIChecks.Failure(message: "remote popup link missing")
     }
     _ = try call("browser.click", ["tileId": source, "ref": String(remoteLine[remoteMatch].dropFirst(5).dropLast())])

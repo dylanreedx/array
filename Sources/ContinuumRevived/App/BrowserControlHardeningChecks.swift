@@ -627,3 +627,47 @@ func runBrowserUnrelatedInputCheck() throws {
     try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControlPaused != true, "unrelated user work must leave ownership intact")
     _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
 }
+
+@MainActor
+func runBrowserRefIdentityCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, page) = try h.ownedBrowser()
+    try Data("<html><body><button onclick='window.hit=(window.hit||0)+1'>Target</button></body></html>".utf8).write(to: page)
+    _ = try h.ok("browser.navigate", ["tileId": tile.uuidString, "action": "reload"])
+    func snapshotRef() throws -> String {
+        let result = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+        guard let text = result["text"] as? String,
+              let line = text.split(separator: "\n").first(where: { $0.contains("- button \"Target\"") }),
+              let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression) else {
+            throw WorkspaceAPIChecks.Failure(message: "no actual Target node ref: \(result)")
+        }
+        return String(line[range].dropFirst(5).dropLast())
+    }
+    var old = try snapshotRef()
+    let second = page.deletingLastPathComponent().appendingPathComponent("same-nodes.html")
+    try Data(contentsOf: page).write(to: second)
+    for navigation: [String: Any] in [["url": second.absoluteString], ["action": "reload"], ["action": "back"], ["action": "forward"]] {
+        var payload = navigation; payload["tileId"] = tile.uuidString
+        _ = try h.ok("browser.navigate", payload)
+        let fresh = try snapshotRef()
+        try expect(fresh != old, "document change reused a node ref: \(old)")
+        let answer = try h.raw("browser.click", ["tileId": tile.uuidString, "ref": old])
+        try expect(h.errorCode(answer) == "target_conflict", "stale ref must reject: \(answer)")
+        old = fresh
+    }
+    guard let view = h.f.canvas.tileView(for: tile) as? BrowserTileNSView, let browser = h.live(tile) else {
+        throw WorkspaceAPIChecks.Failure(message: "no tab surface")
+    }
+    let originalTab = view.activeTabIdForQA
+    view.createTabForQA(url: second.absoluteString, title: "Replacement")
+    h.pump(3) { !browser.webView.isLoading }
+    let replacementRef = try snapshotRef()
+    try expect(replacementRef != old, "tab replacement reused the old ref")
+    view.selectTabForQA(tabId: originalTab)
+    h.pump(3) { !browser.webView.isLoading }
+    let restoredRef = try snapshotRef()
+    try expect(restoredRef != old && restoredRef != replacementRef, "tab restoration reused an old ref")
+    let rejected = try h.raw("browser.click", ["tileId": tile.uuidString, "ref": replacementRef])
+    try expect(h.errorCode(rejected) == "target_conflict", "ref from replaced tab must reject")
+}

@@ -329,6 +329,7 @@ private func checkBrowserRequests() {
     }
     let id = tile.uuidString
     expect(decode("browser.open", ["url": "http://localhost:3000"]) == .open(url: "http://localhost:3000", key: nil), "browser open decodes")
+    expect(decode("browser.click", ["tileId": id, "ref": "e-document-epoch_1"]) == .click(tile: tile, target: .ref("e-document-epoch_1"), key: nil), "browser refs carry opaque identity")
     expect(decode("browser.click", ["tileId": id, "ref": "e1"]) == .click(tile: tile, target: .ref("e1"), key: nil), "browser click ref decodes")
     expect(decode("browser.click", ["tileId": id, "x": 12, "y": 4]) == .click(tile: tile, target: .point(12, 4), key: nil), "browser click coordinates decode")
     expect(decode("browser.click", ["tileId": id, "ref": "e1", "x": 12, "y": 4]) == nil, "ambiguous click is rejected")

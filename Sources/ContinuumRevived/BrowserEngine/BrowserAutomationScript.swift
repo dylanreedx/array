@@ -14,7 +14,7 @@
 // written into the DOM.
 enum BrowserAutomationScript {
     static let bootstrap = #"""
-    if (!globalThis.__arrayAutomation) {
+    if (!globalThis.__arrayAutomation || globalThis.__arrayAutomation.identity !== identity) {
       const state = { next: 1, byRef: new Map(), refOf: new WeakMap(), lastMutation: Date.now(), observer: null };
       const LEAF_ROLES = new Set(['button', 'link', 'heading', 'option', 'checkbox', 'radio', 'tab', 'menuitem',
         'img', 'textbox', 'searchbox', 'combobox', 'slider', 'spinbutton', 'switch', 'clickable']);
@@ -104,7 +104,7 @@ enum BrowserAutomationScript {
       function refFor(el) {
         let ref = state.refOf.get(el);
         if (!ref) {
-          ref = 'e' + state.next++;
+          ref = 'e' + identity + '_' + state.next++;
           state.refOf.set(el, ref);
           state.byRef.set(ref, new WeakRef(el));
         }
@@ -216,6 +216,8 @@ enum BrowserAutomationScript {
       }
 
       globalThis.__arrayAutomation = {
+        identity,
+        activeRef() { const active = deepActive(document); return { ref: active ? refFor(active) : null }; },
         outline() {
           observe();
           for (const [ref, weak] of state.byRef) { const el = weak.deref(); if (!el || !el.isConnected) state.byRef.delete(ref); }

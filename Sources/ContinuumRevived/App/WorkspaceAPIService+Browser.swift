@@ -511,6 +511,7 @@ extension WorkspaceAPIService {
         let permissionAtArrival = supervisor.workspaceToolsPermission()
         let inputCount = browser.automation.userInputCount
         let browserId = browser.id
+        let documentAtArrival = browser.automation.documentIdentity
         var normalized = payload; normalized["idempotencyKey"] = nil
         guard let data = try? JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys]) else {
             completion(.error(WorkspaceAPIError(code: .invalidRequest, message: "The browser request cannot be encoded."))); return
@@ -539,6 +540,9 @@ extension WorkspaceAPIService {
                 guard let self, let browser else { return .error(WorkspaceAPIError(code: .browserNotLive, message: "The browser is no longer live.")) }
                 guard Date() < actionDeadline, browser.automation.userInputCount == inputCount else {
                     return .error(WorkspaceAPIError(code: .targetConflict, message: "The user took control or the request expired. Take a fresh snapshot."))
+                }
+                guard readOnly || browser.automation.documentIdentity == documentAtArrival else {
+                    return .error(WorkspaceAPIError(code: .targetConflict, message: "The browser document changed while this action was queued. Take a fresh snapshot; do not replay the old input."))
                 }
                 var actionDeadline = actionDeadline
                 let approvalAtStart = browser.approvalTime
