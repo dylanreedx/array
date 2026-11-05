@@ -363,3 +363,22 @@ run, the two failures on affected reruns after their fixes. The takeover
 neighbor also passed its affected rerun. No second combined matrix or full
 matrix was run. Final debug Array build exited 0 (`/tmp/focus-integration-final-build.log`);
 CoreChecks was unchanged after its successful combined-run build and arms.
+
+## Review corrections after aad40ca4
+
+Three scoped corrections, with debug builds checked by their own exit codes:
+
+- `press_key` accepts the unchanged host responder, borrows the web view for native dispatch, observes trusted page keydown and reports delivery rather than claiming application success. An unobserved dispatch reports uncertainty. Restoration runs after settling too. Production-tool numeric replay starts at 1, clicks, selects all, delivers 3 and Tab, and reads 3 back. The next user key uses NSApp.sendEvent and reaches the composer without resetting focus after the agent action. Agent keys leave the composer empty. The replay was RED against aad40ca4 (page remained 1), then GREEN. An intermediate experiment observed trusted keydown without editing while the host responder remained active; borrowing the responder was necessary for this public native path.
+- Ordinary click now restores again after the action's settle await. The witness asserts original composer first responder and its next user key. It was RED before this change (WKWebView held first responder), and also RED with the exact unconditional release restore body substituted as an equivalent control. Thus the observed completion-time focus loss predates the guarded restore, rather than being introduced by it. GREEN now: responderBorrowObserved=true, originalResponderAfterAction=true. Native click still borrows first responder temporarily. The mid-type witness remains GREEN: sibling composer gets all five z keys, page retains aaaaa, agent gets partial outcome_unknown with deliveredCharacters=5 and fresh snapshot guidance.
+- Local scrollWheel monitoring uses the browser hit-test path, including windowless wheel events when screen geometry identifies a unique app window. The durable takeover witness sends real CGEvent-backed wheel events through NSApp.sendEvent; it asserts outside canvas wheel/Cmd-wheel do not take over, tile wheel pauses mutations durably, and handback still requires a snapshot. RED with scrollWheel omitted from the monitor on the final fixture; GREEN with it present. The fixture window was enlarged offscreen because its browser originally lay beyond the viewport.
+
+Final targeted runs, all exit 0 (no full matrix):
+- --browser-focus-restoration-check
+- --browser-durable-takeover-check
+- --browser-unrelated-input-check
+- --browser-native-select-preflight-check
+- --browser-automation-engine-check
+
+Final build: /tmp/review-final-build.log, exit 0. Final leg logs: /tmp/<leg>-review-green.log. Red focus/control logs: /tmp/browser-focus-restoration-red.log and /tmp/browser-focus-restoration-control.log. Final valid scroll red: /tmp/browser-durable-takeover-valid-red.log. Initial numeric red: /tmp/key-red.log. Intermediate fixture failures included missing key window, a CGEvent without a window, invalid NSEvent subclass/otherEvent construction (isolated child exceptions), and a browser outside the fixture viewport. An intermediate build failed because a file changed during compilation; another caught an async autoclosure error. These were corrected before the final build; no failed build was used as final verification. The old engine assertion expected sibling-focus key refusal and was updated to assert page editing with the composer unchanged.
+
+No private WebKit API. No live or system input. Universal native-popup lifetime remains an open gap, as documented above. Main checkout, integration branch, live application and remote branches were untouched.

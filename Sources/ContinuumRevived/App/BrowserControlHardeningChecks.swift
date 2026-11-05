@@ -559,7 +559,25 @@ func runBrowserDurableTakeoverCheck() throws {
     let (tile, _) = try h.ownedBrowser()
     _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
     guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing runtime") }
-    h.userKey(into: browser)
+    h.window.setContentSize(NSSize(width: 6000, height: 4000))
+    h.f.canvas.frame = NSRect(x: 0, y: 0, width: 6000, height: 4000)
+    func scroll(at point: NSPoint, flags: CGEventFlags = []) throws {
+        let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: -12, wheel2: 0, wheel3: 0)!
+        let screen = h.window.convertPoint(toScreen: point)
+        cg.location = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.height ?? 0) - screen.y)
+        cg.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(h.window.windowNumber))
+        cg.flags = flags
+        let event = NSEvent(cgEvent: cg)!
+        NSApp.sendEvent(event)
+    }
+    let count = browser.automation.userInputCount
+    for flags: CGEventFlags in [[], .maskCommand] {
+        try scroll(at: NSPoint(x: 4, y: 4), flags: flags)
+    }
+    try expect(browser.automation.userInputCount == count, "outside canvas scroll/zoom must not take browser control")
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+    try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil))
+    try expect(browser.automation.userInputCount > count, "tile scroll must take browser control")
     h.pump(0.1)
     for _ in 0..<2 {
         let answer = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { window.reclaimed = true; return true; }"])

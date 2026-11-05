@@ -810,7 +810,7 @@ final class BrowserAutomation {
         guard monitor == nil else { return }
         // One monitor for every engine. It sees only events that pass
         // `NSApp.sendEvent`, which an engine's own direct delivery never does.
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]) { event in
             MainActor.assumeIsolated { BrowserAutomation.noteUserEvent(event) }
             return event
         }
@@ -820,12 +820,22 @@ final class BrowserAutomation {
         guard !registry.isEmpty else { return }
         if consumeAgentInput(event) { return }
         focusInputGeneration &+= 1
-        guard let window = event.window else { return }
+        let wheelWindow: NSWindow? = event.type == .scrollWheel ? event.cgEvent.flatMap { cg in
+            let point = NSPoint(x: cg.location.x, y: (NSScreen.screens.first?.frame.height ?? 0) - cg.location.y)
+            let candidates = NSApp.windows.filter { $0.frame.contains(point) }
+            return candidates.count == 1 ? candidates.first : nil
+        } : nil
+        guard let window = event.window ?? wheelWindow else { return }
+        var location = event.locationInWindow
+        if event.window == nil, let cg = event.cgEvent {
+            let screenPoint = NSPoint(x: cg.location.x, y: (NSScreen.screens.first?.frame.height ?? 0) - cg.location.y)
+            location = window.convertPoint(fromScreen: screenPoint)
+        }
         var view: NSView?
         if event.type == .keyDown {
             view = window.firstResponder as? NSView
         } else if let content = window.contentView {
-            view = content.hitTest(content.superview?.convert(event.locationInWindow, from: nil) ?? event.locationInWindow)
+            view = content.hitTest(content.superview?.convert(location, from: nil) ?? location)
         }
         while let current = view {
             if let engine = registry[ObjectIdentifier(current)]?.engine {
