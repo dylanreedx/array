@@ -551,3 +551,27 @@ private func runQueuedDomainApprovalScenario() throws {
     try expect(prompts == 1 && (next["value"] as? Int) == 43,
                "after approval the queue must continue and Once must cover the same visit")
 }
+
+@MainActor
+func runBrowserDurableTakeoverCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing runtime") }
+    h.userKey(into: browser)
+    h.pump(0.1)
+    for _ in 0..<2 {
+        let answer = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { window.reclaimed = true; return true; }"])
+        try expect(h.errorCode(answer) == "target_conflict", "takeover must stay paused: \(answer)")
+    }
+    guard let view = h.f.canvas.tileView(for: tile) as? BrowserTileNSView else {
+        throw WorkspaceAPIChecks.Failure(message: "missing browser surface")
+    }
+    try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControlPaused == true, "pause must be stored in tile metadata")
+    view.qaChooseAgentControl("return")
+    let premature = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+    try expect(h.errorCode(premature) == "target_conflict", "handback must require a snapshot")
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+}

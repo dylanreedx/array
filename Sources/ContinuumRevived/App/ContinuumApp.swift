@@ -6178,6 +6178,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-durable-takeover-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserDurableTakeoverCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-action-queue-check") {
             do {
                 _ = NSApplication.shared
@@ -7370,6 +7381,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         view.setAgentControl(name: record?.displayName ?? "Agent",
             colour: record?.identityColor.map { ZoneChromeNSView.color(named: $0) }, engaged: engaged, userDriving: userDriving,
             takeControl: { [weak self] in self?.workspaceAPI.takeBackBrowser(tileId: tileId) },
+            returnToAgent: { [weak self] in _ = self?.workspaceAPI.returnBrowserToAgent(tileId: tileId, agentId: agentId) },
             revealAgent: { [weak self] in _ = self?.revealAgentFromInbox(agentId.rawValue) },
             close: { [weak self] in self?.deleteTile(id: tileId) })
     }

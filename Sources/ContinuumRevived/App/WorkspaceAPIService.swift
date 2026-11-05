@@ -173,6 +173,7 @@ final class WorkspaceAPIService {
     }
     var browserHandOvers: [UUID: BrowserHandOver] = [:]
     var browserUserTakenOver: Set<UUID> = []
+    var browserNeedsHandbackSnapshot: Set<UUID> = []
     enum BrowserDomainDecision { case deny, allowOnce, allowForSession, allowForProjectSession }
     /// Closes a browser approval that is still on screen. Its request answers
     /// "denied" on its own; this only removes the stale sheet.

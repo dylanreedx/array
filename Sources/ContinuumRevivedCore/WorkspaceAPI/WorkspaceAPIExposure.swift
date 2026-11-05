@@ -97,6 +97,7 @@ public enum WorkspaceAPIExposure {
         "tile.metadata.filePath": .internal,
         "tile.metadata.documentLocation": .internal,
         "tile.metadata.browserOwnerAgentId": .internal,
+        "tile.metadata.browserControlPaused": .internal,
         "tile.metadata.browserProfileId": .notExposed("Browser-profile selection is native UI only."),
         "tile.metadata.iosPreviewAutomationOwnership": .internal,
         "tile.metadata.iosPreviewDeviceID": .notExposed("Selection changes remain native UI; device.open fixes the device when creating an owned tile."),

@@ -1276,6 +1276,7 @@ run_app_check .build/debug/Array --sidebar-agent-status-line-check
 run_app_check .build/debug/Array --browser-automation-engine-check
 run_app_check .build/debug/Array --workspace-api-browser-check
 run_app_check .build/debug/Array --agent-browser-spawn-check
+run_app_check .build/debug/Array --browser-durable-takeover-check
 run_app_check .build/debug/Array --browser-action-queue-check
 run_app_check .build/debug/Array --browser-lease-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check

@@ -77,6 +77,8 @@ final class BrowserActionQueue {
         }
     }
 
+    func isActive(tileId: UUID) -> Bool { active[tileId] != nil }
+
     /// Whether a retry of this key would be answered from the queue's history.
     func holds(agentId: AgentID, key: String) -> Bool { entries[Key(agent: agentId, key: key)] != nil }
 

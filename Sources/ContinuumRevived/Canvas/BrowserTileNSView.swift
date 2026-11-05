@@ -560,20 +560,21 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     /// The shared choice control exposes the current driver and explicit user
     /// actions without adding a second, platform-styled menu to the tile.
     func setAgentControl(name: String, colour: NSColor?, engaged: Bool, userDriving: Bool,
-                         takeControl: @escaping () -> Void, revealAgent: @escaping () -> Void,
+                         takeControl: @escaping () -> Void, returnToAgent: @escaping () -> Void = {}, revealAgent: @escaping () -> Void,
                          close: @escaping () -> Void) {
         let visible = engaged || userDriving || !browserActivityLines.isEmpty
         agentControlButton.isHidden = !visible
         guard visible else { agentControlTitleForQA = nil; return }
         let title = AgentControlChip.title(agentName: name, engaged: engaged, userDriving: userDriving) ?? "Browser activity"
         agentControlTitleForQA = title
-        agentControlActions = (userDriving || !engaged ? [] : [AgentControlChip.takeControl]) + [
+        agentControlActions = (userDriving ? [ChoiceItem(id: "return", title: "Return to agent")] : (!engaged ? [] : [AgentControlChip.takeControl])) + [
             ChoiceItem(id: "reveal", title: "Reveal agent"), ChoiceItem(id: "close", title: "Close browser", destructive: true)
         ]
         agentControlButton.leadingSwatches = colour.map { [$0] } ?? []
         agentControlButton.onSelection = { item in
             switch item.id {
             case "take": takeControl()
+            case "return": returnToAgent()
             case "reveal": revealAgent()
             case "close": close()
             default: break
