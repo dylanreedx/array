@@ -219,6 +219,7 @@ check --palette-duplicate-root-check
 check --palette-first-responder-restore-check
 check --palette-jump-check
 check --palette-zone-check
+check --parser-identity-prefix-check
 check --perf-budget-camera-slope-check
 check --perf-budget-check
 check --perf-budget-geometry-hold-probe-check
@@ -860,6 +861,7 @@ leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedAgentContentChecks
+leg run_leg .build/debug/ContinuumRevivedAgentContentChecks --parser-identity-prefix-check
 leg run_leg .build/debug/ContinuumRevivedAgentUIChecks
 leg run_leg .build/debug/ContinuumRevivedCollaborationChecks
 leg run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
@@ -940,7 +942,7 @@ bundle-check --menu-contract-check
 bundle-check --palette-duplicate-root-check
 bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 23
+count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29

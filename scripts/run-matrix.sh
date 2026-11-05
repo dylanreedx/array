@@ -1239,6 +1239,7 @@ run_leg .build/debug/ContinuumRevivedAgentUIChecks
 # blocks so a forbidden import or declared dependency is red before it is ever
 # used. Fast and pure: no app bundle, no display, no provider process.
 run_leg .build/debug/ContinuumRevivedAgentContentChecks
+run_leg .build/debug/ContinuumRevivedAgentContentChecks --parser-identity-prefix-check
 run_leg .build/debug/ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
 run_leg .build/debug/ContinuumRevivedRelayChecks
