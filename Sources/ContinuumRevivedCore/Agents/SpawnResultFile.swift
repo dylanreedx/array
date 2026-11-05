@@ -182,7 +182,10 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         let urls: [URL]
         do { urls = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) }
         catch let error as CocoaError where error.code == .fileReadNoSuchFile { return [] }
-        return try urls.filter { $0.pathExtension == "json" }.map {
+        // The file name ends in the recipient (deliveryURL). Every lead in the
+        // project shares this directory; decode only this lead's own records.
+        let suffix = "-\(recipient.uuidString).json"
+        return try urls.filter { $0.lastPathComponent.hasSuffix(suffix) }.map {
             try JSONCodec.makeDecoder().decode(Delivery.self, from: Data(contentsOf: $0))
         }.filter { $0.recipient == recipient }
     }

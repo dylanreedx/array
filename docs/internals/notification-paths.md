@@ -109,6 +109,10 @@ recipient's `.array/spawn-results/.deliveries/`. Result couriers retain its
 identity and committed delivery mark. All collection, including legacy Pi
 explicit/discovered handles, goes through the recipient-authenticated host;
 Pi reads directory metadata for discovery, never courier bodies for authority.
+A lead reads only the records named for it, so another lead's unreadable record
+(for example one written by a different app version) cannot stall this lead's
+wakes or turn its lookups into `outcome_unknown`; `--agent-report-contract-check`
+witnesses it.
 
 Collection first creates a 30-second offer, not a delivered mark. The same
 lookup request replays its persisted snapshot after a lost response; another

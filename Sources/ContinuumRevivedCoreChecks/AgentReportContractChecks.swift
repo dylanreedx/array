@@ -91,6 +91,32 @@ func runAgentReportContractChecks() {
                "courier: a filed report round-trips into operation.get's child result")
     }
 
+    // MARK: A lead's delivery journal is its own
+
+    // Every lead in one project shares `.array/spawn-results/.deliveries/`, and
+    // `.array/` is shared across app versions. A record this build cannot decode
+    // that belongs to ANOTHER lead must not make this lead's journal unreadable.
+    // That failure turned every helper lookup into outcome_unknown and stalled
+    // every lead's wakes. It also cost a flush one decode per record in the project.
+    let journalRoot = FileManager.default.temporaryDirectory
+        .appendingPathComponent("delivery-journal-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: journalRoot) }
+    let lead = UUID(), otherLead = UUID(), helper = UUID()
+    let turn = UUID().uuidString
+    do {
+        try SpawnResultFile.saveDelivery(
+            SpawnResultFile.Delivery(helper: helper, turn: turn, recipient: lead, now: at), parentCwd: journalRoot.path)
+        if let foreign = SpawnResultFile.deliveryURL(parentCwd: journalRoot.path, helper: UUID(),
+                                                     turn: UUID().uuidString, recipient: otherLead) {
+            try Data("{\"phase\":\"from-a-newer-build\"}".utf8).write(to: foreign)
+        }
+        let own = try SpawnResultFile.deliveries(parentCwd: journalRoot.path, recipient: lead)
+        expect(own.count == 1 && own.first?.helper == helper,
+               "journal: a lead reads exactly its own delivery record: \(own)")
+    } catch {
+        expect(false, "journal: another lead's undecodable record broke this lead's journal: \(error)")
+    }
+
     // MARK: The push-back decision
 
     func stop(_ event: String, _ count: Int, active: Bool = false) -> [String: Any] {
@@ -156,5 +182,5 @@ func runAgentReportContractChecks() {
         expect(AgentShortReportConfig.enabled(defaults: suite), "settings: on reads as on")
         suite.removePersistentDomain(forName: suiteName)
     }
-    print("Agent report contract checks passed: report and status bounds, the declared label, the courier unchanged without a report, the once-only push-back for helpers, a reason that defers to the brief, two self-only catalogue tools and one Settings toggle off by default")
+    print("Agent report contract checks passed: report and status bounds, the declared label, the courier unchanged without a report, the once-only push-back for helpers, a reason that defers to the brief, two self-only catalogue tools, one Settings toggle off by default and a lead reading only its own delivery journal")
 }
