@@ -6730,6 +6730,9 @@ final class CanvasNSView: NSView, TokenThemed {
             applyViewport: { [weak self] viewport in self?.setViewport(viewport) },
             makeDisplayLink: { [weak self] target, selector in
                 self?.displayLink(target: target, selector: selector)
+            },
+            nativeRefreshInterval: { [weak self] in
+                self?.window?.screen?.minimumRefreshInterval
             }
         )
         driver.onSettle = { [weak self] in self?.cameraGestureDidSettle() }

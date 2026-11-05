@@ -2184,6 +2184,7 @@ run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 # clock frozen and must land at most 2 (leading-edge apply + one coalesced
 # flush). Before CanvasCameraDriver, the driven condition measured 6.
 run_app_check .build/debug/Array --canvas-camera-coalesce-check
+run_app_check .build/debug/Array --canvas-native-pacing-check
 # The pinch glide's mechanics, on deterministic time: a flick above the engage
 # threshold glides and terminates on its own; a deliberate stop stays dead; a
 # new pinch or an EXTERNAL viewport write (navigation snap, pointer drag)

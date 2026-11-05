@@ -3954,6 +3954,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--canvas-native-pacing-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasNativePacingChecks.run()
+                print("ContinuumRevivedCanvasNativePacingChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--canvas-zoom-momentum-check") {
             do {
                 _ = NSApplication.shared
