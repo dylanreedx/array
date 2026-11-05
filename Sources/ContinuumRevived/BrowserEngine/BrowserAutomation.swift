@@ -306,10 +306,15 @@ final class BrowserAutomation {
                 }
             }
             try self.requireInputControl(inputAtStart, deadline: deadline)
-            if clear && text.isEmpty { self.deliverKey(Self.namedKeys["Backspace"]!, flags: [], window: window) }
             let focusRef: String
             if let ref { focusRef = ref }
             else { focusRef = try await self.world("activeRef", [:], deadline: deadline)["ref"] as? String ?? "" }
+            if clear && text.isEmpty {
+                let focus = try await self.world("focusedIs", ["ref": focusRef], deadline: deadline)
+                try self.requireInputControl(inputAtStart, deadline: deadline)
+                guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
+                self.deliverKey(Self.namedKeys["Backspace"]!, flags: [], window: window)
+            }
             for character in text {
                 let focus = try await self.world("focusedIs", ["ref": focusRef], deadline: deadline)
                 try self.requireInputControl(inputAtStart, deadline: deadline)
@@ -321,7 +326,12 @@ final class BrowserAutomation {
                 try await self.pause(0.005, deadline: deadline)
             }
             try self.requireInputControl(inputAtStart, deadline: deadline)
-            if submit { self.deliverKey(Self.namedKeys["Enter"]!, flags: [], window: window) }
+            if submit {
+                let focus = try await self.world("focusedIs", ["ref": focusRef], deadline: deadline)
+                try self.requireInputControl(inputAtStart, deadline: deadline)
+                guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
+                self.deliverKey(Self.namedKeys["Enter"]!, flags: [], window: window)
+            }
             var value: String?
             if let ref {
                 try await self.pause(0.1, deadline: deadline)

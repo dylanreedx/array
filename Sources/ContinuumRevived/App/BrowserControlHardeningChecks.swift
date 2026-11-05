@@ -677,6 +677,21 @@ func runBrowserRefIdentityCheck() throws {
     try expect(restoredRef != old && restoredRef != replacementRef, "tab restoration reused an old ref")
     let rejected = try h.raw("browser.click", ["tileId": tile.uuidString, "ref": replacementRef])
     try expect(h.errorCode(rejected) == "target_conflict", "ref from replaced tab must reject")
+    try Data(#"""
+    <html><body><input id="field" aria-label="Submit field" oninput="if(this.value.length===3) document.getElementById('other').focus()">
+    <input id="other" onkeydown="if(event.key==='Enter')window.wrongSubmit=true"></body></html>
+    """#.utf8).write(to: page)
+    _ = try h.ok("browser.navigate", ["tileId": tile.uuidString, "url": page.absoluteString])
+    let target = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let outline = target["text"] as? String,
+          let field = outline.split(separator: "\n").first(where: { $0.contains("- textbox \"Submit field\"") }),
+          let tag = field.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression) else {
+        throw WorkspaceAPIChecks.Failure(message: "no submit field")
+    }
+    let typed = try h.raw("browser.type", ["tileId": tile.uuidString, "ref": String(field[tag].dropFirst(5).dropLast()), "text": "abc", "submit": true])
+    try expect(h.errorCode(typed) == "target_conflict", "submit must refuse after final-character focus change: \(typed)")
+    let wrongSubmit = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => Boolean(window.wrongSubmit)"])
+    try expect(wrongSubmit["value"] as? Bool == false, "Enter reached a different field")
 }
 
 @MainActor
