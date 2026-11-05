@@ -22815,7 +22815,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let onceScope = prompt.op == .deviceOpen
             ? "Allow Once approves this simulator visit."
             : "Allow Once approves only this request."
-        detail += " \"Allow for This Agent Session\" allows this agent until its Workspace Tools are turned off or Array quits. \"Allow for This Project Session\" shares this kind of action with agents in the same project until Array quits. \(onceScope) You can turn off an agent’s Workspace Tools at any time. To stop being asked, choose Free in Settings ▸ Agents ▸ Agent permissions."
+        detail += " \"Allow for This Agent Session\" allows this agent until its Workspace Tools are turned off or Array quits. \"Allow for This Project Session\" shares this kind of action with agents in the same project until Array quits. \(onceScope) Turning off an agent’s Workspace Tools blocks that agent but does not clear a Project Session approval. To stop being asked, choose Free in Settings ▸ Agents ▸ Agent permissions."
         alert.informativeText = detail
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Allow Once")
