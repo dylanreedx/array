@@ -27,7 +27,13 @@ enum HelperGuardChecks {
         let cases: [(String, AgentCommandEvidence.Outcome)] = [
             ("fresh", .observed), ("stale", .stale), ("failed", .observedFailed),
             ("absent", .notObserved), ("unknown", .notObserved), ("shell-edit", .stale),
-            ("masked", .notObserved), ("codex", .observed), ("interrupted", .notObserved)]
+            ("masked", .notObserved), ("codex", .observed), ("interrupted", .notObserved),
+            // Agent shells redirect output and prefix env; none of that is an edit,
+            // and the runner's own exit status still holds.
+            ("redirected", .observed), ("env-prefix", .observed), ("null-write", .observed),
+            ("piped", .notObserved)]
+        let commands = ["masked": "swift test || true", "redirected": "swift test > test.log 2>&1 </dev/null",
+                        "env-prefix": "TERM=xterm-256color swift test", "piped": "swift test 2>&1 | tail -5"]
         for (name, expected) in cases {
             let child = try bench.delegate("HOLD-\(name)")
             let ready = await waitUntil(timeout: 10, pollInterval: 0.02) { supervisor.isRunning(child) }
@@ -35,11 +41,12 @@ enum HelperGuardChecks {
             try await hook(bench, child, tool: "Edit")
             if name != "absent" {
                 try await hook(bench, child, tool: name == "codex" ? "functions.exec_command" : "Bash",
-                         command: name == "masked" ? "swift test || true" : "swift test",
+                         command: commands[name] ?? "swift test",
                          exit: name == "unknown" ? nil : (name == "failed" ? 1 : 0), interrupted: name == "interrupted")
             }
             if name == "stale" { try await hook(bench, child, tool: "Write") }
             if name == "shell-edit" { try await hook(bench, child, tool: "Bash", command: "echo fix > source.swift", exit: 0) }
+            if name == "null-write" { try await hook(bench, child, tool: "Bash", command: "ls Sources > /dev/null && git status > status.log", exit: 0) }
             let config = try bench.configuration(for: child)
             let filed = try await WorkspaceAgentReportChecks.call(config, "array_report", [
                 "summary": "Finished", "checks": [["what": "swift test", "result": "pass"]]])
@@ -60,9 +67,14 @@ enum HelperGuardChecks {
             let entries = (waited.reply["result"] as? [String: Any])?["agents"] as? [[String: Any]]
             let report = entries?.first?["report"] as? [String: Any]
             try expect(report != nil, "wait_agents lost the report")
+            // Only an observed failure reaches the lead. Unconfirmed or stale
+            // passes stay on the stored record; forwarding them made leads re-run
+            // checks that had passed.
             let flags = report?["commandEvidence"] as? [[String: Any]]
-            if expected == .observed {
-                try expect(flags == nil, "observed evidence must not add context to wait_agents")
+            let wake = AgentSupervisor.helperCompletionReportText(supervisor.records[child]!.lastReport!.report)
+            try expect(wake.contains("Check evidence") == (expected == .observedFailed), "\(name): wake evidence lines wrong: \(wake)")
+            if expected != .observedFailed {
+                try expect(flags == nil, "\(name): only an observed failure may add context to wait_agents")
             } else {
                 try expect(flags?.count == 1 && flags?.first?["outcome"] as? String == expected.rawValue, "\(name): wait_agents lost the flag")
                 let text = flags?.first?["detail"] as? String ?? ""

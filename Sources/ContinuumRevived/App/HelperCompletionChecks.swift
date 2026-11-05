@@ -617,9 +617,12 @@ enum HelperCompletionChecks {
         let storedReport = s.records[child]?.lastReport?.report
         let resultReport = SpawnResultFile.read(parentCwd: s.records[parent]!.cwd,
             handle: s.records[child]!.spawnResultHandle!)?.report
+        // The record keeps the unconfirmed check; the lead's copy drops it.
+        var leadReport = storedReport
+        leadReport?.commandEvidence = nil
         try HelperGuardChecks.expect(storedReport?.checks.contains(where: { $0.what == "PASS-OMITTED" }) == true
             && storedReport?.commandEvidence?.first?.outcome == .notObserved
-            && resultReport == storedReport, "wake formatting changed the structured record or result file")
+            && resultReport == leadReport, "wake formatting changed the structured record or result file")
         // Final-helper results are eligible promptly under card 4.
         await s.flushHelperCompletions()
         let cwd = URL(fileURLWithPath: s.records[parent]!.cwd)
@@ -755,7 +758,7 @@ enum HelperCompletionChecks {
             if index == 0 {
                 try HelperGuardChecks.expect(payload.text.contains("WAKE-REPORT")
                     && payload.text.contains("note · Sources/Wake.swift · detail ")
-                    && payload.text.contains("INFO-RETAINED") && payload.text.contains("Check evidence: not-observed · Array saw")
+                    && payload.text.contains("INFO-RETAINED") && !payload.text.contains("Check evidence")
                     && payload.text.contains("WAKE-NEXT")
                     && payload.text.contains("WAKE-DETAILS"), "idle report lost plain report fields")
             } else {
