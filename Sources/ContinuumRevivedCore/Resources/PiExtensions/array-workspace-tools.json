@@ -1862,7 +1862,7 @@
       "description": "File a short report on the work you just finished. If another agent delegated your task, it receives this with your result. Calling again replaces your report for this turn.",
       "promptSnippet": "File a short structured report on finished work",
       "promptGuidelines": [
-        "Use it when you finish delegated work: summary of 60 words or fewer, the checks you ran, ranked findings, the next step, and detailsPath for a file holding anything longer."
+        "Use it when you finish delegated work: summary of 60 words or fewer, any check that failed or that you could not run, ranked findings, the next step, and detailsPath for a file holding anything longer."
       ],
       "parameters": {
         "type": "object",
