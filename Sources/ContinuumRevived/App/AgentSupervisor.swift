@@ -7675,17 +7675,23 @@ final class AgentSupervisor {
             guard let batch = helperCompletionBatches[parent], batch.deadline <= helperCompletionNow() else { continue }
             helperCompletionBatches[parent] = nil
             guard records[parent] != nil, wakesForHelperCompletion(parent),
-                  let sender = batch.updates.first?.0 else { continue }
-            let text = batch.updates.map(\.1).joined(separator: "\n\n")
+                  let first = batch.updates.first else { continue }
+            let prompt = AgentPrompt(AgentMessageEnvelope.wrapBatch(batch.updates.map { id, text in
+                (text: text, senderID: id.rawValue, senderName: records[id]?.humanDisplayName ?? "Agent")
+            }))
             let accepted: Bool
             if isRunning(parent) {
                 // Host-authored attribution must bypass typed-envelope neutralization.
                 // Keep the normal queue admission, persistence and sharing checks.
-                let result = await accept(.queue(AgentPrompt(agentMessageText(text, from: sender))),
+                let result = await accept(.queue(prompt),
                                           for: parent, sharedAdmission: nil)
                 if case .accepted = result { accepted = true } else { accepted = false }
             } else {
-                accepted = sendAgentMessage(text, from: sender, to: parent)
+                // Preserve the existing companion task lineage; attribution is
+                // carried independently by every member of the prompt.
+                accepted = sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: parent),
+                    to: parent, taskParent: companionParentRun(for: first.0))
+                if accepted { echoPrompt(prompt, for: parent) }
             }
             if !accepted {
                 var pending = helperCompletionBatches[parent] ?? HelperCompletionBatch(deadline: helperCompletionNow(), updates: [])

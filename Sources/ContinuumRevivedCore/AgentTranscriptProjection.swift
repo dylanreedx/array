@@ -508,14 +508,20 @@ public struct AgentTranscriptProjection: Sendable {
         let referenceEnvelope = AgentReferencePromptEnvelope.parse(boardEnvelope?.text ?? prompt.text)
         let references = AgentPromptReference.unique(prompt.agentReferences + (referenceEnvelope?.references ?? []))
         var proseText = referenceEnvelope?.text ?? boardEnvelope?.text ?? prompt.text
-        if case let .agentMessage(message) = inbound {
-            // The turn is the sender's, so the card replaces the prose: nothing
-            // of it may draw as something the user typed.
-            mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
-                id: childID(of: id, key: "agent-message"),
-                kind: .agentMessage,
-                payload: .agentMessage(message)
-            )))
+        let messages: [AgentMessagePayload]
+        switch inbound {
+        case .agentMessage(let message): messages = [message]
+        case .agentMessages(let batch): messages = batch
+        default: messages = []
+        }
+        if !messages.isEmpty {
+            for (index, message) in messages.enumerated() {
+                mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
+                    id: childID(of: id, key: index == 0 ? "agent-message" : "agent-message-\(index)"),
+                    kind: .agentMessage,
+                    payload: .agentMessage(message)
+                )))
+            }
             proseText = ""
         } else if let task = BoardTaskPromptEnvelope.parse(proseText) {
             mutations.append(.upsertStructured(entryID: id, block: AgentBlock(

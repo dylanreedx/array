@@ -41,6 +41,8 @@ public enum AgentMessageEnvelope {
         case prompt
         /// Another agent's words.
         case agentMessage(AgentMessagePayload)
+        /// Several independently attributed messages delivered in one turn.
+        case agentMessages([AgentMessagePayload])
         /// A host's note to the model about its other sessions (the Claude
         /// app's `<side-sessions-event>`): neither the user nor an agent wrote
         /// it, so it is a quiet notice carrying its first sentence.
@@ -56,10 +58,46 @@ public enum AgentMessageEnvelope {
             + text + "\n</\(tag)>"
     }
 
+    /// One transport prompt, with each member retaining its own sender. Byte
+    /// lengths delimit verbatim bodies even when they contain envelope examples.
+    public static func wrapBatch(_ messages: [(text: String, senderID: UUID, senderName: String)]) -> String {
+        if messages.count == 1, let message = messages.first {
+            return wrap(message.text, senderID: message.senderID, senderName: message.senderName)
+        }
+        let members = messages.map { message in
+            let name = singleLineName(message.senderName) ?? "Agent"
+            return "<\(tag) from=\"\(message.senderID.uuidString.lowercased())\" name=\"\(escape(name))\" bytes=\"\(message.text.utf8.count)\">\n"
+                + message.text + "\n</\(tag)>"
+        }
+        return "<array-agent-messages>\n" + members.joined(separator: "\n") + "\n</array-agent-messages>"
+    }
+
+    private static func batchMessages(_ text: String) -> [AgentMessagePayload]? {
+        guard let batch = element(text, tag: "array-agent-messages"), batch.attributes.isEmpty else { return nil }
+        var remaining = batch.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        var messages: [AgentMessagePayload] = []
+        while !remaining.isEmpty {
+            guard let headerEnd = remaining.range(of: ">\n") else { return nil }
+            let header = String(remaining[..<headerEnd.upperBound])
+            guard let parsed = element(header + "</\(tag)>", tag: tag),
+                  Set(parsed.attributes.keys) == Set(["from", "name", "bytes"]),
+                  let rawCount = parsed.attributes["bytes"], let count = Int(rawCount), count > 0 else { return nil }
+            let bytes = Data(remaining[headerEnd.upperBound...].utf8)
+            guard count <= bytes.count, let body = String(data: bytes.prefix(count), encoding: .utf8),
+                  let tail = String(data: bytes.dropFirst(count), encoding: .utf8),
+                  tail.hasPrefix("\n</\(tag)>") else { return nil }
+            guard case let .agentMessage(message) = classify(header + body + "\n</\(tag)>") else { return nil }
+            messages.append(message)
+            remaining = String(tail.dropFirst("\n</\(tag)>".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return messages.count > 1 ? messages : nil
+    }
+
     /// The words a person would recognise: the body of a wrapped message, or
     /// the text itself. For naming a tile from its first prompt.
     public static func unwrappedText(_ text: String) -> String {
         if case let .agentMessage(message) = classify(text) { return message.text }
+        if case let .agentMessages(messages) = classify(text) { return messages.map(\.text).joined(separator: "\n\n") }
         return text
     }
 
@@ -82,6 +120,7 @@ public enum AgentMessageEnvelope {
 
     public static func classify(_ text: String) -> Inbound {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let messages = batchMessages(trimmed) { return .agentMessages(messages) }
         if let element = element(trimmed, tag: tag) {
             // Exactly what `wrap` writes, or it is not Array's: a malformed
             // envelope falls back to the prompt with nothing lost.

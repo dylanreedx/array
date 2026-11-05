@@ -597,6 +597,8 @@ final class QueueRailItemRow: NSView, QueueRailRow, TokenThemed {
             let summary = message.text.split(whereSeparator: \.isNewline)
                 .map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? "Message"
             displayText = "\(message.senderName) · \(summary)"
+        case .agentMessages(let messages):
+            displayText = "\(messages.count) helpers · " + (messages.first?.text.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Messages")
         case .hostNote(let note): displayText = note
         case .prompt: displayText = item.text
         }

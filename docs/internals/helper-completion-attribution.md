@@ -70,3 +70,49 @@ queue preview must show sender and clean summary`; the preview fix passes.
 appearances. Before/after images are under the canonical project's
 `output/raw-helper-message-previews/queued-{before,after}-{light,dark}.png`,
 with logs retained in gitignored `releases/0.7.43-evidence/`.
+
+
+## Per-helper attribution in a completion batch
+
+The plain-text follow-up removes JSON and the batch heading at the write
+boundary. Each helper status, summary, findings, attention checks, next step
+and details path is stored as prose; the structured report stays on its record
+and result-file channel.
+
+Previously `flushHelperCompletions` joined all result bodies and wrapped them
+with the first helper's identity. Every subsequent result therefore appeared
+inside that helper's card and model-message envelope. The batched wake now
+contains one independently attributed envelope per result, carried together in
+one `<array-agent-messages>` host envelope and one runner prompt. A single
+result retains the established single-message format. Each batch member names
+its own UUID and display name; its UTF-8 body byte count preserves literal
+closing tags and Unicode without escaping or rewriting report text.
+
+The shared envelope parser recognizes the host batch; transcript projection
+creates one existing agent-message card per member inside one user entry.
+All three session readers reuse that projection on restore. No renderer or
+card styling changes. The existing single-line queue preview shows the helper
+count and first status, rather than attributing the whole batch to its first
+helper. Typed batches pass through the same spoof neutralization as typed
+single-message envelopes. Malformed batches stay user prose.
+
+Both idle delivery and busy queue admission send this one prompt. Queue
+persistence, recovery, admission and retry semantics remain in place. A failed
+admission restores the entire batch for retry. Companion task lineage retains
+its existing first-result run binding; it is separate from message authorship.
+This change does not introduce a turn per helper or a new notification sender.
+The existing SRC-01 notification-path note records the payload change.
+
+### Witness and limits
+
+The existing matrix-registered `--helper-completion-check` finishes three
+helpers in one busy-lead batch. Before the attribution fix, its new assertion
+failed: `three helper results must project as three separately attributed
+messages in one prompt`. It checks each result's own sender and body, absence
+of another member's result in that card, unchanged attribution in the runner
+prompt and all three offline session-reader formats, and exactly one grouped
+wake prompt. Existing idle delivery, light/dark cards and queue preview,
+plain-text report retention and typed-envelope protection remain covered.
+Unicode, literal envelope examples and malformed byte counts exercise batch
+framing. Full matrix and live provider acceptance remain integration work;
+no production-state or live Claude verification is claimed.

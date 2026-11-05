@@ -95,7 +95,13 @@ Passing checks and observed command evidence stay out of the wake; the structure
 report remains on the record and result file. Idle sends and busy composer queues
 use that same text, without a batch heading. `--helper-completion-check` witnesses
 the model prompt, delivered cards, queue preview and all three offline session
-readers; there is no new notification sender or recipient policy.
+readers; there is no new notification sender or recipient policy. **SRC-01**
+completion batches carry independently attributed helper envelopes together in
+one lead prompt; each result becomes its own existing transcript card. The
+busy preview names the helper count rather than claiming the first helper
+sent every result. Single-result wakes retain their existing attribution.
+Rejected admission retains the whole batch for retry; disabled wakes remain
+quiet. Timing, alert suppression and recipient policies are unchanged.
 
 For **SRC-01**, a transient helper provider failure reserved for a host
 retry is withheld from terminal delivery. **SRC-02** retains existing runtime-error
