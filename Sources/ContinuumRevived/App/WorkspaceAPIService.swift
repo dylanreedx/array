@@ -163,7 +163,7 @@ final class WorkspaceAPIService {
     var browserAuditPresentation: ((UUID, [BrowserAuditEntry]) -> Void)?
     func browserAudit(for tileId: UUID) -> [BrowserAuditEntry] { browserAudits[tileId] ?? [] }
     func clearBrowserAudit(for tileId: UUID) { browserAudits[tileId] = nil }
-    let browserActionQueue = BrowserActionQueue()
+    var browserActionQueue = BrowserActionQueue()
     let browserOpenAdmission = BrowserOpenAdmission()
     struct BrowserHandOver {
         let agentId: AgentID
@@ -392,6 +392,7 @@ final class WorkspaceAPIService {
         case let .error(error):
             var details: [String: Any] = [:]
             if let id = error.approvalRequestId { details["approvalRequestId"] = id }
+            if let action = error.action, let encoded = Self.jsonObject(action) { details["action"] = Self.plain(encoded) }
             if let effects = error.requiredEffects, let encoded = Self.jsonObject(effects) {
                 details["requiredEffects"] = Self.plain(encoded)
             }

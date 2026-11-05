@@ -671,3 +671,58 @@ func runBrowserRefIdentityCheck() throws {
     let rejected = try h.raw("browser.click", ["tileId": tile.uuidString, "ref": replacementRef])
     try expect(h.errorCode(rejected) == "target_conflict", "ref from replaced tab must reject")
 }
+
+@MainActor
+func runBrowserActionResultsCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    let script = "async () => { window.actionCount=(window.actionCount||0)+1; await new Promise(r=>setTimeout(r,17000)); return true; }"
+    let payload: [String: Any] = ["tileId": tile.uuidString, "script": script, "idempotencyKey": "uncertain-evaluation"]
+    var expired: WorkspaceAPIService.Reply?
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+        h.f.api.dispatchBrowserAction(agentId: h.f.agentId, requestId: "queued-expiry", operation: .browserEvaluate,
+            payload: ["tileId": tile.uuidString, "script": "() => { window.expiredEffect=true; return true; }"], isCancelled: { false },
+            arrived: Date().addingTimeInterval(-14.99), completion: { expired = $0 })
+    }
+    let first = try h.raw("browser.evaluate", payload, timeout: 22)
+    guard case .error(let expiredError)? = expired else { throw WorkspaceAPIChecks.Failure(message: "queued expiry did not report an error") }
+    try expect(expiredError.action?.state == .queueExpired && expiredError.action?.effects == BrowserActionResult.Effects.none, "queue expiry must report no effects: \(expiredError), \(String(describing: expiredError.action))")
+    let retry = try h.raw("browser.evaluate", payload, timeout: 4)
+    func action(_ response: [String: Any]) -> [String: Any]? {
+        ((response["error"] as? [String: Any])?["details"] as? [String: Any])?["action"] as? [String: Any]
+    }
+    try expect(h.errorCode(first) == "outcome_unknown", "dispatched evaluation must time out with uncertain effects")
+    guard let report = action(first), let repeated = action(retry) else { throw WorkspaceAPIChecks.Failure(message: "browser errors need structured action results") }
+    try expect(report["effects"] as? String == "unknown", "timeout after dispatch must not claim no effects")
+    try expect(report["freshSnapshotRequired"] as? Bool == true, "timeout must require observation")
+    try expect(report["actionId"] as? String == repeated["actionId"] as? String, "same-key retry must retain action identity")
+    h.pump(0.1)
+    h.f.api.browserActionQueue = BrowserActionQueue()
+    let restarted = try h.raw("browser.evaluate", payload, timeout: 4)
+    try expect(action(restarted)?["effects"] as? String == "unknown", "restart must retain uncertain retry history")
+    let observed = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => window.actionCount"])
+    try expect(observed["value"] as? Int == 1, "same-key timeout retry dispatched input twice")
+    let (typingTile, page) = try h.ownedBrowser()
+    try Data("<html><body><input aria-label='Field'></body></html>".utf8).write(to: page)
+    _ = try h.ok("browser.navigate", ["tileId": typingTile.uuidString, "action": "reload"])
+    let snap = try h.ok("browser.snapshot", ["tileId": typingTile.uuidString])
+    guard let text = snap["text"] as? String,
+          let line = text.split(separator: "\n").first(where: { $0.contains("- textbox \"Field\"") }),
+          let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression),
+          let browser = h.live(typingTile) else { throw WorkspaceAPIChecks.Failure(message: "no typing field") }
+    let ref = String(line[range].dropFirst(5).dropLast())
+    let stop = Date().addingTimeInterval(4)
+    func interrupt() {
+        if browser.automation.actionDeliveredCharacters >= 3 { h.userKey(into: browser) }
+        else if Date() < stop { DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) { interrupt() } }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { interrupt() }
+    let partial = try h.raw("browser.type", ["tileId": typingTile.uuidString, "ref": ref, "text": String(repeating: "x", count: 200), "idempotencyKey": "partial-type"])
+    guard let prefix = action(partial), let count = prefix["deliveredCharacters"] as? Int else { throw WorkspaceAPIChecks.Failure(message: "missing partial typing report: \(partial)") }
+    try expect(prefix["effects"] as? String == "partial" && count >= 3 && count < 200, "takeover must report a bounded dispatched prefix: \(partial)")
+    let delivered = browser.automation.actionDeliveredCharacters
+    let partialRetry = try h.raw("browser.type", ["tileId": typingTile.uuidString, "ref": ref, "text": String(repeating: "x", count: 200), "idempotencyKey": "partial-type"])
+    try expect(action(partialRetry)?["effects"] as? String == "partial", "partial retry must retain the original effect report")
+    try expect(browser.automation.actionDeliveredCharacters == delivered, "same-key partial retry must not dispatch")
+}

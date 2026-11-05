@@ -76,7 +76,8 @@ extension WorkspaceAPIService {
         }
         guard tile.metadata.browserControllingAgentId == nil || (!browserUserTakenOver.contains(tileId) && tile.metadata.browserControlPaused != true) else {
             return .failure(WorkspaceAPIError(code: .targetConflict,
-                message: "The user has control. Wait for Return to agent in this tile, then take a fresh snapshot. Do not retry mutations."))
+                message: "The user has control. Wait for Return to agent in this tile, then take a fresh snapshot. Do not retry mutations.",
+                action: BrowserActionResult(state: .takeover, effects: .none, retry: .waitForHandback, freshSnapshotRequired: true)))
         }
         if let owner = tile.metadata.browserControllingAgentId {
             guard owner == agentId else {
@@ -434,7 +435,11 @@ extension WorkspaceAPIService {
     }
 
     func dispatchBrowserAction(agentId: AgentID, requestId: String, operation: WorkspaceAPIOp, payload: [String: Any],
-                               isCancelled: @escaping () -> Bool, arrived: Date = Date(), completion: @escaping (Reply) -> Void) {
+                               isCancelled: @escaping () -> Bool, arrived: Date = Date(), completion rawCompletion: @escaping (Reply) -> Void) {
+        browserActionQueue.configureRetryStore(at: supervisor.browserArtifactRoot.deletingLastPathComponent().appendingPathComponent("browser-action-retries.json"))
+        let actionId = browserActionQueue.actionIdentity(agentId: agentId, key: payload["idempotencyKey"] as? String ?? requestId)
+        let retrySession = browserActionQueue.retrySessionId
+        let completion: (Reply) -> Void = { reply in rawCompletion(BrowserActionReporting.decorate(reply, id: actionId, session: retrySession)) }
         let request: BrowserToolRequest
         do { request = try BrowserToolRequest.decode(operation: operation.rawValue, data: JSONSerialization.data(withJSONObject: payload)) }
         catch { completion(.error(WorkspaceAPIError(code: .invalidRequest, message: "Invalid browser action request."))); return }
@@ -463,6 +468,14 @@ extension WorkspaceAPIService {
         // project; Ask first reads only what the agent controls or was handed.
         let readOnly = [.browserSnapshot, .browserScreenshot, .browserConsole].contains(operation)
             && supervisor.workspaceToolsPermission() == .free
+        if let key = suppliedKey, case .success = browserScopeTarget(tileId: tileId, agentId: agentId) {
+            var canonical = payload; canonical["idempotencyKey"] = nil
+            if let data = try? JSONSerialization.data(withJSONObject: canonical, options: [.sortedKeys]),
+               let prior = browserActionQueue.uncertainReply(agentId: agentId, key: key, tileId: tileId,
+                   operation: operation.rawValue, payload: String(decoding: data, as: UTF8.self)) {
+                completion(prior); return
+            }
+        }
         if !readOnly && operation != .browserSnapshot && (browserNeedsHandbackSnapshot.contains(tileId) || canvasProvider()?.tileRecord(for: tileId)?.metadata.browserControlPaused == false) {
             completion(.error(WorkspaceAPIError(code: .targetConflict, message: "Take a fresh snapshot after handback before sending a mutation."))); return
         }

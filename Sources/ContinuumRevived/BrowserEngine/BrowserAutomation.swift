@@ -120,6 +120,9 @@ final class BrowserAutomation {
         let keyCode: UInt16?
     }
     private var agentInputFingerprints: [AgentInputFingerprint] = []
+    private(set) var actionInputEvents = 0
+    private(set) var actionDeliveredCharacters = 0
+    func beginActionTracking() { actionInputEvents = 0; actionDeliveredCharacters = 0 }
     private(set) var documentIdentity = UUID().uuidString
     func invalidateDocumentIdentity() {
         documentIdentity = UUID().uuidString
@@ -292,6 +295,7 @@ final class BrowserAutomation {
                 guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
                 try self.requireInputControl(inputAtStart, deadline: deadline)
                 self.deliverCharacter(character, window: window)
+                self.actionDeliveredCharacters += 1
                 // WebKit consumes trusted input asynchronously. A small yield
                 // keeps long bursts from losing keys and lets user input win.
                 try await self.pause(0.005, deadline: deadline)
@@ -498,6 +502,7 @@ final class BrowserAutomation {
     }
 
     private func deliverClick(cssX: Double, cssY: Double, window: NSWindow, count: Int) {
+        actionInputEvents += 1
         agentDeliveryDepth += 1
         defer { agentDeliveryDepth -= 1 }
         let zoom = webView.pageZoom
@@ -527,6 +532,7 @@ final class BrowserAutomation {
     }
 
     private func deliverKey(_ key: Key, flags: NSEvent.ModifierFlags, window: NSWindow) {
+        actionInputEvents += 1
         agentDeliveryDepth += 1
         defer { agentDeliveryDepth -= 1 }
         var flags = flags.union(key.flags)

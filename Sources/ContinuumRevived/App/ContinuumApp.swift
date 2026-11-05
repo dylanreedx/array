@@ -6188,6 +6188,11 @@ enum ContinuumApp {
             catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
         }
 
+        if CommandLine.arguments.contains("--browser-action-results-check") {
+            do { _ = NSApplication.shared; try runBrowserActionResultsCheck(); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
         if CommandLine.arguments.contains("--browser-durable-takeover-check") {
             do {
                 _ = NSApplication.shared

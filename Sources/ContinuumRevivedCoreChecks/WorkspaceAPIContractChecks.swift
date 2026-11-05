@@ -22,6 +22,9 @@ func runWorkspaceAPIContractChecks() {
 }
 
 private func checkBrowserNotLiveError() {
+    let actionReport = BrowserActionResult(actionId: "action", retrySessionId: "session", state: .outcomeUnknown, effects: .unknown, retry: .sameKeyOnly, freshSnapshotRequired: true)
+    let reportedError = WorkspaceAPIError(code: .outcomeUnknown, message: "Effects may have happened", action: actionReport)
+    expect((try? JSONDecoder().decode(WorkspaceAPIError.self, from: JSONEncoder().encode(reportedError))) == reportedError, "browser error action metadata round-trips")
     let error = WorkspaceAPIError(code: .browserNotLive, message: "Reload the tile.")
     let encoded = try? JSONEncoder().encode(error)
     let decoded = encoded.flatMap { try? JSONDecoder().decode(WorkspaceAPIError.self, from: $0) }
