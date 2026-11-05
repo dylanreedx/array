@@ -746,11 +746,11 @@ enum WorkspaceAPIChecks {
                    "a revoked caller learns no identifiers: \(contextDenied.message)")
         _ = try error(open(f, ["relativePath": "notes.md"]), .permissionDenied, "own-checkout open after revocation")
         try expect(f.api.qaGrants(for: f.agentId).isEmpty, "revocation dropped every minted grant")
-        // Re-enable: the preset is re-seeded, but the session approval for Pa is gone.
+        // Re-enable: the preset is re-seeded; the revoked agent-only approval must ask again.
         try expect(supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true), "re-enable")
         _ = try result(open(f, ["relativePath": "notes.md", "presentation": ["camera": "preserve"]]), "own open after re-enable")
         f.api.approvalHandler = { _ in .deny }
-        _ = try error(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue]), .permissionDenied, "Pa needs approval again after revocation")
+        _ = try error(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue]), .permissionDenied, "Pa agent-only session approval was revoked")
 
         // CX-01 §14.1 — revocation is scoped to the agent it revokes.
         //
@@ -768,16 +768,15 @@ enum WorkspaceAPIChecks {
         func openAs(_ agent: AgentID, _ payload: [String: Any]) -> WorkspaceAPIService.Reply {
             f.api.dispatch(agentId: agent, requestId: nextRequestId(), op: "artifact.open", payload: payload)
         }
-        // Pa is outside either agent's session preset (both live in Pb), so the
-        // first open per agent is a real approval and "allow for session" is a
-        // durable grant — exactly the thing a foreign revocation used to erase.
+        // Pa is outside either preset. Explicit Project Session approval must
+        // ask once and cover the same action and target project for both callers.
         let paSession: [String: Any] = ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue,
                                         "presentation": ["camera": "preserve"]]
         var scopePrompts: [WorkspaceAPIService.ScopeApprovalPrompt] = []
-        f.api.approvalHandler = { prompt in scopePrompts.append(prompt); return .allowForSession }
+        f.api.approvalHandler = { prompt in scopePrompts.append(prompt); return .allowForProjectSession }
         _ = try result(openAs(f.agentId, paSession), "A earns a session grant for Pa")
         _ = try result(openAs(agentB, paSession), "B earns a session grant for Pa")
-        try expect(scopePrompts.count == 2, "each agent is asked once for the out-of-preset checkout, got \(scopePrompts.count)")
+        try expect(scopePrompts.count == 1, "same-project agents share only the explicit project-session decision, got \(scopePrompts.count) prompts")
 
         // The user turns Workspace Tools OFF for B, and only for B.
         f.api.approvalHandler = { prompt in scopePrompts.append(prompt); return .deny }
@@ -790,22 +789,22 @@ enum WorkspaceAPIChecks {
         try expect(!f.api.qaGrants(for: f.agentId).isEmpty, "A still holds its own grants")
         _ = try error(openAs(agentB, paSession), .permissionDenied, "B is denied while its own policy is off")
 
-        // Re-enabling B re-seeds the preset and resurrects nothing: the old
-        // session approval is gone, so the user is asked again.
+        // Re-enabling B re-seeds the preset and can reuse the explicit decision
+        // that lasts until Array quits. B was denied while its tools were off.
         try expect(supervisor.setWorkspaceToolsEnabled(agentID: agentB, true), "re-enable the policy for the second agent")
         let promptsBeforeBRetry = scopePrompts.count
-        _ = try error(openAs(agentB, paSession), .permissionDenied, "B's revoked session grant is not resurrected by re-enabling")
-        try expect(scopePrompts.count == promptsBeforeBRetry + 1, "B is asked again after re-enabling")
+        _ = try result(openAs(agentB, paSession), "B reuses the app-session decision after re-enabling")
+        try expect(scopePrompts.count == promptsBeforeBRetry, "B does not ask again within the app session")
         _ = try result(openAs(agentB, ["relativePath": "notes.md", "presentation": ["camera": "preserve"]]),
                        "B's own checkout is preset-granted again after re-enabling")
 
-        // Nothing was widened: revoking A still kills A's own session grant.
+        // Revoking A still drops its grants and denies while tools are off.
         _ = try result(openAs(f.agentId, paSession), "A's grant is still live before its own revocation")
         try expect(supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, false), "disable A")
         try expect(f.api.qaGrants(for: f.agentId).isEmpty, "A's own revocation drops A's grants")
         try expect(supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true), "re-enable A")
         let promptsBeforeARetry = scopePrompts.count
-        _ = try error(openAs(f.agentId, paSession), .permissionDenied, "A's own revocation killed A's session grant")
-        try expect(scopePrompts.count == promptsBeforeARetry + 1, "A is asked again after its OWN revocation")
+        _ = try result(openAs(f.agentId, paSession), "A reuses the app-session decision after re-enabling")
+        try expect(scopePrompts.count == promptsBeforeARetry, "A does not ask again within the app session")
     }
 }

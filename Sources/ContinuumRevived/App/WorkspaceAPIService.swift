@@ -57,7 +57,7 @@ final class WorkspaceAPIService {
     /// `allowByPolicy` is never shown to anyone: `decideScope` returns it under
     /// Agent permissions `free` for a request inside the caller's project, and
     /// it mints a session grant marked `.permissionPolicy`.
-    enum ScopeApprovalDecision: Equatable { case deny, allowOnce, allowForSession, allowByPolicy }
+    enum ScopeApprovalDecision: Equatable { case deny, allowOnce, allowForSession, allowForProjectSession, allowByPolicy }
     typealias ApprovalHandler = (ScopeApprovalPrompt) -> ScopeApprovalDecision
 
     // Internal, not private: the `+Agents`, `+Canvas` and `+Delegation`
@@ -125,6 +125,15 @@ final class WorkspaceAPIService {
     // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
     var grants: [AgentID: [WorkspaceToolGrant]] = [:]
     private var revocationGenerations: [AgentID: UInt64] = [:]
+    /// Explicit user approvals belong to the app session and project/action
+    /// scope. Per-agent grants still carry revocation and enabled-state checks.
+    private struct SessionApprovalScope: Hashable {
+        let callerProject: UUID
+        let target: String
+        let action: String
+    }
+    private var sessionApprovals: Set<SessionApprovalScope> = []
+
     var approvalPromptCount = 0
     /// Gated requests approved by Agent permissions `free` without a prompt.
     var policyApprovalCount = 0
@@ -435,7 +444,7 @@ final class WorkspaceAPIService {
         }
         // Principal: the supervisor's record for the bound runner. Nothing in
         // `payload` is consulted for identity or permission.
-        guard let record = supervisor.records[agentId] else {
+        guard let record = supervisor.records[agentId].map(resolvedRecord) else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "Unknown caller."))
         }
         guard record.workspaceToolsEnabled else {
@@ -531,7 +540,6 @@ final class WorkspaceAPIService {
         }
         let zoneId = record.tileId.flatMap { canvas.zoneId(containing: $0) }
         let projectId = record.projectId
-            ?? zoneId.flatMap { id in runtime.document.zones.first(where: { $0.zoneId == id })?.projectId }
         let projectZones = runtime.document.zonesInZOrder.filter { $0.projectId != nil && $0.projectId == projectId }
         let installed = projectId.map { canvas.installedZoneIds(forProjectId: $0) } ?? []
         let coverage = WorkspaceCoverage(
@@ -605,7 +613,7 @@ final class WorkspaceAPIService {
                     projectId: project.id, displayName: project.name)
             }
         }
-        for record in supervisor.records.values {
+        for record in supervisor.records.values.map(resolvedRecord) {
             let canonical = CheckoutHandle.canonicalRoot(record.checkoutRoot)
             let handle = CheckoutHandle.derive(canonicalRoot: canonical)
             guard known[handle] == nil else { continue }
@@ -614,6 +622,27 @@ final class WorkspaceAPIService {
                 projectId: record.projectId, displayName: URL(fileURLWithPath: canonical).lastPathComponent)
         }
         return known
+    }
+
+    /// Legacy records predate project stamps. Prove their owner from their
+    /// recorded repository Home, never from the active controller or tile zone.
+    /// Ambiguous and missing registry entries stay unscoped.
+    func resolvedProjectId(_ record: AgentRecord) -> UUID? {
+        if let projectId = record.projectId { return projectId }
+        guard let registry = try? registryStoreProvider()?.loadOrEmpty() else { return nil }
+        let root = CheckoutHandle.canonicalRoot(AgentSupervisor.repositoryRoot(of: record).path)
+        let matches = registry.projects.filter {
+            !$0.missing && CheckoutHandle.canonicalRoot($0.rootPath) == root
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0].id
+    }
+
+    /// A dispatch-local compatibility projection; it does not rewrite a record.
+    func resolvedRecord(_ record: AgentRecord) -> AgentRecord {
+        var resolved = record
+        resolved.projectId = resolvedProjectId(record)
+        return resolved
     }
 
     static func ownCheckoutHandle(_ record: AgentRecord) -> CheckoutHandle {
@@ -728,7 +757,7 @@ final class WorkspaceAPIService {
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
                     issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
-            case .allowForSession, .allowByPolicy:
+            case .allowForSession, .allowForProjectSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [target.handle], operations: [.artifactOpen],
                     presentationCeiling: WorkspaceToolGrant.phase1Ceiling,
@@ -1060,16 +1089,37 @@ final class WorkspaceAPIService {
             policyApprovalCount += 1
             return .allowByPolicy
         }
+        if let scope = sessionApprovalScope(agentId: prompt.agentId, checkout: prompt.checkout, operation: prompt.op),
+           sessionApprovals.contains(scope) {
+            return .allowForProjectSession
+        }
         approvalPromptCount += 1
         return approvalHandler(prompt)
     }
 
-    static func sessionIssuer(_ decision: ScopeApprovalDecision, requestId: String) -> WorkspaceToolGrant.Issuer {
-        decision == .allowByPolicy ? .permissionPolicy(requestId: requestId) : .userApprovalSession(requestId: requestId)
+    private func sessionApprovalScope(agentId: AgentID, checkout: CheckoutHandle, operation: WorkspaceAPIOp) -> SessionApprovalScope? {
+        guard let record = supervisor.records[agentId], let project = resolvedProjectId(record) else { return nil }
+        // Keep unknown target ownership at the exact checkout. Never use the
+        // active project, or infer a project from another agent's missing tag.
+        let target = knownCheckouts()[checkout]?.projectId.map { "project:\($0.uuidString)" }
+            ?? "checkout:\(checkout.rawValue)"
+        let action: String
+        if WorkspaceAPIOp.deviceOperations.contains(operation) { action = "device" }
+        else if operation.rawValue.hasPrefix("browser.") { action = "browser" }
+        else { action = operation.rawValue }
+        return SessionApprovalScope(callerProject: project, target: target, action: action)
     }
 
-    /// Both agents belong to one known project. An agent with no project
-    /// stamp is never "inside" anything, so it is asked.
+    static func sessionIssuer(_ decision: ScopeApprovalDecision, requestId: String) -> WorkspaceToolGrant.Issuer {
+        switch decision {
+        case .allowByPolicy: return .permissionPolicy(requestId: requestId)
+        case .allowForProjectSession: return .userApprovalProjectSession(requestId: requestId)
+        default: return .userApprovalSession(requestId: requestId)
+        }
+    }
+
+    /// Both agents belong to one known project. Legacy stamps are resolved at
+    /// dispatch; an owner that cannot be proven remains outside every project.
     static func sameProject(_ record: AgentRecord, _ projectId: UUID?) -> Bool {
         guard let own = record.projectId else { return false }
         return projectId == own
@@ -1087,6 +1137,21 @@ final class WorkspaceAPIService {
 
     func mint(_ grant: WorkspaceToolGrant) {
         grants[grant.agentId, default: []].append(grant)
+        // Callers mint only after cancellation and policy rechecks. Recording
+        // here means a delayed approval on a cancelled request creates no
+        // authority for any subsequent request or another agent.
+        if case .userApprovalProjectSession = grant.issuer {
+            let inspectCheckouts = grant.inspectableAgentIds.compactMap { id in
+                supervisor.records[id].map(Self.ownCheckoutHandle)
+            }
+            for checkout in grant.checkoutHandles.union(inspectCheckouts) {
+                for operation in grant.operations {
+                    if let scope = sessionApprovalScope(agentId: grant.agentId, checkout: checkout, operation: operation) {
+                        sessionApprovals.insert(scope)
+                    }
+                }
+            }
+        }
     }
 
     private func consumeSingleUseGrant(agentId: AgentID, checkout: CheckoutHandle) {

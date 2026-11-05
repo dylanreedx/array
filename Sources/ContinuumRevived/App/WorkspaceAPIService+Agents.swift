@@ -51,7 +51,7 @@ extension WorkspaceAPIService {
         // agents in the project's other checkouts too.
         let wholeProject = supervisor.workspaceToolsPermission() == .free
         var facts: [AgentFindCandidateFacts] = []
-        for candidate in supervisor.records.values {
+        for candidate in supervisor.records.values.map(resolvedRecord) {
             let handle = Self.ownCheckoutHandle(candidate)
             let inCheckout = checkouts.contains(handle)
             let inProject = wholeProject && Self.sameProject(record, candidate.projectId)
@@ -109,7 +109,7 @@ extension WorkspaceAPIService {
         guard live.contains(where: { $0.revocationGeneration == revocationGeneration(for: agentId) && $0.operations.contains(.agentInspect) }) else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not inspect agents."))
         }
-        guard let target = supervisor.records[request.agentId] else {
+        guard let target = supervisor.records[request.agentId].map(resolvedRecord) else {
             return .error(WorkspaceAPIError(code: .notFound, message: "No agent with that id is known to this host. Re-resolve it through array_find_agent."))
         }
 
@@ -143,7 +143,7 @@ extension WorkspaceAPIService {
                     agentId: agentId, checkoutHandles: [], operations: [.agentInspect],
                     presentationCeiling: .preserveAll, issuer: .userApprovalOnce(requestId: promptId),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true, inspectableAgentIds: [target.id]))
-            case .allowForSession, .allowByPolicy:
+            case .allowForSession, .allowForProjectSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [], operations: [.agentInspect],
                     presentationCeiling: .preserveAll, issuer: Self.sessionIssuer(decision, requestId: promptId),

@@ -827,7 +827,7 @@ extension WorkspaceAPIService {
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.boardManage],
                     presentationCeiling: .preserveAll, issuer: .userApprovalOnce(requestId: id),
                     revocationGeneration: revocationGeneration(for: agentId), singleUse: true))
-            case .allowForSession, .allowByPolicy:
+            case .allowForSession, .allowForProjectSession, .allowByPolicy:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.boardManage],
                     presentationCeiling: .preserveAll, issuer: Self.sessionIssuer(decision, requestId: id),

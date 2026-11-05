@@ -67,9 +67,14 @@ COMPANION_TASKS_ONLY=0
 NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
 MANAGED_MODE_ONLY=0
+PERMISSION_UX_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --permission-ux)
+      PERMISSION_UX_ONLY=1
+      shift
+      ;;
     --compaction-replay)
       COMPACTION_REPLAY_ONLY=1
       shift
@@ -172,7 +177,9 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+Usage: scripts/run-matrix.sh [--permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+
+--permission-ux rebuilds the app and MCP helper, then reports permission scope, browser, simulator, grants and session witnesses. This is a targeted development gate.
 
 --agent-schedules rebuilds the app and reports native cron lifetime and durable schedule queue/restart witnesses.
 
@@ -619,6 +626,19 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$PERMISSION_UX_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product array-workspace-mcp
+  run swift build --disable-sandbox --skip-update --product Array
+  run_app_check .build/debug/Array --workspace-api-free-permissions-check
+  run_app_check .build/debug/Array --workspace-api-session-permissions-check
+  run_app_check .build/debug/Array --workspace-api-grants-check
+  run_app_check .build/debug/Array --workspace-api-browser-check
+  run_app_check .build/debug/Array --browser-automation-engine-check
+  run_app_check .build/debug/Array --workspace-api-device-check
+  run git diff --check
+  matrix_report 'Permission UX matrix (targeted)'
+  exit $?
+fi
 if [[ "$COMPACTION_REPLAY_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run_app_check .build/debug/Array --live-compaction-replay-check
@@ -1857,6 +1877,7 @@ run_app_check .build/debug/Array --agent-message-card-check
 # agent-to-agent chain stops, leaving Free takes its grants back, Off mints
 # agents without workspace tools.
 run_app_check .build/debug/Array --workspace-api-free-permissions-check
+run_app_check .build/debug/Array --workspace-api-session-permissions-check
 # 0.7.30: an agent's background jobs reach its tile chip and the top bar's
 # menu through the boot mount's tracker, a port opens in a browser beside the
 # agent in its own zone, and Stop All ends every process.

@@ -44,6 +44,7 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
   pi bridge is `Sources/ContinuumRevivedCore/AgentProviders/PiHostToolBridge.swift`
   plus `Resources/PiExtensions/continuum-workspace-tools.ts`. Design and status:
   `.plans/59-parallel-product-investigations/canvas-awareness-api-design.md`.
+- [Workspace permission scopes](./internals/workspace-permissions.md) — Free, Ask first, browser visits and session approvals.
 - [Workspace iOS Preview control](./internals/workspace-ios-preview.md) — scoped
   device ownership, fresh images, acknowledged taps, human takeover and witnesses
 - [Making an agent character set](./internals/agent-characters-authoring.md) — the
