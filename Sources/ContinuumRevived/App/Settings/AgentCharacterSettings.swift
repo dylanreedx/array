@@ -58,7 +58,7 @@ final class AgentCharacterSettingsModel {
         // Reads each found file to name and state it; nothing is written until
         // the person imports one.
         found = AgentCharacterImports.describe(AgentCharacterImports.discover(home: home), importsDirectory: importsDirectory)
-        if selectedID != AgentCharacterBundled.themeID, !imported.contains(where: { $0.id == selectedID }) {
+        if AgentCharacterBundled.theme(id: selectedID) == nil, !imported.contains(where: { $0.id == selectedID }) {
             selectedID = AgentCharacterBundled.themeID
         }
     }
@@ -67,7 +67,7 @@ final class AgentCharacterSettingsModel {
 
     /// The set the preview shows: the selected one.
     var previewTheme: AgentCharacterTheme? {
-        imported.first { $0.id == selectedID } ?? builtIn
+        AgentCharacterBundled.theme(id: selectedID) ?? imported.first { $0.id == selectedID } ?? builtIn
     }
 
     func select(id: String) {
@@ -133,10 +133,14 @@ final class AgentCharacterSettingsModel {
         refresh()
     }
 
-    /// The set picker's rows: the built-in set, each imported set, then Import….
+    /// The set picker's rows: the ducks, the other built-in sets, each imported
+    /// set, then Import….
     var choiceItems: [ChoiceItem] {
         var items = [ChoiceItem(id: AgentCharacterBundled.themeID, title: "Ducks (built in)",
                                 detail: "\(builtIn?.characters.count ?? 0) characters")]
+        items += AgentCharacterBundled.packIDs.compactMap(AgentCharacterBundled.theme(id:)).map {
+            ChoiceItem(id: $0.id, title: "\($0.title) (built in)", detail: "\($0.characters.count) characters")
+        }
         items += imported.map { ChoiceItem(id: $0.id, title: $0.title, detail: "\($0.characters.count) characters") }
         items.append(ChoiceItem(id: Self.importItemID, title: "Import…", icon: nil))
         return items
@@ -277,6 +281,8 @@ struct AgentCharacterSettingsRows: View {
                         .buttonStyle(.link)
                 }
             }
+        } else if let theme = model.previewTheme, AgentCharacterBundled.isBuiltIn(theme.id) {
+            InfoRow(text: "\(theme.title) · \(theme.characters.count) characters · built in")
         } else if let theme = model.previewTheme {
             HStack {
                 InfoRow(text: "\(theme.title) · \(theme.characters.count) characters")

@@ -155,8 +155,8 @@ final class AgentCharacterController {
         for file in files {
             switch file.result {
             case let .success(theme):
-                // One set per id; the built-in id is never shadowed.
-                guard theme.id != AgentCharacterBundled.themeID, next[theme.id] == nil else { continue }
+                // One set per id; a built-in id is never shadowed.
+                guard !AgentCharacterBundled.isBuiltIn(theme.id), next[theme.id] == nil else { continue }
                 next[theme.id] = theme
                 byFile[file.url] = theme.id
             case .failure:
@@ -222,9 +222,13 @@ final class AgentCharacterController {
         if changed { NotificationCenter.default.post(name: Self.didChangeNotification, object: self) }
     }
 
-    /// The selected set: an imported one by id, else the built-in ducks.
+    /// The selected set: a built-in one by id, an imported one by id, else the
+    /// built-in ducks.
     private func resolveTheme(id: String?) -> AgentCharacterTheme? {
-        if let id, id != AgentCharacterBundled.themeID {
+        if let id, AgentCharacterBundled.isBuiltIn(id) {
+            return AgentCharacterBundled.theme(id: id) ?? AgentCharacterBundled.theme()
+        }
+        if let id {
             // Selected the moment it was imported: the watcher may not have
             // reported the file yet, so read the folder now.
             if lastGoodUserThemes[id] == nil { rescanUserThemes() }

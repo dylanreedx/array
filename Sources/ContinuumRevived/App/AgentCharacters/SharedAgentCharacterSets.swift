@@ -42,9 +42,13 @@ enum SharedAgentCharacterSets {
         func fallback(_ reason: String) -> SharedAgentCharacterSet {
             .init(theme: builtIn, key: "builtin:" + builtIn.id, fallbackReason: reason)
         }
+        // A built-in set is drawn from this Mac's own copy. An older host may still
+        // ship a user copy under a built-in id, which no user set may now take.
+        if AgentCharacterBundled.isBuiltIn(reference.id), let own = AgentCharacterBundled.theme(id: reference.id) {
+            return .init(theme: own, key: "builtin:" + own.id, fallbackReason: nil)
+        }
         guard let hash = reference.hash else {
-            return reference.id == builtIn.id ? .init(theme: builtIn, key: "builtin:" + builtIn.id, fallbackReason: nil)
-                : fallback("The owner's set \(reference.id) did not come with its file.")
+            return fallback("The owner's set \(reference.id) did not come with its file.")
         }
         let result: Result<AgentCharacterTheme, AgentCharacterThemeProblems>
         if let known = validated.first(where: { $0.hash == hash }) {

@@ -15,7 +15,8 @@ import Foundation
 final class AgentCharacterSoundCenter {
     /// The character that speaks for an agent in the shown set.
     struct Speaker: Equatable {
-        /// The set's folder in Array's store; nil for the built-in set.
+        /// The set's folder: in Array's store, or a built-in pack's in the app;
+        /// nil for the ducks.
         let themeFolder: URL?
         /// The character's name, for a set's per-character `done` clips.
         let characterName: String?
@@ -108,16 +109,22 @@ final class AgentCharacterSoundCenter {
 
 extension AgentCharacterSoundCenter {
     /// Production's speaker: the agent's character in the shown set, while
-    /// characters show. A set written straight into the themes folder as
-    /// `*.theme.json` has no folder of its own, so it speaks with the bundled sounds.
+    /// characters show. A built-in pack speaks from its folder in the app. A set
+    /// written straight into the themes folder as `*.theme.json` has no folder of
+    /// its own, so it speaks with the bundled sounds, as the ducks do.
     static func productionSpeaker(records: @escaping (UUID) -> AgentRecord?) -> (UUID) -> Speaker? {
         { id in
             let characters = AgentCharacterController.shared
             guard characters.isEnabled, let theme = characters.theme else { return nil }
             let name = characters.characterIndex(for: id, name: records(id)?.characterName)
                 .flatMap { $0 < theme.characters.count ? theme.characters[$0].name : nil }
-            let file = theme.id == AgentCharacterBundled.themeID ? nil : characters.userThemeFileURL(id: theme.id)
-            let folder = file.flatMap { $0.lastPathComponent == AgentCharacterImports.fileName ? $0.deletingLastPathComponent() : nil }
+            let folder: URL?
+            if AgentCharacterBundled.isBuiltIn(theme.id) {
+                folder = AgentCharacterBundled.packFolderURL(id: theme.id)
+            } else {
+                let file = characters.userThemeFileURL(id: theme.id)
+                folder = file.flatMap { $0.lastPathComponent == AgentCharacterImports.fileName ? $0.deletingLastPathComponent() : nil }
+            }
             return Speaker(themeFolder: folder, characterName: name)
         }
     }

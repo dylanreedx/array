@@ -813,3 +813,29 @@ locally). The Bleach file and its art are never committed.
 Follow-ups: voices (spawn/done/any mp3s) would be a new notification path and need
 an entry in `docs/internals/notification-paths.md` first; `shift` as a level-change
 transition; shipping large sets to guests in chunks.
+
+## Built-in symbol packs
+
+Added 2026-11-05. Four more built-in sets ship beside the ducks: Street Sigils,
+Living Chords, ASCII morph and Signal Ghosts (`AgentCharacterBundled.packIDs`).
+The ducks keep their own route (`ducks.theme.json` and the base sounds). Each pack
+is `AgentCharacters/packs/<id>/theme.json`, with only the audio its `voices` and
+`sounds` name: the same layout an imported set has, so the same parser reads it
+and the same sound resolver speaks from its folder. No Swift defines a pack. Core's
+resource bundle is copied whole by `make-app-bundle.sh`, so nothing new is needed
+to bundle them.
+
+- All five ids are reserved. An import with one is refused. A file in the themes
+  folder with one is listed there as a problem, and never shadows the built-in set.
+- A shared agent drawing a built-in set sends only the id. The guest draws its own
+  copy of that set.
+- Character names only have to be unique within their own set. Curly is in Street
+  Sigils and ASCII morph; Square is in ASCII morph and Signal Ghosts. A manual pick
+  is a name, so it carries over when the set changes.
+- Size: 14.2 MiB uncompressed (10.4 MiB JSON, 3.9 MiB WAV), about 3.1 MiB gzipped.
+
+Witnesses: `--agent-character-theme-check` §1b (every pack loads with its character
+count and lead art, every named clip resolves and decodes inside its folder, every
+moment plays a pack clip, ids reserved), and `--character-settings-check` (picker
+rows, choosing each pack draws it and speaks from its folder, the grid of each pack
+renders in both appearances).

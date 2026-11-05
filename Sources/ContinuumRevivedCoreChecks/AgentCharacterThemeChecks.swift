@@ -41,6 +41,92 @@ func runAgentCharacterThemeChecks() {
     expect(license.contains("Copyright (c) 2026 Ali Alsalkhadi") && license.contains("Permission is hereby granted"),
            "the MIT notice ships beside the built-in characters")
 
+    // 1b. The built-in symbol packs, through the lookup the app draws and speaks
+    // from: each loads by id, has its characters and lead art, and every sound
+    // its theme names resolves to a playable file inside its own folder.
+    let packs: [(id: String, title: String, characters: Int)] = [
+        ("street-sigils", "Street Sigils", 12), ("living-chords", "Living Chords", 12),
+        ("ascii-morph", "ASCII morph", 14), ("signal-ghosts", "Signal Ghosts", 12),
+    ]
+    expect(AgentCharacterBundled.builtInIDs == ["ducks-classic"] + packs.map(\.id),
+           "the built-in ids, ducks first: \(AgentCharacterBundled.builtInIDs)")
+    let builtIns = AgentCharacterBundled.themes()
+    expect(builtIns.map(\.id) == AgentCharacterBundled.builtInIDs,
+           "every built-in set loads: \(builtIns.map(\.id))")
+    expect(Set(builtIns.map { $0.title.lowercased() }).count == builtIns.count, "built-in titles are distinct")
+    for pack in packs {
+        guard let theme = AgentCharacterBundled.theme(id: pack.id) else {
+            expect(false, "\(pack.id): the built-in pack does not load from the app's resources")
+            return
+        }
+        expect(theme.title == pack.title, "\(pack.id): title \(theme.title)")
+        expect(theme.characters.count == pack.characters, "\(pack.id): \(pack.characters) characters, got \(theme.characters.count)")
+        expect(Set(theme.characters.map { $0.name.lowercased() }).count == theme.characters.count,
+               "\(pack.id): character names are distinct within the set")
+        expect(theme.hasLead && (theme.leadSet?.characters.isEmpty == false), "\(pack.id): carries lead art")
+        guard let folder = AgentCharacterBundled.packFolderURL(id: pack.id),
+              let data = try? Data(contentsOf: folder.appendingPathComponent(AgentCharacterImports.fileName)) else {
+            expect(false, "\(pack.id): no pack folder with a theme.json")
+            return
+        }
+        let voices = AgentCharacterVoices.parse(themeData: data)
+        expect(!voices.spawn.isEmpty && !voices.doneByName.isEmpty, "\(pack.id): names spawn and per-character done voices")
+        expect(AgentCharacterBaseSound.allCases.allSatisfy { voices.sounds[$0] != nil },
+               "\(pack.id): replaces every base sound: \(voices.sounds.keys.map(\.rawValue).sorted())")
+        for relative in voices.referencedFiles {
+            let file = AgentCharacterAudioImport.containedFile(relative, in: folder)
+            expect(file.map { FileManager.default.fileExists(atPath: $0.path) && AgentCharacterAudioImport.isPlayableCopy($0) } == true
+                   && file.flatMap(AgentCharacterAudioImport.decodedDuration) != nil,
+                   "\(pack.id): sound \(relative) is missing or does not decode in the app's resources")
+        }
+        // What the sound center plays: a pack clip, never the ducks' fallback.
+        for character in theme.characters {
+            let done = AgentCharacterSoundResolver.resolve(moment: .helperFinished, characterName: character.name,
+                                                           voices: voices, themeFolder: folder, pick: { _ in 0 })
+            guard case let .theme(url)? = done, let named = voices.doneByName.first(where: {
+                $0.key.caseInsensitiveCompare(character.name) == .orderedSame })?.value.first else {
+                expect(false, "\(pack.id): \(character.name) finishing has no clip of its own: \(String(describing: done))")
+                return
+            }
+            expect(url.lastPathComponent == (named as NSString).lastPathComponent,
+                   "\(pack.id): \(character.name) finishing plays \(url.lastPathComponent), not its own \(named)")
+        }
+        for moment in AgentCharacterSoundMoment.allCases where moment.baseSound != nil {
+            let source = AgentCharacterSoundResolver.resolve(moment: moment, characterName: nil, voices: voices,
+                                                             themeFolder: folder, pick: { _ in 0 })
+            if case .theme? = source {} else {
+                expect(false, "\(pack.id): \(moment.rawValue) falls back to \(String(describing: source))")
+            }
+        }
+    }
+    // A user set may not take a built-in id: import refuses it, and one written
+    // straight into the themes folder is a problem there, never the built-in.
+    let collision = FileManager.default.temporaryDirectory
+        .appendingPathComponent("agent-character-builtin-collision-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: collision) }
+    let userFolder = collision.appendingPathComponent("characters", isDirectory: true)
+    try? FileManager.default.createDirectory(at: userFolder, withIntermediateDirectories: true)
+    let stolenText = String(decoding: data, as: UTF8.self)
+        .replacingOccurrences(of: "\"id\":\"ducks-classic\"", with: "\"id\":\"ascii-morph\"")
+        .replacingOccurrences(of: "\"title\":\"Ducks\"", with: "\"title\":\"Not ASCII\"")
+    let stolen = collision.appendingPathComponent("stolen.theme.json")
+    try? Data(stolenText.utf8).write(to: stolen)
+    if case let .success(parsed) = AgentCharacterThemeParser.parse(data: Data(stolenText.utf8)) {
+        expect(parsed.id == "ascii-morph", "control: the colliding file really takes the built-in id")
+    } else {
+        expect(false, "control: the colliding file parses")
+    }
+    if case .imported = AgentCharacterImports.importTheme(from: stolen, into: userFolder) {
+        expect(false, "importing a set with a built-in pack's id is refused")
+    }
+    try? Data(stolenText.utf8).write(to: userFolder.appendingPathComponent("stolen.theme.json"))
+    let scanned = AgentCharacterImports.scan(userFolder)
+    expect(AgentCharacterImports.themes(in: scanned).isEmpty, "a folder set with a built-in id is not a user set")
+    expect(scanned.contains { if case let .failure(problems) = $0.result {
+        return problems.messages.contains { $0.contains("ascii-morph") && $0.contains("built-in") } }
+        return false }, "the folder lists the built-in id as the file's problem")
+    expect(AgentCharacterBundled.theme(id: "ascii-morph")?.title == "ASCII morph", "the built-in pack is untouched")
+
     // 2. Parity with the reference parser over the recorded corpus.
     let folder = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         .appendingPathComponent("Fixtures/agent-character-themes", isDirectory: true)
@@ -170,7 +256,7 @@ func runAgentCharacterThemeChecks() {
         expect(false, "the built-in set has a Pekin")
     }
     let duckherd = runDuckherdShapedThemeChecks(expect)
-    print("Agent character theme checks passed: built-in set (8 x 105 frames), \(accepted) accepted + \(rejected) rejected corpus files match the reference (1 widened to 16 helpers), \(atlasChecks) atlas pixels; \(duckherd)")
+    print("Agent character theme checks passed: built-in set (8 x 105 frames), \(packs.count) built-in packs with every sound resolving, built-in ids reserved, \(accepted) accepted + \(rejected) rejected corpus files match the reference (1 widened to 16 helpers), \(atlasChecks) atlas pixels; \(duckherd)")
 }
 
 /// Plan 110 › "Duckherd themes as they ship": a set shaped like the ones Duckherd

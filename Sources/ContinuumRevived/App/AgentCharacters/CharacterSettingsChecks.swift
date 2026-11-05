@@ -72,8 +72,23 @@ enum CharacterSettingsChecks {
         try expect(model.selectedID == "pond" && defaults.string(forKey: AgentCharacterConfig.themeKey) == "pond",
                    "importing selects the new set")
         try expect(controller.theme?.id == "pond", "the app now draws the imported set (\(controller.theme?.id ?? "nil"))")
-        try expect(model.choiceItems.map(\.id) == [AgentCharacterBundled.themeID, "pond", AgentCharacterSettingsModel.importItemID],
-                   "the picker offers the built-in set, the import, and Import…")
+        try expect(model.choiceItems.map(\.id) == AgentCharacterBundled.builtInIDs + ["pond", AgentCharacterSettingsModel.importItemID],
+                   "the picker offers the built-in sets, the import, and Import…: \(model.choiceItems.map(\.id))")
+
+        // A built-in pack: chosen like any set, drawn, and speaking from its own folder.
+        for id in AgentCharacterBundled.packIDs {
+            model.select(id: id)
+            try expect(controller.theme?.id == id, "choosing \(id) draws it (\(controller.theme?.id ?? "nil"))")
+            try expect(model.previewTheme?.id == id, "the preview shows \(id)")
+            let speaker = AgentCharacterSoundCenter.productionSpeaker(records: { _ in nil })(UUID())
+            try expect(speaker?.themeFolder != nil && speaker?.themeFolder == AgentCharacterBundled.packFolderURL(id: id),
+                       "\(id) speaks from its folder in the app: \(String(describing: speaker))")
+            try expect(speaker?.characterName.map { name in controller.theme?.characters.contains { $0.name == name } == true } == true,
+                       "\(id): the speaker is one of its characters")
+        }
+        model.refresh()
+        try expect(model.selectedID == AgentCharacterBundled.packIDs.last, "a selected built-in pack survives a refresh")
+        model.select(id: "pond")
 
         // A bad file: its problems, word for word, and nothing new on disk.
         let before = try fm.contentsOfDirectory(atPath: imports.path).sorted()
@@ -124,7 +139,45 @@ enum CharacterSettingsChecks {
             controller.reduceMotion = { false }
             grids += 1
         }
-        return "Character settings checks passed: discovery through a fixture home (2 files, nothing read), folder import copies one file and selects it, a bad file shows its problems and imports nothing, \(grids) appearances rendered with the 8 x 9 preview grid animating and still under Reduce Motion"
+
+        // Each built-in pack in the same real rows, in both appearances: its whole
+        // preview grid renders from the app's resources.
+        let ducksGrid = AgentCharacterPreviewGridView.height(for: AgentCharacterBundled.theme()!)
+        var packGrids = 0
+        for id in AgentCharacterBundled.packIDs {
+            model.select(id: id)
+            guard let theme = AgentCharacterBundled.theme(id: id), controller.theme?.id == id else {
+                throw Failure(description: "\(id): the built-in pack is not the set shown")
+            }
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                let host = NSHostingView(rootView: Form {
+                    Section(group.title ?? "") {
+                        ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
+                            SettingsFieldRow(model: settings, row: row)
+                        }
+                    }
+                }.formStyle(.grouped))
+                host.frame = NSRect(x: 0, y: 0, width: 720,
+                                    height: 980 + max(0, AgentCharacterPreviewGridView.height(for: theme) - ducksGrid))
+                let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: appearance)
+                window.contentView = host
+                window.orderFrontOffscreenForChecks()
+                defer { window.orderOut(nil) }
+                host.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+                guard let grid = find(AgentCharacterPreviewGridView.self, in: host) else {
+                    throw Failure(description: "\(id) \(appearance.rawValue): the preview grid did not render")
+                }
+                try expect(grid.sprites.count == theme.characters.count * AgentCharacterPreviewGridView.columns.count,
+                           "\(id): \(theme.characters.count) characters x every state, got \(grid.sprites.count) sprites")
+                try SidebarCharacterChecks.capture(window, to: out.appendingPathComponent(
+                    "settings-\(id)-\(appearance == .aqua ? "light" : "dark").png"))
+                packGrids += 1
+            }
+        }
+        model.select(id: AgentCharacterBundled.themeID)
+        return "Character settings checks passed: discovery through a fixture home (2 files, nothing read), folder import copies one file and selects it, \(AgentCharacterBundled.packIDs.count) built-in packs chosen, drawn and speaking from their folders, a bad file shows its problems and imports nothing, \(grids) appearances rendered with the 8 x 9 preview grid animating and still under Reduce Motion, \(packGrids) built-in pack grids rendered"
     }
 
     static func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
