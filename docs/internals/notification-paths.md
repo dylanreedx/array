@@ -142,6 +142,31 @@ report is refreshed (fixture: +6 seconds). Output arriving after that durable
 admission still misses the earlier wake (fixture: +16 logical seconds); recovering
 such late output requires another delivery policy and is outside this interim fix.
 
+For **SRC-01** (0.7.44), a helper turn that ends while its runner reports
+background work (`hasBackgroundWork` or `hasRunningSubagents`: a claude shell job,
+subagent or native schedule) and files no report is held, not delivered. Its wake,
+its message-subscription settlement and its spawn-result write are held together:
+the lead is not woken, `wait_agents` and `operation.get` keep reading `spawned`,
+and a lead that reached the helper only by `array_message_agent` keeps its
+subscription, so the helper's later result reaches it. The helper's next turn end
+decides again; a turn answering a message sent after the hold is never held. A held
+turn is released as it stands when its session exits or is reaped, on Stop, on a
+CLI-update retirement, or 600 s after the first hold (`heldHelperCompletionCap`,
+on the helper-completion clock). A completed turn without a report, held or not,
+is headed `<name> finished: ended its turn without filing a report` (plus `; its
+background work is still running` when the cap releases it) instead of
+`finished: succeeded`; a same-turn report refreshed before admission restores
+`succeeded`. Codex and Pi runners report no background work and are never held.
+Helper results queued in separate batches behind a busy lead are taken together
+when it goes idle: the drain merges the consecutive queued helper results into
+one attributed batch prompt and one lead turn, stopping at any user steer or
+follow-up. Each merged queue entry keeps its own durable custody and settles with
+the turn that carried it; only the first is echoed as the prompt. Quiet outcomes:
+a held turn sends nothing until released; held results never alert the user. No new
+alert sender, recipient, sound or tap action. Witnesses: `--helper-completion-check`
+(scripted Claude-shaped runner: positive control, no-report header, background
+hold then one wake, cap release, message-only result, two batches as one turn).
+
 For **SRC-01**, a transient helper provider failure reserved for a host
 retry is withheld from terminal delivery. **SRC-02** retains existing runtime-error
 handling; there is no new direct alert sender. Success, exhausted retries,

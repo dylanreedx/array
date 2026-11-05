@@ -90,7 +90,7 @@ enum HelperCompletionChecks {
             try HelperGuardChecks.expect(received && updates.count == 1,
                 "retry completion must arrive once and finish draining; received \(updates.count)")
             if marker == "RETRY-EXHAUST" { try HelperGuardChecks.expect(updates[0].contains("failed after 2 retries: serverOverloaded"), "exhausted retries missing from report") }
-            if marker == "RETRY-SUCCESS" { try HelperGuardChecks.expect(updates[0].contains("succeeded") && !updates[0].contains("failed:"), "successful retry was reported failed") }
+            if marker == "RETRY-SUCCESS" { try HelperGuardChecks.expect(updates[0].contains(AgentSupervisor.helperNoReportStatus) && !updates[0].contains("failed:"), "successful retry was reported failed") }
         }
         s.helperProviderRetryDelay = 5_000_000_000
         let stopped = try bench.delegate("RETRY-EXHAUST-stop")
@@ -567,7 +567,270 @@ enum HelperCompletionChecks {
         print("card7 durable custody: user priority, admission exclusion, uncertainty/restart, receipt I/O/retry, visible recovery light/dark PASS")
     }
 
+    /// A Claude-shaped session runner the check drives by hand: one turn at a
+    /// time, background work it reports as the real runner does, and turns it
+    /// starts on its own (a finished background job).
+    final class HeldWakeRunner: AgentSteeringRunning, AgentUnsolicitedTurnReporting, @unchecked Sendable {
+        private let lock = NSLock()
+        private var promptLog: [String] = []
+        private var gates: [DispatchSemaphore] = []
+        private var finalTexts: [String] = []
+        private var unsolicitedHandler: (@Sendable () -> Void)?
+        private var unsolicited = false
+        private var running = false
+        private var ends = true
+        init(autoEnd: Bool) { ends = autoEnd }
+        var prompts: [String] { lock.withLock { promptLog } }
+        var openTurns: Int { lock.withLock { gates.count } }
+        var background: Bool {
+            get { lock.withLock { running } }
+            set { lock.withLock { running = newValue } }
+        }
+        var autoEnd: Bool {
+            get { lock.withLock { ends } }
+            set { lock.withLock { ends = newValue } }
+        }
+        var keepsSessionAliveBetweenTurns: Bool { true }
+        var canAcceptAnotherTurn: Bool { true }
+        var acceptsSteerNow: Bool { true }
+        var hasBackgroundWork: Bool { background }
+        var hasUnsolicitedTurn: Bool { lock.withLock { unsolicited } }
+        func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+            lock.withLock { promptLog.append(prompt.text) }
+            turn(onEvent)
+        }
+        func continueUnsolicitedTurn(onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+            lock.withLock { unsolicited = false }
+            turn(onEvent)
+        }
+        private func turn(_ onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) {
+            let gate = DispatchSemaphore(value: 0)
+            let auto = lock.withLock { () -> Bool in
+                if !ends { gates.append(gate) }
+                return ends
+            }
+            let turnID = UUID().uuidString, itemID = "assistant-\(turnID)"
+            onEvent(.turnStarted(threadId: "", turnId: turnID))
+            if !auto { gate.wait() }
+            let text = lock.withLock { finalTexts.isEmpty ? "Lead turn done." : finalTexts.removeFirst() }
+            onEvent(.itemStarted(threadId: "", itemId: itemID, kind: .assistantMessage, title: nil))
+            onEvent(.contentDelta(threadId: "", turnId: turnID, streamKind: .assistant, delta: text))
+            onEvent(.itemCompleted(threadId: "", itemId: itemID, kind: .assistantMessage, status: .completed))
+            onEvent(.turnCompleted(threadId: "", turnId: turnID, outcome: .completed, errorMessage: nil))
+        }
+        func end(saying text: String) {
+            lock.withLock {
+                finalTexts.append(text)
+                if !gates.isEmpty { gates.removeFirst().signal() }
+            }
+        }
+        func beginUnsolicitedTurn() {
+            let handler = lock.withLock { () -> (@Sendable () -> Void)? in
+                unsolicited = true
+                return unsolicitedHandler
+            }
+            handler?()
+        }
+        func observeUnsolicitedTurns(_ handler: @escaping @Sendable () -> Void) { lock.withLock { unsolicitedHandler = handler } }
+        func steer(_ prompt: AgentPrompt, id: UUID) throws { throw AgentSteerNotAccepted("held-wake fixture takes no steers") }
+        func interrupt() throws {}
+        func stop() { lock.withLock { gates.forEach { $0.signal() }; gates = [] } }
+        func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+        func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+        func observeSteerDispositions(_ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void) {}
+    }
+
+    /// Empty wakes, lost message results and per-batch lead turns, through the
+    /// production supervisor: its send, turn-end, flush, queue and drain paths.
+    static func runHeldCompletions() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("helper-held-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AgentCatalogQAFixture.pi[0]
+        let previousCatalog = AgentModelCatalog.shared.snapshot(for: .pi)
+        defer { AgentModelCatalog.shared.resetForQA(snapshot: previousCatalog) }
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready,
+            models: [model], displayNames: [:], refreshedAt: Date()))
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents"))
+        let lead = AgentID(rawValue: UUID())
+        var leadRecord = AgentRecord(id: lead, displayName: "Held lead", harness: .pi, model: model, thinking: "medium",
+            cwd: root.path, createdAt: Date(), lastActivityAt: Date())
+        leadRecord.workspaceToolsEnabled = true
+        try store.upsert(leadRecord)
+        var runners: [AgentID: HeldWakeRunner] = [lead: HeldWakeRunner(autoEnd: true)]
+        func helper(_ name: String, spawned: Bool = true) throws -> AgentID {
+            let id = AgentID(rawValue: UUID())
+            var record = AgentRecord(id: id, displayName: name, harness: .pi, model: model, thinking: "medium",
+                cwd: root.path, parentAgentID: spawned ? lead : nil, createdAt: Date(), lastActivityAt: Date())
+            if spawned {
+                record.spawnResultHandle = "held-\(name)"
+                SpawnResultFile.write(.init(toolCallId: "held-\(name)", status: .spawned, agentId: id.rawValue,
+                    recipientId: lead.rawValue), parentCwd: root.path, warn: { _ in })
+            }
+            try store.upsert(record)
+            runners[id] = HeldWakeRunner(autoEnd: false)
+            return id
+        }
+        let plain = try helper("Plain"), quitter = try helper("Quitter"), builder = try helper("Builder")
+        let server = try helper("Server"), messenger = try helper("Messenger", spawned: false)
+        let alpha = try helper("Alpha"), beta = try helper("Beta")
+        let pool = runners
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: root.appendingPathComponent("drafts"))
+        let s = AgentSupervisor(store: store, makeRunner: { pool[$0.record.id]! }, warn: { _ in },
+            nameTitlerCommand: { _ in nil }, submissionRecoveryStore: drafts,
+            transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)),
+            maximumActiveManagedChildren: { nil })
+        _ = s.restore()
+        defer { s.stopAll() }
+        var now = Date()
+        s.helperCompletionNow = { now }
+        s.helperCompletionEnabled = { _ in true }
+        let leadRunner = pool[lead]!
+
+        var failures: [String] = []
+        func verdict(_ ok: Bool, _ label: String) {
+            print("helper-completion-check: \(label) \(ok ? "PASS" : "FAIL")")
+            if !ok { failures.append(label) }
+        }
+        func payloads(_ text: String) -> [AgentMessagePayload] {
+            switch AgentMessageEnvelope.classify(text) {
+            case .agentMessage(let payload): return [payload]
+            case .agentMessages(let batch): return batch
+            default: return []
+            }
+        }
+        func wakes(_ child: AgentID) -> [String] {
+            leadRunner.prompts.flatMap(payloads).filter { $0.senderAgentID == child.rawValue }.map(\.text)
+        }
+        func status(_ child: AgentID) -> SpawnResultFile? {
+            s.records[child]?.spawnResultHandle.flatMap { SpawnResultFile.read(parentCwd: root.path, handle: $0) }
+        }
+        /// Past the eight-second batch hold, then until the idle lead drains.
+        func flushToLead() async {
+            now.addTimeInterval(9)
+            await s.flushHelperCompletions()
+            for _ in 0..<2 {
+                _ = await waitUntil(timeout: 5, pollInterval: 0.02) { !s.isRunning(lead) && s.queuedMessages(for: lead).isEmpty }
+                try? await Task.sleep(nanoseconds: 150_000_000)
+            }
+        }
+        func start(_ child: AgentID, _ text: String) async throws {
+            try HelperGuardChecks.expect(s.send(text, to: child), "\(child) did not accept work")
+            let open = await waitUntil(timeout: 5, pollInterval: 0.02) { pool[child]!.openTurns == 1 }
+            try HelperGuardChecks.expect(open, "helper turn did not start")
+        }
+        func end(_ child: AgentID, _ text: String) async throws {
+            pool[child]!.end(saying: text)
+            let ended = await waitUntil(timeout: 5, pollInterval: 0.02) { !s.isRunning(child) && pool[child]!.openTurns == 0 }
+            try HelperGuardChecks.expect(ended, "helper turn did not end")
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        func unsolicited(_ child: AgentID, report: String, _ text: String) async throws {
+            pool[child]!.background = false
+            try HelperGuardChecks.expect(s.fileReport(.init(summary: report), for: child), "report refused")
+            pool[child]!.beginUnsolicitedTurn()
+            let open = await waitUntil(timeout: 5, pollInterval: 0.02) { pool[child]!.openTurns == 1 }
+            try HelperGuardChecks.expect(open, "unsolicited turn was not adopted")
+            try await end(child, text)
+        }
+
+        // Positive control: a helper that reports and ends wakes its lead once.
+        try await start(plain, "Do the plain task.")
+        try HelperGuardChecks.expect(s.fileReport(.init(summary: "PLAIN-REPORT"), for: plain), "report refused")
+        try await end(plain, "Plain task done.")
+        await flushToLead()
+        verdict(wakes(plain).count == 1 && wakes(plain)[0].contains("Plain finished: succeeded")
+            && wakes(plain)[0].contains("PLAIN-REPORT"), "positive control: reporting helper wakes its lead once")
+
+        // A helper with no background work that stops without a report still
+        // wakes, saying so in its header.
+        try await start(quitter, "Do the task.")
+        try await end(quitter, "I stopped before the tests.")
+        await flushToLead()
+        verdict(wakes(quitter).count == 1
+            && wakes(quitter)[0].hasPrefix("Quitter finished: \(AgentSupervisor.helperNoReportStatus)\n")
+            && wakes(quitter)[0].contains("I stopped before the tests."), "no-report turn end wakes with a no-report header")
+
+        // Background work running, no report: no wake, and wait_agents reads running.
+        try await start(builder, "Run the long build.")
+        pool[builder]!.background = true
+        try await end(builder, "Waiting.")
+        await flushToLead()
+        verdict(wakes(builder).isEmpty && status(builder)?.status == .spawned,
+            "background turn end without a report holds the wake and keeps the result running")
+        // The job finishes; claude's own next turn files the report and ends.
+        try await unsolicited(builder, report: "BUILD-REPORT", "Build passed.")
+        await flushToLead()
+        verdict(wakes(builder).count == 1 && wakes(builder)[0].contains("Builder finished: succeeded")
+            && wakes(builder)[0].contains("BUILD-REPORT") && !wakes(builder)[0].contains("Waiting.")
+            && status(builder)?.status == .completed && status(builder)?.report?.summary == "BUILD-REPORT",
+            "the next turn end delivers exactly one wake with the result")
+
+        // A background job that never ends is released at the cap.
+        try await start(server, "Start the dev server.")
+        pool[server]!.background = true
+        try await end(server, "Dev server is up; waiting.")
+        await flushToLead()
+        let heldBeforeCap = wakes(server).isEmpty
+        now.addTimeInterval(s.heldHelperCompletionCap + 1)
+        s.releaseExpiredHeldHelperCompletions()
+        await flushToLead()
+        verdict(heldBeforeCap && wakes(server).count == 1
+            && wakes(server)[0].hasPrefix("Server finished: \(AgentSupervisor.helperNoReportBackgroundStatus)\n")
+            && status(server)?.status == .completed, "the 600 s cap releases a held wake once")
+
+        // A helper reached only by array_message_agent keeps its lead's
+        // subscription across the held turn, so its real result arrives.
+        let context = AgentMessageQueueContext(caller: lead, recipient: messenger, operationId: "held-message",
+            idempotencyKey: "held-message", payloadHash: "held-message")
+        let sent = s.deliverAgentMessage("Run the long job and tell me.", from: lead, to: messenger, hops: 0, context: context)
+        try HelperGuardChecks.expect(sent.delivery == .delivered, "message was not delivered: \(sent)")
+        let messageOpen = await waitUntil(timeout: 5, pollInterval: 0.02) { pool[messenger]!.openTurns == 1 }
+        try HelperGuardChecks.expect(messageOpen, "messaged helper did not start")
+        pool[messenger]!.background = true
+        try await end(messenger, "Started it in the background.")
+        await flushToLead()
+        let messageHeld = wakes(messenger).isEmpty
+            && SpawnResultFile.read(parentCwd: root.path, handle: "held-message")?.status == .spawned
+        try await unsolicited(messenger, report: "MESSAGE-REPORT", "Job done.")
+        await flushToLead()
+        let messageResult = SpawnResultFile.read(parentCwd: root.path, handle: "held-message")
+        verdict(messageHeld && wakes(messenger).count == 1 && wakes(messenger)[0].contains("MESSAGE-REPORT")
+            && messageResult?.status == .completed && messageResult?.report?.summary == "MESSAGE-REPORT",
+            "a message-only helper's later result reaches its lead")
+
+        // Two results queued in separate batches behind a busy lead reach it
+        // as ONE turn when it goes idle.
+        leadRunner.autoEnd = false
+        try HelperGuardChecks.expect(s.send("Lead busy work.", to: lead), "lead did not start")
+        let leadOpen = await waitUntil(timeout: 5, pollInterval: 0.02) { leadRunner.openTurns == 1 }
+        try HelperGuardChecks.expect(leadOpen, "lead turn did not start")
+        let promptsBefore = leadRunner.prompts.count
+        for (child, report) in [(alpha, "ALPHA-REPORT"), (beta, "BETA-REPORT")] {
+            try await start(child, "Do your part.")
+            try HelperGuardChecks.expect(s.fileReport(.init(summary: report), for: child), "report refused")
+            try await end(child, "Part done.")
+            now.addTimeInterval(9)
+            await s.flushHelperCompletions()
+        }
+        let queuedBatches = s.queuedMessages(for: lead).filter(\.helperCompletion).count
+        leadRunner.autoEnd = true
+        leadRunner.end(saying: "Lead busy work done.")
+        _ = await waitUntil(timeout: 5, pollInterval: 0.02) { leadRunner.prompts.count > promptsBefore }
+        for _ in 0..<3 {
+            _ = await waitUntil(timeout: 5, pollInterval: 0.02) { !s.isRunning(lead) && s.queuedMessages(for: lead).isEmpty }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        let after = Array(leadRunner.prompts.dropFirst(promptsBefore))
+        verdict(queuedBatches == 2 && after.count == 1 && after[0].contains("ALPHA-REPORT") && after[0].contains("BETA-REPORT")
+            && payloads(after[0]).count == 2 && s.queuedMessages(for: lead).isEmpty,
+            "two queued wake batches reach a busy lead as one turn (queued \(queuedBatches), turns \(after.count))")
+
+        try HelperGuardChecks.expect(failures.isEmpty, "held completions: " + failures.joined(separator: "; "))
+    }
+
     static func run() async throws {
+        try await runHeldCompletions()
         try await runSteerCustody()
         try await runAgentSteeringChecks(helperCompletionOnly: true)
         try await runDelegateAndMoveOn()
