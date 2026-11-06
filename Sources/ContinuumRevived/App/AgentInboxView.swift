@@ -9598,6 +9598,72 @@ final class InboxRowFocusRingView: NSView, TokenThemed {
 /// A plain `NSView` is answerable for its own layer, has no sublayers but its
 /// own, and IS the background the labels inside it are measured against.
 final class AgentInboxCardView: NSView, TokenThemed {
+    // Internal review switch; production always retains the existing treatment.
+    private static let indicatorStyle: String = {
+        guard Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else { return "current" }
+        return UserDefaults.standard.string(forKey: "SidebarActiveIndicatorStyle") ?? "current"
+    }()
+    var indicatorColour: NSColor? { didSet { applyTokens() } }
+    private let indicatorWash = CAGradientLayer()
+    private let indicatorEdge = CALayer()
+
+    override func layout() {
+        super.layout()
+        indicatorWash.frame = bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        indicatorEdge.frame = bounds.insetBy(dx: 1.5, dy: 1.5)
+        applyIndicator()
+        CATransaction.commit()
+    }
+
+    private func applyIndicator() {
+        let style = Self.indicatorStyle
+        let enabled = style != "current" && (isRouteActive || isSelected)
+        indicatorWash.isHidden = !enabled
+        indicatorEdge.isHidden = !enabled
+        guard enabled, let layer else { return }
+        if indicatorWash.superlayer == nil {
+            layer.insertSublayer(indicatorWash, at: 0)
+            layer.insertSublayer(indicatorEdge, above: indicatorWash)
+        }
+        let dark = effectiveTokenTheme == .dark
+        let colour = indicatorColour ?? TextToken.textPrimary.color.nsColor(in: self)
+        indicatorWash.cornerRadius = Radius.card
+        indicatorWash.startPoint = CGPoint(x: 0, y: 0.5)
+        indicatorWash.endPoint = CGPoint(x: 1, y: 0.5)
+        indicatorEdge.cornerRadius = max(0, Radius.card - 1.5)
+        indicatorEdge.borderWidth = 0
+        indicatorEdge.shadowOpacity = 0
+        indicatorEdge.backgroundColor = nil
+        switch style {
+        case "gradient":
+            // caf22324 SidebarOwnershipMotion.fill: original stops, reach and alpha.
+            let alpha: CGFloat = indicatorColour == nil ? (dark ? 0.05 : 0.035) : (dark ? 0.15 : 0.11)
+            indicatorWash.colors = [colour.withAlphaComponent(alpha).cgColor,
+                colour.withAlphaComponent(alpha * 0.35).cgColor, colour.withAlphaComponent(0).cgColor]
+            indicatorWash.locations = [0, 0.2475, 0.55]
+        case "halo":
+            indicatorWash.colors = [colour.withAlphaComponent(0.035).cgColor, colour.withAlphaComponent(0.035).cgColor]
+            indicatorEdge.borderWidth = 1
+            indicatorEdge.borderColor = colour.withAlphaComponent(dark ? 0.65 : 0.48).cgColor
+            indicatorEdge.shadowColor = colour.cgColor
+            indicatorEdge.shadowOpacity = dark ? 0.28 : 0.16
+            indicatorEdge.shadowRadius = 4
+            indicatorEdge.shadowOffset = .zero
+            indicatorEdge.shadowPath = CGPath(roundedRect: indicatorEdge.bounds,
+                cornerWidth: indicatorEdge.cornerRadius, cornerHeight: indicatorEdge.cornerRadius, transform: nil)
+        case "inset":
+            indicatorWash.colors = [colour.withAlphaComponent(dark ? 0.16 : 0.10).cgColor,
+                                    colour.withAlphaComponent(dark ? 0.16 : 0.10).cgColor]
+            indicatorEdge.borderWidth = 1
+            indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self).withAlphaComponent(dark ? 0.22 : 0.17).cgColor
+        default:
+            indicatorWash.isHidden = true
+            indicatorEdge.isHidden = true
+        }
+    }
+
     /// The three interaction facts, held SEPARATELY. P3.5 collapsed hover,
     /// selection and keyboard-active into one `isInteracting` test because all
     /// three did the same one thing — clear the row's recession. P1.2 splits
@@ -9731,6 +9797,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         let fill = Self.interactionFill(
             for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: effectiveTokenTheme,
             underlay: underlayAlpha)
+        applyIndicator()
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
         layer.backgroundColor = fill
         guard fading, window != nil, presented != fill else { return }

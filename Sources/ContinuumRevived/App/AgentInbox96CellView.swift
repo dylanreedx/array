@@ -1211,6 +1211,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                isInteracting: Bool, now: Date) {
         shown = (row, emphasis, indent, disclosure, rollup, isSelected, now)
         self.indent = indent
+        card.indicatorColour = row.identityColor.map(AgentInboxView.identityDotColour(named:))
         card.isSelected = isSelected
 
         // Measure metadata only when its content changes, outside layout.
