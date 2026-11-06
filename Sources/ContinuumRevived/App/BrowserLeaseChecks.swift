@@ -4,6 +4,9 @@ import Foundation
 
 @MainActor
 func runBrowserLeaseCheck() throws {
+    let priorBackend = BrowserAutomation.focusFreeInputEnabled
+    BrowserAutomation.focusFreeInputEnabled = ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_TIER_A"] == "1"
+    defer { BrowserAutomation.focusFreeInputEnabled = priorBackend }
     guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil,
           Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else {
         throw WorkspaceAPIChecks.Failure(message: "browser lease check requires isolated app support and a dev binary")
@@ -108,6 +111,7 @@ func runBrowserLeaseCheck() throws {
     guard !ledger.touch(tileId: first.tileId, owner: f.agentId), !ledger.protectedTileIds().contains(first.tileId) else {
         throw WorkspaceAPIChecks.Failure(message: "dead browser cannot be leased")
     }
+    try runWarmSceneLeaseExpiryCheck()
     try runBrowserZoomPerformanceCheck()
     try runBrowserControlPresentationCheck()
     try runBrowserIdleSweepCheck()
@@ -406,4 +410,67 @@ private func runBrowserZoomPerformanceCheck() throws {
         measurements.append("\(count) live: p95 \(String(format: "%.2f", p95)) ms")
     }
     print("Browser zoom cascade (30 samples each): " + measurements.joined(separator: "; "))
+}
+
+
+// The scene may exceed its warm limit while any browser has a live lease,
+// including a renewed lease. Expiry must trim without another scene switch.
+@MainActor
+private func runWarmSceneLeaseExpiryCheck() throws {
+    let f = try WorkspaceAPIChecks.makeFixture()
+    defer { f.tearDown() }
+    _ = f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID:f.agentId,true)
+    f.delegate.qaAgentSupervisor.workspaceToolsPermission = { .free }
+    var time=Date()
+    var expiries:[@MainActor () -> Void]=[]
+    let ledger=BrowserLeaseLedger(runtime: { id in
+        f.runtime.controller(for:f.projectPb)?.browserRuntimes.first(where:{$0.tileId==id})
+    }, isRunning:{_ in false}, now:{time}, scheduleExpiry:{_,callback in expiries.append(callback)})
+    guard f.api.installBrowserLeaseLedger(ledger) else { throw WorkspaceAPIChecks.Failure(message:"warm expiry ledger unavailable") }
+    func open() throws -> WKWebViewBrowserRuntime {
+        var response:[String:Any]?
+        f.api.handleMCPRequest(["agentId":f.agentId.rawValue.uuidString,"requestId":UUID().uuidString,
+            "op":"browser.open","payload":["url":"about:blank"]]) { response=$0 }
+        let end=Date().addingTimeInterval(10)
+        while response==nil && Date()<end { _=RunLoop.current.run(mode:.default,before:Date().addingTimeInterval(0.01)) }
+        guard response?["status"] as? String == "ok",
+              let id=(response?["result"] as? [String:Any])?["tileId"] as? String,
+              let browser=f.runtime.controller(for:f.projectPb)?.browserRuntimes.first(where:{$0.tileId.uuidString==id}) else {
+            throw WorkspaceAPIChecks.Failure(message:"warm expiry production open failed: \(String(describing:response))")
+        }
+        return browser
+    }
+    func drain() { RunLoop.current.run(until:Date().addingTimeInterval(0.05)) }
+    let first=try open()
+    time.addTimeInterval(100)
+    let second=try open()
+    guard expiries.count==2 else { throw WorkspaceAPIChecks.Failure(message:"warm expiry must schedule both production leases") }
+    f.runtime.warmSceneCapacity=0
+    try f.runtime.switchWorkspace(to:f.workspaceWB)
+    guard f.runtime.qaWarmWorkspaceIds.contains(f.workspaceWA), !first.isTerminated, !second.isTerminated else {
+        throw WorkspaceAPIChecks.Failure(message:"warm capacity evicted a scene with live leases")
+    }
+    time.addTimeInterval(501)
+    expiries[0]()
+    drain()
+    guard !ledger.protectedTileIds().contains(first.tileId), ledger.protectedTileIds().contains(second.tileId),
+          f.runtime.qaWarmWorkspaceIds.contains(f.workspaceWA), !first.isTerminated, !second.isTerminated else {
+        throw WorkspaceAPIChecks.Failure(message:"one expired lease evicted another live lease in the same warm scene")
+    }
+    guard ledger.touch(tileId:second.tileId,owner:f.agentId) else { throw WorkspaceAPIChecks.Failure(message:"warm lease renewal failed") }
+    time.addTimeInterval(100)
+    expiries[1]()
+    drain()
+    guard expiries.count==3, ledger.protectedTileIds().contains(second.tileId),
+          f.runtime.qaWarmWorkspaceIds.contains(f.workspaceWA), !second.isTerminated else {
+        throw WorkspaceAPIChecks.Failure(message:"obsolete expiry evicted a renewed warm lease")
+    }
+    time.addTimeInterval(501)
+    expiries[2]()
+    drain()
+    guard ledger.protectedTileIds().isEmpty, f.runtime.qaWarmWorkspaceIds.isEmpty,
+          first.isTerminated, second.isTerminated else {
+        throw WorkspaceAPIChecks.Failure(message:"last lease expiry did not trim excess warm scenes without a workspace switch")
+    }
+    print("PASS: warm capacity protects all live/renewed leases and trims on last expiry without a workspace switch")
 }

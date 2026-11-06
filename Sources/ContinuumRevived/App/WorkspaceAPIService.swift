@@ -205,6 +205,13 @@ final class WorkspaceAPIService {
         browserLeaseLedger = ledger
         ledger.onEngagementChanged = { [weak self] tile, agent, engaged in
             self?.browserControlPresentation?(tile, agent, engaged, false)
+            if !engaged {
+                // Ledger callbacks may be iterating leases. Eviction releases
+                // runtimes/leases too, so trim after that iteration unwinds.
+                DispatchQueue.main.async { [weak self] in
+                    self?.runtimeProvider()?.trimWarmScenesToCapacity()
+                }
+            }
         }
         if browserLeaseEventObserver == nil {
             browserLeaseEventObserver = supervisor.addDeliveredEventObserver { [weak self] agentId, event in

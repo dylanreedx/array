@@ -188,3 +188,34 @@ and same-key retries return committed without a second submit, with the switch
 on AND off (/tmp/stage3-review-submit-green-1.log and -0.log). Full editor,
 retention and lifecycle checks also passed in the on leg. Debug build exited 0.
 No activated check ran; the default switch is unchanged.
+
+## Review follow-up: trim warm scenes on lease end
+
+The new production-open witness failed before the fix at "last lease expiry did
+not trim excess warm scenes without a workspace switch"
+(/tmp/stage3-review-warm-red.log). It uses a mounted scene, two browser.open
+requests and the real ledger with an injected clock/expiry scheduler.
+
+Switches and lease-end notifications now use the same capacity trimmer.
+Disengagement schedules trimming on the next main-queue turn, avoiding mutation
+of the ledger while its callbacks iterate it. Every eviction rechecks current
+lease protection. Protection is independent of the delivery backend, so Stage 1
+also keeps a scene while any browser lease remains live. The witness checks that
+one expiry cannot evict a sibling lease, that renewal survives an obsolete expiry,
+and that final expiry actually terminates both parked runtimes without another
+workspace switch.
+
+Final debug build exited 0 (/tmp/stage3-review-final-build.log). Final targeted
+legs all exited 0:
+- --browser-focus-restoration-check, switch on and off:
+  /tmp/stage3-review-final-focus-1.log and -0.log.
+- --browser-lease-check, switch on and off:
+  /tmp/stage3-review-final-lease-1.log and -0.log.
+
+These existing matrix-registered checks now carry the new witnesses; no matrix
+script or verifier tooling was added. Focus legs include the full editor,
+retention, submission, identity and lifecycle scenarios where enabled. Lease legs
+include existing budget, hydration, running-owner and release scenarios.
+No full matrix, activated app, or new Tier B run occurred. The default switch
+remains false. The lead reported the earlier Tier B run passed; this follow-up
+does not repeat that proof or alter its restoration cosmetic line.
