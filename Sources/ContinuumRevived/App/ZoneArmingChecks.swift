@@ -39,6 +39,11 @@ enum ZoneArmingChecks {
         if !condition() { throw Failure(message: message) }
     }
 
+    static func runSpawnFramingCases() throws {
+        try runAutoLayoutSpawnsNeverOverlap()
+        try runSpawnFollowsCamera()
+    }
+
     static func run() throws {
         let fileManager = FileManager.default
         let now = Date(timeIntervalSince1970: 1_900_000_000)
@@ -995,6 +1000,12 @@ enum ZoneArmingChecks {
                                "\(label): after the \(step), the zone \(describe(rect)) grew across the "
                                + "neighbouring zone \(describe(otherRect))")
                 }
+                let settleUntil = Date().addingTimeInterval(step == "second agent" ? 0.4 : 0)
+                while Date() < settleUntil { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+                if step == "second agent", let newest = spawned.last, let tile = m.canvas.allTilesInWorldFrames().first(where: { $0.id == newest }) {
+                    let view = CanvasEngine.visibleWorldRect(viewport: m.canvas.navigationViewport, visibleSize: m.canvas.bounds.size)
+                    try expect(view.contains(CGPoint(x: tile.frame.x, y: tile.frame.y)), "spawned tile top-left must be in view after framing")
+                }
                 // The film re-framed the zone between spawns; so does this framing.
                 if framing == .framesZone { try frameZone() }
             }
@@ -1265,10 +1276,14 @@ enum ZoneArmingChecks {
             guard created.count == 1, let agentId = created.first else {
                 throw Failure(message: "\(label): ⌘K Agent created \(created.count) tile(s), expected one")
             }
+            let settleUntil = Date().addingTimeInterval(0.4)
+            while Date() < settleUntil { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
             let after = members()
             guard let agent = after[agentId] else {
                 throw Failure(message: "\(label): the Agent must belong to Roots")
             }
+            let framedView = CanvasEngine.visibleWorldRect(viewport: m.canvas.navigationViewport, visibleSize: m.canvas.bounds.size)
+            try expect(framedView.contains(CGPoint(x: agent.x, y: agent.y)), "spawn follows camera: top-left is visible after framing")
             let view = TileFrame(x: camera.x, y: camera.y, width: 1600, height: 1000)
             let visible = visibleFraction(agent, in: view)
             try expect(visible >= 0.5,

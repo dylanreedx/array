@@ -2240,6 +2240,7 @@ run_app_check .build/debug/Array --browser-click-recency-check
 run_app_check .build/debug/Array --language-server-release-check
 run_app_check .build/debug/Array --zone-tier-transition-check
 run_app_check .build/debug/Array --spawn-placement-check
+run_app_check .build/debug/Array --spawn-framing-check
 run_app_check .build/debug/Array --focus-mode-check
 run_app_check .build/debug/Array --spawn-rate-limit-check
 run_app_check .build/debug/Array --file-tree-boot-persistence-check
