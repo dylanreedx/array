@@ -1273,7 +1273,7 @@ struct SidebarDensityProposal: Sendable {
     static let locked = SidebarDensityProposal(
         id: "locked", title: "50 pt card / 54 pt pitch — ownership, two lines",
         insetV: 8, bandTop: 0, gapTop: 0, bandTitle: 18, gapBottom: 0, bandDetail: 16,
-        gapBetweenRows: 4,
+        gapBetweenRows: 2,
         rationale: "Plan 106: the project moves under the title; subagents live in the card.")
 
     /// The ownership layout: no band above the title.

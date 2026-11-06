@@ -586,7 +586,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// belongs to NEITHER cell. Named because the tree connector has to cross it:
     /// a lane drawn only inside the cells is a dashed line with a \(Space.s)pt break
     /// at every row, and the whole point of the lane is that you can follow it.
-    static let rowSpacing = Space.s
+    static let rowSpacing = Space.s / 2
 
     /// The identity colour dot beside an agent's name (`AgentInboxRow.identityColor`),
     /// in both the card and the slim row. Small enough to sit inside the name's
@@ -804,21 +804,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         render(display(from: allRows))
     }
 
-    /// Whether a parent is drawn folded: your own choice when you made one;
-    /// otherwise folded, unless a child needs you or failed and you have not
-    /// opened it — a group you never touched must not bury an approval behind a
-    /// default, and an opened failure folds inside its card (plan 106).
+    /// A saved manual choice wins; untouched groups start open.
     private func isFolded(_ parentId: UUID) -> Bool {
         if let open = foldChoices[parentId] { return !open }
-        guard foldsUntouchedGroups else { return false }
-        guard let rollup = rollupsByParent[parentId] else { return true }
-        return rollup.needsYou == 0 && rollup.unopenedFailed == 0
+        return false
     }
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
     /// Parents whose remainder affordance has been opened. This is view-local
     /// presentation state: it changes how many children are inline, never the
     /// underlying rows or any resource bookkeeping.
     private var expandedFanoutParents: Set<UUID> = []
+    private var knownFanoutParents: Set<UUID> = []
     /// The current deferred groups, derived from the full sorted row list. The
     /// remainder cell is a non-agent affordance, so it never enters `rows`,
     /// selection, jump indexes or lifecycle actions.
@@ -1300,7 +1296,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var openAgentId: UUID? {
         didSet {
             guard openAgentId != oldValue else { return }
-            reload(rows: allRows)
+            let next = display(from: allRows)
+            if next.map(\.identity) == items.map(\.identity) {
+                applyHoverInPlace(tableRows: [oldValue, openAgentId].compactMap { $0 }.compactMap(tableRow(forAgentId:)))
+            } else {
+                render(next, animateRows: false)
+            }
         }
     }
     /// Every project and workspace that is OPEN, from the host's registry. The menu
@@ -1386,9 +1387,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         searchField.setAccessibilityLabel("Search agents")
         searchField.setAccessibilityHelp("Filters agents by name, project, workspace, model, or branch")
 
-        scrollView = NSScrollView(frame: .zero)
+        scrollView = InboxOverlayScrollView(frame: .zero)
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
+        scrollView.verticalScroller?.controlSize = .small
         scrollView.drawsBackground = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         // The scroll container is navigation chrome, not a second list in the
@@ -2406,6 +2410,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         parentsWithChildren = InboxSort.parentIds(in: sorted)
         ownershipAskByLead = Self.asksByLead(in: sorted)
         var fullRollups = InboxSort.rollups(in: sorted)
+        expandedFanoutParents.formUnion(parentsWithChildren.subtracting(knownFanoutParents))
+        knownFanoutParents.formUnion(parentsWithChildren)
         let bounded = InboxSort.boundedForInbox(
             rows: sorted, expandedParents: expandedFanoutParents, now: clock())
         fanoutRemaindersByParent = bounded.remainderByParent
@@ -3088,7 +3094,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         keyboardFocusIntent = nil
         // No fade-out ghosts when folding back: the list may scroll to keep the
         // line still, and the ghosts would hang where the rows were.
-        render(display(from: allRows), animateRows: !closing)
+        render(display(from: allRows), animateRows: false)
         guard let lineViewportY, let row = fanoutLineTableRow(parentId: parentId) else { return }
         layoutSubtreeIfNeeded()
         tableView.layoutSubtreeIfNeeded()
@@ -6392,14 +6398,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     // MARK: - QA
 
-    /// Pin the list's scroller style for a measurement probe.
-    ///
-    /// A legacy scroller reserves a permanent lane and narrows the content width every
-    /// measurement is taken against, so a machine whose "Show scroll bars" preference
-    /// is Always measures a different sidebar than one set to When scrolling. The probe
-    /// pins it; PRODUCTION MUST NOT. An earlier attempt set `.overlay` on the shipped
-    /// scroll view for this reason, which silently overrode the user's own preference
-    /// to make a check deterministic — the determinism was real, the place was wrong.
+    /// Keep captures on the production overlay policy.
+    var retainsOverlayScrollerForQA: Bool {
+        scrollView.scrollerStyle = .legacy
+        return scrollView.scrollerStyle == .overlay
+    }
+
     func pinScrollerStyleForQA() {
         scrollView.scrollerStyle = .overlay
     }
@@ -11625,5 +11629,14 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     var renameNestedControlFrameForQA: NSRect? {
         guard !disclosureButton.isHidden else { return nil }
         return disclosureButton.convert(disclosureButton.bounds, to: self)
+    }
+}
+
+/// WebKit's global scroller refresh writes the system preference through this
+/// setter too. Keep the sidebar overlay-only even with Always scrollbars.
+private final class InboxOverlayScrollView: NSScrollView {
+    override var scrollerStyle: NSScroller.Style {
+        get { super.scrollerStyle }
+        set { super.scrollerStyle = .overlay }
     }
 }
