@@ -459,6 +459,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `AgentInboxCardStyleOverride`; nil everywhere but the Component Lab.
     var cardStyleOverride: AgentInboxCardStyleOverride? = .production {
         didSet {
+            recentCells.removeAll()
+            recentCellOrder.removeAll()
+            recentCellModels.removeAll()
             rebuildRowsForQA()
             tableView.noteHeightOfRows(
                 withIndexesChanged: IndexSet(integersIn: 0..<tableView.numberOfRows))
@@ -586,7 +589,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// belongs to NEITHER cell. Named because the tree connector has to cross it:
     /// a lane drawn only inside the cells is a dashed line with a \(Space.s)pt break
     /// at every row, and the whole point of the lane is that you can follow it.
-    static let rowSpacing = Space.s
+    static let rowSpacing = Space.s / 2
 
     /// The identity colour dot beside an agent's name (`AgentInboxRow.identityColor`),
     /// in both the card and the slim row. Small enough to sit inside the name's
@@ -804,21 +807,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         render(display(from: allRows))
     }
 
-    /// Whether a parent is drawn folded: your own choice when you made one;
-    /// otherwise folded, unless a child needs you or failed and you have not
-    /// opened it — a group you never touched must not bury an approval behind a
-    /// default, and an opened failure folds inside its card (plan 106).
+    /// A saved manual choice wins; untouched groups start open.
     private func isFolded(_ parentId: UUID) -> Bool {
         if let open = foldChoices[parentId] { return !open }
-        guard foldsUntouchedGroups else { return false }
-        guard let rollup = rollupsByParent[parentId] else { return true }
-        return rollup.needsYou == 0 && rollup.unopenedFailed == 0
+        return false
     }
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
     /// Parents whose remainder affordance has been opened. This is view-local
     /// presentation state: it changes how many children are inline, never the
     /// underlying rows or any resource bookkeeping.
     private var expandedFanoutParents: Set<UUID> = []
+    private var knownFanoutParents: Set<UUID> = []
     /// The current deferred groups, derived from the full sorted row list. The
     /// remainder cell is a non-agent affordance, so it never enters `rows`,
     /// selection, jump indexes or lifecycle actions.
@@ -1025,13 +1024,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var isOpeningRename = false
 
     /// The cell currently drawn for each row index, and how many cells this view
-    /// has built in total. Together they are the witness for "do not full-reload on
+    /// has requested in total (including cached cards). Together they are the witness for "do not full-reload on
     /// every event" (P2B.7): an incremental apply must build the cells of the
     /// touched rows and no others.
     ///
     /// The QA accessors read this map rather than asking the table for a view with
     /// `makeIfNecessary: true`, which would BUILD one and inflate the very count
     /// the witness is measuring.
+    /// A bounded working set keeps cards returning after a fold from rebuilding
+    /// their controls. Content and interactions are reapplied on every request.
+    private var recentCellModels: [UUID: AgentInboxRow] = [:]
+    private var updatingFold = false
+    private var foldRenderNudge: UUID?
+    private var recentCells: [NSString: NSView] = [:]
+    private var recentCellOrder: [NSString] = []
     private var cellsByRow: [Int: AgentInboxRowCell] = [:]
     // Ticket: docs/38-tickets/90-agent-ux/P4.7-snoozed-shelf.md
     /// The shelf header's view. Kept out of `cellsByRow` on purpose: that map is
@@ -1300,7 +1306,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var openAgentId: UUID? {
         didSet {
             guard openAgentId != oldValue else { return }
-            reload(rows: allRows)
+            let next = display(from: allRows)
+            if next.map(\.identity) == items.map(\.identity) {
+                applyHoverInPlace(tableRows: [oldValue, openAgentId].compactMap { $0 }.compactMap(tableRow(forAgentId:)))
+            } else {
+                render(next, animateRows: false)
+            }
         }
     }
     /// Every project and workspace that is OPEN, from the host's registry. The menu
@@ -1386,9 +1397,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         searchField.setAccessibilityLabel("Search agents")
         searchField.setAccessibilityHelp("Filters agents by name, project, workspace, model, or branch")
 
-        scrollView = NSScrollView(frame: .zero)
+        scrollView = InboxOverlayScrollView(frame: .zero)
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
+        scrollView.verticalScroller?.controlSize = .small
         scrollView.drawsBackground = false
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         // The scroll container is navigation chrome, not a second list in the
@@ -1752,6 +1766,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `AgentInboxCellView.viewDidChangeEffectiveAppearance` for the words, each
     /// on the view that owns the colour.
     func applyTokens() {
+        for cell in recentCells.values { cell.appearance = effectiveAppearance }
         foldMotion.cancel()
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
         emptyLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
@@ -2406,6 +2421,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         parentsWithChildren = InboxSort.parentIds(in: sorted)
         ownershipAskByLead = Self.asksByLead(in: sorted)
         var fullRollups = InboxSort.rollups(in: sorted)
+        expandedFanoutParents.formUnion(parentsWithChildren.subtracting(knownFanoutParents))
+        knownFanoutParents.formUnion(parentsWithChildren)
         let bounded = InboxSort.boundedForInbox(
             rows: sorted, expandedParents: expandedFanoutParents, now: clock())
         fanoutRemaindersByParent = bounded.remainderByParent
@@ -2775,6 +2792,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func setItems(_ next: [InboxListItem]) {
         items = next
         rows = next.compactMap(\.agentRow)
+        if updatingFold { foldRenderNudge = settleNudgeTargetID(now: clock()) }
         nestingByTableRow = AgentInboxView.nestings(for: next)
         ownershipByTableRow = ownsSubagents ? ownershipSlices() : []
         rowIndexByTableRow = []
@@ -2838,7 +2856,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// their indexes belong to the list that just went away, and a bulk action
     /// (P3.11) must never reach a row you cannot see.
     func toggleCollapse(parentId: UUID) {
-        let animates = window != nil && !prefersReducedMotion()
+        updatingFold = true
+        defer { updatingFold = false }
+        let animates = cardStyleOverride?.ownsSubagents != true && window != nil && !prefersReducedMotion()
         let presentation = animates ? foldMotion.takePresentation() : [:]
         foldMotion.cancel()
         // A fold owns the cards and following rows together. Retire any generic
@@ -2910,7 +2930,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let oldNudge = settleNudgeTargetID(now: renderNow)
         endRename(commit: true)
         cancelCrossfades()
+        let previousCells = Dictionary(cellsByRow.compactMap { index, cell in
+            items.indices.contains(index) ? (items[index].identity, cell) : nil
+        }, uniquingKeysWith: { first, _ in first })
         setItems(next)
+        cellsByRow = Dictionary(uniqueKeysWithValues: next.enumerated().compactMap { index, item in
+            previousCells[item.identity].map { (index, $0) }
+        })
         tableView.beginUpdates()
         if inserted.isEmpty {
             tableView.removeRows(at: removed, withAnimation: [])
@@ -2919,13 +2945,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         tableView.endUpdates()
         // The table moved the surviving cells; key them by the rows they are on now.
-        cellsByRow.removeAll()
-        for row in 0..<tableView.numberOfRows {
-            if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
-                cellsByRow[row] = cell
+        for (index, cell) in cellsByRow {
+            if let card = cell as? AgentInbox96CellView, ownsSubagents {
+                card.setOwnership(ownership(atTableRow: index))
             }
         }
-        refreshVisibleOwnership()
         let nudges: Set<UUID> = Set([oldNudge, settleNudgeTargetID(now: renderNow)].compactMap { $0 })
         var stale = IndexSet(new.indices.filter { row in
             guard !inserted.contains(row) else { return false }
@@ -2967,18 +2991,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let oldNudge = settleNudgeTargetID(now: renderNow)
         endRename(commit: true)
         cancelCrossfades()
+        let previousCells = Dictionary(cellsByRow.compactMap { index, cell in
+            items.indices.contains(index) ? (items[index].identity, cell) : nil
+        }, uniquingKeysWith: { first, _ in first })
         setItems(next)
+        cellsByRow = Dictionary(uniqueKeysWithValues: next.enumerated().compactMap { index, item in
+            previousCells[item.identity].map { (index, $0) }
+        })
         tableView.beginUpdates()
         if !removed.isEmpty { tableView.removeRows(at: removed, withAnimation: []) }
         if !inserted.isEmpty { tableView.insertRows(at: inserted, withAnimation: []) }
         tableView.endUpdates()
-        cellsByRow.removeAll()
-        for row in 0..<tableView.numberOfRows {
-            if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
-                cellsByRow[row] = cell
+        for (index, cell) in cellsByRow {
+            if let card = cell as? AgentInbox96CellView, ownsSubagents {
+                card.setOwnership(ownership(atTableRow: index))
             }
         }
-        refreshVisibleOwnership()
         // A survivor is redrawn when what it draws from its neighbours changed: its
         // place in the tree, its rollup (a child in another workspace left), or the
         // settle nudge moving to or from it.
@@ -3076,6 +3104,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the line where it was on screen, so "Show less" at the foot of a long
     /// group lands as "40 more" under the same pointer, its lead just above.
     func toggleFanout(parentId: UUID) {
+        updatingFold = true
+        defer { updatingFold = false }
         guard fanoutRemaindersByParent[parentId] != nil else { return }
         let closing = expandedFanoutParents.contains(parentId)
         let lineViewportY = closing ? fanoutLineTableRow(parentId: parentId).map {
@@ -3088,7 +3118,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         keyboardFocusIntent = nil
         // No fade-out ghosts when folding back: the list may scroll to keep the
         // line still, and the ghosts would hang where the rows were.
-        render(display(from: allRows), animateRows: !closing)
+        let previousRollups = rollupsByParent
+        let next = display(from: allRows)
+        if !applyScopeIncrementally(next, previousRollups: previousRollups) {
+            render(next, animateRows: false)
+        }
+        if let line = fanoutLineTableRow(parentId: parentId),
+           let cell = tableView.view(atColumn: 0, row: line, makeIfNecessary: false) as? AgentInboxRemainderView,
+           let remainder = fanoutRemaindersByParent[parentId] {
+            cell.apply(remainder: remainder)
+        }
         guard let lineViewportY, let row = fanoutLineTableRow(parentId: parentId) else { return }
         layoutSubtreeIfNeeded()
         tableView.layoutSubtreeIfNeeded()
@@ -3896,12 +3935,38 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let index = rowIndex(forTableRow: row) else { return nil }
         cellBuildCountForQA += 1
         let interacting = isInteracting(row: row)
+        let reuseID = NSUserInterfaceItemIdentifier("inbox-\(model.id)-\(model.variant)")
+        // A newly visible helper can use a cached helper that just left the
+        // displayed model. Never lend a card still named by a displayed row.
+        if updatingFold, model.depth > 0, recentCells[reuseID.rawValue as NSString] == nil {
+            let displayed = Set(rows.map(\.id))
+            if let spare = recentCellModels.first(where: { id, previous in
+                previous.depth > 0 && previous.variant == model.variant && !displayed.contains(id)
+                    && recentCells["inbox-\(id)-\(previous.variant)" as NSString] != nil
+            }) {
+                let spareKey = "inbox-\(spare.key)-\(spare.value.variant)" as NSString
+                recentCells[reuseID.rawValue as NSString] = recentCells.removeValue(forKey: spareKey)
+                recentCellOrder.removeAll { $0 == spareKey }
+                recentCellOrder.append(reuseID.rawValue as NSString)
+                recentCellModels.removeValue(forKey: spare.key)
+            }
+        }
+        var reusesRecentCell = false
         let cell: AgentInboxRowCell
-        switch model.variant {
-        // Program 96's redesigned card, when something has injected one. nil is the
-        // default and the only thing production or any queue-94 gate ever sees.
-        case .card: cell = cardStyleOverride?.makeCell() ?? AgentInboxCellView()
-        case .slim: cell = AgentInboxSlimCellView()
+        if let cached = recentCells[reuseID.rawValue as NSString] as? AgentInboxRowCell {
+            cell = cached
+            reusesRecentCell = true
+        } else {
+            switch model.variant {
+            case .card: cell = cardStyleOverride?.makeCell() ?? AgentInboxCellView()
+            case .slim: cell = AgentInboxSlimCellView()
+            }
+            let key = reuseID.rawValue as NSString
+            recentCells[key] = cell
+            recentCellOrder.append(key)
+            if recentCellOrder.count > 128 {
+                recentCells.removeValue(forKey: recentCellOrder.removeFirst())
+            }
         }
         // A 96 card's height is its fixed pitch, never measured off its content,
         // so building one gives the height cache nothing to revalidate. Arming
@@ -3912,11 +3977,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // the cell the live column width before `apply` measures its fit tier;
         // otherwise an empty initial frame leaves a hidden band visible while
         // the table has already cached the shorter content-derived height.
+        cell.appearance = effectiveAppearance
         cell.setLayoutWidth(Double(column.width))
         var cellFrame = cell.frame
         cellFrame.size.width = column.width
         cell.frame = cellFrame
-        cell.identifier = NSUserInterfaceItemIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
+        cell.identifier = reuseID
         cell.setAccessibilityIdentifier(AgentInboxView.accessibilityIdentifier(for: model))
         let agentId = model.id
         cell.onToggleDisclosure = { [weak self] in self?.toggleCollapse(parentId: agentId) }
@@ -3932,31 +3998,44 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // .plans/113: only a lead in the live block is drawn under a project heading.
         (cell as? AgentInbox96CellView)?.placementRepeatsHeading = sortMode == .byProject
             && model.depth == 0 && InboxSort.section(for: model.lifecycle, now: renderNow) == .active
-        cell.apply(
-            model,
-            emphasis: AgentInboxRow.emphasis(
-                for: model.state, attention: model.attention, isInteracting: interacting
-            ),
-            indent: Double(max(0, model.depth)) * AgentInboxView.indentPerLevel,
-            disclosure: rowDisclosure,
-            // P2D.5/P6.5: a full rollup speaks while folded; a capped attention
-            // rollup also speaks while expanded because its hidden child is still
-            // absent from the drawn rows. Neither path mutates row.attention.
-            rollup: rowRollup,
-            // P3.11: EVERY selected row is outlined, not just the last one clicked —
-            // `selectedRow` is one index and a range is a set.
-            isSelected: tableView.selectedRowIndexes.contains(row),
-            isInteracting: interacting,
-            now: renderNow
-        )
-        configureHoverActions(on: cell, for: model)
+        let keepsContent = updatingFold && reusesRecentCell && cell is AgentInbox96CellView
+            && recentCellModels[model.id] == model && !parentsWithChildren.contains(model.id)
+        if keepsContent {
+            (cell as? AgentInbox96CellView)?.clearSelectionForFold()
+            (cell as? AgentInbox96CellView)?.updateElapsedClock(now: renderNow)
+            _ = cell.updateEmphasisInPlace(AgentInboxRow.emphasis(
+                for: model.state, attention: model.attention, isInteracting: interacting))
+        } else {
+            cell.apply(
+                model,
+                emphasis: AgentInboxRow.emphasis(
+                    for: model.state, attention: model.attention, isInteracting: interacting
+                ),
+                indent: Double(max(0, model.depth)) * AgentInboxView.indentPerLevel,
+                disclosure: rowDisclosure,
+                // P2D.5/P6.5: a full rollup speaks while folded; a capped attention
+                // rollup also speaks while expanded because its hidden child is still
+                // absent from the drawn rows. Neither path mutates row.attention.
+                rollup: rowRollup,
+                // P3.11: EVERY selected row is outlined, not just the last one clicked —
+                // `selectedRow` is one index and a range is a set.
+                isSelected: tableView.selectedRowIndexes.contains(row),
+                isInteracting: interacting,
+                now: renderNow
+            )
+        }
+        recentCellModels[model.id] = model
+        if recentCellModels.count > 128, let oldest = recentCellModels.keys.first {
+            recentCellModels.removeValue(forKey: oldest)
+        }
+        if !keepsContent { configureHoverActions(on: cell, for: model) }
         if let redesigned = cell as? AgentInbox96CellView {
             redesigned.reducesHoverMotion = { [weak self] in self?.prefersReducedMotion() ?? false }
             redesigned.workspaceMarkColour = marksWorkspaces
                 ? model.workspaceId.map { workspaceColour($0).withAlphaComponent(0.85) } : nil
-            if let peekWorkspace, model.workspaceId != peekWorkspace {
-                redesigned.setPeekAlpha(Self.peekDimmedAlpha, animated: false)
-            }
+            redesigned.setPeekAlpha(
+                peekWorkspace.map { model.workspaceId != $0 } == true ? Self.peekDimmedAlpha : 1,
+                animated: false)
             // The tree connector. Set from the LIST, which is the only thing that
             // knows what is drawn above and below this row.
             redesigned.setNesting(nesting(atTableRow: row))
@@ -3974,12 +4053,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // The "All set?" nudge: a finished agent you read and left asks to be
             // settled, which closes its tile into History (`.settle`, the same verb
             // as the hover ✓, the row menu and the bulk bar, undo toast included).
-            redesigned.showSettleNudge(settleNudgeTargetID(now: renderNow) == model.id) { [weak self] in
+            redesigned.showSettleNudge((updatingFold ? foldRenderNudge : settleNudgeTargetID(now: renderNow)) == model.id) { [weak self] in
                 guard let self else { return }
                 self.rowChoiceTargetIds = [agentId]
                 self.performRowAction(.settle)
             }
-            if let projectID = model.projectId {
+            if !keepsContent, let projectID = model.projectId {
                 projectFaviconResolver.image(for: projectID) { [weak redesigned] image in
                     redesigned?.setProjectIcon(image, for: agentId)
                 }
@@ -6392,14 +6471,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     // MARK: - QA
 
-    /// Pin the list's scroller style for a measurement probe.
-    ///
-    /// A legacy scroller reserves a permanent lane and narrows the content width every
-    /// measurement is taken against, so a machine whose "Show scroll bars" preference
-    /// is Always measures a different sidebar than one set to When scrolling. The probe
-    /// pins it; PRODUCTION MUST NOT. An earlier attempt set `.overlay` on the shipped
-    /// scroll view for this reason, which silently overrode the user's own preference
-    /// to make a check deterministic — the determinism was real, the place was wrong.
+    /// Keep captures on the production overlay policy.
+    var retainsOverlayScrollerForQA: Bool {
+        scrollView.scrollerStyle = .legacy
+        return scrollView.scrollerStyle == .overlay
+    }
+
     func pinScrollerStyleForQA() {
         scrollView.scrollerStyle = .overlay
     }
@@ -11625,5 +11702,14 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     var renameNestedControlFrameForQA: NSRect? {
         guard !disclosureButton.isHidden else { return nil }
         return disclosureButton.convert(disclosureButton.bounds, to: self)
+    }
+}
+
+/// WebKit's global scroller refresh writes the system preference through this
+/// setter too. Keep the sidebar overlay-only even with Always scrollbars.
+private final class InboxOverlayScrollView: NSScrollView {
+    override var scrollerStyle: NSScroller.Style {
+        get { super.scrollerStyle }
+        set { super.scrollerStyle = .overlay }
     }
 }
