@@ -59,7 +59,7 @@ func runBrowserNativeSelectPreflightCheck() throws {
     try refused("browser.click", point)
     try refused("browser.type", ["ref": ref, "text": "b"])
     _ = try c.evaluate("document.querySelector('select').focus(); return true;")
-    for key in ["Space", "ArrowDown", "Alt+ArrowDown", "Enter"] { try refused("browser.press_key", ["keyName": key]) }
+    for key in ["Space", "ArrowDown", "Alt+ArrowDown", "Enter", "b"] { try refused("browser.press_key", ["keyName": key]) }
     try refused("browser.click", ["ref": try c.ref("Frame picker")])
     _ = try c.call("browser.select", ["ref": try c.ref("Frame picker"), "options": [["value": "a"]]])
     try refused("browser.click", ["ref": try c.ref("Frame label")])
