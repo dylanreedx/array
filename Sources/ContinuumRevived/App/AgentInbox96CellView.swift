@@ -1211,6 +1211,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                isInteracting: Bool, now: Date) {
         shown = (row, emphasis, indent, disclosure, rollup, isSelected, now)
         self.indent = indent
+        card.indicatorReducesMotion = prefersReducedMotion()
         card.indicatorColour = row.identityColor.map(AgentInboxView.identityDotColour(named:))
         card.isSelected = isSelected
 
@@ -1945,7 +1946,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         guard proposal.isTwoLine, let row = shown?.row else { return }
         // Waiting is not progress: a row that asks stops pulsing and shimmering.
         let working = row.state == .working && Self.ask(row) == nil
-        let reduced = prefersReducedMotion()
+        let reduced = prefersReducedMotion() || AgentInboxCardView.indicatorStyle != "current"
         let phase = InboxOwnershipClock.phase(for: row.id)
         let foldsHelpers = (shown?.disclosure ?? .none) != .none
         pulseDots.show(colour: TextToken.textSecondary.color.nsColor(in: self),

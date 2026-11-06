@@ -6,10 +6,12 @@ Internal startup defaults key: `SidebarActiveIndicatorStyle` (`current`, `gradie
 2. Halo: a continuous identity-colour hairline with a soft, evenly distributed halo and a nearly clear centre.
 3. Inset: a solid quiet identity tint and inset neutral hairline, giving the active card the feel of a pressed native panel.
 
-All options affect selected and route-active cards. Existing hover, keyboard focus, state decorations, layout, and default appearance remain intact. Uses existing identity palette and text tokens; no new TokenThemed view. No animation is added.
+All options affect selected and route-active cards. Existing hover, keyboard focus, state decorations, layout, and default appearance remain intact. Uses existing identity palette and text tokens; no new TokenThemed view. Round 1 was static; round 2 adds motion (see below).
 
 Capture uses the existing `--sidebar-screenshot-check`, temporarily pointed at `SidebarPolishFixtures.rows` with its coloured lead selected; the capture-only source edits are reverted before commit. These are offscreen AppKit renders, not live-window screenshots. Light/dark stills and the contact sheet accompany this file. Full matrix deliberately not run. No installed app or live tmux server touched.
 
 The requested `.plans/106-sidebar-ownership/README.md` and `.plans/88-sidebar-refinements` paths are absent at origin d41dad04 and have no tracked history under those exact paths in the available refs. Gradient recovery instead uses the retained throwaway branch commit above. Stash list was empty; session searches also located sidebar gradient discussion, but the committed drawing is the reproducible source.
 
 Validation: `swift build --product Array` passed for the capture binary. Each of the three screenshot runs produced the requested light/dark selected-card stills, then exited 1 on the same proposal geometry assertion: claimed 50/58pt versus measured 24/32pt. The capture fixture substitution means this is not a clean screenshot-suite pass. Full matrix was not run, as requested. The first build attempt failed because the capture source was edited while compilation was in flight; a subsequent stable-source build passed. Reviewed all six appearances in `sheet.png`; no live-window or accessibility-contrast validation is claimed.
+
+Round 2 correction: the geometry failure above was caused by the temporary capture fixture substitution. Untouched d41dad04 rebuilt and passed the normal 48-image screenshot check. See `round2/README.md` for the animated alternatives and baseline evidence.

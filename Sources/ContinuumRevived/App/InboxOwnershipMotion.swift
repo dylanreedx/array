@@ -482,7 +482,7 @@ struct InboxOwnershipChrome {
             card.minY >= clip.minY - 0.5, card.maxY <= clip.maxY + 0.5)
 
         sweep.frame = clip
-        sweep.show(card: slice.sweepPhase == nil ? nil : card.offsetBy(dx: 0, dy: -top),
+        sweep.show(card: slice.sweepPhase == nil || AgentInboxCardView.indicatorStyle != "current" ? nil : card.offsetBy(dx: 0, dy: -top),
                    colour: slice.sweepColour.map(AgentInboxView.identityDotColour(named:)),
                    phase: slice.sweepPhase ?? 0,
                    moving: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
