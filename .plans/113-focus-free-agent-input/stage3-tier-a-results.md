@@ -92,3 +92,64 @@ React's tested route uses edit SelectAll/Undo. CodeMirror uses keyDown Cmd-A bec
 DOM readback proves the witnessed input/model effects, not arbitrary application semantics. Unverifiable delivery is reported honestly. Hidden rAF remains frozen. Universal native-popup lifetime, arbitrary delayed/cached showPicker and page behaviors beyond the existing select preflight boundary remain an open gap; no universal popup guarantee is claimed.
 
 All app/build children used /tmp/exc-probe/noexc. App runs unset ARRAY_AGENT_ID, use /dev/null and TERM=xterm-256color, isolated QA state and disabled/disposable tmux. No synthetic system events, live tiles, standard-default writes or full matrix. Keep this bench for the pending lead-run Tier B proof.
+
+## Prepared LaunchServices retry (not activated)
+
+The first approved bare-binary Tier B attempt exited 1 before any core case:
+all three reported `Tier B real key-window setup failed`. External frontmost
+readings stayed on the same Array ASN. This gives no suppression result.
+
+The retry logs setup state to `ARRAY_REAL_KEY_LOG_PATH`: active state, activation
+policy, frontmost application/PID, native key-window identity, canBecomeKey, and
+elapsed/wait times before and after policy, finishLaunching, activation, and
+makeKey. It uses a regular app policy and waits at most one second for activation
+and one second for key state. No fake key-window override is used.
+
+LaunchServices can foreground the bundle before main, so the command captures the
+previous frontmost PID before launching and passes it explicitly. If the check
+never foregrounded itself and that previous app remains frontmost, restoration is
+reported as unnecessary. Otherwise restoration is attempted and verified by PID,
+regardless of the activation request's completion Bool. The 28-second watchdog
+and independent 29-second hard exit remain.
+
+The dedicated bundle is prepared with `scripts/dev-app.sh --no-launch`,
+DEV_APP_PATH under ~/array-scratch/apps, and a unique bundle ID. It does not replace
+the shared preview. The command below removes this extra bundle after termination.
+It has NOT been launched; approval for the first run does not authorize this one.
+
+This flag exits before normal application delegate boot and its folder grants.
+Ghostty's global bootstrap precedes the flag, but this fixture passes nil Ghostty
+and creates no terminal runtime/config UI. The fixture mounts temp projects;
+CONTINUUM_PROJECT_ROOT and CONTINUUM_APP_SUPPORT also point at fresh /tmp paths.
+No Array folder or Ghostty configuration prompt is on this path. LaunchServices
+and operating-system UI remain untested until the approved retry.
+
+After a fresh explicit approval, execute this single compound command once:
+
+```sh
+(
+  set -eu
+  tier_b_app="$HOME/array-scratch/apps/Array Tier B.app"
+  tier_b_previous="$(lsappinfo info -only pid "$(lsappinfo front)" | sed -nE 's/.*pid = ([0-9]+).*/\1/p')"
+  test -n "$tier_b_previous"
+  test -d "$tier_b_app"
+  tier_b_project="$(mktemp -d /tmp/array-tier-b-project.XXXXXX)"
+  tier_b_state="$(mktemp -d /tmp/array-tier-b-state.XXXXXX)"
+  trap 'rm -rf "$tier_b_app"' EXIT
+  open -n -W     --env ARRAY_AGENT_ID=     --env ARRAY_FOCUS_FREE_TIER_A=0     --env ARRAY_FOCUS_FREE_RED_CONTROL=0     --env TERM=xterm-256color     --env "CONTINUUM_PROJECT_ROOT=$tier_b_project"     --env "CONTINUUM_APP_SUPPORT=$tier_b_state"     --env ARRAY_ALLOW_REAL_KEY_PROOF=1     --env "ARRAY_REAL_KEY_PREVIOUS_PID=$tier_b_previous"     --env ARRAY_REAL_KEY_LOG_PATH=/tmp/stage3-tier-b-launchservices.log     "$tier_b_app" --args --browser-focus-free-real-key-check     -continuum.terminal.tmux.enabled NO -continuum.terminal.tmux.path ''
+  cat /tmp/stage3-tier-b-launchservices.log
+)
+```
+
+On screen, the test app briefly becomes the foreground application (menu bar and
+possibly Dock identity change); the fixture window stays off-screen. The previous
+app is returned to the front before exit. Native activation, actual case outcomes,
+and restoration are still unproven; no further activated run has occurred.
+The experimental delivery switch remains off by default.
+
+Preparation verification: debug dev-app --no-launch exited 0 (73 seconds),
+including both Swift product builds and bundle assembly. Deep/strict codesign
+verification passed. The bundle has no quarantine attribute (only provenance).
+Bare-executable refusal with ARRAY_ALLOW_REAL_KEY_PROOF unset exited 1 and wrote
+the expected REFUSED message to /tmp/stage3-tier-b-refusal-diagnostics.log.
+No open invocation, activation, or approved core case was run during preparation.
