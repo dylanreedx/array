@@ -1,3 +1,5 @@
+Follow-up implementation and measurements: [EXPANSION.md](EXPANSION.md). That report supersedes the initial expansion findings below.
+
 Sidebar feel, based on d41dad04 (0.7.44).
 
 Implemented: focus changes repaint existing cards when row identities stay the same, preserving selection and avoiding a full table reload. Untouched leads and their capped helper groups start expanded; saved per-lead manual fold choices still win. Card gap is 4pt instead of 8pt (2pt intercell + 2pt card inset). The sidebar enforces overlay scrolling through its scrollerStyle setter, autohides, and uses a small scroller.

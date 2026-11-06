@@ -172,6 +172,8 @@ extension SidebarOwnershipChecks {
               inbox.rowIdsForQA.contains(uuid(foldFolded.last!)) else {
             throw fail("untouched helpers must start expanded")
         }
+        inbox.toggleCollapse(parentId: uuid(foldLead))
+        inbox.toggleCollapse(parentId: uuid(foldLead))
         inbox.toggleFanout(parentId: uuid(foldLead))
         guard inbox.retainsOverlayScrollerForQA else {
             throw fail("a system legacy-style rewrite replaced the sidebar overlay")

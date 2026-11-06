@@ -1028,7 +1028,6 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(workspaceLabel)
         card.addSubview(statusGlyph)
 
-        metadataRasterScale = NSScreen.main?.backingScaleFactor ?? 1
         placementLabel.font = .token(.caption)
         projectIcon.imageScaling = .scaleProportionallyDown
         projectIcon.setAccessibilityElement(false)
@@ -1153,7 +1152,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 
     private func refreshMetadataBackingScale() {
-        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        guard let scale = window?.backingScaleFactor else { return }
         guard scale != metadataRasterScale else { return }
         metadataRasterScale = scale
         refreshInkMetrics()
@@ -1168,6 +1167,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     // MARK: Content
 
     func setLayoutWidth(_ width: Double) {
+        guard layoutColumnWidth != width else { return }
         layoutColumnWidth = width
         needsLayout = true
     }
@@ -1830,7 +1830,25 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     /// Everything the ownership layout derives from the row and its slice:
     /// fonts, the clock, the tail, the shimmer and the dots.
+    /// Hidden metadata and actions do not need to join every window transition
+    /// of a recycled row. Their existing controls return as soon as they show.
+    private func reconcileOptionalChrome() {
+        guard proposal.isTwoLine else { return }
+        let optional: [NSView] = [workspaceLabel, placementLabel, projectIcon,
+            branchLabel, modelLabel, selfReportLabel, whereDot, whereLabel, whereIcon,
+            settleNudge, hoverSnooze, hoverSettle, hoverShare, hoverMoveHere, hoverCopy,
+            hoverHide, hoverPopOut, hoverStop, disclosureButton, tailLabel, titleShimmer, statusGlyph]
+        for view in optional {
+            if view.isHidden {
+                if view.superview != nil { view.removeFromSuperview() }
+            } else if view.superview == nil {
+                card.addSubview(view)
+            }
+        }
+    }
+
     private func applyOwnershipContent(_ row: AgentInboxRow, now: Date) {
+        defer { reconcileOptionalChrome() }
         let sub = row.depth > 0 || row.parentId != nil
         titleLabel.font = sub ? Self.subagentTitleFont : .token(.title)
         placementLabel.font = .token(.label)
@@ -2005,6 +2023,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     // MARK: Ownership layout (plan 106)
 
     private func layoutOwnership() {
+        defer { reconcileOptionalChrome() }
         let gutter = CGFloat(Self.outerGutter)
         let gap = proposal.gapBetweenRows
         let spacing = CGFloat(AgentInboxView.rowSpacing)
@@ -2785,6 +2804,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Cross-fade the status slot and the actions over 150ms (instant under Reduce
     /// Motion). Only the actions the row offers ever appear.
     private func setHoverActionsShown(_ shown: Bool) {
+        defer { reconcileOptionalChrome() }
         if isSubagentRow {
             let popOn = shown && onHoverPopOut != nil
             let stopOn = shown && onHoverStop != nil
@@ -2851,6 +2871,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     /// Hide the actions once their fade-out lands, unless hover came back.
     private func finishHoverFade() {
+        defer { reconcileOptionalChrome() }
         if !(hoverActionsShown && onHoverSnooze != nil) { hoverSnooze.isHidden = true }
         if !(hoverActionsShown && onHoverSettle != nil && settleNudge.isHidden) { hoverSettle.isHidden = true }
         if !(hoverActionsShown && onHoverShare != nil) { hoverShare.isHidden = true }
@@ -2912,6 +2933,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         fade.duration = AgentInboxCardView.fillFadeDuration
         fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
         layer.add(fade, forKey: "emphasis")
+    }
+
+    func clearSelectionForFold() {
+        shown?.isSelected = false
+        card.isSelected = false
     }
 
     func applyInteraction(_ interaction: RowInteraction) {
@@ -3126,7 +3152,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     var accessibilityStatusOwner: NSView { stateLabel }
 
-    func showJumpHint(_ chord: String?) { jumpHint.show(chord) }
+    func showJumpHint(_ chord: String?) {
+        jumpHint.show(chord)
+        if chord == nil {
+            jumpHint.removeFromSuperview()
+        } else if jumpHint.superview == nil {
+            addSubview(jumpHint)
+        }
+    }
 
     var qaAgentID: UUID? { shown?.row.id }
     var qaVariant: RowVariant? { shown?.row.variant }
