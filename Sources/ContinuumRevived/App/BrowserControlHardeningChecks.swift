@@ -599,6 +599,12 @@ func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
     }
     try expect(browser.automation.userInputCount == count, "outside canvas scroll/zoom must not take browser control")
     _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+    h.f.canvas.cameraDriver.noteScrollZoom(deltaY: 1, location: .zero)
+    try expect(h.f.canvas.cameraDriver.isCameraSessionActive, "camera fixture must start a zoom session")
+    try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil))
+    try expect(browser.automation.userInputCount == count, "camera follow-through scroll over a driven browser must not take control")
+    h.pump(2)
+
     try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil))
     try expect(browser.automation.userInputCount > count, "tile scroll must take browser control")
     h.pump(0.1)

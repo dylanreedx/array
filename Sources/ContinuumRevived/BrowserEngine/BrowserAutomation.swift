@@ -974,6 +974,18 @@ final class BrowserAutomation {
         } else if let content = window.contentView {
             view = content.hitTest(content.superview?.convert(location, from: nil) ?? location)
         }
+        // The canvas owns the pan following a zoom, even when the pointer
+        // rests on web content. Classify before revoking the browser lease;
+        // local-monitor ordering must not decide whether a camera gesture
+        // becomes durable takeover.
+        if event.type == .scrollWheel, event.hasPreciseScrollingDeltas {
+            var ancestor = view
+            while let current = ancestor {
+                if let canvas = current as? CanvasNSView,
+                   canvas.cameraDriver.isCameraSessionActive { return }
+                ancestor = current.superview
+            }
+        }
         while let current = view {
             if let engine = registry[ObjectIdentifier(current)]?.engine {
                 guard engine.agentDeliveryDepth == 0 || engine.supportsFocusFreeInput else { return }
