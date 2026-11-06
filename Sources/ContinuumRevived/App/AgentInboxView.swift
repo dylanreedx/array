@@ -4744,8 +4744,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func presentIdentityColorOptions(for ids: [UUID], anchor: NSRect, relativeTo view: NSView) {
         guard !ids.isEmpty else { return }
         identityColorTargetIds = ids
-        let items = [ChoiceItem(id: AgentInboxView.noIdentityColorID, title: "None", icon: .system("circle.slash"))]
-            + ZoneColorConfig.palette.map { ChoiceItem(id: $0, title: $0.capitalized, icon: .system("circle.fill")) }
+        let items = AgentIdentityColourPicker.items
         let colours = Set(ids.compactMap { id in rows.first(where: { $0.id == id }) }.map(\.identityColor))
         let selectedID = colours.count == 1 ? (colours.first! ?? AgentInboxView.noIdentityColorID) : nil
         let onSelection: (ChoiceItem) -> Void = { [weak self] item in
@@ -4790,8 +4789,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func chooseIdentityColorForQA(_ title: String) -> Bool {
         guard let list = rowChoiceController.listView ?? qaIdentityColorChoiceListForQA,
               let item = list.qaItems.first(where: { $0.title == title }) else { return false }
-        list.choose(id: item.id)
-        return true
+        return AgentIdentityColorChecks.clickSwatch(list: list, id: item.id, name: "sidebar")
     }
 
     /// The identity dot and the name's frame on the cell drawn for this agent,
