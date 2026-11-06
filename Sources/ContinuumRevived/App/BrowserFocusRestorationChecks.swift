@@ -330,6 +330,39 @@ func runBrowserFocusRestorationCheck(experimental: Bool = false, realKey: Bool =
         }
     }
     if experimental && !realKey {
+        engine._afterAgentCharacterForChecks = nil
+        var retentionFailures: [String] = []
+        for (name, intended, clear, limit) in [
+            ("truncated", String(repeating: "x", count: 240), true, 220),
+            ("rejected", "requested", false, 0)
+        ] {
+            _ = try call("browser.evaluate", ["tileId":tile,"script": "() => { document.body.innerHTML='<div contenteditable=true role=textbox aria-label=Retention></div>'; const e=document.querySelector('[contenteditable]'); e.oninput=()=>{e.textContent=\(limit == 0 ? "'X'" : "e.textContent.slice(0,\(limit))")}; return true }"])
+            let snapshot = try call("browser.snapshot", ["tileId":tile])["text"] as? String ?? ""
+            guard let line = snapshot.split(separator:"\n").first(where:{$0.contains("Retention")}),
+                  let range = line.range(of:#"\[ref=([^\]]+)\]"#, options:.regularExpression) else { throw WorkspaceAPIChecks.Failure(message:"missing retention editor") }
+            let retentionRef = String(line[range].dropFirst(5).dropLast())
+            let reply = try call("browser.type", ["tileId":tile,"ref":retentionRef,"text":intended,"clear":clear], allowError:true)
+            let error = reply["error"] as? [String:Any]
+            let action = (error?["details"] as? [String:Any])?["action"] as? [String:Any]
+            let actual = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('[contenteditable]').textContent"])["value"] as? String
+            let expected = limit == 0 ? "X" : String(repeating:"x",count:limit)
+            if error?["code"] as? String != "outcome_unknown" || action?["effects"] as? String != "partial" ||
+                action?["deliveredCharacters"] as? Int != limit || action?["freshSnapshotRequired"] as? Bool != true || actual != expected {
+                print("FAIL: contenteditable \(name) retained=\(limit): \(reply)")
+                retentionFailures.append(name)
+            } else { print("PASS: contenteditable \(name) reports retained \(limit)/\(intended.count) characters; no false completion") }
+        }
+        _ = try call("browser.evaluate", ["tileId":tile,"script":"() => { document.querySelector('[contenteditable]').oninput=null; return true }"])
+        let normalizedSnapshot = try call("browser.snapshot", ["tileId":tile])["text"] as? String ?? ""
+        guard let normalizedLine=normalizedSnapshot.split(separator:"\n").first(where:{$0.contains("Retention")}),
+              let normalizedRange=normalizedLine.range(of:#"\[ref=([^\]]+)\]"#,options:.regularExpression) else { throw WorkspaceAPIChecks.Failure(message:"missing normalized editor") }
+        let normalizedRef=String(normalizedLine[normalizedRange].dropFirst(5).dropLast())
+        _ = try call("browser.type", ["tileId":tile,"ref":normalizedRef,"text":"alpha  beta\nsecond","clear":true])
+        _ = try call("browser.type", ["tileId":tile,"text":" suffix"])
+        let normalizedValue = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('[contenteditable]').innerText.replace(/\\s+/g,' ').trim()"])
+        guard normalizedValue["value"] as? String == "alpha beta second suffix" else { throw WorkspaceAPIChecks.Failure(message:"contenteditable normalization/append failed: \(normalizedValue)") }
+        print("PASS: contenteditable full multiline and whitespace normalization, followed by verified append")
+        guard retentionFailures.isEmpty else { throw WorkspaceAPIChecks.Failure(message:"contenteditable retention failures: \(retentionFailures)") }
         // Explicit user camera/workspace seams may change host focus. Continue
         // rejecting entry into WebKit while the agent owns delivery.
         strictHostTrace = false
@@ -343,9 +376,9 @@ func runBrowserFocusRestorationCheck(experimental: Bool = false, realKey: Bool =
         _ = try call("browser.evaluate", ["tileId":tile,"script":"() => { const e=document.querySelector('input'); e.value='seed'; e.oninput=()=>{e.value='seed'}; return true }"])
         let rejectionRef = try currentRef()
         let rejected = try call("browser.type", ["tileId":tile,"ref":rejectionRef,"text":"rejected","clear":true], allowError:true)
-        guard let rejectionError = rejected["error"] as? [String:Any], rejectionError["code"] as? String == "outcome_unknown", let rejectionAction = (rejectionError["details"] as? [String:Any])?["action"] as? [String:Any], rejectionAction["effects"] as? String == "unknown" else { throw WorkspaceAPIChecks.Failure(message:"application rejection was reported as retained text: \(rejected)") }
+        guard let rejectionError = rejected["error"] as? [String:Any], rejectionError["code"] as? String == "outcome_unknown", let rejectionAction = (rejectionError["details"] as? [String:Any])?["action"] as? [String:Any], rejectionAction["effects"] as? String == "partial", rejectionAction["deliveredCharacters"] as? Int == 0 else { throw WorkspaceAPIChecks.Failure(message:"application rejection was reported as retained text: \(rejected)") }
         _ = try call("browser.evaluate", ["tileId":tile,"script":"() => { const e=document.querySelector('input'); e.oninput=null; return true }"])
-        print("PASS: Tier A faked key application rejects text: unknown effects and snapshot guidance, no false success")
+        print("PASS: Tier A faked key application rejects text: zero retained characters, partial effects and snapshot guidance")
         _ = try call("browser.evaluate", ["tileId":tile,"script":"() => { const e=document.querySelector('input'); const host=document.createElement('div'); host.className='monaco-editor'; e.replaceWith(host); host.appendChild(e); e.focus(); return true }"])
         let monacoRef = try currentRef()
         for (operation,payload) in [("browser.click", ["tileId":tile,"ref":monacoRef]), ("browser.press_key", ["tileId":tile,"keyName":"Meta+z"])] {

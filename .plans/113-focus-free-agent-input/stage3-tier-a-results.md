@@ -153,3 +153,20 @@ verification passed. The bundle has no quarantine attribute (only provenance).
 Bare-executable refusal with ARRAY_ALLOW_REAL_KEY_PROOF unset exited 1 and wrote
 the expected REFUSED message to /tmp/stage3-tier-b-refusal-diagnostics.log.
 No open invocation, activation, or approved core case was run during preparation.
+
+## Review follow-up: strict input retention
+
+Production-tool contenteditable witnesses failed before the fix:
+truncated 220/240-character replacement and rejected insertion both returned
+success (/tmp/stage3-review-retention-red.log). After the fix both report
+outcome_unknown with partial effects, a fresh snapshot requirement, and verified
+retained counts 220 and 0 respectively. Full multiline/whitespace-normalized text
+and a subsequent insertion pass, as do actual React, CodeMirror and ProseMirror
+models (/tmp/stage3-review-retention-green.log). A detached editor clone preserves
+selection paragraph context; verification no longer truncates either side or
+accepts any change. Destroyed/unknown selection context still reports unknown
+effects rather than inventing a retained count. Known counts use the existing
+deliveredCharacters field and the error explains retention versus dispatch.
+
+Debug build exited 0. Faked-key focus check passed with the switch on; Stage 1
+switch-off focus check passed (/tmp/stage3-review-retention-0.log). No app activated.

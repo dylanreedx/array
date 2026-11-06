@@ -323,18 +323,74 @@ enum BrowserAutomationScript {
         keyboardTarget() { return keyboardTarget(); },
         beginInputVerification(a) {
           const el=element(a.ref), native=el && ['INPUT','TEXTAREA'].includes(el.tagName);
-          const before=el ? (native ? el.value : el.innerText) : '';
-          let expected=null;
-          if(a.clear) expected=a.text;
-          else if(native && Number.isInteger(el.selectionStart)) expected=before.slice(0,el.selectionStart)+a.text+before.slice(el.selectionEnd);
-          state.inputVerification={el,before,expected,text:a.text,native};
+          // Use the same unbounded text reader for the editor and selection
+          // fragments. Block/BR boundaries and NBSP are ordinary editor
+          // whitespace, not reasons to accept a missing non-whitespace suffix.
+          const read=node => {
+            if(node.nodeType===3) return node.data;
+            if(node.nodeName==='BR') return '\n';
+            let text='', previousBlock=false;
+            for(const child of node.childNodes) {
+              const value=read(child), block=/^(DIV|P|LI|PRE|BLOCKQUOTE|H[1-6])$/.test(child.nodeName);
+              if(text && value && (previousBlock || block)) text+='\n';
+              text+=value; previousBlock=block;
+            }
+            return text;
+          };
+          const normalize=value => native ? value : value.replace(/\s+/g,' ').trim();
+          const before=el ? (native ? el.value : read(el)) : '';
+          let left=null,right=null;
+          if(el && a.clear) { left=''; right=''; }
+          else if(native && Number.isInteger(el.selectionStart)) {
+            left=before.slice(0,el.selectionStart); right=before.slice(el.selectionEnd);
+          } else if(el && !native) {
+            const selection=el.ownerDocument.getSelection();
+            if(selection?.rangeCount) {
+              const range=selection.getRangeAt(0);
+              if(el.contains(range.startContainer) && el.contains(range.endContainer)) {
+                // Mark the selection in a detached clone of the WHOLE editor.
+                // Rendering separate Range fragments invents paragraph breaks at
+                // a caret inside a paragraph (e.g. ProseMirror bold insertion).
+                const clone=el.cloneNode(true);
+                const counterpart=node => {
+                  const path=[];
+                  while(node!==el) { path.unshift(Array.prototype.indexOf.call(node.parentNode.childNodes,node)); node=node.parentNode; }
+                  return path.reduce((parent,index)=>parent.childNodes[index],clone);
+                };
+                const copy=el.ownerDocument.createRange();
+                copy.setStart(counterpart(range.startContainer),range.startOffset);
+                copy.setEnd(counterpart(range.endContainer),range.endOffset);
+                const marker='ARRAY_INSERT_'+Math.random().toString(36).slice(2);
+                copy.deleteContents(); copy.insertNode(el.ownerDocument.createTextNode(marker));
+                [left,right]=read(clone).split(marker);
+              }
+            }
+          }
+          state.inputVerification={el,before,left,right,text:a.text,native,read,normalize};
           return {};
         },
         verifyInput() {
           const v=state.inputVerification; delete state.inputVerification;
-          if(!v || !v.el?.isConnected) return {retained:false};
-          const actual=v.native ? v.el.value : v.el.innerText;
-          return {retained:v.expected!==null ? (v.native ? actual===v.expected : collapse(actual,200)===collapse(v.expected,200)) : (v.text==='' || actual!==v.before)};
+          if(!v || !v.el?.isConnected || v.left===null) return {retained:false};
+          const actual=v.normalize(v.native ? v.el.value : v.read(v.el));
+          const expected=v.normalize(v.left+v.text+v.right);
+          const characters=Array.from(new Intl.Segmenter(undefined,{granularity:'grapheme'}).segment(v.text),s=>s.segment);
+          if(actual===expected) return {retained:true,retainedCharacters:characters.length};
+          const left=v.normalize(v.left), right=v.normalize(v.right);
+          if(!actual.startsWith(left) || !actual.endsWith(right) || actual.length<left.length+right.length)
+            return {retained:false};
+          const observed=actual.slice(left.length,right.length ? -right.length : undefined);
+          const inserted=v.native ? observed : observed.trim();
+          const intended=v.normalize(v.text);
+          let common=0;
+          while(common<intended.length && common<inserted.length && intended[common]===inserted[common]) common++;
+          let count=0, prefix='';
+          for(const character of characters) {
+            prefix+=character;
+            if(v.normalize(prefix).length>common) break;
+            count++;
+          }
+          return {retained:false,retainedCharacters:count};
         },
         focusedIs(a) {
           const el = element(a.ref);

@@ -106,7 +106,7 @@ enum BrowserActionExecutor {
             case .invalidSelection, .unknownKey, .script: code = .invalidRequest
             }
             let effects: BrowserActionResult.Effects
-            if case .inputNotRetained = error { effects = .unknown }
+            if case let .inputNotRetained(retained, _) = error { effects = retained == nil ? .unknown : .partial }
             else if case .selectionNotRetained = error { effects = .unknown }
             else if case .timedOut = error { effects = .unknown }
             else if case .script = error { effects = .unknown }

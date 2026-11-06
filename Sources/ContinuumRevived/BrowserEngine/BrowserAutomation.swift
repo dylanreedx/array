@@ -29,7 +29,7 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
     case nativeSelectUnsupported
     case uninspectableFrame
     case invalidSelection(String)
-    case inputNotRetained
+    case inputNotRetained(retainedCharacters: Int?, intendedCharacters: Int)
     case selectionNotRetained
     case focusChanged
     case userTyping
@@ -59,8 +59,10 @@ enum BrowserAutomationError: Error, Equatable, CustomStringConvertible {
             return "This frame cannot be inspected before native input, so picker safety cannot be established. Use array_browser_select on an accessible HTML select; this frame requires manual interaction."
         case .invalidSelection(let message):
             return message
-        case .inputNotRetained:
-            return "Background editing was dispatched but the page did not retain the expected text. Application handlers may have rejected or transformed it. Take a snapshot and inspect application state before retrying."
+        case let .inputNotRetained(retained, intended):
+            let detail = retained.map { $0 == 0 ? "The page rejected the intended text (0/\(intended) characters retained)." : "The page retained only \($0)/\(intended) intended characters." }
+                ?? "The retained character count could not be established."
+            return "Background editing did not retain the full intended text. \(detail) Take a snapshot and inspect application state before retrying."
         case .selectionNotRetained:
             return "The requested selection could not be verified after page events and reconciliation. Application handlers may have changed it; inspect the page before another action."
         case .focusChanged:
@@ -442,7 +444,11 @@ final class BrowserAutomation {
             if self.supportsFocusFreeInput {
                 try await self.pause(0.1, deadline: deadline)
                 let verification = try await self.world("verifyInput", [:], deadline: deadline)
-                guard verification["retained"] as? Bool == true else { throw BrowserAutomationError.inputNotRetained }
+                guard verification["retained"] as? Bool == true else {
+                    let retained = verification["retainedCharacters"] as? Int
+                    if let retained { self.actionDeliveredCharacters = retained }
+                    throw BrowserAutomationError.inputNotRetained(retainedCharacters: retained, intendedCharacters: text.count)
+                }
             }
             var value: String?
             if let ref {
