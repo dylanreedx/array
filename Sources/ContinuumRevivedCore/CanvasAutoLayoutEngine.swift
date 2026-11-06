@@ -1315,7 +1315,15 @@ public enum CanvasAutoLayoutEngine {
     private static func resolveOuterCollisions(tiles: inout [UUID: LayoutTile], zones: inout [UUID: ZonePlacement], scene: Scene, activeZone: UUID?, preferredGap: Double, exempt: Set<UUID> = []) {
         enum Peer: Hashable { case zone(UUID), tile(UUID) }
         var peers = zones.keys.map(Peer.zone) + tiles.values.filter { $0.zoneId == nil }.map { Peer.tile($0.id) }
-        peers.sort { String(describing: $0) < String(describing: $1) }
+        // The order `String(describing:)` gave ("tile(…)" < "zone(…)", then the
+        // id), without reflecting two strings per comparison.
+        peers.sort { lhs, rhs in
+            switch (lhs, rhs) {
+            case let (.tile(a), .tile(b)), let (.zone(a), .zone(b)): return UUID.isOrderedBeforeByString(a, b)
+            case (.tile, .zone): return true
+            case (.zone, .tile): return false
+            }
+        }
         // Only a directly moved/resized ZONE projects force onto the outer
         // canvas. Tiles never do: a dragged bare tile is freeform (it may cross
         // anything and settles by the drop policy), and a member tile's world
@@ -1390,5 +1398,5 @@ public enum CanvasAutoLayoutEngine {
     }
 
     private static func squaredDistance(_ a: TileFrame, _ b: TileFrame) -> Double { let dx = a.x - b.x, dy = a.y - b.y; return dx * dx + dy * dy }
-    private static func uuidLess(_ lhs: UUID, _ rhs: UUID) -> Bool { lhs.uuidString < rhs.uuidString }
+    private static func uuidLess(_ lhs: UUID, _ rhs: UUID) -> Bool { UUID.isOrderedBeforeByString(lhs, rhs) }
 }

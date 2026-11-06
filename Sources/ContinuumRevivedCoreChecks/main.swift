@@ -91,6 +91,12 @@ if CommandLine.arguments.contains("--layout-pressure-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--uuid-string-order-check") {
+    runUUIDStringOrderChecks()
+    print("UUIDStringOrderChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--exact-rebase-performance-check") {
     let oldOrigin = -0.000_976_562_5
     let proposed = -0.334_309_895_833_333_3

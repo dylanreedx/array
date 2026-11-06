@@ -1176,6 +1176,7 @@ run_leg scripts/check-film-absent.sh
 run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks
+run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 fi

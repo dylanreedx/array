@@ -1,3 +1,11 @@
+bundle-check --agent-awareness-check
+bundle-check --app-support-channel-check
+bundle-check --delete-confirm-policy-defaults-check
+bundle-check --file-tree-boot-persistence-check
+bundle-check --menu-contract-check
+bundle-check --palette-duplicate-root-check
+bundle-check --terminal-theme-fidelity-check
+bundle-check --tool-path-bootstrap-check
 check --add-zone-check
 check --agent-account-manage-check
 check --agent-account-usage-check
@@ -285,8 +293,8 @@ check --sidebar-workspace-treatment-check
 check --single-zone-compat-check
 check --spawn-arrange-commit-check
 check --spawn-focus-policy-check
-check --spawn-placement-check
 check --spawn-framing-check
+check --spawn-placement-check
 check --spawn-rate-limit-check
 check --stranded-tile-recovery-check
 check --stray-window-audit-check
@@ -343,6 +351,7 @@ check --ui-test-support-check
 check --ui-tour-check
 check --unified-model-boot-check
 check --update-channel-check
+check --uuid-string-order-check
 check --viewport-sanitize-check
 check --web-link-open-check
 check --window-chrome-check
@@ -421,6 +430,20 @@ check --zone-tier-transition-check
 check --zone-tile-detach-sweep-check
 check --zone-tile-hydration-check
 check --zone-unacquired-project-check
+count ContinuumRevivedAgentContentChecks 23
+count ContinuumRevivedAgentUIChecks 22
+count ContinuumRevivedCollaborationChecks 25
+count ContinuumRevivedCollaborationServiceChecks 29
+count ContinuumRevivedCoreChecks 204
+count ContinuumRevivedFileTreeChecks 0
+count ContinuumRevivedPaletteChecks 0
+count ContinuumRevivedPerfChecks 0
+count ContinuumRevivedRelayChecks 7
+count ContinuumRevivedRelayCoreChecks 3
+count ContinuumRevivedRelayIntegrationChecks 4
+count ContinuumRevivedRelayProtocolChecks 0
+count ContinuumRevivedSyncChecks 12
+count ContinuumRevivedSyncIntegrationChecks 1
 leg run env IOS_PREVIEW_PROOF_OUT="$MATRIX_RESULTS/ios-preview-proof" scripts/check-ios-preview-proof.sh --prepare-only
 leg run git diff --check
 leg run python3 scripts/check-multiplayer-journey.py --relay local --name "$journey" --prepare-only
@@ -866,6 +889,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-c
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-board-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
@@ -911,25 +935,3 @@ leg run_leg swift run --skip-build ContinuumRevivedRelayChecks
 leg run_leg swift run --skip-build ContinuumRevivedRelayCoreChecks
 leg run_leg swift run --skip-build ContinuumRevivedRelayIntegrationChecks
 leg run_leg swift run ContinuumRevivedPaletteChecks
-bundle-check --agent-awareness-check
-bundle-check --app-support-channel-check
-bundle-check --delete-confirm-policy-defaults-check
-bundle-check --file-tree-boot-persistence-check
-bundle-check --menu-contract-check
-bundle-check --palette-duplicate-root-check
-bundle-check --terminal-theme-fidelity-check
-bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 23
-count ContinuumRevivedAgentUIChecks 22
-count ContinuumRevivedCollaborationChecks 25
-count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 203
-count ContinuumRevivedFileTreeChecks 0
-count ContinuumRevivedPaletteChecks 0
-count ContinuumRevivedPerfChecks 0
-count ContinuumRevivedRelayChecks 7
-count ContinuumRevivedRelayCoreChecks 3
-count ContinuumRevivedRelayIntegrationChecks 4
-count ContinuumRevivedRelayProtocolChecks 0
-count ContinuumRevivedSyncChecks 12
-count ContinuumRevivedSyncIntegrationChecks 1
