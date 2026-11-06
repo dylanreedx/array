@@ -6325,6 +6325,21 @@ final class CanvasNSView: NSView, TokenThemed {
         return result
     }
 
+    func visibleSpawnSlot(size: CGSize, anchor: CGPoint, zoneId: UUID?) -> CGRect? {
+        let usable = usableVisibleScreenRect
+        let origin = CanvasEngine.screenToWorld(usable.origin, viewport: navigationViewport)
+        let visible = CGRect(x: origin.x, y: origin.y,
+                             width: usable.width / navigationViewport.zoom,
+                             height: usable.height / navigationViewport.zoom)
+        let placement = zoneId.flatMap { installedZonePlacement(for: $0) }
+        let zoneBounds = placement.map { CGRect(x: $0.origin.x, y: $0.origin.y,
+                                                 width: $0.size.width, height: $0.size.height) }
+        return TileSpawnPlacement.nearestVisibleSlot(size: size, anchor: anchor, visible: visible,
+            bounds: zoneBounds, obstacles: (zoneId.flatMap { tilesInWorldFrames(forZoneId: $0) } ?? allTilesInWorldFrames()).map {
+                CGRect(x: $0.frame.x,y: $0.frame.y,width: $0.frame.width,height: $0.frame.height)
+            }, gap: TileGapResolver.resolvedGap())
+    }
+
     var spawnAnchorWorldPoint: CGPoint {
         let usable = usableVisibleScreenRect
         let visible = CanvasEngine.visibleWorldRect(viewport: navigationViewport, visibleSize: bounds.size)
@@ -14110,8 +14125,7 @@ final class CanvasNSView: NSView, TokenThemed {
             return onProjectFolderDrop?(url, screenPoint) ?? false
         }
         let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
-        let spawnPoint = activeZone.map { CanvasEngine.zoneLocalPoint(world: worldPoint, zone: $0) } ?? worldPoint
-        onFileURLDrop?(url.path, spawnPoint)
+        onFileURLDrop?(url.path, worldPoint)
         return true
     }
 

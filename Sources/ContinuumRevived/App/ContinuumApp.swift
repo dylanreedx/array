@@ -16361,6 +16361,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let gap = TileGapResolver.resolvedGap()
         let zoneRect = CGRect(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
         let zoneTiles = canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []
+        if let slot = canvasView.visibleSpawnSlot(size: size,
+            anchor: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width/2,
+                            y: parent.worldFrame.y + parent.worldFrame.height/2), zoneId: zoneId) {
+            return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), nil)
+        }
         // Auto layout fans a helper out around its lead and the lead's other
         // helpers, shaped for the screen (.plans/107). The column scan below
         // always started right of the lead and only searched inside the zone's
