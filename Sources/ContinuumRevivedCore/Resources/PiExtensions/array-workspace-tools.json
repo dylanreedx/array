@@ -26,7 +26,7 @@
       "promptGuidelines": [
         "Use array_open_document (not bash or open) to show a file to the user on the canvas; quote the returned tileId when you refer to it.",
         "On not_found or target_conflict, re-check the path and handle; never substitute a similarly named file or another checkout.",
-        "Prefer mode 'revealOnly' when you only want to point at something already open, and presentation.camera 'preserve' unless the user asked to be taken there.",
+        "Prefer mode 'revealOnly' when pointing at something already open. Camera defaults to preserve. Request presentation.camera 'revealResult' only when the user asks to be taken there; recent input or an active gesture defers it.",
         "Reuse the same idempotencyKey when retrying an open that returned outcome_unknown or partial."
       ],
       "parameters": {

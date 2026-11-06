@@ -351,6 +351,7 @@ extension WorkspaceAPIService {
             if existing == nil { throw WorkspaceAPIError(code: .durabilityFailed, message: "The owned preview tile could not be saved. No helper was started; only its newly created disposable device was eligible for cleanup.") }
             throw error
         }
+        canvas.trackAgentResult(preview.tileID)
         controller.iosPreviewRuntimes[preview.tileID] = preview
         let controlAtStart = preview.controlGeneration
         if preview.state != .connected && preview.state != .connecting {

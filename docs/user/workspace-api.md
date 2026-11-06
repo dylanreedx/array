@@ -18,7 +18,7 @@ Browser approvals are separate. Navigation to a remote domain asks for domain ap
 
 ## Presentation
 
-The presentation result reports what happened to the workspace, armed zone, selection, camera and keyboard focus: preserved, changed, deferred or unavailable. Canvas moves and resizes preserve the view. Messaging preserves it by default. An explicit document open or agent reveal can request a camera reveal; the host’s explicit-open default requests one, subject to the grant and current user interaction. Ask the agent to preserve the camera when you want no view movement. A request to reveal does not itself grant permission or override a newer user interaction. Array can return `presentation_required` when the destination needs the user to open the workspace or zone.
+The presentation result reports what happened to the workspace, armed zone, selection, camera and keyboard focus: preserved, changed, deferred or unavailable. Canvas moves and resizes preserve the view. Messaging preserves it by default. An explicit document open or agent reveal can request a camera reveal; the default preserves the camera. Explicit reveals remain subject to the grant and defer during recent keyboard or pointer activity and active camera or geometry gestures. A request to reveal does not itself grant permission or override a newer user interaction. Array can return `presentation_required` when the destination needs the user to open the workspace or zone.
 
 ## Retries and outcomes
 

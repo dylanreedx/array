@@ -5583,7 +5583,62 @@ final class CanvasNSView: NSView, TokenThemed {
     /// the focus border and the attention borders. They are deliberately not in
     /// the world plane: their stroke widths and corner radii are screen-space
     /// affordances that must not shrink with zoom.
+    // Only agent results are tracked; camera steps visit this small set, never
+    // the workspace's complete tile collection.
+    private var agentResultIndicators: [UUID: (ComposerActionButton, TileNSView)] = [:]
+    var onVisitAgentResult: ((UUID) -> Void)?
+
+    func trackAgentResult(_ tileId: UUID) {
+        guard agentResultIndicators[tileId] == nil,
+              let view = tileView(for: tileId) else { return }
+        let button = ComposerActionButton(presentation: .init(
+            primaryAction: .send, title: "New tile", symbolName: "arrow.up.right",
+            accessibilityLabel: "Visit new agent tile", isEnabled: true,
+            isLoading: false, secondaryActions: []), target: self,
+            action: #selector(visitAgentResult(_:)))
+        button.identifier = NSUserInterfaceItemIdentifier(tileId.uuidString)
+        agentResultIndicators[tileId] = (button, view)
+        addSubview(button)
+        repositionAgentResultIndicators()
+    }
+
+    @objc private func visitAgentResult(_ sender: NSControl) {
+        guard let raw = sender.identifier?.rawValue, let id = UUID(uuidString: raw) else { return }
+        agentResultIndicators.removeValue(forKey: id)?.0.removeFromSuperview()
+        onVisitAgentResult?(id)
+    }
+
+    var qaAgentResultIndicatorButtons: [ComposerActionButton] {
+        agentResultIndicators.values.map { $0.0 }
+    }
+
+    private func repositionAgentResultIndicators() {
+        for (id, entry) in agentResultIndicators {
+            let (button, view) = entry
+            let rect = view.convert(view.bounds, to: self)
+            if view.window !== window || rect.intersects(bounds) {
+                button.removeFromSuperview()
+                agentResultIndicators.removeValue(forKey: id)
+                continue
+            }
+            let size = button.intrinsicContentSize
+            let dx = rect.midX - bounds.midX, dy = rect.midY - bounds.midY
+            let halfX = max(1, (bounds.width - size.width) / 2 - 12)
+            let halfY = max(1, (bounds.height - size.height) / 2 - 12)
+            let scale = min(halfX / max(abs(dx), 1), halfY / max(abs(dy), 1))
+            button.frame = CGRect(x: bounds.midX + dx * scale - size.width / 2,
+                                  y: bounds.midY + dy * scale - size.height / 2,
+                                  width: size.width, height: size.height)
+            var presentation = button.presentation
+            presentation.symbolName = abs(dx) > abs(dy)
+                ? (dx > 0 ? "arrow.right" : "arrow.left")
+                : (dy > 0 ? "arrow.down" : "arrow.up")
+            if presentation != button.presentation { button.presentation = presentation }
+        }
+    }
+
     private func repositionTrackingOverlaysForCamera() {
+        repositionAgentResultIndicators()
         if let tileId = borderedTileId { repositionFocusBorderIfNeeded(for: tileId) }
         for tileId in attentionTileIds { repositionAttentionBorderIfNeeded(for: tileId) }
         // Resolve after the whole tracking pass so camera commits keep shared

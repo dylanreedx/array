@@ -77,6 +77,17 @@ final class WorkspaceRuntime {
     // links persisted). Camera motion alone never bumps it.
     private(set) var interactionGeneration: UInt64 = 0
     private(set) var structuralRevision: UInt64 = 0
+    // Constant work per input, independent of tile count. Monotonic uptime
+    // keeps clock changes from extending or shortening the engagement window.
+    private var engagementMonitor: Any?
+    private var lastEngagementUptime: TimeInterval = -.infinity
+    var engagementClock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    var isUserEngaged: Bool {
+        engagementClock() - lastEngagementUptime < 3
+            || canvasView?.isCameraInMotion == true
+            || canvasView?.isGeometryGestureActive == true
+    }
+
     func noteUserInteraction() { interactionGeneration &+= 1 }
     func noteStructuralCommit() { structuralRevision &+= 1 }
 
@@ -488,6 +499,18 @@ final class WorkspaceRuntime {
     /// than a second boot path. `install(into:)` stays a checks-only entry point.
     func adoptCanvas(_ canvasView: CanvasNSView) {
         self.canvasView = canvasView
+        if engagementMonitor == nil {
+            engagementMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+                .keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown,
+                .otherMouseDown, .leftMouseDragged, .rightMouseDragged,
+                .otherMouseDragged, .mouseMoved, .scrollWheel, .magnify, .rotate
+            ]) { [weak self] event in
+                guard let self, let canvas = self.canvasView,
+                      event.window === canvas.window else { return event }
+                self.lastEngagementUptime = self.engagementClock()
+                return event
+            }
+        }
         applyCanvasBackground()
     }
 
