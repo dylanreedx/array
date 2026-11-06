@@ -6308,6 +6308,11 @@ final class CanvasNSView: NSView, TokenThemed {
     /// The camera navigation should reason from: where an in-flight jump is
     /// going, else where the camera is. A jump made mid-flight records THIS as
     /// the view to go back to, not a point the camera was only passing through.
+    var usableVisibleScreenRect: CGRect { bounds }
+    func framedWorkViewport(for rect: CGRect, kind: TileKind) -> CanvasViewport {
+        CameraFraming.revealWorkViewport(for: rect, kind: kind, currentViewport: navigationViewport, viewportSize: bounds.size)
+    }
+
     var navigationViewport: CanvasViewport { cameraDriver.flightTarget ?? canvasState.viewport }
 
     /// QA: force navigation to fly (true) or cut (false) whatever the window's

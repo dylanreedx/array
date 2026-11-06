@@ -19769,11 +19769,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         refreshGettingStartedTasks()
     }
 
+    private var pendingSpawnTiles: [UUID] = []
+    private var pendingSpawnFrame: DispatchWorkItem?
+
     func focusSpawnedTile(_ tileId: UUID) {
-        // CX-01: a palette spawn's focus is the user's newer intent; `.tileSpawned`
-        // never arms a zone, so nothing else records it.
         workspaceRuntime?.noteUserInteraction()
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+        pendingSpawnTiles.append(tileId)
+        pendingSpawnFrame?.cancel()
+        scheduleSpawnFrame(epoch: workspaceRuntime?.mountEpoch)
+    }
+
+    private func scheduleSpawnFrame(epoch: UInt64?) {
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.workspaceRuntime?.mountEpoch == epoch,
+                  self.workspaceRuntime?.isSwitching != true else {
+                self.pendingSpawnTiles.removeAll()
+                return
+            }
+            guard let canvas = self.canvasView else { return }
+            if canvas.isGeometryGestureActive || canvas.isCameraInMotion {
+                self.scheduleSpawnFrame(epoch: epoch)
+                return
+            }
+            let ids = self.pendingSpawnTiles
+            self.pendingSpawnTiles.removeAll()
+            guard let newest = ids.last,
+                  let snapshot = canvas.navigationTileSnapshot(for: newest) else { return }
+            let union = ids.compactMap { canvas.navigationTileSnapshot(for: $0) }
+                .reduce(CGRect.null) { rect, tile in
+                    rect.union(CGRect(x: tile.worldFrame.x, y: tile.worldFrame.y,
+                                      width: tile.worldFrame.width, height: tile.worldFrame.height))
+                }
+            let target = canvas.framedViewportForTileJump(newest)
+            var burstTarget = target
+            if ids.count > 1, let target {
+                let available = canvas.usableVisibleScreenRect
+                if union.width * target.zoom <= available.width,
+                   union.height * target.zoom <= available.height {
+                    burstTarget = canvas.framedWorkViewport(for: union, kind: snapshot.kind)
+                }
+            }
+            if !self.revealTileForWork(newest, historyReason: .tileSpawned,
+                                      scopeReason: .tileSpawned, viewportOverride: burstTarget) {
+                self.focusBroker.enterScope(.tile(newest), reason: .tileSpawned)
+            }
+        }
+        pendingSpawnFrame = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
     private func installSpawnedTerminal(_ runtime: GhosttyTerminalRuntime, from spawner: TileSpawner) {
@@ -21161,14 +21205,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func revealTileForWork(
         _ tileId: UUID,
         historyReason: FocusHistoryEventReason,
-        scopeReason: FocusRequest
+        scopeReason: FocusRequest,
+        viewportOverride: CanvasViewport? = nil
     ) -> Bool {
         guard let canvasView, canvasView.navigationTileSnapshot(for: tileId) != nil else { return false }
         // CX-01: every route here (⌘K, leader, hold-⌥ Return, previous tile) is
         // the user's own jump — newer intent than any pending API presentation.
         // `setViewport` cannot tell, because an API reveal drives it too.
         workspaceRuntime?.noteUserInteraction()
-        if let targetViewport = canvasView.framedViewportForTileJump(tileId) {
+        if let targetViewport = viewportOverride ?? canvasView.framedViewportForTileJump(tileId) {
             recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: targetViewport)
             #if ARRAY_FILM
             if let filmRevealCamera {
