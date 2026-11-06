@@ -154,20 +154,27 @@ public enum AgentCharacterBundled {
 /// edit. Keys, ids, wire fields, tool arguments and file names are not here: those
 /// never change with the word.
 public enum AgentCharacterCopy {
-    public static let feature = "Agent characters"
-    public static let show = "Show agent characters"
-    public static let one = "character"
-    public static let many = "characters"
+    /// The Settings page and its sidebar entry.
+    public static let feature = "Agent Icons"
+    public static let show = "Show agent icons"
+    public static let one = "icon"
+    public static let many = "icons"
+    /// `one` with its article, for a sentence.
+    public static let anOne = "an icon"
     /// The tile's menu.
-    public static let menu = "Character"
-    public static let set = "Character set"
-    public static let size = "Character size"
-    public static let sounds = "Character sounds"
+    public static let menu = "Icon"
+    /// The sets: as a heading, and in a sentence.
+    public static let set = "Agent Icon Packs"
+    public static let pack = "agent icon pack"
+    public static let aPack = "an agent icon pack"
+    public static let packs = "agent icon packs"
+    public static let size = "Icon size"
+    public static let sounds = "Icon sounds"
 
     public static func count(_ count: Int) -> String { "\(count) \(count == 1 ? one : many)" }
 }
 
-/// Settings › Agent characters. Off by default.
+/// Settings › Agent Icons. Off by default.
 public enum AgentCharacterConfig {
     public static let enabledKey = "agentCharacters.enabled"
     public static let defaultEnabled = false
@@ -679,7 +686,7 @@ public enum AgentCharacterImports {
             case let .failure(problems):
                 row = FoundTheme(url: file.url, paths: [file.url], source: file.source, hash: hash,
                                  title: rawTitle(data, file: file), theme: nil,
-                                 state: .invalid(problems.messages.first ?? "not a \(AgentCharacterCopy.one) theme"))
+                                 state: .invalid(problems.messages.first ?? "not \(AgentCharacterCopy.aPack)"))
             }
             index[hash] = rows.count
             rows.append(row)

@@ -22,7 +22,7 @@ tile header, and it acts out what the agent is doing. A set is one JSON file.
    them and run it again.
 4. Array watches the folder. A valid file shows on the canvas and in the sidebar as
    soon as it is saved, with no relaunch, once the person picks the set in
-   Settings › Agent characters (a set already selected updates by itself).
+   Settings › Agent Icons (a pack already selected updates by itself).
    While a file is broken, the last good version keeps showing and Settings lists the
    file's problems.
 

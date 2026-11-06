@@ -74,8 +74,8 @@ enum CharacterSettingsChecks {
         try expect(controller.theme?.id == "pond", "the app now draws the imported set (\(controller.theme?.id ?? "nil"))")
         try expect(model.cards.map(\.id) == AgentCharacterBundled.builtInIDs + ["pond"],
                    "the picker offers the built-in sets, then the import: \(model.cards.map(\.id))")
-        try expect(model.cards.map(\.detail) == ["8 characters", "12 characters", "12 characters", "14 characters",
-                                                 "12 characters", "2 characters · imported"],
+        try expect(model.cards.map(\.detail) == ["8 icons", "12 icons", "12 icons", "14 icons",
+                                                 "12 icons", "2 icons · imported"],
                    "each card says how many characters, with no set parsed: \(model.cards.map(\.detail))")
 
         // A bad file: its problems, word for word, and nothing new on disk.
@@ -99,6 +99,14 @@ enum CharacterSettingsChecks {
             defer { fixture.tearDown() }
             fixture.show(paneID: "agentCharacters")
             let arts = try awaitCards(count: 6, in: fixture)
+            // Renamed in the UI, the page answers to its new word and its old one.
+            for word in ["icon", "character"] {
+                settings.searchQuery = word
+                try expect(settings.searchResults.first?.entry.paneID == "agentCharacters",
+                           "searching Settings for \"\(word)\" leads with the page: \(settings.searchResults.prefix(3).map(\.entry.label))")
+            }
+            settings.searchQuery = ""
+            fixture.settle(0.1)
             let parses = AgentCharacterBundled.parseCount
             try expect(parses == parsesBefore, "\(label): opening the page and drawing every card parsed a whole pack: \(parsesBefore) -> \(parses)")
             for (id, art) in arts {

@@ -14,7 +14,7 @@ func runSettingsSchemaChecks() {
 
     expect(
         sections.map(\.title) == [
-            "General", "Appearance", "Agent characters", "Canvas", "Agents", "Editor", "Terminal", "Browser",
+            "General", "Appearance", "Agent Icons", "Canvas", "Agents", "Editor", "Terminal", "Browser",
             "Notifications & Sounds", "Keyboard", "iPhone", "Advanced",
         ],
         "settings exposes the twelve product panes in stable order, got \(sections.map(\.title))"

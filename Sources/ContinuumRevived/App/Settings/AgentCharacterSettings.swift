@@ -5,7 +5,7 @@ import SwiftUI
 
 // Plan: .plans/110-agent-characters/README.md, slice 6 (§4.4, §4.5)
 //
-// Settings › Agent characters: a card for each set, importing a set from a theme
+// Settings › Agent Icons: a card for each set, importing a set from a theme
 // file, the problems a bad file has, theme files found on this Mac (each named,
 // stated and pictured at rest), and a preview grid of every character of the
 // chosen set in every state.
@@ -202,13 +202,13 @@ final class AgentCharacterSettingsModel {
                 if problems.isEmpty { problems = [reason]; problemFile = file }
             }
         }
-        if results.isEmpty { message = "No theme files in that folder." }
+        if results.isEmpty { message = "No \(AgentCharacterCopy.pack) files in that folder." }
         refresh()
         if let first = added.first {
             let withSounds = sounds == 0 ? "" : sounds == 1 ? ", 1 sound" : ", \(sounds) sounds"
             message = added.count == 1
                 ? "Imported \(first.title): \(AgentCharacterCopy.count(first.characters.count))\(withSounds)."
-                : "Imported \(added.count) sets\(withSounds)."
+                : "Imported \(added.count) \(AgentCharacterCopy.packs)\(withSounds)."
             select(id: first.id)
         }
     }
@@ -219,7 +219,7 @@ final class AgentCharacterSettingsModel {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.json]
-        panel.message = "Choose a \(AgentCharacterCopy.one) theme file, or a folder of them."
+        panel.message = "Choose \(AgentCharacterCopy.aPack) file, or a folder of them."
         let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             MainActor.assumeIsolated { self?.importTheme(from: url) }
@@ -377,13 +377,13 @@ struct AgentCharacterSections: View {
             .settingsAnchor(SettingsRegistry.anchor(for: field) ?? field.label, model: settings)
             .task { model.reload() }
             setDetail
-            InfoRow(text: "Each agent gets a \(AgentCharacterCopy.one) from its id. To choose one for an agent, use \(AgentCharacterCopy.menu) in its tile's ⋯ menu.")
+            InfoRow(text: "Each agent gets \(AgentCharacterCopy.anOne) from its id. To choose one for an agent, use \(AgentCharacterCopy.menu) in its tile's ⋯ menu.")
             if let message = model.message {
                 InfoRow(text: message)
             }
             if !model.droppedSounds.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("Some of the set's sounds were left out.", systemImage: "speaker.slash")
+                    Label("Some of the pack's sounds were left out.", systemImage: "speaker.slash")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     ForEach(Array(model.droppedSounds.prefix(8).enumerated()), id: \.offset) { _, line in
@@ -394,7 +394,7 @@ struct AgentCharacterSections: View {
             }
             if !model.problems.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("This file is not a \(AgentCharacterCopy.one) theme, so nothing was imported.", systemImage: "exclamationmark.triangle.fill")
+                    Label("This file is not \(AgentCharacterCopy.aPack), so nothing was imported.", systemImage: "exclamationmark.triangle.fill")
                         .font(.callout)
                         .foregroundStyle(.orange)
                     ForEach(Array(model.problems.enumerated()), id: \.offset) { _, problem in
@@ -408,12 +408,12 @@ struct AgentCharacterSections: View {
                 .accessibilityIdentifier("ArrayAgentCharacterProblems")
             }
             HStack {
-                InfoRow(text: "Import any theme file in the \(AgentCharacterCopy.one) format; Array keeps its own copy and reads it only.")
+                InfoRow(text: "Import any \(AgentCharacterCopy.pack) file; Array keeps its own copy and reads it only.")
                 Spacer()
                 Button("Import…") { model.chooseFileToImport(window: settings.hostWindow) }
             }
             HStack {
-                InfoRow(text: "Agents can make and edit sets in the themes folder; changes show at once.")
+                InfoRow(text: "Agents can make and edit \(AgentCharacterCopy.packs) in this folder; changes show at once.")
                 Spacer()
                 Button("Show Folder") {
                     try? FileManager.default.createDirectory(at: model.importsDirectory, withIntermediateDirectories: true)
@@ -422,7 +422,7 @@ struct AgentCharacterSections: View {
             }
             ForEach(Array(model.folderProblems.enumerated()), id: \.offset) { _, entry in
                 VStack(alignment: .leading, spacing: 2) {
-                    Label("\(entry.file.lastPathComponent) is not a valid set yet", systemImage: "exclamationmark.triangle.fill")
+                    Label("\(entry.file.lastPathComponent) is not a valid pack yet", systemImage: "exclamationmark.triangle.fill")
                         .font(.callout)
                         .foregroundStyle(.orange)
                     ForEach(Array(entry.problems.enumerated()), id: \.offset) { _, problem in

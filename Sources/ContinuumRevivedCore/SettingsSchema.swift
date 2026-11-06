@@ -93,28 +93,28 @@ public enum SettingsSchema {
     // Plan 110: small characters beside each agent's provider mark.
     private static func agentCharacters() -> SettingsSection {
         SettingsSection(id: "agentCharacters", title: AgentCharacterCopy.feature, iconSystemName: "face.smiling",
-                        keywords: ["characters", "sprites", "ducks", "mascot", "symbols"], groups: [
+                        keywords: ["icons", "icon packs", "characters", "sprites", "ducks", "mascot", "symbols"], groups: [
             SettingsGroup(id: "agentCharacters.display", title: nil, rows: [
                 SettingsRow(.toggle(key: AgentCharacterConfig.enabledKey, label: AgentCharacterCopy.show,
                                     default: AgentCharacterConfig.defaultEnabled),
                             help: "A small \(AgentCharacterCopy.one) beside each agent's provider mark acts out what the agent is doing.",
-                            keywords: ["characters", "sprites", "ducks", "animation", "mascot"]),
+                            keywords: ["icons", "characters", "sprites", "ducks", "animation", "mascot"]),
                 SettingsRow(.choice(key: AgentCharacterConfig.motionKey, label: "Motion",
                                     options: AgentCharacterConfig.Motion.allCases.map(\.rawValue),
                                     default: AgentCharacterConfig.defaultMotion.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Motion.allCases.map { ($0.rawValue, $0.title) })),
                             help: "Resting agents always hold still. Reduce Motion in System Settings stills every \(AgentCharacterCopy.one).",
-                            keywords: ["characters", "animation", "reduce motion"]),
+                            keywords: ["icons", "characters", "animation", "reduce motion"]),
                 SettingsRow(.choice(key: AgentCharacterConfig.sizeKey, label: AgentCharacterCopy.size,
                                     options: AgentCharacterConfig.Size.allCases.map(\.rawValue),
                                     default: AgentCharacterConfig.defaultSize.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Size.allCases.map { ($0.rawValue, $0.title) })),
                             help: "Larger \(AgentCharacterCopy.many) make the sidebar row and the agent tile's title bar taller to fit them.",
-                            keywords: ["characters", "size", "scale", "bigger", "larger"]),
+                            keywords: ["icons", "characters", "size", "scale", "bigger", "larger"]),
             ]),
             SettingsGroup(id: "agentCharacters.sets", title: AgentCharacterCopy.set, rows: [
                 SettingsRow(.custom(id: "agentCharacters", label: AgentCharacterCopy.set),
-                            keywords: ["characters", "theme", "import", "ducks", "symbols"]),
+                            keywords: ["icons", "icon packs", "characters", "character sets", "theme", "import", "ducks", "symbols"]),
             ]),
         ])
     }
@@ -475,7 +475,7 @@ public enum SettingsSchema {
                 CustomEntry(anchor: "sounds.kind.\(kind.rawValue)", label: "\(kind.displayName) sound", keywords: sound)
             } + [
                 CustomEntry(anchor: "sounds.characters", label: AgentCharacterCopy.sounds,
-                            keywords: sound + ["characters", "ducks", "quack", "voices", "duckherd"]),
+                            keywords: sound + ["icons", "characters", "ducks", "quack", "voices", "duckherd"]),
                 CustomEntry(anchor: "sounds.library", label: "Custom sounds", keywords: sound + ["import", "library"]),
             ]
         case .custom("harnessStatus", _):
