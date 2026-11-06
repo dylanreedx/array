@@ -433,14 +433,6 @@ final class BrowserAutomation {
                 try await self.pause(0.005, deadline: deadline)
             }
             try self.requireInputControl(inputAtStart, deadline: deadline)
-            if submit {
-                try await self.preflightKeyboard(deadline: deadline)
-                let focus = try await self.world("focusedIs", ["ref": focusRef], deadline: deadline)
-                try self.requireInputControl(inputAtStart, deadline: deadline)
-                try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
-                guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
-                self.deliverKey(Self.namedKeys["Enter"]!, flags: [], window: window)
-            }
             if self.supportsFocusFreeInput {
                 try await self.pause(0.1, deadline: deadline)
                 let verification = try await self.world("verifyInput", [:], deadline: deadline)
@@ -455,8 +447,19 @@ final class BrowserAutomation {
                 try await self.pause(0.1, deadline: deadline)
                 value = try await self.world("focusedIs", ["ref": ref], deadline: deadline)["value"] as? String
             }
+            // Retention and value are established BEFORE Enter. Submission
+            // may synchronously clear the field or replace the document. After
+            // dispatch, a stale field must not turn committed input into a retry.
+            if submit {
+                try await self.preflightKeyboard(deadline: deadline)
+                let focus = try await self.world("focusedIs", ["ref": focusRef], deadline: deadline)
+                try self.requireInputControl(inputAtStart, deadline: deadline)
+                try self.requireTypingResponder(in: window, original: responder, inputGeneration: focusInput)
+                guard focus["focused"] as? Bool == true else { throw BrowserAutomationError.focusRefused(what) }
+                self.deliverKey(Self.namedKeys["Enter"]!, flags: [], window: window)
+            }
             let count = text.count
-            if self.supportsFocusFreeInput { return ("Delivered \(count) editing characters into \(what); page text read back" + (submit ? "; Enter dispatched, inspect application outcome" : ""), value) }
+            if self.supportsFocusFreeInput { return ("Delivered \(count) editing characters into \(what); page text read back" + (submit ? "; text verified before Enter dispatched, inspect application outcome" : ""), value) }
             return ("Typed \(count) character\(count == 1 ? "" : "s") into \(what)" + (submit ? " and pressed Enter" : ""), value)
         }
     }

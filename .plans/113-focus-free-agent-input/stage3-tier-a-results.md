@@ -170,3 +170,21 @@ deliveredCharacters field and the error explains retention versus dispatch.
 
 Debug build exited 0. Faked-key focus check passed with the switch on; Stage 1
 switch-off focus check passed (/tmp/stage3-review-retention-0.log). No app activated.
+
+## Review follow-up: submission verification
+
+Both reset-on-submit and navigate-on-submit production-tool witnesses failed
+before reordering (/tmp/stage3-review-submit-red2.log), despite observing exactly
+one trusted submission. The reset case produced a retention error; navigation
+lost the old document's verification state. A fixture-only correction carries
+the submission record in the destination URL because file navigation can clear
+window.name; the earlier navigation fixture exception was not a product result.
+
+The action now verifies text and captures its value before Enter, then sends the
+key without querying the old field afterward. Normal post-action settling remains
+best-effort. The value is the pre-submission readback; the summary distinguishes
+Enter dispatch from application outcome. Both forms now return committed effects,
+and same-key retries return committed without a second submit, with the switch
+on AND off (/tmp/stage3-review-submit-green-1.log and -0.log). Full editor,
+retention and lifecycle checks also passed in the on leg. Debug build exited 0.
+No activated check ran; the default switch is unchanged.

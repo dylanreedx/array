@@ -273,6 +273,42 @@ func runBrowserFocusRestorationCheck(experimental: Bool = false, realKey: Bool =
         throw WorkspaceAPIChecks.Failure(message: "typing restored obsolete focus or lost user keys: newResponder=\(window.firstResponder === next), delivered=\(delivered), next=\(next.string), old=\(old.string)")
     }
     if experimental { guard !borrowedDuringOrdinaryClick else { throw WorkspaceAPIChecks.Failure(message:"core type changed host responder") } }
+    if !realKey {
+        engine._afterAgentCharacterForChecks = nil
+        var submissionFailures: [String] = []
+        for kind in ["reset", "navigate"] {
+            let destination=f.pbRoot.appendingPathComponent("submission-done.html")
+            try Data("<html><title>Submitted</title><body>Submitted once<script>window.submissionReadback=JSON.parse(new URLSearchParams(location.search).get('state'));</script></body></html>".utf8).write(to:destination)
+            let page=f.pbRoot.appendingPathComponent("submission-\(kind).html")
+            let afterSubmit=kind == "reset" ? "form.reset()" : "location.href=\(String(data:try JSONSerialization.data(withJSONObject:destination.absoluteString,options:.fragmentsAllowed),encoding:.utf8)!)+'?state='+encodeURIComponent(window.name)"
+            let html="""
+            <html><body><form><input aria-label=Submission></form><script>
+            window.name=JSON.stringify({count:0}); const form=document.querySelector('form');
+            form.addEventListener('submit',event=>{event.preventDefault(); const state=JSON.parse(window.name);
+            window.name=JSON.stringify({count:state.count+1,value:form.querySelector('input').value,trusted:event.isTrusted});
+            \(afterSubmit)});
+            </script></body></html>
+            """
+            try Data(html.utf8).write(to:page)
+            _ = try call("browser.navigate", ["tileId":tile,"url":page.absoluteString])
+            _ = try call("browser.wait_for", ["tileId":tile,"condition":"idle"])
+            let snapshot=try call("browser.snapshot",["tileId":tile])["text"] as? String ?? ""
+            guard let line=snapshot.split(separator:"\n").first(where:{$0.contains("Submission")}),
+                  let range=line.range(of:#"\[ref=([^\]]+)\]"#,options:.regularExpression) else { throw WorkspaceAPIChecks.Failure(message:"missing submission field") }
+            let submitRef=String(line[range].dropFirst(5).dropLast())
+            let payload:[String:Any]=["tileId":tile,"ref":submitRef,"text":"submit once","clear":true,"submit":true,"idempotencyKey":"form-\(kind)"]
+            let submitted=try call("browser.type",payload,allowError:true)
+            let retried=try call("browser.type",payload,allowError:true)
+            _ = try call("browser.wait_for",["tileId":tile,"condition":"idle"])
+            let state=try call("browser.evaluate",["tileId":tile,"script":"() => { const state=globalThis.submissionReadback || JSON.parse(window.name); return state.count===1 && state.value==='submit once' && state.trusted && \(kind == "reset" ? "document.querySelector('input').value===''" : "document.title==='Submitted'") }"])
+            if (submitted["action"] as? [String:Any])?["effects"] as? String != "committed" ||
+                (retried["action"] as? [String:Any])?["effects"] as? String != "committed" || state["value"] as? Bool != true {
+                print("FAIL: form \(kind): first=\(submitted), retry=\(retried), singleSubmit=\(state)")
+                submissionFailures.append(kind)
+            } else { print("PASS: form \(kind) reports committed after exactly one trusted submit, including same-key retry") }
+        }
+        guard submissionFailures.isEmpty else { throw WorkspaceAPIChecks.Failure(message:"submission verification failures: \(submissionFailures)") }
+    }
     if experimental && !realKey {
         guard let assets = Bundle.module.url(forResource: "FocusInputFixtures", withExtension: nil) else { throw WorkspaceAPIChecks.Failure(message: "missing vendored editor fixtures") }
         let js = try Data(contentsOf: assets.appendingPathComponent("editor.js"))
