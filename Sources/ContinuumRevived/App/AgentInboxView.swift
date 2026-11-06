@@ -9675,6 +9675,141 @@ final class InboxRowFocusRingView: NSView, TokenThemed {
 /// A plain `NSView` is answerable for its own layer, has no sublayers but its
 /// own, and IS the background the labels inside it are measured against.
 final class AgentInboxCardView: NSView, TokenThemed {
+    // Internal review switch; production always retains the existing treatment.
+    static let indicatorStyle: String = {
+        guard Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else { return "current" }
+        let value = UserDefaults.standard.string(forKey: "SidebarActiveIndicatorStyle") ?? "current"
+        return ["gradient", "halo", "inset"].contains(value) ? value : "current"
+    }()
+    var indicatorColour: NSColor? { didSet { applyTokens() } }
+    private let indicatorWash = CAGradientLayer()
+    private let indicatorEdge = CALayer()
+    private let indicatorSheen = CAGradientLayer()
+    var indicatorReducesMotion = false { didSet { applyIndicator() } }
+    private var motionSignature: String?
+
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        indicatorWash.frame = bounds
+        indicatorEdge.frame = bounds.insetBy(dx: 1.5, dy: 1.5)
+        applyIndicator()
+        CATransaction.commit()
+    }
+
+    private func applyIndicator() {
+        let style = Self.indicatorStyle
+        let enabled = style != "current" && (isRouteActive || isSelected)
+        indicatorWash.isHidden = !enabled
+        indicatorEdge.isHidden = !enabled
+        guard enabled, let layer else {
+            stopIndicatorMotion()
+            return
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        if indicatorWash.superlayer == nil {
+            layer.insertSublayer(indicatorWash, at: 0)
+            layer.insertSublayer(indicatorEdge, above: indicatorWash)
+            indicatorWash.addSublayer(indicatorSheen)
+            indicatorWash.masksToBounds = true
+        }
+        let dark = effectiveTokenTheme == .dark
+        let colour = indicatorColour ?? TextToken.textPrimary.color.nsColor(in: self)
+        indicatorWash.cornerRadius = Radius.card
+        indicatorWash.startPoint = CGPoint(x: 0, y: 0.5)
+        indicatorWash.endPoint = CGPoint(x: 1, y: 0.5)
+        indicatorEdge.cornerRadius = max(0, Radius.card - 1.5)
+        indicatorEdge.borderWidth = 0
+        indicatorEdge.shadowOpacity = 0
+        indicatorEdge.backgroundColor = nil
+        indicatorSheen.isHidden = style != "inset"
+        indicatorSheen.frame = CGRect(x: -bounds.width, y: 0, width: bounds.width * 0.6, height: bounds.height)
+        indicatorSheen.startPoint = CGPoint(x: 0, y: 0)
+        indicatorSheen.endPoint = CGPoint(x: 1, y: 1)
+        let light = TextToken.textPrimary.color.nsColor(in: self)
+        indicatorSheen.colors = [light.withAlphaComponent(0).cgColor,
+            light.withAlphaComponent(dark ? 0.07 : 0.035).cgColor, light.withAlphaComponent(0).cgColor]
+        switch style {
+        case "gradient":
+            // caf22324 SidebarOwnershipMotion.fill: original stops, reach and alpha.
+            let alpha: CGFloat = indicatorColour == nil ? (dark ? 0.05 : 0.035) : (dark ? 0.15 : 0.11)
+            indicatorWash.colors = [colour.withAlphaComponent(alpha).cgColor,
+                colour.withAlphaComponent(alpha * 0.35).cgColor, colour.withAlphaComponent(0).cgColor]
+            indicatorWash.locations = [0, 0.2475, 0.55]
+        case "halo":
+            indicatorWash.colors = nil
+            indicatorEdge.borderWidth = 1
+            indicatorEdge.borderColor = colour.withAlphaComponent(dark ? 0.65 : 0.48).cgColor
+            indicatorEdge.shadowColor = colour.cgColor
+            indicatorEdge.shadowOpacity = dark ? 0.28 : 0.16
+            indicatorEdge.shadowRadius = 4
+            indicatorEdge.shadowOffset = .zero
+            indicatorEdge.shadowPath = CGPath(roundedRect: indicatorEdge.bounds,
+                cornerWidth: indicatorEdge.cornerRadius, cornerHeight: indicatorEdge.cornerRadius, transform: nil)
+                .copy(strokingWithWidth: 1, lineCap: .butt, lineJoin: .round, miterLimit: 1)
+        case "inset":
+            indicatorWash.colors = [colour.withAlphaComponent(dark ? 0.16 : 0.10).cgColor,
+                                    colour.withAlphaComponent(dark ? 0.16 : 0.10).cgColor]
+            indicatorEdge.borderWidth = 1
+            indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self).withAlphaComponent(dark ? 0.22 : 0.17).cgColor
+        default:
+            indicatorWash.isHidden = true
+            indicatorEdge.isHidden = true
+        }
+        // Only the open agent animates. Multi-selection remains a static indication.
+        let moving = isRouteActive && !indicatorReducesMotion
+            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && window != nil
+        let signature = moving ? "\(style):\(bounds.size)" : nil
+        guard signature != motionSignature else { return }
+        stopIndicatorMotion()
+        motionSignature = signature
+        guard moving else { return }
+        switch style {
+        case "gradient":
+            let drift = CAKeyframeAnimation(keyPath: "locations")
+            drift.values = [[0, 0.2475, 0.55], [0, 0.3375, 0.75], [0, 0.2475, 0.55]]
+            drift.keyTimes = [0, 0.5, 1]
+            drift.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut), CAMediaTimingFunction(name: .easeInEaseOut)]
+            drift.duration = 6
+            drift.repeatCount = .infinity
+            indicatorWash.add(drift, forKey: "indicator.drift")
+        case "halo":
+            let breath = CAKeyframeAnimation(keyPath: "opacity")
+            breath.values = [0.55, 0.9, 0.55]
+            breath.keyTimes = [0, 0.5, 1]
+            breath.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut), CAMediaTimingFunction(name: .easeInEaseOut)]
+            breath.duration = 6
+            breath.repeatCount = .infinity
+            indicatorEdge.add(breath, forKey: "indicator.breath")
+        case "inset":
+            let sweep = CAKeyframeAnimation(keyPath: "position.x")
+            sweep.values = [-bounds.width, -bounds.width, bounds.width * 2, bounds.width * 2]
+            sweep.keyTimes = [0, 0.15, 0.45, 1]
+            sweep.timingFunctions = [CAMediaTimingFunction(name: .linear), CAMediaTimingFunction(name: .easeInEaseOut), CAMediaTimingFunction(name: .linear)]
+            sweep.duration = 6
+            sweep.repeatCount = .infinity
+            indicatorSheen.add(sweep, forKey: "indicator.sheen")
+        default: break
+        }
+    }
+
+    private func stopIndicatorMotion() {
+        indicatorWash.removeAllAnimations()
+        indicatorEdge.removeAllAnimations()
+        indicatorSheen.removeAllAnimations()
+        motionSignature = nil
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        motionSignature = nil
+        applyIndicator()
+    }
+
     /// The three interaction facts, held SEPARATELY. P3.5 collapsed hover,
     /// selection and keyboard-active into one `isInteracting` test because all
     /// three did the same one thing — clear the row's recession. P1.2 splits
@@ -9808,6 +9943,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         let fill = Self.interactionFill(
             for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: effectiveTokenTheme,
             underlay: underlayAlpha)
+        applyIndicator()
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
         layer.backgroundColor = fill
         guard fading, window != nil, presented != fill else { return }
