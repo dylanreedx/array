@@ -6242,6 +6242,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-focus-free-real-key-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserFocusFreeRealKeyCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-background-scheduling-check") {
             do {
                 _ = NSApplication.shared

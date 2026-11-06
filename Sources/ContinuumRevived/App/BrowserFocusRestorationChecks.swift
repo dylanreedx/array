@@ -480,3 +480,49 @@ func runBrowserFocusRestorationCheck(experimental: Bool = false, realKey: Bool =
         print("PASS: \(realKey ? "Tier B real key" : "Tier A faked key") 100 agent characters, five concurrent user keys, zero transient borrow")
     } else { print("PASS: browser focus restoration preserves another agent composer, its draft and all five user keys") }
 }
+
+/// Explicitly authorized, one-shot Tier B. Never a normal matrix leg.
+@MainActor
+func runBrowserFocusFreeRealKeyCheck() throws {
+    guard ProcessInfo.processInfo.environment["ARRAY_ALLOW_REAL_KEY_PROOF"] == "1" else {
+        throw WorkspaceAPIChecks.Failure(message: "REFUSED: Tier B activates an offscreen check app briefly. Requires Dylan approval and ARRAY_ALLOW_REAL_KEY_PROOF=1; no activation occurred.")
+    }
+    setbuf(stdout, nil)
+    tierBPassedCases.removeAll()
+    let previous = NSWorkspace.shared.frontmostApplication
+    let progress = tierBPassedCases
+    // POSIX exit is independent of the main queue and of the restoration IPC.
+    let previousAlarmHandler = signal(SIGALRM) { _ in Darwin._exit(1) }
+    alarm(29)
+    defer { alarm(0); _ = signal(SIGALRM, previousAlarmHandler) }
+    let watchdog = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+    watchdog.schedule(deadline: .now() + 28)
+    watchdog.setEventHandler {
+        for name in ["numeric", "click", "type"] where !progress.contains(name) { fputs("FAIL: Tier B \(name): hard timeout\n", stderr) }
+        fputs("FAIL: Tier B hard timeout (28s); returning previous app and exiting\n", stderr)
+        _ = previous?.activate(options: [.activateIgnoringOtherApps])
+        Darwin._exit(1)
+    }
+    watchdog.resume()
+    defer { watchdog.cancel() }
+    NSApp.setActivationPolicy(.accessory)
+    NSApp.finishLaunching()
+    var failure: Error?
+    do { try runBrowserFocusRestorationCheck(experimental: true, realKey: true) }
+    catch {
+        for name in ["numeric", "click", "type"] where !tierBPassedCases.contains(name) { print("FAIL: Tier B \(name): \(error)") }
+        failure = error
+    }
+    if let previous {
+        let requested = previous.activate(options: [.activateIgnoringOtherApps])
+        let end = Date().addingTimeInterval(0.5)
+        while NSWorkspace.shared.frontmostApplication?.processIdentifier != previous.processIdentifier, Date() < end {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        guard requested, NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier else {
+            throw WorkspaceAPIChecks.Failure(message: "Tier B could not confirm restoration of the previous frontmost app")
+        }
+        print("PASS: Tier B returned previous frontmost app")
+    }
+    if let failure { throw failure }
+}
