@@ -1003,8 +1003,8 @@ final class CanvasNSView: NSView, TokenThemed {
             let anchor = spawnedTileId.flatMap { tile in
                 autoLayoutScene().tiles.contains { $0.id == tile && $0.zoneId == id } ? tile : nil
             }
-            let zoom = viewport.zoom.isFinite && viewport.zoom > 0 ? viewport.zoom : 1
-            let view = TileFrame(x: viewport.x, y: viewport.y,
+            let zoom = navigationViewport.zoom.isFinite && navigationViewport.zoom > 0 ? navigationViewport.zoom : 1
+            let view = TileFrame(x: navigationViewport.x, y: navigationViewport.y,
                                  width: Double(bounds.width) / zoom, height: Double(bounds.height) / zoom)
             applyAutoLayout(.settle(zoneId: id, anchor: anchor, pin: false, grow: anchor != nil, view: view),
                             baseline: autoLayoutScene())
@@ -3564,6 +3564,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     func markActive(tileId: UUID) {
+        focusIsNewerThanCamera = true
         canvasState.lastActiveTileId = tileId
         updateFocusBorder(borderedTileId: tileId)
         updateDocumentRelationshipOverlay()
@@ -4224,7 +4225,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // API reveal or a check is programmatic and must not defer itself.
         // A navigation flight's steps are the driver's, but programmatic: the jump
         // that started it already noted the user's interaction once.
-        if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { onUserCameraChange?() }
+        if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { focusIsNewerThanCamera = false; onUserCameraChange?() }
         if !agentChromeRestedForMotion, cameraDriver.isApplying || pointerPanActive {
             agentChromeRestedForMotion = true
             restAgentChromeForCameraMotion()
@@ -6285,7 +6286,7 @@ final class CanvasNSView: NSView, TokenThemed {
         guard let snapshot = navigationTileSnapshot(for: tileId) else { return nil }
         let frame = snapshot.worldFrame
         let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
-        return CameraFraming.revealWorkViewport(for: rect, kind: snapshot.kind, currentViewport: navigationViewport, viewportSize: bounds.size)
+        return framedWorkViewport(for: rect, kind: snapshot.kind)
     }
 
     /// Frames the tile as a readable jump target. This first T07 slice snaps to
@@ -6308,9 +6309,46 @@ final class CanvasNSView: NSView, TokenThemed {
     /// The camera navigation should reason from: where an in-flight jump is
     /// going, else where the camera is. A jump made mid-flight records THIS as
     /// the view to go back to, not a point the camera was only passing through.
-    var usableVisibleScreenRect: CGRect { bounds }
+    var spawnOverlayRects: (() -> [CGRect])?
+    private var focusIsNewerThanCamera = false
+    var usableVisibleScreenRect: CGRect {
+        var result = bounds
+        for overlay in spawnOverlayRects?() ?? [] where overlay.intersects(result) {
+            let cut = overlay.intersection(result)
+            let candidates = [
+                CGRect(x: result.minX, y: result.minY, width: max(0, cut.minX-result.minX), height: result.height),
+                CGRect(x: cut.maxX, y: result.minY, width: max(0, result.maxX-cut.maxX), height: result.height),
+                CGRect(x: result.minX, y: result.minY, width: result.width, height: max(0, cut.minY-result.minY)),
+                CGRect(x: result.minX, y: cut.maxY, width: result.width, height: max(0, result.maxY-cut.maxY))]
+            result = candidates.max { $0.width*$0.height < $1.width*$1.height } ?? result
+        }
+        return result
+    }
+
+    var spawnAnchorWorldPoint: CGPoint {
+        let usable = usableVisibleScreenRect
+        let visible = CanvasEngine.visibleWorldRect(viewport: navigationViewport, visibleSize: bounds.size)
+        if focusIsNewerThanCamera, let id = canvasState.lastActiveTileId,
+           let tile = navigationTileSnapshot(for: id) {
+            let f = tile.worldFrame
+            let rect = CGRect(x: f.x, y: f.y, width: f.width, height: f.height)
+            if rect.intersects(visible) { return CGPoint(x: rect.midX, y: rect.midY) }
+        }
+        return CanvasEngine.screenToWorld(CGPoint(x: usable.midX, y: usable.midY), viewport: navigationViewport)
+    }
+
     func framedWorkViewport(for rect: CGRect, kind: TileKind) -> CanvasViewport {
-        CameraFraming.revealWorkViewport(for: rect, kind: kind, currentViewport: navigationViewport, viewportSize: bounds.size)
+        let usable = usableVisibleScreenRect
+        var current = navigationViewport
+        current.x += Double(usable.minX) / current.zoom
+        current.y += Double(usable.minY) / current.zoom
+        var target = CameraFraming.revealWorkViewport(for: rect, kind: kind,
+            currentViewport: current, viewportSize: usable.size)
+        if rect.width * target.zoom > usable.width { target.x = Double(rect.minX) - 16 / target.zoom }
+        if rect.height * target.zoom > usable.height { target.y = Double(rect.minY) - 16 / target.zoom }
+        target.x -= Double(usable.minX) / target.zoom
+        target.y -= Double(usable.minY) / target.zoom
+        return target
     }
 
     var navigationViewport: CanvasViewport { cameraDriver.flightTarget ?? canvasState.viewport }

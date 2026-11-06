@@ -5868,6 +5868,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--spawn-framing-check") {
+            do {
+                _ = NSApplication.shared
+                try SpawnFramingChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--spawn-placement-check") {
             do {
                 _ = NSApplication.shared
@@ -14747,6 +14758,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             toolbar.install(in: contentPane)
         }
 
+        canvasView.spawnOverlayRects = { [weak self, weak canvasView] in
+            guard let self, let canvasView else { return [] }
+            var rects: [CGRect] = []
+            for view in [self.canvasShortcutRailView, self.canvasGettingStartedView].compactMap({ $0 }) where !view.isHidden {
+                rects.append(view.convert(view.bounds, to: canvasView).insetBy(dx: -8, dy: -8))
+            }
+            if let toolbar = self.floatingToolbar {
+                rects.append(toolbar.toolbar.convert(toolbar.toolbar.bounds, to: canvasView).insetBy(dx: -8, dy: -8))
+            }
+            return rects
+        }
         splitView.addSubview(sidebar)
         splitView.addSubview(contentPane)
         workspaceSidebarView = sidebar
@@ -23059,7 +23081,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let runtime = workspaceRuntime else { return zone }
             return runtime.document.zones.contains(where: { $0.zoneId == zone.zoneId }) ? zone : nil
         }
-        let zonePlacement = canvasView?.activeProjectZonePlacement
+        let spawnZone: ZonePlacement? = {
+            guard explicit == nil, explicitCreationScopeOverride == nil,
+                  let canvas = canvasView, let runtime = workspaceRuntime else { return nil }
+            let anchor = canvas.spawnAnchorWorldPoint
+            let viewport = canvas.navigationViewport
+            let visible = CanvasEngine.visibleWorldRect(viewport: viewport, visibleSize: canvas.bounds.size)
+            func rect(_ z: ZonePlacement) -> CGRect {
+                CGRect(x: z.origin.x, y: z.origin.y, width: z.size.width, height: z.size.height)
+            }
+            let zones = runtime.document.zones.filter { $0.projectId != nil }
+            if let under = zones.first(where: { rect($0).contains(anchor) }) { return under }
+            if let armed = armedFromDocument, rect(armed).intersects(visible) { return armed }
+            return zones.filter { $0.projectId == armedFromDocument?.projectId && rect($0).intersects(visible) }
+                .min { hypot(rect($0).midX-anchor.x, rect($0).midY-anchor.y) < hypot(rect($1).midX-anchor.x, rect($1).midY-anchor.y) }
+        }()
+        let zonePlacement = spawnZone ?? canvasView?.activeProjectZonePlacement
             ?? armedFromDocument
             ?? bootZone
         let zoneScope: CreationScope? = zonePlacement.flatMap { zone in
