@@ -1,4 +1,6 @@
-# Stage 3 progress: scheduling proven, input proof blocked
+# Historical Stage 3 progress: scheduling proven, input proof blocked
+
+Superseded by [the Tier A results and guarded Tier B command](stage3-tier-a-results.md). The candidate below is now integrated behind one internal, default-off switch. Faked-key-window production checks pass; real-key acceptance remains pending. The account below records the earlier setup failure, not the current implementation status.
 
 Branch: array/focus-free-backend, created from d6802caf in the focus-safe-input bench. No preview, main-checkout edits, integration-branch changes, pushes or live input.
 
