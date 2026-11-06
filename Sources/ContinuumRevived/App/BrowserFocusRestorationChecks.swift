@@ -22,7 +22,7 @@ final class BrowserFakedKeyCheckWindow: BrowserFocusCheckWindow {
     override var isKeyWindow: Bool { true }
 }
 
-private final class BrowserRealKeyProofProgress: @unchecked Sendable {
+final class BrowserRealKeyProofProgress: @unchecked Sendable {
     private let lock = NSLock()
     private var passed: Set<String> = []
     func insert(_ name: String) { lock.lock(); defer { lock.unlock() }; passed.insert(name) }
@@ -652,7 +652,13 @@ func runBrowserFocusFreeRealKeyCheck() throws {
     if !progress.contains("tookForeground") && NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier {
         print("INFO: Tier B never took foreground; no restoration needed")
     } else {
-        let requested = previous.activate(options: [.activateIgnoringOtherApps])
+        let requested: Bool
+        if #available(macOS 14.0, *) {
+            NSApp.yieldActivation(to: previous)
+            requested = previous.activate(from: .current, options: [.activateAllWindows])
+        } else {
+            requested = previous.activate(options: [.activateIgnoringOtherApps])
+        }
         let end = Date().addingTimeInterval(0.5)
         while NSWorkspace.shared.frontmostApplication?.processIdentifier != previous.processIdentifier, Date() < end {
             _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
