@@ -947,46 +947,14 @@ final class BrowserAutomation {
         guard monitor == nil else { return }
         // One monitor for every engine. It sees only events that pass
         // `NSApp.sendEvent`, which an engine's own direct delivery never does.
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel,
-            .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate,
-            .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]) { event in
-            let suppressed = MainActor.assumeIsolated {
-                if passivePointerEvents.contains(event.type), let engine = pointerOwner(for: event), engine.isEngaged {
-                    return true
-                }
-                BrowserAutomation.noteUserEvent(event)
-                return false
-            }
-            return suppressed ? nil : event
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]) { event in
+            MainActor.assumeIsolated { BrowserAutomation.noteUserEvent(event) }
+            return event
         }
-    }
-
-    private static let passivePointerEvents: Set<NSEvent.EventType> = [
-        .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate,
-        .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
-    ]
-
-    /// Tracking exits belong to their owner even after the pointer leaves.
-    /// Ordinary moves use AppKit's topmost view, preserving hover in overlapping
-    /// user tiles and modal content. Browser bodies do not use canvas surfacing.
-    private static func pointerOwner(for event: NSEvent) -> BrowserAutomation? {
-        var target: NSView?
-        if [.mouseEntered, .mouseExited, .cursorUpdate].contains(event.type) {
-            target = event.trackingArea?.owner as? NSView
-        }
-        if target == nil, let content = event.window?.contentView {
-            target = content.hitTest(content.superview?.convert(event.locationInWindow, from: nil) ?? event.locationInWindow)
-        }
-        while let view = target {
-            if let engine = registry[ObjectIdentifier(view)]?.engine { return engine }
-            target = view.superview
-        }
-        return nil
     }
 
     private static func noteUserEvent(_ event: NSEvent) {
         guard !registry.isEmpty else { return }
-        if passivePointerEvents.contains(event.type) { return }
         if consumeAgentInput(event) { return }
         focusInputGeneration &+= 1
         let wheelWindow: NSWindow? = event.type == .scrollWheel ? event.cgEvent.flatMap { cg in
