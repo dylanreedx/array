@@ -756,6 +756,94 @@ enum FileOpenChecks {
     /// `FileMarkdownDocumentView.BodyView.layout()` → `AssistantProseRenderer.measure`
     /// → `AgentTextStyleResolver.append` → `replacingOccurrences`. Height now comes
     /// from `intrinsicContentSize`, so a real window layout converges.
+    /// With a mouse paired, every WKWebView layer commit makes AppKit rewrite all
+    /// scroll views to legacy style. Legacy scrollers took 17 pt from the clip,
+    /// every Markdown document re-measured at the new width, and 24 tiles stalled
+    /// the main thread for seconds. Calls that AppKit entry point directly, on a
+    /// real file tile, so the flip does not depend on web-process timing.
+    static func runMarkdownScrollerStyleCheck() throws {
+        guard let pairs = NSClassFromString("NSScrollerImpPair"),
+              let method = class_getClassMethod(
+                  pairs, NSSelectorFromString("_updateAllScrollerImpPairsForNewRecommendedScrollerStyle:")
+              ) else {
+            throw Failure(message: "AppKit no longer has the scroller style entry point this check drives")
+        }
+        typealias Update = @convention(c) (AnyClass, Selector, Int) -> Void
+        let update = unsafeBitCast(method_getImplementation(method), to: Update.self)
+        let flip: (NSScroller.Style) -> Void = {
+            update(pairs, method_getName(method), $0.rawValue)
+        }
+
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-file-markdown-scroller-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+        let url = root.appendingPathComponent("README.md")
+        try Data(perfFixture().utf8).write(to: url)
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.orderOut(nil) }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        window.contentView = host
+        window.orderFrontOffscreenForChecks()
+        let tile = Tile(id: UUID(), kind: .file, title: "README.md",
+                        frame: TileFrame(x: 0, y: 0, width: 620, height: 460),
+                        zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                        metadata: TileMetadata(filePath: url.path))
+        let view = FileTileNSView(tile: tile)
+        view.frame = NSRect(x: 10, y: 10, width: 620, height: 460)
+        host.addSubview(view)
+        view.layoutSubtreeIfNeeded()
+        guard let document = view.qaMarkdownDocument,
+              let scrollView = document.subviews.compactMap({ $0 as? NSScrollView }).first,
+              let body = scrollView.documentView else {
+            throw Failure(message: "the file tile must install the native Markdown document")
+        }
+        // Control: an ordinary scroll view must follow the flip, or the flip did
+        // not happen and everything below would pass for nothing.
+        let control = NSScrollView(frame: NSRect(x: 640, y: 10, width: 240, height: 200))
+        control.hasVerticalScroller = true
+        control.documentView = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 2_000))
+        host.addSubview(control)
+
+        func settle() {
+            window.layoutIfNeeded()
+            view.layoutSubtreeIfNeeded()
+            document.layoutSubtreeIfNeeded()
+        }
+        flip(.overlay)
+        settle()
+        try expect(document.qaDocumentHeight > document.qaClipHeight,
+                   "the document must overflow, or no scroller could ever take width")
+        let width = body.frame.width
+        let clipWidth = scrollView.contentView.bounds.width
+        let documentMeasurements = document.qaMeasurementCount
+        let proseMeasurements = AssistantProseView.qaMeasurementCount
+        try expect(width > 0 && documentMeasurements > 0, "the document must have been measured before the flip")
+
+        for style in [NSScroller.Style.legacy, .overlay, .legacy] {
+            flip(style)
+            settle()
+            let name = style == .legacy ? "legacy" : "overlay"
+            try expect(control.scrollerStyle == style, "\(name): AppKit did not flip the control scroll view")
+            try expect(body.frame.width == width && scrollView.contentView.bounds.width == clipWidth,
+                       "\(name): the scroller moved the text width: document \(width) -> \(body.frame.width), clip \(clipWidth) -> \(scrollView.contentView.bounds.width)")
+            try expect(document.qaMeasurementCount == documentMeasurements
+                       && AssistantProseView.qaMeasurementCount == proseMeasurements,
+                       "\(name): a scroller style change re-measured the document: blocks \(document.qaMeasurementCount - documentMeasurements), prose rows \(AssistantProseView.qaMeasurementCount - proseMeasurements)")
+        }
+        flip(.overlay)
+        // Mouse users keep a scroller, and the document still scrolls.
+        try expect(scrollView.hasVerticalScroller && scrollView.verticalScroller?.isEnabled == true,
+                   "the overflowing document lost its vertical scroller")
+        document.qaScroll(toY: 200)
+        settle()
+        try expect(document.qaScrollOffsetY == 200, "the document must still scroll after the flips")
+    }
+
     static func runMarkdownLayoutSettlesCheck() throws {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: false)

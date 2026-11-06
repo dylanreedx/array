@@ -149,6 +149,7 @@ check --file-image-check
 check --file-initial-load-check
 check --file-markdown-perf-check
 check --file-markdown-preview-check
+check --file-markdown-scroller-check
 check --file-open-active-context-check
 check --file-tree-boot-persistence-check
 check --file-tree-hardening-check
@@ -589,6 +590,7 @@ leg run_app_check .build/debug/Array --file-image-check
 leg run_app_check .build/debug/Array --file-initial-load-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check
 leg run_app_check .build/debug/Array --file-markdown-preview-check
+leg run_app_check .build/debug/Array --file-markdown-scroller-check
 leg run_app_check .build/debug/Array --file-open-active-context-check
 leg run_app_check .build/debug/Array --file-tree-boot-persistence-check
 leg run_app_check .build/debug/Array --file-tree-hardening-check

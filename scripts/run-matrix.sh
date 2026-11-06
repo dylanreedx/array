@@ -2136,6 +2136,9 @@ run_app_check .build/debug/Array --agent-local-file-link-check
 # of Markdown built 12,000 TextKit stacks, 1.39 GB resident, and the process died.
 # Preview is budgeted and says where it stopped, and a relayout re-measures nothing.
 run_app_check .build/debug/Array --file-markdown-perf-check
+# A paired mouse flips macOS to legacy scrollers mid-run. The scroller must not
+# take width from the text, or every Markdown tile re-measures on the main thread.
+run_app_check .build/debug/Array --file-markdown-scroller-check
 # Standing performance budgets (docs/internals/performance-budgets.md). The pan
 # leg gates: a camera pan must cost no bounds write, no tile-model write and no
 # text re-measurement, over a canvas of large Markdown tiles. The zoom leg is

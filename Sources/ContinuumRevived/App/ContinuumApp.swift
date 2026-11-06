@@ -2648,6 +2648,18 @@ enum ContinuumApp {
         }
 
         #if ARRAY_CHECKS
+        if CommandLine.arguments.contains("--file-markdown-scroller-check") {
+            do {
+                _ = NSApplication.shared
+                try FileOpenChecks.runMarkdownScrollerStyleCheck()
+                print("ContinuumRevivedFileMarkdownScrollerChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--file-markdown-perf-check") {
             do {
                 _ = NSApplication.shared
