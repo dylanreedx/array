@@ -36,18 +36,32 @@ public enum AgentCharacterBundled {
     /// `<folder>/packs/<id>/theme.json` with its sounds beside it: the layout of an
     /// imported user set, read by the same parser and the same sound resolver.
     public static let packIDs = ["street-sigils", "living-chords", "ascii-morph", "signal-ghosts"]
+    /// Mac only: the iOS app links Core but not this bundle, so there every pack
+    /// lookup is nil and only the ducks exist.
+    static let packsBundleName = "continuum-revived_ContinuumRevivedCharacterPacks.bundle"
     static let packsFolder = "packs"
+    static let manifestFileName = "manifest.json"
 
     /// Every built-in id, the ducks first. No user set may take one.
     public static var builtInIDs: [String] { [themeID] + packIDs }
 
     public static func isBuiltIn(_ id: String) -> Bool { id == themeID || packIDs.contains(id) }
 
+    /// The packs' folder, found the way `folderURL()` finds Core's.
+    public static func packsFolderURL() -> URL? {
+        let roots = [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()].compactMap { $0 }
+        for root in roots {
+            let url = root.appendingPathComponent(packsBundleName).appendingPathComponent(packsFolder, isDirectory: true)
+            if FileManager.default.fileExists(atPath: url.appendingPathComponent(manifestFileName).path) { return url }
+        }
+        return nil
+    }
+
     /// A built-in pack's folder (holding its `theme.json` and sounds); nil for the
     /// ducks, whose sounds are the base ones, and for a pack that is missing.
     public static func packFolderURL(id: String) -> URL? {
         guard packIDs.contains(id),
-              let url = folderURL()?.appendingPathComponent(packsFolder).appendingPathComponent(id, isDirectory: true),
+              let url = packsFolderURL()?.appendingPathComponent(id, isDirectory: true),
               FileManager.default.fileExists(atPath: url.appendingPathComponent(AgentCharacterImports.fileName).path)
         else { return nil }
         return url

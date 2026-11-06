@@ -79,6 +79,13 @@ let package = Package(
                         // Plan 110: the built-in agent characters and their MIT notice.
                         .copy("Resources/AgentCharacters")]
         ),
+        // The built-in character packs: resources only, Mac only. Core is shared
+        // with iOS and SwiftPM resources cannot be conditioned on a platform, so
+        // the packs sit in a target the iOS app never links.
+        .target(
+            name: "ContinuumRevivedCharacterPacks",
+            resources: [.copy("Resources/packs")]
+        ),
         // Sync layer (ticket 06's home; stood up by ticket 05 with the
         // tombstone vocabulary). Pure Swift, depends only on Core.
         // `linkedFramework("CloudKit")` (ticket 57): CloudKit is a system
@@ -173,6 +180,7 @@ let package = Package(
                 "ContinuumRevivedAgentUI",
                 "ContinuumRevivedFileTree",
                 "ContinuumRevivedCore",
+                "ContinuumRevivedCharacterPacks",
                 "ContinuumRevivedSync",
                 "GhosttyKit",
                 .product(name: "Sparkle", package: "Sparkle")
@@ -203,7 +211,7 @@ let package = Package(
             name: "ContinuumRevivedCoreChecks",
             // Ticket 07 (convergence fuzz) drives materialize/compact/applySnapshot
             // from the op-log core, which lives in ContinuumRevivedSync.
-            dependencies: ["ContinuumRevivedAgentContent", "ContinuumRevivedAgentUI", "ContinuumRevivedCore", "ContinuumRevivedSync"]
+            dependencies: ["ContinuumRevivedAgentContent", "ContinuumRevivedAgentUI", "ContinuumRevivedCharacterPacks", "ContinuumRevivedCore", "ContinuumRevivedSync"]
         ),
         // Ticket P1.1: depends on AgentUI ALONE, so a token reaching back into
         // Core fails to compile here rather than being caught in review.

@@ -205,6 +205,15 @@ if ! cmp -s "$SPAWN_AGENT_EXTENSION_SOURCE" "$SPAWN_AGENT_EXTENSION_BUNDLED"; th
   exit 1
 fi
 
+# The built-in character packs ship in their own bundle, so the iOS app can leave
+# them out. Each pack's theme and card must reach the app, byte-identical.
+CHARACTER_PACKS_SOURCE="$ROOT_DIR/Sources/ContinuumRevivedCharacterPacks/Resources/packs"
+CHARACTER_PACKS_BUNDLED="$RESOURCES/continuum-revived_ContinuumRevivedCharacterPacks.bundle/packs"
+if ! diff -rq "$CHARACTER_PACKS_SOURCE" "$CHARACTER_PACKS_BUNDLED" >/dev/null; then
+  echo "FAIL: bundled character packs differ from the committed source" >&2
+  exit 1
+fi
+
 # The app target's SwiftPM resource bundle owns the fully local CodeMirror
 # surface. Verify the executable page and generated assets all reached the
 # signed app; loading any of these from the network is intentionally forbidden.

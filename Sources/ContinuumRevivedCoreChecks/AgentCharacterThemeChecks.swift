@@ -99,6 +99,12 @@ func runAgentCharacterThemeChecks() {
             }
         }
     }
+    // Core, which iOS links, holds no pack.
+    if let core = AgentCharacterBundled.folderURL() {
+        expect(!FileManager.default.fileExists(atPath: core.appendingPathComponent("packs").path),
+               "Core's resources hold no pack: the iOS app bundles them")
+    }
+
     // A user set may not take a built-in id: import refuses it, and one written
     // straight into the themes folder is a problem there, never the built-in.
     let collision = FileManager.default.temporaryDirectory
