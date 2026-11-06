@@ -1628,6 +1628,10 @@ final class TileSpawner {
         guard let canvasView,
               canvasView.tileRecord(for: tileId) != nil
         else { return false }
+        if let reveal = canvasView.onUserTileReveal {
+            reveal(tileId)
+            return true
+        }
         canvasView.centerOnTile(tileId)
         if canvasView.focusBroker?.enterScope(.tile(tileId), reason: .userClick) != true {
             canvasView.bringToFront(tileId: tileId)
@@ -3006,6 +3010,9 @@ final class TileSpawner {
         // producing a tile belonging to no zone at all. One real store held exactly
         // that: notes.md at world (1246,-851) with `zoneId: nil`.
         let worldSiblings = canvasView.allTilesInWorldFrames()
+        let targetZoneId = targetZoneId
+            ?? anchorTileId.flatMap { id in worldSiblings.first(where: { $0.id == id })?.zoneId }
+            ?? canvasView.activeProjectZonePlacement?.zoneId
         if let existing = canvasView.allWorkspaceTiles().first(where: { $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == canonicalPath }) {
             return .alreadyOpen(tileId: existing.id)
         }
@@ -5021,7 +5028,7 @@ final class TileSpawner {
             throw CheckError.failed("anchored file missing from world scene")
         }
         try expectFrame(anchoredWorld, TileFrame(x: 5344, y: 2300, width: 640, height: 560),
-                        "pinned settle preserves explicit beside intent in world coordinates")
+                        "pinned settle preserves explicit beside intent in world coordinates; scene=\(layerFixture.canvas.allTilesInWorldFrames().map(\.frame))")
 
         // A file opened with no anchor and no point is an automatic spawn. This zone
         // runs auto layout, so it fans out (.plans/107): edge-aligned slots around

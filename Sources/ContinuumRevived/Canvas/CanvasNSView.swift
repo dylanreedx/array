@@ -4225,7 +4225,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // API reveal or a check is programmatic and must not defer itself.
         // A navigation flight's steps are the driver's, but programmatic: the jump
         // that started it already noted the user's interaction once.
-        if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { focusIsNewerThanCamera = false; onUserCameraChange?() }
+        if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { focusIsNewerThanCamera = false; userCameraMovedSinceArming = true; onUserCameraChange?() }
         if !agentChromeRestedForMotion, cameraDriver.isApplying || pointerPanActive {
             agentChromeRestedForMotion = true
             restAgentChromeForCameraMotion()
@@ -6309,8 +6309,10 @@ final class CanvasNSView: NSView, TokenThemed {
     /// The camera navigation should reason from: where an in-flight jump is
     /// going, else where the camera is. A jump made mid-flight records THIS as
     /// the view to go back to, not a point the camera was only passing through.
+    var onUserTileReveal: ((UUID) -> Void)?
     var spawnOverlayRects: (() -> [CGRect])?
     private var focusIsNewerThanCamera = false
+    private(set) var userCameraMovedSinceArming = false
     var usableVisibleScreenRect: CGRect {
         var result = bounds
         for overlay in spawnOverlayRects?() ?? [] where overlay.intersects(result) {
@@ -6344,7 +6346,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let usable = usableVisibleScreenRect
         let visible = CanvasEngine.visibleWorldRect(viewport: navigationViewport, visibleSize: bounds.size)
         if focusIsNewerThanCamera, let id = canvasState.lastActiveTileId,
-           let tile = navigationTileSnapshot(for: id) {
+           let tile = navigationTileSnapshot(for: id), tile.zoneId == activeProjectZoneId {
             let f = tile.worldFrame
             let rect = CGRect(x: f.x, y: f.y, width: f.width, height: f.height)
             if rect.intersects(visible) { return CGPoint(x: rect.midX, y: rect.midY) }
@@ -7993,6 +7995,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var activeProjectZoneId: UUID?
 
     func setActiveProjectZone(_ zoneId: UUID?) {
+        userCameraMovedSinceArming = false
         defer { applyArmedZoneChrome() }
         guard let zoneId,
               zoneLayers.contains(where: {

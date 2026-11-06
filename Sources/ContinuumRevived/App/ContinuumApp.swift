@@ -16361,11 +16361,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let gap = TileGapResolver.resolvedGap()
         let zoneRect = CGRect(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
         let zoneTiles = canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []
-        if let slot = canvasView.visibleSpawnSlot(size: size,
-            anchor: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width/2,
-                            y: parent.worldFrame.y + parent.worldFrame.height/2), zoneId: zoneId) {
-            return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), nil)
-        }
         // Auto layout fans a helper out around its lead and the lead's other
         // helpers, shaped for the screen (.plans/107). The column scan below
         // always started right of the lead and only searched inside the zone's
@@ -16379,6 +16374,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let helperSize = CGSize(
                 width: max(Double(minimum.width), parent.worldFrame.width),
                 height: max(Double(minimum.height), (parent.worldFrame.height - gap) / 2))
+            if let slot = canvasView.visibleSpawnSlot(size: helperSize,
+                anchor: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width/2,
+                                y: parent.worldFrame.y + parent.worldFrame.height/2), zoneId: zoneId) {
+                return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), helperSize)
+            }
             let familyTileIds = Set(agentSupervisor.records.values
                 .filter { $0.parentAgentID == parentId && $0.id != agentId }
                 .compactMap(\.tileId))
@@ -16397,6 +16397,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     focus: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width / 2,
                                    y: parent.worldFrame.y + parent.worldFrame.height / 2))))
             return (spawner, scope, CGPoint(x: placed.x + placed.width / 2, y: placed.y + placed.height / 2), helperSize)
+        }
+        if let slot = canvasView.visibleSpawnSlot(size: size,
+            anchor: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width/2,
+                            y: parent.worldFrame.y + parent.worldFrame.height/2), zoneId: zoneId) {
+            return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), nil)
         }
         let occupied = zoneTiles.map {
             CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height)
@@ -23096,7 +23101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 CGRect(x: z.origin.x, y: z.origin.y, width: z.size.width, height: z.size.height)
             }
             let zones = runtime.document.zones.filter { $0.projectId != nil }
-            if let under = zones.first(where: { rect($0).contains(anchor) }) { return under }
+            if let under = zones.first(where: { rect($0).contains(anchor) && ($0.projectId == armedFromDocument?.projectId || canvas.userCameraMovedSinceArming) }) { return under }
             if let armed = armedFromDocument, rect(armed).intersects(visible) { return armed }
             return zones.filter { $0.projectId == armedFromDocument?.projectId && rect($0).intersects(visible) }
                 .min { hypot(rect($0).midX-anchor.x, rect($0).midY-anchor.y) < hypot(rect($1).midX-anchor.x, rect($1).midY-anchor.y) }
@@ -23747,6 +23752,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvasView.onLayoutCommitted = { [weak self] transaction in
             self?.persistLayoutTransaction(transaction) ?? false
         }
+        canvasView.onUserTileReveal = { [weak self] id in self?.focusSpawnedTile(id) }
         if let spawner { configureCreationAndRuntimeRoutes(on: spawner) }
         configureWorkspaceRuntimeHooks()
         installSettingsChangeObserver()

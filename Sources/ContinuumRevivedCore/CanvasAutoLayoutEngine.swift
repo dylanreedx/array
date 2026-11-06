@@ -907,7 +907,7 @@ public enum CanvasAutoLayoutEngine {
     ) -> [UUID: TileFrame] {
         let content = contentRect(zone: zone, padding: padding, header: header)
         guard content.width > 0, content.height > 0 else { return [:] }
-        let growing = growMover && !pinMover && mover != nil
+        let growing = growMover && mover != nil
         var result: [UUID: TileFrame] = [:]
         for id in memberIds {
             guard let tile = tiles[id] else { continue }
