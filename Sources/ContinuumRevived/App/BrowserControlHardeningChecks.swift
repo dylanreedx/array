@@ -563,6 +563,61 @@ func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
     let (tile, _) = try h.ownedBrowser()
     _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
     guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing runtime") }
+    h.window.setContentSize(NSSize(width: 6000, height: 4000))
+    h.f.canvas.frame = NSRect(x: 0, y: 0, width: 6000, height: 4000)
+    h.pump(0.1)
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": """
+        () => {
+          document.body.innerHTML = '<style>#choice{display:none}#menu:hover #choice,#menu.open #choice{display:block}</style><div id="menu"><button id="opener">Pointer opener</button><button id="choice">Pointer choice</button></div><p title="Pointer tooltip">Tooltip</p><p draggable="true">Draggable text and selection</p>';
+          window.pointerEvents = []; window.pointerChoice = 0;
+          const menu = document.getElementById('menu');
+          document.getElementById('opener').onclick = () => menu.classList.add('open');
+          document.getElementById('choice').onclick = () => pointerChoice++;
+          menu.addEventListener('mouseleave', () => menu.classList.remove('open'));
+          for (const type of ['mousemove','mouseenter','mouseleave','dragstart'])
+            document.addEventListener(type, e => { if(e.isTrusted) pointerEvents.push(type) }, true);
+          return true;
+        }
+        """])
+    func pointerRef(_ label: String) throws -> String {
+        let text = try h.ok("browser.snapshot", ["tileId": tile.uuidString])["text"] as? String ?? ""
+        guard let line = text.split(separator: "\n").first(where: { $0.contains(label) }),
+              let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression) else {
+            throw WorkspaceAPIChecks.Failure(message: "missing pointer fixture ref: \(label)")
+        }
+        return String(line[range].dropFirst(5).dropLast())
+    }
+    _ = try h.ok("browser.click", ["tileId": tile.uuidString, "ref": try pointerRef("Pointer opener")])
+    let parentBefore = browser.webView.superview
+    let responderBefore = h.window.firstResponder
+    let countBefore = browser.automation.userInputCount
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { pointerEvents = []; return true }"])
+    for local in [NSPoint(x: 30, y: 30), NSPoint(x: 500, y: 300)] {
+        let point = browser.webView.convert(local, to: nil)
+        for type: NSEvent.EventType in [.mouseMoved, .leftMouseDragged] {
+            let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: h.window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+            NSApp.sendEvent(event)
+            // Exercise window routing as well when inactive NSApp routing drops input.
+            h.window.sendEvent(event)
+        }
+        for type: NSEvent.EventType in [.mouseEntered, .mouseExited] {
+            let event = NSEvent.enterExitEvent(with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: h.window.windowNumber,
+                context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!
+            NSApp.sendEvent(event)
+        }
+    }
+    h.pump(0.1)
+    let pointerState = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => JSON.stringify({events:pointerEvents,hover:document.getElementById('menu').matches(':hover'),open:document.getElementById('menu').classList.contains('open')})"])
+    print("Pointer fixture observation (synthetic off-screen only): \(pointerState["value"] ?? "missing")")
+    _ = try h.ok("browser.click", ["tileId": tile.uuidString, "ref": try pointerRef("Pointer choice")])
+    let picked = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => pointerChoice"])
+    try expect(picked["value"] as? Int == 1, "agent next click must still reach the dropdown choice")
+    try expect(h.live(tile) === browser && browser.webView.superview === parentBefore &&
+        h.window.firstResponder === responderBefore && browser.automation.userInputCount == countBefore,
+        "passive pointer fixture changed browser runtime, parent, responder or control generation")
     if experimental {
         _ = try h.ok("browser.evaluate", ["tileId":tile.uuidString,"script":"() => { document.body.innerHTML='<button>Target</button>'; return true }"])
         let text = try h.ok("browser.snapshot", ["tileId":tile.uuidString])["text"] as? String ?? ""
