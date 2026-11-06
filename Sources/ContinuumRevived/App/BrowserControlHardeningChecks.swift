@@ -45,7 +45,7 @@ private final class BrowserHardeningHarness {
     init(fakedKey: Bool = false) throws {
         f = try WorkspaceAPIChecks.makeFixture()
         _ = f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
-        window = fakedKey ? BrowserFakedKeyCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false) : NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window = fakedKey ? BrowserFakedKeyCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false) : BrowserFocusCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = f.canvas
         window.orderFrontOffscreenForChecks()
         f.delegate.qaAgentSupervisor.workspaceToolsPermission = { [unowned self] in self.permission }
@@ -563,6 +563,37 @@ func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
     let (tile, _) = try h.ownedBrowser()
     _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
     guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing runtime") }
+    // Assert the real AppKit dispatch boundary as well as page state. An
+    // inactive off-screen WebKit may discard mousemove by itself; that must
+    // not produce a false claim of host-side isolation.
+    h.window.setContentSize(NSSize(width: 6000, height: 4000))
+    h.f.canvas.frame = NSRect(x: 0, y: 0, width: 6000, height: 4000)
+    var forwardedMoves = 0
+    let moveMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { event in
+        MainActor.assumeIsolated { forwardedMoves += 1 }
+        return event
+    }
+    defer { if let moveMonitor { NSEvent.removeMonitor(moveMonitor) } }
+    h.window.acceptsMouseMovedEvents = true
+    let pointerPoint = browser.webView.convert(NSPoint(x: 30, y: 30), to: nil)
+    func movePointer() {
+        let event = NSEvent.mouseEvent(with: .mouseMoved, location: pointerPoint, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: h.window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+        NSApp.sendEvent(event)
+    }
+    var pointerHit = h.window.contentView?.hitTest(pointerPoint)
+    var pointerChain: [String] = []
+    while let view = pointerHit { pointerChain.append(String(describing: type(of: view))); pointerHit = view.superview }
+    print("Pointer routing at \(pointerPoint): \(pointerChain)")
+    try expect(browser.automation.isEngaged, "pointer fixture must hold browser ownership")
+    movePointer()
+    try expect(forwardedMoves == 0, "passive pointer movement must be stopped before later AppKit monitors for an agent-owned browser")
+    browser.automation.isEngaged = false
+    movePointer()
+    try expect(forwardedMoves == 1, "an unowned browser must receive normal pointer movement")
+    browser.automation.isEngaged = true
+    print("PASS: passive movement filtered before AppKit window routing; unowned tile movement preserved")
     if experimental {
         _ = try h.ok("browser.evaluate", ["tileId":tile.uuidString,"script":"() => { document.body.innerHTML='<button>Target</button>'; return true }"])
         let text = try h.ok("browser.snapshot", ["tileId":tile.uuidString])["text"] as? String ?? ""
