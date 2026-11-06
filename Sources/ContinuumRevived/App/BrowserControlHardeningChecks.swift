@@ -584,13 +584,16 @@ func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
     }
     h.window.setContentSize(NSSize(width: 6000, height: 4000))
     h.f.canvas.frame = NSRect(x: 0, y: 0, width: 6000, height: 4000)
-    func scroll(at point: NSPoint, flags: CGEventFlags = []) throws {
-        let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: -12, wheel2: 0, wheel3: 0)!
+    func scroll(at point: NSPoint, flags: CGEventFlags = [], delta: Int32 = -12, phase: Int64 = 0, momentum: Int64 = 0) throws {
+        let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: delta, wheel2: 0, wheel3: 0)!
         let screen = h.window.convertPoint(toScreen: point)
         cg.location = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.height ?? 0) - screen.y)
         cg.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(h.window.windowNumber))
         cg.flags = flags
+        cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+        cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum)
         let event = NSEvent(cgEvent: cg)!
+        print("Scroll witness delta=\(event.scrollingDeltaY) phase=\(event.phase.rawValue) momentum=\(event.momentumPhase.rawValue)")
         NSApp.sendEvent(event)
     }
     let count = browser.automation.userInputCount
@@ -603,7 +606,25 @@ func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
     try expect(h.f.canvas.cameraDriver.isCameraSessionActive, "camera fixture must start a zoom session")
     try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil))
     try expect(browser.automation.userInputCount == count, "camera follow-through scroll over a driven browser must not take control")
+    for phase: Int64 in [1, 2, 4, 8] {
+        h.f.canvas.cameraDriver.noteScrollZoom(deltaY: 1, location: .zero)
+        try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil), phase: phase)
+        try expect(browser.automation.userInputCount == count, "camera scroll phase must not take browser control")
+    }
+    for momentum: Int64 in [1, 2, 3] {
+        h.f.canvas.cameraDriver.noteScrollZoom(deltaY: 1, location: .zero)
+        try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil), momentum: momentum)
+        try expect(browser.automation.userInputCount == count, "camera momentum must not take browser control")
+    }
     h.pump(2)
+    for phase: Int64 in [1, 2, 4, 8] {
+        try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil), delta: 0, phase: phase)
+        try expect(browser.automation.userInputCount == count, "zero-delta scroll phase must not take browser control after camera settles")
+    }
+    for momentum: Int64 in [1, 2, 3] {
+        try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil), delta: 0, momentum: momentum)
+        try expect(browser.automation.userInputCount == count, "zero-delta momentum must not take browser control after camera settles")
+    }
 
     try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil))
     try expect(browser.automation.userInputCount > count, "tile scroll must take browser control")

@@ -956,6 +956,11 @@ final class BrowserAutomation {
     private static func noteUserEvent(_ event: NSEvent) {
         guard !registry.isEmpty else { return }
         if consumeAgentInput(event) { return }
+        // Trackpads send phase/momentum boundaries with no displacement,
+        // sometimes after the camera session expires. They carry no browser
+        // scroll intent and must not revoke its lease or focus restoration.
+        if event.type == .scrollWheel, event.scrollingDeltaX == 0,
+           event.scrollingDeltaY == 0, event.deltaZ == 0 { return }
         focusInputGeneration &+= 1
         let wheelWindow: NSWindow? = event.type == .scrollWheel ? event.cgEvent.flatMap { cg in
             let point = NSPoint(x: cg.location.x, y: (NSScreen.screens.first?.frame.height ?? 0) - cg.location.y)
