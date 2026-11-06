@@ -2248,6 +2248,17 @@ enum ContinuumApp {
         }
         // CX-01: grants, trusted approval, forgery, revocation, and the five
         // presentation dimensions including concurrent user interaction.
+        if CommandLine.arguments.contains("--workspace-api-agent-camera-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIChecks.runAgentCameraCheck()
+                print("WorkspaceAPIAgentCameraChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-api-grants-check") {
             do {
                 _ = NSApplication.shared
@@ -23670,6 +23681,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // missing zone may be the result of an intentional delete.
         if let runtime = workspaceRuntime {
             runtime.adoptCanvas(canvasView)
+            canvasView.onVisitAgentResult = { [weak self] tileId in
+                _ = self?.revealTileForWork(tileId, historyReason: .completedTileJump, scopeReason: .tileSpawned)
+            }
             if persistedWorkspaceRegistry == nil, let controller = runtime.activeController {
                 runtime.ensureZoneForActiveProject(controller: controller)
             }

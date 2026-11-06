@@ -947,12 +947,13 @@ final class WorkspaceAPIService {
         tileId: UUID, policy: WorkspacePresentationPolicy, generationAtDispatch: UInt64,
         runtime: WorkspaceRuntime, canvas: CanvasNSView
     ) -> (ArtifactOpenResult.Presentation, WorkspacePresentationEffects) {
+        canvas.trackAgentResult(tileId)
         var effects = WorkspacePresentationEffects.allPreserved
         guard policy.requestsAnyChange else { return (.deferred, effects) }
 
         // Newer user intent wins: a stale request never restores old state over it.
         let expected = policy.expectedInteractionGeneration ?? generationAtDispatch
-        if runtime.interactionGeneration != expected {
+        if runtime.interactionGeneration != expected || runtime.isUserEngaged {
             if policy.workspace != .preserve { effects.workspace = .deferred }
             if policy.armedZone != .preserve { effects.armedZone = .deferred }
             if policy.selection != .preserve { effects.selection = .deferred }

@@ -83,9 +83,9 @@ private func checkPresentationIntersection() {
     expect(effective == WorkspacePresentationPolicy(camera: .revealResult, expectedInteractionGeneration: 7),
            "phase1 ceiling permits camera only and keeps the generation, got \(effective)")
     expect(!WorkspacePresentationPolicy.preserveAll.requestsAnyChange, "preserveAll requests nothing")
-    expect(WorkspacePresentationPolicy.defaultExplicitOpen.camera == .revealResult
+    expect(WorkspacePresentationPolicy.defaultExplicitOpen.camera == .preserve
            && WorkspacePresentationPolicy.defaultExplicitOpen.keyboardFocus == .preserve,
-           "default explicit open reveals the camera and preserves focus")
+           "default explicit open preserves camera and focus")
     expect(requested.intersected(with: .preserveAll) == WorkspacePresentationPolicy(expectedInteractionGeneration: 7),
            "a preserve-all ceiling collapses every dimension")
 }
@@ -173,8 +173,11 @@ private func checkGrantEvaluator() {
                                              grants: grants, currentGeneration: generation)
     }
     if case let .allowed(id, policy) = verdict(.artifactOpen, own, grants: [preset]) {
-        expect(id == preset.grantId && policy == WorkspacePresentationPolicy(camera: .revealResult), "preset allows own-checkout open with camera-only ceiling")
+        expect(id == preset.grantId && policy == .preserveAll, "preset preserves the default open camera")
     } else { expect(false, "preset must allow an own-checkout open") }
+    if case let .allowed(_, policy) = verdict(.artifactOpen, own, grants: [preset], requested: .init(camera: .revealResult)) {
+        expect(policy.camera == .revealResult, "preset still permits explicit reveal")
+    } else { expect(false, "explicit reveal remains available") }
     expect(verdict(.artifactOpen, foreign, grants: [preset]) == .scopeApprovalRequired(missing: foreign),
            "another checkout needs scope approval, not a silent fallback")
     expect(verdict(.artifactOpen, own, grants: [preset], generation: 2) == .denied,
