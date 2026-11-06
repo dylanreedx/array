@@ -709,10 +709,10 @@ final class BrowserAutomation {
 
     private static func requireNativeInputTarget(_ target: [String: Any], clicking: Bool = true) throws {
         if target["uninspectableFrame"] as? Bool == true { throw BrowserAutomationError.uninspectableFrame }
+        if target["nativeSelect"] as? Bool == true { throw BrowserAutomationError.nativeSelectUnsupported }
         if clicking, Self.focusFreeInputEnabled, WKWebView.instancesRespond(to: NSSelectorFromString("_setShouldSuppressFirstResponderChanges:")), target["editor"] as? String == "monaco" {
             throw BrowserAutomationError.editorUnsupported("Monaco background click/caret placement is unsupported; its tested click selected text instead of placing a caret. No foreground fallback.")
         }
-        if target["nativeSelect"] as? Bool == true { throw BrowserAutomationError.nativeSelectUnsupported }
     }
 
     private func preflightKeyboard(deadline: Date) async throws {

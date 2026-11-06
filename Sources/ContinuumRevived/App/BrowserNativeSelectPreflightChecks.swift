@@ -3,6 +3,10 @@ import ContinuumRevivedCore
 
 @MainActor
 func runBrowserNativeSelectPreflightCheck() throws {
+    let previous = BrowserAutomation.focusFreeInputEnabled
+    let experimental = ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_TIER_A"] == "1"
+    BrowserAutomation.focusFreeInputEnabled = experimental
+    defer { BrowserAutomation.focusFreeInputEnabled = previous }
     let c = try BrowserInputCheckFixture()
     defer { c.close() }
     _ = try c.evaluate("""
@@ -17,6 +21,7 @@ func runBrowserNativeSelectPreflightCheck() throws {
         inaccessible.srcdoc = '<select><option>A</option></select>'; document.body.append(inaccessible);
         return true;
         """)
+    if experimental { _ = try c.evaluate("document.querySelector('select').className='monaco-editor'; return true;") }
     let ready = Date().addingTimeInterval(1.5)
     while Date() < ready { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
     guard let runtime = c.f.runtime.liveControllers.flatMap(\.browserRuntimes).first(where: { $0.tileId.uuidString == c.tile }) else {

@@ -650,6 +650,7 @@ if [[ "$BROWSER_SCHEDULING_ONLY" -eq 1 ]]; then
   ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-focus-restoration-check
   run_app_check .build/debug/Array --browser-focus-restoration-check
   run_app_check .build/debug/Array --browser-automation-engine-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
   run_app_check .build/debug/Array --browser-native-select-preflight-check
   ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-durable-takeover-check
   run_app_check .build/debug/Array --browser-durable-takeover-check
@@ -665,6 +666,7 @@ if [[ "$FOCUS_SAFE_INPUT_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --browser-focus-restoration-check
   ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-focus-restoration-check
   run_app_check .build/debug/Array --browser-select-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
   run_app_check .build/debug/Array --browser-native-select-preflight-check
   run_app_check .build/debug/Array --browser-automation-engine-check
   run_app_check .build/debug/Array --workspace-api-browser-check
@@ -693,6 +695,7 @@ if [[ "$PERMISSION_UX_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --workspace-api-browser-check
   run_app_check .build/debug/Array --browser-focus-restoration-check
   run_app_check .build/debug/Array --browser-select-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
   run_app_check .build/debug/Array --browser-native-select-preflight-check
   run_app_check .build/debug/Array --browser-automation-engine-check
   run_app_check .build/debug/Array --workspace-api-device-check
@@ -1333,6 +1336,7 @@ run_app_check .build/debug/Array --browser-background-scheduling-check
 ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-focus-restoration-check
 run_app_check .build/debug/Array --browser-focus-restoration-check
 run_app_check .build/debug/Array --browser-select-check
+ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
 run_app_check .build/debug/Array --browser-native-select-preflight-check
 run_app_check .build/debug/Array --agent-browser-spawn-check
 run_app_check .build/debug/Array --browser-unrelated-input-check
