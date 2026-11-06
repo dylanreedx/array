@@ -3144,7 +3144,7 @@ final class TileSpawner {
             // this project living in a zone below the live tier -- or in another
             // workspace -- on the next spawn. Only a zone that is actually
             // installed may delete a tile.
-            try projectStore.saveCanvas(
+            try projectStore.saveCanvasAfterVerifiedRead(
                 canvasView.canvasStateForPersistence(
                     projectId: projectId,
                     base: persisted,

@@ -21815,7 +21815,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             var savedProjectWrites: [(store: ProjectStore, original: CanvasState)] = []
             do {
                 for write in projectWrites {
-                    try write.store.saveCanvas(write.updated)
+                    try write.store.saveCanvasAfterVerifiedRead(write.updated)
                     savedProjectWrites.append((write.store, write.original))
                 }
                 if let workspaceRuntime {
