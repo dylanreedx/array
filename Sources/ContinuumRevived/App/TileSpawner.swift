@@ -8731,6 +8731,8 @@ final class TileSpawner {
             canvasView: canvasView, zone: zone, zoom: zoom)
         localViewport.x += Double(usable.minX)/zoom
         localViewport.y += Double(usable.minY)/zoom
+        let siblings = siblingTiles(in: canvasView, targetZoneId: zone.zoneId)
+        let autoLayoutActive = canvasView.isAutoLayoutActive(inZone: zone.zoneId)
         return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
             newSize: size,
             viewport: localViewport,
@@ -8739,7 +8741,7 @@ final class TileSpawner {
             // `projectTiles()` reads `activeProjectZoneId`, so auto-placement used
             // to dodge the wrong zone's tiles and could stack the new tile straight
             // on top of an existing one.
-            siblings: siblingTiles(in: canvasView, targetZoneId: zone.zoneId),
+            siblings: siblings,
             gap: TileGapResolver.resolvedGap(),
             // The camera clamp above keeps the point of attention in the zone, not
             // the tile: a centre near the zone's edge framed an agent half a tile
@@ -8751,14 +8753,14 @@ final class TileSpawner {
             // every docked slot of a full zone into an overlap, and the settle
             // then sent the tile to the zone's far edge, off screen (0.7.30;
             // `--zone-arming-check` §10b).
-            bounds: canvasView.isAutoLayoutActive(inZone: zone.zoneId)
+            bounds: autoLayoutActive
                 ? nil : zoneLocalContentRect(zone, defaults: canvasView.autoLayoutDefaults),
             // Auto layout fans out around every tile of the zone, shaped for the
             // screen, instead of docking right of whatever the camera is on
             // (.plans/107).
-            fanOut: canvasView.isAutoLayoutActive(inZone: zone.zoneId)
+            fanOut: autoLayoutActive
                 ? TileSpawnPlacement.FanOut(
-                    hosts: siblingTiles(in: canvasView, targetZoneId: zone.zoneId).map(\.frame),
+                    hosts: siblings.map(\.frame),
                     targetAspect: canvasView.bounds.height > 0
                         ? Double(canvasView.bounds.width / canvasView.bounds.height) : 1.6,
                     growth: CanvasAutoLayoutConfig.growth(defaults: canvasView.autoLayoutDefaults))
