@@ -30,7 +30,7 @@ enum BrowserActionExecutor {
             case let .snapshot(tile, _) where tile == runtime.tileId:
                 let value = try await engine.snapshot(deadline: deadline)
                 return reply(["text": value.text, "generation": value.generation, "url": value.url,
-                              "title": value.title, "cut": value.cut, "backgroundScheduling": engine.backgroundSchedulingCapability])
+                              "title": value.title, "cut": value.cut, "backgroundScheduling": engine.backgroundSchedulingCapability, "inputBackend": BrowserAutomation.focusFreeInputEnabled ? (engine.supportsFocusFreeInput ? "experimental focus suppression; Tier B unproven" : "suppression unavailable; Stage 1 delivery") : "Stage 1 delivery"])
             case let .click(tile, target, _) where tile == runtime.tileId:
                 switch target {
                 case .ref(let ref): return outcome(try await engine.click(ref: ref, deadline: deadline))
@@ -99,14 +99,15 @@ enum BrowserActionExecutor {
             let code: WorkspaceAPIError.Code
             switch error {
             case .notLive: code = .browserNotLive
-            case .nativeSelectUnsupported, .uninspectableFrame: code = .unsupported
-            case .focusChanged, .selectionNotRetained, .timedOut: code = .outcomeUnknown
+            case .editorUnsupported, .nativeSelectUnsupported, .uninspectableFrame: code = .unsupported
+            case .focusChanged, .inputNotRetained, .selectionNotRetained, .timedOut: code = .outcomeUnknown
             case .userTyping: code = .busy
             case .staleRef, .notVisible, .covered, .notEditable, .focusRefused: code = .targetConflict
             case .invalidSelection, .unknownKey, .script: code = .invalidRequest
             }
             let effects: BrowserActionResult.Effects
-            if case .selectionNotRetained = error { effects = .unknown }
+            if case .inputNotRetained = error { effects = .unknown }
+            else if case .selectionNotRetained = error { effects = .unknown }
             else if case .timedOut = error { effects = .unknown }
             else if case .script = error { effects = .unknown }
             else { effects = engine.actionInputEvents > 0 ? .partial : .none }

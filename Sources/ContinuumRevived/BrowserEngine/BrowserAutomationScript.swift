@@ -268,7 +268,7 @@ enum BrowserAutomationScript {
             active = deepActive(active.contentDocument);
           } catch (_) { return { uninspectableFrame: true }; }
         }
-        return { nativeSelect: isNativeSelect(active) };
+        return { nativeSelect: isNativeSelect(active), editor: active?.closest('.monaco-editor') ? 'monaco' : active?.closest('.cm-editor') ? 'cm' : active?.closest('.ProseMirror') ? 'pm' : 'native' };
       }
       function element(ref) {
         const weak = state.byRef.get(ref);
@@ -309,6 +309,7 @@ enum BrowserAutomationScript {
             x: cx + offset.x, y: cy + offset.y,
             rect: { x: rect.left + offset.x, y: rect.top + offset.y, w: rect.width, h: rect.height },
             lands, cover: lands ? null : describe(hit), what: describe(el),
+            editor: el.closest('.monaco-editor') ? 'monaco' : 'native',
             nativeSelect: isNativeSelect(el) || inspected.nativeSelect || topInspection.nativeSelect,
             uninspectableFrame: inspected.uninspectableFrame || offset.uninspectableFrame || topInspection.uninspectableFrame,
             editable: el.tagName === 'TEXTAREA' || el.isContentEditable ||
@@ -317,9 +318,24 @@ enum BrowserAutomationScript {
         },
         at(a) {
           const inspected = inspectPoint(document, a.x, a.y);
-          return { what: describe(inspected.hit), nativeSelect: inspected.nativeSelect, uninspectableFrame: inspected.uninspectableFrame };
+          return { what: describe(inspected.hit), editor: inspected.hit?.closest('.monaco-editor') ? 'monaco' : 'native', nativeSelect: inspected.nativeSelect, uninspectableFrame: inspected.uninspectableFrame };
         },
         keyboardTarget() { return keyboardTarget(); },
+        beginInputVerification(a) {
+          const el=element(a.ref), native=el && ['INPUT','TEXTAREA'].includes(el.tagName);
+          const before=el ? (native ? el.value : el.innerText) : '';
+          let expected=null;
+          if(a.clear) expected=a.text;
+          else if(native && Number.isInteger(el.selectionStart)) expected=before.slice(0,el.selectionStart)+a.text+before.slice(el.selectionEnd);
+          state.inputVerification={el,before,expected,text:a.text,native};
+          return {};
+        },
+        verifyInput() {
+          const v=state.inputVerification; delete state.inputVerification;
+          if(!v || !v.el?.isConnected) return {retained:false};
+          const actual=v.native ? v.el.value : v.el.innerText;
+          return {retained:v.expected!==null ? (v.native ? actual===v.expected : collapse(actual,200)===collapse(v.expected,200)) : (v.text==='' || actual!==v.before)};
+        },
         focusedIs(a) {
           const el = element(a.ref);
           const active = deepActive(document);

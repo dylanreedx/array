@@ -42,10 +42,10 @@ private final class BrowserHardeningHarness {
     let window: NSWindow
     var permission: WorkspaceToolsPermission = .free
 
-    init() throws {
+    init(fakedKey: Bool = false) throws {
         f = try WorkspaceAPIChecks.makeFixture()
         _ = f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
-        window = NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window = fakedKey ? BrowserFakedKeyCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false) : NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = f.canvas
         window.orderFrontOffscreenForChecks()
         f.delegate.qaAgentSupervisor.workspaceToolsPermission = { [unowned self] in self.permission }
@@ -554,12 +554,34 @@ private func runQueuedDomainApprovalScenario() throws {
 }
 
 @MainActor
-func runBrowserDurableTakeoverCheck() throws {
-    let h = try BrowserHardeningHarness()
+func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
+    let priorSwitch = BrowserAutomation.focusFreeInputEnabled
+    BrowserAutomation.focusFreeInputEnabled = experimental
+    defer { BrowserAutomation.focusFreeInputEnabled = priorSwitch }
+    let h = try BrowserHardeningHarness(fakedKey: experimental)
     defer { h.tearDown() }
     let (tile, _) = try h.ownedBrowser()
     _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
     guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing runtime") }
+    if experimental {
+        _ = try h.ok("browser.evaluate", ["tileId":tile.uuidString,"script":"() => { document.body.innerHTML='<button>Target</button>'; return true }"])
+        let text = try h.ok("browser.snapshot", ["tileId":tile.uuidString])["text"] as? String ?? ""
+        guard let line = text.split(separator:"\n").first(where:{$0.contains("Target")}), let range = line.range(of:#"\[ref=([^\]]+)\]"#,options:.regularExpression) else { throw WorkspaceAPIChecks.Failure(message:"missing nested takeover target") }
+        let ref = String(line[range].dropFirst(5).dropLast())
+        let before = browser.automation.userInputCount
+        var immediateCount = before
+        browser.automation._duringAgentClickForChecks = { h.userKey(into:browser); immediateCount = browser.automation.userInputCount }
+        let answer = try h.raw("browser.click", ["tileId":tile.uuidString,"ref":ref])
+        browser.automation._duringAgentClickForChecks = nil
+        try expect(immediateCount == before+1 && browser.automation.userInputCount == before+1, "real tile key during native delivery must count as takeover")
+        try expect(answer["status"] as? String == "error", "nested takeover must fence click result")
+        let mutation = try h.raw("browser.evaluate", ["tileId":tile.uuidString,"script":"() => 1"])
+        try expect(h.errorCode(mutation) == "target_conflict", "nested takeover must stay paused")
+        guard let surface = h.f.canvas.tileView(for:tile) as? BrowserTileNSView else { throw WorkspaceAPIChecks.Failure(message:"missing nested handback") }
+        surface.qaChooseAgentControl("return")
+        _ = try h.ok("browser.snapshot", ["tileId":tile.uuidString])
+        print("PASS: Tier A faked key nested tile-local key takes over during native click and requires explicit handback")
+    }
     h.window.setContentSize(NSSize(width: 6000, height: 4000))
     h.f.canvas.frame = NSRect(x: 0, y: 0, width: 6000, height: 4000)
     func scroll(at point: NSPoint, flags: CGEventFlags = []) throws {
@@ -823,6 +845,9 @@ func runBrowserWriterTransferCheck() throws {
 
 @MainActor
 func runBrowserBackgroundSchedulingCheck() throws {
+    let priorSwitch = BrowserAutomation.focusFreeInputEnabled
+    BrowserAutomation.focusFreeInputEnabled = true
+    defer { BrowserAutomation.focusFreeInputEnabled = priorSwitch }
     let h = try BrowserHardeningHarness()
     defer { h.tearDown() }
     let (tile, _) = try h.ownedBrowser()

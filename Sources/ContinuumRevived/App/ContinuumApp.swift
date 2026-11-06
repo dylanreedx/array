@@ -6201,7 +6201,7 @@ enum ContinuumApp {
         if CommandLine.arguments.contains("--browser-durable-takeover-check") {
             do {
                 _ = NSApplication.shared
-                try runBrowserDurableTakeoverCheck()
+                try runBrowserDurableTakeoverCheck(experimental: ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_TIER_A"] == "1")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -6256,7 +6256,7 @@ enum ContinuumApp {
         if CommandLine.arguments.contains("--browser-focus-restoration-check") {
             do {
                 _ = NSApplication.shared
-                try runBrowserFocusRestorationCheck()
+                try runBrowserFocusRestorationCheck(experimental: ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_TIER_A"] == "1")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

@@ -2631,7 +2631,11 @@ final class WorkspaceRuntime {
         clock.begin("park")
         warmScenes.insert(departing, at: 0)
         while warmScenes.count > max(0, warmSceneCapacity) {
-            let evicted = warmScenes.removeLast()
+            let protected = BrowserAutomation.focusFreeInputEnabled ? (browserLeaseProtectionProvider?() ?? []) : []
+            guard let index = warmScenes.indices.reversed().first(where: { index in
+                !warmScenes[index].layers.contains { layer in layer.tiles.contains { protected.contains($0.id) } }
+            }) else { break }
+            let evicted = warmScenes.remove(at: index)
             report.evictedWorkspaces.append(evicted.workspaceId)
             evict(evicted)
         }
@@ -2806,6 +2810,16 @@ final class WorkspaceRuntime {
         warmScenes.flatMap(\.layers).first(where: {
             $0.placement.projectId == projectId && $0.tiles.contains { $0.id == tileId }
         })?.tiles.first { $0.id == tileId }
+    }
+
+    /// Update only metadata: parked layer frames are zone-local, whereas the
+    /// project's persisted tile frames are world coordinates.
+    func mutateParkedBrowserMetadata(tileId: UUID, projectId: UUID, _ change: (inout TileMetadata) -> Void) {
+        for layer in warmScenes.flatMap(\.layers) where layer.placement.projectId == projectId {
+            guard let index = layer.tiles.firstIndex(where: { $0.id == tileId && $0.kind == .browser }) else { continue }
+            change(&layer.tiles[index].metadata)
+            if let view = layer.tileViews[tileId] { change(&view.tile.metadata) }
+        }
     }
 
     /// A Terminal face may finish after its view was evicted from a warm

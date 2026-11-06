@@ -191,7 +191,8 @@ let package = Package(
             resources: [
                 .copy("Resources/CodeEditor"),
                 .copy("Resources/IOSPreview"),
-                .copy("Resources/TaskEditor")
+                .copy("Resources/TaskEditor"),
+                .copy("Resources/FocusInputFixtures")
             ],
             linkerSettings: [
                 .linkedFramework("Carbon"),

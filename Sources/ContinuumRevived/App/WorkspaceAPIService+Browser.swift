@@ -27,13 +27,13 @@ extension WorkspaceAPIService {
     /// Called after production hydration has registered the new runtime and
     /// before the browser budget chooses a victim.
     func trackHydratedOwnedBrowser(_ browser: WKWebViewBrowserRuntime) {
-        if let tile = canvasProvider()?.tileRecord(for: browser.tileId), tile.metadata.browserControlPaused == true,
+        if let tile = observedBrowserTile(browser.tileId), tile.metadata.browserControlPaused == true,
            let owner = tile.metadata.browserControllingAgentId {
             browserControlPresentation?(tile.id, owner, false, true)
             return
         }
         guard !browserUserTakenOver.contains(browser.tileId),
-              let owner = canvasProvider()?.tileRecord(for: browser.tileId)?.metadata.browserControllingAgentId,
+              let owner = observedBrowserTile(browser.tileId)?.metadata.browserControllingAgentId,
               ensureBrowserLeaseLedger() else { return }
         wireAgentBrowserDownloads(browser)
         let tileId = browser.tileId
@@ -41,6 +41,38 @@ extension WorkspaceAPIService {
         if let surface = canvasProvider()?.tileView(for: browser.tileId) { browser.automation.trackInputSurface(surface) }
         _ = browserLeaseLedger?.track(tileId: browser.tileId, owner: owner, sweepEligible: true)
     }
+    /// The experimental backend may continue against the same live runtime
+    /// while its owning scene is parked. Never infer ownership from the active
+    /// project, and never resolve a persisted tile without its live runtime.
+    private func parkedBrowserLocation(_ tileId: UUID) -> (tile: Tile, projectId: UUID)? {
+        guard BrowserAutomation.focusFreeInputEnabled, let workspace = runtimeProvider() else { return nil }
+        let owners = workspace.liveControllers.filter { $0.browserRuntimes.contains { $0.tileId == tileId && !$0.isTerminated } }
+        guard owners.count == 1, let owner = owners.first else { return nil }
+        let projectId = owner.project.id
+        guard let tile = workspace.parkedTileRecord(for: tileId, projectId: projectId)
+            ?? (try? owner.projectStore.loadCanvas())?.tiles.first(where: { $0.id == tileId }), tile.kind == .browser else { return nil }
+        return (tile, projectId)
+    }
+
+    private func observedBrowserTile(_ tileId: UUID) -> Tile? {
+        canvasProvider()?.tileRecord(for: tileId) ?? parkedBrowserLocation(tileId)?.tile
+    }
+
+    private func persistParkedBrowserMetadata(_ tileId: UUID, _ change: (inout TileMetadata) -> Void) throws {
+        guard let location = parkedBrowserLocation(tileId), let workspace = runtimeProvider(),
+              let controller = workspace.controller(for: location.projectId) else {
+            throw WorkspaceAPIError(code: .browserNotLive, message: "The owning browser runtime is unavailable.")
+        }
+        var stored = try controller.projectStore.loadCanvas()
+        let indices = stored.tiles.indices.filter { stored.tiles[$0].id == tileId && stored.tiles[$0].kind == .browser }
+        guard indices.count == 1, let index = indices.first else {
+            throw WorkspaceAPIError(code: .targetConflict, message: "The persisted browser identity is missing or ambiguous.")
+        }
+        change(&stored.tiles[index].metadata)
+        try controller.projectStore.saveCanvas(stored)
+        workspace.mutateParkedBrowserMetadata(tileId: tileId, projectId: location.projectId, change)
+    }
+
     /// Resolve from the mounted scene on every use, including at queue head.
     func browserScopeTarget(tileId: UUID, agentId: AgentID) -> Result<Tile, WorkspaceAPIError> {
         guard let rawRecord = supervisor.records[agentId], let record = Optional(resolvedRecord(rawRecord)), record.workspaceToolsEnabled,
@@ -52,6 +84,7 @@ extension WorkspaceAPIService {
             return .failure(WorkspaceAPIError(code: .permissionDenied, message: "Browser access is unavailable."))
         }
         let zones = canvas.installedZoneIds(containing: tileId)
+        if zones.isEmpty, let parked = parkedBrowserLocation(tileId), parked.projectId == projectId { return .success(parked.tile) }
         guard !zones.contains(where: { canvas.projectId(forZone: $0) != projectId }) else {
             return .failure(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not control that browser."))
         }
@@ -118,7 +151,7 @@ extension WorkspaceAPIService {
     /// sessions, so no lease, gate or hand-over may survive it.
     func browserProfileDidChange(tileId: UUID) {
         guard browserHandOvers[tileId] != nil || browserGateInstallations[tileId] != nil
-              || canvasProvider()?.tileRecord(for: tileId)?.metadata.browserOwnerAgentId != nil else { return }
+              || observedBrowserTile(tileId)?.metadata.browserOwnerAgentId != nil else { return }
         takeBackBrowser(tileId: tileId)
     }
 
@@ -193,6 +226,9 @@ extension WorkspaceAPIService {
         controller.scheduleCanvasSave()
         do { try controller.flushCanvasSave() }
         catch { canvas.updateTile(original, recalculateZoneBounds: false); return false }
+        if BrowserAutomation.focusFreeInputEnabled {
+            guard ensureBrowserLeaseLedger(), browserLeaseLedger?.touch(tileId: tileId, owner: agentId, sweepEligible: true) == true else { return false }
+        }
         browser.automation.invalidateDocumentIdentity()
         browserUserTakenOver.remove(tileId)
         browserNeedsHandbackSnapshot.insert(tileId)
@@ -212,7 +248,7 @@ extension WorkspaceAPIService {
                 catch { fputs("Browser takeover remains paused; its canvas save failed: \(error)\n", stderr) }
             }
         }
-        let owner = browserHandOvers[tileId]?.agentId ?? canvasProvider()?.tileRecord(for: tileId)?.metadata.browserOwnerAgentId
+        let owner = browserHandOvers[tileId]?.agentId ?? observedBrowserTile(tileId)?.metadata.browserOwnerAgentId
         browserUserTakenOver.insert(tileId)
         browserVisitApprovals[tileId] = nil
         browserHandOvers[tileId] = nil
@@ -525,7 +561,7 @@ extension WorkspaceAPIService {
                 completion(prior); return
             }
         }
-        if !readOnly && operation != .browserSnapshot && (browserNeedsHandbackSnapshot.contains(tileId) || canvasProvider()?.tileRecord(for: tileId)?.metadata.browserControlPaused == false) {
+        if !readOnly && operation != .browserSnapshot && (browserNeedsHandbackSnapshot.contains(tileId) || observedBrowserTile(tileId)?.metadata.browserControlPaused == false) {
             completion(.error(WorkspaceAPIError(code: .targetConflict, message: "Take a fresh snapshot after handback before sending a mutation."))); return
         }
         let target = readOnly ? browserScopeTarget(tileId: tileId, agentId: agentId) : browserControlTarget(tileId: tileId, agentId: agentId)
@@ -613,10 +649,10 @@ extension WorkspaceAPIService {
                 let priorAdmission = browser.agentNavigationAdmission
                 browser.agentNavigationAdmission = { !isCancelled() }
                 defer { browser.agentNavigationAdmission = priorAdmission }
-                let owner = self.canvasProvider()?.tileRecord(for: tileId)?.metadata.browserControllingAgentId
+                let owner = self.observedBrowserTile(tileId)?.metadata.browserControllingAgentId
                 // Inspecting a user-held tile must not reacquire its lease,
                 // rearm the agent gate, or hide its Return to agent control.
-                let userHoldsTile = self.browserUserTakenOver.contains(tileId) || self.canvasProvider()?.tileRecord(for: tileId)?.metadata.browserControlPaused == true
+                let userHoldsTile = self.browserUserTakenOver.contains(tileId) || self.observedBrowserTile(tileId)?.metadata.browserControlPaused == true
                 let agentControls = (!readOnly || owner == agentId) && !userHoldsTile
                 if agentControls { self.installBrowserNavigationGate(browser, agentId: agentId, generation: generation) }
                 guard let url = browser.webView.url ?? URL(string: browser.url),
@@ -695,6 +731,9 @@ extension WorkspaceAPIService {
                         controller.scheduleCanvasSave()
                         do { try controller.flushCanvasSave() }
                         catch { reply = .error(WorkspaceAPIError(code: .outcomeUnknown, message: "The page loaded but its URL could not be saved. Re-query before retrying.")) }
+                    } else if BrowserAutomation.focusFreeInputEnabled {
+                        do { try self.persistParkedBrowserMetadata(tileId) { $0.url = browser.url } }
+                        catch { reply = .error(WorkspaceAPIError(code: .outcomeUnknown, message: "The parked page loaded but its URL could not be saved. Observe before retrying.")) }
                     } else {
                         reply = .error(WorkspaceAPIError(code: .outcomeUnknown, message: "The page loaded but its tile could not be updated. Re-query before retrying."))
                     }
@@ -704,6 +743,10 @@ extension WorkspaceAPIService {
                     if let canvas = self.canvasProvider(), var tile = canvas.tileRecord(for: tileId), tile.metadata.browserControlPaused == false {
                         tile.metadata.browserControlPaused = nil
                         canvas.updateTile(tile, recalculateZoneBounds: false)
+                    } else if BrowserAutomation.focusFreeInputEnabled, !self.browserUserTakenOver.contains(tileId),
+                              self.parkedBrowserLocation(tileId)?.tile.metadata.browserControlPaused == false {
+                        do { try self.persistParkedBrowserMetadata(tileId) { $0.browserControlPaused = nil } }
+                        catch { reply = .error(WorkspaceAPIError(code: .outcomeUnknown, message: "The snapshot was read but its parked handback fence could not be saved. Observe before retrying.")) }
                     }
                 }
                 let status: String

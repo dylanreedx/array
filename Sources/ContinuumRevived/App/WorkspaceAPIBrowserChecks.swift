@@ -333,11 +333,15 @@ func runWorkspaceAPIBrowserCheck() throws {
     guard reapproval["status"] as? String == "ok" else {
         throw WorkspaceAPIChecks.Failure(message: "initial hand-over failed: inputs=\(reapprovalInputs)->\(userBrowser.automation.userInputCount), engaged=\(userBrowser.automation.isEngaged), gate=\(userBrowser.agentNavigationDecision != nil), prompts=\(handOverPrompts), reply=\(reapproval)")
     }
+    _ = try call("browser.evaluate", ["tileId": userTile, "script": "() => { window.foreignKeys=0; document.addEventListener('keydown',()=>foreignKeys++); return true }"])
+    _ = try call("browser.evaluate", ["tileId": target, "script": "() => { window.targetKeys=0; document.addEventListener('keydown',()=>targetKeys++); return true }"])
     window.makeFirstResponder(userBrowser.webView)
     let otherBrowserInputCount = userBrowser.automation.userInputCount
     let foreignKey = try rawCall("browser.press_key", ["tileId": target, "keyName": "Enter"])
-    guard (foreignKey["error"] as? [String: Any])?["code"] as? String == "outcome_unknown" else {
-        throw WorkspaceAPIChecks.Failure(message: "a native key must not be forwarded into another browser's responder")
+    let targetKeys = try call("browser.evaluate", ["tileId": target, "script": "() => targetKeys"])
+    let foreignKeys = try call("browser.evaluate", ["tileId": userTile, "script": "() => foreignKeys"])
+    guard foreignKey["status"] as? String == "ok", targetKeys["value"] as? Int == 1, foreignKeys["value"] as? Int == 0 else {
+        throw WorkspaceAPIChecks.Failure(message: "native key must reach only the requested page: reply=\(foreignKey), target=\(targetKeys), foreign=\(foreignKeys)")
     }
     window.makeFirstResponder(restarted.webView)
     _ = try call("browser.press_key", ["tileId": target, "keyName": "Enter"])

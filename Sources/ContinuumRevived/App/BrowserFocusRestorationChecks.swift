@@ -1,46 +1,73 @@
 import AppKit
 import ContinuumRevivedCore
 import ObjectiveC
+import Darwin
 
 @MainActor
-private final class BrowserFocusCheckWindow: NSWindow {
+class BrowserFocusCheckWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
-    override var isKeyWindow: Bool { true }
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
     var responderTrace: ((NSResponder?) -> Void)?
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let before = firstResponder
         let accepted = super.makeFirstResponder(responder)
-        if accepted { responderTrace?(firstResponder) }
+        if accepted && firstResponder !== before { responderTrace?(firstResponder) }
         return accepted
     }
 }
 
 @MainActor
-func runBrowserFocusRestorationCheck() throws {
+final class BrowserFakedKeyCheckWindow: BrowserFocusCheckWindow {
+    override var isKeyWindow: Bool { true }
+}
+
+private final class BrowserRealKeyProofProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var passed: Set<String> = []
+    func insert(_ name: String) { lock.lock(); defer { lock.unlock() }; passed.insert(name) }
+    func contains(_ name: String) -> Bool { lock.lock(); defer { lock.unlock() }; return passed.contains(name) }
+    func removeAll() { lock.lock(); defer { lock.unlock() }; passed.removeAll() }
+}
+@MainActor private var tierBPassedCases = BrowserRealKeyProofProgress()
+
+@MainActor
+func runBrowserFocusRestorationCheck(experimental: Bool = false, realKey: Bool = false) throws {
+    let priorSwitch = BrowserAutomation.focusFreeInputEnabled
+    BrowserAutomation.focusFreeInputEnabled = experimental && (realKey || ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_RED_CONTROL"] != "1")
+    defer { BrowserAutomation.focusFreeInputEnabled = priorSwitch }
     guard let method = class_getInstanceMethod(ComposerTextView.self, #selector(NSView.acceptsFirstMouse(for:))) else {
         throw WorkspaceAPIChecks.Failure(message: "missing acceptsFirstMouse")
     }
     let original = method_getImplementation(method)
     let accept: @convention(block) (NSView, NSEvent?) -> Bool = { _, _ in true }
-    method_setImplementation(method, imp_implementationWithBlock(accept))
-    defer { method_setImplementation(method, original) }
+    if !realKey { method_setImplementation(method, imp_implementationWithBlock(accept)) }
+    defer { if !realKey { method_setImplementation(method, original) } }
     let f = try WorkspaceAPIChecks.makeFixture()
     defer { f.tearDown() }
     _ = f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
     f.delegate.qaAgentSupervisor.workspaceToolsPermission = { .free }
-    let window = BrowserFocusCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
+    let window: BrowserFocusCheckWindow = realKey ? BrowserFocusCheckWindow(contentRect: f.canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false) : BrowserFakedKeyCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
     let root = NSView(frame: f.canvas.frame)
     root.addSubview(f.canvas)
     window.contentView = root
     window.orderFrontOffscreenForChecks()
     defer { window.orderOut(nil) }
-    func call(_ op: String, _ payload: [String: Any]) throws -> [String: Any] {
+    if realKey {
+        NSApp.activate(ignoringOtherApps: true)
+        let end = Date().addingTimeInterval(0.5)
+        while !NSApp.isActive && Date() < end { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        window.makeKey()
+        guard window.isKeyWindow, NSApp.keyWindow === window else { throw WorkspaceAPIChecks.Failure(message: "Tier B real key-window setup failed") }
+    }
+    func call(_ op: String, _ payload: [String: Any], allowError: Bool = false) throws -> [String: Any] {
         var response: [String: Any]?
         f.api.handleMCPRequest(["agentId": f.agentId.rawValue.uuidString, "requestId": UUID().uuidString,
             "op": op, "payload": payload]) { response = $0 }
         let limit = Date().addingTimeInterval(20)
         while response == nil && Date() < limit { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
-        if op == "browser.type", response?["status"] as? String == "error",
+        if allowError, response?["status"] as? String == "error", let response { return response }
+        if !experimental, op == "browser.type", response?["status"] as? String == "error",
            let error = response?["error"] as? [String: Any], error["code"] as? String == "outcome_unknown",
            (error["message"] as? String)?.contains("Keyboard focus moved") == true {
             guard let action = (error["details"] as? [String: Any])?["action"] as? [String: Any],
@@ -111,8 +138,18 @@ func runBrowserFocusRestorationCheck() throws {
         throw WorkspaceAPIChecks.Failure(message: "missing browser engine")
     }
     let engine = browser.automation
+    if realKey && !engine.supportsFocusFreeInput { throw WorkspaceAPIChecks.Failure(message: "Tier B suppression selector unavailable; Stage 1 fallback is not a focus-free proof") }
+    var transientBorrow = false
+    var expectedHostResponder: NSResponder? = old
+    var userFocusGesture = false
+    var strictHostTrace = experimental
+    if experimental {
+        window.responderTrace = { responder in
+            if let view = responder as? NSView, view === browser.webView || view.isDescendant(of: browser.webView) { transientBorrow = true }
+        }
+    }
     // Replay the numeric input sequence while a host composer owns focus.
-    _ = try call("browser.evaluate", ["tileId": tile, "script": "() => { const e=document.querySelector('input'); e.type='number'; e.value='1'; return true }"])
+    _ = try call("browser.evaluate", ["tileId": tile, "script": "() => { const e=document.querySelector('input'); e.type='number'; e.value='1'; window.numericModel='1'; window.numericTrusted=false; e.oninput=event=>{ numericModel=e.value; numericTrusted=event.isTrusted }; return true }"])
     _ = try call("browser.snapshot", ["tileId": tile])
     _ = try call("browser.click", ["tileId": tile, "ref": ref])
     window.makeFirstResponder(old)
@@ -123,6 +160,15 @@ func runBrowserFocusRestorationCheck() throws {
     guard numeric["value"] as? String == "3" else {
         throw WorkspaceAPIChecks.Failure(message: "numeric replay did not commit 3: \(numeric)")
     }
+    let numericModel = try call("browser.evaluate", ["tileId":tile,"script":"() => numericModel==='3' && numericTrusted"])
+    guard numericModel["value"] as? Bool == true else { throw WorkspaceAPIChecks.Failure(message:"numeric 3 did not reach trusted application state") }
+    _ = try call("browser.click", ["tileId":tile,"ref":ref])
+    _ = try call("browser.press_key", ["tileId":tile,"keyName":"Meta+a"])
+    _ = try call("browser.press_key", ["tileId":tile,"keyName":"1"])
+    _ = try call("browser.press_key", ["tileId":tile,"keyName":"2"])
+    _ = try call("browser.press_key", ["tileId":tile,"keyName":"Tab"])
+    let twelve = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('input').value==='12' && numericModel==='12' && numericTrusted"])
+    guard twelve["value"] as? Bool == true else { throw WorkspaceAPIChecks.Failure(message:"numeric 12 did not persist after Tab") }
     guard window.firstResponder === old && old.string.isEmpty else { throw WorkspaceAPIChecks.Failure(message: "agent key disturbed composer") }
     let userKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
         windowNumber: window.windowNumber, context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12)!
@@ -130,32 +176,55 @@ func runBrowserFocusRestorationCheck() throws {
     guard old.string == "q" else { throw WorkspaceAPIChecks.Failure(message: "user key missed composer: value=\(old.string), responder=\(String(describing: window.firstResponder)), keyWindow=\(String(describing: NSApp.keyWindow))") }
     old.string = ""
     _ = try call("browser.evaluate", ["tileId": tile, "script": "() => { const e=document.querySelector('input'); e.type='text'; e.value=''; return true }"])
+    if experimental {
+        if realKey {
+            guard NSApp.keyWindow === window, window.isKeyWindow else { throw WorkspaceAPIChecks.Failure(message:"Tier B lost native key state in numeric case") }
+        }
+        guard !transientBorrow else { throw WorkspaceAPIChecks.Failure(message: "numeric replay borrowed responder") }
+        if realKey { tierBPassedCases.insert("numeric") }
+        print("PASS: \(realKey ? "Tier B real key" : "Tier A faked key") numeric 3 and 12 after Tab; trusted application state; user key in composer")
+    }
     var borrowedDuringOrdinaryClick = false
     window.responderTrace = { responder in
         if let view = responder as? NSView, view === browser.webView || view.isDescendant(of: browser.webView) {
             borrowedDuringOrdinaryClick = true
+        } else if strictHostTrace && !userFocusGesture && responder !== expectedHostResponder {
+            borrowedDuringOrdinaryClick = true
         }
     }
+    if experimental { engine._duringAgentClickForChecks = { NSApp.sendEvent(userKey) } }
     _ = try call("browser.click", ["tileId": tile, "ref": ref])
-    window.responderTrace = nil
+    engine._duringAgentClickForChecks = nil
+    if experimental { guard !borrowedDuringOrdinaryClick else { throw WorkspaceAPIChecks.Failure(message: "agent click borrowed responder") } }
+    if !experimental { window.responderTrace = nil }
     print("Ordinary agent click: responderBorrowObserved=\(borrowedDuringOrdinaryClick), originalResponderAfterAction=\(window.firstResponder === old)")
     guard window.firstResponder === old else {
         throw WorkspaceAPIChecks.Failure(message: "ordinary click lost composer: \(String(describing: window.firstResponder))")
     }
-    NSApp.sendEvent(userKey)
+    if !experimental { NSApp.sendEvent(userKey) }
     guard old.string == "q" else { throw WorkspaceAPIChecks.Failure(message: "ordinary click lost next user key") }
+    if experimental {
+        if realKey {
+            guard NSApp.keyWindow === window, window.isKeyWindow else { throw WorkspaceAPIChecks.Failure(message:"Tier B lost native key state in click case") }
+            tierBPassedCases.insert("click")
+        }
+        print("PASS: \(realKey ? "Tier B real key" : "Tier A faked key") user key during click; zero transient borrow")
+    }
     old.string = ""
     var delivered = 0
     engine._afterAgentCharacterForChecks = {
         delivered += 1
         guard delivered == 5 else { return }
         DispatchQueue.main.async {
+            userFocusGesture = true
             let point = next.convert(NSPoint(x: 10, y: 10), to: nil)
             for kind in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                 let event = NSEvent.mouseEvent(with: kind, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                     windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
                 NSApp.sendEvent(event)
             }
+            expectedHostResponder = next
+            userFocusGesture = false
             for _ in 0..<5 {
                 let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                     windowNumber: window.windowNumber, context: nil, characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6)!
@@ -167,8 +236,247 @@ func runBrowserFocusRestorationCheck() throws {
     defer { engine._afterAgentCharacterForChecks = nil }
     _ = try call("browser.type", ["tileId": tile, "ref": ref, "text": String(repeating: "a", count: 100)])
     let prefix = try call("browser.evaluate", ["tileId": tile, "script": "() => document.querySelector('input').value"])
-    guard prefix["value"] as? String == "aaaaa", sent, delivered == 5, window.firstResponder === next, next.string == "zzzzz", siblingTile.qaComposerDraftText == "zzzzz", old.string.isEmpty else {
+    guard prefix["value"] as? String == (experimental ? String(repeating: "a", count: 100) : "aaaaa"), sent, delivered == (experimental ? 100 : 5), window.firstResponder === next, next.string == "zzzzz", siblingTile.qaComposerDraftText == "zzzzz", old.string.isEmpty else {
         throw WorkspaceAPIChecks.Failure(message: "typing restored obsolete focus or lost user keys: newResponder=\(window.firstResponder === next), delivered=\(delivered), next=\(next.string), old=\(old.string)")
     }
-    print("PASS: browser focus restoration preserves another agent composer, its draft and all five user keys")
+    if experimental { guard !borrowedDuringOrdinaryClick else { throw WorkspaceAPIChecks.Failure(message:"core type changed host responder") } }
+    if experimental && !realKey {
+        guard let assets = Bundle.module.url(forResource: "FocusInputFixtures", withExtension: nil) else { throw WorkspaceAPIChecks.Failure(message: "missing vendored editor fixtures") }
+        let js = try Data(contentsOf: assets.appendingPathComponent("editor.js"))
+        try js.write(to: f.pbRoot.appendingPathComponent("editor.js"))
+        func fieldRef() throws -> String {
+            let text = try call("browser.snapshot", ["tileId": tile])["text"] as? String ?? ""
+            guard let line = text.split(separator: "\n").first(where: { $0.contains("Field") }), let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression) else { throw WorkspaceAPIChecks.Failure(message: "missing editor ref: \(text)") }
+            return String(line[range].dropFirst(5).dropLast())
+        }
+        for kind in ["react", "cm", "pm"] {
+            if ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_RED_CONTROL"] == kind { BrowserAutomation.focusFreeInputEnabled = false }
+            engine._afterAgentCharacterForChecks = nil
+            let page = f.pbRoot.appendingPathComponent("editor-\(kind).html")
+            try Data("<html><head><style>body{margin:20px}input{width:240px;height:40px}.cm-editor,.ProseMirror{min-height:100px;border:1px solid}</style></head><body data-kind='\(kind)'><div id='root'></div><script src='editor.js'></script></body></html>".utf8).write(to: page)
+            _ = try call("browser.navigate", ["tileId": tile, "url": page.absoluteString])
+            _ = try call("browser.wait_for", ["tileId": tile, "condition": "idle"])
+            let editorRef = try fieldRef()
+            let startKeys = next.string
+            engine._afterAgentCharacterForChecks = { NSApp.sendEvent(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: "u", charactersIgnoringModifiers: "u", isARepeat: false, keyCode: 32)!) }
+            _ = try call("browser.type", ["tileId": tile, "ref": editorRef, "text": "agent", "clear": true])
+            let model = try call("browser.evaluate", ["tileId": tile, "script": "() => readState().value"])
+            let trustedInput = try call("browser.evaluate", ["tileId": tile, "script": "() => events.some(e=>e.type==='input' && e.trusted)"])
+            guard trustedInput["value"] as? Bool == true, model["value"] as? String == "agent", next.string == startKeys + "uuuuu", window.firstResponder === next, !borrowedDuringOrdinaryClick else { throw WorkspaceAPIChecks.Failure(message: "\(kind) application state/concurrent input failed: \(model)") }
+            engine._afterAgentCharacterForChecks = nil
+            _ = try call("browser.press_key", ["tileId": tile, "keyName": "Meta+a"])
+            _ = try call("browser.type", ["tileId": tile, "text": "replace"])
+            let replaced = try call("browser.evaluate", ["tileId": tile, "script": "() => readState().value"])
+            guard replaced["value"] as? String == "replace" else { throw WorkspaceAPIChecks.Failure(message: "\(kind) Select All route failed: \(replaced)") }
+            _ = try call("browser.press_key", ["tileId": tile, "keyName": "Meta+z"])
+            let undone = try call("browser.evaluate", ["tileId": tile, "script": "() => readState().value"])
+            guard ["seed", "agent"].contains(undone["value"] as? String ?? "") else { throw WorkspaceAPIChecks.Failure(message: "\(kind) Undo model failed: \(undone)") }
+            _ = try call("browser.evaluate", ["tileId": tile, "script": "() => { refreshEditor(); return true }"])
+            _ = try call("browser.type", ["tileId": tile, "ref": editorRef, "text": "rerender", "clear": true])
+            let refreshed = try call("browser.evaluate", ["tileId": tile, "script": "() => readState().value"])
+            guard refreshed["value"] as? String == "rerender" else { throw WorkspaceAPIChecks.Failure(message: "\(kind) rerender failed: \(refreshed)") }
+            if kind == "pm" {
+                _ = try call("browser.press_key", ["tileId": tile, "keyName": "Meta+b"])
+                _ = try call("browser.type", ["tileId": tile, "text": "B"])
+                let bold = try call("browser.evaluate", ["tileId": tile, "script": "() => readState().doc.content.some(p => (p.content||[]).some(t => (t.marks||[]).some(m=>m.type==='strong')))"])
+                guard bold["value"] as? Bool == true else { throw WorkspaceAPIChecks.Failure(message: "ProseMirror direct bold did not update model") }
+            }
+            if kind == "react" {
+                _ = try call("browser.evaluate", ["tileId":tile,"script":"() => { const host=document.getElementById('root'); const form=document.createElement('form'); host.replaceWith(form); form.appendChild(host); window.submitted=0; window.submitTrusted=false; form.addEventListener('submit',e=>{e.preventDefault(); submitted++; submitTrusted=e.isTrusted}); return true }"])
+                _ = try call("browser.type", ["tileId":tile,"ref":editorRef,"text":"submitted","clear":true,"submit":true])
+                let submitted = try call("browser.evaluate", ["tileId":tile,"script":"() => submitted===1 && submitTrusted && readState().value==='submitted'"])
+                guard submitted["value"] as? Bool == true else { throw WorkspaceAPIChecks.Failure(message:"React form did not submit its model exactly once") }
+            } else {
+                _ = try call("browser.press_key", ["tileId":tile,"keyName":"Enter"])
+                let entered = try call("browser.evaluate", ["tileId":tile,"script":kind == "cm" ? "() => readState().value==='rerender\\n'" : "() => readState().doc.content.length===2"])
+                guard entered["value"] as? Bool == true else { throw WorkspaceAPIChecks.Failure(message:"\(kind) Enter did not update application model: \(entered)") }
+                _ = try call("browser.press_key", ["tileId":tile,"keyName":"Tab"])
+            }
+            guard window.firstResponder === next, !borrowedDuringOrdinaryClick else { throw WorkspaceAPIChecks.Failure(message:"\(kind) submit/Enter/Tab moved host responder") }
+            print("PASS: Tier A faked key \(kind) application model, selection/replace, Undo, rerender, submit/Enter/Tab and concurrent composer input")
+        }
+    }
+    if experimental && !realKey {
+        // Explicit user camera/workspace seams may change host focus. Continue
+        // rejecting entry into WebKit while the agent owns delivery.
+        strictHostTrace = false
+        engine._afterAgentCharacterForChecks = nil
+        _ = try call("browser.evaluate", ["tileId": tile, "script": "() => { document.body.innerHTML='<input aria-label=Field>'; return true }"])
+        func currentRef() throws -> String {
+            let text = try call("browser.snapshot", ["tileId": tile])["text"] as? String ?? ""
+            guard let line = text.split(separator: "\n").first(where: { $0.contains("Field") }), let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression) else { throw WorkspaceAPIChecks.Failure(message: "missing lifecycle ref") }
+            return String(line[range].dropFirst(5).dropLast())
+        }
+        _ = try call("browser.evaluate", ["tileId":tile,"script":"() => { const e=document.querySelector('input'); e.value='seed'; e.oninput=()=>{e.value='seed'}; return true }"])
+        let rejectionRef = try currentRef()
+        let rejected = try call("browser.type", ["tileId":tile,"ref":rejectionRef,"text":"rejected","clear":true], allowError:true)
+        guard let rejectionError = rejected["error"] as? [String:Any], rejectionError["code"] as? String == "outcome_unknown", let rejectionAction = (rejectionError["details"] as? [String:Any])?["action"] as? [String:Any], rejectionAction["effects"] as? String == "unknown" else { throw WorkspaceAPIChecks.Failure(message:"application rejection was reported as retained text: \(rejected)") }
+        _ = try call("browser.evaluate", ["tileId":tile,"script":"() => { const e=document.querySelector('input'); e.oninput=null; return true }"])
+        print("PASS: Tier A faked key application rejects text: unknown effects and snapshot guidance, no false success")
+        _ = try call("browser.evaluate", ["tileId":tile,"script":"() => { const e=document.querySelector('input'); const host=document.createElement('div'); host.className='monaco-editor'; e.replaceWith(host); host.appendChild(e); e.focus(); return true }"])
+        let monacoRef = try currentRef()
+        for (operation,payload) in [("browser.click", ["tileId":tile,"ref":monacoRef]), ("browser.press_key", ["tileId":tile,"keyName":"Meta+z"])] {
+            let refused = try call(operation,payload,allowError:true)
+            guard let error = refused["error"] as? [String:Any], error["code"] as? String == "unsupported", let action = (error["details"] as? [String:Any])?["action"] as? [String:Any], action["effects"] as? String == "none" else { throw WorkspaceAPIChecks.Failure(message:"Monaco known limit was dispatched: \(refused)") }
+        }
+        _ = try call("browser.evaluate", ["tileId":tile,"script":"() => { document.body.innerHTML='<input aria-label=Field>'; return true }"])
+        print("PASS: Tier A faked key Monaco classification fixture refuses caret/Undo before dispatch (actual Monaco remains unsupported)")
+        if ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_RED_CONTROL"] == "pan" { BrowserAutomation.focusFreeInputEnabled = false }
+        let panRef = try currentRef()
+        let cameraBefore = f.canvas.canvasState.viewport
+        var panSent = false
+        engine._afterAgentCharacterForChecks = {
+            guard !panSent else { return }; panSent = true
+            DispatchQueue.main.async {
+                for (kind, point) in [(NSEvent.EventType.leftMouseDown, NSPoint(x: 1000,y:900)), (.leftMouseDragged, NSPoint(x:1020,y:920)), (.leftMouseUp, NSPoint(x:1020,y:920))] {
+                    NSApp.sendEvent(NSEvent.mouseEvent(with:kind,location:point,modifierFlags:.command,timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,eventNumber:2,clickCount:1,pressure:1)!)
+                }
+            }
+        }
+        _ = try call("browser.type", ["tileId":tile,"ref":panRef,"text":"pan survives","clear":true])
+        let panValue = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('input').value"])
+        guard !borrowedDuringOrdinaryClick, panSent, f.canvas.canvasState.viewport != cameraBefore, panValue["value"] as? String == "pan survives" else { throw WorkspaceAPIChecks.Failure(message:"pan interrupted typing or camera: \(panValue)") }
+        print("PASS: Tier A faked key pan during type preserves page and camera")
+        engine._afterAgentCharacterForChecks = nil
+        if ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_RED_CONTROL"] == "zone" { BrowserAutomation.focusFreeInputEnabled = false }
+        let zoneRef = try currentRef()
+        guard let originalZone = f.runtime.document.zones.first(where:{$0.zoneId == f.zoneB}) else { throw WorkspaceAPIChecks.Failure(message:"missing driven zone") }
+        var automaticZone = originalZone
+        automaticZone.hydrationPolicy = .automatic
+        try f.runtime.commitZonePlacement(automaticZone)
+        var zoneReconciled = false
+        var zoneCharacters = 0
+        engine._afterAgentCharacterForChecks = {
+            zoneCharacters += 1
+            guard zoneCharacters == 3 else { return }
+            DispatchQueue.main.async {
+                _ = f.runtime.setActiveZone(f.zoneA,reason:.click)
+                f.canvas.setViewport(CanvasViewport(x:-10000,y:-10000,zoom:1))
+                f.runtime.flushPendingHydrationReconcile()
+                zoneReconciled = true
+            }
+        }
+        _ = try call("browser.type", ["tileId":tile,"ref":zoneRef,"text":"zone survives","clear":true])
+        let zoneValue = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('input').value"])
+        guard !borrowedDuringOrdinaryClick, zoneReconciled, !browser.isTerminated, zoneValue["value"] as? String == "zone survives" else { throw WorkspaceAPIChecks.Failure(message:"off-camera automatic zone retired input") }
+        try f.runtime.commitZonePlacement(originalZone)
+        f.runtime.flushPendingHydrationReconcile()
+        print("PASS: Tier A faked key off-camera automatic zone retains in-flight input")
+        engine._afterAgentCharacterForChecks = nil
+        if ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_RED_CONTROL"] == "workspace" { BrowserAutomation.focusFreeInputEnabled = false }
+        let switchRef = try currentRef()
+        let originalWarmCapacity = f.runtime.warmSceneCapacity
+        f.runtime.warmSceneCapacity = 0
+        defer { f.runtime.warmSceneCapacity = originalWarmCapacity }
+        var switched = false
+        var switchError: Error?
+        var characters = 0
+        let originalRuntime = browser.id
+        engine._afterAgentCharacterForChecks = {
+            characters += 1
+            guard characters == 3 else { return }
+            DispatchQueue.main.async {
+                do {
+                    _ = f.runtime.setActiveZone(f.zoneA, reason: .click)
+                    try f.runtime.switchWorkspace(to: f.workspaceWB)
+                    f.runtime.enforceBrowserRuntimeBudget()
+                    switched = true
+                } catch { switchError = error }
+            }
+        }
+        _ = try call("browser.type", ["tileId":tile,"ref":switchRef,"text":"workspace survives","clear":true])
+        if let switchError { throw switchError }
+        guard !borrowedDuringOrdinaryClick, switched, !browser.isTerminated, browser.id == originalRuntime else { throw WorkspaceAPIChecks.Failure(message:"workspace switch retired action runtime") }
+        engine._afterAgentCharacterForChecks = nil
+        let parked = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('input').value"])
+        guard parked["value"] as? String == "workspace survives" else { throw WorkspaceAPIChecks.Failure(message:"parked application value incorrect: \(parked)") }
+        _ = try call("browser.snapshot", ["tileId":tile])
+        _ = try call("browser.type", ["tileId":tile,"text":" parked"])
+        let parkedTyped = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('input').value"])
+        guard parkedTyped["value"] as? String == "workspace survives parked" else { throw WorkspaceAPIChecks.Failure(message:"parked type failed: \(parkedTyped)") }
+        let parkedPage = f.pbRoot.appendingPathComponent("parked-navigation.html")
+        try Data("<html><body><input aria-label=Field value=navigated></body></html>".utf8).write(to:parkedPage)
+        _ = try call("browser.navigate", ["tileId":tile,"url":parkedPage.absoluteString])
+        let parkedNavigation = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('input').value"])
+        let storedNavigation = try f.storePb.loadCanvas().tiles.first(where:{$0.id == browser.tileId})?.metadata.url
+        guard parkedNavigation["value"] as? String == "navigated", storedNavigation == parkedPage.absoluteString else { throw WorkspaceAPIChecks.Failure(message:"parked navigation did not reconcile page and persisted URL") }
+        try f.runtime.switchWorkspace(to:f.workspaceWA)
+        guard !browser.isTerminated, browser.id == originalRuntime else { throw WorkspaceAPIChecks.Failure(message:"remount replaced action runtime") }
+        print("PASS: Tier A faked key zone/workspace switch, parking, parked input/navigation and persisted URL retain runtime identity")
+        guard !borrowedDuringOrdinaryClick else { throw WorkspaceAPIChecks.Failure(message:"parked input/navigation borrowed responder") }
+        // This is the user's deliberate entry, outside any agent action.
+        window.responderTrace = nil
+        window.makeFirstResponder(browser.webView)
+        NSApp.sendEvent(userKey)
+        guard let handbackSurface = f.canvas.tileView(for:browser.tileId) as? BrowserTileNSView else { throw WorkspaceAPIChecks.Failure(message:"missing handback surface") }
+        handbackSurface.qaChooseAgentControl("return")
+        guard f.canvas.tileRecord(for:browser.tileId)?.metadata.browserControlPaused == false else { throw WorkspaceAPIChecks.Failure(message:"handback did not establish snapshot fence") }
+        window.makeFirstResponder(next)
+        f.canvas.markActive(tileId:f.agentTileB)
+        window.responderTrace = { responder in
+            if let view = responder as? NSView, view === browser.webView || view.isDescendant(of:browser.webView) { borrowedDuringOrdinaryClick = true }
+        }
+        try f.runtime.switchWorkspace(to:f.workspaceWB)
+        _ = try call("browser.snapshot", ["tileId":tile])
+        guard try f.storePb.loadCanvas().tiles.first(where:{$0.id == browser.tileId})?.metadata.browserControlPaused == nil else { throw WorkspaceAPIChecks.Failure(message:"parked handback snapshot did not clear persisted fence") }
+        let handbackRef = try currentRef()
+        _ = try call("browser.type", ["tileId":tile,"ref":handbackRef,"text":"handback","clear":true])
+        let handbackValue = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('input').value"])
+        guard handbackValue["value"] as? String == "handback", f.runtime.document.zones.contains(where:{$0.projectId == f.projectPc}) else { throw WorkspaceAPIChecks.Failure(message:"parked handback failed or revealed source workspace") }
+        try f.runtime.switchWorkspace(to:f.workspaceWA)
+        print("PASS: Tier A faked key handback followed by workspace switch clears its durable fence and resumes input while parked")
+        engine._afterAgentCharacterForChecks = nil
+        let extra = try call("browser.open", ["url":"about:blank"])
+        let extraID = extra["tileId"] as! String
+        _ = try call("browser.wait_for", ["tileId":extraID,"condition":"idle"])
+        guard let spare = f.runtime.liveControllers.flatMap(\.browserRuntimes).first(where:{$0.tileId.uuidString == extraID}) else { throw WorkspaceAPIChecks.Failure(message:"missing eviction spare") }
+        window.makeFirstResponder(spare.webView)
+        NSApp.sendEvent(userKey)
+        window.makeFirstResponder(next)
+        f.canvas.markActive(tileId:f.agentTileB)
+        f.runtime.qaSetBrowserRuntimeMaxLive(1)
+        defer { f.runtime.qaSetBrowserRuntimeMaxLive(6) }
+        if ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_RED_CONTROL"] == "eviction" { BrowserAutomation.focusFreeInputEnabled = false }
+        let evictionRef = try currentRef()
+        var evictionAttempted = false
+        characters = 0
+        engine._afterAgentCharacterForChecks = {
+            characters += 1
+            guard characters == 3 else { return }
+            DispatchQueue.main.async { f.runtime.enforceBrowserRuntimeBudget(); evictionAttempted = true }
+        }
+        _ = try call("browser.type", ["tileId":tile,"ref":evictionRef,"text":"eviction survives","clear":true])
+        let evictionValue = try call("browser.evaluate", ["tileId":tile,"script":"() => document.querySelector('input').value"])
+        guard !borrowedDuringOrdinaryClick, evictionAttempted, spare.isTerminated, !browser.isTerminated, browser.id == originalRuntime, evictionValue["value"] as? String == "eviction survives" else { throw WorkspaceAPIChecks.Failure(message:"budget did not evict spare and preserve leased action: spare=\(spare.isTerminated), active=\(browser.isTerminated), value=\(evictionValue)") }
+        print("PASS: Tier A faked key real budget eviction retires spare and preserves in-flight leased input")
+        engine._afterAgentCharacterForChecks = nil
+        if ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_RED_CONTROL"] == "close" { BrowserAutomation.focusFreeInputEnabled = false }
+        let closingRef = try currentRef()
+        var closed = false
+        characters = 0
+        engine._afterAgentCharacterForChecks = {
+            characters += 1
+            guard characters == 3 else { return }
+            DispatchQueue.main.async { f.delegate.deleteTile(id:browser.tileId); closed = true }
+        }
+        let closeReply = try call("browser.type", ["tileId":tile,"ref":closingRef,"text":String(repeating:"x",count:100),"clear":true], allowError:true)
+        guard !borrowedDuringOrdinaryClick, closed, browser.isTerminated, closeReply["status"] as? String == "error", engine.actionDeliveredCharacters < 100 else { throw WorkspaceAPIChecks.Failure(message:"close did not fence original input: \(closeReply)") }
+        let deliveredAtClose = engine.actionDeliveredCharacters
+        let replacement = try call("browser.open", ["url":"about:blank"])
+        let replacementID = replacement["tileId"] as! String
+        _ = try call("browser.wait_for", ["tileId":replacementID,"condition":"idle"])
+        _ = try call("browser.evaluate", ["tileId":replacementID,"script":"() => { document.body.innerHTML='<input>'; return true }"])
+        let obsolete = try call("browser.type", ["tileId":tile,"text":"LEAK"], allowError:true)
+        let replacementValue = try call("browser.evaluate", ["tileId":replacementID,"script":"() => document.querySelector('input').value"])
+        guard obsolete["status"] as? String == "error", replacementValue["value"] as? String == "", engine.actionDeliveredCharacters == deliveredAtClose else { throw WorkspaceAPIChecks.Failure(message:"closed identity leaked input into replacement") }
+        print("PASS: Tier A faked key close stops prefix input and old identity cannot target replacement")
+    }
+    if experimental {
+        guard !borrowedDuringOrdinaryClick else { throw WorkspaceAPIChecks.Failure(message: "agent type borrowed responder") }
+        if realKey {
+            guard NSApp.keyWindow === window, window.isKeyWindow else { throw WorkspaceAPIChecks.Failure(message:"Tier B lost native key state in type case") }
+            tierBPassedCases.insert("type")
+        }
+        print("PASS: \(realKey ? "Tier B real key" : "Tier A faked key") 100 agent characters, five concurrent user keys, zero transient borrow")
+    } else { print("PASS: browser focus restoration preserves another agent composer, its draft and all five user keys") }
 }
