@@ -182,6 +182,12 @@ final class BrowserAutomation {
     var _afterAgentCharacterForChecks: (() -> Void)?
     private(set) var lastUserKeyAt: Date?
     private var inputSurfaceIds: Set<ObjectIdentifier> = []
+    // Guarded active-pointer experiment only. Normal launches keep both off.
+    static var _pointerFilterForChecks = false
+    static var _atomicClicksForChecks = false
+    private static weak var activeClickEngine: BrowserAutomation?
+    private static var replayingPointerEvents: Set<ObjectIdentifier> = []
+    private var deferredUserEvents: [NSEvent] = []
     private var agentDeliveryDepth = 0
     private struct AgentInputFingerprint: Hashable {
         let type: NSEvent.EventType
@@ -803,12 +809,26 @@ final class BrowserAutomation {
         let point = webView.convert(local, to: nil)
         let responder = self.supportsFocusFreeInput ? nil : window.firstResponder
         let focusInput = self.supportsFocusFreeInput ? 0 : Self.focusInputGeneration
+        let previousClick = Self.activeClickEngine
+        Self.activeClickEngine = self
+        defer {
+            Self.activeClickEngine = previousClick
+            let events = deferredUserEvents
+            deferredUserEvents.removeAll()
+            for event in events {
+                Self.replayingPointerEvents.insert(ObjectIdentifier(event))
+                NSApp.sendEvent(event)
+                Self.replayingPointerEvents.remove(ObjectIdentifier(event))
+            }
+        }
         for clickCount in 1...count {
             let down = Self.mouseEvent(.leftMouseDown, at: point, window: window, clickCount: clickCount)
             rememberAgentInput(down)
             webView.mouseDown(with: down)
             _duringAgentClickForChecks?()
-            webView.mouseUp(with: Self.mouseEvent(.leftMouseUp, at: point, window: window, clickCount: clickCount))
+            let up = Self.mouseEvent(.leftMouseUp, at: point, window: window, clickCount: clickCount)
+            if Self._atomicClicksForChecks { rememberAgentInput(up) }
+            webView.mouseUp(with: up)
         }
         if restoreFocus && !supportsFocusFreeInput { restore(responder, in: window, inputGeneration: focusInput) }
         onAgentClick?(local)
@@ -947,14 +967,57 @@ final class BrowserAutomation {
         guard monitor == nil else { return }
         // One monitor for every engine. It sees only events that pass
         // `NSApp.sendEvent`, which an engine's own direct delivery never does.
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]) { event in
-            MainActor.assumeIsolated { BrowserAutomation.noteUserEvent(event) }
-            return event
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+            .leftMouseUp, .rightMouseUp, .otherMouseUp, .scrollWheel,
+            .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate,
+            .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]) { event in
+            let suppress = MainActor.assumeIsolated {
+                if replayingPointerEvents.contains(ObjectIdentifier(event)) { return false }
+                // WebKit can re-route an agent event through AppKit. It must
+                // never become a deferred user event and be delivered twice.
+                if consumeAgentInput(event) { return false }
+                if _pointerFilterForChecks, passivePointerTypes.contains(event.type),
+                   eventEngine(event)?.isEngaged == true { return true }
+                if _atomicClicksForChecks, let engine = activeClickEngine,
+                   event.window === engine.webView.window {
+                    noteUserEvent(event)
+                    engine.deferredUserEvents.append(event)
+                    return true
+                }
+                if !passivePointerTypes.contains(event.type),
+                   ![NSEvent.EventType.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type) {
+                    noteUserEvent(event)
+                }
+                return false
+            }
+            return suppress ? nil : event
         }
     }
 
+    private static let passivePointerTypes: Set<NSEvent.EventType> = [
+        .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate,
+        .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
+    ]
+
+    private static func eventEngine(_ event: NSEvent) -> BrowserAutomation? {
+        var view: NSView?
+        if event.type == .keyDown { view = event.window?.firstResponder as? NSView }
+        else if [.mouseEntered, .mouseExited, .cursorUpdate].contains(event.type) {
+            view = event.trackingArea?.owner as? NSView
+        }
+        if view == nil, let content = event.window?.contentView {
+            view = content.hitTest(content.superview?.convert(event.locationInWindow, from: nil) ?? event.locationInWindow)
+        }
+        while let current = view {
+            if let engine = registry[ObjectIdentifier(current)]?.engine { return engine }
+            view = current.superview
+        }
+        return nil
+    }
+
     private static func noteUserEvent(_ event: NSEvent) {
-        guard !registry.isEmpty else { return }
+        guard !registry.isEmpty, !passivePointerTypes.contains(event.type),
+              ![NSEvent.EventType.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type) else { return }
         if consumeAgentInput(event) { return }
         // Trackpads send phase/momentum boundaries with no displacement,
         // sometimes after the camera session expires. They carry no browser
@@ -993,7 +1056,7 @@ final class BrowserAutomation {
         }
         while let current = view {
             if let engine = registry[ObjectIdentifier(current)]?.engine {
-                guard engine.agentDeliveryDepth == 0 || engine.supportsFocusFreeInput else { return }
+                guard engine.agentDeliveryDepth == 0 || engine.supportsFocusFreeInput || Self._atomicClicksForChecks else { return }
                 engine.suppressionInterrupted = true
                 engine.setResponderSuppression(false)
                 engine.userInputCount += 1

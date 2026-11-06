@@ -30,7 +30,7 @@ The requested investigation is incomplete. Passive pointer filtering, atomic cli
 
 ## Follow-up investigation (2026-11-06)
 
-The broad isolation request remains incomplete. Two scroll mechanisms are proven and fixed. No passive-pointer filter or click-atomicity change remains in the final tree. No private API or default-switch change was added.
+At 829fac8a, the broad isolation request remained incomplete. Two scroll mechanisms were proven and fixed. No passive-pointer filter or click-atomicity change remained in that tree. No private API or default-switch change was added.
 
 ### Hypothesis dispositions
 
@@ -53,3 +53,8 @@ The broad isolation request remains incomplete. Two scroll mechanisms are proven
 - All final runs used unique temporary app-support/project dirs, unset ARRAY_AGENT_ID, TERM=xterm-256color, /dev/null stdin, /tmp/exc-probe/noexc and disabled tmux. No display failure was classified as a product regression. No full matrix was run. Existing matrix registrations for durable-takeover and native-select-preflight already exercise both modes.
 
 Physical-pointer coexistence, genuine tracking-area exit delivery, native tooltip lifetime, mouse drag/click interleaving within native down/up and arbitrary native-popup lifetime still require a safely isolated experiment that can actually deliver those events to WebKit. They cannot be called fixed on this evidence. Preserve this bench for continuation; no push or live-app input occurred.
+
+
+## Guarded active proof prepared (not run)
+
+See [pointer-active-launch.md](pointer-active-launch.md) for the dedicated bundle, exact one-run LaunchServices command, per-case red/green/KILLED contract, cooperative foreground restoration, watchdogs and preparation results. The candidates are check-only and default false. The inactive conclusions above remain the current behavioral evidence; no activation was performed during preparation.

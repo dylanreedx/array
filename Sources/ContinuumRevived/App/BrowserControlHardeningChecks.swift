@@ -37,15 +37,15 @@ func runBrowserControlHardeningChecks() throws {
 }
 
 @MainActor
-private final class BrowserHardeningHarness {
+final class BrowserHardeningHarness {
     let f: WorkspaceAPIChecks.Fixture
     let window: NSWindow
     var permission: WorkspaceToolsPermission = .free
 
-    init(fakedKey: Bool = false) throws {
+    init(fakedKey: Bool = false, realKey: Bool = false) throws {
         f = try WorkspaceAPIChecks.makeFixture()
         _ = f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
-        window = fakedKey ? BrowserFakedKeyCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false) : NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window = fakedKey ? BrowserFakedKeyCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false) : (realKey ? BrowserFocusCheckWindow(contentRect: f.canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false) : NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false))
         window.contentView = f.canvas
         window.orderFrontOffscreenForChecks()
         f.delegate.qaAgentSupervisor.workspaceToolsPermission = { [unowned self] in self.permission }
