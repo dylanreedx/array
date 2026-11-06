@@ -31,6 +31,20 @@ private final class BrowserRealKeyProofProgress: @unchecked Sendable {
 }
 @MainActor private var tierBPassedCases = BrowserRealKeyProofProgress()
 
+/// Written to stdout/stderr (optionally redirected before any setup).
+@MainActor
+private func tierBSetupLog(_ step: String, window: NSWindow? = nil, since: Date) {
+    let front = NSWorkspace.shared.frontmostApplication
+    if front?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+        tierBPassedCases.insert("tookForeground")
+    }
+    func describe(_ window: NSWindow?) -> String {
+        guard let window else { return "nil" }
+        return "\(type(of: window))#\(window.windowNumber)"
+    }
+    print("SETUP: \(step) elapsed=\(String(format: "%.3f", Date().timeIntervalSince(since)))s isActive=\(NSApp.isActive) activationPolicy=\(NSApp.activationPolicy().rawValue) frontmost=\(front?.localizedName ?? "nil") pid=\(front?.processIdentifier ?? -1) selfPid=\(ProcessInfo.processInfo.processIdentifier) window=\(describe(window)) isKeyWindow=\(window?.isKeyWindow.description ?? "nil") keyWindow=\(describe(NSApp.keyWindow)) canBecomeKey=\(window?.canBecomeKey.description ?? "nil")")
+}
+
 @MainActor
 func runBrowserFocusRestorationCheck(experimental: Bool = false, realKey: Bool = false) throws {
     let priorSwitch = BrowserAutomation.focusFreeInputEnabled
@@ -43,6 +57,8 @@ func runBrowserFocusRestorationCheck(experimental: Bool = false, realKey: Bool =
     let accept: @convention(block) (NSView, NSEvent?) -> Bool = { _, _ in true }
     if !realKey { method_setImplementation(method, imp_implementationWithBlock(accept)) }
     defer { if !realKey { method_setImplementation(method, original) } }
+    let setupStart = Date()
+    if realKey { tierBSetupLog("before fixture", since: setupStart) }
     let f = try WorkspaceAPIChecks.makeFixture()
     defer { f.tearDown() }
     _ = f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
@@ -54,11 +70,28 @@ func runBrowserFocusRestorationCheck(experimental: Bool = false, realKey: Bool =
     window.orderFrontOffscreenForChecks()
     defer { window.orderOut(nil) }
     if realKey {
+        tierBSetupLog("offscreen window ordered; before activate", window: window, since: setupStart)
         NSApp.activate(ignoringOtherApps: true)
-        let end = Date().addingTimeInterval(0.5)
-        while !NSApp.isActive && Date() < end { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        tierBSetupLog("activate requested", window: window, since: setupStart)
+        let activationStart = Date()
+        let end = activationStart.addingTimeInterval(1)
+        while !NSApp.isActive && Date() < end {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            tierBSetupLog("waiting for activation", window: window, since: setupStart)
+        }
+        tierBSetupLog("activation wait ended (waited \(Date().timeIntervalSince(activationStart))s)", window: window, since: setupStart)
         window.makeKey()
-        guard window.isKeyWindow, NSApp.keyWindow === window else { throw WorkspaceAPIChecks.Failure(message: "Tier B real key-window setup failed") }
+        tierBSetupLog("makeKey requested", window: window, since: setupStart)
+        let keyStart = Date()
+        let keyEnd = keyStart.addingTimeInterval(1)
+        while (!window.isKeyWindow || NSApp.keyWindow !== window) && Date() < keyEnd {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            tierBSetupLog("waiting for native key window", window: window, since: setupStart)
+        }
+        tierBSetupLog("key wait ended (waited \(Date().timeIntervalSince(keyStart))s)", window: window, since: setupStart)
+        guard NSApp.isActive, window.isKeyWindow, NSApp.keyWindow === window else {
+            throw WorkspaceAPIChecks.Failure(message: "Tier B real key-window setup failed; see SETUP diagnostics")
+        }
     }
     func call(_ op: String, _ payload: [String: Any], allowError: Bool = false) throws -> [String: Any] {
         var response: [String: Any]?
@@ -484,12 +517,34 @@ func runBrowserFocusRestorationCheck(experimental: Bool = false, realKey: Bool =
 /// Explicitly authorized, one-shot Tier B. Never a normal matrix leg.
 @MainActor
 func runBrowserFocusFreeRealKeyCheck() throws {
+    if let path = ProcessInfo.processInfo.environment["ARRAY_REAL_KEY_LOG_PATH"] {
+        let fd = Darwin.open(path, O_WRONLY | O_CREAT | O_TRUNC, mode_t(0o600))
+        guard fd >= 0 else { throw WorkspaceAPIChecks.Failure(message: "Tier B cannot open log: \(path), errno=\(errno)") }
+        guard dup2(fd, STDOUT_FILENO) >= 0, dup2(fd, STDERR_FILENO) >= 0 else {
+            close(fd)
+            throw WorkspaceAPIChecks.Failure(message: "Tier B cannot redirect log")
+        }
+        if fd > STDERR_FILENO { close(fd) }
+    }
+    setbuf(stdout, nil)
+    setbuf(stderr, nil)
     guard ProcessInfo.processInfo.environment["ARRAY_ALLOW_REAL_KEY_PROOF"] == "1" else {
         throw WorkspaceAPIChecks.Failure(message: "REFUSED: Tier B activates an offscreen check app briefly. Requires Dylan approval and ARRAY_ALLOW_REAL_KEY_PROOF=1; no activation occurred.")
     }
     setbuf(stdout, nil)
     tierBPassedCases.removeAll()
-    let previous = NSWorkspace.shared.frontmostApplication
+    // LaunchServices may foreground us before main(). The launcher captures the
+    // previous PID before open; without it, never pretend self is a restore target.
+    let priorPID = ProcessInfo.processInfo.environment["ARRAY_REAL_KEY_PREVIOUS_PID"].flatMap(Int32.init)
+    let previous = priorPID.flatMap { NSRunningApplication(processIdentifier: $0) }
+        ?? NSWorkspace.shared.frontmostApplication.flatMap {
+            $0.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : $0
+        }
+    guard let previous, previous.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+        throw WorkspaceAPIChecks.Failure(message: "Tier B requires an external previous-frontmost PID; pass ARRAY_REAL_KEY_PREVIOUS_PID captured before open")
+    }
+    let start = Date()
+    tierBSetupLog("entry; restore target=\(previous.localizedName ?? "nil") pid=\(previous.processIdentifier)", since: start)
     let progress = tierBPassedCases
     // POSIX exit is independent of the main queue and of the restoration IPC.
     let previousAlarmHandler = signal(SIGALRM) { _ in Darwin._exit(1) }
@@ -500,26 +555,41 @@ func runBrowserFocusFreeRealKeyCheck() throws {
     watchdog.setEventHandler {
         for name in ["numeric", "click", "type"] where !progress.contains(name) { fputs("FAIL: Tier B \(name): hard timeout\n", stderr) }
         fputs("FAIL: Tier B hard timeout (28s); returning previous app and exiting\n", stderr)
-        _ = previous?.activate(options: [.activateIgnoringOtherApps])
+        if progress.contains("tookForeground") || NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+            _ = previous.activate(options: [.activateIgnoringOtherApps])
+            let end = Date().addingTimeInterval(0.5)
+            while NSWorkspace.shared.frontmostApplication?.processIdentifier != previous.processIdentifier, Date() < end { Thread.sleep(forTimeInterval: 0.01) }
+            fputs(NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier
+                ? "PASS: Tier B watchdog returned previous frontmost app\n"
+                : "FAIL: Tier B watchdog could not confirm restoration\n", stderr)
+        } else {
+            fputs("INFO: Tier B never took foreground; no restoration needed\n", stderr)
+        }
         Darwin._exit(1)
     }
     watchdog.resume()
     defer { watchdog.cancel() }
-    NSApp.setActivationPolicy(.accessory)
+    let policyAccepted = NSApp.setActivationPolicy(.regular)
+    tierBSetupLog("regular policy requested accepted=\(policyAccepted); before finishLaunching", since: start)
     NSApp.finishLaunching()
+    tierBSetupLog("after finishLaunching", since: start)
     var failure: Error?
     do { try runBrowserFocusRestorationCheck(experimental: true, realKey: true) }
     catch {
         for name in ["numeric", "click", "type"] where !tierBPassedCases.contains(name) { print("FAIL: Tier B \(name): \(error)") }
         failure = error
     }
-    if let previous {
+    tierBSetupLog("before restoration", since: start)
+    if !progress.contains("tookForeground") && NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier {
+        print("INFO: Tier B never took foreground; no restoration needed")
+    } else {
         let requested = previous.activate(options: [.activateIgnoringOtherApps])
         let end = Date().addingTimeInterval(0.5)
         while NSWorkspace.shared.frontmostApplication?.processIdentifier != previous.processIdentifier, Date() < end {
             _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
-        guard requested, NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier else {
+        tierBSetupLog("restoration requested=\(requested); wait ended", since: start)
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier else {
             throw WorkspaceAPIChecks.Failure(message: "Tier B could not confirm restoration of the previous frontmost app")
         }
         print("PASS: Tier B returned previous frontmost app")
