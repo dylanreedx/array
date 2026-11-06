@@ -1006,7 +1006,7 @@ final class CanvasNSView: NSView, TokenThemed {
             let zoom = navigationViewport.zoom.isFinite && navigationViewport.zoom > 0 ? navigationViewport.zoom : 1
             let view = TileFrame(x: navigationViewport.x, y: navigationViewport.y,
                                  width: Double(bounds.width) / zoom, height: Double(bounds.height) / zoom)
-            applyAutoLayout(.settle(zoneId: id, anchor: anchor, pin: false, grow: anchor != nil, view: view),
+            applyAutoLayout(.settle(zoneId: id, anchor: anchor, pin: anchor != nil, grow: anchor != nil, view: view),
                             baseline: autoLayoutScene())
             if anchor != nil, let before = liveZones.first(where: { $0.zoneId == id }) {
                 expandZoneToContainMembers(id, roundingWhenInexact: true)

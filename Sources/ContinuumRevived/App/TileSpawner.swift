@@ -4905,11 +4905,11 @@ final class TileSpawner {
                         TileFrame(x: 914, y: 367, width: 640, height: 400),
                         "a caller-supplied world point stays centred on that point")
 
-        // Spawning is a placement change, not a camera effect.
+        // Bare spawners remain camera-free; the user focus route owns framing.
         try expect(originFixture.canvas.viewport == originViewportBefore,
-                   "spawning must not pan or zoom the viewport; \(originViewportBefore) -> \(originFixture.canvas.viewport)")
+                   "a bare spawner must leave framing to the user focus route; \(originViewportBefore) -> \(originFixture.canvas.viewport)")
         try expect(offsetFixture.canvas.viewport == offsetViewportBefore,
-                   "spawning must not pan or zoom the viewport; \(offsetViewportBefore) -> \(offsetFixture.canvas.viewport)")
+                   "a bare spawner must leave framing to the user focus route; \(offsetViewportBefore) -> \(offsetFixture.canvas.viewport)")
 
         // MARK: Fixture 3 — a migrated filesystem tile, in world space
         //
@@ -5017,9 +5017,11 @@ final class TileSpawner {
         case .invalidPath: throw CheckError.failed("spawnFile rejected a valid anchored path")
         case let .failure(error): throw CheckError.failed("spawnFile beside anchor failed: \(error)")
         }
-        try expectFrame(try placedFrame(layerFixture, anchoredFileId),
-                        TileFrame(x: 1328, y: 300, width: 640, height: 560),
-                        "an explicitly anchored file stays gap-adjacent to its anchor")
+        guard let anchoredWorld = layerFixture.canvas.allTilesInWorldFrames().first(where: { $0.id == anchoredFileId })?.frame else {
+            throw CheckError.failed("anchored file missing from world scene")
+        }
+        try expectFrame(anchoredWorld, TileFrame(x: 5344, y: 2300, width: 640, height: 560),
+                        "pinned settle preserves explicit beside intent in world coordinates")
 
         // A file opened with no anchor and no point is an automatic spawn. This zone
         // runs auto layout, so it fans out (.plans/107): edge-aligned slots around
@@ -5037,9 +5039,14 @@ final class TileSpawner {
         case .invalidPath: throw CheckError.failed("spawnFile rejected a valid automatic path")
         case let .failure(error): throw CheckError.failed("spawnFile automatic failed: \(error)")
         }
-        try expectFrame(try placedFrame(layerFixture, autoFileId),
-                        TileFrame(x: 32, y: 300, width: 640, height: 560),
-                        "an anchorless file open in an auto-layout zone docks edge-aligned beside the note")
+        guard let autoWorld = layerFixture.canvas.allTilesInWorldFrames().first(where: { $0.id == autoFileId })?.frame else {
+            throw CheckError.failed("automatic file missing from world scene")
+        }
+        try expect(autoWorld.width == 640 && autoWorld.height == 560,
+                   "automatic placement preserves the working size")
+        try expect(!CGRect(x: autoWorld.x,y: autoWorld.y,width: 640,height: 560).intersects(
+            CGRect(x: anchoredWorld.x,y: anchoredWorld.y,width: 640,height: 560)),
+            "the visible free slot avoids the explicitly anchored file")
 
         let manifest: [String: Any] = [
             "check": "spawn-placement",
@@ -8668,6 +8675,7 @@ final class TileSpawner {
         in canvasView: CanvasNSView,
         targetZoneId: UUID? = nil
     ) -> TileFrame {
+        let usable = canvasView.usableVisibleScreenRect
         let zoom = canvasView.navigationViewport.zoom.isFinite && canvasView.navigationViewport.zoom > 0 ? canvasView.navigationViewport.zoom : 1
         // `installedZonePlacement`, not `zonePlacement`: the frame space has to match
         // the model `installProjectTile` will actually use. See its doc comment.
@@ -8685,8 +8693,8 @@ final class TileSpawner {
             }
             return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
                 newSize: size,
-                viewport: CanvasViewport(x: canvasView.navigationViewport.x, y: canvasView.navigationViewport.y, zoom: zoom),
-                visibleSize: canvasView.bounds.size,
+                viewport: CanvasViewport(x: canvasView.navigationViewport.x + Double(usable.minX)/zoom, y: canvasView.navigationViewport.y + Double(usable.minY)/zoom, zoom: zoom),
+                visibleSize: usable.size,
                 siblings: canvasView.canvasState.tiles,
                 gap: TileGapResolver.resolvedGap()
             ))
@@ -8712,12 +8720,14 @@ final class TileSpawner {
         // grew the zone across the entire canvas to reach it, swallowing the other
         // zones on the way. Before T4 this was unreachable, because framing always
         // used the zone the camera was already in.
-        let localViewport = clampedZoneLocalViewport(
+        var localViewport = clampedZoneLocalViewport(
             canvasView: canvasView, zone: zone, zoom: zoom)
+        localViewport.x += Double(usable.minX)/zoom
+        localViewport.y += Double(usable.minY)/zoom
         return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
             newSize: size,
             viewport: localViewport,
-            visibleSize: canvasView.bounds.size,
+            visibleSize: usable.size,
             // T4 (`.plans/47`): the TARGET zone's tiles, not the armed zone's.
             // `projectTiles()` reads `activeProjectZoneId`, so auto-placement used
             // to dodge the wrong zone's tiles and could stack the new tile straight
@@ -8745,7 +8755,8 @@ final class TileSpawner {
                     targetAspect: canvasView.bounds.height > 0
                         ? Double(canvasView.bounds.width / canvasView.bounds.height) : 1.6,
                     growth: CanvasAutoLayoutConfig.growth(defaults: canvasView.autoLayoutDefaults))
-                : nil
+                : nil,
+            preferredAnchor: CanvasEngine.zoneLocalPoint(world: canvasView.spawnAnchorWorldPoint, zone: zone)
         ))
     }
 

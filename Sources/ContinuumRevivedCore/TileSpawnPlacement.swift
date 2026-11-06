@@ -42,6 +42,7 @@ public enum TileSpawnPlacement {
         /// tile under the camera, choosing by the zone's shape. `nil` keeps the
         /// .plans/18 policy everywhere else.
         public var fanOut: FanOut?
+        public var preferredAnchor: CGPoint? = nil
 
         public init(
             newSize: CGSize,
@@ -50,7 +51,8 @@ public enum TileSpawnPlacement {
             siblings: [Tile],
             gap: Double,
             bounds: CGRect? = nil,
-            fanOut: FanOut? = nil
+            fanOut: FanOut? = nil,
+            preferredAnchor: CGPoint? = nil
         ) {
             self.newSize = newSize
             self.viewport = viewport
@@ -59,6 +61,7 @@ public enum TileSpawnPlacement {
             self.gap = gap
             self.bounds = bounds
             self.fanOut = fanOut
+            self.preferredAnchor = preferredAnchor
         }
     }
 
@@ -144,8 +147,20 @@ public enum TileSpawnPlacement {
             return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
         }
 
+        if let anchor = context.preferredAnchor,
+           context.fanOut == nil || obstacles.contains(where: { $0.intersects(viewportRect) }),
+           let placed = nearestVisibleSlot(size: size, anchor: anchor, visible: viewportRect,
+                                           bounds: bounds, obstacles: obstacles, gap: gap) {
+            return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
+        }
         if let fanOut = context.fanOut,
            let placed = fanOutPlacement(fanOut, size: size, viewport: viewportRect, obstacles: obstacles, gap: gap) {
+            return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
+        }
+
+        if let anchor = context.preferredAnchor,
+           let placed = nearestVisibleSlot(size: size, anchor: anchor, visible: viewportRect,
+                                           bounds: bounds, obstacles: obstacles, gap: gap) {
             return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
         }
 
@@ -176,6 +191,25 @@ public enum TileSpawnPlacement {
             return TileFrame(x: centre.x - size.width / 2, y: centre.y - size.height / 2, width: size.width, height: size.height)
         }
         return TileFrame(x: chosen.rect.minX, y: chosen.rect.minY, width: size.width, height: size.height)
+    }
+
+    public static func nearestVisibleSlot(size: CGSize, anchor: CGPoint, visible: CGRect,
+                                          bounds: CGRect?, obstacles: [CGRect], gap: Double) -> CGRect? {
+        let area = bounds.map { visible.intersection($0) } ?? visible
+        guard !area.isNull, area.width >= size.width, area.height >= size.height else { return nil }
+        let slotGap = CGFloat(gap)
+        let xs: [CGFloat] = [anchor.x-size.width/2, area.minX, area.maxX-size.width]
+            + obstacles.flatMap { [$0.maxX+slotGap, $0.minX-slotGap-size.width] }
+        let ys: [CGFloat] = [anchor.y-size.height/2, area.minY, area.maxY-size.height]
+            + obstacles.flatMap { [$0.maxY+slotGap, $0.minY-slotGap-size.height] }
+        var best: CGRect?
+        for x in xs { for y in ys {
+            let rect = CGRect(x: min(max(x, area.minX), area.maxX-size.width),
+                              y: min(max(y, area.minY), area.maxY-size.height), width: size.width, height: size.height)
+            guard !obstacles.contains(where: { $0.intersects(rect.insetBy(dx: -gap/2, dy: -gap/2)) }) else { continue }
+            if best == nil || hypot(rect.midX-anchor.x, rect.midY-anchor.y) < hypot(best!.midX-anchor.x, best!.midY-anchor.y) { best = rect }
+        } }
+        return best
     }
 
     // MARK: - Fan out

@@ -5884,6 +5884,19 @@ do {
     expect(viewportRect.intersects(CGRect(x: placed.x, y: placed.y, width: placed.width, height: placed.height)), "Fallback from far-away last tile is clamped into visible viewport, got \(placed)")
 }
 
+// Spawn free-slot contract: hand-computed centre and bounds, plus occupied centre.
+do {
+    let area = CGRect(x: 100, y: 200, width: 800, height: 600)
+    let size = CGSize(width: 200, height: 100)
+    let centre = CGPoint(x: 500, y: 500)
+    let empty = TileSpawnPlacement.nearestVisibleSlot(size: size, anchor: centre, visible: area, bounds: nil, obstacles: [], gap: 8)
+    expect(empty == CGRect(x: 400, y: 450, width: 200, height: 100), "spawn free slot centres on the chosen anchor")
+    let blocker = CGRect(x: 400, y: 450, width: 200, height: 100)
+    let free = TileSpawnPlacement.nearestVisibleSlot(size: size, anchor: centre, visible: area, bounds: nil, obstacles: [blocker], gap: 8)
+    expect(free != nil && area.contains(free!) && !blocker.intersects(free!), "spawn free slot stays visible and avoids the focused tile")
+    expect(TileSpawnPlacement.nearestVisibleSlot(size: size, anchor: centre, visible: area, bounds: CGRect(x: 0,y: 0,width: 50,height: 50), obstacles: [], gap: 8) == nil, "no fitting zone intersection produces no visible slot")
+}
+
 // MARK: - TileSpawnPlacement: centre-aware spawn placement (.plans/18)
 //
 // Pure geometry only. Every expectation is written out by hand from the fixture
