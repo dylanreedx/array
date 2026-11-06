@@ -6285,7 +6285,7 @@ final class CanvasNSView: NSView, TokenThemed {
         guard let snapshot = navigationTileSnapshot(for: tileId) else { return nil }
         let frame = snapshot.worldFrame
         let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
-        return CameraFraming.revealWorkViewport(for: rect, kind: snapshot.kind, currentViewport: canvasState.viewport, viewportSize: bounds.size)
+        return CameraFraming.revealWorkViewport(for: rect, kind: snapshot.kind, currentViewport: navigationViewport, viewportSize: bounds.size)
     }
 
     /// Frames the tile as a readable jump target. This first T07 slice snaps to

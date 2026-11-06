@@ -4827,6 +4827,17 @@ final class TileSpawner {
             return tile.frame
         }
 
+        // A spawn during a camera flight belongs at the destination, rather than
+        // the transient position at the time the command was handled.
+        let flightFixture = try makeFixture(name: "flight", zoneOrigin: ZonePoint(x: 0, y: 0), viewport: CanvasViewport(x: 0, y: 0, zoom: 1))
+        flightFixture.canvas.navigationFlightOverrideForQA = true
+        flightFixture.canvas.navigateViewport(to: CanvasViewport(x: 900, y: 400, zoom: 1))
+        let destination = flightFixture.canvas.navigationViewport
+        let flightNote = try spawnNote(flightFixture, "Flight destination")
+        try expectFrame(try placedFrame(flightFixture, flightNote),
+                        TileFrame(x: destination.x + 580, y: destination.y + 250, width: 640, height: 400),
+                        "a spawn during flight uses the camera destination")
+
         // MARK: Fixture 1 — flat canvas, zone at the world origin
         //
         // Viewport (0,0) over an 1800x900 canvas: the world centre is (900,450), so a
@@ -8657,7 +8668,7 @@ final class TileSpawner {
         in canvasView: CanvasNSView,
         targetZoneId: UUID? = nil
     ) -> TileFrame {
-        let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
+        let zoom = canvasView.navigationViewport.zoom.isFinite && canvasView.navigationViewport.zoom > 0 ? canvasView.navigationViewport.zoom : 1
         // `installedZonePlacement`, not `zonePlacement`: the frame space has to match
         // the model `installProjectTile` will actually use. See its doc comment.
         let targetZone = targetZoneId.flatMap { canvasView.installedZonePlacement(for: $0) }
@@ -8674,7 +8685,7 @@ final class TileSpawner {
             }
             return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
                 newSize: size,
-                viewport: CanvasViewport(x: canvasView.viewport.x, y: canvasView.viewport.y, zoom: zoom),
+                viewport: CanvasViewport(x: canvasView.navigationViewport.x, y: canvasView.navigationViewport.y, zoom: zoom),
                 visibleSize: canvasView.bounds.size,
                 siblings: canvasView.canvasState.tiles,
                 gap: TileGapResolver.resolvedGap()
@@ -8762,8 +8773,8 @@ final class TileSpawner {
         zone: ZonePlacement,
         zoom: Double
     ) -> CanvasViewport {
-        let localX = canvasView.viewport.x - zone.origin.x
-        let localY = canvasView.viewport.y - zone.origin.y
+        let localX = canvasView.navigationViewport.x - zone.origin.x
+        let localY = canvasView.navigationViewport.y - zone.origin.y
         let visibleWidth = Double(canvasView.bounds.width) / zoom
         let visibleHeight = Double(canvasView.bounds.height) / zoom
         let overlaps = localX < zone.size.width && localX + visibleWidth > 0
