@@ -138,23 +138,23 @@ public enum TileSpawnPlacement {
         let obstacles = context.siblings.map { rect(for: $0.frame) }.filter { $0.width > 0 && $0.height > 0 }
         let bounds = context.bounds.flatMap(sanitizedBounds)
 
+        // Auto-layout owns the cluster shape. A nearest-slot shortcut here
+        // bypassed growth/shape ranking whenever a host was visible, so a camera
+        // following each new tile grew one column. Focus is only the fan-out's
+        // final distance tie-break; framing reveals the selected docked slot.
+        if var fanOut = context.fanOut {
+            fanOut.focus = fanOut.focus ?? context.preferredAnchor
+            if let placed = fanOutPlacement(fanOut, size: size, viewport: viewportRect, obstacles: obstacles, gap: gap) {
+                return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
+            }
+        }
+
         // A tile bigger than the viewport keeps its working size: centre the axis that
         // fits, and use a stable padded origin on an axis that cannot.
         if size.width > viewportRect.width || size.height > viewportRect.height {
             let x = size.width > viewportRect.width ? viewportRect.minX + gap : centre.x - size.width / 2
             let y = size.height > viewportRect.height ? viewportRect.minY + gap : centre.y - size.height / 2
             let placed = contained(CGRect(x: x, y: y, width: size.width, height: size.height), in: bounds)
-            return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
-        }
-
-        if let anchor = context.preferredAnchor,
-           context.fanOut == nil || obstacles.contains(where: { $0.intersects(viewportRect) }),
-           let placed = nearestVisibleSlot(size: size, anchor: anchor, visible: viewportRect,
-                                           bounds: bounds, obstacles: obstacles, gap: gap) {
-            return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
-        }
-        if let fanOut = context.fanOut,
-           let placed = fanOutPlacement(fanOut, size: size, viewport: viewportRect, obstacles: obstacles, gap: gap) {
             return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
         }
 

@@ -6,6 +6,22 @@ enum SpawnFramingChecks {
     struct Failure: Error { let message: String }
     private final class Window: NSWindow { override var canBecomeKey: Bool { true } }
     static func run() throws {
+        // Hand-computed competing slots: below is nearer the focused host, but
+        // right gives the screen-shaped envelope (1288x520 vs 640x1048).
+        // A preferred anchor must never bypass the requested fan-out policy.
+        let host = TileFrame(x: 0, y: 0, width: 640, height: 520)
+        let sibling = Tile(id: UUID(), kind: .note, title: "host", frame: host,
+                           zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+        for (growth, wanted) in [(CanvasGrowthDirection.fan, TileFrame(x: 648,y: 0,width: 640,height: 520)),
+                                  (.right, TileFrame(x: 648,y: 0,width: 640,height: 520)),
+                                  (.down, TileFrame(x: 0,y: 528,width: 640,height: 520))] {
+            let placed = TileSpawnPlacement.automatic(.init(newSize: CGSize(width: 640,height: 520),
+                viewport: CanvasViewport(x: -1000,y: -1000,zoom: 1), visibleSize: CGSize(width: 3000,height: 2500),
+                siblings: [sibling], gap: 8, fanOut: .init(hosts: [host], targetAspect: 1.6, growth: growth),
+                preferredAnchor: CGPoint(x: 320,y: 260)))
+            guard placed == wanted else { throw Failure(message: "focused fan-out \(growth): expected \(wanted), got \(placed)") }
+        }
+
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: AgentCatalogQAFixture.pi))
         let unpin = AgentCatalogQAFixture.pinAmbientSelection(harness: .pi, model: AgentCatalogQAFixture.pi[0])
         defer { unpin(); AgentModelCatalog.shared.resetForQA() }
