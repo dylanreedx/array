@@ -50,7 +50,7 @@ func runAgentCharacterThemeChecks() {
     ]
     expect(AgentCharacterBundled.builtInIDs == ["ducks-classic"] + packs.map(\.id),
            "the built-in ids, ducks first: \(AgentCharacterBundled.builtInIDs)")
-    let builtIns = AgentCharacterBundled.themes()
+    let builtIns = AgentCharacterBundled.builtInIDs.compactMap(AgentCharacterBundled.theme(id:))
     expect(builtIns.map(\.id) == AgentCharacterBundled.builtInIDs,
            "every built-in set loads: \(builtIns.map(\.id))")
     expect(Set(builtIns.map { $0.title.lowercased() }).count == builtIns.count, "built-in titles are distinct")
@@ -99,7 +99,33 @@ func runAgentCharacterThemeChecks() {
             }
         }
     }
-    // Core, which iOS links, holds no pack.
+    // What the picker reads instead of a pack: the manifest and each pack's card.
+    // Neither may drift from the pack, and Core, which iOS links, holds no pack.
+    expect(AgentCharacterBundled.summaries().map(\.id) == AgentCharacterBundled.builtInIDs,
+           "the manifest lists every built-in set in order: \(AgentCharacterBundled.summaries().map(\.id))")
+    for summary in AgentCharacterBundled.summaries() {
+        let theme = AgentCharacterBundled.theme(id: summary.id)
+        expect(theme?.title == summary.title && theme?.characters.count == summary.characters,
+               "\(summary.id): the manifest says \(summary.title), \(summary.characters); the set says \(theme?.title ?? "nil"), \(theme?.characters.count ?? 0). Run scripts/make-character-pack-cards.py")
+    }
+    for pack in packs {
+        guard let theme = AgentCharacterBundled.theme(id: pack.id), let card = AgentCharacterBundled.cardTheme(id: pack.id),
+              let cardFile = AgentCharacterBundled.packFolderURL(id: pack.id)?.appendingPathComponent("card.json"),
+              let cardBytes = (try? FileManager.default.attributesOfItem(atPath: cardFile.path)[.size] as? NSNumber)?.intValue else {
+            expect(false, "\(pack.id): no card")
+            return
+        }
+        expect(cardBytes <= 256 * 1024, "\(pack.id): a card stays small, got \(cardBytes) bytes")
+        expect(card.title == theme.title && card.palette == theme.palette && card.characters.count == 2,
+               "\(pack.id): the card is the set's title, palette and first two characters")
+        for (loop, (drawn, source)) in zip([AgentCharacterLoop.type, .read], zip(card.characters, theme.characters)) {
+            expect(drawn.name == source.name && drawn.colours == source.colours && drawn.loops[loop] == source.loops[loop]
+                   && drawn.frame(of: .clip(.idle)) == source.frame(of: .clip(.idle)),
+                   "\(pack.id): \(drawn.name) on its card matches the pack. Run scripts/make-character-pack-cards.py")
+        }
+        expect(card.lead?.levels.first == theme.lead?.levels.first && card.lead?.rest.first == theme.lead?.rest.first,
+               "\(pack.id): the card's lead matches the pack")
+    }
     if let core = AgentCharacterBundled.folderURL() {
         expect(!FileManager.default.fileExists(atPath: core.appendingPathComponent("packs").path),
                "Core's resources hold no pack: the iOS app bundles them")
@@ -262,7 +288,7 @@ func runAgentCharacterThemeChecks() {
         expect(false, "the built-in set has a Pekin")
     }
     let duckherd = runDuckherdShapedThemeChecks(expect)
-    print("Agent character theme checks passed: built-in set (8 x 105 frames), \(packs.count) built-in packs with every sound resolving, built-in ids reserved, \(accepted) accepted + \(rejected) rejected corpus files match the reference (1 widened to 16 helpers), \(atlasChecks) atlas pixels; \(duckherd)")
+    print("Agent character theme checks passed: built-in set (8 x 105 frames), \(packs.count) built-in packs with every sound resolving, cards and manifest matching their packs, built-in ids reserved, \(accepted) accepted + \(rejected) rejected corpus files match the reference (1 widened to 16 helpers), \(atlasChecks) atlas pixels; \(duckherd)")
 }
 
 /// Plan 110 › "Duckherd themes as they ship": a set shaped like the ones Duckherd

@@ -72,23 +72,11 @@ enum CharacterSettingsChecks {
         try expect(model.selectedID == "pond" && defaults.string(forKey: AgentCharacterConfig.themeKey) == "pond",
                    "importing selects the new set")
         try expect(controller.theme?.id == "pond", "the app now draws the imported set (\(controller.theme?.id ?? "nil"))")
-        try expect(model.choiceItems.map(\.id) == AgentCharacterBundled.builtInIDs + ["pond", AgentCharacterSettingsModel.importItemID],
-                   "the picker offers the built-in sets, the import, and Import…: \(model.choiceItems.map(\.id))")
-
-        // A built-in pack: chosen like any set, drawn, and speaking from its own folder.
-        for id in AgentCharacterBundled.packIDs {
-            model.select(id: id)
-            try expect(controller.theme?.id == id, "choosing \(id) draws it (\(controller.theme?.id ?? "nil"))")
-            try expect(model.previewTheme?.id == id, "the preview shows \(id)")
-            let speaker = AgentCharacterSoundCenter.productionSpeaker(records: { _ in nil })(UUID())
-            try expect(speaker?.themeFolder != nil && speaker?.themeFolder == AgentCharacterBundled.packFolderURL(id: id),
-                       "\(id) speaks from its folder in the app: \(String(describing: speaker))")
-            try expect(speaker?.characterName.map { name in controller.theme?.characters.contains { $0.name == name } == true } == true,
-                       "\(id): the speaker is one of its characters")
-        }
-        model.refresh()
-        try expect(model.selectedID == AgentCharacterBundled.packIDs.last, "a selected built-in pack survives a refresh")
-        model.select(id: "pond")
+        try expect(model.cards.map(\.id) == AgentCharacterBundled.builtInIDs + ["pond"],
+                   "the picker offers the built-in sets, then the import: \(model.cards.map(\.id))")
+        try expect(model.cards.map(\.detail) == ["8 characters", "12 characters", "12 characters", "14 characters",
+                                                 "12 characters", "2 characters · imported"],
+                   "each card says how many characters, with no set parsed: \(model.cards.map(\.detail))")
 
         // A bad file: its problems, word for word, and nothing new on disk.
         let before = try fm.contentsOfDirectory(atPath: imports.path).sorted()
@@ -97,87 +85,134 @@ enum CharacterSettingsChecks {
         try expect(try fm.contentsOfDirectory(atPath: imports.path).sorted() == before, "a bad file imports nothing")
         try expect(controller.theme?.id == "pond", "a bad import changes nothing")
 
-        // Back to the built-in set for the render.
-        model.select(id: AgentCharacterBundled.themeID)
-        try expect(controller.theme?.id == AgentCharacterBundled.themeID, "choosing the built-in set switches back")
-
-        // The real Settings rows of this group, in both appearances.
-        let settings = SettingsModel(defaults: defaults, navKeymap: .default)
-        guard let group = settings.sections.first(where: { $0.id == "appearance" })?.groups
-            .first(where: { $0.id == "appearance.agentCharacters" }) else {
-            throw Failure(description: "Settings › Appearance has no Agent characters group")
-        }
+        // The real page, in the real modal, on the real event path.
+        var stills = 0
+        var moving = 0
+        let parsesBefore = AgentCharacterBundled.parseCount
         let out = URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("qa-runs/agent-characters", isDirectory: true)
         try? fm.createDirectory(at: out, withIntermediateDirectories: true)
-        var grids = 0
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-            let host = NSHostingView(rootView: Form {
-                Section(group.title ?? "") {
-                    ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
-                        SettingsFieldRow(model: settings, row: row)
-                    }
-                }
-            }.formStyle(.grouped))
-            host.frame = NSRect(x: 0, y: 0, width: 720, height: 980)
-            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-            window.appearance = NSAppearance(named: appearance)
-            window.contentView = host
-            window.orderFrontOffscreenForChecks()
-            defer { window.orderOut(nil) }
-            host.layoutSubtreeIfNeeded()
-            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
-            guard let grid = find(AgentCharacterPreviewGridView.self, in: host) else {
-                throw Failure(description: "\(appearance.rawValue): the preview grid did not render")
+            let label = appearance == .aqua ? "light" : "dark"
+            let settings = SettingsModel(defaults: defaults, navKeymap: .default)
+            let fixture = SettingsFixtureWindow(model: settings, size: NSSize(width: 1_100, height: 1_100),
+                                                appearance: NSAppearance(named: appearance))
+            defer { fixture.tearDown() }
+            fixture.show(paneID: "agentCharacters")
+            let arts = try awaitCards(count: 6, in: fixture)
+            let parses = AgentCharacterBundled.parseCount
+            try expect(parses == parsesBefore, "\(label): opening the page and drawing every card parsed a whole pack: \(parsesBefore) -> \(parses)")
+            for (id, art) in arts {
+                try expect(art.sprites.count == 3 && art.sprites.allSatisfy { $0.contents != nil },
+                           "\(label) \(id): the card draws a lead and two helpers, got \(art.sprites.count)")
+                try expect(art.sprites.allSatisfy(\.isAnimating), "\(label) \(id): a card in view moves")
             }
-            try expect(grid.sprites.count == 8 * AgentCharacterPreviewGridView.columns.count, "8 characters x every state")
-            try expect(grid.sprites.filter(\.isAnimating).count == 8 * 7, "the moving states animate in the preview")
-            try SidebarCharacterChecks.capture(window, to: out.appendingPathComponent(
-                "settings-\(appearance == .aqua ? "light" : "dark").png"))
+            let pane = try FoundCharacterThemesChecks.pane(fixture)
+            try SidebarCharacterChecks.capture(fixture.window, to: out.appendingPathComponent("page-\(label).png"))
+            stills += 1
+
+            // Scrolled out of view, a card holds still and costs the render server
+            // nothing; back in view, it moves again.
+            let clip = pane.contentView
+            let top = clip.bounds.origin
+            let end = (pane.documentView?.bounds.height ?? 0) - clip.bounds.height
+            try expect(end > 0, "\(label): the page scrolls")
+            clip.scroll(to: NSPoint(x: top.x, y: end))
+            pane.reflectScrolledClipView(clip)
+            fixture.settle(0.3)
+            let hidden = fixture.descendants(AgentCharacterCardArtView.self).filter { $0.visibleRect.isEmpty }
+            try expect(!hidden.isEmpty, "\(label): scrolling to the end takes cards out of view")
+            try expect(hidden.flatMap(\.sprites).allSatisfy { !$0.isAnimating },
+                       "\(label): a card out of view must not animate")
+            guard let grid = fixture.descendants(AgentCharacterPreviewGridView.self).first else {
+                throw Failure(description: "\(label): the every-state grid did not render")
+            }
+            try awaitAnimating(grid, "\(label): the every-state grid in view moves", in: fixture)
+            try expect(grid.sprites.count == 2 * AgentCharacterPreviewGridView.columns.count, "\(label): the set's characters x every state")
+            try SidebarCharacterChecks.capture(fixture.window, to: out.appendingPathComponent("page-end-\(label).png"))
+            clip.scroll(to: top)
+            pane.reflectScrolledClipView(clip)
+            fixture.settle(0.3)
+            try expect(grid.sprites.allSatisfy { !$0.isAnimating }, "\(label): the grid out of view holds still")
+            try expect(arts.values.flatMap(\.sprites).allSatisfy(\.isAnimating), "\(label): cards moved back into view move again")
+            moving += 1
+
+            // Reduce Motion stills what is on screen, and the Motion row does too.
             controller.reduceMotion = { true }
-            grid.apply()
-            try expect(grid.sprites.allSatisfy { !$0.isAnimating }, "Reduce Motion: the preview is still")
+            controller.reload(force: true)
+            fixture.settle(0.1)
+            try expect(arts.values.flatMap(\.sprites).allSatisfy { !$0.isAnimating }, "\(label): Reduce Motion stills the cards")
             controller.reduceMotion = { false }
-            grids += 1
+            controller.reload(force: true)
+            fixture.settle(0.1)
+            try expect(arts.values.flatMap(\.sprites).allSatisfy(\.isAnimating), "\(label): cards move again after Reduce Motion")
         }
 
-        // Each built-in pack in the same real rows, in both appearances: its whole
-        // preview grid renders from the app's resources.
-        let ducksGrid = AgentCharacterPreviewGridView.height(for: AgentCharacterBundled.theme()!)
-        var packGrids = 0
+        // Clicking each pack's card: the mark moves, the app draws the set, it
+        // speaks from its folder, and the parse never lands on the main thread.
+        let settings = SettingsModel(defaults: defaults, navKeymap: .default)
+        let fixture = SettingsFixtureWindow(model: settings, size: NSSize(width: 1_100, height: 1_100),
+                                            appearance: NSAppearance(named: .darkAqua))
+        defer { fixture.tearDown() }
+        fixture.show(paneID: "agentCharacters")
+        _ = try awaitCards(count: 6, in: fixture)
+        let page = settings.agentCharacters
         for id in AgentCharacterBundled.packIDs {
-            model.select(id: id)
-            guard let theme = AgentCharacterBundled.theme(id: id), controller.theme?.id == id else {
-                throw Failure(description: "\(id): the built-in pack is not the set shown")
-            }
-            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
-                let host = NSHostingView(rootView: Form {
-                    Section(group.title ?? "") {
-                        ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
-                            SettingsFieldRow(model: settings, row: row)
-                        }
-                    }
-                }.formStyle(.grouped))
-                host.frame = NSRect(x: 0, y: 0, width: 720,
-                                    height: 980 + max(0, AgentCharacterPreviewGridView.height(for: theme) - ducksGrid))
-                let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-                window.appearance = NSAppearance(named: appearance)
-                window.contentView = host
-                window.orderFrontOffscreenForChecks()
-                defer { window.orderOut(nil) }
-                host.layoutSubtreeIfNeeded()
-                RunLoop.current.run(until: Date().addingTimeInterval(0.4))
-                guard let grid = find(AgentCharacterPreviewGridView.self, in: host) else {
-                    throw Failure(description: "\(id) \(appearance.rawValue): the preview grid did not render")
-                }
-                try expect(grid.sprites.count == theme.characters.count * AgentCharacterPreviewGridView.columns.count,
-                           "\(id): \(theme.characters.count) characters x every state, got \(grid.sprites.count) sprites")
-                try SidebarCharacterChecks.capture(window, to: out.appendingPathComponent(
-                    "settings-\(id)-\(appearance == .aqua ? "light" : "dark").png"))
-                packGrids += 1
+            try FoundCharacterThemesChecks.click("ArrayAgentCharacterSet.\(id)", in: fixture)
+            try expect(page.selectedID == id, "clicking the \(id) card selects it at once")
+            try waitUntil(fixture, "choosing \(id) draws it (\(controller.theme?.id ?? "nil"))") { controller.theme?.id == id }
+            try waitUntil(fixture, "the preview shows \(id)") { page.previewTheme?.id == id }
+            try expect(defaults.string(forKey: AgentCharacterConfig.themeKey) == id, "\(id) is saved")
+            let speaker = AgentCharacterSoundCenter.productionSpeaker(records: { _ in nil })(UUID())
+            try expect(speaker?.themeFolder != nil && speaker?.themeFolder == AgentCharacterBundled.packFolderURL(id: id),
+                       "\(id) speaks from its folder in the app: \(String(describing: speaker))")
+            try expect(speaker?.characterName.map { name in controller.theme?.characters.contains { $0.name == name } == true } == true,
+                       "\(id): the speaker is one of its characters")
+            let theme = try require(AgentCharacterBundled.cachedTheme(id: id), "\(id) is parsed")
+            try waitUntil(fixture, "\(id): its whole grid renders") {
+                fixture.descendants(AgentCharacterPreviewGridView.self).first?.sprites.count
+                    == theme.characters.count * AgentCharacterPreviewGridView.columns.count
             }
         }
-        model.select(id: AgentCharacterBundled.themeID)
-        return "Character settings checks passed: discovery through a fixture home (2 files, nothing read), folder import copies one file and selects it, \(AgentCharacterBundled.packIDs.count) built-in packs chosen, drawn and speaking from their folders, a bad file shows its problems and imports nothing, \(grids) appearances rendered with the 8 x 9 preview grid animating and still under Reduce Motion, \(packGrids) built-in pack grids rendered"
+        let parses = AgentCharacterBundled.parseCount
+        try expect(parses.onMain == parsesBefore.onMain && parses.all == parsesBefore.all + AgentCharacterBundled.packIDs.count,
+                   "each pack parsed once, off the main thread: \(parsesBefore) -> \(parses)")
+        page.reload()
+        fixture.settle(0.3)
+        try expect(page.selectedID == AgentCharacterBundled.packIDs.last, "a selected built-in pack survives a reload")
+        try SidebarCharacterChecks.capture(fixture.window, to: out.appendingPathComponent("page-pack-selected-dark.png"))
+
+        // Back to the built-in set, which is parsed, so it takes effect at once.
+        page.select(id: AgentCharacterBundled.themeID)
+        try expect(controller.theme?.id == AgentCharacterBundled.themeID, "choosing the built-in set switches back")
+        return "Character settings checks passed: discovery through a fixture home (2 files, nothing read), folder import copies one file and selects it, a bad file shows its problems and imports nothing, the page opened in \(stills) appearances with 6 cards drawn and no whole pack parsed, cards and grid move only in view and still under Reduce Motion in \(moving) appearances, \(AgentCharacterBundled.packIDs.count) pack cards clicked: drawn, saved, speaking from their folders, each parsed once off the main thread"
+    }
+
+    /// Every card's art, by set id, once `count` have their pictures.
+    private static func awaitCards(count: Int, in fixture: SettingsFixtureWindow) throws -> [String: AgentCharacterCardArtView] {
+        var arts: [String: AgentCharacterCardArtView] = [:]
+        try waitUntil(fixture, "\(count) cards draw") {
+            let views = fixture.descendants(AgentCharacterCardArtView.self).filter { $0.art != nil }
+            arts = Dictionary(views.map { ($0.accessibilityIdentifier(), $0) }, uniquingKeysWith: { first, _ in first })
+            return arts.count == count
+        }
+        return arts
+    }
+
+    private static func awaitAnimating(_ grid: AgentCharacterPreviewGridView, _ what: String, in fixture: SettingsFixtureWindow) throws {
+        try waitUntil(fixture, what) { grid.sprites.filter(\.isAnimating).count == grid.sprites.count / AgentCharacterPreviewGridView.columns.count * 7 }
+    }
+
+    private static func waitUntil(_ fixture: SettingsFixtureWindow, _ what: @autoclosure () -> String, until done: () -> Bool) throws {
+        let deadline = Date().addingTimeInterval(15)
+        while !done() {
+            guard Date() < deadline else { throw Failure(description: what()) }
+            fixture.settle(0.05)
+        }
+    }
+
+    private static func require<T>(_ value: T?, _ what: String) throws -> T {
+        guard let value else { throw Failure(description: what) }
+        return value
     }
 
     static func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {

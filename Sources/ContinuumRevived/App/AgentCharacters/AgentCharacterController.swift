@@ -6,8 +6,9 @@ import ContinuumRevivedCore
 /// One character's atlas as an image every sprite of that character shares.
 ///
 /// A class so a sprite can tell "the same picture" by identity: the render server
-/// uploads one `CGImage` once, however many layers point at it.
-final class AgentCharacterSpriteAtlas {
+/// uploads one `CGImage` once, however many layers point at it. Immutable, so a
+/// picture built off the main thread can be handed to a view.
+final class AgentCharacterSpriteAtlas: @unchecked Sendable {
     let atlas: AgentCharacterAtlas
     let image: CGImage
     /// Seconds per frame of each loop, at the theme's own pace, never faster than 12 fps.

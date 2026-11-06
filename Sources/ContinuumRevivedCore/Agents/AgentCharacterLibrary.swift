@@ -33,7 +33,7 @@ public enum AgentCharacterBundled {
     }
 
     /// The other built-in sets, in the picker's order. Each ships as
-    /// `<folder>/packs/<id>/theme.json` with its sounds beside it: the layout of an
+    /// `<packs>/<id>/theme.json` with its sounds beside it: the layout of an
     /// imported user set, read by the same parser and the same sound resolver.
     public static let packIDs = ["street-sigils", "living-chords", "ascii-morph", "signal-ghosts"]
     /// Mac only: the iOS app links Core but not this bundle, so there every pack
@@ -41,6 +41,9 @@ public enum AgentCharacterBundled {
     static let packsBundleName = "continuum-revived_ContinuumRevivedCharacterPacks.bundle"
     static let packsFolder = "packs"
     static let manifestFileName = "manifest.json"
+    /// A pack's small cut of itself: a valid theme holding only what a preview
+    /// card draws. `scripts/make-character-pack-cards.py` writes it.
+    static let cardFileName = "card.json"
 
     /// Every built-in id, the ducks first. No user set may take one.
     public static var builtInIDs: [String] { [themeID] + packIDs }
@@ -67,31 +70,87 @@ public enum AgentCharacterBundled {
         return url
     }
 
+    /// What a picker says about a built-in set, known without parsing it.
+    public struct Summary: Codable, Equatable, Sendable {
+        public let id: String
+        public let title: String
+        public let characters: Int
+    }
+
+    nonisolated(unsafe) private static var cachedSummaries: [Summary]?
+
+    /// Every built-in set's summary, from one small file, read once. Only ids
+    /// that are built in, in the picker's order; empty where the packs do not ship.
+    public static func summaries() -> [Summary] {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cachedSummaries { return cachedSummaries }
+        let file = packsFolderURL()?.appendingPathComponent(manifestFileName)
+        let listed = file.flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode([Summary].self, from: $0) } ?? []
+        let ordered = builtInIDs.compactMap { id in listed.first { $0.id == id } }
+        cachedSummaries = ordered
+        return ordered
+    }
+
     nonisolated(unsafe) private static var cached: [String: AgentCharacterTheme] = [:]
     private static let lock = NSLock()
+    /// Whole built-in sets parsed so far, and how many of those on the main
+    /// thread: what a witness reads.
+    nonisolated(unsafe) private static var parses = (all: 0, onMain: 0)
+    public static var parseCount: (all: Int, onMain: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return parses
+    }
 
     /// The ducks, parsed once per process. nil only when the resource is
     /// missing or broken, which the bundle checks catch before a release.
     public static func theme() -> AgentCharacterTheme? { theme(id: themeID) }
 
-    /// The built-in set `id`, parsed once per process; nil when `id` is not a
-    /// built-in id or its resource is missing or broken.
-    public static func theme(id: String) -> AgentCharacterTheme? {
+    /// The built-in set `id` if it has been parsed; never reads a file.
+    public static func cachedTheme(id: String) -> AgentCharacterTheme? {
         lock.lock()
         defer { lock.unlock() }
-        if let theme = cached[id] { return theme }
+        return cached[id]
+    }
+
+    /// The built-in set `id`, parsed once per process; nil when `id` is not a
+    /// built-in id or its resource is missing or broken. A pack is megabytes of
+    /// JSON: anything that can wait should use `loadTheme(id:)`.
+    public static func theme(id: String) -> AgentCharacterTheme? {
+        if let theme = cachedTheme(id: id) { return theme }
         let url = id == themeID ? themeURL : packFolderURL(id: id)?.appendingPathComponent(AgentCharacterImports.fileName)
-        guard let url, let data = try? Data(contentsOf: url),
-              case let .success(theme) = AgentCharacterThemeParser.parse(data: data), theme.id == id else { return nil }
+        guard let url, let data = try? Data(contentsOf: url) else { return nil }
+        // Outside the lock: a parse must not stall a reader of another set.
+        let parsed = AgentCharacterThemeParser.parse(data: data)
+        guard case let .success(theme) = parsed, theme.id == id else { return nil }
+        let onMain = Thread.isMainThread
+        lock.lock()
+        defer { lock.unlock() }
+        parses.all += 1
+        if onMain { parses.onMain += 1 }
         cached[id] = theme
         return theme
     }
 
-    /// Every built-in set that loads, in the picker's order.
-    public static func themes() -> [AgentCharacterTheme] { builtInIDs.compactMap(theme(id:)) }
+    /// `theme(id:)` off the main thread.
+    public static func loadTheme(id: String) async -> AgentCharacterTheme? {
+        if let theme = cachedTheme(id: id) { return theme }
+        return await Task.detached(priority: .userInitiated) { theme(id: id) }.value
+    }
+
+    /// What a preview card draws for the built-in set `id`: a pack's small cut,
+    /// or the ducks, whose whole file is that small. Not cached: its owner keeps
+    /// the pictures it builds from this, not the frames.
+    public static func cardTheme(id: String) -> AgentCharacterTheme? {
+        let url = id == themeID ? themeURL : packFolderURL(id: id)?.appendingPathComponent(cardFileName)
+        guard let url, let data = try? Data(contentsOf: url),
+              case let .success(theme) = AgentCharacterThemeParser.parse(data: data), theme.id == id else { return nil }
+        return theme
+    }
 }
 
-/// Settings › Appearance › Agent characters. Off by default.
+/// Settings › Agent characters. Off by default.
 public enum AgentCharacterConfig {
     public static let enabledKey = "agentCharacters.enabled"
     public static let defaultEnabled = false

@@ -13,7 +13,7 @@ public enum SettingsSchema {
 
     public static func sections() -> [SettingsSection] {
         [
-            general(), appearance(), canvas(),
+            general(), appearance(), agentCharacters(), canvas(),
             agents(), editor(), terminal(), browser(),
             notificationsAndSounds(), keyboard(), iPhone(), advanced(),
         ]
@@ -81,8 +81,20 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: ResizeHUDConfig.enabledKey, label: "Show size while resizing", default: ResizeHUDConfig.defaultEnabled),
                             keywords: ["resize", "dimensions", "hud"]),
             ]),
-            // Plan 110: small characters beside each agent's provider mark.
-            SettingsGroup(id: "appearance.agentCharacters", title: "Agent characters", rows: [
+            SettingsGroup(id: "appearance.commandMenu", title: "Command menu", rows: [
+                SettingsRow(.choice(key: CommandCenterAppearanceConfig.glassinessKey, label: "Background", options: CommandCenterAppearanceConfig.options, default: CommandCenterAppearanceConfig.defaultGlassiness.rawValue),
+                            keywords: ["command center", "palette", "glass", "blur", "frosted", "transparency"]),
+                SettingsRow(.slider(key: CommandCenterAppearanceConfig.customOpacityKey, label: "Opacity", range: CommandCenterAppearanceConfig.customOpacityRange, default: CommandCenterAppearanceConfig.defaultCustomOpacity, visibleWhen: SettingsVisibility(key: CommandCenterAppearanceConfig.glassinessKey, equals: CommandCenterGlassiness.custom.rawValue), format: .percent),
+                            keywords: ["command center", "palette", "transparency"]),
+            ]),
+        ])
+    }
+
+    // Plan 110: small characters beside each agent's provider mark.
+    private static func agentCharacters() -> SettingsSection {
+        SettingsSection(id: "agentCharacters", title: "Agent characters", iconSystemName: "face.smiling",
+                        keywords: ["characters", "sprites", "ducks", "mascot", "symbols"], groups: [
+            SettingsGroup(id: "agentCharacters.display", title: nil, rows: [
                 SettingsRow(.toggle(key: AgentCharacterConfig.enabledKey, label: "Show agent characters",
                                     default: AgentCharacterConfig.defaultEnabled),
                             help: "A small character beside each agent's provider mark acts out what the agent is doing.",
@@ -99,14 +111,10 @@ public enum SettingsSchema {
                                     titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Size.allCases.map { ($0.rawValue, $0.title) })),
                             help: "Larger characters make the sidebar row and the agent tile's title bar taller to fit them.",
                             keywords: ["characters", "size", "scale", "bigger", "larger"]),
-                SettingsRow(.custom(id: "agentCharacters", label: "Character set"),
-                            keywords: ["characters", "theme", "import", "ducks"]),
             ]),
-            SettingsGroup(id: "appearance.commandMenu", title: "Command menu", rows: [
-                SettingsRow(.choice(key: CommandCenterAppearanceConfig.glassinessKey, label: "Background", options: CommandCenterAppearanceConfig.options, default: CommandCenterAppearanceConfig.defaultGlassiness.rawValue),
-                            keywords: ["command center", "palette", "glass", "blur", "frosted", "transparency"]),
-                SettingsRow(.slider(key: CommandCenterAppearanceConfig.customOpacityKey, label: "Opacity", range: CommandCenterAppearanceConfig.customOpacityRange, default: CommandCenterAppearanceConfig.defaultCustomOpacity, visibleWhen: SettingsVisibility(key: CommandCenterAppearanceConfig.glassinessKey, equals: CommandCenterGlassiness.custom.rawValue), format: .percent),
-                            keywords: ["command center", "palette", "transparency"]),
+            SettingsGroup(id: "agentCharacters.sets", title: "Character set", rows: [
+                SettingsRow(.custom(id: "agentCharacters", label: "Character set"),
+                            keywords: ["characters", "theme", "import", "ducks", "symbols"]),
             ]),
         ])
     }

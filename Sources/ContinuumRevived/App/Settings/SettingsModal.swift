@@ -192,6 +192,7 @@ final class SettingsModal {
         overlay.removeFromSuperview()
         self.overlay = nil
         model.hostWindow = nil
+        model.agentCharacters.releaseCardArt()
         let previous = previousResponder
         previousResponder = nil
         onClose?()

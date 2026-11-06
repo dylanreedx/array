@@ -5,10 +5,13 @@ import SwiftUI
 
 // Plan: .plans/110-agent-characters/README.md, slice 6 (§4.4, §4.5)
 //
-// Settings › Appearance › Agent characters: which set, importing a set from a
-// theme file, the problems a bad file has, theme files found on this Mac (each
-// named, stated and pictured at rest), and a preview grid of every character of
-// the chosen set in every state.
+// Settings › Agent characters: a card for each set, importing a set from a theme
+// file, the problems a bad file has, theme files found on this Mac (each named,
+// stated and pictured at rest), and a preview grid of every character of the
+// chosen set in every state.
+//
+// Opening this page parses no pack: the cards' words come from the packs'
+// manifest, and everything else is read off the main thread (see `reload()`).
 
 /// The section's state. Paths are injected so a check can point every one of
 /// them at a temp root; production uses app support and the person's home.
@@ -28,50 +31,133 @@ final class AgentCharacterSettingsModel {
     /// Sound files the last import left out, each with why ("file: reason").
     private(set) var droppedSounds: [String] = []
     private(set) var selectedID: String
+    /// The set the preview shows: the selected one, once it has loaded.
+    private(set) var previewTheme: AgentCharacterTheme?
     /// Files in the themes folder that are not valid sets right now.
     private(set) var folderProblems: [(file: URL, problems: [String])] = []
+    /// The pictures the cards draw, by set and appearance, as they arrive.
+    private(set) var cardArt: [CardArtKey: AgentCharacterCardArt] = [:]
     @ObservationIgnored private var folderObserver: NSObjectProtocol?
+    /// Only the latest pick commits; only the latest reload lands.
+    @ObservationIgnored private var selectGeneration = 0
+    @ObservationIgnored private var reloadGeneration = 0
 
     /// Checks point discovery at a fixture home; production never sets it.
     nonisolated(unsafe) static var homeOverrideForChecks: URL?
 
+    struct SetCard: Equatable, Identifiable {
+        let id: String
+        let title: String
+        let detail: String
+    }
+
+    struct CardArtKey: Hashable {
+        let id: String
+        let appearance: AgentCharacterAtlas.Appearance
+    }
+
+    /// `loadNow` false builds nothing from disk: `reload()` does, off the main
+    /// thread, when the page opens.
     init(defaults: UserDefaults, importsDirectory: URL = AgentCharacterController.shared.importsDirectory,
-         home: URL? = nil) {
+         home: URL? = nil, loadNow: Bool = true) {
         self.defaults = defaults
         self.importsDirectory = importsDirectory
         self.home = home ?? Self.homeOverrideForChecks ?? FileManager.default.homeDirectoryForCurrentUser
         selectedID = defaults.string(forKey: AgentCharacterConfig.themeKey) ?? AgentCharacterBundled.themeID
-        refresh()
+        if loadNow {
+            refresh()
+            if previewTheme == nil { previewTheme = AgentCharacterBundled.theme(id: selectedID) }
+        }
         // A set an agent adds or edits in the folder appears here live.
         folderObserver = NotificationCenter.default.addObserver(
             forName: AgentCharacterController.userThemesDidChangeNotification, object: nil, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.reload() } }
     }
 
+    /// Read the themes folder and the found files now. For the moment after an
+    /// import or a removal; the page itself uses `reload()`.
     func refresh() {
         let files = AgentCharacterImports.scan(importsDirectory)
-        imported = AgentCharacterImports.themes(in: files).sorted { $0.title < $1.title }
+        // Reads each found file to name and state it; nothing is written until
+        // the person imports one.
+        apply(files: files, found: AgentCharacterImports.describe(AgentCharacterImports.discover(home: home),
+                                                                  importsDirectory: importsDirectory))
+    }
+
+    /// `refresh()` off the main thread: found files can be megabytes each. The
+    /// controller has already parsed the themes folder, so it is not read twice.
+    func reload() {
+        reloadGeneration += 1
+        let generation = reloadGeneration
+        let directory = importsDirectory, home = home
+        let controller = AgentCharacterController.shared
+        let parsed = controller.importsDirectory == directory ? controller.userThemeFiles : nil
+        Task { [weak self] in
+            let (files, found) = await Task.detached(priority: .utility) {
+                let files = parsed ?? AgentCharacterImports.scan(directory)
+                return (files, AgentCharacterImports.describe(AgentCharacterImports.discover(home: home),
+                                                              importsDirectory: directory))
+            }.value
+            guard let self, generation == self.reloadGeneration else { return }
+            self.apply(files: files, found: found)
+            self.showSelected()
+        }
+    }
+
+    private func apply(files: [AgentCharacterImports.UserThemeFile], found: [AgentCharacterImports.FoundTheme]) {
+        let sets = AgentCharacterImports.themes(in: files).sorted { $0.title < $1.title }
+        // An edited set keeps its id: its picture has to be drawn again.
+        if sets != imported { cardArt = cardArt.filter { AgentCharacterBundled.isBuiltIn($0.key.id) } }
+        imported = sets
         folderProblems = files.compactMap { file in
             if case let .failure(problems) = file.result { return (file.url, problems.messages) }
             return nil
         }
-        // Reads each found file to name and state it; nothing is written until
-        // the person imports one.
-        found = AgentCharacterImports.describe(AgentCharacterImports.discover(home: home), importsDirectory: importsDirectory)
-        if AgentCharacterBundled.theme(id: selectedID) == nil, !imported.contains(where: { $0.id == selectedID }) {
+        self.found = found
+        if !AgentCharacterBundled.isBuiltIn(selectedID), !imported.contains(where: { $0.id == selectedID }) {
             selectedID = AgentCharacterBundled.themeID
+            previewTheme = nil
+        }
+        if let set = imported.first(where: { $0.id == selectedID }) { previewTheme = set }
+    }
+
+    /// Point the preview at the selected set, loading it off the main thread.
+    private func showSelected() {
+        guard previewTheme?.id != selectedID else { return }
+        let id = selectedID
+        Task { [weak self] in
+            let theme = await AgentCharacterBundled.loadTheme(id: id)
+            guard let self, id == self.selectedID, let theme else { return }
+            self.previewTheme = theme
         }
     }
 
-    var builtIn: AgentCharacterTheme? { AgentCharacterBundled.theme() }
-
-    /// The set the preview shows: the selected one.
-    var previewTheme: AgentCharacterTheme? {
-        AgentCharacterBundled.theme(id: selectedID) ?? imported.first { $0.id == selectedID } ?? builtIn
-    }
-
+    /// Choose a set. The choice shows at once; a built-in set that has not been
+    /// parsed yet is parsed off the main thread and then takes effect, so the
+    /// app's own synchronous read of the setting finds it ready.
     func select(id: String) {
         selectedID = id
+        selectGeneration += 1
+        if let set = imported.first(where: { $0.id == id }) ?? AgentCharacterBundled.cachedTheme(id: id) {
+            previewTheme = set
+            commitSelection(id)
+            return
+        }
+        guard AgentCharacterBundled.isBuiltIn(id) else {
+            commitSelection(id)
+            return
+        }
+        let generation = selectGeneration
+        Task { [weak self] in
+            let theme = await AgentCharacterBundled.loadTheme(id: id)
+            guard let self, generation == self.selectGeneration else { return }
+            guard let theme else { return self.select(id: AgentCharacterBundled.themeID) }
+            self.previewTheme = theme
+            self.commitSelection(id)
+        }
+    }
+
+    private func commitSelection(_ id: String) {
         if id == AgentCharacterBundled.themeID {
             defaults.removeObject(forKey: AgentCharacterConfig.themeKey)
         } else {
@@ -79,6 +165,20 @@ final class AgentCharacterSettingsModel {
         }
         SettingChangeEvent.post(SettingID(rawValue: AgentCharacterConfig.themeKey))
     }
+
+    /// Build a card's picture off the main thread. A pack draws its small cut.
+    func loadCardArt(id: String, appearance: AgentCharacterAtlas.Appearance) async {
+        let key = CardArtKey(id: id, appearance: appearance)
+        guard cardArt[key] == nil else { return }
+        let set = imported.first { $0.id == id }
+        let art = await Task.detached(priority: .utility) {
+            (set ?? AgentCharacterBundled.cardTheme(id: id)).flatMap { AgentCharacterCardArt(theme: $0, appearance: appearance) }
+        }.value
+        if let art { cardArt[key] = art }
+    }
+
+    /// Settings closed: the cards' pictures go with it.
+    func releaseCardArt() { cardArt = [:] }
 
     /// Validate and copy `url` (a file, or a folder scanned as the format scans
     /// its themes folder). A file with problems imports nothing and shows them.
@@ -133,20 +233,11 @@ final class AgentCharacterSettingsModel {
         refresh()
     }
 
-    /// The set picker's rows: the ducks, the other built-in sets, each imported
-    /// set, then Import….
-    var choiceItems: [ChoiceItem] {
-        var items = [ChoiceItem(id: AgentCharacterBundled.themeID, title: "Ducks (built in)",
-                                detail: "\(builtIn?.characters.count ?? 0) characters")]
-        items += AgentCharacterBundled.packIDs.compactMap(AgentCharacterBundled.theme(id:)).map {
-            ChoiceItem(id: $0.id, title: "\($0.title) (built in)", detail: "\($0.characters.count) characters")
-        }
-        items += imported.map { ChoiceItem(id: $0.id, title: $0.title, detail: "\($0.characters.count) characters") }
-        items.append(ChoiceItem(id: Self.importItemID, title: "Import…", icon: nil))
-        return items
+    /// The picker's cards: every built-in set, then each imported set.
+    var cards: [SetCard] {
+        AgentCharacterBundled.summaries().map { SetCard(id: $0.id, title: $0.title, detail: "\($0.characters) characters") }
+            + imported.map { SetCard(id: $0.id, title: $0.title, detail: "\($0.characters.count) characters · imported") }
     }
-
-    static let importItemID = "array.agentCharacters.import"
 
     /// A found row's button: Import, Update, Imported (disabled), or none for an
     /// invalid file, whose reason shows instead.
@@ -157,35 +248,6 @@ final class AgentCharacterSettingsModel {
         case .imported: return ("Imported", false)
         case .invalid: return nil
         }
-    }
-}
-
-/// The set picker: Array's `ChoiceButton`, hosted in the Settings form.
-private struct CharacterSetChoice: NSViewRepresentable {
-    let model: AgentCharacterSettingsModel
-
-    func makeNSView(context: Context) -> ChoiceButton {
-        let button = ChoiceButton(title: "Ducks (built in)")
-        button.setAccessibilityLabel("Character set")
-        return button
-    }
-
-    func updateNSView(_ button: ChoiceButton, context: Context) {
-        button.items = model.choiceItems
-        button.selectedID = model.selectedID
-        button.onSelection = { [model, weak button] item in
-            if item.id == AgentCharacterSettingsModel.importItemID {
-                model.chooseFileToImport(window: button?.window)
-                button?.selectedID = model.selectedID
-            } else {
-                model.select(id: item.id)
-            }
-        }
-    }
-
-    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ChoiceButton, context: Context) -> CGSize? {
-        let fitting = nsView.fittingSize
-        return CGSize(width: max(fitting.width, 200), height: max(fitting.height, 24))
     }
 }
 
@@ -260,87 +322,117 @@ private struct RestStrip: NSViewRepresentable {
     }
 }
 
-/// The custom rows of the section, below the switch and the Motion choice.
-struct AgentCharacterSettingsRows: View {
-    @State var model: AgentCharacterSettingsModel
-    let settings: SettingsModel
+/// One card: the set's lead and first helpers, its name and how many characters.
+private struct CharacterSetCard: View {
+    let card: AgentCharacterSettingsModel.SetCard
+    let selected: Bool
+    let model: AgentCharacterSettingsModel
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var theme = AppTheme.current
+
+    private var key: AgentCharacterSettingsModel.CardArtKey {
+        .init(id: card.id, appearance: colorScheme == .dark ? .dark : .light)
+    }
 
     var body: some View {
-        let _ = model.selectedID
-        LabeledContent {
-            CharacterSetChoice(model: model)
-        } label: {
-            SettingsRowLabel(title: "Character set",
-                             help: "Import any theme file in the character format; Array keeps its own copy and reads it only.")
+        let appearance: TokenTheme = colorScheme == .dark ? .dark : .light
+        SettingsPreviewCard(title: card.title, selected: selected, appearance: appearance,
+                            background: Color(nsColor: SurfaceToken.tileBody.color(for: theme).nsColor(for: appearance)),
+                            outlined: true) {
+            CharacterCardArt(art: model.cardArt[key], identifier: "ArrayAgentCharacterCardArt.\(card.id)")
+                .padding(.horizontal, 16)
+                .padding(.top, 20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } footer: {
+            Text(card.detail).font(.callout).opacity(0.65).lineLimit(1)
         }
-        if model.selectedID == AgentCharacterBundled.themeID {
-            HStack(spacing: 6) {
-                InfoRow(text: "Ducks: pixel art © 2026 Ali Alsalkhadi, MIT License.")
-                if let license = AgentCharacterBundled.licenseURL {
-                    Button("License") { NSWorkspace.shared.open(license) }
-                        .buttonStyle(.link)
+        .task(id: key) { await model.loadCardArt(id: key.id, appearance: key.appearance) }
+        .onReceive(NotificationCenter.default.publisher(for: AppThemeController.didChangeNotification)) { _ in
+            theme = AppTheme.current
+        }
+    }
+}
+
+/// The Agent characters pane's sets: the cards, what can be done with them, the
+/// files found on this Mac, and the chosen set in every state.
+struct AgentCharacterSections: View {
+    let model: AgentCharacterSettingsModel
+    let settings: SettingsModel
+    let field: SettingsField
+
+    var body: some View {
+        Section("Character set") {
+            SettingsPreviewCardGrid {
+                ForEach(model.cards) { card in
+                    Button { model.select(id: card.id) } label: {
+                        CharacterSetCard(card: card, selected: model.selectedID == card.id, model: model)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(card.title), \(card.detail)")
+                    .accessibilityAddTraits(model.selectedID == card.id ? .isSelected : [])
+                    .accessibilityIdentifier("ArrayAgentCharacterSet.\(card.id)")
+                    .settingsFrame("ArrayAgentCharacterSet.\(card.id)")
                 }
             }
-        } else if let theme = model.previewTheme, AgentCharacterBundled.isBuiltIn(theme.id) {
-            InfoRow(text: "\(theme.title) · \(theme.characters.count) characters · built in")
-        } else if let theme = model.previewTheme {
+            .settingsAnchor(SettingsRegistry.anchor(for: field) ?? field.label, model: settings)
+            .task { model.reload() }
+            setDetail
+            InfoRow(text: "Each agent gets a character from its id. To choose one for an agent, use Character in its tile's ⋯ menu.")
+            if let message = model.message {
+                InfoRow(text: message)
+            }
+            if !model.droppedSounds.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Some of the set's sounds were left out.", systemImage: "speaker.slash")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    ForEach(Array(model.droppedSounds.prefix(8).enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.callout.monospaced()).foregroundStyle(.secondary)
+                    }
+                }
+                .accessibilityIdentifier("ArrayAgentCharacterDroppedSounds")
+            }
+            if !model.problems.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("This file is not a character theme, so nothing was imported.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                    ForEach(Array(model.problems.enumerated()), id: \.offset) { _, problem in
+                        Text(problem).font(.callout.monospaced()).foregroundStyle(.secondary)
+                    }
+                    if let file = model.problemFile {
+                        Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([file]) }
+                            .buttonStyle(.link)
+                    }
+                }
+                .accessibilityIdentifier("ArrayAgentCharacterProblems")
+            }
             HStack {
-                InfoRow(text: "\(theme.title) · \(theme.characters.count) characters")
+                InfoRow(text: "Import any theme file in the character format; Array keeps its own copy and reads it only.")
                 Spacer()
-                Button("Remove") { model.remove(id: theme.id) }
+                Button("Import…") { model.chooseFileToImport(window: settings.hostWindow) }
             }
-        }
-        InfoRow(text: "Each agent gets a character from its id. To choose one for an agent, use Character in its tile's ⋯ menu.")
-        if let message = model.message {
-            InfoRow(text: message)
-        }
-        if !model.droppedSounds.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Label("Some of the set's sounds were left out.", systemImage: "speaker.slash")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                ForEach(Array(model.droppedSounds.prefix(8).enumerated()), id: \.offset) { _, line in
-                    Text(line).font(.callout.monospaced()).foregroundStyle(.secondary)
+            HStack {
+                InfoRow(text: "Agents can make and edit sets in the themes folder; changes show at once.")
+                Spacer()
+                Button("Show Folder") {
+                    try? FileManager.default.createDirectory(at: model.importsDirectory, withIntermediateDirectories: true)
+                    NSWorkspace.shared.activateFileViewerSelecting([model.importsDirectory])
                 }
             }
-            .accessibilityIdentifier("ArrayAgentCharacterDroppedSounds")
-        }
-        if !model.problems.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Label("This file is not a character theme, so nothing was imported.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                ForEach(Array(model.problems.enumerated()), id: \.offset) { _, problem in
-                    Text(problem).font(.callout.monospaced()).foregroundStyle(.secondary)
-                }
-                if let file = model.problemFile {
-                    Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([file]) }
-                        .buttonStyle(.link)
-                }
-            }
-            .accessibilityIdentifier("ArrayAgentCharacterProblems")
-        }
-        HStack {
-            InfoRow(text: "Agents can make and edit sets in the themes folder; changes show at once.")
-            Spacer()
-            Button("Show Folder") {
-                try? FileManager.default.createDirectory(at: model.importsDirectory, withIntermediateDirectories: true)
-                NSWorkspace.shared.activateFileViewerSelecting([model.importsDirectory])
-            }
-        }
-        ForEach(Array(model.folderProblems.enumerated()), id: \.offset) { _, entry in
-            VStack(alignment: .leading, spacing: 2) {
-                Label("\(entry.file.lastPathComponent) is not a valid set yet", systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                ForEach(Array(entry.problems.enumerated()), id: \.offset) { _, problem in
-                    Text(problem).font(.callout.monospaced()).foregroundStyle(.secondary)
+            ForEach(Array(model.folderProblems.enumerated()), id: \.offset) { _, entry in
+                VStack(alignment: .leading, spacing: 2) {
+                    Label("\(entry.file.lastPathComponent) is not a valid set yet", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                    ForEach(Array(entry.problems.enumerated()), id: \.offset) { _, problem in
+                        Text(problem).font(.callout.monospaced()).foregroundStyle(.secondary)
+                    }
                 }
             }
         }
         if !model.found.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Found on this Mac").font(.callout.weight(.medium))
+            Section("Found on this Mac") {
                 ForEach(Array(model.found.enumerated()), id: \.element.hash) { index, row in
                     FoundThemeRow(row: row, index: index, model: model, settings: settings)
                 }
@@ -349,12 +441,34 @@ struct AgentCharacterSettingsRows: View {
         if let theme = model.previewTheme {
             // The grid belongs to the chosen set (what agents draw), and says so;
             // a found file shows its own characters in its row.
-            VStack(alignment: .leading, spacing: 6) {
-                Text("\(theme.title) in every state").font(.callout.weight(.medium))
-                    .settingsRenderedText("ArrayAgentCharacterGridTitle", "\(theme.title) in every state", model: settings)
+            Section {
                 PreviewGrid(theme: theme)
                     .id(theme.id)
+            } header: {
+                Text("\(theme.title) in every state")
+                    .settingsRenderedText("ArrayAgentCharacterGridTitle", "\(theme.title) in every state", model: settings)
             }
+        }
+    }
+
+    /// What is known about the selected set, and what can be done to it.
+    @ViewBuilder private var setDetail: some View {
+        if model.selectedID == AgentCharacterBundled.themeID {
+            HStack(spacing: 6) {
+                InfoRow(text: "Ducks: pixel art © 2026 Ali Alsalkhadi, MIT License.")
+                if let license = AgentCharacterBundled.licenseURL {
+                    Button("License") { NSWorkspace.shared.open(license) }
+                        .buttonStyle(.link)
+                }
+            }
+        } else if let set = model.imported.first(where: { $0.id == model.selectedID }) {
+            HStack {
+                InfoRow(text: "\(set.title) · \(set.characters.count) characters")
+                Spacer()
+                Button("Remove") { model.remove(id: set.id) }
+            }
+        } else if let card = model.cards.first(where: { $0.id == model.selectedID }) {
+            InfoRow(text: "\(card.title) · \(card.detail) · built in")
         }
     }
 }
@@ -385,6 +499,11 @@ final class AgentCharacterPreviewGridView: NSView {
     private(set) var sprites: [CharacterSpriteLayer] = []
     private let theme: AgentCharacterTheme
     private var labels: [NSTextField] = []
+    /// Each character's picture, built off the main thread: the grid holds a
+    /// whole set, every frame, up to 16 times over.
+    private var atlases: [AgentCharacterAtlas.Appearance: [AgentCharacterSpriteAtlas]] = [:]
+    private var building: AgentCharacterAtlas.Appearance?
+    private lazy var motion = CharacterPreviewMotion(view: self, sprites: { [unowned self] in sprites }, changed: { [unowned self] in apply() })
 
     init(theme: AgentCharacterTheme) {
         self.theme = theme
@@ -432,10 +551,12 @@ final class AgentCharacterPreviewGridView: NSView {
             if sprite.frame != rect { sprite.frame = rect }
         }
         CATransaction.commit()
+        motion.update()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        motion.windowChanged()
         apply()
     }
 
@@ -444,16 +565,32 @@ final class AgentCharacterPreviewGridView: NSView {
         apply()
     }
 
-    /// Show every cell; out of a window, everything holds still.
+    /// Show every cell; out of sight, everything holds still.
     func apply(now: Date = Date()) {
-        let controller = AgentCharacterController.shared
         let appearance = AgentCharacterController.appearance(of: self)
-        let moving = window != nil && controller.motion == .working && !controller.reduceMotion()
+        guard let pictures = atlases[appearance] else { return build(appearance) }
+        let moving = window != nil && AgentCharacterController.shared.allowsMotion
         for (i, sprite) in sprites.enumerated() {
             let row = i / Self.columns.count, column = i % Self.columns.count
-            guard let atlas = controller.atlas(theme: theme, character: row, appearance: appearance) else { continue }
+            guard row < pictures.count else { continue }
             let plan = Self.columns[column].plan
-            sprite.show(moving ? plan : .still(plan.still), sprite: atlas, phase: Double(row) / 8, now: now)
+            sprite.show(moving ? plan : .still(plan.still), sprite: pictures[row], phase: Double(row) / 8, now: now)
+        }
+        motion.update()
+    }
+
+    private func build(_ appearance: AgentCharacterAtlas.Appearance) {
+        guard building != appearance else { return }
+        building = appearance
+        let theme = theme
+        Task { [weak self] in
+            let pictures = await Task.detached(priority: .userInitiated) {
+                theme.characters.indices.compactMap { AgentCharacterSpriteAtlas(theme: theme, character: $0, appearance: appearance) }
+            }.value
+            guard let self else { return }
+            self.atlases[appearance] = pictures
+            self.building = nil
+            self.apply()
         }
     }
 }
@@ -469,6 +606,7 @@ final class AgentCharacterRestStripView: NSView {
     let naturalSize: NSSize
     /// (theme, character) per sprite, left to right.
     private var cells: [(theme: AgentCharacterTheme, character: Int, size: NSSize)] = []
+    private var generation = 0
 
     init(theme: AgentCharacterTheme) {
         let points = AgentCharacterPreviewGridView.pointsPerPixel
@@ -518,13 +656,21 @@ final class AgentCharacterRestStripView: NSView {
         apply()
     }
 
-    /// Every cell at rest, in this view's appearance.
+    /// Every cell at rest, in this view's appearance, each picture built off the
+    /// main thread: a found set can be megabytes of frames.
     func apply() {
         let appearance = AgentCharacterController.appearance(of: self)
-        for (sprite, cell) in zip(sprites, cells) {
-            guard let atlas = AgentCharacterSpriteAtlas(theme: cell.theme, character: cell.character, appearance: appearance)
-            else { continue }
-            sprite.show(.still(.clip(.idle)), sprite: atlas, phase: 0)
+        let cells = cells.map { (theme: $0.theme, character: $0.character) }
+        generation += 1
+        let generation = generation
+        Task { [weak self] in
+            let pictures = await Task.detached(priority: .utility) {
+                cells.map { AgentCharacterSpriteAtlas(theme: $0.theme, character: $0.character, appearance: appearance) }
+            }.value
+            guard let self, generation == self.generation else { return }
+            for (sprite, picture) in zip(self.sprites, pictures) {
+                if let picture { sprite.show(.still(.clip(.idle)), sprite: picture, phase: 0) }
+            }
         }
     }
 }

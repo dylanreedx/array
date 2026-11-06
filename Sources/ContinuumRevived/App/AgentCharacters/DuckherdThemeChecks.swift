@@ -7,7 +7,7 @@ import ContinuumRevivedCore
 // `--duckherd-theme-check`: a set shaped like the ones Duckherd users share
 // (`AgentCharacterDuckherdFixture`: scale 4, 151 colours, 16 helpers, trimmed
 // lead frames up to 111 rows, `shift`, a level by index, `voices`) imports
-// through Settings › Appearance › Character set's own import into a temp app
+// through Settings › Agent characters › Character set's own import into a temp app
 // support folder, and is selected. Then a real supervisor's lead and three
 // helpers, on the production sidebar rows and the lead's tile header, at Small,
 // Medium and Large: the lead draws the set's lead art at its own box, each

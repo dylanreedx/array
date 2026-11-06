@@ -3,7 +3,7 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import SwiftUI
 
-// Plan 110 › found themes: Settings › Appearance › Agent characters, "Found on
+// Plan 110 › found themes: Settings › Agent characters, "Found on
 // this Mac".
 //
 // `--found-character-themes-check`: a fixture home's plugins point at seven theme
@@ -169,13 +169,13 @@ enum FoundCharacterThemesChecks {
 
     // MARK: The real Settings modal
 
-    /// Settings on Appearance, scrolled to Agent characters, tall enough that the
+    /// Settings on Agent characters, tall enough that the
     /// found list sits inside the pane's viewport.
     static func open(defaults: UserDefaults, appearance: NSAppearance.Name) throws -> SettingsFixtureWindow {
         let settings = SettingsModel(defaults: defaults, navKeymap: .default)
         let fixture = SettingsFixtureWindow(model: settings, size: NSSize(width: 1_100, height: 1_500),
                                             appearance: NSAppearance(named: appearance))
-        fixture.show(paneID: "appearance")
+        fixture.show(paneID: "agentCharacters")
         guard let entry = settings.entries().first(where: { $0.anchor == "custom.agentCharacters" }) else {
             throw Failure(description: "Settings has no Agent characters entry")
         }

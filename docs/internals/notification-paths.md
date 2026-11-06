@@ -597,8 +597,8 @@ and 64 files per set, must decode as WAV/MP3; each file left out is reported
 with its reason), else Duckherd's MIT-licensed quack/honk/chirp bundled in Core's
 AgentCharacters resources (credit: Duckherd and Ali Alsalkhadi). The built-in
 packs (Street Sigils, Living Chords, ASCII morph, Signal Ghosts) speak from their
-own folders in the app, `AgentCharacters/packs/<id>/`, laid out like an imported
-set and resolved the same way; each names its own spawn, per-character done and
+own folders in the Mac app, `packs/<id>/` in the character packs bundle, laid out
+like an imported set and resolved the same way; each names its own spawn, per-character done and
 quack/honk/chirp clips, so none falls back to the ducks' sounds. Witnesses:
 `--agent-character-theme-check` (every pack clip resolves and decodes) and
 `--character-settings-check` (choosing a pack makes the production speaker use

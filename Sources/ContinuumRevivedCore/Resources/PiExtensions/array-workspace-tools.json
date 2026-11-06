@@ -838,7 +838,7 @@
         "displayName: a short, accurate title: a few plain words saying what the agent is actually doing. Always pass nameIntent with it.",
         "nameIntent requested: the user asked (\"rename yourself to X\") or another agent asked you to rename. It may replace any name, including one the user typed.",
         "nameIntent proactive: give yourself a better title when your automatic title is wrong or your task has clearly changed. Check nameSource in array_workspace_context first: if it is user or requested, leave the name alone.",
-        "character: the name of a character in the selected character set (as listed in Settings › Appearance › Agent characters), or null to return to the automatic pick. An unknown name is refused with the allowed names.",
+        "character: the name of a character in the selected character set (as listed in Settings › Agent characters), or null to return to the automatic pick. An unknown name is refused with the allowed names.",
         "Reuse the same idempotencyKey for a retry of the same intent. Self updates are allowed; other-agent updates use the canvas-write scope."
       ],
       "parameters": {
