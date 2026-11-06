@@ -768,8 +768,8 @@ private struct SettingsSoundRows: View {
         }
 
         Toggle(isOn: Binding(get: { model.characterSoundsEnabled }, set: { model.characterSoundsEnabled = $0 })) {
-            SettingsRowLabel(title: "Character sounds",
-                             help: "While characters show, they quack when an agent hands back to you, chirp when it needs you and honk when it fails, or use their set's own voices. A sound turned on above for the same moment plays instead.")
+            SettingsRowLabel(title: AgentCharacterCopy.sounds,
+                             help: "While \(AgentCharacterCopy.many) show, they quack when an agent hands back to you, chirp when it needs you and honk when it fails, or use their set's own voices. A sound turned on above for the same moment plays instead.")
         }
         .toggleStyle(.switch)
         .disabled(!model.soundsEnabled)

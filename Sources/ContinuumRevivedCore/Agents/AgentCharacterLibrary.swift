@@ -150,6 +150,23 @@ public enum AgentCharacterBundled {
     }
 }
 
+/// The words the app shows for this feature, in one place so renaming it is one
+/// edit. Keys, ids, wire fields, tool arguments and file names are not here: those
+/// never change with the word.
+public enum AgentCharacterCopy {
+    public static let feature = "Agent characters"
+    public static let show = "Show agent characters"
+    public static let one = "character"
+    public static let many = "characters"
+    /// The tile's menu.
+    public static let menu = "Character"
+    public static let set = "Character set"
+    public static let size = "Character size"
+    public static let sounds = "Character sounds"
+
+    public static func count(_ count: Int) -> String { "\(count) \(count == 1 ? one : many)" }
+}
+
 /// Settings › Agent characters. Off by default.
 public enum AgentCharacterConfig {
     public static let enabledKey = "agentCharacters.enabled"
@@ -618,7 +635,7 @@ public enum AgentCharacterImports {
                 let helpers = theme.characters.count
                 parts.append(theme.hasLead
                     ? "Lead + \(helpers) helper\(helpers == 1 ? "" : "s")"
-                    : "\(helpers) character\(helpers == 1 ? "" : "s")")
+                    : AgentCharacterCopy.count(helpers))
             }
             if let source { parts.append("from \(source.label)") }
             return parts.joined(separator: " · ")
@@ -662,7 +679,7 @@ public enum AgentCharacterImports {
             case let .failure(problems):
                 row = FoundTheme(url: file.url, paths: [file.url], source: file.source, hash: hash,
                                  title: rawTitle(data, file: file), theme: nil,
-                                 state: .invalid(problems.messages.first ?? "not a character theme"))
+                                 state: .invalid(problems.messages.first ?? "not a \(AgentCharacterCopy.one) theme"))
             }
             index[hash] = rows.count
             rows.append(row)

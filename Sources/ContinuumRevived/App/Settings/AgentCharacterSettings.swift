@@ -207,7 +207,7 @@ final class AgentCharacterSettingsModel {
         if let first = added.first {
             let withSounds = sounds == 0 ? "" : sounds == 1 ? ", 1 sound" : ", \(sounds) sounds"
             message = added.count == 1
-                ? "Imported \(first.title): \(first.characters.count) characters\(withSounds)."
+                ? "Imported \(first.title): \(AgentCharacterCopy.count(first.characters.count))\(withSounds)."
                 : "Imported \(added.count) sets\(withSounds)."
             select(id: first.id)
         }
@@ -219,7 +219,7 @@ final class AgentCharacterSettingsModel {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.json]
-        panel.message = "Choose a character theme file, or a folder of them."
+        panel.message = "Choose a \(AgentCharacterCopy.one) theme file, or a folder of them."
         let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             MainActor.assumeIsolated { self?.importTheme(from: url) }
@@ -235,8 +235,8 @@ final class AgentCharacterSettingsModel {
 
     /// The picker's cards: every built-in set, then each imported set.
     var cards: [SetCard] {
-        AgentCharacterBundled.summaries().map { SetCard(id: $0.id, title: $0.title, detail: "\($0.characters) characters") }
-            + imported.map { SetCard(id: $0.id, title: $0.title, detail: "\($0.characters.count) characters · imported") }
+        AgentCharacterBundled.summaries().map { SetCard(id: $0.id, title: $0.title, detail: AgentCharacterCopy.count($0.characters)) }
+            + imported.map { SetCard(id: $0.id, title: $0.title, detail: "\(AgentCharacterCopy.count($0.characters.count)) · imported") }
     }
 
     /// A found row's button: Import, Update, Imported (disabled), or none for an
@@ -361,7 +361,7 @@ struct AgentCharacterSections: View {
     let field: SettingsField
 
     var body: some View {
-        Section("Character set") {
+        Section(AgentCharacterCopy.set) {
             SettingsPreviewCardGrid {
                 ForEach(model.cards) { card in
                     Button { model.select(id: card.id) } label: {
@@ -377,7 +377,7 @@ struct AgentCharacterSections: View {
             .settingsAnchor(SettingsRegistry.anchor(for: field) ?? field.label, model: settings)
             .task { model.reload() }
             setDetail
-            InfoRow(text: "Each agent gets a character from its id. To choose one for an agent, use Character in its tile's ⋯ menu.")
+            InfoRow(text: "Each agent gets a \(AgentCharacterCopy.one) from its id. To choose one for an agent, use \(AgentCharacterCopy.menu) in its tile's ⋯ menu.")
             if let message = model.message {
                 InfoRow(text: message)
             }
@@ -394,7 +394,7 @@ struct AgentCharacterSections: View {
             }
             if !model.problems.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("This file is not a character theme, so nothing was imported.", systemImage: "exclamationmark.triangle.fill")
+                    Label("This file is not a \(AgentCharacterCopy.one) theme, so nothing was imported.", systemImage: "exclamationmark.triangle.fill")
                         .font(.callout)
                         .foregroundStyle(.orange)
                     ForEach(Array(model.problems.enumerated()), id: \.offset) { _, problem in
@@ -408,7 +408,7 @@ struct AgentCharacterSections: View {
                 .accessibilityIdentifier("ArrayAgentCharacterProblems")
             }
             HStack {
-                InfoRow(text: "Import any theme file in the character format; Array keeps its own copy and reads it only.")
+                InfoRow(text: "Import any theme file in the \(AgentCharacterCopy.one) format; Array keeps its own copy and reads it only.")
                 Spacer()
                 Button("Import…") { model.chooseFileToImport(window: settings.hostWindow) }
             }
@@ -463,7 +463,7 @@ struct AgentCharacterSections: View {
             }
         } else if let set = model.imported.first(where: { $0.id == model.selectedID }) {
             HStack {
-                InfoRow(text: "\(set.title) · \(set.characters.count) characters")
+                InfoRow(text: "\(set.title) · \(AgentCharacterCopy.count(set.characters.count))")
                 Spacer()
                 Button("Remove") { model.remove(id: set.id) }
             }
