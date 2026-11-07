@@ -404,7 +404,19 @@ final class CanvasCameraDriver: NSObject {
         // Link stalled or gone: finish what is in flight rather than freeze it.
         cancelGlide()
         applyPending(at: now)
-        if let flight { flightStart = now - flight.duration; stepFlight(at: now) }
+        if let flight {
+            // Subtracting duration from a large uptime and subtracting again
+            // can round just BELOW duration forever. A stalled display link
+            // must land exactly, rather than replaying that almost-final step.
+            isApplying = true
+            isFlying = true
+            applyViewport(flight.to)
+            isFlying = false
+            isApplying = false
+            self.flight = nil
+            lastCommitTime = now
+            lastActivityTime = now
+        }
         if now - lastActivityTime >= tuning.settleQuiet {
             stopDisplayLink()
             markSettled()

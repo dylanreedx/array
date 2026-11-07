@@ -5879,7 +5879,7 @@ enum ContinuumApp {
             }
         }
 
-        if CommandLine.arguments.contains("--spawn-framing-check") {
+        if CommandLine.arguments.contains("--spawn-framing-check") || CommandLine.arguments.contains("--spawn-live-framing-check") {
             do {
                 _ = NSApplication.shared
                 try SpawnFramingChecks.run()
@@ -19814,10 +19814,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private var pendingSpawnTiles: [UUID] = []
     private var pendingSpawnFrame: DispatchWorkItem?
+    private var pendingSpawnDeadline: TimeInterval = 0
 
     func focusSpawnedTile(_ tileId: UUID) {
         workspaceRuntime?.noteUserInteraction()
         focusBroker.enterScope(.tile(tileId), reason: .tileSpawned)
+        if pendingSpawnTiles.isEmpty { pendingSpawnDeadline = ProcessInfo.processInfo.systemUptime + 1.5 }
         pendingSpawnTiles.append(tileId)
         pendingSpawnFrame?.cancel()
         scheduleSpawnFrame(epoch: workspaceRuntime?.mountEpoch)
@@ -19832,14 +19834,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 return
             }
             guard let canvas = self.canvasView else { return }
-            if canvas.isGeometryGestureActive || canvas.isCameraInMotion {
+            let canDefer = ProcessInfo.processInfo.systemUptime < self.pendingSpawnDeadline
+            if canDefer && (canvas.isGeometryGestureActive || canvas.isCameraInMotion) {
                 self.scheduleSpawnFrame(epoch: epoch)
                 return
             }
             let ids = self.pendingSpawnTiles
+            guard let newest = ids.last else { return }
+            guard let snapshot = canvas.navigationTileSnapshot(for: newest) else {
+                if canDefer { self.scheduleSpawnFrame(epoch: epoch); return }
+                self.pendingSpawnTiles.removeAll()
+                self.focusBroker.enterScope(.tile(newest), reason: .tileSpawned)
+                return
+            }
             self.pendingSpawnTiles.removeAll()
-            guard let newest = ids.last,
-                  let snapshot = canvas.navigationTileSnapshot(for: newest) else { return }
             let union = ids.compactMap { canvas.navigationTileSnapshot(for: $0) }
                 .reduce(CGRect.null) { rect, tile in
                     rect.union(CGRect(x: tile.worldFrame.x, y: tile.worldFrame.y,
@@ -19860,7 +19868,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
         }
         pendingSpawnFrame = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+        // A continuing burst cannot reset the first spawn's upper bound.
+        let delay = min(0.25, max(0, pendingSpawnDeadline - ProcessInfo.processInfo.systemUptime))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func installSpawnedTerminal(_ runtime: GhosttyTerminalRuntime, from spawner: TileSpawner) {

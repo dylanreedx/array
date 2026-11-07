@@ -295,6 +295,7 @@ check --spawn-arrange-commit-check
 check --spawn-focus-policy-check
 check --spawn-framing-check
 check --spawn-placement-check
+check --spawn-live-framing-check
 check --spawn-rate-limit-check
 check --stranded-tile-recovery-check
 check --stray-window-audit-check

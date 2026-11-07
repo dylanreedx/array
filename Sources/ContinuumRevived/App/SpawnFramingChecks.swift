@@ -108,6 +108,8 @@ enum SpawnFramingChecks {
         }
         _ = m.delegate.qaFocusBroker.enterScope(.canvas, reason: .userClick)
         window.makeFirstResponder(m.canvas)
+        m.canvas.navigationFlightOverrideForQA = true
+        m.canvas.navigateViewport(to: CanvasViewport(x: 24000, y: 24000, zoom: 0.4))
         let beforeTyping = Set(m.canvas.allTilesInWorldFrames().map(\.id))
         try key("k", code: 40, modifiers: .command)
         guard m.delegate.qaProfilePalette?.isVisible == true else { throw Failure(message: "Command-K did not open palette") }
@@ -116,6 +118,23 @@ enum SpawnFramingChecks {
         drain()
         guard let typed = m.canvas.allTilesInWorldFrames().first(where: { !beforeTyping.contains($0.id) }) else {
             throw Failure(message: "typed Command-K New Note produced no tile")
+        }
+        let liveDeadline = Date().addingTimeInterval(3)
+        while Date() < liveDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
+        guard m.delegate.qaFocusBroker.activeSurface == .tile(typed.id) else {
+            throw Failure(message: "live palette spawn lost focus: \(String(describing: m.delegate.qaFocusBroker.activeSurface))")
+        }
+        guard let tileView = m.canvas.tileView(for: typed.id),
+              let responder = window.firstResponder as? NSView,
+              responder === tileView || responder.isDescendant(of: tileView) else {
+            throw Failure(message: "live palette spawn lost first responder: \(String(describing: window.firstResponder))")
+        }
+        guard let target = m.canvas.framedViewportForTileJump(typed.id),
+              m.canvas.viewport == target else {
+            throw Failure(message: "live palette spawn did not finish reveal: viewport=\(m.canvas.viewport), destination=\(m.canvas.navigationViewport), motion=\(m.canvas.isCameraInMotion), settled=\(m.canvas.cameraDriver.isSettled), geometry=\(m.canvas.isGeometryGestureActive)")
+        }
+        guard m.canvas.cameraDriver.isSettled, !m.canvas.cameraDriver.isFlightActive else {
+            throw Failure(message: "live palette reveal reached its target but left the camera session unsettled")
         }
         try assertFramed(typed, "typed Command-K")
         let before = Set(m.canvas.allTilesInWorldFrames().map(\.id))
