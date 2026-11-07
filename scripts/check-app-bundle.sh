@@ -83,6 +83,7 @@ mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd)
 
 if [[ -z "$BUNDLE_PATH" ]]; then
+  [[ "$CONFIGURATION" != release ]] || { echo "Release verification requires --bundle <built bundle>" >&2; exit 2; }
   BUNDLE_PATH="$OUTPUT_DIR/Array.app"
   "$ROOT_DIR/scripts/make-app-bundle.sh" --configuration "$CONFIGURATION" --channel "$CHANNEL" --output "$BUNDLE_PATH"
 fi

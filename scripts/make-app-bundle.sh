@@ -109,6 +109,25 @@ if [[ "$FILM" == 1 ]]; then
 fi
 
 cd "$ROOT_DIR"
+if [[ "$CONFIGURATION" == release ]]; then
+  # The nightly runner may override this shared lock path. A missing lock on
+  # older matrix revisions is covered by the process guard below.
+  ARRAY_MATRIX_LOCK="${ARRAY_MATRIX_LOCK:-/tmp/array-matrix.lock}"
+  python3 - "$ARRAY_MATRIX_LOCK" <<'LOCK'
+import fcntl, os, sys
+path = sys.argv[1]
+if os.path.isfile(path):
+    with open(path, 'r') as lock:
+        try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: raise SystemExit('Refusing release build: matrix lock is held')
+elif os.path.isdir(path):
+    raise SystemExit('Refusing release build: matrix lock directory exists')
+LOCK
+  if pgrep -f '[r]un-matrix.sh' >/dev/null; then
+    echo "Refusing release build while run-matrix.sh is running" >&2
+    exit 2
+  fi
+fi
 swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product Array
 swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product array-workspace-mcp
 

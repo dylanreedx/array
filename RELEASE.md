@@ -1,89 +1,86 @@
 # Releasing Array
 
-The one-page runbook for shipping a release. Program history and rationale live in
-`docs/38-tickets/95-go-live.md`; this file is just the steps.
+## Cut a preview and release candidate together
 
-## Prerequisites (already provisioned)
-
-- Developer ID Application identity in the login Keychain:
-  `Developer ID Application: Dylan Reed (46TTB6J9DZ)`
-- notarytool keychain profile: `array-notary`
-- Sparkle private EdDSA key in the login Keychain
-  ("Private key for signing Sparkle updates"). **Back it up. Never in the repo.**
-- `releases/` dir at the repo root (gitignored) holding every shipped
-  `Array-<version>.dmg` from 0.2.1 on — the appcast is generated from it.
-- Public releases repo: `dylanreedx/array-releases` (code repo stays private).
-
-## Ship a release
-
-1. **Version numbers.** Pick `X.Y.Z` and a build number `N`. `N` (CFBundleVersion)
-   MUST increase every release — it is the field Sparkle compares. Keep a simple
-   +1 sequence (0.2.0 was build 2).
-
-2. **Build, sign, notarize, staple:**
+1. Choose a commit with a passing nightly matrix report. Record that report and
+   commit in the release notes. Do not run the full matrix during publishing.
+2. Reserve the next global build number in docs/VERSIONING.md: both tip and
+   stable consume the same +1 sequence. Check published GitHub releases too,
+   including prereleases; never reuse an allocated published number.
+3. In the release bench run `scripts/prepare-ghosttykit.sh`, then
+   `scripts/make-app-bundle.sh --configuration release --channel prod --output releases/candidate/Array.app`.
+   This is the only optimized compile (budget 12–16 minutes, measured in the release audit).
+   The script refuses while a matrix process runs or its lock is held
+   (`ARRAY_MATRIX_LOCK`, default `/tmp/array-matrix.lock`; the nightly runner
+   must use the same path). Preview the same source through
+   `scripts/dev-app.sh` (roughly 16 seconds), on its scratch project only.
+4. Stamp the candidate's Info.plist with the intended version and build before
+   signing. Tip versions use `X.Y.Z-tip.<12-character-source-commit>`.
+   Keep Packaging/Info.plist at its dev defaults. Never launch the prod candidate
+   against Dylan's workspace. Use the isolated bundle harness below.
+5. Sign/notarize and package without compiling:
 
    ```sh
-   scripts/release-app.sh \
+   scripts/release-app.sh --bundle releases/candidate/Array.app \
      --identity "Developer ID Application: Dylan Reed (46TTB6J9DZ)" \
-     --notary-profile array-notary \
-     --set-version X.Y.Z --set-build N
+     --notary-profile array-notary --set-version X.Y.Z --set-build N
+   scripts/check-app-bundle.sh --configuration release --channel prod \
+     --bundle qa-runs/<stamp>/release/Array.app
    ```
 
-   Ends with `spctl` verification. Artifacts land in `qa-runs/<stamp>/release/`.
+   Budget 2–10 minutes for Apple notarization plus packaging; this is an estimate,
+   not a measured guarantee. Keychain holds Developer ID, array-notary credentials
+   and Sparkle EdDSA private key. Never commit signing material or releases/.
+6. Publish to opted-in tip users first using the script below; allow dogfooding.
+   Dylan reviews the preview and approves stable publication. Promote the same
+   optimized executable; changing version metadata requires signing/notarizing
+   again, never recompilation. Stable promotion consumes a fresh global build.
 
-3. **Archive the DMG:** copy `Array-X.Y.Z.dmg` into `releases/`.
+## Publish after Dylan approves
 
-4. **Publish on GitHub** (release notes = what changed, friend-readable):
+1. Stable: archive the notarized `Array-X.Y.Z.dmg` under releases/; upload BOTH
+   `Array.dmg` and `Array-X.Y.Z.dmg` to `dylanreedx/array-releases`, tag `vX.Y.Z`,
+   with friend-readable release notes. Use `gh release create` only after approval.
+2. Run `scripts/generate-appcast.sh`. It signs stable archives using the Keychain
+   key, preserves tip items, and adds a one-day phased rollout interval (seven
+   Sparkle groups). Manual checks can see the update immediately.
+3. Append the stable row to docs/VERSIONING.md. Review the feed, then commit ledger
+   and website/public/appcast.xml. With Dylan's approval push array/integration,
+   fast-forward main, and push main. Vercel deploys the feed from main.
+4. Verify the deployed appcast, both downloadable assets, and an older installed
+   copy's Check for Updates. Do not replace /Applications/Array.app yourself.
 
-   ```sh
-   cp "qa-runs/<stamp>/release/Array-X.Y.Z.dmg" /tmp/Array.dmg
-   gh release create vX.Y.Z --repo dylanreedx/array-releases \
-     --title "Array X.Y.Z" --notes "..." \
-     /tmp/Array.dmg "releases/Array-X.Y.Z.dmg"
-   ```
+## Tip and rollback
 
-   BOTH assets every time: `Array.dmg` (constant name — the site's
-   latest-download URL depends on it) and `Array-X.Y.Z.dmg` (appcast permalink).
+Settings → General → Updates → Update channel offers Stable (default) or Tip.
+The single appcast uses Sparkle's `tip` channel. Tip also receives stable items;
+Stable ignores tip items. Dev builds and QA never start the updater. Switching
+back to Stable waits for a higher stable build; it does not downgrade.
 
-5. **Regenerate the appcast** (signs items with the Keychain EdDSA key):
+For a built, signed, stapled tip bundle (already stamped before signing):
 
-   ```sh
-   scripts/generate-appcast.sh
-   ```
+```sh
+scripts/release-tip.sh --dry-run <notarized-Array.app> <source-commit>
+scripts/release-tip.sh <notarized-Array.app> <source-commit>
+```
 
-   Writes `website/public/appcast.xml` with per-version GitHub enclosure URLs.
+Dry run only reads metadata and prints the planned artifacts, ledger row and exact
+remote commands. Normal execution validates the app, makes both DMG assets, signs
+the enclosure and edits the feed and ledger locally. It STOPS before upload,
+commit or push. Review the diff and obtain Dylan's approval before executing the
+printed commands. Tip is a GitHub prerelease so the website latest-download URL
+continues to serve stable. The app inside the DMG is stapled; the tip DMG itself
+is not notarized separately.
 
-6. **Deploy the feed + record the release:** append a row to the release ledger
-   (`docs/VERSIONING.md` — the ledger is how the next release knows its build
-   number), then commit it together with `website/public/appcast.xml`, push
-   `array/integration`, fast-forward `main` (Vercel deploys arrayapp.dev from
-   `main`).
+One-time rollout: ship a stable version containing the channel setting, deploy
+its appcast, then publish the first tip with the next global build. There is no
+second feed or website setting to provision. Preserve the releases/ archive and
+back up the Keychain Sparkle key.
 
-7. **Spot-check:**
-   - `curl -s https://arrayapp.dev/appcast.xml` shows the new item.
-   - Download `https://github.com/dylanreedx/array-releases/releases/latest/download/Array.dmg`,
-     confirm the version.
-   - An installed previous version sees the update (Array → Check for Updates…).
-
-## Verification gates before publishing
-
-- `scripts/check-app-bundle.sh --configuration release` passes (bundle harness:
-  self-checks, Sparkle embedding, codesign, launch smoke, pollution guards).
-- For releases with app-code changes: the relevant matrix legs are green
-  (`scripts/run-matrix.sh`; two KNOWN-RED pre-existing gates are documented in
-  the go-live doc — don't chase them as regressions).
-
-## Notes
-
-- **Channels:** only `release-app.sh` produces a prod-identified bundle
-  (`dev.arrayapp.macos`). Plain `make-app-bundle.sh` output is the DEV channel
-  ("Array Dev", own state, updater inert) — safe to run next to the prod copy.
-  Verify a release bundle with `check-app-bundle.sh --channel prod`.
-
-- 0.2.0 shipped without Sparkle: those installs cannot auto-update and make one
-  final manual download. Every install from 0.2.1 on updates in-app.
-- Sparkle asks the user for permission to check automatically on second launch
-  (`SUEnableAutomaticChecks` deliberately unset); "Check for Updates…" always
-  works manually.
-- If notarization fails, `release-app.sh` prints the log path; the notary
-  history is available via `xcrun notarytool history --keychain-profile array-notary`.
+Rollback means roll forward: revert the faulty change, build a new candidate with
+an unused higher global number, and add `<sparkle:criticalUpdate/>` to its item.
+Remove its phasedRolloutInterval to bypass staging. Publish both assets, append
+ledger, deploy feed after approval. Never lower a version number or replace an
+existing download in place. A critical item cannot be skipped. Confirm the update
+from an affected installed build. Older pre-Sparkle 0.2.0 installs need a manual
+replacement.

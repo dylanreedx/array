@@ -2371,6 +2371,7 @@ else
   run_app_check .build/debug/Array --terminal-cmd-w-check
 fi
 run_app_check .build/debug/Array --stray-window-audit-check
+run_app_check .build/debug/Array --update-channel-check
 if [[ "$FAST" -eq 0 ]]; then
   # `run_leg`, not `run`: a red bundle probe used to abort the whole script under
   # `set -e`, so `matrix_report` never ran. A real 216-leg run therefore printed

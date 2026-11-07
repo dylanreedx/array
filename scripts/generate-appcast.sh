@@ -48,10 +48,18 @@ for item in items:
     short = item.findtext(f"{{{SPARKLE}}}shortVersionString") or enclosure.get(f"{{{SPARKLE}}}shortVersionString")
     if not short:
         raise SystemExit("update item without sparkle:shortVersionString")
+    if item.find(f"{{{SPARKLE}}}phasedRolloutInterval") is None:
+        ET.SubElement(item, f"{{{SPARKLE}}}phasedRolloutInterval").text = "86400"
     enclosure.set("url", f"https://github.com/dylanreedx/array-releases/releases/download/v{short}/Array-{short}.dmg")
     if item.find(f"{{{SPARKLE}}}releaseNotesLink") is None:
         notes = ET.SubElement(item, f"{{{SPARKLE}}}releaseNotesLink")
         notes.text = f"https://github.com/dylanreedx/array-releases/releases/tag/v{short}"
+# Tip archives live separately; preserve their signed items on stable regeneration.
+import os
+if os.path.exists(dst):
+    for old in ET.parse(dst).findall("./channel/item"):
+        if old.findtext(f"{{{SPARKLE}}}channel") == "tip":
+            channel.insert(0, old)
 tree.write(dst, encoding="UTF-8", xml_declaration=True)
 with open(dst, "a") as handle:
     handle.write("\n")
