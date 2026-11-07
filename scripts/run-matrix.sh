@@ -550,10 +550,11 @@ MATRIX_SCHEDULING=0
 MATRIX_JOB_PIDS=()
 MATRIX_JOB_IDS=()
 MATRIX_JOB_NEXT=0
+MATRIX_QUEUED_LEGS=0
 MATRIX_JOB_JOIN=0
 matrix_awake_leg() {
   case "$*" in
-    *CoreChecks*|*PaletteChecks*|*PerfChecks*|*check-app-bundle*|*multiplayer-journey*|*collaboration-pair*|*--ui-tour-check*|*--nav-mode-check*|*--agent-face-switch-check*|*--tile-surface-residency-check*|*--inbox-parent-fold-check*|*--share-agent-relay-check*|*--shell-open-as-agent-check*|*terminal*|*tmux*|*session-resume*|*focus*|*perf*|*gesture*|*pointer*|*browser*|*magnify*|*snapshot*|*appearance*|*pixel*|*geometry*|*outline*|*residency*) return 0 ;;
+    *check-ios-preview-proof*|*CoreChecks*|*PaletteChecks*|*PerfChecks*|*check-app-bundle*|*multiplayer-journey*|*collaboration-pair*|*--ui-tour-check*|*--nav-mode-check*|*--agent-face-switch-check*|*--tile-surface-residency-check*|*--inbox-parent-fold-check*|*--share-agent-relay-check*|*--shell-open-as-agent-check*|*terminal*|*tmux*|*session-resume*|*focus*|*perf*|*gesture*|*pointer*|*browser*|*magnify*|*snapshot*|*appearance*|*pixel*|*geometry*|*outline*|*residency*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -591,7 +592,7 @@ matrix_launch() {
     started=$SECONDS
     "$runner" "$@"
     printf '%s\n' "$((SECONDS - started))" > "$MATRIX_RESULTS/$id.seconds"
-  ) > "$MATRIX_RESULTS/$id.log" 2>&1 &
+  ) </dev/null > "$MATRIX_RESULTS/$id.log" 2>&1 &
   MATRIX_JOB_PIDS+=("$!")
   MATRIX_JOB_IDS+=("$id")
 }
@@ -603,9 +604,11 @@ matrix_queue() {
       printf 'SKIPPED awake: %s\n' "$(matrix_leg_name "$@")"
       return 0
     fi
+    MATRIX_QUEUED_LEGS=$((MATRIX_QUEUED_LEGS + 1))
     printf '%q ' "$runner" "$@" >> "$MATRIX_RESULTS/awake.sh"
     printf '\n' >> "$MATRIX_RESULTS/awake.sh"
   elif [[ "$MATRIX_MODE" != awake-only ]]; then
+    MATRIX_QUEUED_LEGS=$((MATRIX_QUEUED_LEGS + 1))
     if (( ${#MATRIX_JOB_PIDS[@]} - MATRIX_JOB_JOIN >= MATRIX_JOBS )); then matrix_join_one; fi
     matrix_launch "$runner" "$@"
   fi
@@ -651,6 +654,10 @@ matrix_finish_jobs() {
       eval "matrix_launch $command"
       matrix_drain
     done < "$MATRIX_RESULTS/awake.sh"
+  fi
+  if [[ "$MATRIX_JOB_NEXT" != "$MATRIX_QUEUED_LEGS" ]]; then
+    printf 'RUNNER FAILURE: queued %s legs but launched %s\n' "$MATRIX_QUEUED_LEGS" "$MATRIX_JOB_NEXT"
+    MATRIX_LEG_SECONDS=0 matrix_classify matrix-runner-completeness 1
   fi
   python3 - "$MATRIX_RESULTS" <<'RESULTS_PY'
 import csv, json, pathlib, sys
@@ -1134,7 +1141,7 @@ fi
 # Fail before building when the requested awake pass cannot run. Check again
 # immediately before its serial group, since independent legs can take minutes.
 if [[ "$MATRIX_MODE" != skip-awake ]]; then matrix_require_awake; fi
-run_leg scripts/check-ios-preview-proof.sh
+run env IOS_PREVIEW_PROOF_OUT="$MATRIX_RESULTS/ios-preview-proof" scripts/check-ios-preview-proof.sh --prepare-only
 # Ticket P1.7: colour hygiene. A pure grep lint over the view layers, so it runs
 # before the build for the same reason as the inventory guard — a new raw colour
 # should be named in seconds, not after a full build. Red on any raw colour or
@@ -1160,6 +1167,7 @@ for journey in ShareKinds ShareTerminal; do
  done
 export ARRAY_MATRIX_PREBUILT=1
 MATRIX_SCHEDULING=1
+run_leg env IOS_PREVIEW_PROOF_OUT="$MATRIX_RESULTS/ios-preview-proof" scripts/check-ios-preview-proof.sh --skip-build
 printf '\n==> Independent group (%s workers), then serial awake group; mode=%s\n' "$MATRIX_JOBS" "$MATRIX_MODE"
 # .plans/73-film-studio: the film recorder is compiled only into the film build
 # (-DARRAY_FILM). The normal binary must carry none of it and refuse --film.
@@ -1167,6 +1175,9 @@ run_leg scripts/check-film-absent.sh
 run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks
+if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
+  run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
+fi
 run_leg scripts/capture-cli-fixtures.sh check
 run_leg .build/debug/ContinuumRevivedAgentUIChecks
 # Ticket 91/P0.2: the semantic agent-content module's own leg. It links

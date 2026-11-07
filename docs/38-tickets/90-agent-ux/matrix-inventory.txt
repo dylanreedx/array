@@ -419,6 +419,7 @@ check --zone-tier-transition-check
 check --zone-tile-detach-sweep-check
 check --zone-tile-hydration-check
 check --zone-unacquired-project-check
+leg run env IOS_PREVIEW_PROOF_OUT="$MATRIX_RESULTS/ios-preview-proof" scripts/check-ios-preview-proof.sh --prepare-only
 leg run git diff --check
 leg run python3 scripts/check-multiplayer-journey.py --relay local --name "$journey" --prepare-only
 leg run scripts/make-app-bundle.sh --skip-build --configuration debug --output "$MATRIX_RESULTS/Array.app"
@@ -877,6 +878,7 @@ leg run_leg .build/debug/ContinuumRevivedSyncChecks
 leg run_leg .build/debug/ContinuumRevivedSyncChecks --companion-task-publication-check
 leg run_leg .build/debug/ContinuumRevivedSyncIntegrationChecks
 leg run_leg bash scripts/check-relay-linux.sh
+leg run_leg env IOS_PREVIEW_PROOF_OUT="$MATRIX_RESULTS/ios-preview-proof" scripts/check-ios-preview-proof.sh --skip-build
 leg run_leg git diff --check
 leg run_leg node --experimental-strip-types --no-warnings scripts/check-pi-helper-waits.mjs
 leg run_leg node Tools/IOSPreviewProof/check-bridge.cjs
