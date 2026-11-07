@@ -807,10 +807,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         render(display(from: allRows))
     }
 
-    /// A saved manual choice wins; untouched groups start open.
+    /// Saved choices win. Production starts open; legacy fixtures may opt into automatic folding.
     private func isFolded(_ parentId: UUID) -> Bool {
         if let open = foldChoices[parentId] { return !open }
-        return false
+        guard foldsUntouchedGroups else { return false }
+        guard let rollup = rollupsByParent[parentId] else { return true }
+        return rollup.needsYou == 0 && rollup.unopenedFailed == 0
     }
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
     /// Parents whose remainder affordance has been opened. This is view-local
@@ -2858,7 +2860,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func toggleCollapse(parentId: UUID) {
         updatingFold = true
         defer { updatingFold = false }
-        let animates = cardStyleOverride?.ownsSubagents != true && window != nil && !prefersReducedMotion()
+        let animates = window != nil && !prefersReducedMotion()
+        let liveMotion = cardStyleOverride?.ownsSubagents == true
         let presentation = animates ? foldMotion.takePresentation() : [:]
         foldMotion.cancel()
         // A fold owns the cards and following rows together. Retire any generic
@@ -2871,7 +2874,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // reused at the far end and only the rebuilt cells are taken again.
         // The fold photographs the resting deck, never a pose mid-spring.
         for card in deckCells.allObjects { card.restDeck() }
-        let before = animates ? captureFoldRows() : FoldCapture()
+        let before = animates ? captureFoldRows(capturePixels: !liveMotion) : FoldCapture()
         let expanded = collapsedParents.contains(parentId)
         let anchor = tableRow(forAgentId: parentId).map {
             (id: parentId, viewportMinY: tableView.rect(ofRow: $0).minY - tableView.visibleRect.minY)
@@ -2900,7 +2903,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         layoutSubtreeIfNeeded()
         restoreScrollAnchor(anchor)
         guard animates else { return }
-        let after = captureFoldRows(reusing: before, excluding: relit)
+        let after = captureFoldRows(reusing: before, excluding: relit, capturePixels: !liveMotion)
+        if liveMotion {
+            foldMotion.startLive(from: before.snapshots.merging(presentation) { _, drawn in drawn },
+                to: after.snapshots, beforeViews: before.sources, afterViews: after.sources,
+                parentKey: "agent:\(parentId.uuidString)", expanded: expanded,
+                container: scrollView.contentView)
+            return
+        }
         foldMotion.start(from: before.snapshots.merging(presentation) { _, drawn in drawn },
                          to: after.snapshots,
                          parentKey: "agent:\(parentId.uuidString)", expanded: expanded,
@@ -3057,13 +3067,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// image from `earlier` is reused when it was taken of this same cell at
     /// this same size, unless the row is in `excluding`.
     private func captureFoldRows(reusing earlier: FoldCapture = FoldCapture(),
-                                 excluding: Set<String> = []) -> FoldCapture {
+                                 excluding: Set<String> = [], capturePixels: Bool = true) -> FoldCapture {
         let clip = scrollView.contentView
         var capture = FoldCapture()
         for index in items.indices {
             if case .shelfSpacer = items[index] { continue }
             let key = items[index].identity
-            let cell = tableView.view(atColumn: 0, row: index, makeIfNecessary: false)
+            let cell: NSView? = capturePixels
+                ? tableView.view(atColumn: 0, row: index, makeIfNecessary: false)
+                : cellsByRow[index]
             var rect = tableView.rect(ofRow: index)
             var local = cell?.bounds ?? NSRect(origin: .zero, size: rect.size)
             if items[index].agentRow?.variant == .card, cardStyleOverride != nil {
@@ -3078,7 +3090,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             frame.origin.y -= clip.bounds.minY
             let visible = frame.intersects(NSRect(origin: .zero, size: clip.bounds.size))
             var image: NSImage?
-            if visible, let cell, capture.sources.count < InboxFoldMotion.snapshotLimit {
+            if capturePixels, visible, let cell, capture.sources.count < InboxFoldMotion.snapshotLimit {
                 if !excluding.contains(key), earlier.sources[key] === cell,
                    let reused = earlier.snapshots[key]?.image, reused.size == local.size {
                     image = reused
@@ -3088,7 +3100,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 }
             }
             capture.snapshots[key] = InboxFoldMotion.Snapshot(key: key, frame: frame, image: image, order: index)
-            if image != nil, let cell { capture.sources[key] = cell }
+            if visible, let cell, image != nil || !capturePixels { capture.sources[key] = cell }
         }
         return capture
     }
@@ -3104,6 +3116,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the line where it was on screen, so "Show less" at the foot of a long
     /// group lands as "40 more" under the same pointer, its lead just above.
     func toggleFanout(parentId: UUID) {
+        foldMotion.cancel()
         updatingFold = true
         defer { updatingFold = false }
         guard fanoutRemaindersByParent[parentId] != nil else { return }

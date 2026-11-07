@@ -14877,7 +14877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         // Groups start folded, and each parent's fold is kept as it was left
         // (launch polish, item Q).
-        sidebar.agentInbox.foldsUntouchedGroups = true
+        sidebar.agentInbox.foldsUntouchedGroups = false
         sidebar.agentInbox.restoreParentFolds(WorkspaceSidebarConfig.parentFolds(defaults: settingsDefaults))
         sidebar.agentInbox.onParentFoldChange = { [weak self] folds in
             guard let self else { return }
