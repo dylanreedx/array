@@ -1,6 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Share the release-build guard's regular-file flock for the entire process
+# lifetime. macOS has no system flock command; Python's flock uses the same
+# kernel lock. Exec preserves both the PID and the inheritable descriptor.
+if [[ "${ARRAY_MATRIX_LOCK_OWNER:-}" != "$$" ]]; then
+  exec python3 - "$0" "$@" <<'MATRIX_LOCK_PY'
+import fcntl
+import os
+import stat
+import sys
+
+path = os.environ.get("ARRAY_MATRIX_LOCK", "/tmp/array-matrix.lock")
+try:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise OSError("lock path must be a regular file")
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(f"Refusing matrix: another matrix or release build holds {path}")
+except OSError as error:
+    sys.exit(f"Refusing matrix: cannot lock {path}: {error}")
+os.set_inheritable(fd, True)
+env = dict(os.environ, ARRAY_MATRIX_LOCK_OWNER=str(os.getpid()))
+os.execvpe("bash", ["bash", sys.argv[1], *sys.argv[2:]], env)
+MATRIX_LOCK_PY
+fi
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
