@@ -9602,7 +9602,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
     static let indicatorStyle: String = {
         guard Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else { return "current" }
         let value = UserDefaults.standard.string(forKey: "SidebarActiveIndicatorStyle") ?? "current"
-        return ["gradient", "halo", "inset"].contains(value) ? value : "current"
+        return ["gradient", "sheen", "duplex"].contains(value) ? value : "current"
     }()
     var indicatorColour: NSColor? { didSet { applyTokens() } }
     private let indicatorWash = CAGradientLayer()
@@ -9642,6 +9642,8 @@ final class AgentInboxCardView: NSView, TokenThemed {
         }
         let dark = effectiveTokenTheme == .dark
         let colour = indicatorColour ?? TextToken.textPrimary.color.nsColor(in: self)
+        indicatorWash.type = .axial
+        indicatorSheen.type = .axial
         indicatorWash.cornerRadius = Radius.card
         indicatorWash.startPoint = CGPoint(x: 0, y: 0.5)
         indicatorWash.endPoint = CGPoint(x: 1, y: 0.5)
@@ -9649,7 +9651,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         indicatorEdge.borderWidth = 0
         indicatorEdge.shadowOpacity = 0
         indicatorEdge.backgroundColor = nil
-        indicatorSheen.isHidden = style != "inset"
+        indicatorSheen.isHidden = style != "sheen" && style != "duplex"
         indicatorSheen.frame = CGRect(x: -bounds.width, y: 0, width: bounds.width * 0.6, height: bounds.height)
         indicatorSheen.startPoint = CGPoint(x: 0, y: 0)
         indicatorSheen.endPoint = CGPoint(x: 1, y: 1)
@@ -9663,22 +9665,22 @@ final class AgentInboxCardView: NSView, TokenThemed {
             indicatorWash.colors = [colour.withAlphaComponent(alpha).cgColor,
                 colour.withAlphaComponent(alpha * 0.35).cgColor, colour.withAlphaComponent(0).cgColor]
             indicatorWash.locations = [0, 0.2475, 0.55]
-        case "halo":
-            indicatorWash.colors = nil
-            indicatorEdge.borderWidth = 1
-            indicatorEdge.borderColor = colour.withAlphaComponent(dark ? 0.65 : 0.48).cgColor
-            indicatorEdge.shadowColor = colour.cgColor
-            indicatorEdge.shadowOpacity = dark ? 0.28 : 0.16
-            indicatorEdge.shadowRadius = 4
-            indicatorEdge.shadowOffset = .zero
-            indicatorEdge.shadowPath = CGPath(roundedRect: indicatorEdge.bounds,
-                cornerWidth: indicatorEdge.cornerRadius, cornerHeight: indicatorEdge.cornerRadius, transform: nil)
-                .copy(strokingWithWidth: 1, lineCap: .butt, lineJoin: .round, miterLimit: 1)
-        case "inset":
+        case "duplex":
+            indicatorWash.type = .radial
+            indicatorWash.startPoint = CGPoint(x: 0.1, y: 0.1)
+            indicatorWash.endPoint = CGPoint(x: 1, y: 1)
+            indicatorWash.colors = [colour.withAlphaComponent(dark ? 0.20 : 0.13).cgColor, colour.withAlphaComponent(0.015).cgColor]
+            indicatorWash.locations = [0, 1]
+            indicatorSheen.frame = indicatorWash.bounds
+            indicatorSheen.type = .radial
+            indicatorSheen.startPoint = CGPoint(x: 0.9, y: 0.9)
+            indicatorSheen.endPoint = CGPoint(x: 0, y: 0)
+            indicatorSheen.colors = [colour.withAlphaComponent(dark ? 0.20 : 0.13).cgColor, colour.withAlphaComponent(0).cgColor]
+        case "sheen":
             indicatorWash.colors = [colour.withAlphaComponent(dark ? 0.16 : 0.10).cgColor,
                                     colour.withAlphaComponent(dark ? 0.16 : 0.10).cgColor]
-            indicatorEdge.borderWidth = 1
-            indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self).withAlphaComponent(dark ? 0.22 : 0.17).cgColor
+            // A continuous tinted surface, with no recessed inner outline.
+            indicatorEdge.borderWidth = 0
         default:
             indicatorWash.isHidden = true
             indicatorEdge.isHidden = true
@@ -9700,15 +9702,15 @@ final class AgentInboxCardView: NSView, TokenThemed {
             drift.duration = 6
             drift.repeatCount = .infinity
             indicatorWash.add(drift, forKey: "indicator.drift")
-        case "halo":
-            let breath = CAKeyframeAnimation(keyPath: "opacity")
-            breath.values = [0.55, 0.9, 0.55]
-            breath.keyTimes = [0, 0.5, 1]
-            breath.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut), CAMediaTimingFunction(name: .easeInEaseOut)]
-            breath.duration = 6
-            breath.repeatCount = .infinity
-            indicatorEdge.add(breath, forKey: "indicator.breath")
-        case "inset":
+        case "duplex":
+            let focus = CAKeyframeAnimation(keyPath: "opacity")
+            focus.values = [0.2, 0.85, 0.2]
+            focus.keyTimes = [0, 0.5, 1]
+            focus.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut), CAMediaTimingFunction(name: .easeInEaseOut)]
+            focus.duration = 6
+            focus.repeatCount = .infinity
+            indicatorSheen.add(focus, forKey: "indicator.focus")
+        case "sheen":
             let sweep = CAKeyframeAnimation(keyPath: "position.x")
             sweep.values = [-bounds.width, -bounds.width, bounds.width * 2, bounds.width * 2]
             sweep.keyTimes = [0, 0.15, 0.45, 1]
@@ -9743,7 +9745,23 @@ final class AgentInboxCardView: NSView, TokenThemed {
         didSet { guard isSelected != oldValue else { return }; applyFill(fading: true) }
     }
     var isHovered = false {
-        didSet { guard isHovered != oldValue else { return }; applyFill(fading: true) }
+        didSet {
+            guard isHovered != oldValue else { return }
+            applyFill(fading: true)
+            guard Self.indicatorStyle != "current", !isRouteActive, window != nil,
+                  !indicatorReducesMotion, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+                layer?.removeAnimation(forKey: "indicator.hover-settle")
+                return
+            }
+            guard isHovered else { return }
+            // A single subpixel acknowledgement; idle rows own no animation.
+            let settle = CAKeyframeAnimation(keyPath: "transform.scale")
+            settle.values = [1, 0.998, 1]
+            settle.keyTimes = [0, 0.35, 1]
+            settle.duration = 0.28
+            settle.timingFunctions = [CAMediaTimingFunction(name: .easeOut), CAMediaTimingFunction(name: .easeInEaseOut)]
+            layer?.add(settle, forKey: "indicator.hover-settle")
+        }
     }
     /// The fill the group's sheets already show under this card at rest.
     var underlayAlpha: CGFloat = 0 {
@@ -9870,6 +9888,11 @@ final class AgentInboxCardView: NSView, TokenThemed {
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
         layer.backgroundColor = fill
         guard fading, window != nil, presented != fill else { return }
+        if Self.indicatorStyle != "current",
+           indicatorReducesMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            layer.removeAnimation(forKey: Self.fillFadeKey)
+            return
+        }
         let fade = CABasicAnimation(keyPath: "backgroundColor")
         fade.fromValue = presented ?? fill?.copy(alpha: 0)
         fade.toValue = fill ?? presented?.copy(alpha: 0)
