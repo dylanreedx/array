@@ -120,7 +120,7 @@ enum SidebarOwnershipChecks {
                       record: @escaping (InboxRowAction, [UUID]) -> Void) -> (AgentInboxView, NSWindow) {
         let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         inbox.clock = clock
-        inbox.foldsUntouchedGroups = true
+        inbox.foldsUntouchedGroups = false
         inbox.prefersReducedMotion = { false }
         inbox.onRevealRow = { _ in }
         inbox.hoverCardEnabled = false
