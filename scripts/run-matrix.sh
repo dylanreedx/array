@@ -678,6 +678,8 @@ run_ios_build() {
     -scheme Continuum
     -sdk iphonesimulator
     -destination 'generic/platform=iOS Simulator'
+    ARCHS=arm64
+    ONLY_ACTIVE_ARCH=YES
     # Keep Xcode's build cache inside this checkout's .build, so it goes when
     # the bench goes; the default DerivedData path leaked ~2GB per worktree.
     -derivedDataPath .build/ios-derived-data
@@ -1128,8 +1130,6 @@ fi
 # Fail before building when the requested awake pass cannot run. Check again
 # immediately before its serial group, since independent legs can take minutes.
 if [[ "$MATRIX_MODE" != skip-awake ]]; then matrix_require_awake; fi
-# Program 91 setup: keep the 50-ticket agent-tile queue, dependency order,
-# packet structure, ledger rows, and supervised review gates from drifting.
 run_leg scripts/check-ios-preview-proof.sh
 # Ticket P1.7: colour hygiene. A pure grep lint over the view layers, so it runs
 # before the build for the same reason as the inventory guard — a new raw colour
