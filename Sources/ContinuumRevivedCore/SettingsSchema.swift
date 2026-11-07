@@ -43,6 +43,8 @@ public enum SettingsSchema {
                             keywords: ["sidebar"]),
             ]),
             SettingsGroup(id: "general.updates", title: "Updates", rows: [
+                SettingsRow(.choice(key: "array.updateChannel", label: "Update channel", options: ["Stable", "Tip"], default: "Stable"),
+                            help: "Tip includes prerelease updates. Applies to the released app only.", keywords: ["sparkle", "beta"]),
                 SettingsRow(.action(id: "checkForUpdates", label: "Software update", buttonTitle: "Check for Updates…"),
                             keywords: ["update", "upgrade", "version", "sparkle"]),
             ]),

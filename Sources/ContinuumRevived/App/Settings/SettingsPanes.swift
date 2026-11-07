@@ -355,6 +355,12 @@ struct SettingsFieldRow: View {
             NeutralThemePickerRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == CornerStyle.defaultsKey:
             PickerRow(row: row, model: model, segmented: true)
+        case let .choice(key, _, _, _, _) where key == "array.updateChannel":
+            HStack {
+                SettingsRowLabel(title: row.field.label, help: row.help)
+                Spacer()
+                UpdateChannelChoice(row: row, model: model).frame(width: 160, height: 28)
+            }
         case .choice:
             PickerRow(row: row, model: model)
         case .slider:
@@ -914,4 +920,20 @@ private struct ChordCaptureRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: ChordCaptureView, context: Context) {}
+}
+
+private struct UpdateChannelChoice: NSViewRepresentable {
+    let row: SettingsRow
+    let model: SettingsModel
+    func makeNSView(context: Context) -> ChoiceButton {
+        let button = ChoiceButton(title: "Stable")
+        button.setAccessibilityLabel("Update channel")
+        return button
+    }
+    func updateNSView(_ button: ChoiceButton, context: Context) {
+        let binding = model.binding(for: row.field)
+        button.items = [ChoiceItem(id: "Stable", title: "Stable"), ChoiceItem(id: "Tip", title: "Tip")]
+        button.selectedID = binding.string
+        button.onSelection = { item in binding.set(.string(item.id)) }
+    }
 }

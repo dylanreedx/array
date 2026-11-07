@@ -1187,6 +1187,10 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--update-channel-check") {
+            UpdateChannelDelegate.check()
+            return
+        }
         if CommandLine.arguments.contains("--menu-contract-check") {
             do {
                 _ = NSApplication.shared
@@ -6661,7 +6665,7 @@ enum ContinuumApp {
         application.delegate = delegate
         application.setActivationPolicy(.regular)
         if updaterPermitted() {
-            updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+            updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: updateChannelDelegate, userDriverDelegate: nil)
         }
         installMainMenu()
         application.run()
@@ -6672,6 +6676,8 @@ enum ContinuumApp {
     // binary (bundleIdentifier == nil), self-check legs pass `--*-check` flags,
     // and isolated QA runs of the bundle mark themselves with CONTINUUM_* env —
     // in all of those the updater must stay inert: no network, no prompts.
+    @MainActor
+    private static let updateChannelDelegate = UpdateChannelDelegate()
     @MainActor
     private static var updaterController: SPUStandardUpdaterController?
 

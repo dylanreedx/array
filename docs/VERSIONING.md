@@ -17,6 +17,15 @@ Two numbers, two audiences:
   reused or decreased — a repeated or lower build number silently breaks
   auto-update for every installed copy already in the field.
 
+Tip and stable share ONE serialized +1 build sequence. Every published tip
+consumes the next number and a ledger row; stable promotion consumes the next
+number too, reusing the optimized executable but stamping metadata and re-signing.
+Check both the feed and all GitHub releases (including prereleases) before allocation.
+Never concurrently allocate numbers in separate benches. Tip marketing versions
+are `X.Y.Z-tip.<12-character-source-commit>`; stable remains `X.Y.Z`.
+There are no separate ranges, timestamps or reset counters. A user switching
+from Tip to Stable waits for a higher stable number, never a downgrade.
+
 The two move together: every shipped `X.Y.Z` gets the next build number
 (0.2.2 was build 4, 0.3.0 was build 5; the next release is build 6).
 

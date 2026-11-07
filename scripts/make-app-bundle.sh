@@ -113,6 +113,21 @@ if [[ "$FILM" == 1 ]]; then
 fi
 
 cd "$ROOT_DIR"
+if [[ "$SKIP_BUILD" == 0 && "$CONFIGURATION" == release && "${ARRAY_RELEASE_LOCK_OWNER:-}" != "$$" ]]; then
+  exec python3 - "$0" "$@" <<'RELEASE_LOCK_PY'
+import fcntl, os, stat, sys
+path = os.environ.get("ARRAY_MATRIX_LOCK", "/tmp/array-matrix.lock")
+try:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise OSError("lock path must be a regular file")
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (OSError, BlockingIOError) as error:
+    sys.exit(f"Refusing release build: cannot lock {path}: {error}")
+os.set_inheritable(fd, True)
+os.execvpe("bash", ["bash", sys.argv[1], *sys.argv[2:]], dict(os.environ, ARRAY_RELEASE_LOCK_OWNER=str(os.getpid())))
+RELEASE_LOCK_PY
+fi
 if [[ "$SKIP_BUILD" == 0 ]]; then
 swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product Array
 swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product array-workspace-mcp
