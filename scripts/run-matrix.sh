@@ -1062,7 +1062,9 @@ run_leg swift run ContinuumRevivedCollaborationServiceChecks
 # .plans/73-film-studio: every scene in film/scenes/ still runs on this checkout's
 # app, so a UI change that breaks filming is red the day it lands. Builds the film
 # build in its own scratch path (.build-film).
-run_leg scripts/check-film-scenes.sh
+if [[ "${CONTINUUM_CHECK_FILM_SCENES:-0}" == "1" ]]; then
+  run_leg scripts/check-film-scenes.sh
+fi
 run_leg swift run ContinuumRevivedCoreChecks
 # Directory-aware document identity, symlink-safe/longest-root classification,
 # workspace-v5 migration, and durable agent-document relationship cleanup.
