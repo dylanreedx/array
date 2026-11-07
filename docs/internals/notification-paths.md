@@ -855,10 +855,6 @@ receipt parsing in the existing Core `--codex-appserver-runner-check` arm.
 
 ## Repository developer tooling (outside app notification scope)
 
-`scripts/nightly-gate.sh` is a developer LaunchAgent, outside the owned app-agent
-sender scope above. It calls macOS `osascript display notification` once after
-an attempted run finishes, addressed to the logged-in developer, with green or
-red count and commit prefix. There is no tap action, retry, phone delivery or
-Array state mutation. Lock contention and already-green skips are silent.
-Delivery errors are retained in the result's `notification.log`; Focus settings
-may suppress presentation. This is not a witnessed Array app notification path.
+| ID | Trigger | Policy / recipient / delivery | Action / quiet and failure outcomes | Coverage / limitation |
+| --- | --- | --- | --- | --- |
+| DEV-01 | Nightly matrix attempt finishes, including a caught setup/build failure | Developer tooling: `scripts/nightly-gate.sh` invokes `osascript` once; recipient Dylan only, in his logged-in macOS session; title “Array nightly gate”, payload “Green” or “N red” plus 12-character commit prefix | No tap action or retry. Lock contention and already-green skips are quiet; failures before result creation send nothing. Delivery errors go to `notification.log` and do not alter gate results; Focus may suppress presentation | Sender census maps the invocation; actual OS presentation is not witnessed. No phone delivery or Array state mutation |
