@@ -32287,6 +32287,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Beta")
             ]
         )
+        // Fixed directional geometry is this fixture's subject; deletion must
+        // not compact its hand-placed neighbors under the default auto-layout.
+        let navDefaultsName = "array.qa.nav-mode.\(UUID().uuidString)"
+        let navDefaults = UserDefaults(suiteName: navDefaultsName)!
+        defer { navDefaults.removePersistentDomain(forName: navDefaultsName) }
+        navDefaults.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
+        overlayCanvas.autoLayoutDefaults = navDefaults
         overlayCanvas.frame = CGRect(x: 0, y: 0, width: 900, height: 520)
         overlayCanvas.setNavModeOverlayVisible(true)
         let openOverlay = overlayCanvas.navModeOverlayQASnapshot()
@@ -32389,6 +32396,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileA, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent A", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: tempProjectRoot.path, status: .working, statusUpdatedAt: now)))
         try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileB, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent B", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .codex, worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
         try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: orphanAgentTile, launchProfileId: "old", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Orphan", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
+        // Activity reads registered project canvases, as it does at boot. Session
+        // files alone are deliberately insufficient: orphan sessions are excluded.
+        try tempStore.saveProject(tempProject)
+        try tempStore.saveCanvas(overlayCanvas.canvasState)
+        let cycleRegistryStore = RegistryStore(applicationSupportDirectory: tempProjectRoot)
+        var cycleRegistry = Registry.empty()
+        cycleRegistry.projects = [ProjectEntry(id: tempProject.id, name: tempProject.name,
+            rootPath: tempProjectRoot.path, workspaceId: nil, lastOpenedAt: now, pinned: false)]
+        try cycleRegistryStore.save(cycleRegistry)
+        navApp.registryStore = cycleRegistryStore
+        try navApp.reconciledManagedSessionSource.reconcile(
+            registry: cycleRegistry, reason: .continuumRestarted, now: now)
         overlayCanvas.markActive(tileId: selectedTileId)
         navApp.openNavMode()
         navApp.handleNavModeKey(keyEvent("a", keyCode: 0))
