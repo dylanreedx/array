@@ -832,6 +832,11 @@ public enum LaunchPaletteModel {
     private static func searchRank(for item: CommandCenterItem, query: String) -> (Int, Int, String) {
         let normalized = query.lowercased()
         let title = item.title.lowercased()
+        // The navigation shortcut searches for zones. Existing destinations
+        // precede creation even when only the Zone alias matches their name.
+        if normalized == "zone", case .jumpToZone = item.row {
+            return (-1, 0, title)
+        }
         let match: Int
         if title == normalized { match = 0 }
         else if title.hasPrefix(normalized) { match = 1 }

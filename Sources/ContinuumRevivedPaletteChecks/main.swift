@@ -261,6 +261,13 @@ expect(Array(homeIDs.prefix(2)) == ["action:new-agent", "action:new-agent:claude
            && !homeIDs.contains("action:new-agent:codex") && !homeIDs.contains("action:new-agent:pi"),
        "the empty-query home offers each ready non-default CLI under New Agent: \(homeIDs)")
 
+
+let zoneNavigationRows: [LaunchPaletteRow] = [
+    .action(.createZone), .jumpToZone(JumpZoneRow(id: UUID(), title: "Alpha"))
+]
+expect(LaunchPaletteModel.makeSections(rows: zoneNavigationRows, query: "zone").flatMap(\.items).first?.title == "Alpha",
+       "zone navigation must rank existing Alpha before Create Zone")
+
 let build = try runSwift(["build", "--product", "Array"])
 guard build.status == 0 else { Foundation.exit(build.status) }
 

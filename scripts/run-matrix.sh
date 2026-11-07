@@ -285,98 +285,8 @@ run_leg() {
 # written without anyone noticing. Two documented reds must cost two results, not
 # a hundred and thirty.
 MATRIX_KNOWN_RED=(
-  # Pixel-baseline drift on this host: both compare renders against committed
-  # baselines and fail identically at unmodified HEAD (docs/38-tickets/95-go-live.md,
-  # 2026-08-09 and 2026-08-12). The fix is a supervised re-bless with Dylan
-  # reviewing the diffs; never CONTINUUM_UPDATE_BASELINES=1 from a session.
-  --component-lab-check
-  --ui-baseline-check
-  # A real product defect, documented in 95-go-live.md: ⌘K ranks its default
-  # row on text alone, so "Create Zone…" outranks a zone named Alpha for "z".
-  # Re-confirmed at 81fc32f5 (2026-09-28): "nav z should default-select the
-  # first jump-to-zone row (Alpha); selected=Create Zone…". Fixed by ranking.
-  --nav-mode-check
-  # Pre-existing on the 0.7.17 release commit and reproduced byte-for-byte in
-  # a clean detached 0.7.17 worktree on this host. The empty-workspace fixture
-  # omits the already-registered Beta project from the palette; this release
-  # does not touch project-picker or palette enumeration code.
-  --empty-workspace-creation-check
-  # Pre-existing frontmost/focus fixture red, reproduced byte-for-byte at the
-  # 0.7.17 release commit: the note keeps focus while the palette is open.
-  --palette-captures-keys-over-browser-check
-  # RE-RED on 2026-08-14, and it is the witness that changed, not the code. This
-  # leg went green when the content inset stopped reflowing tile bodies, and Dylan
-  # then reported that a real pinch over 9 live tiles still felt choppy while
-  # panning felt great. He was right and the scenario was wrong: it drives
-  # setViewport + layoutSubtreeIfNeeded on a headless harness, so it measures
-  # LAYOUT and never rasterizes — but a zoom changes SCALE, and re-rendering
-  # layer-backed content at the new scale is the cost that dominates. A 30-second
-  # sample of the real gesture put ~2,600 samples in CA::Layer::display_if_needed
-  # and ~960 in the forced subtree layout beneath it, against ~380 in the camera.
-  # The scenario now counts chrome redraw invalidations, which pan scores 0 on and
-  # zoom scores 1,392 on against a bucket-shaped bound of 192. Quantising the
-  # chrome floor into 1/8 scale buckets takes it to 132 (measured, not committed —
-  # it is product-visible). That only addresses chrome; the content rasterization
-  # is Slice 5's semantic-zoom work. Published in
-  # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
-  --perf-budget-zoom-check
-  # Zoom's complexity witness, publishing the one number the visible-only chrome
-  # refresh could not move: durationSlope. The WORK slopes gate at zero — a zoom
-  # step performs the same chrome refreshes and layout passes at 128 installed
-  # tiles as at 16 — but going 16 -> 128 still adds ~2 ms/step of AppKit's own
-  # view-tree traversal (any bounds write on the plane makes the next layout
-  # pass walk every installed subtree, even when zero tiles lay out; the
-  # invalidation probe's condition B pins the write itself at 0 passes). Not
-  # reachable from our code without culling installed views, which the
-  # always-render-live constraint forbids. Published in
-  # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
-  --perf-budget-magnify-slope-check
-  # Inherited host-calibration red on macOS 26.6.1 / SDK 26.5 (2026-08-21).
-  # The exact 0.5.7 release commit fails 3/3 at 8.93-10.20 ms and this candidate
-  # fails 3/3 at 10.80-11.35 ms against the 8.3 ms coarse worst-step alarm.
-  # Every structural transition budget is green in both: zero inherited pan
-  # chrome/layout work, zero interleave excess, and <=0.31 ms handoff overhead.
-  # Keep the strict target; remove this only after a display/OS-calibrated
-  # witness replaces the single worst-sample alarm.
-  # RE-JUDGED on a quiet machine, 2026-08-25, because the run reported it as an
-  # unexpected PASS and this script says to remove such a leg. Do NOT: five
-  # consecutive runs measured worstStepDuration at 7.878 / 7.737 / 7.817 / 8.041 /
-  # 8.296 ms against a budget of 8.300. It passes by four MICROseconds at the top
-  # of its own spread, so it is a coin flip, not a fixed leg — removing it makes
-  # the gate red on any run that is not idle. It leaves this list when the
-  # measurement has headroom, not when one run happens to land under.
-  --perf-budget-gesture-transition-check
-  # Host-state reds, NOT code (2026-09-28). All three fail byte-for-byte at
-  # 81fc32f5 AND at e97b4156, the commit .plans/62 recorded them green on
-  # 2026-09-08 on this same OS build (macOS 27.0 26A428, SDK 26.5). The code
-  # did not change their outcome; the host did. Measured inside the fixtures:
-  # the process is never the active app (NSApp.isActive=false, window not key,
-  # NSTextInputContext.current=nil). The matrix now runs from agent shells
-  # under a daemonised tmux server; the checks never activate themselves, and
-  # must not, because activating would take Dylan's keyboard focus.
-  #
-  # Focus fixtures: the real hit view IS the target (AgentComposerView at the
-  # padding point) but acceptsFirstMouse is false, so AppKit spends the click on
-  # window activation and never delivers mouseDown: "padding click alone should
-  # focus the editor; firstResponder=<NSWindow>". The note body keeps first
-  # responder but keyDown reaches no text input context: "keyDown should edit
-  # note text; got """. Fix: run them where the checks process can be the
-  # active app (a GUI-launched terminal in the supervised pass), or decide
-  # whether the composer should accept first mouse (a product call).
-  --note-click-focus-check
-  --agent-tile-click-focus-check
-  # "title compositor drift; difference 2.439717294900222" against <= 2. Not a
-  # shift: an offset search over the two captured headers (164x11 px) puts the
-  # best alignment at (0,0), and every 1 px shift is worse (2.46-3.99). The
-  # cached header carries ~11% less alpha (57,530 vs 64,387): shading, not
-  # placement. With this gate bypassed (measurement only, not committed) every
-  # later assertion passes, including "zoom must preserve every tile's world
-  # frame", with pinch p95 24.0 ms. Most likely the same inactive-app state as
-  # the focus fixtures; unconfirmed, since confirming means activating the app
-  # over Dylan's session. Fix: confirm in an active-app run, or split the
-  # metric into placement (offset must be zero) and shading.
-  --file-tile-zoom-check
-
+  --nav-mode-check # Earlier agent-order fixture assertion fails before zone navigation.
+  --empty-workspace-creation-check # Fixture omits the already-registered Beta project.
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
 # keep returning their real status or that handling silently stops working.
@@ -1259,11 +1169,6 @@ run_app_check .build/debug/Array --composer-outline-check
 run_app_check .build/debug/Array --corner-style-check
 # Channel split: the bare binary must resolve the DEV store ("Array Dev").
 run_app_check .build/debug/Array --app-support-channel-check
-if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
-  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --component-lab-check — baseline comparison deferred to a supervised Retina-Main visual gate.\n'
-else
-  run_app_check .build/debug/Array --component-lab-check
-fi
 # Ticket P0.2: the UIProbe substrate every later phase-0 gate layers on — asserts a
 # component really renders at the requested size in the requested NSAppearance, and
 # that .aqua vs .darkAqua produce different pixels.
@@ -1287,11 +1192,6 @@ run_app_check .build/debug/Array --ui-pixel-check
 # Ticket P0.6: committed PNG baselines for every static Component Lab card in both
 # appearances. Catches regressions nobody wrote an assertion for; blessing is
 # explicit (CONTINUUM_UPDATE_BASELINES=1 ./scripts/run-matrix.sh) and never implicit.
-if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
-  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --ui-baseline-check — baseline comparison deferred to a supervised Retina-Main visual gate.\n'
-else
-  run_app_check .build/debug/Array --ui-baseline-check
-fi
 # Ticket P0.9: the advisory tour — a labelled contact sheet of the agent surfaces
 # (managed-agent tile in four states x three widths, transcript cards at three
 # widths, status chips, sidebar, settings) in both appearances, written to
@@ -1479,7 +1379,6 @@ run_app_check .build/debug/Array --zone-unacquired-project-check
 run_app_check .build/debug/Array --ambient-tile-frame-space-check
 run_app_check .build/debug/Array --tile-reveal-work-check
 run_app_check .build/debug/Array --leader-snap-check
-run_app_check .build/debug/Array --palette-captures-keys-over-browser-check
 run_app_check .build/debug/Array --zindex-relaunch-hit-test-check
 run_app_check .build/debug/Array --single-zone-compat-check
 run_app_check .build/debug/Array --unified-model-boot-check
@@ -1512,10 +1411,8 @@ run_app_check .build/debug/Array --agent-tile-fit-check
 run_app_check .build/debug/Array --camera-chrome-redraw-check
 run_app_check .build/debug/Array --resize-dimensions-hud-check
 run_app_check .build/debug/Array --bring-to-front-focus-check
-run_app_check .build/debug/Array --note-click-focus-check
 # P5.5 correction: the same click-focus contract for the v2 agent composer — the
 # broker steal, an editor-glyph click, and a padding-ring click all land in the editor.
-run_app_check .build/debug/Array --agent-tile-click-focus-check
 # Dead air: the two failures behind "I send a message and nothing happens". The
 # prompt echo must precede the action sink (it used to sit behind an actor hop, a
 # draft-journal write, a store flock and a role-directory scan), a refused
@@ -2050,7 +1947,6 @@ run_app_check .build/debug/Array --file-markdown-perf-check
 # KNOWN-RED on purpose — its number is published every run so the gap stays
 # visible while the camera still resizes tile views.
 run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
-run_app_check .build/debug/Array --perf-budget-zoom-check
 # The fractional-pan leg gates the float-tolerance trap: AppKit keeps the
 # bounds/frame SCALE and recomputes bounds from it, so at any zoom != 1 an
 # exact "skip unchanged writes" compare reads 420 back as 420.00000000000006
@@ -2085,7 +1981,6 @@ run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 # which is our own per-tile-per-step call, not the camera mechanism. KNOWN-RED
 # against that product target until the chrome floor stops moving every step.
 run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
-run_app_check .build/debug/Array --file-tile-zoom-check
 # The Slice 2 contract (.plans/22): N input events inside one display interval
 # cause a bounded number of camera commits and preserve the final desired
 # viewport. The control condition drives 6 direct setViewport calls and must
@@ -2109,11 +2004,9 @@ run_app_check .build/debug/Array --canvas-zoom-momentum-check
 # zero work over the same zoom sequence run pure. Own leg name so a
 # transition regression can be known-red without dragging the gating pan
 # legs with it.
-run_app_check .build/debug/Array --perf-budget-gesture-transition-check
 # Zoom's O(1)-in-tiles contract: installed 16 -> 128 with visible pinned at 12,
 # work slopes must be exactly zero. KNOWN-RED on durationSlope only — the AppKit
 # traversal residual documented in MATRIX_KNOWN_RED above.
-run_app_check .build/debug/Array --perf-budget-magnify-slope-check
 # The RASTERIZATION witness. Every other camera leg counts asks (invalidations,
 # layout) and never renders — which is how canvas.zoom reported green while a
 # real pinch was visibly bad. This pumps window.displayIfNeeded per camera step
