@@ -341,6 +341,7 @@ check --ui-probe-check
 check --ui-test-support-check
 check --ui-tour-check
 check --unified-model-boot-check
+check --update-channel-check
 check --viewport-sanitize-check
 check --web-link-open-check
 check --window-chrome-check
@@ -761,6 +762,7 @@ leg run_app_check .build/debug/Array --ui-probe-check
 leg run_app_check .build/debug/Array --ui-test-support-check
 leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/Array --unified-model-boot-check
+leg run_app_check .build/debug/Array --update-channel-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
 leg run_app_check .build/debug/Array --web-link-open-check
 leg run_app_check .build/debug/Array --window-chrome-check
