@@ -786,7 +786,7 @@ enum SidebarScreenshotChecks {
             // The PRODUCTION proposal (T3 since the confidence pass) is the one the
             // shipped list must measure as.
             let expectedCard = SidebarDensityProposal.production.cardHeight
-            let expectedPitch = AgentInbox96CellView.rowHeight(for: .production) + Space.s
+            let expectedPitch = AgentInbox96CellView.rowHeight(for: .production) + AgentInboxView.rowSpacing
                 + (SidebarDensityProposal.production.isTwoLine
                     ? AgentInbox96CellView.ownershipTrailingGap(for: .none)
                     : AgentInbox96CellView.trailingGap(for: .none))
