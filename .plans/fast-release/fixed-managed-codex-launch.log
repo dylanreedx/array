@@ -1,0 +1,6 @@
+AgentSupervisor.requestGeneratedName: agent 17E58444-1F6E-4547-B300-23DC8FAF65EC harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 17E58444-1F6E-4547-B300-23DC8FAF65EC harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 7E6E7D53-7D1C-411A-80B9-0481ACCA0DD7 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 7E6E7D53-7D1C-411A-80B9-0481ACCA0DD7 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 17E58444-1F6E-4547-B300-23DC8FAF65EC harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+Managed Codex launch passed: production lead spawn, frozen free argv, scoped hooks enforce policy, deferred switches both directions, new app-server resumes same thread, cold-cache flag

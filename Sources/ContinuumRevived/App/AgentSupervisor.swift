@@ -1387,6 +1387,7 @@ final class AgentSupervisor {
         records[id] = record
         persist(record)
         let runnerGeneration = RunnerGenerationToken()
+        piConversationLossNotices.remove(id)
         runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
         activeCompactionOperations.insert(id)
@@ -3760,6 +3761,7 @@ final class AgentSupervisor {
         if companionAcceptedStarts.remove(id) == nil && !continuingHelperRetry.contains(id) {
             updateCompanionTasks { ledger in companionRunBindings[id] = try ledger.beginUnknown(agentID: id.rawValue) }
         }
+        piConversationLossNotices.remove(id)
         runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
         notifyTurnCapabilitiesChanged(id)
@@ -4066,9 +4068,12 @@ final class AgentSupervisor {
     /// It also survives the rpc migration rather than dying with it: rpc registers
     /// SIGTERM/SIGHUP handlers that one-shot mode does not, but persistence is
     /// gated by the watermark in BOTH modes, so the first turn stays exposed.
+    private var piConversationLossNotices: Set<AgentID> = []
+
     private func noticePiConversationLoss(_ id: AgentID) {
         guard records[id]?.harness == .pi else { return }
         guard !piPersistenceWatermarkReached.contains(id) else { return }
+        guard piConversationLossNotices.insert(id).inserted else { return }
         let threadId = Self.threadId(for: id)
         deliver(.itemStarted(
             threadId: threadId,
@@ -4530,6 +4535,7 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
         deliver(.sessionStateChanged(.stopped), to: id)
         if hadRunner {
+            noticePiConversationLoss(id)
             deliver(.turnCompleted(threadId: Self.threadId(for: id), turnId: "stopped:\(Self.threadId(for: id))",
                 outcome: .interrupted, errorMessage: nil), to: id)
         } else { releaseHeldHelperCompletion(id) }
@@ -10762,7 +10768,7 @@ final class AgentSupervisor {
                     attachmentCount: 0, kind: .compaction))
             }
         }
-        state.steers += (deliveringSteers[id] ?? []).map {
+        state.steers += (deliveringSteers[id] ?? []).filter { !publishedConsumedSteers.contains($0.id) }.map {
             ComposerQueueRailState.Item(
                 id: $0.id, text: $0.message.text,
                 attachmentCount: $0.message.imageAttachments.count + $0.message.fileReferences.count + $0.message.agentReferences.count + $0.message.boardReferences.count,
@@ -11094,6 +11100,7 @@ final class AgentSupervisor {
         guard let store = submissionRecoveryStore else { return }
         if disposition == .consumed, let entry = deliveringSteers[id]?.first(where: { $0.id == steerID }),
            publishedConsumedSteers.insert(steerID).inserted {
+            notifyTurnCapabilitiesChanged(id)
             publishConsumedSteer(entry, for: id)
         }
         let previous = queueOpTasks[id]

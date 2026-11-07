@@ -1,0 +1,5 @@
+AgentSupervisor.requestGeneratedName: agent 384BD971-7FB7-4100-AD77-FE652AEB9A97 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 384BD971-7FB7-4100-AD77-FE652AEB9A97 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 971D3D11-3F87-4775-8621-DB2832A124F0 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 971D3D11-3F87-4775-8621-DB2832A124F0 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+FAIL: managed-mode: Codex: free argv changed

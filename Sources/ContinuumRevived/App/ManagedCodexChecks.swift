@@ -54,7 +54,8 @@ enum ManagedCodexChecks {
             "mcp_servers.array_workspace.tool_timeout_sec=86400", "mcp_servers.array_workspace.default_tools_approval_mode=\"approve\"",
             "mcp_servers.array_workspace.env.ARRAY_WORKSPACE_AGENT_ID=\"\(c.agentID)\"",
             "mcp_servers.array_workspace.env.ARRAY_WORKSPACE_MCP_ENDPOINT=\"\(c.endpoint)\"",
-            "mcp_servers.array_workspace.env.ARRAY_WORKSPACE_MCP_TOKEN_FILE=\"\(c.tokenFilePath)\""]
+            "mcp_servers.array_workspace.env.ARRAY_WORKSPACE_MCP_TOKEN_FILE=\"\(c.tokenFilePath)\"",
+            "mcp_servers.array_workspace.env.ARRAY_WORKSPACE_RESULT_DELIVERY=\"\(c.resultDelivery.rawValue)\""]
         let command = [c.serverExecutable, "hook", "--endpoint", c.endpoint, "--agent-id", c.agentID, "--token-file", c.tokenFilePath].map(quoted).joined(separator: " ")
         let events = [("SessionStart", "session_start"), ("UserPromptSubmit", "user_prompt_submit"),
                       ("PreToolUse", "pre_tool_use"), ("PostToolUse", "post_tool_use"), ("Stop", "stop"),
