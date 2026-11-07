@@ -852,3 +852,13 @@ recipient (0.7.44) is never woken; its collection keeps the leases and receipts.
 No new alert sender, recipient, sound or tap action. Behavioral witnesses are
 in the matrix-registered `--helper-completion-check`, with correlated Codex
 receipt parsing in the existing Core `--codex-appserver-runner-check` arm.
+
+## Repository developer tooling (outside app notification scope)
+
+`scripts/nightly-gate.sh` is a developer LaunchAgent, outside the owned app-agent
+sender scope above. It calls macOS `osascript display notification` once after
+an attempted run finishes, addressed to the logged-in developer, with green or
+red count and commit prefix. There is no tap action, retry, phone delivery or
+Array state mutation. Lock contention and already-green skips are silent.
+Delivery errors are retained in the result's `notification.log`; Focus settings
+may suppress presentation. This is not a witnessed Array app notification path.

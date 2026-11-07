@@ -2,8 +2,11 @@
 
 ## Cut a preview and release candidate together
 
-1. Choose a commit with a passing nightly matrix report. Record that report and
-   commit in the release notes. Do not run the full matrix during publishing.
+1. Run `scripts/nightly-gate.sh --latest-green` to select the newest green
+   nightly commit on `origin/array/integration`. Inspect its report (see below),
+   complete the awake checks, and cut the candidate from that exact commit.
+   Record the report and commit in the release notes. Do not run the full matrix
+   during publishing.
 2. Reserve the next global build number in docs/VERSIONING.md: both tip and
    stable consume the same +1 sequence. Check published GitHub releases too,
    including prereleases; never reuse an allocated published number.
@@ -84,3 +87,22 @@ ledger, deploy feed after approval. Never lower a version number or replace an
 existing download in place. A critical item cannot be skipped. Confirm the update
 from an affected installed build. Older pre-Sparkle 0.2.0 installs need a manual
 replacement.
+
+## Promote a nightly checked commit
+
+One-time setup: run `scripts/nightly-gate.sh --install` from the landed repository
+(`--install --dry-run` previews paths and launchctl commands). This schedules
+03:00 local in the logged-in user's session; `--uninstall` removes the job.
+The Mac must be awake to start it; caffeinate prevents idle system sleep during
+the run. The installed wrapper is copied to `~/array-scratch/nightly-gate`;
+rerun install after wrapper changes. Installation only sets up the scheduled job.
+
+Run `scripts/nightly-gate.sh --latest-green` to print the newest integration
+ancestor with a green nightly result. Inspect `~/array-scratch/nightly-gate/latest.json`
+and `results/<commit>/summary.md` before selecting that exact commit for promotion.
+Nightlies run the independent matrix group; complete
+`scripts/run-matrix.sh --awake-only` at that same commit while unlocked before release.
+A managed-agent run retains crash-witness deferrals and is not complete crash
+coverage. Missing results or a red nightly do not authorize promotion.
+Results expire after 14 days. The job requires the parallel matrix cleanup on
+integration and uses its shared release/matrix lock; contention skips the run.
