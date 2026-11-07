@@ -42,8 +42,8 @@
    `Array.dmg` and `Array-X.Y.Z.dmg` to `dylanreedx/array-releases`, tag `vX.Y.Z`,
    with friend-readable release notes. Use `gh release create` only after approval.
 2. Run `scripts/generate-appcast.sh`. It signs stable archives using the Keychain
-   key, preserves tip items, and adds a one-day phased rollout interval (seven
-   Sparkle groups). Manual checks can see the update immediately.
+   key, preserves tip items, and adds a one-hour phased rollout interval on the new item only (seven
+   Sparkle groups, reaching all groups in about six hours). Manual checks can see the update immediately.
 3. Append the stable row to docs/VERSIONING.md. Review the feed, then commit ledger
    and website/public/appcast.xml. With Dylan's approval push array/integration,
    fast-forward main, and push main. Vercel deploys the feed from main.

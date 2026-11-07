@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PHASED_ROLLOUT_INTERVAL=3600
+
 # Phase 2 step 6 (docs/38-tickets/95-go-live.md): regenerate the Sparkle appcast
 # from the local archive of shipped DMGs and write the copy the site deploys.
 #
@@ -29,18 +31,29 @@ ls "$RELEASES_DIR"/Array-*.dmg >/dev/null 2>&1 || { echo "no Array-<version>.dmg
   --maximum-versions 0 \
   --maximum-deltas 0
 
-/usr/bin/python3 - "$RELEASES_DIR/appcast.xml" "$SITE_APPCAST" <<'PY'
+/usr/bin/python3 - "$RELEASES_DIR/appcast.xml" "$SITE_APPCAST" "$PHASED_ROLLOUT_INTERVAL" <<'PY'
 import sys
+import os
+import copy
 import xml.etree.ElementTree as ET
 
 SPARKLE = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 ET.register_namespace("sparkle", SPARKLE)
-src, dst = sys.argv[1], sys.argv[2]
+src, dst, rollout_interval = sys.argv[1:]
 tree = ET.parse(src)
 channel = tree.getroot().find("channel")
 items = channel.findall("item") if channel is not None else []
 if not items:
     raise SystemExit(f"no update items found in {src}")
+def version(item):
+    enclosure = item.find("enclosure")
+    return item.findtext(f"{{{SPARKLE}}}version") or (enclosure.get(f"{{{SPARKLE}}}version") if enclosure is not None else None)
+
+previous = ET.parse(dst).findall("./channel/item") if os.path.exists(dst) else []
+previous_stable = {version(item): item for item in previous if item.find(f"{{{SPARKLE}}}channel") is None}
+# Build numbers are monotonic integers. Only the newest stable item can be
+# the release being published; older archives must never acquire staging.
+newest = max(items, key=lambda item: int(version(item)))
 for item in items:
     enclosure = item.find("enclosure")
     if enclosure is None:
@@ -48,16 +61,30 @@ for item in items:
     short = item.findtext(f"{{{SPARKLE}}}shortVersionString") or enclosure.get(f"{{{SPARKLE}}}shortVersionString")
     if not short:
         raise SystemExit("update item without sparkle:shortVersionString")
-    if item.find(f"{{{SPARKLE}}}phasedRolloutInterval") is None:
-        ET.SubElement(item, f"{{{SPARKLE}}}phasedRolloutInterval").text = "86400"
+    rollout_tag = f"{{{SPARKLE}}}phasedRolloutInterval"
+    old = previous_stable.get(version(item))
+    if old is not None:
+        # Preserve the published policy, including an absent interval.
+        for interval in item.findall(rollout_tag):
+            item.remove(interval)
+        old_interval = old.find(rollout_tag)
+        if old_interval is not None:
+            item.append(copy.deepcopy(old_interval))
+    elif item is newest:
+        interval = item.find(rollout_tag)
+        if interval is None:
+            interval = ET.SubElement(item, rollout_tag)
+        interval.text = rollout_interval
+    else:
+        for interval in item.findall(rollout_tag):
+            item.remove(interval)
     enclosure.set("url", f"https://github.com/dylanreedx/array-releases/releases/download/v{short}/Array-{short}.dmg")
     if item.find(f"{{{SPARKLE}}}releaseNotesLink") is None:
         notes = ET.SubElement(item, f"{{{SPARKLE}}}releaseNotesLink")
         notes.text = f"https://github.com/dylanreedx/array-releases/releases/tag/v{short}"
 # Tip archives live separately; preserve their signed items on stable regeneration.
-import os
-if os.path.exists(dst):
-    for old in ET.parse(dst).findall("./channel/item"):
+if previous:
+    for old in previous:
         if old.findtext(f"{{{SPARKLE}}}channel") == "tip":
             channel.insert(0, old)
 tree.write(dst, encoding="UTF-8", xml_declaration=True)

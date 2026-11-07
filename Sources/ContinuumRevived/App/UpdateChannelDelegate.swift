@@ -1,3 +1,4 @@
+import ContinuumRevivedCore
 import Foundation
 import Sparkle
 
@@ -17,16 +18,20 @@ final class UpdateChannelDelegate: NSObject, SPUUpdaterDelegate {
         defer { defaults.removePersistentDomain(forName: suite) }
         let delegate = UpdateChannelDelegate(defaults: defaults)
         let controller = SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: delegate, userDriverDelegate: nil)
-        // Drive the production delegate with an inert real updater. These are
-        // the channels Sparkle uses to filter the feed, including stable always.
-        func accepted(_ channel: String?) -> Bool {
-            channel == nil || delegate.allowedChannels(for: controller.updater).contains(channel!)
+        // Sparkle's public appcast API exposes items, but no channel-filtering
+        // operation. Assert its delegate contract directly rather than copying
+        // Sparkle's filtering logic. Resolve the real Settings field so a key
+        // drift between Settings and the updater makes this witness fail.
+        guard let field = SettingsSchema.sections().flatMap(\.groups)
+            .flatMap(\.rows).map(\.field)
+            .first(where: { $0.key == "array.updateChannel" }) else {
+            preconditionFailure("Settings is missing the update channel field")
         }
-        precondition(accepted(nil) && !accepted("tip") && !accepted("beta"))
-        defaults.set("Tip", forKey: "array.updateChannel")
-        precondition(accepted(nil) && accepted("tip") && !accepted("beta"))
-        defaults.set("Stable", forKey: "array.updateChannel")
-        precondition(accepted(nil) && !accepted("tip"))
-        print("update-channel-check passed: Stable → Tip → Stable through Sparkle delegate")
+        precondition(delegate.allowedChannels(for: controller.updater) == [])
+        field.setValue(.string("Tip"), in: defaults)
+        precondition(delegate.allowedChannels(for: controller.updater) == ["tip"])
+        field.setValue(.string("Stable"), in: defaults)
+        precondition(delegate.allowedChannels(for: controller.updater) == [])
+        print("update-channel-check passed: Settings writer → Sparkle delegate: Stable [] → Tip [tip] → Stable []")
     }
 }
