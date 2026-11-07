@@ -87,3 +87,22 @@ The one-page runbook for shipping a release. Program history and rationale live 
   works manually.
 - If notarization fails, `release-app.sh` prints the log path; the notary
   history is available via `xcrun notarytool history --keychain-profile array-notary`.
+
+## Promote a nightly checked commit
+
+One-time setup: run `scripts/nightly-gate.sh --install` from the landed repository
+(`--install --dry-run` previews paths and launchctl commands). This schedules
+03:00 local in the logged-in user's session; `--uninstall` removes the job.
+The Mac must be awake to start it; caffeinate prevents idle system sleep during
+the run. The installed wrapper is copied to `~/array-scratch/nightly-gate`;
+rerun install after wrapper changes. No app bundle is installed or rebuilt.
+
+Run `scripts/nightly-gate.sh --latest-green` to print the newest integration
+ancestor with a green nightly result. Inspect `~/array-scratch/nightly-gate/latest.json`
+and `results/<commit>/summary.md` before selecting that exact commit for promotion.
+Nightlies run the independent matrix group with UI baselines skipped; complete
+`--awake-only` and the required display checks while unlocked before release.
+A managed-agent run retains crash-witness deferrals and is not complete crash
+coverage. Missing results or a red nightly do not authorize promotion.
+Results expire after 14 days. The job requires the parallel matrix cleanup on
+integration and uses its shared release/matrix lock; contention skips the run.
