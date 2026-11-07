@@ -85,6 +85,9 @@ enum CanvasCameraDriverChecks {
             scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2,
             wheel1: dy, wheel2: 0, wheel3: 0
         ) else { return nil }
+        // A nil CGEvent source inherits session modifiers. Command would route
+        // this pan fixture through scroll zoom instead, depending on live keys.
+        cgEvent.flags = []
         return NSEvent(cgEvent: cgEvent)
     }
 
