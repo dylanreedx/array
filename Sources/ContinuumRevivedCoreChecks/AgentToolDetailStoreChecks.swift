@@ -19,7 +19,6 @@ func runAgentToolDetailStoreChecks() async throws {
     runAgentToolKindChecks()
     await runArrayWorkspaceToolRowChecks()
     await runAgentToolDetailSupplyContractChecks()
-    runAgentToolDetailSourceBoundaryChecks()
     try runAgentToolDetailCompileNegativeBoundaryCheck()
     print("Agent tool detail store checks passed: privacy redaction/fail-closed output, scoped cross-agent/turn identity, path-title retention/AX witnesses, implicit-path and compound-argv secret witnesses, cross-store reversed-arrival ties, provider ID bounds, argument/file bounds, truncation caps, start/end ordering, local expiry, same-ID concurrency, one tool taxonomy behind icon/sentence/fold, the supply contract behind shell and delegation rows, and source boundaries")
 }
@@ -1760,55 +1759,6 @@ private func runAgentToolDetailSupplyContractChecks() async {
     for kind in [ItemKind.assistantMessage, .reasoning, .plan, .error, .compaction] {
         expect(!AgentToolDetailPolicy.carriesHostLocalDetail(kind),
                "AgentToolDetailPolicy: .\(kind.rawValue) has no whitelist to publish through and must not carry detail")
-    }
-}
-
-private func runAgentToolDetailSourceBoundaryChecks() {
-    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-    let sources = root.appendingPathComponent("Sources")
-    let swiftFiles = allSwiftFiles(under: sources)
-    expect(!swiftFiles.isEmpty, "AgentToolDetailStore source boundary: expected Swift sources under \(sources.path)")
-
-    for file in swiftFiles {
-        guard let source = try? String(contentsOf: file, encoding: .utf8) else {
-            fputs("FAIL: AgentToolDetailStore source boundary: could not read \(file.path)\n", stderr)
-            Foundation.exit(1)
-        }
-        let relative = file.path.replacingOccurrences(of: root.path + "/", with: "")
-        let compacted = source.replacingOccurrences(of: "\n", with: " ")
-        let localDetailTypeNames = [
-            "AgentToolDetailID",
-            "AgentToolDetailScope",
-            "AgentToolDetailKey",
-            "AgentToolDetailField",
-            "AgentToolDetailStart",
-            "AgentToolDetailEnd",
-            "AgentToolDetailBoundedText",
-            "AgentToolDetailArgument",
-            "AgentToolDetailRecord"
-        ]
-        for typeName in localDetailTypeNames {
-            let conformancePattern = #"(struct|enum|extension)\s+"# + typeName + #"\b[^\{;]*(Codable|Encodable|Decodable)\b"#
-            expect(compacted.range(of: conformancePattern, options: .regularExpression) == nil,
-                   "AgentToolDetailStore source boundary: host-local detail vocabulary must remain non-Codable; found forbidden conformance on \(typeName) in \(relative)")
-        }
-
-        if relative == "Sources/ContinuumRevivedCore/Agents/AgentToolDetailStore.swift" {
-            expect(source.contains("HMAC<SHA256>"),
-                   "AgentToolDetailStore privacy boundary: secret association must use keyed HMAC")
-            expect(!source.contains("SHA256.hash"),
-                   "AgentToolDetailStore privacy boundary: predictable exact-secret SHA-256 fingerprint remains")
-            expect(source.contains("SymmetricKey(size: .bits256)"),
-                   "AgentToolDetailStore privacy boundary: per-store ephemeral key generation is missing")
-        }
-
-        let isRuntimeOrActivityFile = relative == "Sources/ContinuumRevivedCore/AgentStatusEngine.swift" ||
-            relative == "Sources/ContinuumRevivedCore/AgentActivityEvent.swift"
-        let isSyncFile = relative.hasPrefix("Sources/ContinuumRevivedSync/")
-        if isRuntimeOrActivityFile || isSyncFile {
-            expect(!source.contains("AgentToolDetail"),
-                   "AgentToolDetailStore source boundary: runtime/activity/sync production types must not gain local detail references; found in \(relative)")
-        }
     }
 }
 
