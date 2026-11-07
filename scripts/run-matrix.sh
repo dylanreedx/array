@@ -614,9 +614,33 @@ run_app_check() {
   if [[ "$MATRIX_SCHEDULING" == 1 ]]; then matrix_queue matrix_run_app_now "$@"
   else matrix_run_app_now "$@"; fi
 }
+matrix_require_awake() {
+  python3 - <<'AWAKE_PY'
+import ctypes, os, plistlib, subprocess, sys
+try:
+    session = plistlib.loads(subprocess.check_output(['/usr/sbin/ioreg', '-n', 'Root', '-d', '1', '-a']))
+    if isinstance(session, list): session = session[0]
+    if session.get('IOConsoleLocked'):
+        sys.exit('Refusing awake group: the console is locked. Unlock the Mac or use --skip-awake.')
+    if not any(u.get('kCGSSessionOnConsoleKey') and u.get('kCGSSessionUserIDKey') == os.getuid()
+               for u in session.get('IOConsoleUsers', [])):
+        sys.exit('Refusing awake group: this user has no active console session. Use --skip-awake.')
+    cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+    cg.CGMainDisplayID.restype = ctypes.c_uint32
+    cg.CGDisplayIsAsleep.argtypes = [ctypes.c_uint32]
+    display = cg.CGMainDisplayID()
+    if not display or cg.CGDisplayIsAsleep(display):
+        sys.exit('Refusing awake group: the main display is asleep or unavailable. Wake it or use --skip-awake.')
+except (OSError, ValueError, subprocess.SubprocessError) as error:
+    sys.exit(f'Refusing awake group: cannot verify display state: {error}')
+print('Awake preflight: console unlocked, main display awake.')
+AWAKE_PY
+}
+
 matrix_finish_jobs() {
   matrix_drain
   if [[ -s "$MATRIX_RESULTS/awake.sh" ]]; then
+    matrix_require_awake
     printf '\n==> Serial awake group\n'
     # Only shell-escaped invocations written by matrix_queue are evaluated.
     while IFS= read -r command; do
@@ -1101,6 +1125,9 @@ if [[ "$TILE_SELECTION_ONLY" -eq 1 ]]; then
   matrix_report 'Tile selection matrix (targeted)'
   exit $?
 fi
+# Fail before building when the requested awake pass cannot run. Check again
+# immediately before its serial group, since independent legs can take minutes.
+if [[ "$MATRIX_MODE" != skip-awake ]]; then matrix_require_awake; fi
 # Program 91 setup: keep the 50-ticket agent-tile queue, dependency order,
 # packet structure, ledger rows, and supervised review gates from drifting.
 run_leg scripts/check-ios-preview-proof.sh
