@@ -21,6 +21,8 @@ inert) — only the release pipeline passes --channel prod. This bundle is
 unsigned/unprovisioned CloudKit-wise; use scripts/provisioned-cloudkit-app.sh
 for real iCloud/CloudKit proof.
 
+--skip-build assembles already-built binaries without invoking Swift.
+
 --film builds the FILM bundle for scripts/film-capture.sh: the film recorder
 compiled in (-DARRAY_FILM), in its own scratch path (.build-film) so ordinary
 builds never rebuild for the flag, stamped with its own identity
@@ -34,8 +36,10 @@ the same TCC reason. Never the prod or the shared dev id.
 USAGE
 }
 
+SKIP_BUILD=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --skip-build) SKIP_BUILD=1; shift ;;
     --configuration)
       [[ $# -ge 2 ]] || { echo "missing value for --configuration" >&2; exit 2; }
       CONFIGURATION="$2"
@@ -109,8 +113,10 @@ if [[ "$FILM" == 1 ]]; then
 fi
 
 cd "$ROOT_DIR"
+if [[ "$SKIP_BUILD" == 0 ]]; then
 swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product Array
 swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product array-workspace-mcp
+fi
 
 BUILD_DIR="$SCRATCH/$CONFIGURATION"
 EXECUTABLE="$BUILD_DIR/Array"

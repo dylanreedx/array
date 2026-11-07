@@ -99,9 +99,12 @@ NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
 MANAGED_MODE_ONLY=0
 PERMISSION_UX_ONLY=0
+MATRIX_MODE=full
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --awake-only) MATRIX_MODE=awake-only; shift ;;
+    --skip-awake) MATRIX_MODE=skip-awake; shift ;;
     --permission-ux)
       PERMISSION_UX_ONLY=1
       shift
@@ -208,7 +211,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+Usage: scripts/run-matrix.sh [--awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
 
 --permission-ux rebuilds the app and MCP helper, then reports permission scope, browser, simulator, grants and session witnesses. This is a targeted development gate.
 
@@ -219,6 +222,11 @@ Usage: scripts/run-matrix.sh [--permission-ux | --agent-schedules | --share-revo
 --composer-send rebuilds the app and reports native composer acceptance, refusal and in-flight edit checks.
 
 --boards rebuilds app/CoreChecks and reports the board library, lifecycle, API and reference witnesses.
+
+--awake-only runs only serial display/focus/perf/terminal legs.
+--skip-awake runs the independent group unattended.
+ARRAY_MATRIX_JOBS sets parallel workers (default: core count clamped to 4–6).
+ARRAY_MATRIX_RESULTS sets the results directory (logs plus results.json).
 
 Runs the project verification matrix. --fast skips the slower packaging bundle
 probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
@@ -276,6 +284,12 @@ if [[ $# -gt 0 ]]; then
   exit 2
 fi
 
+MATRIX_RESULTS=${ARRAY_MATRIX_RESULTS:-"$ROOT_DIR/qa-runs/matrix-$(date -u +%Y%m%dT%H%M%SZ)-$$"}
+mkdir -p "$MATRIX_RESULTS"
+MATRIX_RESULTS=$(cd "$MATRIX_RESULTS" && pwd)
+: > "$MATRIX_RESULTS/results.tsv"
+: > "$MATRIX_RESULTS/awake.sh"
+
 run() {
   printf '\n==> %s\n' "$*"
   "$@"
@@ -284,8 +298,8 @@ run() {
 # A non-app leg (checks executable or hygiene script) that must NOT abort the run.
 # Builds keep using `run`, because a failed build makes every later result
 # meaningless — but one red checks executable must not hide the other seventeen.
-run_leg() {
-  local status
+matrix_run_leg_now() {
+  local status started=$SECONDS
   printf '\n==> %s\n' "$*"
   matrix_focus_watch_start
   set +e
@@ -295,6 +309,7 @@ run_leg() {
   if ! matrix_focus_watch_stop && [[ $status -eq 0 ]]; then
     status=1
   fi
+  MATRIX_LEG_SECONDS=$((SECONDS - started))
   matrix_classify "$(matrix_leg_name "$@")" "$status"
 }
 
@@ -309,7 +324,6 @@ run_leg() {
 # written without anyone noticing. Two documented reds must cost two results, not
 # a hundred and thirty.
 MATRIX_KNOWN_RED=(
-  --nav-mode-check # Earlier agent-order fixture assertion fails before zone navigation.
   --empty-workspace-creation-check # Fixture omits the already-registered Beta project.
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
@@ -346,6 +360,18 @@ matrix_list_contains() {
 # is an advisory leg, whose real status its caller captures itself.
 matrix_classify() {
   local leg=$1 status=$2
+  if [[ -n "${MATRIX_JOB_STATUS_FILE:-}" ]]; then
+    printf '%s\n' "$status" > "$MATRIX_JOB_STATUS_FILE"
+    return 0
+  fi
+  local classification=pass
+  if [[ "$status" != 0 ]]; then classification=fail; fi
+  if matrix_list_contains "$leg" "${MATRIX_KNOWN_RED[@]}"; then
+    if [[ "$status" != 0 ]]; then classification=known-red; else classification=known-red-passed; fi
+  elif matrix_list_contains "$leg" "${MATRIX_ADVISORY[@]}"; then
+    classification=advisory
+  fi
+  printf '%s\t%s\t%s\n' "$leg" "$classification" "${MATRIX_LEG_SECONDS:-0}" >> "$MATRIX_RESULTS/results.tsv"
   MATRIX_LEGS_RUN=$((MATRIX_LEGS_RUN + 1))
 
   if matrix_list_contains "$leg" "${MATRIX_ADVISORY[@]}"; then
@@ -467,8 +493,8 @@ matrix_focus_watch_stop() {
   return 0
 }
 
-run_app_check() {
-  local project_root app_support status stdout_log
+matrix_run_app_now() {
+  local project_root app_support status stdout_log started=$SECONDS
   local tmux_args=()
   project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-project.XXXXXX")
   app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-appsupport.XXXXXX")
@@ -510,7 +536,108 @@ run_app_check() {
   matrix_collect_notes "$(matrix_leg_name "$@")" "$stdout_log"
   rm -rf "$project_root" "$app_support" "$stdout_log"
 
+  MATRIX_LEG_SECONDS=$((SECONDS - started))
   matrix_classify "$(matrix_leg_name "$@")" "$status"
+}
+
+# Full runs queue independent legs; display and shared terminal legs are replayed
+# serially after all workers finish. Targeted modes retain their direct runner.
+MATRIX_SCHEDULING=0
+MATRIX_JOB_PIDS=()
+MATRIX_JOB_IDS=()
+MATRIX_JOB_NEXT=0
+MATRIX_JOB_JOIN=0
+matrix_awake_leg() {
+  case "$*" in
+    *CoreChecks*|*PaletteChecks*|*PerfChecks*|*check-app-bundle*|*multiplayer-journey*|*collaboration-pair*|*--ui-tour-check*|*--nav-mode-check*|*--agent-face-switch-check*|*--tile-surface-residency-check*|*--inbox-parent-fold-check*|*--share-agent-relay-check*|*--shell-open-as-agent-check*|*terminal*|*tmux*|*session-resume*|*focus*|*perf*|*gesture*|*pointer*|*browser*|*magnify*|*snapshot*|*appearance*|*pixel*|*geometry*|*outline*|*residency*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+matrix_join_one() {
+  local id=${MATRIX_JOB_IDS[$MATRIX_JOB_JOIN]} pid=${MATRIX_JOB_PIDS[$MATRIX_JOB_JOIN]}
+  local status=0 leg seconds
+  wait "$pid" || status=$?
+  leg=$(cat "$MATRIX_RESULTS/$id.leg")
+  seconds=$(cat "$MATRIX_RESULTS/$id.seconds" 2>/dev/null || printf 0)
+  if [[ -f "$MATRIX_RESULTS/$id.status" ]]; then
+    status=$(cat "$MATRIX_RESULTS/$id.status")
+  elif [[ "$status" == 0 ]]; then
+    status=1 # A worker that never classified its outcome is not green.
+  fi
+  MATRIX_LEG_SECONDS=$seconds
+  matrix_collect_notes "$leg" "$MATRIX_RESULTS/$id.log"
+  matrix_classify "$leg" "$status" || true
+  printf '  %5ss  %s  %s\n' "$seconds" "$([[ $status == 0 ]] && printf PASS || printf RED)" "$leg"
+  if [[ "$status" != 0 ]]; then tail -25 "$MATRIX_RESULTS/$id.log"; fi
+  MATRIX_JOB_JOIN=$((MATRIX_JOB_JOIN + 1))
+}
+matrix_drain() {
+  while (( MATRIX_JOB_JOIN < ${#MATRIX_JOB_PIDS[@]} )); do matrix_join_one; done
+}
+
+matrix_launch() {
+  local runner=$1; shift
+  local id=$MATRIX_JOB_NEXT
+  MATRIX_JOB_NEXT=$((MATRIX_JOB_NEXT + 1))
+  matrix_leg_name "$@" > "$MATRIX_RESULTS/$id.leg"
+  (
+    trap - EXIT
+    MATRIX_JOB_STATUS_FILE="$MATRIX_RESULTS/$id.status"
+    started=$SECONDS
+    "$runner" "$@"
+    printf '%s\n' "$((SECONDS - started))" > "$MATRIX_RESULTS/$id.seconds"
+  ) > "$MATRIX_RESULTS/$id.log" 2>&1 &
+  MATRIX_JOB_PIDS+=("$!")
+  MATRIX_JOB_IDS+=("$id")
+}
+
+matrix_queue() {
+  local runner=$1; shift
+  if matrix_awake_leg "$@"; then
+    if [[ "$MATRIX_MODE" == skip-awake ]]; then
+      printf 'SKIPPED awake: %s\n' "$(matrix_leg_name "$@")"
+      return 0
+    fi
+    printf '%q ' "$runner" "$@" >> "$MATRIX_RESULTS/awake.sh"
+    printf '\n' >> "$MATRIX_RESULTS/awake.sh"
+  elif [[ "$MATRIX_MODE" != awake-only ]]; then
+    if (( ${#MATRIX_JOB_PIDS[@]} - MATRIX_JOB_JOIN >= MATRIX_JOBS )); then matrix_join_one; fi
+    matrix_launch "$runner" "$@"
+  fi
+}
+run_leg() {
+  if [[ "$MATRIX_SCHEDULING" == 1 ]]; then matrix_queue matrix_run_leg_now "$@"
+  else matrix_run_leg_now "$@"; fi
+}
+run_app_check() {
+  if [[ "$MATRIX_SCHEDULING" == 1 ]]; then matrix_queue matrix_run_app_now "$@"
+  else matrix_run_app_now "$@"; fi
+}
+matrix_finish_jobs() {
+  matrix_drain
+  if [[ -s "$MATRIX_RESULTS/awake.sh" ]]; then
+    printf '\n==> Serial awake group\n'
+    # Only shell-escaped invocations written by matrix_queue are evaluated.
+    while IFS= read -r command; do
+      eval "matrix_launch $command"
+      matrix_drain
+    done < "$MATRIX_RESULTS/awake.sh"
+  fi
+  python3 - "$MATRIX_RESULTS" <<'RESULTS_PY'
+import csv, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+rows = []
+for leg, status, seconds in csv.reader((root / 'results.tsv').open(), delimiter='\t'):
+    rows.append(dict(leg=leg, status=status, seconds=int(seconds)))
+(root / 'results.json').write_text(json.dumps(rows, indent=2) + '\n')
+print('\nPer-leg wall times:')
+for row in rows:
+    print(f"  {row['seconds']:5}s  {row['status']:4}  {row['leg']}")
+print(f"JSON results: {root / 'results.json'}")
+RESULTS_PY
+  printf 'Full run wall time: %ss\n' "$SECONDS"
+  MATRIX_SCHEDULING=0
 }
 
 # Ticket P0.1: compile the iOS app, not just the macOS package. Core is shared
@@ -986,107 +1113,46 @@ run_leg scripts/check-ios-preview-proof.sh
 run_leg scripts/check-color-hygiene.sh
 run swift build
 run_ios_build
-# .plans/73-film-studio: the film recorder is compiled only into the film build
-# (-DARRAY_FILM). The normal binary must carry none of it and refuse --film.
-run_leg scripts/check-film-absent.sh
-run_leg swift run ContinuumRevivedCollaborationChecks
-run_leg swift run ContinuumRevivedCollaborationServiceChecks
+run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
+run_leg scripts/check-cursor-contrast.sh
 # .plans/73-film-studio: every scene in film/scenes/ still runs on this checkout's
 # app, so a UI change that breaks filming is red the day it lands. Builds the film
 # build in its own scratch path (.build-film).
 if [[ "${CONTINUUM_CHECK_FILM_SCENES:-0}" == "1" ]]; then
   run_leg scripts/check-film-scenes.sh
 fi
-run_leg swift run ContinuumRevivedCoreChecks
-# Directory-aware document identity, symlink-safe/longest-root classification,
-# workspace-v5 migration, and durable agent-document relationship cleanup.
-# An unreadable canvas.json throws instead of loading as empty, and the store
-# refuses to write over it.
-# Worst-case cost of the exact zone-origin correction on the resize input path
-# (it runs per zone per mouseDragged). Registered so the bound is gated, not
-# merely measurable: the leg existed with a failing exit path no gate ran.
-# Provider-native compaction lifecycle, opaque-payload discipline, and token
-# precision semantics. Standalone so unrelated long-running CoreChecks failures
-# cannot prevent this contract from running.
-# Standalone: the bare CoreChecks run is KNOWN-RED before the meter sections.
-# DI-01: the dictation state machine and waveform arithmetic over the fake
-# engine. Standalone: the bare CoreChecks run is KNOWN-RED before it.
-# Standalone for the same reason: the runner half (incl. the real 0.159.3
-# manual-compaction turn, which once left a tile "Working" forever) only ran
-# inside the KNOWN-RED bare CoreChecks run.
+MATRIX_JOBS=${ARRAY_MATRIX_JOBS:-$(sysctl -n hw.logicalcpu | awk '{ n=int($1/2); if(n<4)n=4; if(n>6)n=6; print n }')}
+[[ "$MATRIX_JOBS" =~ ^[1-9][0-9]*$ ]] || { echo 'ARRAY_MATRIX_JOBS must be a positive integer' >&2; exit 2; }
+run scripts/make-app-bundle.sh --skip-build --configuration debug --output "$MATRIX_RESULTS/Array.app"
+for journey in ShareKinds ShareTerminal; do
+  run python3 scripts/check-multiplayer-journey.py --relay local --name "$journey" --prepare-only
+ done
+export ARRAY_MATRIX_PREBUILT=1
+MATRIX_SCHEDULING=1
+printf '\n==> Independent group (%s workers), then serial awake group; mode=%s\n' "$MATRIX_JOBS" "$MATRIX_MODE"
+# .plans/73-film-studio: the film recorder is compiled only into the film build
+# (-DARRAY_FILM). The normal binary must carry none of it and refuse --film.
+run_leg scripts/check-film-absent.sh
+run_leg .build/debug/ContinuumRevivedCollaborationChecks
+run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
+run_leg .build/debug/ContinuumRevivedCoreChecks
 run_leg scripts/capture-cli-fixtures.sh check
-# ST-01. Standalone for the same reason as the compaction leg above: the bare
-# CoreChecks run holds an unrelated pre-existing failure (the codex argv drift),
-# and a witness only counts if the gate reports IT rather than the first red
-# thing ahead of it.
-# 0.7.30: which agent owns a running process (owner tag, then ancestry), its
-# listening ports, Stop, and that agents no longer inherit the app's
-# descriptors. Real processes: a setsid'd job and a scrubbed-environment job.
-# Complete request clocks and original restore timestamps must run even when
-# an earlier full-CoreChecks section is KNOWN-RED.
-# .plans/79: which Claude and Codex sessions run on this Mac, where, and who
-# owns each. Synthetic session files, rollouts and process table; a stale pid,
-# Claude's background host and an unreadable format are all dropped.
-# .plans/79: agents messaging each other — the envelope parser, every
-# provider's restore of an agent's message as a card, and the sender's
-# "Messaged …" row. Neither section it draws from is a leg of its own.
-# .plans/107: a live drag moves at most three other tiles a frame and nothing
-# teleports; spawns fan out screen-shaped; the jelly trajectory fails on any
-# ORTHO/FLIP/TELEPORT/STUCK frame.
-# Film phase 1: the pairing page and the user-facing copy that must say Array.
-# Standalone because the bare CoreChecks run stops at its KNOWN-RED pin first.
-# Confidence pass S4: the record/context/row-builder sections sit after the
-# KNOWN-RED seed-1 pin in the bare run and never reported; this arm runs them.
-# T3 (0.7.26): Claude/Codex get pi's workspace tools over array-workspace-mcp.
-# Parity against pi's allowlist, one catalog for both transports, the Claude and
-# Codex guidance/allowance/timeout projections, and the capability token kept out
-# of every agent's environment, argv and config. Its own arm because the bare
-# CoreChecks run is KNOWN-RED and never reached this section.
-# .plans/102 P1: a Claude agent with workspace tools gets Array's observation
-# hooks through one --settings value: exactly seven events, a short timeout,
-# earlier flags unchanged, never --setting-sources (it drops the user's hooks).
-# Duckherd stays off inside a Managed Claude lead (pluginConfigs startOn false
-# under every installed key, plus one unpublished /duckherd off on a resume
-# Duckherd saved as on), declines /duckherd on there, and Free is untouched.
-# The same through real claude with Duckherd loaded by --plugin-dir, plus the
-# push-back shortening a real helper's report. Spends a little usage; opt in
-# with CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE=1 and CONTINUUM_DUCKHERD_PLUGIN_DIR.
-if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
-  run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
-fi
-# .plans/102 P2a: array_report/array_status bounds, the once-only push-back
-# decision and its wording, the courier unchanged without a report, and the
-# Settings toggle off by default.
-# T5 (0.7.26): steering, interrupt-not-kill and the persistent Claude process,
-# through the production Claude/Codex/Pi runners against reactive fakes of each
-# CLI that record the exact argv and stdin frames. Its own arm for the same
-# reason as the one above: the bare CoreChecks run is KNOWN-RED.
-# A pi provider refusal (model not on the plan) read "error" on the card. Real
-# captured rpc frames through the translator and projection; own arm because
-# the bare CoreChecks run is KNOWN-RED.
-# Plan 110 (agent characters): the theme format against the reference parser's
-# recorded corpus, the built-in set with its MIT notice, and the atlas pixels.
-# Plan 110, slice 2: which loop, clip or still each agent state plays.
-# Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
-# it also proves the dependency direction — a token that reaches back into Core
-# cannot compile here. StatusChip's assertions moved here from
-# ContinuumRevivedCoreChecks unchanged.
-run_leg swift run ContinuumRevivedAgentUIChecks
+run_leg .build/debug/ContinuumRevivedAgentUIChecks
 # Ticket 91/P0.2: the semantic agent-content module's own leg. It links
 # AgentContent alone, so it proves the dependency direction the same way the
 # AgentUI leg does, and it scans the module's sources and both manifest target
 # blocks so a forbidden import or declared dependency is red before it is ever
 # used. Fast and pure: no app bundle, no display, no provider process.
-run_leg swift run ContinuumRevivedAgentContentChecks
-run_leg swift run ContinuumRevivedSyncChecks
+run_leg .build/debug/ContinuumRevivedAgentContentChecks
+run_leg .build/debug/ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
-run_leg swift run ContinuumRevivedRelayChecks
+run_leg .build/debug/ContinuumRevivedRelayChecks
 # Friends-alpha relay: Foundation wire schema, durable per-instance core, and
 # real NIO public/admin listener startup plus graceful shutdown.
-run_leg swift run ContinuumRevivedRelayProtocolChecks
-run_leg swift run ContinuumRevivedRelayCoreChecks
+run_leg .build/debug/ContinuumRevivedRelayProtocolChecks
+run_leg .build/debug/ContinuumRevivedRelayCoreChecks
 run_leg python3 scripts/check-notification-map.py --self-test
-run_leg swift run ContinuumRevivedRelayIntegrationChecks
+run_leg .build/debug/ContinuumRevivedRelayIntegrationChecks
 # Ticket 57: gated real-CloudKit backend leg. Skips gracefully (exit 0,
 # cloudkit_available=false in the manifest) unless CLOUDKIT_ENABLED=1 is set
 # — never set in this matrix; the real leg is device-gate-owed. Explicitly
@@ -1094,10 +1160,10 @@ run_leg swift run ContinuumRevivedRelayIntegrationChecks
 # accidentally go live against a real, unentitled CKContainer just because
 # CLOUDKIT_ENABLED=1 happens to be exported in the ambient shell environment
 # the matrix runs in.
-CLOUDKIT_ENABLED=0 run swift run ContinuumRevivedSyncIntegrationChecks
-run_leg swift run ContinuumRevivedPaletteChecks
-run_leg swift run ContinuumRevivedFileTreeChecks
-run_leg swift run ContinuumRevivedPerfChecks
+CLOUDKIT_ENABLED=0 run_leg .build/debug/ContinuumRevivedSyncIntegrationChecks
+run_leg .build/debug/ContinuumRevivedPaletteChecks
+run_leg .build/debug/ContinuumRevivedFileTreeChecks
+run_leg .build/debug/ContinuumRevivedPerfChecks
 run_app_check .build/debug/Array --companion-sync-health-check
 run_app_check .build/debug/Array --push-payload-dump-check
 run_app_check .build/debug/Array --palette-duplicate-root-check
@@ -1563,7 +1629,6 @@ run_app_check .build/debug/Array --board-task-workflow-check
 # ERR_MODULE_NOT_FOUND on every bench. Install exactly the lockfile, OFFLINE:
 # npm never touches the network here, and a package missing from the local npm
 # cache fails this leg by name (ENOTCACHED) rather than hiding in the test leg.
-run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 run_leg npm test --prefix Tools/TaskEditor
 run_app_check .build/debug/Array --board-interaction-check
 run_app_check .build/debug/Array --board-tile-lifecycle-check
@@ -1581,7 +1646,6 @@ run_app_check .build/debug/Array --zone-tile-hydration-check
 run_app_check .build/debug/Array --collaboration-native-check
 run_app_check .build/debug/Array --collaboration-full-access-check
 run_app_check .build/debug/Array --collaboration-cursor-motion-check
-run_leg scripts/check-cursor-contrast.sh
 run_app_check .build/debug/Array --shared-area-zone-check
 # Mode A (share one agent, .plans/105): the one-agent zone migration, a real
 # header Share against a local continuum-relay, and the tile in light and dark.
@@ -1617,7 +1681,7 @@ run_app_check .build/debug/Array --portal-kinds-check
 # classes, rendered elements and pixels, light and dark.
 run_app_check .build/debug/Array --shared-tile-parity-check
 run_app_check .build/debug/Array --portal-board-check
-run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
+run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --skip-build
 # A shared terminal streamed from its tmux pane (.plans/114-terminal-sharing):
 # the follower and the stream lane, the guest's Ghostty mirror in light and
 # dark, and two real apps through a local relay.
@@ -1626,7 +1690,7 @@ run_app_check .build/debug/Array --shared-terminal-render-check
 # Sharing a terminal whose tmux never answers must not freeze the app; a
 # stand-in tmux, never a real server.
 run_app_check .build/debug/Array --shared-terminal-tmux-unresponsive-check
-run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
+run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --skip-build
 run_leg python3 scripts/check-collaboration-pair.py
 # M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,
 # install(into:appRegistry:), and NOTHING in production has ever called it -- so
@@ -2243,14 +2307,16 @@ if [[ "$FAST" -eq 0 ]]; then
   # the two legs after this one never executed. That is the "matrix halts hide
   # legs" hazard, which classify-and-continue already fixed everywhere else.
   # The bundle probe is a leg like any other: it must be REPORTED, not fatal.
-  run_leg scripts/check-app-bundle.sh --configuration debug
+  run_leg scripts/check-app-bundle.sh --configuration debug --bundle "$MATRIX_RESULTS/Array.app"
 else
   printf '\n==> skipping scripts/check-app-bundle.sh --configuration debug (--fast)\n'
 fi
 run_leg scripts/check-root-docs.sh
-run git diff --check
+run_leg git diff --check
 
 run_app_check .build/debug/Array --board-comments-check
+
+matrix_finish_jobs
 
 if [[ "$FAST" -eq 1 ]]; then
   matrix_report "Fast matrix"

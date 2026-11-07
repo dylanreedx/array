@@ -1153,6 +1153,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--relay", choices=["staging", "local"], default="staging")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--prepare-only", action="store_true", help="assemble fixtures from prebuilt binaries, then exit")
     parser.add_argument("--keep", action="store_true", help="leave the state folder for inspection")
     parser.add_argument("--hold", type=int, default=0, help="on failure, keep the apps running this many seconds")
     parser.add_argument("--name", default="Journey", help="bundle and state name, e.g. ShareJourney (letters only)")
@@ -1197,6 +1198,14 @@ def main():
         else:
             try: clean_relay(admin[0], admin[1], created_people())
             finally: admin[2].terminate()
+
+    if args.prepare_only:
+        for side, (bundle_name, bundle_id, _, _) in PEOPLE.items():
+            if side == "o": continue
+            subprocess.run(["scripts/make-app-bundle.sh", "--skip-build", "--configuration", "debug",
+                            "--bundle-id", bundle_id, "--name", bundle_name,
+                            "--output", str(APPS / f"{bundle_name}.app")], check=True)
+        return
 
     if not args.skip_build:
         # /usr/bin/python3 is an xcrun shim that exports its own SDKROOT; the
