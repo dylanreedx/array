@@ -9783,13 +9783,21 @@ final class AgentInboxCardView: NSView, TokenThemed {
         guard moving else { return }
         switch style {
         case "gradient":
-            let drift = CAKeyframeAnimation(keyPath: "locations")
-            drift.values = [[0, 0.2475, 0.55], [0, 0.3375, 0.75], [0, 0.2475, 0.55]]
-            drift.keyTimes = [0, 0.5, 1]
-            drift.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut), CAMediaTimingFunction(name: .easeInEaseOut)]
-            drift.duration = 6
-            drift.repeatCount = .infinity
-            indicatorWash.add(drift, forKey: "indicator.drift")
+            // One minute round the card: rotate the light axis, not the card.
+            // Antipodal endpoints keep its width/identity wash constant. The
+            // closed circle has matching position and velocity at the seam.
+            for (key, sign) in [("startPoint", CGFloat(-1)), ("endPoint", CGFloat(1))] {
+                let orbit = CAKeyframeAnimation(keyPath: key)
+                orbit.values = (0...128).map { step in
+                    let angle = CGFloat(step) / 128 * 2 * .pi
+                    return NSValue(point: NSPoint(x: 0.5 + sign * 0.5 * cos(angle),
+                                                  y: 0.5 + sign * 0.5 * sin(angle)))
+                }
+                orbit.calculationMode = .linear
+                orbit.duration = 60
+                orbit.repeatCount = .infinity
+                indicatorWash.add(orbit, forKey: "indicator.orbit." + key)
+            }
         case "duplex":
             let focus = CAKeyframeAnimation(keyPath: "opacity")
             focus.values = [0.2, 0.85, 0.2]
