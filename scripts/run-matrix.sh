@@ -291,8 +291,12 @@ MATRIX_RESULTS=$(cd "$MATRIX_RESULTS" && pwd)
 : > "$MATRIX_RESULTS/awake.sh"
 
 run() {
-  printf '\n==> %s\n' "$*"
-  "$@"
+  local log status=0
+  log=$(mktemp "$MATRIX_RESULTS/build.XXXXXX")
+  printf '\n==> %s (log: %s)\n' "$*" "$log"
+  "$@" >"$log" 2>&1 || status=$?
+  if [[ "$status" != 0 ]]; then tail -40 "$log"; fi
+  return "$status"
 }
 
 # A non-app leg (checks executable or hygiene script) that must NOT abort the run.
