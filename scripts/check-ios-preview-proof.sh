@@ -17,8 +17,10 @@ case "${1:-}" in
   *) echo 'usage: check-ios-preview-proof.sh [--prepare-only|--skip-build]' >&2; exit 2 ;;
 esac
 if [[ "${1:-}" != --skip-build ]]; then
-  swiftc -module-cache-path "$OUT/cache" "$ROOT_DIR/Tools/IOSPreviewProof/PreviewProof.swift" -o "$OUT/PreviewProof"
-  swiftc -DPROOF_WRONG_ROTATION -module-cache-path "$OUT/cache" \
+  # Resolve compiler and SDK together; the implicit SDK can come from newer CLTs.
+  proof_sdk=$(xcrun --sdk macosx --show-sdk-path)
+  xcrun --sdk macosx swiftc -sdk "$proof_sdk" -module-cache-path "$OUT/cache" "$ROOT_DIR/Tools/IOSPreviewProof/PreviewProof.swift" -o "$OUT/PreviewProof"
+  xcrun --sdk macosx swiftc -sdk "$proof_sdk" -DPROOF_WRONG_ROTATION -module-cache-path "$OUT/cache" \
   "$ROOT_DIR/Tools/IOSPreviewProof/PreviewProof.swift" -o "$OUT/WrongRotation"
 fi
 if [[ "${1:-}" == --prepare-only ]]; then exit 0; fi
