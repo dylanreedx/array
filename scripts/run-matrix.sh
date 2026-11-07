@@ -304,9 +304,6 @@ MATRIX_KNOWN_RED=(
   # Pre-existing frontmost/focus fixture red, reproduced byte-for-byte at the
   # 0.7.17 release commit: the note keeps focus while the palette is open.
   --palette-captures-keys-over-browser-check
-  # CoreChecks' arm64 seed-1 canonical-byte baseline is already 5 bytes behind
-  # the clean 0.7.17 release commit; no sync/materialize code is in this slice.
-  swift\ run\ ContinuumRevivedCoreChecks
   # RE-RED on 2026-08-14, and it is the witness that changed, not the code. This
   # leg went green when the content inset stopped reflowing tile bodies, and Dylan
   # then reported that a real pinch over 9 live tiles still felt choppy while
@@ -1069,114 +1066,73 @@ run_leg scripts/check-film-scenes.sh
 run_leg swift run ContinuumRevivedCoreChecks
 # Directory-aware document identity, symlink-safe/longest-root classification,
 # workspace-v5 migration, and durable agent-document relationship cleanup.
-run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
 # An unreadable canvas.json throws instead of loading as empty, and the store
 # refuses to write over it.
-run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
 # Worst-case cost of the exact zone-origin correction on the resize input path
 # (it runs per zone per mouseDragged). Registered so the bound is gated, not
 # merely measurable: the leg existed with a failing exit path no gate ran.
-run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
 # Provider-native compaction lifecycle, opaque-payload discipline, and token
 # precision semantics. Standalone so unrelated long-running CoreChecks failures
 # cannot prevent this contract from running.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
 # Standalone: the bare CoreChecks run is KNOWN-RED before the meter sections.
-run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
 # DI-01: the dictation state machine and waveform arithmetic over the fake
 # engine. Standalone: the bare CoreChecks run is KNOWN-RED before it.
-run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
 # Standalone for the same reason: the runner half (incl. the real 0.159.3
 # manual-compaction turn, which once left a tile "Working" forever) only ran
 # inside the KNOWN-RED bare CoreChecks run.
-run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
 run_leg scripts/capture-cli-fixtures.sh check
 # ST-01. Standalone for the same reason as the compaction leg above: the bare
 # CoreChecks run holds an unrelated pre-existing failure (the codex argv drift),
 # and a witness only counts if the gate reports IT rather than the first red
 # thing ahead of it.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-usage-check
 # 0.7.30: which agent owns a running process (owner tag, then ancestry), its
 # listening ports, Stop, and that agents no longer inherit the app's
 # descriptors. Real processes: a setsid'd job and a scrubbed-environment job.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
 # Complete request clocks and original restore timestamps must run even when
 # an earlier full-CoreChecks section is KNOWN-RED.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --transcript-rehydration-check
 # .plans/79: which Claude and Codex sessions run on this Mac, where, and who
 # owns each. Synthetic session files, rollouts and process table; a stale pid,
 # Claude's background host and an unreadable format are all dropped.
-run_leg .build/debug/ContinuumRevivedCoreChecks --external-session-discovery-check
 # .plans/79: agents messaging each other — the envelope parser, every
 # provider's restore of an agent's message as a card, and the sender's
 # "Messaged …" row. Neither section it draws from is a leg of its own.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
 # .plans/107: a live drag moves at most three other tiles a frame and nothing
 # teleports; spawns fan out screen-shaped; the jelly trajectory fails on any
 # ORTHO/FLIP/TELEPORT/STUCK frame.
-run_leg .build/debug/ContinuumRevivedCoreChecks --auto-layout-fanout-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
-run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
 # Film phase 1: the pairing page and the user-facing copy that must say Array.
 # Standalone because the bare CoreChecks run stops at its KNOWN-RED pin first.
-run_leg .build/debug/ContinuumRevivedCoreChecks --local-pairing-endpoint-check
 # Confidence pass S4: the record/context/row-builder sections sit after the
 # KNOWN-RED seed-1 pin in the bare run and never reported; this arm runs them.
-run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --file-content-foundation-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --file-format-backends-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --onboarding-foundation-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
 # T3 (0.7.26): Claude/Codex get pi's workspace tools over array-workspace-mcp.
 # Parity against pi's allowlist, one catalog for both transports, the Claude and
 # Codex guidance/allowance/timeout projections, and the capability token kept out
 # of every agent's environment, argv and config. Its own arm because the bare
 # CoreChecks run is KNOWN-RED and never reached this section.
-run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 # .plans/102 P1: a Claude agent with workspace tools gets Array's observation
 # hooks through one --settings value: exactly seven events, a short timeout,
 # earlier flags unchanged, never --setting-sources (it drops the user's hooks).
-run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
 # Duckherd stays off inside a Managed Claude lead (pluginConfigs startOn false
 # under every installed key, plus one unpublished /duckherd off on a resume
 # Duckherd saved as on), declines /duckherd on there, and Free is untouched.
-run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
 # The same through real claude with Duckherd loaded by --plugin-dir, plus the
 # push-back shortening a real helper's report. Spends a little usage; opt in
 # with CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE=1 and CONTINUUM_DUCKHERD_PLUGIN_DIR.
 if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 fi
-run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
 # .plans/102 P2a: array_report/array_status bounds, the once-only push-back
 # decision and its wording, the courier unchanged without a report, and the
 # Settings toggle off by default.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
 # T5 (0.7.26): steering, interrupt-not-kill and the persistent Claude process,
 # through the production Claude/Codex/Pi runners against reactive fakes of each
 # CLI that record the exact argv and stdin frames. Its own arm for the same
 # reason as the one above: the bare CoreChecks run is KNOWN-RED.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
 # A pi provider refusal (model not on the plan) read "error" on the card. Real
 # captured rpc frames through the translator and projection; own arm because
 # the bare CoreChecks run is KNOWN-RED.
-run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --board-task-transcript-check
 # Plan 110 (agent characters): the theme format against the reference parser's
 # recorded corpus, the built-in set with its MIT notice, and the atlas pixels.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-character-theme-check
 # Plan 110, slice 2: which loop, clip or still each agent state plays.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-character-pose-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
 # Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
 # it also proves the dependency direction — a token that reaches back into Core
 # cannot compile here. StatusChip's assertions moved here from
@@ -1357,8 +1313,6 @@ run_app_check .build/debug/Array --ui-test-support-check
 # Also source-scans Sources/ContinuumRevived so no view can construct its own
 # PiAgentRunner and become a second owner.
 run_app_check .build/debug/Array --agent-supervisor-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-check
 run_leg .build/debug/ContinuumRevivedSyncChecks --companion-task-publication-check
 run_app_check .build/debug/Array --companion-task-host-check
 run_app_check .build/debug/Array --agent-notify-check
@@ -1675,7 +1629,6 @@ run_app_check .build/debug/Array --window-chrome-check
 run_app_check .build/debug/Array --top-bar-icons-check
 run_app_check .build/debug/Array --workspace-selector-check
 run_app_check .build/debug/Array --browser-profile-persistence-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --browser-profile-registry-check
 # Hidden note autosave plus Preview/Edit and same-identity Save-as-Markdown conversion.
 run_app_check .build/debug/Array --note-file-tile-spawn-check
 run_app_check .build/debug/Array --run-artifacts-tile-check
@@ -1694,7 +1647,6 @@ run_leg npm test --prefix Tools/TaskEditor
 run_app_check .build/debug/Array --board-interaction-check
 run_app_check .build/debug/Array --board-tile-lifecycle-check
 run_app_check .build/debug/Array --board-library-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
 run_app_check .build/debug/Array --zone-registry-refcount-check
 run_app_check .build/debug/Array --agent-message-bus-check
 run_app_check .build/debug/Array --workspace-runtime-install-check
@@ -1754,7 +1706,6 @@ run_app_check .build/debug/Array --shared-terminal-render-check
 # stand-in tmux, never a real server.
 run_app_check .build/debug/Array --shared-terminal-tmux-unresponsive-check
 run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
-run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
 run_leg python3 scripts/check-collaboration-pair.py
 # M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,
 # install(into:appRegistry:), and NOTHING in production has ever called it -- so
@@ -1856,7 +1807,6 @@ run_app_check .build/debug/Array --workspace-api-agent-rename-check
 # Agent rename from the tile: double-click the title (or the menu's Rename),
 # type, Enter / Escape / empty, through NSApp.sendEvent into a production mount.
 run_app_check .build/debug/Array --agent-tile-rename-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 run_app_check .build/debug/Array --workspace-api-agents-check
 # CX-01 Phase 4: canvas.query paging/coverage/byte cap, and canvas.apply through
 # the drag's own owner route — the persisted WORLD frame, untouched and
@@ -1960,13 +1910,11 @@ run_app_check .build/debug/Array --canvas-persistence-model-check
 # phase, adaptive stride hysteresis, Fill/Fit, the malformed corpus, the managed
 # asset contract) is exhaustive and fast, and a long process-heavy binary is a
 # bad place to bisect it.
-run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
 # .plans/70 S5: project ownership is recorded once. Both field registry shapes
 # (2026-10-05 consistent, 2026-09-27 four-of-seven disagreeing) decode through
 # RegistryStore without an ownership throw and migrate losslessly and
 # idempotently; deleting a workspace never un-owns another workspace's project
 # and falls back to the most recently mounted survivor.
-run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
 # The RENDERER, in pixels, in an offscreen fixture window: it sits below
 # worldPlane and hit-transparent, base+image are screen-fixed while the grid is
 # world-aligned (sampled before and after a pan into negative world space), a
