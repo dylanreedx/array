@@ -6417,8 +6417,6 @@ final class CanvasNSView: NSView, TokenThemed {
         current.y += Double(usable.minY) / current.zoom
         var target = CameraFraming.revealWorkViewport(for: rect, kind: kind,
             currentViewport: current, viewportSize: usable.size)
-        if rect.width * target.zoom > usable.width { target.x = Double(rect.minX) - 16 / target.zoom }
-        if rect.height * target.zoom > usable.height { target.y = Double(rect.minY) - 16 / target.zoom }
         target.x -= Double(usable.minX) / target.zoom
         target.y -= Double(usable.minY) / target.zoom
         return target
