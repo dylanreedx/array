@@ -2012,7 +2012,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func reapplyDisplayPreferences() {
         foldMotion.cancel()
         let increasedContrast = prefersIncreasedContrast()
-        for cell in cellsByRow.values { cell.setIncreasedContrast(increasedContrast) }
+        for cell in cellsByRow.values {
+            cell.setIncreasedContrast(increasedContrast)
+            (cell as? NSView)?.needsLayout = true
+        }
+        for tail in fanoutRemainderCellsByParent.values { tail.needsLayout = true }
         for card in deckCells.allObjects { card.snapDeck() }
     }
 
@@ -2737,6 +2741,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Every row's slice of its lead's card, in one pass over the list: where the
     /// card starts and ends, the lead's title column its subagents line up under,
     /// the stem's lanes, and whether the card's light runs.
+    private var groupFocusMemory: [UUID: (target: CGFloat, from: CGFloat?, changedAt: CFTimeInterval?)] = [:]
     private func ownershipSlices() -> [InboxOwnershipSlice] {
         var slices = Array(repeating: InboxOwnershipSlice(), count: items.count)
         let spacing = CGFloat(AgentInboxView.rowSpacing)
@@ -2774,6 +2779,28 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 }
                 lanes[0] = (.start, .none)
             }
+            var runningOffset: CGFloat? = nil
+            var scan: CGFloat = heights[0] + spacing
+            if end > start {
+                for i in (start + 1)...end {
+                    if case .agent(let helper) = items[i], helper.state == .working, runningOffset == nil { runningOffset = scan + heights[i - start] / 2 }
+                    scan += heights[i - start] + spacing
+                }
+            }
+            let activeGroup = end > start && (start...end).contains {
+                if case .agent(let row) = items[$0] { return row.id == openAgentId }
+                return false
+            }
+            let focusHeight = max(1, groupHeight - SidebarDensityProposal.production.gapBetweenRows)
+            let focusTarget = runningOffset.map { $0 / focusHeight } ?? min(0.9, heights[0] / focusHeight * 0.8)
+            if let old = groupFocusMemory[lead.id] {
+                if abs(old.target - focusTarget) > 0.001 {
+                    groupFocusMemory[lead.id] = (focusTarget, old.target, CACurrentMediaTime())
+                }
+            } else {
+                groupFocusMemory[lead.id] = (focusTarget, nil, nil)
+            }
+            let focusMemory = groupFocusMemory[lead.id]
             var offset: CGFloat = 0
             for index in start...end {
                 slices[index] = InboxOwnershipSlice(
@@ -2781,11 +2808,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     continuesAbove: index > start, continuesBelow: index < end,
                     leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
                     sweepPhase: sweepPhase, sweepColour: lead.identityColor,
-                    raisedAsk: index == start ? ask : nil)
+                    raisedAsk: index == start ? ask : nil,
+                    activeGroup: activeGroup,
+                    leadHeight: heights[0], runningY: runningOffset,
+                    rowIndex: index - start, focusFrom: focusMemory?.from,
+                    focusChangedAt: focusMemory?.changedAt)
                 offset += heights[index - start] + spacing
             }
             start = end + 1
         }
+        let liveLeads = Set(allRows.filter { $0.depth == 0 }.map(\.id))
+        groupFocusMemory = groupFocusMemory.filter { liveLeads.contains($0.key) }
         return slices
     }
 
@@ -8364,6 +8397,7 @@ final class AgentInboxRemainderView: NSTableCellView {
                 gap: SidebarDensityProposal.production.gapBetweenRows,
                 spacing: CGFloat(AgentInboxView.rowSpacing), laneTop: 0,
                 rowMid: InboxOwnershipChrome.subagentHeight / 2, indicatorStyle: activeIndicatorStyle)
+            fill.sharesGroupLight = ownership.activeGroup && activeIndicatorStyle != "current"
             // A subagent row's card footprint (`AgentInbox96CellView.layoutOwnership`).
             let gutter = CGFloat(AgentInbox96CellView.outerGutter)
             let spacing = CGFloat(AgentInboxView.rowSpacing)
@@ -9648,6 +9682,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
     var qaIndicatorLayers: (wash: CAGradientLayer, edge: CALayer, sheen: CAGradientLayer) {
         (indicatorWash, indicatorEdge, indicatorSheen)
     }
+    var sharesGroupLight = false { didSet { if sharesGroupLight != oldValue { applyTokens() } } }
     var indicatorColour: NSColor? { didSet { applyTokens() } }
     private let indicatorWash = CAGradientLayer()
     private let indicatorEdge = CALayer()
@@ -9668,7 +9703,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
 
     private func applyIndicator() {
         let style = indicatorStyle
-        let enabled = style != "current" && (isRouteActive || isSelected)
+        let enabled = !sharesGroupLight && style != "current" && (isRouteActive || isSelected)
         indicatorWash.isHidden = !enabled
         indicatorEdge.isHidden = !enabled
         guard enabled, let layer else {
@@ -9939,8 +9974,9 @@ final class AgentInboxCardView: NSView, TokenThemed {
             underlay: underlayAlpha)
         applyIndicator()
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
-        layer.backgroundColor = fill
-        guard fading, window != nil, presented != fill else { return }
+        layer.backgroundColor = sharesGroupLight ? nil : fill
+        if sharesGroupLight { layer.removeAnimation(forKey: Self.fillFadeKey) }
+        guard !sharesGroupLight, fading, window != nil, presented != fill else { return }
         if indicatorStyle != "current",
            indicatorReducesMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             layer.removeAnimation(forKey: Self.fillFadeKey)
