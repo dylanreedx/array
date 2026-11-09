@@ -5,10 +5,17 @@ import ContinuumRevivedAgentUI
 /// No timer, layout measurement, or idle-group animation.
 @MainActor
 final class InboxExpandedGroupLight: NSView {
-    private var signature = ""
+    private struct DrawingState: Equatable {
+        let slice: InboxOwnershipSlice
+        let card: CGRect
+        let style: String
+        let dark: Bool
+        let reduced: Bool
+    }
+    private var drawingState: DrawingState?
     private var focus: CAGradientLayer?
     private var previousStyle = ""
-    var reducesMotionForChecks = false { didSet { signature = ""; if let last { show(last.0, card: last.1, style: last.2) } } }
+    var reducesMotionForChecks = false { didSet { drawingState = nil; if let last { show(last.0, card: last.1, style: last.2) } } }
     private var last: (InboxOwnershipSlice, CGRect, String)?
     var renderedLayersForChecks: [CALayer] {
         var result: [CALayer] = []
@@ -27,18 +34,19 @@ final class InboxExpandedGroupLight: NSView {
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     func show(_ slice: InboxOwnershipSlice, card: CGRect, style: String) {
+        last = (slice, card, style)
         if !slice.activeGroup || style == "current" {
             if !isHidden { layer?.sublayers?.forEach { $0.removeFromSuperlayer() } }
             isHidden = true
-            signature = ""
+            drawingState = nil
             focus = nil
             return
         }
         let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let reduced = reducesMotionForChecks || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let key = "\(slice):\(card):\(style):\(dark):\(reduced)"
-        guard signature != key else { return }
-        signature = key
+        let key = DrawingState(slice: slice, card: card, style: style, dark: dark, reduced: reduced)
+        guard drawingState != key else { return }
+        drawingState = key
         last = (slice, card, style)
         let presentedFocus = focus?.presentation() as? CAGradientLayer
         let oldFocus: CGPoint? = previousStyle == style ? (presentedFocus?.startPoint ?? focus?.startPoint) : nil
