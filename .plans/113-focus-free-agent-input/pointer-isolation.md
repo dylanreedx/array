@@ -63,3 +63,6 @@ See [pointer-active-launch.md](pointer-active-launch.md) for the dedicated bundl
 ## Approved active result and atomic removal (2026-11-08)
 
 `/tmp/array-pointer-active.log`: native active/key setup passed, synthetic hover stimulus was zero, and the split-click control was KILLED: one clean agent click, no drag/selection, and one intended user click. The atomic buffering/replay candidate has been removed. No active check was rerun. The deliberate-key failure occurred with candidates=false, before any buffering could be enabled. Its event counter is under investigation separately.
+
+
+Restoration follow-up: the approved active log again showed requested=false and no PID restoration before exit. No working public route has been established here. Both active check implementations now explicitly report that foreground restoration is unsupported, and no longer emit PASS/restored claims or attempt the unsuccessful cooperative handoff. No activated check was rerun.

@@ -623,17 +623,7 @@ func runBrowserFocusFreeRealKeyCheck() throws {
     watchdog.schedule(deadline: .now() + 28)
     watchdog.setEventHandler {
         for name in ["numeric", "click", "type"] where !progress.contains(name) { fputs("FAIL: Tier B \(name): hard timeout\n", stderr) }
-        fputs("FAIL: Tier B hard timeout (28s); returning previous app and exiting\n", stderr)
-        if progress.contains("tookForeground") || NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
-            _ = previous.activate(options: [.activateIgnoringOtherApps])
-            let end = Date().addingTimeInterval(0.5)
-            while NSWorkspace.shared.frontmostApplication?.processIdentifier != previous.processIdentifier, Date() < end { Thread.sleep(forTimeInterval: 0.01) }
-            fputs(NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier
-                ? "PASS: Tier B watchdog returned previous frontmost app\n"
-                : "FAIL: Tier B watchdog could not confirm restoration\n", stderr)
-        } else {
-            fputs("INFO: Tier B never took foreground; no restoration needed\n", stderr)
-        }
+        fputs("FAIL: Tier B hard timeout (28s); exiting. No foreground restoration is claimed.\n", stderr)
         Darwin._exit(1)
     }
     watchdog.resume()
@@ -648,26 +638,6 @@ func runBrowserFocusFreeRealKeyCheck() throws {
         for name in ["numeric", "click", "type"] where !tierBPassedCases.contains(name) { print("FAIL: Tier B \(name): \(error)") }
         failure = error
     }
-    tierBSetupLog("before restoration", since: start)
-    if !progress.contains("tookForeground") && NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier {
-        print("INFO: Tier B never took foreground; no restoration needed")
-    } else {
-        let requested: Bool
-        if #available(macOS 14.0, *) {
-            NSApp.yieldActivation(to: previous)
-            requested = previous.activate(from: .current, options: [.activateAllWindows])
-        } else {
-            requested = previous.activate(options: [.activateIgnoringOtherApps])
-        }
-        let end = Date().addingTimeInterval(0.5)
-        while NSWorkspace.shared.frontmostApplication?.processIdentifier != previous.processIdentifier, Date() < end {
-            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
-        }
-        tierBSetupLog("restoration requested=\(requested); wait ended", since: start)
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier else {
-            throw WorkspaceAPIChecks.Failure(message: "Tier B could not confirm restoration of the previous frontmost app")
-        }
-        print("PASS: Tier B returned previous frontmost app")
-    }
+    print("INFO: Tier B has no verified foreground-restoration route; exiting. Previous app PID=\(previous.processIdentifier). No restoration is claimed.")
     if let failure { throw failure }
 }

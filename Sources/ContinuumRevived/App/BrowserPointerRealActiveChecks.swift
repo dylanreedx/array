@@ -35,16 +35,7 @@ func runBrowserPointerRealActiveCheck() throws {
     watchdog.schedule(deadline: .now() + 26)
     watchdog.setEventHandler {
         for name in names where !progress.contains(name) { fputs("FAIL: \(name): hard timeout\n", stderr) }
-        fputs("FAIL: pointer proof timed out at 26s; restoring previous app and exiting\n", stderr)
-        DispatchQueue.main.async {
-            if #available(macOS 14.0, *) { NSApp.yieldActivation(to: previous) }
-            _ = previous.activate(options: [.activateIgnoringOtherApps])
-        }
-        _ = previous.activate(options: [.activateIgnoringOtherApps])
-        Thread.sleep(forTimeInterval: 0.5)
-        fputs(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
-            ? "PASS: watchdog confirmed previous frontmost PID\n"
-            : "FAIL: watchdog could not confirm restoration before exit\n", stderr)
+        fputs("FAIL: pointer proof timed out at 26s; exiting. Foreground restoration is not supported by this check.\n", stderr)
         Darwin._exit(1)
     }
     watchdog.resume()
@@ -236,20 +227,7 @@ func runBrowserPointerRealActiveCheck() throws {
     } catch { failures.append("setup: \(error)"); print("FAIL: setup: \(error)") }
     for name in names where !progress.contains(name) { print("FAIL: \(name): setup prevented execution") }
     BrowserAutomation._pointerFilterForChecks = false
-    // Cooperatively yield the foreground, rather than only asking a background
-    // process to take it. Confirm the PID, not the request's Bool.
-    if #available(macOS 14.0, *) {
-        NSApp.yieldActivation(to: previous)
-        let requested = previous.activate(from: .current, options: [.activateAllWindows])
-        print("INFO: restoration yield + activate(from:) requested=\(requested)")
-    } else { _ = previous.activate(options: [.activateIgnoringOtherApps]) }
-    let restoreEnd = Date().addingTimeInterval(1)
-    while NSWorkspace.shared.frontmostApplication?.processIdentifier != pid && Date() < restoreEnd {
-        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
-    }
-    if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
-        print("PASS: previous frontmost PID \(pid) restored before exit; elapsed=\(Date().timeIntervalSince(start))s")
-    } else { failures.append("previous frontmost PID did not restore before exit"); print("FAIL: foreground restoration") }
+    print("INFO: no verified foreground-restoration route; exiting. Previous app PID=\(pid). No restoration is claimed.")
     if !failures.isEmpty { throw WorkspaceAPIChecks.Failure(message: failures.joined(separator: "; ")) }
     print("PASS: active pointer proof complete")
 }

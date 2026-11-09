@@ -1,3 +1,5 @@
+> RETIRED after the approved run: do not rerun this launch. Cooperative restoration returned false and was not confirmed. Current checks make no automatic-restoration claim; the old preparation text below is historical. Atomic buffering has been removed. Use the hands-on preview steps in pointer-manual-test.md instead.
+
 # Guarded active-pointer proof — prepared, never activated
 
 This is a preparation result, not a passing active-pointer claim. The dedicated debug bundle is `~/array-scratch/apps/Array Pointer Proof.app`, bundle ID `dev.arrayapp.macos.pointer-proof`. No activated run occurred during preparation. Each run needs Dylan's explicit approval. The command removes the bundle when that one run ends.
