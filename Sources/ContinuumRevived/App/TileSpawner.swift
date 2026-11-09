@@ -331,7 +331,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .terminal),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .terminal
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let wherePath = profile.cwd
@@ -1127,7 +1128,8 @@ final class TileSpawner {
                 worldPoint: worldPoint,
                 size: size,
                 in: canvasView,
-                targetZoneId: targetZoneId
+                targetZoneId: targetZoneId,
+                fitting: .browser
             )
         }
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
@@ -1888,7 +1890,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: size ?? CanvasEngine.defaultFrame(for: .managedAgent),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .managedAgent
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         // One resolution seeds every pre-attach projection. Cmd+K supplies its
@@ -2433,7 +2436,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .note),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .note
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
@@ -2554,7 +2558,8 @@ final class TileSpawner {
         switch placement {
         case let .automatic(worldPoint):
             frame = makeProjectTilePlacement(
-                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId)
+                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId,
+                fitting: .kanban)
         case let .beside(anchorTileId):
             let siblings = targetZoneId.flatMap { canvasView.tilesInWorldFrames(forZoneId: $0) } ?? []
             guard let anchor = siblings.first(where: { $0.id == anchorTileId }) else {
@@ -2673,7 +2678,7 @@ final class TileSpawner {
             let targetZoneId = creationScopeProvider?()?.zoneId
             let frame = makeProjectTilePlacement(
                 worldPoint: nil, size: CanvasEngine.defaultFrame(for: .kanban),
-                in: canvasView, targetZoneId: targetZoneId)
+                in: canvasView, targetZoneId: targetZoneId, fitting: .kanban)
             let tile = Tile(id: tileId, kind: .kanban, title: board.title, frame: frame,
                             zPosition: CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId)),
                             runtimeRef: nil, metadata: TileMetadata(boardId: boardId))
@@ -2722,7 +2727,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .diffReview),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .diffReview
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
@@ -3035,7 +3041,8 @@ final class TileSpawner {
             frame = targetPlacement.map { CanvasEngine.worldToZoneLocal(world, zoneOrigin: $0.origin) } ?? world
         } else {
             frame = makeProjectTilePlacement(
-                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId)
+                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId,
+                fitting: .file)
         }
 
         let tile = Tile(
@@ -3175,7 +3182,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .runArtifacts),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .runArtifacts
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
@@ -6929,7 +6937,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .fileTree),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .fileTree
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
@@ -8676,11 +8685,18 @@ final class TileSpawner {
     /// `targetZoneId` is important for child surfaces such as target-blank browser
     /// windows and inspectors: their opener's layer owns placement even when a
     /// different zone happens to be active by the time WebKit requests the child.
+    ///
+    /// `fitting` names the kind of a tile created at its DEFAULT size. In an
+    /// auto-layout zone with room, an automatic placement then takes the largest
+    /// of `TileGeometry.spawnFitSizes` that has a free slot inside the zone, so
+    /// the zone is not grown and its neighbours are not pushed
+    /// (`.plans/auto-layout-night`). An explicit point or size is never resized.
     private func makeProjectTilePlacement(
         worldPoint: CGPoint?,
         size: CGSize,
         in canvasView: CanvasNSView,
-        targetZoneId: UUID? = nil
+        targetZoneId: UUID? = nil,
+        fitting kind: TileKind? = nil
     ) -> TileFrame {
         let usable = canvasView.usableVisibleScreenRect
         let zoom = canvasView.navigationViewport.zoom.isFinite && canvasView.navigationViewport.zoom > 0 ? canvasView.navigationViewport.zoom : 1
@@ -8733,7 +8749,7 @@ final class TileSpawner {
         localViewport.y += Double(usable.minY)/zoom
         let siblings = siblingTiles(in: canvasView, targetZoneId: zone.zoneId)
         let autoLayoutActive = canvasView.isAutoLayoutActive(inZone: zone.zoneId)
-        return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
+        let context = TileSpawnPlacement.Context(
             newSize: size,
             viewport: localViewport,
             visibleSize: usable.size,
@@ -8766,7 +8782,15 @@ final class TileSpawner {
                     growth: CanvasAutoLayoutConfig.growth(defaults: canvasView.autoLayoutDefaults))
                 : nil,
             preferredAnchor: CanvasEngine.zoneLocalPoint(world: canvasView.spawnAnchorWorldPoint, zone: zone)
-        ))
+        )
+        if autoLayoutActive, let kind, size == CanvasEngine.defaultFrame(for: kind),
+           let fitted = TileSpawnPlacement.roomFit(
+               context,
+               room: zoneLocalContentRect(zone, defaults: canvasView.autoLayoutDefaults),
+               sizes: TileGeometry.spawnFitSizes(for: kind)) {
+            return fitted
+        }
+        return TileSpawnPlacement.automatic(context)
     }
 
     /// A zone's content rect in its own local space: inside the header and the

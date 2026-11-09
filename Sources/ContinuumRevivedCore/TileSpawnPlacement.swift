@@ -212,10 +212,57 @@ public enum TileSpawnPlacement {
         return best
     }
 
+    /// Auto-layout zones only (`.plans/auto-layout-night`): the first of `sizes`
+    /// (largest first) that has a free slot wholly inside `room`, the zone's
+    /// content rect in the placement space. Slots are the fan-out's, ranked by
+    /// the fan-out's own key but among in-room slots only; an empty zone centres
+    /// the tile on the focus, clamped into the room. `nil` when nothing fits, and
+    /// the caller places the default size as before, growing the zone.
+    ///
+    /// Without it, a zone with room still grew: the fan-out ranks visibility and
+    /// screen shape, not containment, so it could choose a slot past the zone's
+    /// edge, and the settle then grew the zone and pushed its neighbours.
+    public static func roomFit(_ context: Context, room: CGRect, sizes: [CGSize]) -> TileFrame? {
+        guard let fanOut = context.fanOut,
+              let room = sanitizedBounds(room) else { return nil }
+        let zoom = context.viewport.zoom.isFinite && context.viewport.zoom > 0 ? context.viewport.zoom : 1
+        let viewportRect = CGRect(
+            x: context.viewport.x.isFinite ? context.viewport.x : 0,
+            y: context.viewport.y.isFinite ? context.viewport.y : 0,
+            width: max(Double(context.visibleSize.width).isFinite ? Double(context.visibleSize.width) : 0, 0) / zoom,
+            height: max(Double(context.visibleSize.height).isFinite ? Double(context.visibleSize.height) : 0, 0) / zoom)
+        let gap = context.gap.isFinite && context.gap > 0 ? context.gap : 0
+        let obstacles = context.siblings.map { rect(for: $0.frame) }.filter { $0.width > 0 && $0.height > 0 }
+        var ranked = fanOut
+        ranked.focus = fanOut.focus ?? context.preferredAnchor
+        for candidate in sizes {
+            let size = sanitizedSize(candidate)
+            guard size.width <= room.width, size.height <= room.height else { continue }
+            let placed: CGRect?
+            if ranked.hosts.contains(where: { $0.width > 0 && $0.height > 0 }) {
+                placed = fanOutPlacement(ranked, size: size, viewport: viewportRect,
+                                         obstacles: obstacles, gap: gap, room: room)
+            } else {
+                let focus = ranked.focus ?? CGPoint(x: viewportRect.midX, y: viewportRect.midY)
+                // Centred where the user is looking (.plans/18), as before; only
+                // the size and the clamp into the room are new.
+                let centred = contained(CGRect(x: focus.x - size.width / 2, y: focus.y - size.height / 2,
+                                               width: size.width, height: size.height), in: room)
+                let guarded = centred.insetBy(dx: -(gap - 0.5), dy: -(gap - 0.5))
+                placed = obstacles.contains(where: { $0.intersects(guarded) }) ? nil : centred
+            }
+            if let placed {
+                return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
+            }
+        }
+        return nil
+    }
+
     // MARK: - Fan out
 
     private static func fanOutPlacement(
-        _ fanOut: FanOut, size: CGSize, viewport: CGRect, obstacles: [CGRect], gap: Double
+        _ fanOut: FanOut, size: CGSize, viewport: CGRect, obstacles: [CGRect], gap: Double,
+        room: CGRect? = nil
     ) -> CGRect? {
         let hosts = fanOut.hosts.map { rect(for: $0) }.filter { $0.width > 0 && $0.height > 0 }
         guard !hosts.isEmpty else { return nil }
@@ -234,6 +281,7 @@ public enum TileSpawnPlacement {
                 CGRect(x: host.minX, y: host.minY - gap - h, width: w, height: h),
             ]
             for slot in slots {
+                if let room, !room.insetBy(dx: -0.5, dy: -0.5).contains(slot) { continue }
                 // Free with the standard gap to every other tile, not just the host.
                 let guarded = slot.insetBy(dx: -(gap - 0.5), dy: -(gap - 0.5))
                 guard !obstacles.contains(where: { $0.intersects(guarded) }) else { continue }

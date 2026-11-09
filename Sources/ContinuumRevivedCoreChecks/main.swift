@@ -6371,18 +6371,18 @@ do {
 
 do {
     let terminal = TileGeometry.preset(for: .terminal)
-    expect(terminal.defaultSize == CGSize(width: 900, height: 584), "Terminal default is 100x28 grid at 9x20 plus 24pt chrome, got \(terminal.defaultSize)")
+    expect(terminal.defaultSize == CGSize(width: 720, height: 804), "Terminal default is 80x39 grid at 9x20 plus 24pt chrome, got \(terminal.defaultSize)")
     expect(terminal.aspect == .free, "Terminal aspect is free")
     expect(terminal.sizeQuantum == CGSize(width: 9, height: 20), "Terminal quantum is cell size, got \(String(describing: terminal.sizeQuantum))")
     expect(TileGeometry.minimumSize(for: .terminal) == CGSize(width: 180, height: 124), "Terminal minimum is 20x5 cells plus chrome")
 
     let customTerminal = TileGeometry.preset(for: .terminal, terminalCell: TerminalCellSize(width: 10, height: 18))
-    expect(customTerminal.defaultSize == CGSize(width: 1000, height: 528), "Terminal grid math honors injectable cell size, got \(customTerminal.defaultSize)")
+    expect(customTerminal.defaultSize == CGSize(width: 800, height: 726), "Terminal grid math honors injectable cell size, got \(customTerminal.defaultSize)")
     expect(customTerminal.sizeQuantum == CGSize(width: 10, height: 18), "Terminal quantum honors injectable cell size")
     expect(TileGeometry.minimumSize(for: .terminal, terminalCell: TerminalCellSize(width: 10, height: 18)) == CGSize(width: 200, height: 114), "Terminal min-cells floor honors injectable cell size")
 
     let browser = TileGeometry.preset(for: .browser)
-    expect(browser.defaultSize == CGSize(width: 1024, height: 640), "Browser default is 16:10 1024x640, got \(browser.defaultSize)")
+    expect(browser.defaultSize == CGSize(width: 1024, height: 576), "Browser default is 16:9 1024x576, got \(browser.defaultSize)")
     expect(browser.aspect == .free && browser.sizeQuantum == nil, "Browser carries free aspect and no quantum")
 
     struct TileGeometryPresetCase {
@@ -6394,8 +6394,8 @@ do {
     }
 
     let cases: [TileGeometryPresetCase] = [
-        TileGeometryPresetCase(kind: .terminal, defaultSize: CGSize(width: 900, height: 584), minimumSize: CGSize(width: 180, height: 124), aspect: .free, quantum: CGSize(width: 9, height: 20)),
-        TileGeometryPresetCase(kind: .browser, defaultSize: CGSize(width: 1024, height: 640), minimumSize: CGSize(width: 320, height: 220), aspect: .free, quantum: nil),
+        TileGeometryPresetCase(kind: .terminal, defaultSize: CGSize(width: 720, height: 804), minimumSize: CGSize(width: 180, height: 124), aspect: .free, quantum: CGSize(width: 9, height: 20)),
+        TileGeometryPresetCase(kind: .browser, defaultSize: CGSize(width: 1024, height: 576), minimumSize: CGSize(width: 320, height: 220), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .note, defaultSize: CGSize(width: 640, height: 400), minimumSize: CGSize(width: 240, height: 160), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .file, defaultSize: CGSize(width: 640, height: 560), minimumSize: CGSize(width: 200, height: 200), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .fileTree, defaultSize: CGSize(width: 360, height: 520), minimumSize: CGSize(width: 220, height: 240), aspect: .free, quantum: nil),
@@ -6411,6 +6411,68 @@ do {
         expect(CanvasEngine.defaultFrame(for: row.kind) == row.defaultSize, "CanvasEngine default delegates to TileGeometry for \(row.kind)")
         expect(CanvasEngine.minimumFrame(for: row.kind) == row.minimumSize, "CanvasEngine minimum delegates to TileGeometry for \(row.kind)")
     }
+}
+
+// MARK: - TileGeometry: a new tile is born in the shape tidy gives it (.plans/auto-layout-night)
+
+do {
+    func inRule(_ size: CGSize, _ kind: TileKind) -> Bool {
+        let ratio = Double(size.width / size.height)
+        switch TileGeometry.shapeRule(for: kind) {
+        case let .aspect(wanted): return abs(ratio - wanted) < 1e-9
+        case let .band(min, max): return ratio >= min && ratio <= max
+        case .keep: return true
+        }
+    }
+    let kinds: [TileKind] = [.terminal, .browser, .iosPreview, .browserInspector, .note, .file, .fileTree,
+                             .ticketQueue, .conductorQueue, .diffReview, .runArtifacts, .managedAgent,
+                             .sharedAgent, .sharedTile, .kanban, .sharedPortal]
+    for kind in kinds {
+        let base = TileGeometry.preset(for: kind).defaultSize
+        expect(inRule(base, kind), "\(kind) default \(base) must be inside its shape rule \(TileGeometry.shapeRule(for: kind))")
+        let fits = TileGeometry.spawnFitSizes(for: kind)
+        expect(fits.first == base, "\(kind) fit sizes must start at the default, got \(fits)")
+        let minimum = TileGeometry.minimumSize(for: kind)
+        for (index, size) in fits.enumerated() {
+            expect(inRule(size, kind), "\(kind) fit size \(size) must be inside its shape rule")
+            expect(size.width >= minimum.width && size.height >= minimum.height, "\(kind) fit size \(size) is below the minimum \(minimum)")
+            if index > 0 { expect(size.width < fits[index - 1].width, "\(kind) fit sizes must shrink, got \(fits)") }
+        }
+    }
+    expect(TileGeometry.spawnFitSizes(for: .browser) == [CGSize(width: 1024, height: 576), CGSize(width: 896, height: 504), CGSize(width: 768, height: 432)],
+           "browser fit sizes are exact 16:9 eighths, got \(TileGeometry.spawnFitSizes(for: .browser))")
+    expect(TileGeometry.spawnFitSizes(for: .terminal) == [CGSize(width: 720, height: 804)], "a terminal never shrinks below its 80 columns")
+    expect(TileGeometry.preset(for: .terminal).defaultSize.width >= 80 * 9, "the default terminal keeps 80 columns of the default cell")
+
+    // roomFit, by hand. Room x 0..1000, y 0..600; a 400x600 host at the left; gap 8.
+    // A 1024x576 browser has no in-room slot (only 592 right of the host), its
+    // 7/8 step 896x504 neither, its 3/4 step 768x432 neither: nil, and the caller
+    // grows the zone. A 576x640 agent is too tall for the 600 room; its 7/8 step
+    // (504x560) docks right of the host at x 408, top-aligned because the focus
+    // is the host's top edge.
+    let host = TileFrame(x: 0, y: 0, width: 400, height: 600)
+    let sibling = Tile(id: UUID(), kind: .note, title: "host", frame: host,
+                       zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+    let room = CGRect(x: 0, y: 0, width: 1000, height: 600)
+    func context(_ size: CGSize) -> TileSpawnPlacement.Context {
+        .init(newSize: size, viewport: CanvasViewport(x: -200, y: -200, zoom: 1), visibleSize: CGSize(width: 1600, height: 1200),
+              siblings: [sibling], gap: 8, fanOut: .init(hosts: [host], targetAspect: 1.6),
+              preferredAnchor: CGPoint(x: 200, y: 0))
+    }
+    let browserFit = TileSpawnPlacement.roomFit(context(CGSize(width: 1024, height: 576)), room: room,
+                                                sizes: TileGeometry.spawnFitSizes(for: .browser))
+    expect(browserFit == nil, "roomFit: no browser step fits beside the host, expected nil, got \(String(describing: browserFit))")
+    let agentFit = TileSpawnPlacement.roomFit(context(CGSize(width: 576, height: 640)), room: room,
+                                              sizes: TileGeometry.spawnFitSizes(for: .managedAgent))
+    expect(agentFit == TileFrame(x: 408, y: 0, width: 504, height: 560),
+           "roomFit: the agent's 7/8 step docks right of the host inside the room, got \(String(describing: agentFit))")
+    // An empty zone: centred on the focus, clamped into the room.
+    var empty = context(CGSize(width: 1024, height: 576))
+    empty.siblings = []; empty.fanOut = .init(hosts: [], targetAspect: 1.6); empty.preferredAnchor = CGPoint(x: 900, y: 300)
+    let emptyFit = TileSpawnPlacement.roomFit(empty, room: CGRect(x: 0, y: 0, width: 1200, height: 700),
+                                              sizes: TileGeometry.spawnFitSizes(for: .browser))
+    expect(emptyFit == TileFrame(x: 176, y: 12, width: 1024, height: 576),
+           "roomFit: an empty zone centres on the focus and clamps into the room, got \(String(describing: emptyFit))")
 }
 
 // MARK: - FocusDispatchChecks

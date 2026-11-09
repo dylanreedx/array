@@ -6273,6 +6273,18 @@ enum ContinuumApp {
             }
         }
 
+        // `.plans/auto-layout-night`: spawns a real terminal, so below `ghostty_init()`.
+        if CommandLine.arguments.contains("--spawn-sizing-check") {
+            do {
+                _ = NSApplication.shared
+                try SpawnSizingChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --spawn-sizing-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         // M1.3b (`.plans/46`): builds a real `GhosttyRuntimeContext` for the same
         // reason as the leg above, so it sits below `ghostty_init()` too.
         if CommandLine.arguments.contains("--zone-spawner-coverage-check") {
