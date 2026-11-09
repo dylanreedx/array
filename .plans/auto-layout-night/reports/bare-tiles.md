@@ -3,18 +3,29 @@
 Date: 2026-11-09. Branch: array/bare-tiles (local, not pushed, not merged).
 Base: ceb37f6c (array/auto-layout-night).
 
-## Outcome
+## Outcome (updated 02:50)
 
-Stopped at the witness and this design, as the brief allows when fix A is
-much bigger than it looks. Nothing in production code changed.
+Fix A is built and the witness is green. A tile dragged clearly outside
+every zone becomes bare: its stamp is cleared on screen and in
+`canvas.json`, and its WORLD frame is kept. It stays bare through an
+auto-layout off-to-on toggle, a move of its old zone, undo and redo, and a
+remount, with auto layout off and on. Dropping it back into a zone of its
+project adopts it.
 
-What it is: a project tile cannot be bare in the layered canvas today.
-Why it happened: since the mount fix (599126a2) every project tile lives in
-some zone's `ZoneLayer`; the flat scene that held bare tiles is retired at
-mount. There is no place for a dropped-outside tile to go, so it keeps its
-stamp, and everything that settles a zone pulls it back.
+The lead's first stop note (below "Why fix A is bigger") still holds as the
+risk statement; the lead chose to build it tonight on this isolated branch,
+which never merges into array/auto-layout-night.
 
-Commit: e2c1f42a test(canvas): witness a tile dragged out of its zone staying bare
+Commits (array/bare-tiles, local, not pushed, not merged):
+- e2c1f42a test(canvas): witness a tile dragged out of its zone staying bare (red)
+- 48b5005c docs(canvas): this design
+- 11cb2b29 feat(canvas): let membership and persistence keep a bare project tile (Phase 1)
+- f655189f feat(canvas): give bare project tiles a layer and let a drag break out (Phases 2-3)
+- 5274378e feat(canvas): mount each project's bare tiles from its membership (Phase 4)
+- 214578f5 test(canvas): cover undo of a drag out and register the bare tile leg (Phase 5)
+
+Phases 2-3 and 4 were built and tested together, then committed apart.
+f655189f alone was not built or run on its own; the tree at 5274378e was.
 
 ## The witness: --bare-tile-check (red at e2c1f42a)
 
@@ -137,3 +148,121 @@ merge CoreChecks, canvas-pointer-path.
 - The red witness is ready to drive it. Phase 1 is pure and safe to do
   first.
 - Not done here: no production change, no matrix registration.
+
+
+## What was built
+
+### Phase 1 (11cb2b29), pure core, CoreChecks witnesses
+- `resolveZoneMembership(keepsBare:)` (rule 6): a nil stamp whose centre is
+  outside every zone of its project goes to a `bare` bucket, unstamped. A
+  nil stamp inside a zone, and a foreign stamp anywhere, are still rescued.
+  Default off. CoreChecks case 10 covers all three plus rule 4 (every tile
+  in exactly one bucket) and the default-off behaviour.
+- `mergeProjectTilesForPersistence(bareCovered:)`: with the project's bare
+  layer installed, an absent nil-stamped tile was deleted. CoreChecks case 8.
+
+### Phases 2-3 (f655189f), CanvasNSView
+- `ZoneLayer.bare(projectId:)`: origin (0,0), size 0, a private zone id never
+  written to a tile. `coversPersistedBareTiles` is true only when the runtime
+  built it from resolved membership; one created on demand by a drag never
+  lets the merge delete anything.
+- Storage: `bareLayers`, held apart from `zoneLayers`. `tileLayers` is
+  `zoneLayers + bareLayers` for tile surfaces. A missed site therefore costs
+  a missing operation on a bare tile, never a phantom zone stamp.
+- Break-out: `reevaluateLayerMembership` moves a record whose centre is in no
+  zone and at least `ZoneBreakoutConfig` (48pt) past its zone's edge into the
+  bare layer, then settles the zone it left.
+- Adoption: a bare record dropped with its centre in a zone of its project
+  transfers in (`transferLayerTile` now accepts a bare source).
+- Auto layout: bare tiles enter the scene with `zoneId: nil`, so the engine
+  treats them as bare peers (zones push them, settle and tidy never target
+  them).
+- Commit: `CanvasLayoutTransaction.bareTileIds` (Core); the app's
+  `persistLayoutTransaction` clears the stamp for those tiles.
+- Undo/redo: `applyGeometrySnapshot` transfers a tile back into its zone, or
+  back out to bare, when the snapshot's stamp differs from where it lives.
+- Stacking: bare tiles rank above every zone's tiles. Hit-test checks bare
+  layers first. Navigation snapshots include them with no zone.
+
+### Phase 4 (5274378e), WorkspaceRuntime
+- `membership(forProject:)` resolves with `keepsBare: true` and returns
+  `ProjectMembership { byZone, bare }`.
+- `install(into:)`, `buildLayers` (switch) and `installZoneLayerIfMissing`
+  build each mounted project's bare layer (even empty) and pass it in the
+  same `layers` array as the zone layers. `setZones` and `upsertZoneLayer`
+  route it to `bareLayers`; `parkZoneLayers` parks it with them; the
+  hydration hook needed no change.
+
+### Phase 5 (214578f5)
+- `--bare-tile-check` gained undo/redo of the drag out, and is registered
+  in run-matrix.sh beside `--canvas-pointer-path-check`; inventory updated
+  (C locale, only this leg added).
+
+## Classification of every layer use in CanvasNSView
+
+Generated from the source at 5274378e (line numbers there). Z = zone-only,
+bare layers stay out. T = tile surface, reads `tileLayers`. B = bare-specific.
+
+Zone surfaces (Z), unchanged on purpose:
+- Model B and chrome: rebuildLayerDerivedProjections (liveZones, tile
+  membership), setZones, upsertZoneLayer, removeZoneLayer, _installLayer,
+  setZoneChromeVisible, reorderTileSubviewsByZIndex (chrome order),
+  allZonePlacements, zoneWorldBounds.
+- Zone gestures and menus: mountedLayer, gestureRoutingMode, sameIDTopology,
+  applyConcreteZonePlacement, registerConcreteUndo, mouseDragged (zone move,
+  resize), zoneHeaderTarget, zoneResizeEdge, _zoneId, menu,
+  changeZoneScopeFromMenu, toggleZoneCollapsedFromMenu, requestZoneScopeChange,
+  toggleZoneAutoLayout, presentZoneColorPicker, applyZoneRename,
+  fitZoneToViewport, setZoneAutoLayoutMode, setZoneScope,
+  mutateZonePlacement, setZonePlacement, closeZone, growZone.
+- Zone placement in transactions: applyLayoutTransaction (resolvedOrigin),
+  applyGeometrySnapshot (zone origins and placements).
+- Zone lookups and arming: zonePlacement, installedZonePlacement,
+  activeProjectZonePlacement, setActiveProjectZone, projectId(forZone:),
+  zoneId(containing:) (nil for a bare tile, which is the truth),
+  installedZoneIds, tileIds(inZone:), tiles(inZone:),
+  tilesInWorldFrames(forZoneId:), geometryTileIds(inZone:), moveLayerTiles,
+  transferLayerTile (destination), applyProgrammaticTileGeometry (the API
+  names a zone), installProjectTile (spawns never land bare).
+- Sharing: lendableTile, lendTilesToSharedArea, returnLentTiles (a bare tile
+  cannot be lent: lending needs a home zone).
+- Hit-test per zone: tileId(at:) zone branch (bare checked before it).
+- Autolayout zone list: autoLayoutScene placements.
+- QA: qaInstalledLayerZoneIds, qaZoneLayerPlacement.
+
+Tile surfaces (T), now read `tileLayers`:
+- Lookup: tileView(for:), tileRecord(for:), allWorkspaceTiles,
+  allTilesInWorldFrames, tiles(forProjectId:), tilesInWorldFrames(forProjectId:)
+  (persistence), worldFrame(forTileFrame:), tileFrame(fromWorldFrame:).
+- Mutation: updateTile, applySelectionFrames, removeTile, setBrowserURL,
+  materializeProjectTile (Phase B hydration), transferLayerTile (source),
+  reevaluateZoneMembership.
+- Geometry: applyLayoutTransaction (tile occurrences), captureGeometry,
+  applyGeometrySnapshot (tile frames and transfers).
+- Layout and views: layoutAllTiles, refreshRunArtifactsTiles,
+  updateDocumentRelationshipOverlay, restAgentChromeForCameraMotion,
+  appDidResignActiveForOverlays, cancelActiveGeometryCapture.
+- QA counters: qaTotalInstalledTileCount, qaTileScreenFrameMismatchCount,
+  qaTilesIntersectingViewport.
+
+Bare-specific (B): autoLayoutScene (nil-zone peers), tileId(at:) (bare
+first), navigationTileSnapshots, reorderTileSubviewsByZIndex (rank above
+zones), canvasStateForPersistence (bareCovered), setZones / parkZoneLayers
+(install, park), installBareLayer, bareLayer(forProjectId:),
+hasResolvedBareLayer, bareTileIds, transferLayerTileToBare.
+
+Outside CanvasNSView: WorkspaceRuntime builds, parks and hydrates the bare
+layer with the zone layers. SidebarTree and SharedAreaInventory still call
+the resolver with keepsBare off (see Open).
+
+## Open
+
+- Sidebar: `SidebarTree` resolves membership with keepsBare off, so a bare
+  tile is listed under its project's home zone. Display only; nothing
+  persists from it. Turning it on needs a sidebar row for zoneless tiles.
+- Workspace API: `canvas.apply` with an explicit zone still requires a zone;
+  the API cannot make a tile bare. Not asked for.
+- A bare tile cannot be lent to a shared area.
+- A project whose zones are all below the live hydration tier has no bare
+  layer, so its bare tiles are kept on disk but not drawn until a zone of it
+  goes live. That matches how its zone tiles behave.
