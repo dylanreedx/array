@@ -124,6 +124,7 @@ check --corner-style-check
 check --cross-project-agents-check
 check --diff-review-off-main-check
 check --diff-tile-check
+check --drag-in-tidy-check
 check --drag-magnetize-check
 check --duckherd-theme-check
 check --editor-navigation-check
@@ -558,6 +559,7 @@ leg run_app_check .build/debug/Array --corner-style-check
 leg run_app_check .build/debug/Array --cross-project-agents-check
 leg run_app_check .build/debug/Array --diff-review-off-main-check
 leg run_app_check .build/debug/Array --diff-tile-check
+leg run_app_check .build/debug/Array --drag-in-tidy-check
 leg run_app_check .build/debug/Array --drag-magnetize-check
 leg run_app_check .build/debug/Array --duckherd-theme-check
 leg run_app_check .build/debug/Array --editor-navigation-check
@@ -872,6 +874,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-teleme
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --command-center-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check

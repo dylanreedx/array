@@ -1537,6 +1537,11 @@ run_app_check .build/debug/Array --zone-close-keep-delete-check
 run_app_check .build/debug/Array --zone-chrome-zorder-check
 run_app_check .build/debug/Array --zone-resize-check
 run_app_check .build/debug/Array --jelly-auto-layout-check
+# Everyday drags in a tidied mixed zone stay legal (unequal swaps trade row
+# positions), and the jelly trajectory probe, now with a tidied mixed zone, finds
+# no ORTHO/FLIP/TELEPORT/STUCK frame and no overlapping drop (.plans/auto-layout-night).
+run_app_check .build/debug/Array --drag-in-tidy-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
 run_app_check .build/debug/Array --auto-layout-fanout-app-check
 run_app_check .build/debug/Array --zone-adaptive-bounds-check
 run_app_check .build/debug/Array --agent-status-check
