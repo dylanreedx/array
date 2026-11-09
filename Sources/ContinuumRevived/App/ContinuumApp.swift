@@ -3716,6 +3716,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tidy-camera-check") {
+            _ = NSApplication.shared
+            do {
+                try TidyCameraChecks.run()
+                print("TidyCameraChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --tidy-camera-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--tidy-offscreen-defer-check") {
             _ = NSApplication.shared
             do {
@@ -12305,7 +12316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return revealFocusedTileInFinder()
         case "zone.tidy":
             guard let canvasView, let zoneId = zoneIdForZoneCommands() else { return false }
-            canvasView.tidyAutoLayout(zoneId: zoneId)
+            canvasView.tidyAutoLayout(zoneId: zoneId, framesZone: true)
         default:
             return false
         }
@@ -21240,7 +21251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return canvasView != nil
         case .tidyCurrentZone:
             guard let zoneId = paletteContextZoneId else { return false }
-            canvasView?.tidyAutoLayout(zoneId: zoneId)
+            canvasView?.tidyAutoLayout(zoneId: zoneId, framesZone: true)
             return canvasView != nil
         case .replayGettingStarted:
             replayGettingStarted()

@@ -230,6 +230,11 @@ enum AutoLayoutTidyLatencyChecks {
         // the tiles whose position animation CA has committed (a stamped
         // beginTime) at that moment.
         var animatedAtPersist = 0
+        // The same census for the size animations, taken here too: a loaded run
+        // can take longer than the 110 ms animation to get back to the check,
+        // and CA has removed a finished animation by then.
+        var resizeAnimatedAtPersist = Set<UUID>()
+        var zoneResizeAnimatedAtPersist = false
         let persist = canvas.onLayoutCommitted
         canvas.onLayoutCommitted = { transaction in
             animatedAtPersist = m.ids.compactMap { canvas.tileView(for: $0)?.layer }.filter { layer in
@@ -238,6 +243,10 @@ enum AutoLayoutTidyLatencyChecks {
                     return animation.keyPath == "position" && animation.beginTime > 0
                 }
             }.count
+            resizeAnimatedAtPersist = Set(m.ids.filter {
+                canvas.tileView(for: $0)?.layer?.animation(forKey: CanvasNSView.autoLayoutResizeAnimationKey) != nil
+            })
+            zoneResizeAnimatedAtPersist = canvas.qaZoneOutlineResizeAnimating(Fixture.zoneA1)
             return persist?(transaction) ?? true
         }
         // Per tile: a RESIZED tile must redraw; only a tile that purely
@@ -299,6 +308,8 @@ enum AutoLayoutTidyLatencyChecks {
             let before = frames()
             let zoneBefore = canvas.qaLiveZonePlacement(Fixture.zoneA1)?.size
             animatedAtPersist = 0
+            resizeAnimatedAtPersist = []
+            zoneResizeAnimatedAtPersist = false
             var titleRedrawsBefore = titleRedraws()
             var tileInvalidationsBefore = tileInvalidations()
             var sample = Sample()
@@ -413,7 +424,7 @@ enum AutoLayoutTidyLatencyChecks {
                     break
                 }
             }
-            sample.animatedViews = animated
+            sample.animatedViews = max(animated, animatedAtPersist)
             let afterFrames = frames()
             let resized = m.ids.filter { id in
                 guard let a = before[id], let b = afterFrames[id] else { return false }
@@ -421,10 +432,11 @@ enum AutoLayoutTidyLatencyChecks {
             }
             sample.resizedTiles = resized.count
             sample.resizeAnimated = resized.filter {
-                canvas.tileView(for: $0)?.layer?.animation(forKey: CanvasNSView.autoLayoutResizeAnimationKey) != nil
+                resizeAnimatedAtPersist.contains($0)
+                    || canvas.tileView(for: $0)?.layer?.animation(forKey: CanvasNSView.autoLayoutResizeAnimationKey) != nil
             }.count
             sample.zoneResized = canvas.qaLiveZonePlacement(Fixture.zoneA1)?.size != zoneBefore
-            sample.zoneResizeAnimated = canvas.qaZoneOutlineResizeAnimating(Fixture.zoneA1)
+            sample.zoneResizeAnimated = zoneResizeAnimatedAtPersist || canvas.qaZoneOutlineResizeAnimating(Fixture.zoneA1)
             sample.beginTimes = stamped
             sample.movementStart = firstBegin.isFinite ? (firstBegin - triggerAt) * 1000 : 0
             sample.animationDelay = delay
