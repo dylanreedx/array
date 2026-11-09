@@ -10,9 +10,11 @@ import Foundation
 /// 1. Reading order: lines of tiles by top edge (a tile joins a line when its top
 ///    sits within half the line's shortest tile of the line's top), then x. A
 ///    lead and its helpers become ONE item where the first of them reads: the
-///    lead on the left, its helpers stacked in columns beside it, each column's
-///    heights (with gaps) summing to the lead's height. Only the lead takes the
-///    agent band; helpers are shaped by the block (`.plans/auto-layout-night`).
+///    lead on the left at its agent shape, its helpers stacked top to bottom in
+///    one column on its right (two columns past four helpers), each column's
+///    heights (with gaps) summing to the lead's height, every helper in a
+///    column the same height. Helpers are exempt from the agent band; the
+///    column geometry shapes them (`.plans/auto-layout-night`).
 /// 2. For a uniform area scale `s` on a grid over [`areaFloor`, `areaCeiling`],
 ///    a dynamic program picks the row breaks whose rows, each justified to the
 ///    content width, keep every tile closest to `s` × its current area at its
@@ -106,8 +108,12 @@ public enum CanvasTidyPacker {
         var q: Double
     }
 
-    /// Helpers stacked per column beside their lead.
-    public static let helpersPerColumn = 3
+    /// Up to this many helpers stack in one column beside their lead; more
+    /// take two columns.
+    public static let helpersInOneColumn = 4
+    /// A helper's own loose band (w/h). The column geometry decides its shape;
+    /// this only bounds the column width.
+    public static let helperRatioBand = (min: 0.9, max: 2.6)
 
     /// A candidate row. Its geometry does not depend on the area scale; only
     /// its cost does: Σ (Lᵢ − ln s)² + shape, with Lᵢ = ln(areaᵢ / current areaᵢ).
@@ -220,27 +226,27 @@ public enum CanvasTidyPacker {
     // MARK: - Order and clusters
 
     /// The lead on the left at the block's full height; each helper column of
-    /// q × the lead's width, its helpers splitting the height. The last column
-    /// and the last helper of a column end exactly on the block's edges.
+    /// q × the lead's width, its helpers splitting the height equally. Every
+    /// column has the same snapped width and the lead takes the rounding, so a
+    /// tidied block reads back to the same q; the last helper of a column ends
+    /// exactly on the block's bottom.
     private static func placeBlock(_ block: Block, in frame: TileFrame, gap: Double,
                                    snap: (Double) -> Double, into frames: inout [UUID: TileFrame]) {
         let columns = Double(block.columns.count)
         let flexible = frame.width - columns * gap
-        let leadWidth = flexible / (1 + block.q * columns)
+        let columnWidth = snap(block.q * flexible / (1 + block.q * columns))
         let right = frame.x + frame.width, bottom = frame.y + frame.height
-        var x = snap(frame.x + leadWidth)
-        frames[block.lead] = TileFrame(x: frame.x, y: frame.y, width: x - frame.x, height: frame.height)
+        let leadRight = right - columns * (columnWidth + gap)
+        frames[block.lead] = TileFrame(x: frame.x, y: frame.y, width: leadRight - frame.x, height: frame.height)
         for (c, column) in block.columns.enumerated() {
-            let left = x + gap
-            let edge = c == block.columns.count - 1 ? right : snap(left + block.q * leadWidth)
+            let left = leadRight + gap + Double(c) * (columnWidth + gap)
             let share = (frame.height - Double(column.count - 1) * gap) / Double(column.count)
             var y = frame.y
             for (r, id) in column.enumerated() {
                 let end = r == column.count - 1 ? bottom : snap(y + share)
-                frames[id] = TileFrame(x: left, y: y, width: edge - left, height: end - y)
+                frames[id] = TileFrame(x: left, y: y, width: columnWidth, height: end - y)
                 y = end + gap
             }
-            x = edge
         }
     }
 
@@ -304,15 +310,22 @@ public enum CanvasTidyPacker {
     private static func blockItem(lead: Member, helpers: [Member], gap: Double) -> Item {
         let leadItem = item(for: lead)
         let leadW = max(1, lead.frame.width), leadH = max(1, lead.frame.height)
-        let perColumn = helpersPerColumn
-        let columns = stride(from: 0, to: helpers.count, by: perColumn).map {
-            Array(helpers[$0..<min($0 + perColumn, helpers.count)])
-        }
+        let firstColumn = helpers.count > helpersInOneColumn ? (helpers.count + 1) / 2 : helpers.count
+        let columns = [Array(helpers.prefix(firstColumn)), Array(helpers.dropFirst(firstColumn))].filter { !$0.isEmpty }
         let cols = Double(columns.count)
-        // Column width relative to the lead's: the helpers' mean width as they
-        // are now (a fresh helper is its lead's width), within reason.
+        // Column width q × the lead's: the helpers' width as they are now (576
+        // at creation), within 0.5–1.5. A helper in a column of m is about
+        // q × (lead ratio) × m wide per unit height, so the helper band becomes
+        // a limit on the lead's ratio inside the block. Every bound here is a
+        // constant, q or a count, so a tidied block reads back the same block.
         let meanHelperWidth = helpers.reduce(0.0) { $0 + $1.frame.width } / Double(helpers.count)
-        let q = min(max(meanHelperWidth / leadW, 0.5), 1.25)
+        let mMin = Double(columns.map(\.count).min() ?? 1), mMax = Double(columns.map(\.count).max() ?? 1)
+        var q = min(max(meanHelperWidth / leadW, 0.5), 1.5)
+        q = min(q, helperRatioBand.max / (leadItem.ratioMin * mMax))
+        q = max(q, helperRatioBand.min / (leadItem.ratioMax * mMin))
+        var leadLo = max(leadItem.ratioMin, helperRatioBand.min / (q * mMin))
+        var leadHi = min(leadItem.ratioMax, helperRatioBand.max / (q * mMax))
+        if leadLo > leadHi { leadLo = leadItem.ratioMin; leadHi = leadItem.ratioMax }
         let factor = 1 + q * cols
         let helperMinimum = helpers.map { $0.kind.map { TileGeometry.minimumSize(for: $0) } ?? $0.minimumSize }
         let helperMinW = helperMinimum.map { Double($0.width) }.max() ?? 1
@@ -324,10 +337,10 @@ public enum CanvasTidyPacker {
         // inner column gaps a tidied block holds (so a tidied block costs zero).
         var area = leadW * leadH + helpers.reduce(0.0) { $0 + $1.frame.width * $1.frame.height }
         for column in columns { area += q * leadW * Double(column.count - 1) * gap }
-        let leadRatio = min(max(leadW / leadH, leadItem.ratioMin), leadItem.ratioMax)
+        let leadRatio = min(max(leadW / leadH, leadLo), leadHi)
         return Item(
             id: lead.id, area: area,
-            ratio: leadRatio * factor, ratioMin: leadItem.ratioMin * factor, ratioMax: leadItem.ratioMax * factor,
+            ratio: leadRatio * factor, ratioMin: leadLo * factor, ratioMax: leadHi * factor,
             minW: leadMinW * factor, minH: minH, fixed: nil,
             extraWidth: cols * gap,
             block: Block(lead: lead.id, columns: columns.map { $0.map(\.id) }, q: q))

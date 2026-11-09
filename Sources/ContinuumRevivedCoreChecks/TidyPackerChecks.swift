@@ -54,7 +54,7 @@ func runTidyPackerChecks() {
 
     /// Tiles at their preset sizes (jittered ±25%) scattered over a loose grid
     /// with holes; the zone is the members' envelope plus `slack`.
-    func makeCase(_ name: String, number: Int, kinds: [TileKind], columns: Int, slack: CGSize, cluster: Bool = false) -> Case {
+    func makeCase(_ name: String, number: Int, kinds: [TileKind], columns: Int, slack: CGSize, cluster: Bool = false, helperCount: Int = 3) -> Case {
         let zoneId = uuid(number, 999)
         var tiles: [CanvasAutoLayoutEngine.LayoutTile] = []
         var lead: UUID?
@@ -72,13 +72,13 @@ func runTidyPackerChecks() {
         }
         if cluster {
             let agents = tiles.indices.filter { tiles[$0].kind == .managedAgent }
-            if agents.count >= 4 {
+            if agents.count >= helperCount + 1 {
                 lead = tiles[agents[0]].id
-                helpers = agents[1...3].map { tiles[$0].id }
-                for i in agents.prefix(4) { tiles[i].clusterLead = lead }
+                helpers = agents[1...helperCount].map { tiles[$0].id }
+                for i in agents.prefix(helperCount + 1) { tiles[i].clusterLead = lead }
                 // Helpers as spawn makes them: the lead's width, half its height.
                 let leadFrame = tiles[agents[0]].frame
-                for i in agents[1...3] {
+                for i in agents[1...helperCount] {
                     tiles[i].frame.width = leadFrame.width
                     tiles[i].frame.height = ((leadFrame.height - gap) / 2).rounded()
                 }
@@ -103,6 +103,9 @@ func runTidyPackerChecks() {
         makeCase("lead-three-helpers", number: 20,
                  kinds: [.browser, .managedAgent, .terminal, .managedAgent, .note, .managedAgent, .managedAgent, .terminal],
                  columns: 3, slack: CGSize(width: 0, height: 0), cluster: true),
+        makeCase("lead-five-helpers", number: 21,
+                 kinds: [.terminal, .managedAgent, .managedAgent, .managedAgent, .browser, .managedAgent, .managedAgent, .managedAgent, .note],
+                 columns: 3, slack: CGSize(width: 0, height: 0), cluster: true, helperCount: 5),
     ]
     // Cramped: the eight tiles' zone squeezed to a third of its height (members
     // overlap a hand-shrunk zone), so tidy must grow it.
@@ -211,13 +214,28 @@ func runTidyPackerChecks() {
             let leadFrame = members.first { $0.id == lead }!.frame
             let helperFrames = members.filter { c.helpers.contains($0.id) }.map(\.frame)
             let columns = Dictionary(grouping: helperFrames, by: \.x).sorted { $0.key < $1.key }
+            // The lead's rule, pinned here rather than read from the packer: more than four helpers take two columns.
+            let expectedColumns = c.helpers.count > 4 ? 2 : 1
+            check(columns.count == expectedColumns,
+                  "\(c.name): \(c.helpers.count) helpers make \(columns.count) columns, expected \(expectedColumns)")
             check(abs(columns.first!.key - (leadFrame.x + leadFrame.width + gap)) <= eps,
                   "\(c.name): helpers do not start one gap right of the lead: \(leadFrame) \(helperFrames)")
+            let grid = CanvasTidyPacker.grid
             for (_, column) in columns {
                 let stacked = column.sorted { $0.y < $1.y }
-                let total = stacked.reduce(0.0) { $0 + $1.height } + Double(stacked.count - 1) * gap
-                check(abs(stacked.first!.y - leadFrame.y) <= eps && abs(total - leadFrame.height) <= eps,
-                      "\(c.name): a helper column does not span the lead's height: \(stacked) vs \(leadFrame)")
+                check(abs(stacked.first!.y - leadFrame.y) <= grid
+                      && abs(stacked.last!.y + stacked.last!.height - (leadFrame.y + leadFrame.height)) <= grid,
+                      "\(c.name): the helper column's top and bottom do not match the lead's: \(stacked) vs \(leadFrame)")
+                let heights = stacked.map(\.height)
+                check(heights.max()! - heights.min()! <= 2 * grid, "\(c.name): helpers in a column differ in height: \(heights)")
+                check(Set(stacked.map(\.width)).count == 1, "\(c.name): helpers in a column differ in width: \(stacked)")
+                // About the helper band: exact without the gaps between helpers.
+                let ratio = stacked[0].width / ((leadFrame.height) / Double(stacked.count))
+                check(ratio >= CanvasTidyPacker.helperRatioBand.min - 1e-3 && ratio <= CanvasTidyPacker.helperRatioBand.max + 1e-3,
+                      "\(c.name): helpers outside their band: \(ratio)")
+                for (upper, lower) in zip(stacked, stacked.dropFirst()) {
+                    check(abs(lower.y - (upper.y + upper.height) - gap) <= eps, "\(c.name): helpers are not one gap apart: \(stacked)")
+                }
             }
             let blockRight = helperFrames.map { $0.x + $0.width }.max()!
             check(!members.contains { m in
@@ -266,7 +284,7 @@ func runTidyPackerChecks() {
     }
     // A wide zone of two or three tiles cannot be filled by shape alone, so its
     // height may give a little; it never widens and never grows by more than 15%.
-    for name in ["two", "three", "five", "eight", "thirteen", "lead-three-helpers"] {
+    for name in ["two", "three", "five", "eight", "thirteen", "lead-three-helpers", "lead-five-helpers"] {
         let (b, a) = zoneAfter(name)
         check(a.width <= b.width + 0.01 && a.height <= b.height * 1.15, "\(name): zone grew more than needed: \(b) -> \(a)")
     }
