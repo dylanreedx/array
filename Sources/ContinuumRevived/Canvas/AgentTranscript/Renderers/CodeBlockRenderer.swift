@@ -246,6 +246,14 @@ final class CodeBlockScrollView: NSScrollView {
 
     private var lastTiledInputs: TileInputs?
 
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        contentView = CodeBlockClipView()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
     /// While a camera gesture moves, a retile whose inputs are unchanged only
     /// re-snaps to the moving pixel grid, so it waits: the canvas retiles every
     /// deferred scroll view once at settle, which is when the grid stops moving and
@@ -274,6 +282,28 @@ final class CodeBlockScrollView: NSScrollView {
             return
         }
         super.scrollWheel(with: event)
+    }
+}
+
+/// The same moving pixel grid reaches the clip view directly: the backing-
+/// properties cascade re-snaps its bounds origin on every zoom step, a write of
+/// less than one device pixel that re-reflects the scroll view, its scrollers and
+/// every geometry observer. 128 per step in the motion workload. While a driver
+/// gesture moves, a sub-pixel origin write waits for the settle, where the canvas
+/// re-applies the constrained origin. A real scroll moves by more than a pixel and
+/// happens at once; nothing scrolls a code block mid-zoom anyway.
+@MainActor
+final class CodeBlockClipView: NSClipView {
+    override func setBoundsOrigin(_ newOrigin: NSPoint) {
+        let pixel = convertFromBacking(NSRect(x: 0, y: 0, width: 1, height: 1)).size
+        if newOrigin != bounds.origin,
+           abs(newOrigin.x - bounds.origin.x) < abs(pixel.width),
+           abs(newOrigin.y - bounds.origin.y) < abs(pixel.height),
+           let canvas = CanvasNSView.enclosing(self), canvas.defersPixelGridRetile {
+            canvas.deferPixelGridRetile(self)
+            return
+        }
+        super.setBoundsOrigin(newOrigin)
     }
 }
 

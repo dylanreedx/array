@@ -33,10 +33,13 @@ import ObjectiveC
 ///    view to it: a fraction-of-a-point nudge that reflows the document and the
 ///    scrollers. Before the fix, 128 code-block retiles per step in four visible
 ///    Markdown tiles. `CodeBlockScrollView.tile` now defers those to the settle.
-/// 2. **Every deferred retile runs at the settle.** Nothing may stay waiting once
-///    the camera rests. (Retiling again at rest then changes no clip geometry; that
-///    clause is a guard only: it also held with the settle retile removed, so it
-///    is not what proves the settle runs.)
+/// 2. **No sub-pixel clip re-snap while the camera moves.** The backing cascade
+///    also re-snaps each clip view's bounds origin by under a device pixel per step
+///    (128 per step before the fix); `CodeBlockClipView` defers those to the settle.
+/// 3. **Everything deferred is released at the settle.** Nothing may stay waiting
+///    once the camera rests. (Retiling or re-applying clip bounds at rest then moves
+///    nothing; those clauses are guards only: both also held with the whole settle
+///    flush removed, so they are not what proves the settle runs.)
 ///
 /// Gated on `--canvas-zoom-step-cost-check`. Diagnosis, never in the matrix:
 /// `CANVAS_ZOOM_STEP_COST_REPORT=1` prints the per-class table and the
@@ -52,20 +55,28 @@ enum CanvasZoomStepCostChecks {
     nonisolated(unsafe) static var layouts: [String: Int] = [:]
     nonisolated(unsafe) static var tileRequests: [String: Int] = [:]
     nonisolated(unsafe) static var tiles: [String: Int] = [:]
-    /// The witnessed code blocks' own size and document size when the gesture
-    /// began. A retile with both unchanged only re-snaps to the moving pixel grid.
-    nonisolated(unsafe) static var gestureStartGeometry: [ObjectIdentifier: [CGFloat]] = [:]
+    /// The witnessed code blocks' tile inputs at their previous real retile during
+    /// the gesture (nil until one is seen: the view's last retile before the gesture
+    /// is unknown here). A retile with its inputs unchanged since then only
+    /// re-snaps to the moving pixel grid.
+    nonisolated(unsafe) static var gestureStartGeometry: [ObjectIdentifier: [CGFloat]?] = [:]
     nonisolated(unsafe) static var gridOnlyRetiles = 0
+    nonisolated(unsafe) static var subPixelClipResnaps = 0
+    nonisolated(unsafe) static var clipOriginRequests = 0
 
     static func geometry(_ scroll: NSScrollView) -> [CGFloat] {
         let document = scroll.documentView?.frame.size ?? .zero
-        return [scroll.bounds.width, scroll.bounds.height, document.width, document.height]
+        let insets = scroll.contentInsets
+        return [scroll.bounds.width, scroll.bounds.height, document.width, document.height,
+                insets.top, insets.left, insets.bottom, insets.right,
+                CGFloat(scroll.scrollerStyle.rawValue), scroll.hasHorizontalScroller ? 1 : 0,
+                scroll.hasVerticalScroller ? 1 : 0, scroll.autohidesScrollers ? 1 : 0]
     }
     nonisolated(unsafe) static var clipOriginWrites = 0
     nonisolated(unsafe) static var clipSizeWrites = 0
 
     static func reset() {
-        displays = [:]; layouts = [:]; tileRequests = [:]; tiles = [:]; gridOnlyRetiles = 0
+        displays = [:]; layouts = [:]; tileRequests = [:]; tiles = [:]; gridOnlyRetiles = 0; subPixelClipResnaps = 0; clipOriginRequests = 0
         clipOriginWrites = 0; clipSizeWrites = 0
     }
 
@@ -136,9 +147,14 @@ enum CanvasZoomStepCostChecks {
             let block: @convention(block) (NSScrollView) -> Void = { scroll in
                 if counting {
                     tiles[name(scroll), default: 0] += 1
-                    if let size = gestureStartGeometry[ObjectIdentifier(scroll)],
-                       size == geometry(scroll) {
-                        gridOnlyRetiles += 1
+                    let id = ObjectIdentifier(scroll)
+                    if let previous = gestureStartGeometry[id] {
+                        let now = geometry(scroll)
+                        if let previous, now == previous,
+                           CanvasNSView.enclosing(scroll)?.defersPixelGridRetile == true {
+                            gridOnlyRetiles += 1
+                        }
+                        gestureStartGeometry[id] = .some(now)
                     }
                 }
                 unsafeBitCast(original, to: VoidIMP.self)(scroll, tileSel)
@@ -154,9 +170,27 @@ enum CanvasZoomStepCostChecks {
             return block
         }
         let originSel = #selector(NSView.setBoundsOrigin(_:))
+        hook(CodeBlockClipView.self, originSel) { original in
+            let block: @convention(block) (NSClipView, NSPoint) -> Void = { clip, point in
+                if counting { clipOriginRequests += 1 }
+                unsafeBitCast(original, to: PointIMP.self)(clip, originSel, point)
+            }
+            return block
+        }
         hook(NSClipView.self, originSel) { original in
             let block: @convention(block) (NSClipView, NSPoint) -> Void = { clip, point in
-                if counting { clipOriginWrites += 1 }
+                if counting {
+                    clipOriginWrites += 1
+                    if let scroll = clip.superview as? NSScrollView,
+                       gestureStartGeometry[ObjectIdentifier(scroll)] != nil, point != clip.bounds.origin,
+                       CanvasNSView.enclosing(clip)?.defersPixelGridRetile == true {
+                        let pixel = clip.convertFromBacking(NSRect(x: 0, y: 0, width: 1, height: 1)).size
+                        if abs(point.x - clip.bounds.origin.x) < abs(pixel.width),
+                           abs(point.y - clip.bounds.origin.y) < abs(pixel.height) {
+                            subPixelClipResnaps += 1
+                        }
+                    }
+                }
                 unsafeBitCast(original, to: PointIMP.self)(clip, originSel, point)
             }
             return block
@@ -257,6 +291,8 @@ enum CanvasZoomStepCostChecks {
         if env["CANVAS_ZOOM_STEP_COST_REPORT"] == "1" || !hooks {
             // Diagnosis: the probe's shape, in and out around the start zoom.
             let posts = Int(env["CANVAS_ZOOM_STEP_COST_STEPS"] ?? "") ?? 240
+            // A profiler attaches here, after warmup and parking.
+            print("[zoom-step-cost] zoom phase starts pid=\(getpid())"); fflush(stdout)
             report(await measure(canvas, posts: posts) { ($0 / 8) % 2 == 0 ? 1.03 : 1 / 1.03 })
             return
         }
@@ -265,7 +301,7 @@ enum CanvasZoomStepCostChecks {
         guard codeBlocks.count >= 32 else {
             throw Failure(description: "positive control: expected the visible Markdown tiles' code blocks, found \(codeBlocks.count)")
         }
-        gestureStartGeometry = Dictionary(uniqueKeysWithValues: codeBlocks.map { (ObjectIdentifier($0), geometry($0)) })
+        gestureStartGeometry = Dictionary(uniqueKeysWithValues: codeBlocks.map { (ObjectIdentifier($0), nil) })
         let startZoom = canvas.viewport.zoom
         // Zoom IN only, so the gesture ends on a different pixel grid than it began.
         let motion = await measure(canvas, posts: 24) { _ in 1.03 }
@@ -277,11 +313,20 @@ enum CanvasZoomStepCostChecks {
         guard requests >= motion.steps * 32 else {
             throw Failure(description: "positive control: AppKit asked code blocks to retile \(requests) times in \(motion.steps) steps; the scenario no longer moves the pixel grid")
         }
-        // A code block mounted or resized mid-gesture tiles, as it must; the
-        // defect is a retile whose own geometry did not change at all.
+        // A code block mounted or resized mid-gesture tiles, as it must (its text
+        // view's document also drifts by fractions of a point with the zoom), and
+        // so does any after a settle; the defect is a retile whose own geometry
+        // did not change since its previous retile while the gesture was moving.
         let resnaps = gridOnlyRetiles
         guard resnaps == 0 else {
             throw Failure(description: "code blocks re-snapped to the moving pixel grid \(resnaps) times in \(motion.steps) zoom steps (\(String(format: "%.1f", motion.perStep(resnaps)))/step) with their own geometry unchanged; they must wait for the settle")
+        }
+
+        guard clipOriginRequests >= motion.steps * 32 else {
+            throw Failure(description: "positive control: AppKit re-snapped code-block clips \(clipOriginRequests) times in \(motion.steps) steps; the scenario no longer moves the pixel grid")
+        }
+        guard subPixelClipResnaps == 0 else {
+            throw Failure(description: "code-block clip views re-snapped their origin by under a device pixel \(subPixelClipResnaps) times in \(motion.steps) zoom steps (\(String(format: "%.1f", motion.perStep(subPixelClipResnaps)))/step); they must wait for the settle")
         }
 
         // Settle, then the resting witness.
@@ -291,6 +336,17 @@ enum CanvasZoomStepCostChecks {
         guard !canvas.isCameraInMotion else { throw Failure(description: "the camera never settled") }
         guard canvas.qaDeferredPixelGridRetileCount == 0 else {
             throw Failure(description: "\(canvas.qaDeferredPixelGridRetileCount) deferred retiles survived the settle")
+        }
+        // Guard: re-applying a clip's bounds at rest (the call the backing cascade
+        // makes, which snaps to device pixels) moves nothing.
+        let offGrid = codeBlockScrollViews(in: canvas).filter { scroll in
+            let clip = scroll.contentView
+            let before = clip.bounds.origin
+            clip.bounds = clip.bounds
+            return abs(before.x - clip.bounds.origin.x) > 1e-6 || abs(before.y - clip.bounds.origin.y) > 1e-6
+        }.count
+        guard offGrid == 0 else {
+            throw Failure(description: "\(offGrid) code-block clips were off the resting pixel grid after the settle")
         }
         var moved = 0
         for scroll in codeBlockScrollViews(in: canvas) {
@@ -307,7 +363,7 @@ enum CanvasZoomStepCostChecks {
         guard moved == 0 else {
             throw Failure(description: "\(moved) code blocks changed geometry when retiled at rest")
         }
-        print("[zoom-step-cost] \(motion.steps) zoom steps: \(requests) code-block retile requests deferred, 0 grid-only re-snaps; "
+        print("[zoom-step-cost] \(motion.steps) zoom steps: \(requests) code-block retile requests deferred, 0 grid-only re-snaps; \(clipOriginRequests) sub-pixel clip re-snaps deferred, 0 reached AppKit; "
               + "every deferred retile ran at settle")
     }
 }

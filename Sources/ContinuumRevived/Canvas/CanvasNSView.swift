@@ -6795,7 +6795,8 @@ final class CanvasNSView: NSView, TokenThemed {
     /// settle is what brings it back. A pointer pan never changes the grid.
     var defersPixelGridRetile: Bool { cameraDriver.isApplying || !cameraDriver.isSettled }
 
-    /// Views whose pixel-grid retile waited for the settle (`CodeBlockScrollView.tile`).
+    /// Views whose pixel-grid re-snap waited for the settle: code-block scroll
+    /// views (`CodeBlockScrollView.tile`) and their clips (`CodeBlockClipView`).
     private let pixelGridRetiles = NSHashTable<NSView>.weakObjects()
 
     func deferPixelGridRetile(_ view: NSView) { pixelGridRetiles.add(view) }
@@ -6804,7 +6805,15 @@ final class CanvasNSView: NSView, TokenThemed {
     var qaDeferredPixelGridRetileCount: Int { pixelGridRetiles.count }
 
     private func flushPixelGridRetiles() {
-        for view in pixelGridRetiles.allObjects { view.needsLayout = true }
+        for view in pixelGridRetiles.allObjects {
+            if let clip = view as? NSClipView {
+                // The re-snap the cascade asked for, now on the resting grid:
+                // `setBounds` is the call that snaps the origin to device pixels.
+                clip.bounds = clip.bounds
+            } else {
+                view.needsLayout = true
+            }
+        }
         pixelGridRetiles.removeAllObjects()
     }
 
