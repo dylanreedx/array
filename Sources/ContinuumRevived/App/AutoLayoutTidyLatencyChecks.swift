@@ -52,7 +52,7 @@ enum AutoLayoutTidyLatencyChecks {
 
     /// Budgets, in ms, on the app-side work between the trigger and the commit
     /// that starts the movement (see the gate in `summarize`).
-    static let appSideBudgetMs: [Int: Double] = [4: 6, 12: 10, 30: 20, 89: 50]
+    static let appSideBudgetMs: [Int: Double] = [4: 3, 12: 5, 30: 10, 89: 25]
 
     struct Sample {
         var trigger = 0.0          // synchronous: the menu action / mouse-up returns
@@ -74,6 +74,11 @@ enum AutoLayoutTidyLatencyChecks {
         var animatedAtPersist = 0  // moved tiles whose position animation CA had committed when the durable write ran
         var titleRedraws = 0       // title-bar invalidations on the moved tiles (a pure move draws nothing new)
         var tileInvalidations = 0  // `invalidateForCanvasLayout` on the moved tiles (same reason)
+        var translatedOnly = 0     // tiles the trigger moved without resizing
+        var resizedTiles = 0       // tiles whose size the trigger changed
+        var resizeAnimated = 0     // of those, how many carry the committed size animation
+        var zoneResized = false
+        var zoneResizeAnimated = false
         var dragEvent = 0.0        // drag release only: median mouseDragged handling, ms
         var dragEventMax = 0.0
     }
@@ -234,9 +239,13 @@ enum AutoLayoutTidyLatencyChecks {
             }.count
             return persist?(transaction) ?? true
         }
-        func titleRedraws() -> Int { m.ids.compactMap { canvas.tileView(for: $0)?.qaTitleBarRedrawCount }.reduce(0, +) }
-        func tileInvalidations() -> Int {
-            m.ids.compactMap { canvas.tileView(for: $0)?.qaCanvasLayoutInvalidationCount }.reduce(0, +)
+        // Per tile: a RESIZED tile must redraw; only a tile that purely
+        // translated is held to zero.
+        func titleRedraws() -> [UUID: Int] {
+            Dictionary(uniqueKeysWithValues: m.ids.compactMap { id in canvas.tileView(for: id).map { (id, $0.qaTitleBarRedrawCount) } })
+        }
+        func tileInvalidations() -> [UUID: Int] {
+            Dictionary(uniqueKeysWithValues: m.ids.compactMap { id in canvas.tileView(for: id).map { (id, $0.qaCanvasLayoutInvalidationCount) } })
         }
         func frames() -> [UUID: TileFrame] {
             Dictionary(canvas.allTilesInWorldFrames().map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
@@ -282,8 +291,12 @@ enum AutoLayoutTidyLatencyChecks {
             return (menu, index)
         }
 
+        if scenario == .tidyMenu, let dir = ProcessInfo.processInfo.environment["ALN_TIDY_FRAMES_DIR"] {
+            try captureTidyFrames(m, directory: URL(fileURLWithPath: dir, isDirectory: true), count: count)
+        }
         for repetition in 0..<repetitions {
             let before = frames()
+            let zoneBefore = canvas.qaLiveZonePlacement(Fixture.zoneA1)?.size
             animatedAtPersist = 0
             var titleRedrawsBefore = titleRedraws()
             var tileInvalidationsBefore = tileInvalidations()
@@ -340,8 +353,14 @@ enum AutoLayoutTidyLatencyChecks {
             }
             sample.stages = canvas.qaAutoLayoutStageTimes
             sample.animatedAtPersist = animatedAtPersist
-            sample.titleRedraws = titleRedraws() - titleRedrawsBefore
-            sample.tileInvalidations = tileInvalidations() - tileInvalidationsBefore
+            let translatedOnly = m.ids.filter { id in
+                guard let a = before[id], let b = frames()[id] else { return false }
+                return a != b && a.width == b.width && a.height == b.height
+            }
+            let titlesNow = titleRedraws(), invalidationsNow = tileInvalidations()
+            sample.titleRedraws = translatedOnly.reduce(0) { $0 + (titlesNow[$1] ?? 0) - (titleRedrawsBefore[$1] ?? 0) }
+            sample.tileInvalidations = translatedOnly.reduce(0) { $0 + (invalidationsNow[$1] ?? 0) - (tileInvalidationsBefore[$1] ?? 0) }
+            sample.translatedOnly = translatedOnly.count
             // Counted, not timed: what the end of the turn has to do.
             var needLayout: [String: Int] = [:], needDisplay: [String: Int] = [:], layersNeedDisplay = 0
             func walk(_ view: NSView) {
@@ -387,6 +406,17 @@ enum AutoLayoutTidyLatencyChecks {
                 }
             }
             sample.animatedViews = animated
+            let afterFrames = frames()
+            let resized = m.ids.filter { id in
+                guard let a = before[id], let b = afterFrames[id] else { return false }
+                return a.width != b.width || a.height != b.height
+            }
+            sample.resizedTiles = resized.count
+            sample.resizeAnimated = resized.filter {
+                canvas.tileView(for: $0)?.layer?.animation(forKey: CanvasNSView.autoLayoutResizeAnimationKey) != nil
+            }.count
+            sample.zoneResized = canvas.qaLiveZonePlacement(Fixture.zoneA1)?.size != zoneBefore
+            sample.zoneResizeAnimated = canvas.qaZoneOutlineResizeAnimating(Fixture.zoneA1)
             sample.beginTimes = stamped
             sample.movementStart = firstBegin.isFinite ? (firstBegin - triggerAt) * 1000 : 0
             sample.animationDelay = delay
@@ -405,6 +435,57 @@ enum AutoLayoutTidyLatencyChecks {
             }
         }
         return samples
+    }
+
+    /// Look at the movement before anyone else does: the window's layer clock
+    /// runs 20x slow, a tidy is dispatched, and the presentation tree is
+    /// rendered at points through the animation, light and dark. Diagnostic
+    /// only (ALN_TIDY_FRAMES_DIR); it asserts nothing.
+    static func captureTidyFrames(_ m: Mount, directory: URL, count: Int) throws {
+        let canvas = m.mounted.canvas
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            m.window.appearance = NSAppearance(named: appearance)
+            canvas.layoutSubtreeIfNeeded(); canvas.displayIfNeeded(); CATransaction.flush()
+            guard let root = m.window.contentView?.layer, let placement = canvas.qaLiveZonePlacement(Fixture.zoneA1) else { continue }
+            let world = CGPoint(x: placement.origin.x + 60, y: placement.origin.y + Double(ZoneChromeNSView.headerHeight) / 2)
+            let point = canvas.convert(CanvasEngine.worldToScreen(world, viewport: canvas.viewport), to: nil)
+            guard let event = NSEvent.mouseEvent(with: .rightMouseDown, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: m.window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+                  let menu = canvas.menu(for: event),
+                  let item = menu.items.first(where: { $0.title == "Tidy Zone Now" }) else { continue }
+            func render(_ label: String) {
+                let layer = root.presentation() ?? root
+                let size = layer.bounds.size
+                guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+                        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                      let context = NSGraphicsContext(bitmapImageRep: rep) else { return }
+                context.cgContext.translateBy(x: 0, y: size.height)
+                context.cgContext.scaleBy(x: 1, y: -1)
+                layer.render(in: context.cgContext)
+                try? rep.representation(using: .png, properties: [:])?
+                    .write(to: directory.appendingPathComponent("n\(count)-\(name)-\(label).png"))
+            }
+            render("0-before")
+            root.speed = 0.05
+            NSApp.sendAction(item.action!, to: item.target, from: item)
+            for (index, wait) in [0.4, 0.6, 0.6, 1.0].enumerated() {
+                RunLoop.main.run(until: Date().addingTimeInterval(wait))
+                render("\(index + 1)-t\(Int((([0.4, 1.0, 1.6, 2.6][index]) / 2.2) * 100))pct")
+            }
+            if let view = canvas.tileView(for: m.ids[0]), let tile = view.layer {
+                let chain = sequence(first: tile, next: { $0.superlayer }).prefix(5).map { "\(type(of: $0))(flip=\($0.isGeometryFlipped) bounds=\($0.bounds))" }
+                print("frames n=\(count) \(name): anchor=\(tile.anchorPoint) viewFrame=\(view.frame) layerFrame=\(tile.frame) position=\(tile.position) viewFlipped=\(view.isFlipped) superviewFlipped=\(view.superview?.isFlipped ?? false) chain=\(chain)")
+                if let title = view.qaTitleBarView?.layer { print("frames title layer frame=\(title.frame) view=\(view.qaTitleBarView!.frame)") }
+            }
+            root.speed = 1
+            _ = canvas.qaClickAutoLayoutUndo()
+            canvas.layoutSubtreeIfNeeded(); canvas.displayIfNeeded(); CATransaction.flush()
+            m.fixture.drain(0.3)
+        }
+        m.window.appearance = nil
     }
 
     /// The longest stretch the main run loop spent awake (after-waiting to
@@ -457,6 +538,11 @@ enum AutoLayoutTidyLatencyChecks {
         json["animatedAtPersist"] = samples.map(\.animatedAtPersist)
         json["titleRedraws"] = samples.map(\.titleRedraws)
         json["tileInvalidations"] = samples.map(\.tileInvalidations)
+        json["resizedTiles"] = samples.map(\.resizedTiles)
+        json["translatedOnly"] = samples.map(\.translatedOnly)
+        json["resizeAnimated"] = samples.map(\.resizeAnimated)
+        json["zoneResized"] = samples.map(\.zoneResized)
+        json["zoneResizeAnimated"] = samples.map(\.zoneResizeAnimated)
         json["needLayout"] = samples.last?.needLayout ?? [:]
         json["needDisplay"] = samples.last?.needDisplay ?? [:]
         json["layersNeedDisplay"] = samples.map(\.layersNeedDisplay)
@@ -489,23 +575,32 @@ enum AutoLayoutTidyLatencyChecks {
                 if sample.animationDelay > 1 {
                     failures.append("\(label): the animation begins \(f(sample.animationDelay)) ms after its commit")
                 }
+                // A tidy that resizes tiles or the zone animates the size with
+                // the move instead of snapping it first.
+                if sample.resizeAnimated < sample.resizedTiles {
+                    failures.append("\(label): \(sample.resizedTiles - sample.resizeAnimated) of \(sample.resizedTiles) resized tiles snapped to their new size")
+                }
+                if sample.zoneResized && !sample.zoneResizeAnimated {
+                    failures.append("\(label): the zone snapped to its new size")
+                }
                 if sample.titleRedraws > 0 || sample.tileInvalidations > 0 {
-                    failures.append("\(label): moving tiles invalidated \(sample.titleRedraws) title bars and "
-                        + "\(sample.tileInvalidations) tile surfaces; a move draws nothing new")
+                    failures.append("\(label): \(sample.translatedOnly) tiles that only moved invalidated \(sample.titleRedraws) "
+                        + "title bars and \(sample.tileInvalidations) tile surfaces; a move draws nothing new")
                 }
             }
-            // Wall-clock budget on the app side of the pre-movement path: the
-            // canvas stages around the solve plus the presentation's layout and
-            // display. The solve (the packer's own cost) and the CA flush
-            // (compositor) are published above, never gated here. The FASTEST
+            // Wall-clock budget on the canvas's own stages around the solve
+            // (scene capture, apply, animation setup, finish, commit capture).
+            // Published, never gated: the solve (the packer's cost), the
+            // presentation's layout (AppKit re-tiling every RESIZED tile's
+            // scroll view, inherent to resizing real views once) and the CA
+            // flush (compositor and the resized tiles' redraw). The FASTEST
             // repetition is gated, the estimator least moved by a loaded Mac
             // (a run under load doubled every median); the counted assertions
             // above are the deterministic half of this witness.
             let budget = appSideBudgetMs[count] ?? 50
-            let appSide = samples.map { $0.stages.begin + $0.stages.apply + $0.stages.finish + $0.stages.capture
-                + $0.stages.presentLayout + $0.stages.presentDisplay }.min() ?? 0
+            let appSide = samples.map { $0.stages.begin + $0.stages.apply + $0.stages.finish + $0.stages.capture }.min() ?? 0
             if appSide > budget {
-                failures.append("\(name) n=\(count): the app-side work before the movement took \(f(appSide)) ms (budget \(budget))")
+                failures.append("\(name) n=\(count): the canvas stages before the movement took \(f(appSide)) ms (budget \(budget))")
             }
         }
         return Row(json: json, line: line, failures: failures)
