@@ -289,11 +289,15 @@ ARRAY_AGENT_ID unset, managed-agent marker inherited, stdin /dev/null.
 - Full CoreChecks (isolated tmux, socket path verified): exit 1 on one line
   only, "bridge concurrency: turn completes" (a 15 s wait in the pi host
   bridge, unrelated, load). Membership, merge and exposure sections pass.
-- Sweep, 70 more offscreen app legs over zones, tiles, layout, workspace,
-  persistence and sharing: 66 exit 0 (39 before the marker, 34 after it;
-  zone-breakout, zone-layer-move, zone-close-*, zone-tier-transition,
-  workspace-switch*, workspace-restart-fault, stranded-tile-recovery,
-  shared-area-zone and tile-insert-slide among them).
+- Sweep over zones, tiles, layout, workspace, persistence and sharing,
+  offscreen: batch 1 ran 44 app legs before the marker (39 exit 0), batch 2
+  ran 34 after it (32 exit 0): zone-breakout, zone-layer-move, zone-close-*,
+  zone-tier-transition, workspace-switch*, workspace-restart-fault,
+  stranded-tile-recovery, shared-area-zone and tile-insert-slide among them.
+  Of batch 1's five failures: the two helper-tile legs needed the
+  array-workspace-mcp product built and then passed;
+  workspace-runtime-install found the marker bug and passes after it; the
+  other two are below.
 - Failures shared with the binary that has no bare-tile code (8ae82646),
   so not caused here: `--note-click-focus-check` ("keyDown should edit note
   text"), `--tile-reveal-work-check` (padding 16.00000000000002),
