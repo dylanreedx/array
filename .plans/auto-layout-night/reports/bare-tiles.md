@@ -338,3 +338,79 @@ array/auto-layout-night since 932a6fee. Not stream 3, and not bare tiles.
 - A project whose zones are all below the live hydration tier has no bare
   layer, so its bare tiles are kept on disk but not drawn until a zone of it
   goes live. That matches how its zone tiles behave.
+
+## Morning-review state (updated 04:35, merged with the night branch)
+
+array/bare-tiles now carries array/auto-layout-night at 47ba6fa5
+(a76afe30). One textual conflict (two check flags side by side in
+ContinuumApp.main). Two semantic fixes in the merge:
+- `autoLayoutScene`: bare tiles now carry their `kind` like zone tiles, and
+  still enter with no zone, so `CanvasTidyPacker` never takes them (it packs
+  only a zone's members) and Tidy's cluster pass skips them.
+- Scoped save: `persistLayoutTransaction` found owners only through
+  `zoneId(containing:)`, so a bare tile fell back to scanning every project.
+  `CanvasNSView.projectId(ofBareTile:)` now names its owner from the bare
+  layer.
+
+Real bare tiles against the night branch's tidy:
+- `--tidy-zone-neighbours-check` gained `growOverBareTile` (both auto-layout
+  modes): a real bare tile (nil stamp, `bare: true`) 20pt under a cramped
+  zone of its own project. Tidy grows the zone to 558.9 tall; the tile is
+  pushed clear, keeps its size, stays bare on screen and on disk, its disk
+  frame matches the screen, and the save loads and writes only that project.
+  Teeth: with the push disabled, "the grown zone still covers the bare tile"
+  in both modes.
+- `--bare-tile-check` now asserts the drag-out's save loads and writes only
+  the tile's project, and adds a drag-out of zone A2's note. A2 sorts second,
+  so a save falling back to the full scan would read A1 first. Teeth: with
+  the bare-owner lookup disabled, "the save loaded [A1, A2], expected only
+  project A2", in both modes.
+
+Commits since the last update: a76afe30 (merge and fixes), then
+"test(canvas): prove the scoped save finds a bare tile's own project".
+
+### Sidebar: written up, not changed
+
+What it is: the sidebar lists a bare tile under its project's home zone.
+Right project and workspace, wrong zone.
+
+Why it is not a small change:
+- `SidebarTree` is more than the outline. `SidebarModelInputs.reachableTileIds`
+  and `AgentContextIndex.tilePlacements` flatten its zone rows to decide
+  whether an agent's tile still exists, and how to label it. Simply running
+  the sidebar resolver with `keepsBare: true` drops bare tiles from every
+  row, so a bare agent tile in a workspace that is not mounted reads as
+  unreachable. That is worse than the wrong label.
+- `SidebarTree` is Codable and also feeds the companion snapshot
+  (`ActivityTreeSnapshot`), so a new row shape is a wire change.
+- A pseudo-zone row ("Outside zones") would carry zone actions (rename,
+  close, colour, arm, jump to zone) that must each refuse a zone id the
+  document does not hold.
+
+Proposed design:
+1. `SidebarZoneRow` gains `isBareGroup: Bool`, decoded with a false default
+   (old snapshots and phones read unchanged). The builder runs the resolver
+   with `keepsBare: true` and puts each project's bare tiles in one such row
+   after that project's zones: zoneId = the project id, name = the project's
+   name plus "outside zones", no navKey, the project's zone colour.
+2. The Mac outline draws it with the existing zone row component; its
+   context menu offers no zone actions, and a click jumps to the tiles, not
+   to a zone.
+3. Reachability and the inbox keep working unchanged: they flatten rows.
+4. Witnesses: a CoreChecks case for the builder (bare tiles in the group,
+   none in a zone), an app leg that renders the outline offscreen in light
+   and dark with a bare tile, and one that clicks the group's tile row and
+   checks the camera frames the bare tile.
+
+## Checks on the merged tree
+
+All exit 0, offscreen, each with its own CONTINUUM_APP_SUPPORT and
+TMUX_TMPDIR: bare-tile, tidy-zone-neighbours, layout-commit-scope, and the
+regression set (subagent-tile-zone, leader-jump, tile-reveal-work,
+agent-local-file-link, canvas-zoom-momentum, spawn-placement, spawn-sizing,
+auto-layout-fanout-app, zone-arming, canvas-undo), plus
+auto-layout-tidy-latency, workspace-scene-owner, workspace-runtime-install,
+canvas-persistence-model, zone-runtime-duplication, layout-commit-truth,
+zone-breakout, stranded-tile-recovery, jelly-auto-layout.
+
+Stays unmerged into the night branch, as the conductor ruled.
