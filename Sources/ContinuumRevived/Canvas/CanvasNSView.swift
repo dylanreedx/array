@@ -507,7 +507,7 @@ final class CanvasNSView: NSView, TokenThemed {
         var layoutTiles = (flatCompatibilitySceneActive ? canvasState.tiles : []).map {
             CanvasAutoLayoutEngine.LayoutTile(
                 id: $0.id, frame: $0.frame, zoneId: tileZoneMembership[$0.id],
-                minimumSize: TileGeometry.minimumSize(for: $0.kind))
+                minimumSize: TileGeometry.minimumSize(for: $0.kind), kind: $0.kind)
         }
         let known = Set(layoutTiles.map(\.id))
         for layer in zoneLayers {
@@ -516,7 +516,8 @@ final class CanvasNSView: NSView, TokenThemed {
                     id: tile.id,
                     frame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
                     zoneId: layer.placement.zoneId,
-                    minimumSize: TileGeometry.minimumSize(for: tile.kind)
+                    minimumSize: TileGeometry.minimumSize(for: tile.kind),
+                    kind: tile.kind
                 ))
             }
         }
@@ -931,6 +932,10 @@ final class CanvasNSView: NSView, TokenThemed {
 
     func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true) {
         let baseline = autoLayoutScene()
+        // The explicit tidy keeps each lead agent's helpers in one block with it
+        // (`CanvasTidyPacker`). Only it reads lineage, so only it asks: once per
+        // agent tile per tidy, never on the per-frame scene path.
+        let tidyScene = compact ? sceneWithAgentClusters(baseline, zoneId: zoneId) : baseline
         _ = beginGeometryEdit(
             .tidy,
             tileIds: Set(baseline.tiles.map(\.id)),
@@ -938,7 +943,7 @@ final class CanvasNSView: NSView, TokenThemed {
         )
         autoLayoutGestureBaseline = baseline
         if compact {
-            applyAutoLayout(.tidy(zoneId: zoneId), baseline: baseline)
+            applyAutoLayout(.tidy(zoneId: zoneId), baseline: tidyScene)
         } else {
             for id in zoneId.map({ [$0] }) ?? baseline.zones.map(\.zoneId) {
                 applyAutoLayout(.settle(zoneId: id, anchor: nil, pin: false), baseline: autoLayoutScene())
@@ -952,6 +957,29 @@ final class CanvasNSView: NSView, TokenThemed {
                 )
             }
         }
+    }
+
+    /// `scene` with each lead agent and its helpers stamped with the lead's
+    /// tile id, for the zones a tidy touches. Lead and helpers must share a zone;
+    /// a helper elsewhere stays out of the block. Unlike `autoLayoutCluster(for:)`
+    /// this ignores the auto-layout switch: an explicit Tidy runs regardless.
+    private func sceneWithAgentClusters(_ scene: CanvasAutoLayoutEngine.Scene, zoneId: UUID?) -> CanvasAutoLayoutEngine.Scene {
+        guard let provider = autoLayoutClusterProvider else { return scene }
+        var index: [UUID: Int] = [:]
+        for (i, tile) in scene.tiles.enumerated() where index[tile.id] == nil { index[tile.id] = i }
+        var result = scene
+        var seen = Set<UUID>()
+        for tile in scene.tiles where tile.kind == .managedAgent && !seen.contains(tile.id) {
+            guard let zone = tile.zoneId, zoneId == nil || zone == zoneId else { continue }
+            seen.insert(tile.id)
+            guard let cluster = provider(tile.id), let leadIndex = index[cluster.lead],
+                  scene.tiles[leadIndex].zoneId == zone else { continue }
+            let helpers = cluster.helpers.filter { id in index[id].map { scene.tiles[$0].zoneId == zone } ?? false }
+            seen.formUnion(cluster.helpers + [cluster.lead])
+            guard !helpers.isEmpty else { continue }
+            for id in helpers + [cluster.lead] { result.tiles[index[id]!].clusterLead = cluster.lead }
+        }
+        return result
     }
 
     /// Whether a settle of `zoneId` will actually run (the engine's own gate).
