@@ -844,6 +844,23 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // Headless per-step zoom cost: an off-screen window, never the screen.
+        if CommandLine.arguments.contains("--canvas-zoom-step-cost-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                do {
+                    try await CanvasZoomStepCostChecks.run()
+                    print("ContinuumRevivedCanvasZoomStepCostChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains(ChildCrashIsolationChecks.trapChildFlag) {
             ChildCrashIsolationChecks.trapChild()
         }
@@ -2661,6 +2678,18 @@ enum ContinuumApp {
         }
 
         #if ARRAY_CHECKS
+        if CommandLine.arguments.contains("--file-markdown-scroller-check") {
+            do {
+                _ = NSApplication.shared
+                try FileOpenChecks.runMarkdownScrollerStyleCheck()
+                print("ContinuumRevivedFileMarkdownScrollerChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--file-markdown-perf-check") {
             do {
                 _ = NSApplication.shared
@@ -3400,6 +3429,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--compact-status-row-skip-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    try runCompactStatusRowSkipChecks()
+                    print("CompactStatusRowSkipChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-compaction-ui-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -4058,6 +4101,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 try CanvasCameraDriverChecks.runCoalesce()
                 print("ContinuumRevivedCanvasCameraCoalesceChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--canvas-native-pacing-check") {
+            do {
+                _ = NSApplication.shared
+                try CanvasNativePacingChecks.run()
+                print("ContinuumRevivedCanvasNativePacingChecks passed")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

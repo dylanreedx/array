@@ -4586,6 +4586,9 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func cameraGestureDidSettle() {
         agentChromeRestedForMotion = false
+        // Resting text sits on whole device pixels again: one retile per scroll
+        // view whose grid re-snap waited out the gesture.
+        flushPixelGridRetiles()
         // Agent chrome the pointer reached only because tiles slid under it waited
         // for this edge (`ManagedAgentTileNSView.mouseEntered`).
         wakeAgentChromeUnderPointer()
@@ -4803,6 +4806,9 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Checks pump the display without the run loop going to sleep, so the
     /// observer never fires there.
     func qaCompletePendingFrame() { completePendingFrame() }
+
+    /// QA: the newest camera frame's time from `setViewport` to after the CA commit.
+    var qaLastFrameTailMs: Double? { gestureFrameTailsMs.last }
 
     /// Ends the current gesture as the settle edge would, and logs it.
     func qaLogGestureNow() { logGestureCost() }
@@ -7162,6 +7168,9 @@ final class CanvasNSView: NSView, TokenThemed {
             applyViewport: { [weak self] viewport in self?.setViewport(viewport) },
             makeDisplayLink: { [weak self] target, selector in
                 self?.displayLink(target: target, selector: selector)
+            },
+            nativeRefreshInterval: { [weak self] in
+                self?.window?.screen?.minimumRefreshInterval
             }
         )
         driver.onSettle = { [weak self] in self?.cameraGestureDidSettle() }
@@ -7212,6 +7221,43 @@ final class CanvasNSView: NSView, TokenThemed {
     /// pointer that only "entered" because the canvas moved under it; waking costs
     /// 7-15 ms and landed mid-gesture (pan with three agents streaming, 56 -> 34/s).
     var isCameraInMotion: Bool { pointerPanActive || cameraDriver.isApplying || !cameraDriver.isSettled }
+
+    /// A driver gesture is under way, and it will end in `cameraGestureDidSettle`.
+    /// Only then may work that merely re-snaps to the moving pixel grid wait: the
+    /// settle is what brings it back. A pointer pan never changes the grid.
+    var defersPixelGridRetile: Bool { cameraDriver.isApplying || !cameraDriver.isSettled }
+
+    /// Views whose pixel-grid re-snap waited for the settle: code-block scroll
+    /// views (`CodeBlockScrollView.tile`) and their clips (`CodeBlockClipView`).
+    private let pixelGridRetiles = NSHashTable<NSView>.weakObjects()
+
+    func deferPixelGridRetile(_ view: NSView) { pixelGridRetiles.add(view) }
+
+    /// QA: views still waiting for their settle retile.
+    var qaDeferredPixelGridRetileCount: Int { pixelGridRetiles.count }
+
+    private func flushPixelGridRetiles() {
+        for view in pixelGridRetiles.allObjects {
+            if let clip = view as? NSClipView {
+                // The re-snap the cascade asked for, now on the resting grid:
+                // `setBounds` is the call that snaps the origin to device pixels.
+                clip.bounds = clip.bounds
+            } else {
+                view.needsLayout = true
+            }
+        }
+        pixelGridRetiles.removeAllObjects()
+    }
+
+    /// The canvas a view is mounted under, if any.
+    static func enclosing(_ view: NSView) -> CanvasNSView? {
+        var current = view.superview
+        while let candidate = current {
+            if let canvas = candidate as? CanvasNSView { return canvas }
+            current = candidate.superview
+        }
+        return nil
+    }
 
     /// At a settle (or a pointer pan's end): the one agent tile actually under the
     /// pointer wakes, if it is resting. Every other tile the camera slid under the

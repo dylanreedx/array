@@ -17,7 +17,7 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
     /// Preview renders at most this many semantic blocks; see `BodyView`.
     static var maximumRenderedBlocks: Int { BodyView.maximumRenderedBlocks }
 
-    private let scrollView = NSScrollView()
+    private let scrollView = OverlayScrollerView()
     private let body = BodyView()
 
     override init(frame frameRect: NSRect) {
@@ -142,6 +142,20 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
 
     func richInlineTextViewsInSelectionOrder() -> [RichInlineTextView] {
         qaInlineTextViews()
+    }
+
+    /// Setting `.overlay` once does not hold on a Mac with a mouse. Every WKWebView
+    /// layer commit (the code editor in a split tile) makes AppKit rewrite all
+    /// scroll views in the process to the system style. A legacy scroller takes
+    /// 17 pt from the clip and the whole document re-measures for it: seconds on
+    /// the main thread across a canvas of tiles. Overlay scrollers stay draggable.
+    private final class OverlayScrollerView: NSScrollView {
+        override var scrollerStyle: NSScroller.Style {
+            get { super.scrollerStyle }
+            set {
+                super.scrollerStyle = .overlay
+            }
+        }
     }
 
     /// One vertical stack of semantic blocks. Flipped so rows advance from the

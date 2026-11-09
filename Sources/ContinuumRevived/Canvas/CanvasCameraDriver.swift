@@ -63,9 +63,8 @@ final class CanvasCameraDriver: NSObject {
         /// Camera quiet time that counts as settled.
         var settleQuiet: TimeInterval = 0.25
         /// The leading-edge window: an input applies immediately unless a
-        /// commit already happened within this interval. 1/120 s is one frame
-        /// on the fastest supported panel — on slower panels it allows a
-        /// harmless extra commit rather than adding latency.
+        /// commit already happened within this interval. Used only when the
+        /// view has no screen; attached canvases use that screen's native interval.
         var minCommitInterval: TimeInterval = 1.0 / 120.0
 
         static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Tuning {
@@ -87,6 +86,7 @@ final class CanvasCameraDriver: NSObject {
     private let currentViewport: () -> CanvasViewport
     private let applyViewport: (CanvasViewport) -> Void
     private let makeDisplayLink: (CanvasCameraDriver, Selector) -> CADisplayLink?
+    private let nativeRefreshInterval: () -> TimeInterval?
 
     /// True while the driver itself is inside `applyViewport`, so the canvas
     /// can tell a driver commit from an external write (navigation snap,
@@ -142,12 +142,14 @@ final class CanvasCameraDriver: NSObject {
         tuning: Tuning,
         currentViewport: @escaping () -> CanvasViewport,
         applyViewport: @escaping (CanvasViewport) -> Void,
-        makeDisplayLink: @escaping (CanvasCameraDriver, Selector) -> CADisplayLink?
+        makeDisplayLink: @escaping (CanvasCameraDriver, Selector) -> CADisplayLink?,
+        nativeRefreshInterval: @escaping () -> TimeInterval? = { nil }
     ) {
         self.tuning = tuning
         self.currentViewport = currentViewport
         self.applyViewport = applyViewport
         self.makeDisplayLink = makeDisplayLink
+        self.nativeRefreshInterval = nativeRefreshInterval
     }
 
     // MARK: - Input taps
@@ -230,7 +232,18 @@ final class CanvasCameraDriver: NSObject {
 
     private func submit() {
         let now = nowProvider()
-        if now - lastCommitTime >= tuning.minCommitInterval {
+        // Read the view's screen on each submission: the existing view-bound
+        // display link follows a window between monitors automatically, and
+        // leading-edge input pacing must follow it too. Preserve fractional
+        // refresh intervals; no fixed 60/120 Hz floor or FPS rounding.
+        let reportedInterval = nativeRefreshInterval()
+        let interval: TimeInterval
+        if let reportedInterval, reportedInterval.isFinite, reportedInterval > 0 {
+            interval = reportedInterval
+        } else {
+            interval = tuning.minCommitInterval
+        }
+        if now - lastCommitTime >= interval {
             applyPending(at: now)
         } else {
             // A commit already landed this interval: the newest state waits for

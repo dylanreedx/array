@@ -91,6 +91,7 @@ check --canvas-background-render-check
 check --canvas-background-settings-check
 check --canvas-camera-coalesce-check
 check --canvas-camera-hit-oracle-check
+check --canvas-native-pacing-check
 check --canvas-persistence-model-check
 check --canvas-pointer-path-check
 check --canvas-save-receipt-check
@@ -98,6 +99,7 @@ check --canvas-unreadable-check
 check --canvas-visibility-index-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
+check --canvas-zoom-step-cost-check
 check --character-perf-check
 check --character-settings-check
 check --character-size-check
@@ -117,6 +119,7 @@ check --collaboration-full-access-check
 check --collaboration-native-check
 check --collaboration-usage-telemetry-check
 check --command-center-check
+check --compact-status-row-skip-check
 check --companion-agent-destination-check
 check --companion-command-check
 check --companion-sync-health-check
@@ -150,6 +153,7 @@ check --file-image-check
 check --file-initial-load-check
 check --file-markdown-perf-check
 check --file-markdown-preview-check
+check --file-markdown-scroller-check
 check --file-open-active-context-check
 check --file-tree-boot-persistence-check
 check --file-tree-hardening-check
@@ -222,6 +226,7 @@ check --palette-duplicate-root-check
 check --palette-first-responder-restore-check
 check --palette-jump-check
 check --palette-zone-check
+check --parser-identity-prefix-check
 check --perf-budget-camera-slope-check
 check --perf-budget-check
 check --perf-budget-geometry-hold-probe-check
@@ -547,6 +552,7 @@ leg run_app_check .build/debug/Array --canvas-background-render-check
 leg run_app_check .build/debug/Array --canvas-background-settings-check
 leg run_app_check .build/debug/Array --canvas-camera-coalesce-check
 leg run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
+leg run_app_check .build/debug/Array --canvas-native-pacing-check
 leg run_app_check .build/debug/Array --canvas-persistence-model-check
 leg run_app_check .build/debug/Array --canvas-pointer-path-check
 leg run_app_check .build/debug/Array --canvas-save-receipt-check
@@ -554,6 +560,7 @@ leg run_app_check .build/debug/Array --canvas-unreadable-check
 leg run_app_check .build/debug/Array --canvas-visibility-index-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
+leg run_app_check .build/debug/Array --canvas-zoom-step-cost-check
 leg run_app_check .build/debug/Array --character-perf-check
 leg run_app_check .build/debug/Array --character-settings-check
 leg run_app_check .build/debug/Array --character-size-check
@@ -568,6 +575,7 @@ leg run_app_check .build/debug/Array --cli-update-settings-check
 leg run_app_check .build/debug/Array --collaboration-cursor-motion-check
 leg run_app_check .build/debug/Array --collaboration-full-access-check
 leg run_app_check .build/debug/Array --collaboration-native-check
+leg run_app_check .build/debug/Array --compact-status-row-skip-check
 leg run_app_check .build/debug/Array --companion-command-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --companion-task-host-check
@@ -598,6 +606,7 @@ leg run_app_check .build/debug/Array --file-image-check
 leg run_app_check .build/debug/Array --file-initial-load-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check
 leg run_app_check .build/debug/Array --file-markdown-preview-check
+leg run_app_check .build/debug/Array --file-markdown-scroller-check
 leg run_app_check .build/debug/Array --file-open-active-context-check
 leg run_app_check .build/debug/Array --file-tree-boot-persistence-check
 leg run_app_check .build/debug/Array --file-tree-hardening-check
@@ -879,6 +888,7 @@ leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedAgentContentChecks
+leg run_leg .build/debug/ContinuumRevivedAgentContentChecks --parser-identity-prefix-check
 leg run_leg .build/debug/ContinuumRevivedAgentUIChecks
 leg run_leg .build/debug/ContinuumRevivedCollaborationChecks
 leg run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
@@ -961,7 +971,7 @@ bundle-check --menu-contract-check
 bundle-check --palette-duplicate-root-check
 bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 23
+count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29

@@ -1240,6 +1240,7 @@ run_leg .build/debug/ContinuumRevivedAgentUIChecks
 # blocks so a forbidden import or declared dependency is red before it is ever
 # used. Fast and pure: no app bundle, no display, no provider process.
 run_leg .build/debug/ContinuumRevivedAgentContentChecks
+run_leg .build/debug/ContinuumRevivedAgentContentChecks --parser-identity-prefix-check
 run_leg .build/debug/ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
 run_leg .build/debug/ContinuumRevivedRelayChecks
@@ -1436,6 +1437,9 @@ run_app_check .build/debug/Array --canvas-pointer-path-check
 # undo and a remount, through NSApp.sendEvent (.plans/auto-layout-night).
 run_app_check .build/debug/Array --bare-tile-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
+# The compact status row skips an identical apply and repaints any change it
+# shows: presentation, last prompt, background jobs or a quarter-point width.
+run_app_check .build/debug/Array --compact-status-row-skip-check
 # Offline seed replay shares the live acceptance tile fixture, without CLI usage.
 run_app_check .build/debug/Array --live-compaction-replay-check
 run_app_check .build/debug/Array --agent-account-usage-check
@@ -2154,6 +2158,9 @@ run_app_check .build/debug/Array --agent-local-file-link-check
 # of Markdown built 12,000 TextKit stacks, 1.39 GB resident, and the process died.
 # Preview is budgeted and says where it stopped, and a relayout re-measures nothing.
 run_app_check .build/debug/Array --file-markdown-perf-check
+# A paired mouse flips macOS to legacy scrollers mid-run. The scroller must not
+# take width from the text, or every Markdown tile re-measures on the main thread.
+run_app_check .build/debug/Array --file-markdown-scroller-check
 # Standing performance budgets (docs/internals/performance-budgets.md). The pan
 # leg gates: a camera pan must cost no bounds write, no tile-model write and no
 # text re-measurement, over a canvas of large Markdown tiles. The zoom leg is
@@ -2194,6 +2201,11 @@ run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 # which is our own per-tile-per-step call, not the camera mechanism. KNOWN-RED
 # against that product target until the chrome floor stops moving every step.
 run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
+# A zoom step moves the device-pixel grid, and AppKit retiled every scroll view
+# to re-snap its clip view to it: 128 code-block retiles per step in the motion
+# workload's four visible Markdown tiles, each reflowing its document. They wait
+# for the settle now. Off-screen window, production camera driver entry.
+run_app_check .build/debug/Array --canvas-zoom-step-cost-check
 # The Slice 2 contract (.plans/22): N input events inside one display interval
 # cause a bounded number of camera commits and preserve the final desired
 # viewport. The control condition drives 6 direct setViewport calls and must
@@ -2202,6 +2214,7 @@ run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 # clock frozen and must land at most 2 (leading-edge apply + one coalesced
 # flush). Before CanvasCameraDriver, the driven condition measured 6.
 run_app_check .build/debug/Array --canvas-camera-coalesce-check
+run_app_check .build/debug/Array --canvas-native-pacing-check
 # The pinch glide's mechanics, on deterministic time: a flick above the engage
 # threshold glides and terminates on its own; a deliberate stop stays dead; a
 # new pinch or an EXTERNAL viewport write (navigation snap, pointer drag)
