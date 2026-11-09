@@ -308,7 +308,7 @@ public enum CanvasTidyPacker {
         let restContent = CGRect(x: content.minX + CGFloat(columnGuess + gap), y: content.minY,
                                  width: CGFloat(max(1, guessHeight * aspect - columnGuess - gap)), height: CGFloat(guessHeight))
         // The column is only worth having in band, so its rows are too.
-        guard let rows = packPass(rest, content: restContent, gap: gap, hard: featuredBands),
+        guard let rows = packPass(rest, content: restContent, gap: gap, hard: featuredBands, scan: false),
               !rows.frames.isEmpty else { return nil }
         func snap(_ v: Double) -> Double { (v / grid).rounded() * grid }
         let left = snap(Double(content.minX)), top = snap(Double(content.minY)), gridGap = snap(gap)
@@ -369,7 +369,7 @@ public enum CanvasTidyPacker {
         return packPass(items, content: content, gap: gap, hard: false) ?? Result(frames: [:], content: content, scale: 1)
     }
 
-    private static func packPass(_ items: [Item], content: CGRect, gap: Double, hard: Bool) -> Result? {
+    private static func packPass(_ items: [Item], content: CGRect, gap: Double, hard: Bool, scan: Bool = true) -> Result? {
         var height = max(Double(content.height), 1)
 
         // Width grows only for a tile that cannot fit across at its minimum.
@@ -432,7 +432,7 @@ public enum CanvasTidyPacker {
                 // In-band layouts come and go with the width (a row must justify
                 // exactly), so when the steps above found none, look evenly
                 // between the smallest width and the zone's.
-                if hard && chosen == nil {
+                if hard && scan && chosen == nil {
                     for step in 0..<20 {
                         let w = (minimumWidth + (originalWidth - minimumWidth) * Double(step) / 19).rounded(.down)
                         let h = max(1, (originalHeight * w / originalWidth).rounded(.down))
