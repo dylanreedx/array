@@ -2951,7 +2951,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     func contentPresentationForQA(in destination: CALayer, cardBounds: Bool = false) -> CGRect? {
         guard let presentation = (cardBounds ? card.layer : titleLabel.layer)?.presentation() else { return nil }
-        return presentation.convert(presentation.bounds, to: destination)
+        var frame = presentation.convert(presentation.bounds, to: destination)
+        if cardBounds {
+            var ancestor = presentation.superlayer
+            while let layer = ancestor, layer !== destination {
+                if layer.masksToBounds { frame = frame.intersection(layer.convert(layer.bounds, to: destination)) }
+                ancestor = layer.superlayer
+            }
+        }
+        return frame
     }
 
     func clearSelectionForFold() {
