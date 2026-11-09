@@ -97,6 +97,7 @@ public enum WorkspaceAPIExposure {
         "tile.zIndex": .internal, // Legacy decode-only rank.
         "tile.zoneId": .exposed(.canvasApply), // Membership may follow a move.
         "tile.runtimeRef": .internal,
+        "tile.bare": .notExposed("Set by dragging a tile out of every zone; canvas.apply moves tiles within zones."),
         "tile.metadata": .internal, // Its fields are audited individually below.
         "tile.metadata.launchProfileId": .notExposed("Retargeting an existing terminal is native UI only."),
         "tile.metadata.projectRelativeCwd": .notExposed("Retargeting an existing terminal is native UI only."),

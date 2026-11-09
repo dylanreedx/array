@@ -135,6 +135,36 @@ func runZoneMembershipRepairChecks() {
     expect(r9.restamped.isEmpty, "and must not be reported as repaired")
     expect(r9.deferred == [elsewhere], "it must be reported as deferred; got \(r9.deferred)")
 
+    // 10. Bare tiles (`keepsBare`, `.plans/auto-layout-night`). A nil stamp
+    //     outside every project zone stays bare, its stamp and WORLD frame
+    //     untouched; a nil stamp INSIDE a zone is still rescued into it; a
+    //     foreign stamp outside every zone is still rescued home. Off, the same
+    //     bare tile is rescued home exactly as before.
+    var dragged = tile(UUID(), zone: nil, x: -900, y: 1500)
+    dragged.isBare = true
+    var insideTwo = tile(UUID(), zone: nil, x: 1050, y: 50)
+    insideTwo.isBare = true
+    let foreignOut = tile(UUID(), zone: foreignZone, x: -900, y: 900)
+    // A legacy, never-stamped tile outside every zone: unmarked, so rescued home.
+    let legacy = tile(UUID(), zone: nil, x: -900, y: -900)
+    let r10 = CanvasEngine.resolveZoneMembership(
+        tiles: [dragged, insideTwo, foreignOut, legacy], projectZones: zones, documentZoneIds: documentZones,
+        homeZoneId: zoneOne, keepsBare: true)
+    expect(r10.bare.map(\.id) == [dragged.id], "a nil stamp outside every zone must stay bare; bare \(r10.bare.map(\.id))")
+    expect(r10.bare.first?.zoneId == nil && r10.bare.first?.frame == dragged.frame,
+           "a bare tile keeps its nil stamp and its WORLD frame")
+    expect(!r10.restamped.contains(dragged.id), "a bare tile is not reported as repaired")
+    expect(r10.byZone[zoneTwo]?.map(\.id) == [insideTwo.id], "a marked nil stamp inside a zone is still rescued into it")
+    expect(r10.byZone[zoneTwo]?.first?.isBare == false, "a rescued tile loses its bare mark")
+    expect(r10.byZone[zoneOne]?.map(\.id) == [foreignOut.id, legacy.id],
+           "a foreign stamp and an UNMARKED legacy nil stamp outside every zone are still rescued home")
+    let placedCount = r10.byZone.values.reduce(0) { $0 + $1.count } + r10.bare.count + r10.deferred.count
+    expect(placedCount == 4, "rule 4: every tile lands in exactly one bucket, got \(placedCount)")
+    let r10off = CanvasEngine.resolveZoneMembership(
+        tiles: [dragged], projectZones: zones, documentZoneIds: documentZones, homeZoneId: zoneOne)
+    expect(r10off.bare.isEmpty && r10off.byZone[zoneOne]?.map(\.id) == [dragged.id],
+           "without keepsBare a nil stamp outside every zone is rescued home, as before")
+
     print("ZoneMembershipRepairChecks passed: owned stamps win, foreign/nil/unknown rescue by "
           + "geometry then home, another workspace's zone is left alone, positions survive the "
           + "round trip, and no tile is ever dropped")

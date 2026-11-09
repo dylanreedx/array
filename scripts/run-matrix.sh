@@ -1432,6 +1432,9 @@ run_app_check .build/debug/Array --agent-tile-reference-check
 # and swaps, through NSApp.sendEvent: the window hit-test and the focus monitor
 # that direct `mouseDown` calls skipped while all four regressed in 0.7.31.
 run_app_check .build/debug/Array --canvas-pointer-path-check
+# A tile dragged out of its zone stays bare through auto layout, a zone move,
+# undo and a remount, through NSApp.sendEvent (.plans/auto-layout-night).
+run_app_check .build/debug/Array --bare-tile-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
 # Offline seed replay shares the live acceptance tile fixture, without CLI usage.
 run_app_check .build/debug/Array --live-compaction-replay-check

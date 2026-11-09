@@ -3717,6 +3717,16 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--bare-tile-check") {
+            do {
+                _ = NSApplication.shared
+                try BareTileChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --bare-tile-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--auto-layout-tidy-latency-check") {
             _ = NSApplication.shared
             do {
@@ -22038,6 +22048,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    let projectId = document.zones.first(where: { $0.zoneId == zoneId })?.projectId,
                    projectZones[projectId] != nil {
                     ownerProjectIds.insert(projectId)
+                } else if let projectId = canvasView?.projectId(ofBareTile: tileId), projectZones[projectId] != nil {
+                    // A bare tile lives in no zone; its project still owns it.
+                    ownerProjectIds.insert(projectId)
                 }
             }
             var projectWrites: [(projectId: UUID, store: ProjectStore, original: CanvasState, updated: CanvasState)] = []
@@ -22067,6 +22080,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     if let zoneId = transaction.tileZoneIds[updated.tiles[index].id],
                        document.zones.contains(where: { $0.zoneId == zoneId && $0.projectId == projectId }) {
                         updated.tiles[index].zoneId = zoneId
+                        updated.tiles[index].isBare = false
+                    } else if transaction.bareTileIds.contains(updated.tiles[index].id) {
+                        updated.tiles[index].zoneId = nil
+                        updated.tiles[index].isBare = true
                     }
                     changed = true
                 }
