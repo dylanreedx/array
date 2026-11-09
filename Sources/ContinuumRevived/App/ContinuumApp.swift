@@ -12044,7 +12044,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: CanvasViewport) {
         guard let canvasView else { return }
         let current = canvasView.navigationViewport
-        guard Self.viewportChangeExceedsJumpEpsilon(from: current, to: targetViewport) else { return }
+        // A second jump can share the first flight's destination. It still
+        // departs from that destination for history, rather than the old start.
+        guard canvasView.cameraDriver.isFlightActive
+            || Self.viewportChangeExceedsJumpEpsilon(from: current, to: targetViewport) else { return }
         focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: current, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
     }
 
