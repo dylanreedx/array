@@ -3716,6 +3716,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tidy-zone-shortcut-check") {
+            _ = NSApplication.shared
+            do {
+                try AutoLayoutTidyLatencyChecks.runShortcut()
+                print("TidyZoneShortcutChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --tidy-zone-shortcut-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--canvas-pointer-path-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -12270,10 +12281,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             toggleWorkspaceSidebar()
         case "tile.revealInFinder":
             return revealFocusedTileInFinder()
+        case "zone.tidy":
+            guard let canvasView, let zoneId = zoneIdForZoneCommands() else { return false }
+            canvasView.tidyAutoLayout(zoneId: zoneId)
         default:
             return false
         }
         return true
+    }
+
+    /// The zone a "This Zone" command acts on: the focused tile's zone, else the
+    /// armed zone, else the active one. The ⌘K zone rows and the zone shortcuts
+    /// resolve it the same way.
+    private func zoneIdForZoneCommands(focusedTileId: UUID? = nil) -> UUID? {
+        let tileId = focusedTileId ?? focusedTileIdForPaletteContext()
+        return tileId.flatMap { canvasView?.zoneId(containing: $0) }
+            ?? canvasView?.activeProjectZonePlacement?.zoneId
+            ?? canvasView?.activeZone?.zoneId
     }
 
     func qaPerformRegisteredGlobalCommand(_ commandID: CommandID) -> Bool { performRegisteredGlobalCommand(commandID) }
@@ -12533,9 +12557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let palette = profilePalette ?? makeProfilePalette()
         let wasVisible = palette.isVisible
         let focusedTileId = focusedTileIdForPaletteContext()
-        let focusedZoneId = focusedTileId.flatMap { canvasView?.zoneId(containing: $0) }
-            ?? canvasView?.activeProjectZonePlacement?.zoneId
-            ?? canvasView?.activeZone?.zoneId
+        let focusedZoneId = zoneIdForZoneCommands(focusedTileId: focusedTileId)
         let contextualActions = contextualPaletteActions(for: focusedTileId)
         profilePalette = palette
         paletteContextTileId = focusedTileId
@@ -23407,6 +23429,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (`--canvas-pointer-path-check`): the production click monitor, which a
     /// headless mount leaves out.
     func qaInstallTileFocusMonitor() { if tileFocusMonitor == nil { installTileFocusMonitor() } }
+    /// QA: the production key-down monitor, so a check's `NSApp.sendEvent`
+    /// reaches registered shortcuts the way a keypress does.
+    func qaInstallHotkeyMonitor() { if hotkeyMonitor == nil { installHotkeyMonitor() } }
+    func qaRemoveHotkeyMonitor() {
+        if let monitor = hotkeyMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = flagsMonitor { NSEvent.removeMonitor(monitor) }
+        hotkeyMonitor = nil
+        flagsMonitor = nil
+    }
     func qaRemoveTileFocusMonitor() {
         if let monitor = tileFocusMonitor { NSEvent.removeMonitor(monitor) }
         tileFocusMonitor = nil

@@ -75,6 +75,7 @@ enum AutoLayoutTidyLatencyChecks {
         var titleRedraws = 0       // title-bar invalidations on the moved tiles (a pure move draws nothing new)
         var tileInvalidations = 0  // `invalidateForCanvasLayout` on the moved tiles (same reason)
         var translatedOnly = 0     // tiles the trigger moved without resizing
+        var resizedInvalidations = 0 // positive control: invalidations on resized tiles
         var resizedTiles = 0       // tiles whose size the trigger changed
         var resizeAnimated = 0     // of those, how many carry the committed size animation
         var zoneResized = false
@@ -361,6 +362,13 @@ enum AutoLayoutTidyLatencyChecks {
             sample.titleRedraws = translatedOnly.reduce(0) { $0 + (titlesNow[$1] ?? 0) - (titleRedrawsBefore[$1] ?? 0) }
             sample.tileInvalidations = translatedOnly.reduce(0) { $0 + (invalidationsNow[$1] ?? 0) - (tileInvalidationsBefore[$1] ?? 0) }
             sample.translatedOnly = translatedOnly.count
+            // Positive control: the same counters on the RESIZED tiles, which must
+            // redraw. A zero here means the counters are dead, not that moves are free.
+            let resizedIds = m.ids.filter { id in
+                guard let a = before[id], let b = frames()[id] else { return false }
+                return a.width != b.width || a.height != b.height
+            }
+            sample.resizedInvalidations = resizedIds.reduce(0) { $0 + (invalidationsNow[$1] ?? 0) - (tileInvalidationsBefore[$1] ?? 0) }
             // Counted, not timed: what the end of the turn has to do.
             var needLayout: [String: Int] = [:], needDisplay: [String: Int] = [:], layersNeedDisplay = 0
             func walk(_ view: NSView) {
@@ -488,6 +496,81 @@ enum AutoLayoutTidyLatencyChecks {
         m.window.appearance = nil
     }
 
+    // MARK: - --tidy-zone-shortcut-check
+
+    /// ⌥⌘T tidies the zone you are in. A real key-down goes through
+    /// `NSApp.sendEvent` into the production hotkey monitor on a mounted scene,
+    /// and the armed zone's tiles must come out tidied and committed. Also: the
+    /// binding is registered (so Settings lists it), collides with no other
+    /// registered gesture or known system chord, and the ⌘K "Tidy This Zone"
+    /// row shows it. ⌥T alone is the negative control.
+    static func runShortcut() throws {
+        let registry = try CommandRegistry.productRegistry()
+        guard let shortcut = registry.shortcuts.first(where: { $0.commandID == "zone.tidy" }),
+              let gesture = ShortcutBindingStore().gestures(for: shortcut).first else {
+            throw Failure(message: "zone.tidy has no registered shortcut")
+        }
+        let tidyChord = KeyChord(keyCode: 17, modifiers: [.command, .option])
+        guard gesture.chord == tidyChord else {
+            throw Failure(message: "zone.tidy is bound to \(gesture.displayString), not ⌥⌘T")
+        }
+        let clashes: [ShortcutDefinition] = registry.shortcuts.filter { other in
+            other.id != shortcut.id && other.defaultGestures.contains { $0.chord == tidyChord }
+        }
+        guard clashes.isEmpty else {
+            throw Failure(message: "⌥⌘T is also bound to \(clashes.map { $0.id.rawValue })")
+        }
+        guard !KnownChordConflicts.all.contains(where: { $0.chord == tidyChord }) else {
+            throw Failure(message: "⌥⌘T is a known system chord")
+        }
+        let rowHint = LaunchProfilePalette.registeredShortcutDisplay(for: .tidyCurrentZone)
+        guard rowHint == gesture.displayString else {
+            throw Failure(message: "the ⌘K Tidy This Zone row shows \(rowHint ?? "nothing"), not \(gesture.displayString)")
+        }
+
+        let m = try mount(count: 12)
+        defer { m.mounted.delegate.qaRemoveHotkeyMonitor(); m.mounted.delegate.qaRemoveTileFocusMonitor(); m.window.orderOut(nil); m.fixture.dispose() }
+        let canvas = m.mounted.canvas
+        m.mounted.delegate.qaInstallHotkeyMonitor()
+        guard canvas.activeProjectZonePlacement?.zoneId == Fixture.zoneA1 else {
+            throw Failure(message: "fixture: zone A1 is not armed (armed: \(String(describing: canvas.activeProjectZonePlacement?.zoneId)))")
+        }
+        var committed = 0
+        let persist = canvas.onLayoutCommitted
+        canvas.onLayoutCommitted = { committed += 1; return persist?($0) ?? true }
+        func frames() -> [UUID: TileFrame] {
+            Dictionary(canvas.allTilesInWorldFrames().map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        }
+        func press(_ characters: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) throws {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: m.window.windowNumber,
+                context: nil, characters: characters, charactersIgnoringModifiers: "t",
+                isARepeat: false, keyCode: keyCode) else { throw Failure(message: "could not synthesize a key event") }
+            NSApp.sendEvent(event)
+            canvas.layoutSubtreeIfNeeded()
+        }
+
+        // Negative control: ⌥T alone is typing, not the command.
+        let messy = frames()
+        try press("†", keyCode: 17, modifiers: [.option])
+        guard frames() == messy, committed == 0 else {
+            throw Failure(message: "⌥T alone moved tiles or committed a layout")
+        }
+
+        try press("†", keyCode: 17, modifiers: [.command, .option])
+        let tidied = frames()
+        let moved = m.ids.filter { messy[$0] != tidied[$0] }
+        guard moved.count == m.ids.count else {
+            throw Failure(message: "⌥⌘T tidied \(moved.count) of the armed zone's \(m.ids.count) tiles")
+        }
+        guard committed == 1 else { throw Failure(message: "⌥⌘T committed \(committed) layouts, expected 1") }
+        guard canvas.qaAutoLayoutUndoText.contains("Auto layout arranged") else {
+            throw Failure(message: "⌥⌘T offered no Undo; the notice reads \(canvas.qaAutoLayoutUndoText)")
+        }
+        print("tidy-zone-shortcut: ⌥⌘T tidied \(moved.count) tiles in the armed zone, 1 commit, Undo offered; ⌥T alone did nothing; ⌘K row shows \(rowHint ?? "")")
+    }
+
     /// The longest stretch the main run loop spent awake (after-waiting to
     /// before-waiting) while it runs for `seconds`.
     static func longestStall(during seconds: TimeInterval) -> Double {
@@ -540,6 +623,7 @@ enum AutoLayoutTidyLatencyChecks {
         json["tileInvalidations"] = samples.map(\.tileInvalidations)
         json["resizedTiles"] = samples.map(\.resizedTiles)
         json["translatedOnly"] = samples.map(\.translatedOnly)
+        json["resizedInvalidations"] = samples.map(\.resizedInvalidations)
         json["resizeAnimated"] = samples.map(\.resizeAnimated)
         json["zoneResized"] = samples.map(\.zoneResized)
         json["zoneResizeAnimated"] = samples.map(\.zoneResizeAnimated)
@@ -582,6 +666,9 @@ enum AutoLayoutTidyLatencyChecks {
                 }
                 if sample.zoneResized && !sample.zoneResizeAnimated {
                     failures.append("\(label): the zone snapped to its new size")
+                }
+                if sample.resizedTiles > 0 && sample.resizedInvalidations == 0 {
+                    failures.append("\(label): positive control: \(sample.resizedTiles) resized tiles registered no invalidation; the counters are dead")
                 }
                 if sample.titleRedraws > 0 || sample.tileInvalidations > 0 {
                     failures.append("\(label): \(sample.translatedOnly) tiles that only moved invalidated \(sample.titleRedraws) "

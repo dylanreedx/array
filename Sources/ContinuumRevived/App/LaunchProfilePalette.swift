@@ -1190,12 +1190,22 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private func shortcutAccessory(for row: LaunchPaletteRow) -> String? {
+        if case let .action(action) = row { return Self.registeredShortcutDisplay(for: action) }
         guard case let .profile(profile) = row,
               let index = rootRows.compactMap({ candidate -> LaunchPaletteProfileRow? in
                   if case let .profile(value) = candidate { return value }
                   return nil
               }).firstIndex(where: { $0.id == profile.id }), index < 4 else { return nil }
         return "⌘\(index + 1)"
+    }
+
+    /// The binding a registered command gives this row's action, as the user
+    /// has it now (Settings › Shortcuts can move or clear it).
+    static func registeredShortcutDisplay(for action: LaunchPaletteAction) -> String? {
+        guard let registry = try? CommandRegistry.productRegistry(),
+              let command = registry.commands.first(where: { $0.paletteAction == action }),
+              let shortcut = registry.shortcuts.first(where: { $0.commandID == command.id }) else { return nil }
+        return ShortcutBindingStore().gestures(for: shortcut).first?.displayString
     }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
