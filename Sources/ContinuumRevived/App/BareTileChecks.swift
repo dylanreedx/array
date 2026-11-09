@@ -74,6 +74,18 @@ enum BareTileChecks {
         try host.dragHeader(of: tile, byWorld: dragOut)
         host.expectBare(tile, at: expected, "\(mode) after the drag out")
 
+        // 1b. Undo puts it back in its zone where it started; redo takes it out again.
+        host.undo()
+        let undone = host.world(tile)
+        check(host.canvas.qaZoneMembership(of: tile) == Fixture.zoneA1,
+              "\(mode) undo of the drag out: membership \(String(describing: host.canvas.qaZoneMembership(of: tile))), expected zone A1")
+        check(undone.map { abs($0.x - start.x) < 1 && abs($0.y - start.y) < 1 } == true,
+              "\(mode) undo of the drag out: the tile is at \(String(describing: undone)), expected \(start)")
+        check(host.persisted(tile)?.zoneId == Fixture.zoneA1,
+              "\(mode) undo of the drag out: canvas.json stamps \(String(describing: host.persisted(tile)?.zoneId)), expected zone A1")
+        host.redo()
+        host.expectBare(tile, at: expected, "\(mode) after redo of the drag out")
+
         // 2. Auto layout off, then on: the toggle Dylan reported.
         host.setAutoLayout(false)
         host.setAutoLayout(true)
@@ -161,6 +173,21 @@ enum BareTileChecks {
             try? mounted.runtime.controller(for: Fixture.projectA1)?.flushCanvasSave()
             let store = ProjectStore(projectRoot: fixture.projectRoots[Fixture.projectA1]!)
             return (try? store.loadCanvas())?.tiles.first { $0.id == id }
+        }
+
+        /// The canvas's own Undo / Redo actions (the Edit menu's), with the canvas
+        /// focused so no tile's text undo takes them.
+        func undo() {
+            _ = mounted.delegate.qaFocusBroker.enterScope(.canvas, reason: .userClick)
+            canvas.undo(nil)
+            canvas.layoutSubtreeIfNeeded()
+            fixture.drain(0.3)
+        }
+        func redo() {
+            _ = mounted.delegate.qaFocusBroker.enterScope(.canvas, reason: .userClick)
+            canvas.redo(nil)
+            canvas.layoutSubtreeIfNeeded()
+            fixture.drain(0.3)
         }
 
         func setAutoLayout(_ enabled: Bool) {
