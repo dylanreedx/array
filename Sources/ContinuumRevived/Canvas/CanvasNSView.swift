@@ -984,9 +984,16 @@ final class CanvasNSView: NSView, TokenThemed {
         return transaction
     }
 
-    func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true) {
+    /// `framesZone`: the user tidied this one zone (its menu, ⌥⌘T, ⌘K). Tidy can
+    /// grow a zone, push it, or shrink it, so a zone that was wholly in view can
+    /// end up partly off screen; then the camera flies to frame its new rect,
+    /// starting in the same commit as the tidy's own movement. A zone that stays
+    /// in view never moves the camera, and Tidy canvas never does.
+    func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true,
+                        framesZone: Bool = false) {
         let tidyStart = Self.stageClock()
         defer { qaAutoLayoutStageTimes.tidy += Self.stageClock() - tidyStart }
+        let zoneWasInView = framesZone && zoneId.flatMap(zoneWorldRect).map(isInUsableView) == true
         let baseline = autoLayoutScene()
         // The explicit tidy keeps each lead agent's helpers in one block with it
         // (`CanvasTidyPacker`). Only it reads lineage, so only it asks: once per
@@ -1006,6 +1013,10 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         pushPeersOfZonesGrown(since: baseline)
+        // Before the commit: the flight and the tidy's animations start together.
+        if zoneWasInView, let rect = zoneId.flatMap(zoneWorldRect), !isInUsableView(rect) {
+            navigateViewport(to: framedZoneViewport(for: rect))
+        }
         if commit {
             _ = finishAutoLayoutGesture()
             if let transaction = commitGeometryEdit(), offerUndo {
@@ -6651,6 +6662,34 @@ final class CanvasNSView: NSView, TokenThemed {
         return target
     }
 
+    /// A zone's world rect as the canvas holds it now (its layer when installed).
+    func zoneWorldRect(_ zoneId: UUID) -> CGRect? {
+        allZonePlacements().first(where: { $0.zoneId == zoneId })
+            .map { Self.cgRect(from: CanvasEngine.zoneWorldFrame($0)) }
+    }
+
+    /// Whether `rect` lies wholly inside the part of the canvas no overlay
+    /// covers, at the camera navigation reasons from.
+    func isInUsableView(_ rect: CGRect) -> Bool {
+        let usable = usableVisibleScreenRect
+        let viewport = navigationViewport
+        let origin = CanvasEngine.screenToWorld(usable.origin, viewport: viewport)
+        let visible = CGRect(x: origin.x, y: origin.y,
+                             width: usable.width / viewport.zoom, height: usable.height / viewport.zoom)
+        return visible.insetBy(dx: -0.5, dy: -0.5).contains(rect)
+    }
+
+    /// The zone overview camera (`CameraFraming.zoneOverviewViewport`, which the
+    /// sidebar and leader zone jumps use) fitted to the usable rect rather than
+    /// the whole canvas, as `framedWorkViewport` does for tiles.
+    func framedZoneViewport(for rect: CGRect) -> CanvasViewport {
+        let usable = usableVisibleScreenRect
+        var target = CameraFraming.zoneOverviewViewport(for: rect, viewportSize: usable.size)
+        target.x -= Double(usable.minX) / target.zoom
+        target.y -= Double(usable.minY) / target.zoom
+        return target
+    }
+
     var navigationViewport: CanvasViewport { cameraDriver.flightTarget ?? canvasState.viewport }
 
     /// QA: force navigation to fly (true) or cut (false) whatever the window's
@@ -7262,7 +7301,7 @@ final class CanvasNSView: NSView, TokenThemed {
     @objc private func tidyZoneFromMenu(_ sender: NSMenuItem) {
         guard let idString = sender.representedObject as? String,
               let zoneId = UUID(uuidString: idString) else { return }
-        tidyAutoLayout(zoneId: zoneId)
+        tidyAutoLayout(zoneId: zoneId, framesZone: true)
     }
 
     func requestZoneScopeChange(zoneId: UUID) {

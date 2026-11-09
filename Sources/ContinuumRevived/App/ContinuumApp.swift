@@ -12305,7 +12305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return revealFocusedTileInFinder()
         case "zone.tidy":
             guard let canvasView, let zoneId = zoneIdForZoneCommands() else { return false }
-            canvasView.tidyAutoLayout(zoneId: zoneId)
+            canvasView.tidyAutoLayout(zoneId: zoneId, framesZone: true)
         default:
             return false
         }
@@ -21240,7 +21240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return canvasView != nil
         case .tidyCurrentZone:
             guard let zoneId = paletteContextZoneId else { return false }
-            canvasView?.tidyAutoLayout(zoneId: zoneId)
+            canvasView?.tidyAutoLayout(zoneId: zoneId, framesZone: true)
             return canvasView != nil
         case .replayGettingStarted:
             replayGettingStarted()
