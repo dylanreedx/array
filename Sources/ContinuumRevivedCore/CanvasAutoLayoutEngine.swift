@@ -28,19 +28,14 @@ public struct CanvasLayoutTransaction: Equatable, Sendable {
     /// another zone changes membership in the same commit as geometry, and a
     /// writer that persisted the frame alone left the old stamp on disk.
     public var tileZoneIds: [UUID: UUID]
-    /// Committed tiles that are bare (`.plans/auto-layout-night`): the writer
-    /// clears their stamp with their frame, or a tile dragged out of its zone
-    /// keeps the old stamp on disk and is rescued back in on the next load.
-    public var bareTileIds: Set<UUID>
 
-    public init(tileFrames: [UUID: TileFrame] = [:], zonePlacements: [UUID: ZonePlacement] = [:], blockedZoneIds: Set<UUID> = [], moveLatch: CanvasAutoLayoutEngine.MoveLatch? = nil, latchedSlot: TileFrame? = nil, tileZoneIds: [UUID: UUID] = [:], bareTileIds: Set<UUID> = []) {
+    public init(tileFrames: [UUID: TileFrame] = [:], zonePlacements: [UUID: ZonePlacement] = [:], blockedZoneIds: Set<UUID> = [], moveLatch: CanvasAutoLayoutEngine.MoveLatch? = nil, latchedSlot: TileFrame? = nil, tileZoneIds: [UUID: UUID] = [:]) {
         self.tileFrames = tileFrames
         self.zonePlacements = zonePlacements
         self.blockedZoneIds = blockedZoneIds
         self.moveLatch = moveLatch
         self.latchedSlot = latchedSlot
         self.tileZoneIds = tileZoneIds
-        self.bareTileIds = bareTileIds
     }
 }
 

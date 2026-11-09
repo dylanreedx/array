@@ -765,19 +765,12 @@ final class WorkspaceRuntime {
     /// unavailable, never empty: it gets no layers (an empty layer is what a pan
     /// then saved over the file), its controller refuses to write, and the user
     /// is told once per mount.
-    /// One project's resolved membership: its zone buckets and its bare tiles
-    /// (`.plans/auto-layout-night`), which render in the project's bare layer.
-    struct ProjectMembership {
-        var byZone: [UUID: [Tile]]
-        var bare: [Tile]
-    }
-
     private func membership(
         forProject projectId: UUID,
         controller: ZoneRuntimeController,
         in document: WorkspaceDocument,
-        cache: inout [UUID: ProjectMembership]
-    ) throws -> ProjectMembership {
+        cache: inout [UUID: [UUID: [Tile]]]
+    ) throws -> [UUID: [Tile]] {
         if let cached = cache[projectId] { return cached }
         let persisted: CanvasState
         do {
@@ -790,8 +783,8 @@ final class WorkspaceRuntime {
         }
         let projectZones = document.zones.filter { $0.projectId == projectId }
         guard !projectZones.isEmpty else {
-            cache[projectId] = ProjectMembership(byZone: [:], bare: [])
-            return ProjectMembership(byZone: [:], bare: [])
+            cache[projectId] = [:]
+            return [:]
         }
         let home = document.lastActiveZoneId.flatMap { candidate in
             projectZones.contains(where: { $0.zoneId == candidate }) ? candidate : nil
@@ -801,9 +794,7 @@ final class WorkspaceRuntime {
             tiles: persisted.tiles,
             projectZones: projectZones,
             documentZoneIds: Set(document.zones.map(\.zoneId)),
-            homeZoneId: home,
-            // Every caller renders the bare bucket in the project's bare layer.
-            keepsBare: true)
+            homeZoneId: home)
 
         if !resolved.restamped.isEmpty {
             // Say it out loud. This write is durable and one-way, so a rule that is
@@ -824,9 +815,8 @@ final class WorkspaceRuntime {
             try? controller.projectStore.saveCanvas(repaired)
         }
 
-        let answer = ProjectMembership(byZone: resolved.byZone, bare: resolved.bare)
-        cache[projectId] = answer
-        return answer
+        cache[projectId] = resolved.byZone
+        return resolved.byZone
     }
 
     /// Guarantee that a project with a live controller owns at least one zone in
@@ -859,9 +849,9 @@ final class WorkspaceRuntime {
     /// `persistProjectCanvas` would write the unrepaired state straight back over
     /// it.
     func repairBootMembership(controller: ZoneRuntimeController, canvasView: CanvasNSView) {
-        var cache: [UUID: ProjectMembership] = [:]
+        var cache: [UUID: [UUID: [Tile]]] = [:]
         guard let byZone = try? membership(
-            forProject: controller.project.id, controller: controller, in: document, cache: &cache).byZone else { return }
+            forProject: controller.project.id, controller: controller, in: document, cache: &cache) else { return }
         for (zoneId, tiles) in byZone {
             for tile in tiles { canvasView.setTileZone(tile.id, zoneId: zoneId) }
         }
@@ -965,7 +955,7 @@ final class WorkspaceRuntime {
         let previouslyAcquired = Set(acquiredProjectIds)
         var newlyAcquired: [UUID] = []
         // One repaired membership answer per project, reused across its zones.
-        var membershipCache: [UUID: ProjectMembership] = [:]
+        var membershipCache: [UUID: [UUID: [Tile]]] = [:]
 
         for zone in mountableZones {
             guard let projectId = zone.projectId else {
@@ -1007,13 +997,6 @@ final class WorkspaceRuntime {
             registry.release(projectId: projectId)
         }
         acquiredProjectIds = newlyAcquired
-        for projectId in newlyAcquired {
-            guard let controller = registry.controller(for: projectId),
-                  let bare = makeProjectBareLayer(projectId: projectId, controller: controller,
-                                                  document: document, membershipCache: &membershipCache)
-            else { continue }
-            layers.append(bare)
-        }
 
         // Wire the broker before setZones so _installLayer can register adapters.
         canvasView.focusBroker = focusBroker
@@ -1690,25 +1673,6 @@ final class WorkspaceRuntime {
         }
     }
 
-    /// One project's bare layer (`.plans/auto-layout-night`), built from the same
-    /// membership answer as its zone layers: the tiles dragged out of every zone,
-    /// at their WORLD frames, with descriptor views the hydrator replaces. Built
-    /// even when empty, so a later drag-out lands in a layer that covers the
-    /// project's persisted bare tiles.
-    private func makeProjectBareLayer(
-        projectId: UUID,
-        controller: ZoneRuntimeController,
-        document: WorkspaceDocument,
-        membershipCache: inout [UUID: ProjectMembership]
-    ) -> CanvasNSView.ZoneLayer? {
-        guard let bare = try? membership(forProject: projectId, controller: controller,
-                                         in: document, cache: &membershipCache).bare else { return nil }
-        let layer = CanvasNSView.ZoneLayer.bare(projectId: projectId, tiles: bare)
-        for tile in layer.tiles { layer.tileViews[tile.id] = DescriptorTileNSView(tile: tile) }
-        layer.coversPersistedBareTiles = true
-        return layer
-    }
-
     /// One project zone's `ZoneLayer`, built from its controller's repaired
     /// membership answer. The mount, the switch and `installZoneLayerIfMissing`
     /// all build a layer this way.
@@ -1718,10 +1682,10 @@ final class WorkspaceRuntime {
         controller: ZoneRuntimeController,
         document: WorkspaceDocument,
         registry appRegistry: Registry,
-        membershipCache: inout [UUID: ProjectMembership]
+        membershipCache: inout [UUID: [UUID: [Tile]]]
     ) -> CanvasNSView.ZoneLayer? {
         guard let byZone = try? membership(forProject: projectId, controller: controller,
-                                           in: document, cache: &membershipCache).byZone else { return nil }
+                                           in: document, cache: &membershipCache) else { return nil }
         let memberTiles = (byZone[zone.zoneId] ?? [])
         .map { tile -> Tile in
             var adopted = tile
@@ -1804,19 +1768,13 @@ final class WorkspaceRuntime {
                 Logger(subsystem: "continuum.canvas", category: "hydration").notice("\(line, privacy: .public)")
             }
         }
-        var membershipCache: [UUID: ProjectMembership] = [:]
+        var membershipCache: [UUID: [UUID: [Tile]]] = [:]
         guard let layer = makeProjectZoneLayer(
             zone: placement, projectId: projectId, controller: controller,
             document: document, registry: appRegistry, membershipCache: &membershipCache) else { return }
-        var newLayers = [layer]
-        if !canvasView.hasResolvedBareLayer(forProjectId: projectId),
-           let bare = makeProjectBareLayer(projectId: projectId, controller: controller,
-                                           document: document, membershipCache: &membershipCache) {
-            newLayers.append(bare)
-        }
-        hydrateZoneLayerTiles?(canvasView, newLayers, .beforeInstall)
-        for installing in newLayers { canvasView.upsertZoneLayer(installing) }
-        installedLayers.append(contentsOf: newLayers)
+        hydrateZoneLayerTiles?(canvasView, [layer], .beforeInstall)
+        canvasView.upsertZoneLayer(layer)
+        installedLayers.append(layer)
         // Phase B needs this controller's spawner. Build one only if it has none:
         // `attachActiveControllerUI` replaces EVERY spawner, and this runs inside a
         // spawn's scope lookup, so the spawn's own managed-agent memo would land on
@@ -1824,7 +1782,7 @@ final class WorkspaceRuntime {
         if controller.tileSpawner == nil {
             controller.attachSpawner(makeSpawner(for: controller, canvasView: canvasView), canvasView: canvasView)
         }
-        hydrateZoneLayerTiles?(canvasView, newLayers, .afterInstall)
+        hydrateZoneLayerTiles?(canvasView, [layer], .afterInstall)
     }
 
     private func makeSpawner(for controller: ZoneRuntimeController, canvasView: CanvasNSView) -> TileSpawner {
@@ -2780,7 +2738,7 @@ final class WorkspaceRuntime {
         registry appRegistry: Registry
     ) -> [CanvasNSView.ZoneLayer] {
         var layers: [CanvasNSView.ZoneLayer] = []
-        var membershipCache: [UUID: ProjectMembership] = [:]
+        var membershipCache: [UUID: [UUID: [Tile]]] = [:]
         for zone in zones {
             guard let projectId = zone.projectId else {
                 if zone.isSharedArea { continue }
@@ -2798,14 +2756,6 @@ final class WorkspaceRuntime {
                 document: document, registry: appRegistry, membershipCache: &membershipCache) {
                 layers.append(layer)
             }
-        }
-        // Every project with a live zone gets its bare layer (`.plans/auto-layout-night`).
-        for projectId in Set(layers.compactMap { $0.placement.projectId }).sorted(by: { $0.uuidString < $1.uuidString }) {
-            guard let controller = registry.controller(for: projectId),
-                  let bare = makeProjectBareLayer(projectId: projectId, controller: controller,
-                                                  document: document, membershipCache: &membershipCache)
-            else { continue }
-            layers.append(bare)
         }
         return layers
     }

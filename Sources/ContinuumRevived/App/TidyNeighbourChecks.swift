@@ -40,9 +40,6 @@ enum TidyNeighbourChecks {
         for autoLayout in [true, false] {
             try growIntoNeighbours(autoLayout: autoLayout)
         }
-        for autoLayout in [true, false] {
-            try growOverBareTile(autoLayout: autoLayout)
-        }
         try shrinkLeavesNeighbours()
         let first = try tidyCanvasGrid(label: "grid run 1")
         let second = try tidyCanvasGrid(label: "grid run 2")
@@ -159,47 +156,6 @@ enum TidyNeighbourChecks {
         // Accepted trade-off: G may overlap U on screen until U loads; moving U
         // without its tiles is the data loss this guards against.
         check(host.canvas.tiles(inZone: u.zoneId) == nil, "unloaded: U became live during the check; the scenario no longer holds")
-    }
-
-    // MARK: - 4 with real bare tiles: a grown zone pushes a bare tile clear
-
-    /// A real bare project tile (dragged out earlier: nil stamp, `bare: true`)
-    /// sits 20pt below a cramped zone of its own project. Tidying the zone grows
-    /// it over the tile, which must move clear and stay bare, on screen and on
-    /// disk, and never be adopted.
-    private static func growOverBareTile(autoLayout: Bool) throws {
-        let label = "autoLayout=\(autoLayout) bare"
-        let scene = try Scene(seed: 4)
-        let g = scene.zone("G2", CGRect(x: 6000, y: 2000, width: 900, height: 420),
-                           notes: (0..<4).map { CGRect(x: 6024 + Double($0 % 2) * 420, y: 2058 + Double($0 / 2) * 170, width: 400, height: 300) })
-        let bareId = scene.bare(in: g, CGRect(x: 6100, y: 2440, width: 240, height: 160))
-        let host = try scene.mount(autoLayout: autoLayout, label: label)
-        defer { host.close() }
-        check(host.canvas.bareTileIds.contains(bareId), "\(label): precondition: the seeded tile must mount bare")
-        let before = host.snapshot()
-        host.mounted.delegate.qaLastLayoutCommitProjects = nil
-        try host.tidyFromZoneMenu(g.zoneId)
-        let after = host.snapshot()
-        // The scoped save owns bare tiles too: their project, found through the
-        // bare layer, with no fall back to scanning every project.
-        let commit = host.mounted.delegate.qaLastLayoutCommitProjects
-        check(commit?.loaded == [g.projectId] && commit?.written == [g.projectId],
-              "\(label): the tidy's save loaded \(String(describing: commit?.loaded)) and wrote \(String(describing: commit?.written)), expected only G2's project")
-        guard let zone = after.zones[g.zoneId], let start = before.tiles[bareId]?.frame, let moved = after.tiles[bareId]?.frame else {
-            check(false, "\(label): the zone or the bare tile vanished"); return
-        }
-        check(zone.height > (before.zones[g.zoneId]?.height ?? 0) + 1, "\(label): precondition: the zone must grow; \(zone)")
-        let overlap = moved.x < zone.x + zone.width && zone.x < moved.x + moved.width
-            && moved.y < zone.y + zone.height && zone.y < moved.y + moved.height
-        check(!overlap, "\(label): the grown zone \(zone) still covers the bare tile \(moved)")
-        check(moved.width == start.width && moved.height == start.height, "\(label): the bare tile was resized \(start) -> \(moved)")
-        check(after.tiles[bareId]?.zone == nil && host.canvas.bareTileIds.contains(bareId),
-              "\(label): the pushed tile was adopted by \(String(describing: after.tiles[bareId]?.zone))")
-        let disk = (try? ProjectStore(projectRoot: g.root).loadCanvas())?.tiles.first { $0.id == bareId }
-        check(disk?.zoneId == nil && disk?.isBare == true,
-              "\(label): canvas.json stamps the pushed tile \(String(describing: disk?.zoneId)), bare \(String(describing: disk?.isBare))")
-        check(disk?.frame == moved, "\(label): canvas.json holds the bare tile at \(String(describing: disk?.frame)), on screen \(moved)")
-        host.expectOnDisk(after, label)
     }
 
     // MARK: - 3: a zone that shrinks leaves its neighbours
@@ -382,18 +338,6 @@ enum TidyNeighbourChecks {
             return zone
         }
 
-        private var bareTiles: [UUID: [Tile]] = [:]
-
-        /// A bare tile of `zone`'s project: nil stamp, marked bare, WORLD frame.
-        func bare(in zone: SceneZone, _ rect: CGRect) -> UUID {
-            let id = nextId()
-            var tile = Tile(id: id, kind: .note, title: "bare", frame: TileFrame(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height),
-                            zPosition: .fromLegacyRank(99), runtimeRef: nil, metadata: TileMetadata(noteId: id))
-            tile.isBare = true
-            bareTiles[zone.projectId, default: []].append(tile)
-            return id
-        }
-
         func mount(autoLayout: Bool, label: String, unloaded: Set<UUID> = []) throws -> Host {
             let now = Date(timeIntervalSince1970: 1_900_000_000)
             var registry = try fixture.registryStore.loadOrEmpty()
@@ -407,10 +351,9 @@ enum TidyNeighbourChecks {
                     defaultLaunchProfileId: "shell", editorPreference: .auto,
                     settings: ProjectSettings(restorePolicy: .restoreDescriptors, browserStoragePolicy: .perProject,
                                               terminalClosePolicy: .askWhenRunning)))
-                let allTiles = tiles + (bareTiles[zone.projectId] ?? [])
-                for tile in allTiles where tile.kind == .note { try store.saveNoteBody(id: tile.id, text: "") }
+                for tile in tiles where tile.kind == .note { try store.saveNoteBody(id: tile.id, text: "") }
                 try store.saveCanvas(CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
-                                                 tiles: allTiles, groups: [], lastActiveTileId: nil))
+                                                 tiles: tiles, groups: [], lastActiveTileId: nil))
                 var placement = ZonePlacement(
                     zoneId: zone.zoneId, projectId: zone.projectId,
                     origin: ZonePoint(x: Double(rect.minX), y: Double(rect.minY)),

@@ -91,12 +91,6 @@ public struct Tile: Equatable, Sendable {
     public var zoneId: UUID?
     public var runtimeRef: RuntimeRef?
     public var metadata: TileMetadata
-    /// The user dragged this tile out of every zone (`.plans/auto-layout-night`).
-    /// Only a marked tile with a nil `zoneId` stays outside a zone on load; an
-    /// unmarked nil stamp is a legacy, never-stamped tile and is rescued into
-    /// its project's zone as before (`resolveZoneMembership`). Persisted only
-    /// when true, so every canvas written before it reads unchanged.
-    public var isBare: Bool = false
 
     public init(
         id: UUID,
@@ -129,7 +123,6 @@ extension Tile: Codable {
     enum CodingKeys: String, CodingKey, CaseIterable {
         // `zIndex` is decode-only: the pre-v3 integer rank. Never re-emitted.
         case id, kind, title, frame, zPosition, zIndex, zoneId, runtimeRef, metadata
-        case isBare = "bare"
     }
 
     public init(from decoder: Decoder) throws {
@@ -152,7 +145,6 @@ extension Tile: Codable {
         zoneId = try container.decodeIfPresent(UUID.self, forKey: .zoneId)
         runtimeRef = try container.decodeIfPresent(RuntimeRef.self, forKey: .runtimeRef)
         metadata = try container.decode(TileMetadata.self, forKey: .metadata)
-        isBare = try container.decodeIfPresent(Bool.self, forKey: .isBare) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -165,7 +157,6 @@ extension Tile: Codable {
         try container.encodeIfPresent(zoneId, forKey: .zoneId)
         try container.encodeIfPresent(runtimeRef, forKey: .runtimeRef)
         try container.encode(metadata, forKey: .metadata)
-        if isBare { try container.encode(true, forKey: .isBare) }
     }
 }
 
