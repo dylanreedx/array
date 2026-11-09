@@ -112,6 +112,15 @@ enum TidyCameraChecks {
         return ZoneSpec(id: id, project: project, origin: origin, size: ZoneSize(width: 900, height: 700), frames: frames)
     }
 
+    /// Twenty-four 400x300 notes stacked in a 900x700 zone: tidy grows it far
+    /// past any view that held it at zoom 1.4.
+    static func overstuffedZone(_ id: UUID, project: UUID, at origin: ZonePoint) -> ZoneSpec {
+        let frames = (0..<24).map { i in
+            TileFrame(x: origin.x + 20 + Double(i % 3) * 240, y: origin.y + 40 + Double(i / 3) * 50, width: 400, height: 300)
+        }
+        return ZoneSpec(id: id, project: project, origin: origin, size: ZoneSize(width: 900, height: 700), frames: frames)
+    }
+
     /// `count` small notes on an uneven grid with room to spare.
     static func roomyZone(_ id: UUID, project: UUID, at origin: ZonePoint, count: Int, size: ZoneSize) -> ZoneSpec {
         let columns = max(2, Int(Double(count).squareRoot().rounded(.up)))
@@ -180,15 +189,18 @@ enum TidyCameraChecks {
         var notes: [String] = []
         let a1 = Fixture.zoneA1, a2 = Fixture.zoneA2
 
-        // A. A zone wholly in view that tidy grows past the bottom: framed, by
-        //    the zone menu and by ⌥⌘T.
+        // A. A zone wholly in view that tidy grows a little past the bottom: the
+        //    camera keeps its zoom and pans by the least that shows it, by the
+        //    zone menu and by ⌥⌘T.
+        let padding = CameraFraming.zonePaddingScreenPx
         for trigger in ["zone menu", "⌥⌘T"] {
             let m = try mount([crampedZone(a1, project: Fixture.projectA1, at: ZonePoint(x: 600, y: 200))], label: "grow")
             defer { m.mounted.delegate.qaRemoveHotkeyMonitor(); m.window.orderOut(nil); m.fixture.dispose() }
             let canvas = m.canvas
             canvas.navigationFlightOverrideForQA = true
             if trigger == "⌥⌘T" { m.mounted.delegate.qaInstallHotkeyMonitor() }
-            canvas.setViewport(bottomHugging(canvas, zone: canvas.zoneWorldRect(a1)!))
+            let camera = bottomHugging(canvas, zone: canvas.zoneWorldRect(a1)!)
+            canvas.setViewport(camera)
             settle(m)
             let before = canvas.zoneWorldRect(a1)!
             guard canvas.isInUsableView(before) else { throw Failure(message: "A \(trigger): fixture zone is not wholly in view") }
@@ -196,26 +208,62 @@ enum TidyCameraChecks {
             let after = canvas.zoneWorldRect(a1)!
             let flying = canvas.cameraDriver.isFlightActive
             let target = canvas.cameraDriver.flightTarget
-            let expected = canvas.framedZoneViewport(for: after)
             let animations = committedTileAnimations(m)
             if after.maxY <= before.maxY + 1 {
                 failures.append("A \(trigger): fixture: tidy did not grow the zone downward (\(before) -> \(after))")
             }
-            if !flying || target != expected {
-                failures.append("A \(trigger): the zone left the view and the camera did not fly to frame it (flying \(flying), target \(String(describing: target)), want \(expected))")
-            }
-            // Same turn: the tidy's animations are committed and the flight is
-            // armed when the trigger returns — the flight's first step is the
-            // next frame, never after the slide.
+            if !flying || target == nil { failures.append("A \(trigger): the zone left the view and the camera did not fly") }
+            // Same turn: the tidy's movement is committed and the flight is armed
+            // when the trigger returns, so the flight's first step is the next frame.
             if animations == 0 { failures.append("A \(trigger): the tidy's movement was not committed with the flight") }
             waitForFlight(m)
+            let landed = canvas.viewport
+            let usable = canvas.usableVisibleScreenRect
             if canvas.cameraDriver.isFlightActive { failures.append("A \(trigger): the flight never landed") }
-            if canvas.viewport != expected {
-                failures.append("A \(trigger): the flight landed at \(canvas.viewport), not the framed \(expected)")
+            if let target, landed != target { failures.append("A \(trigger): the flight landed at \(landed), not its target \(target)") }
+            if landed.zoom != camera.zoom { failures.append("A \(trigger): the zoom changed \(camera.zoom) -> \(landed.zoom) though the zone fits at it") }
+            if landed.x != camera.x { failures.append("A \(trigger): the camera moved sideways (\(camera.x) -> \(landed.x)) for a zone that grew down") }
+            let bottomOnScreen = (Double(after.maxY) - landed.y) * landed.zoom
+            if abs(bottomOnScreen - (Double(usable.maxY) - padding)) > 0.01 {
+                failures.append("A \(trigger): not the least pan: the zone's bottom sits at \(bottomOnScreen), want \(Double(usable.maxY) - padding)")
             }
             if !canvas.isInUsableView(after) { failures.append("A \(trigger): the grown zone is still not wholly in view") }
-            notes.append(String(format: "A %@: zone %.0f→%.0f tall, camera zoom 1.40→%.2f, landed exactly", trigger,
-                                before.height, after.height, canvas.viewport.zoom))
+            notes.append(String(format: "A %@: zone %.0f→%.0f tall; zoom kept %.2f, panned %.1f pt down, landed exactly", trigger,
+                                before.height, after.height, landed.zoom, landed.y - camera.y))
+        }
+
+        // E. A zone that tidy grows past what the current zoom can hold: the camera
+        //    zooms out exactly far enough to contain it with the standard padding.
+        do {
+            let m = try mount([overstuffedZone(a1, project: Fixture.projectA1, at: ZonePoint(x: 600, y: 200))], label: "big")
+            defer { m.window.orderOut(nil); m.fixture.dispose() }
+            let canvas = m.canvas
+            canvas.navigationFlightOverrideForQA = true
+            let camera = bottomHugging(canvas, zone: canvas.zoneWorldRect(a1)!)
+            canvas.setViewport(camera)
+            settle(m)
+            let before = canvas.zoneWorldRect(a1)!
+            try zoneMenuTidy(m, zoneId: a1)
+            let after = canvas.zoneWorldRect(a1)!
+            let target = canvas.cameraDriver.flightTarget
+            waitForFlight(m)
+            let landed = canvas.viewport
+            let usable = canvas.usableVisibleScreenRect
+            let contain = min((Double(usable.width) - 2 * padding) / Double(after.width),
+                              (Double(usable.height) - 2 * padding) / Double(after.height))
+            if contain >= camera.zoom { failures.append("E: fixture: the grown zone (\(after)) still fits at zoom \(camera.zoom)") }
+            if let target, landed != target { failures.append("E: the flight landed at \(landed), not its target \(target)") }
+            if target == nil { failures.append("E: the camera did not move for a zone that no longer fits") }
+            if abs(landed.zoom - contain) > 1e-9 {
+                failures.append("E: zoomed to \(landed.zoom), not exactly the containing \(contain)")
+            }
+            let screenMid = CGPoint(x: (Double(after.midX) - landed.x) * landed.zoom, y: (Double(after.midY) - landed.y) * landed.zoom)
+            if abs(screenMid.x - usable.midX) > 0.5 || abs(screenMid.y - usable.midY) > 0.5 {
+                failures.append("E: the zone is not centred in the usable view (\(screenMid) vs \(CGPoint(x: usable.midX, y: usable.midY)))")
+            }
+            if !canvas.isInUsableView(after) { failures.append("E: the grown zone is not wholly in view") }
+            notes.append(String(format: "E: zone %.0f→%.0f tall; zoom %.2f→%.3f (exactly contains with %.0f px padding), landed exactly",
+                                before.height, after.height, camera.zoom, landed.zoom, padding))
         }
 
         // B. A zone that stays in view: the camera does not move.
