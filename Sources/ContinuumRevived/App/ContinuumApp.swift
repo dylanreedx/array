@@ -3727,6 +3727,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--tidy-zone-neighbours-check") {
+            do {
+                _ = NSApplication.shared
+                try TidyNeighbourChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --tidy-zone-neighbours-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--canvas-pointer-path-check") {
             _ = NSApplication.shared
             Task { @MainActor in

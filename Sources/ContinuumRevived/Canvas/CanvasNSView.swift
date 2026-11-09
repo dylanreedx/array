@@ -1004,12 +1004,48 @@ final class CanvasNSView: NSView, TokenThemed {
                 applyAutoLayout(.settle(zoneId: id, anchor: nil, pin: false), baseline: autoLayoutScene())
             }
         }
+        pushPeersOfZonesGrown(since: baseline)
         if commit {
             _ = finishAutoLayoutGesture()
             if let transaction = commitGeometryEdit(), offerUndo {
                 showAutoLayoutUndo(
                     changedCount: transaction.changedEntityCount
                 )
+            }
+        }
+    }
+
+    /// A tidy can GROW a zone (`CanvasTidyPacker`), and the engine resolves outer
+    /// collisions only for a zone being moved, so a grown zone was left over the
+    /// zone it grew into (`--tidy-zone-neighbours-check`). Each zone that grew now
+    /// pushes what it reached further into, as spawn growth does
+    /// (`CanvasAutoLayoutEngine.pushPeers(ofGrownZone:)`): neighbouring zones move
+    /// clear as rigid bodies with their members, bare tiles move clear, nothing
+    /// changes zone, and a zone that shrank pushes and pulls nothing.
+    ///
+    /// Reading order (top, then left) so a cascade runs the way growth does, down
+    /// and right. A zone's "before" is its pre-tidy size at its current origin: a
+    /// push it took from a zone above is not growth of its own.
+    private func pushPeersOfZonesGrown(since baseline: CanvasAutoLayoutEngine.Scene) {
+        let before = firstWinsDictionary(baseline.zones.map { ($0.zoneId, $0) })
+        let grown = autoLayoutScene().zones.filter { zone in
+            guard let previous = before[zone.zoneId] else { return false }
+            return zone.size.width > previous.size.width + 0.01 || zone.size.height > previous.size.height + 0.01
+        }.sorted { lhs, rhs in
+            if lhs.origin.y != rhs.origin.y { return lhs.origin.y < rhs.origin.y }
+            if lhs.origin.x != rhs.origin.x { return lhs.origin.x < rhs.origin.x }
+            return lhs.zoneId.uuidString < rhs.zoneId.uuidString
+        }.map(\.zoneId)
+        guard !grown.isEmpty else { return }
+        let gap = TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)
+        for zoneId in grown {
+            let scene = autoLayoutScene()
+            guard var previous = scene.zones.first(where: { $0.zoneId == zoneId }),
+                  let original = before[zoneId] else { continue }
+            previous.size = original.size
+            let push = CanvasAutoLayoutEngine.pushPeers(ofGrownZone: zoneId, from: previous, scene: scene, gap: gap)
+            if !push.tileFrames.isEmpty || !push.zonePlacements.isEmpty {
+                applyLayoutTransaction(push)
             }
         }
     }

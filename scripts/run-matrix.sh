@@ -1491,6 +1491,9 @@ run_app_check .build/debug/Array --layout-commit-truth-check
 # A drag or tidy commit reads and writes only the projects it touched, flat in
 # the workspace's project count (.plans/auto-layout-night).
 run_app_check .build/debug/Array --layout-commit-scope-check
+# A tidy that grows a zone pushes its neighbours clear as rigid bodies; a shrink
+# pulls nothing in; Tidy Canvas over a 2x3 grid fills and is a fixed point.
+run_app_check .build/debug/Array --tidy-zone-neighbours-check
 # Confidence pass S2: a refused or failed spawn left its web view running and
 # its tile drawn with nothing on disk. It now takes back what it made.
 run_app_check .build/debug/Array --refused-spawn-teardown-check
