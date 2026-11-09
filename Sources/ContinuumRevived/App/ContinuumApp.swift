@@ -3907,7 +3907,6 @@ enum ContinuumApp {
             catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
         }
 
-        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--gesture-telemetry-check") {
             do {
                 _ = NSApplication.shared
@@ -3919,9 +3918,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
-        #endif
 
-        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--tile-surface-residency-check") {
             do {
                 _ = NSApplication.shared
@@ -3933,7 +3930,6 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
-        #endif
 
         if CommandLine.arguments.contains("--canvas-camera-coalesce-check") {
             do {

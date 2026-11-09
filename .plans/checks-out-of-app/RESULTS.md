@@ -50,3 +50,15 @@ and unset inherited TMUX/TMUX_PANE. Full matrix owns its verified private socket
 
 The packaging script performs its normal mandatory ad hoc signing; no Developer
 ID signing, notarization, release assets, pushes or /Applications changes.
+
+## Scope correction after release compile
+
+The first release attempt failed in AppThemeChecks.swift:23 and
+CanvasZoomInvalidationProbeChecks.swift:223 because both depend on
+TileSurfaceResidencyChecks. That file and its two dispatch branches are now
+left unchanged. Final scope is THREE pure-check files, 7,746 lines, SIX branches.
+The final release retry reuses dependencies compiled during the failed clean
+attempt; its wall time is not a clean-build comparison. Earlier scope and
+incremental measurements above describe the four-file candidate. Debug bodies
+are unchanged between these candidates. The full 100k-line extraction is not
+complete, and no release-speed improvement is established by these measurements.
