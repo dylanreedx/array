@@ -145,7 +145,11 @@ extension TileGeometry {
             return .band(min: 0.6, max: 1.0)
         case .iosPreview, .sharedPortal, .sharedTile:
             return .keep
-        case .note, .file, .fileTree, .diffReview, .runArtifacts:
+        case .note, .file, .diffReview:
+            // Text reads badly as a tall strip: a 0.6 editor in a full row was
+            // the worst tile of the real-app film (`.plans/auto-layout-night`).
+            return .band(min: 0.75, max: 1.8)
+        case .fileTree, .runArtifacts:
             return .band(min: 0.6, max: 1.8)
         case .browserInspector, .ticketQueue, .conductorQueue, .kanban:
             return .band(min: 0.8, max: 2.0)

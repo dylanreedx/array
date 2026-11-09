@@ -334,6 +334,46 @@ failures:
   In that same run the solve column reads 14.9 ms (it was about 232 ms
   before this round). The rest is the app's apply and commit path.
 
+## Round 5: text tiles get a 0.75 floor
+
+- `26c93cce` feat(auto-layout): keep text tiles at least 0.75 wide on tidy
+
+Why: in the real-app film, tidy squeezed an editor (file) and a note to
+0.60 w/h in a full row, a tall strip that reads badly. Decision (the lead's):
+`.note`, `.file` and `.diffReview` take the band 0.75–1.8 in
+`TileGeometry.shapeRule`. `.fileTree` (and `.runArtifacts`) keep 0.6–1.8.
+
+Fill before → after the rule change (seeded zones, gap 16 / padding 16 /
+header 32): unchanged on every seed to three places, between 0.962 (cramped,
+which has no text tile) and 0.992. Two seeds changed their frames: thirteen
+(zone height 2343 → 2310) and dust (1462 → 1432). Their files had been at
+0.60; they are wider now, so their rows are shorter and the zone gives up a
+little height instead of the tiles stretching. Their digests were re-pinned
+deliberately. The 30/60/89 cost seeds did not change.
+
+The film scene, with the app's own gap 8, padding 24 and header 34: 3
+browsers, 2 files and 3 notes in a 2300×1480 zone at 0,0. Before the rule
+change, fill was 0.982 with three text tiles at 0.60 and one at 0.74. After,
+fill is 0.981 and every text tile is at least 0.75; the zone is 2300×1084
+(1158 under the old rule). Picture: `qa-runs/aln-tidy-engine/pictures/film-scene.png`.
+The old rule's picture is in `pictures-before/`.
+
+Witness (`--tidy-packer-check`):
+- **Per-kind shapes:** one shape check for every case and the film scene, with
+  the numbers written into the check. Text kinds 0.75–1.8, file tree 0.6–1.8,
+  terminal 0.6–0.9 (it was only "taller than wide" before), browser 16:9,
+  iOS preview not resized.
+- **Rule pins:** the rule values themselves are checked.
+- **Presets:** every kind's spawn preset sits inside its band. Note 640×400 =
+  1.6, file 640×560 = 1.14, diff 720×520 = 1.38.
+- **Teeth:** before the rule change these assertions failed on thirteen, dust
+  and the film scene, five text tiles there at about 0.60.
+
+Checks, all exit 0: `--tidy-packer-check`, `--layout-pressure-check`,
+`--jelly-trajectory-probe` and `--auto-layout-fanout-check` (CoreChecks);
+`--spawn-sizing-check`, `--auto-layout-fanout-app-check`,
+`--undo-toast-placement-check` and `--jelly-auto-layout-check` (app).
+
 ## Open, for the lead
 
 1. **Tidy animation feel.** `applyLayoutTransaction` animates only origins,
