@@ -9855,7 +9855,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         indicatorWash.cornerRadius = Radius.card
         indicatorWash.startPoint = CGPoint(x: 0, y: 0.5)
         indicatorWash.endPoint = CGPoint(x: 1, y: 0.5)
-        indicatorEdge.cornerRadius = max(0, Radius.card - 1.5)
+        indicatorEdge.cornerRadius = CGFloat(CornerRole.radius(base: CornerRole.card.base - 1.5))
         indicatorEdge.borderWidth = 0
         indicatorEdge.shadowOpacity = 0
         indicatorEdge.backgroundColor = nil
