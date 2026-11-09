@@ -86,7 +86,7 @@ enum AutoLayoutFanoutChecks {
         ("Diff", TileFrame(x: 2372, y: 1206, width: 720, height: 520)),
     ]
 
-    private static func reseed(_ fixture: Fixture, zoneSize: ZoneSize, tiles: [(String, TileFrame)],
+    static func reseed(_ fixture: Fixture, zoneSize: ZoneSize, tiles: [(String, TileFrame)],
                                agents: Set<String> = [], browsers: Set<String> = []) throws -> [String: UUID] {
         let store = WorkspaceStore(workspaceId: Fixture.workspaceA, applicationSupportDirectory: fixture.appSupport)
         var document = try store.load()

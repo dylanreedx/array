@@ -3672,6 +3672,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--undo-toast-placement-check") {
+            do {
+                _ = NSApplication.shared
+                try UndoToastPlacementChecks.run()
+                print("UndoToastPlacementChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --undo-toast-placement-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--auto-layout-fanout-app-check") {
             do {
                 _ = NSApplication.shared
@@ -7229,6 +7240,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA: stands in for bringing another app forward ("Show Ghostty").
     var activateExternalSessionHostForQA: ((_ pid: Int32?, _ hostName: String) -> Void)?
     private var canvasShortcutRailView: CanvasShortcutRailView?
+    var qaCanvasShortcutRailView: CanvasShortcutRailView? { canvasShortcutRailView }
+    var qaFloatingToolbar: FloatingToolbarHostView? { floatingToolbar }
+    /// Where the floating toolbar keeps its edge and settings. A check points it
+    /// at an isolated suite before the content view is made.
+    var floatingToolbarDefaults: UserDefaults = .standard
     private var canvasGettingStartedView: CanvasGettingStartedView?
     private var workspaceSplitView: NSSplitView?
     private var isApplyingWorkspaceSidebarVisibility = false
@@ -14763,14 +14779,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // The creation toolbar is canvas chrome: an overlay over this pane, never
         // a window of its own (see `FloatingToolbarHostView`).
         let toolbarQAOptIn = ProcessInfo.processInfo.environment["CONTINUUM_TOOLBAR_QA"] == "1"
-        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }),
-           toolbarQAOptIn || (!smokeTestEnabled && ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"] == nil) {
-            let toolbar = FloatingToolbarHostView(terminalProfiles: {
+        // A check opts in explicitly (and isolates `floatingToolbarDefaults`).
+        if toolbarQAOptIn || (!CommandLine.arguments.contains(where: { $0.hasSuffix("-check") })
+            && !smokeTestEnabled && ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"] == nil) {
+            let toolbar = FloatingToolbarHostView(defaults: floatingToolbarDefaults, terminalProfiles: {
                 LaunchProfileRegistry().all().map { FloatingToolbarProfile(id: $0.id, title: $0.displayName) }
             }, onSelection: { [weak self] selection in
                 self?.handleFloatingToolbarSelection(selection)
             })
-            toolbar.onPositionChanged = { [weak self] in self?.demonstrateOnboarding(.toolbarDragged) }
+            toolbar.onPositionChanged = { [weak self, weak canvasView] in
+                self?.demonstrateOnboarding(.toolbarDragged)
+                canvasView?.placeAutoLayoutUndoToast()
+            }
             toolbar.zoneDrawing = canvasView
             toolbar.obstacles = { [weak toolbar, weak shortcutRail] in
                 guard let toolbar, let shortcutRail, !shortcutRail.isHidden, let pane = shortcutRail.superview else { return [] }
@@ -14789,6 +14809,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             if let toolbar = self.floatingToolbar {
                 rects.append(toolbar.toolbar.convert(toolbar.toolbar.bounds, to: canvasView).insetBy(dx: -8, dy: -8))
+                rects.append(toolbar.convert(toolbar.restingBarFrame, to: canvasView).insetBy(dx: -8, dy: -8))
             }
             return rects
         }
