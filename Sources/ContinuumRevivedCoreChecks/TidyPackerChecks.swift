@@ -132,6 +132,49 @@ func runTidyPackerChecks() {
     for i in dust.scene.tiles.indices { dust.scene.tiles[i].frame.x += dustShift; dust.scene.tiles[i].frame.y -= dustShift / 3 }
     cases.append(dust)
 
+    // The shape every tidied tile must have, per kind. The numbers that are
+    // decisions are written here rather than read from TileGeometry, so a
+    // changed rule shows up as a failure: text tiles (note, file, diff) never
+    // narrower than 0.75 w/h (a 0.6 editor read as a strip in the film), the
+    // file tree free down to 0.6, terminals 0.6–0.9, browsers 16:9.
+    func checkShape(_ name: String, _ tile: CanvasAutoLayoutEngine.LayoutTile, original: TileFrame) {
+        let f = tile.frame, ratio = f.width / f.height, tol = 1e-3
+        func within(_ lo: Double, _ hi: Double) {
+            check(ratio >= lo - tol && ratio <= hi + tol, "\(name): \(tile.kind!) ratio \(ratio) outside \(lo)–\(hi): \(f)")
+        }
+        switch tile.kind! {
+        case .browser:
+            // 16:9 to the 1/64 pt grid every tidy edge lands on.
+            check(abs(f.width - f.height * 16 / 9) <= 2 * CanvasTidyPacker.grid, "\(name): browser not 16:9: \(f)")
+        case .terminal:
+            check(f.height > f.width, "\(name): terminal not taller than wide: \(f)")
+            within(0.6, 0.9)
+        case .iosPreview:
+            check(f.width == original.width && f.height == original.height, "\(name): iOS preview was resized")
+        case .note, .file, .diffReview:
+            within(0.75, 1.8)
+        case .fileTree:
+            within(0.6, 1.8)
+        default:
+            break
+        }
+    }
+    check(TileGeometry.shapeRule(for: .note) == .band(min: 0.75, max: 1.8)
+          && TileGeometry.shapeRule(for: .file) == .band(min: 0.75, max: 1.8)
+          && TileGeometry.shapeRule(for: .diffReview) == .band(min: 0.75, max: 1.8),
+          "text tiles (note, file, diff) must have the 0.75–1.8 band")
+    check(TileGeometry.shapeRule(for: .fileTree) == .band(min: 0.6, max: 1.8), "the file tree keeps the 0.6–1.8 band")
+    // Every kind is born inside its own band (spawn presets).
+    for kind in TileKind.allCases {
+        let size = TileGeometry.preset(for: kind).defaultSize
+        let ratio = Double(size.width / size.height)
+        switch TileGeometry.shapeRule(for: kind) {
+        case let .aspect(a): check(abs(ratio - a) < 1e-6, "\(kind) preset \(size) is not \(a)")
+        case let .band(lo, hi): check(ratio >= lo - 1e-9 && ratio <= hi + 1e-9, "\(kind) preset \(size) (\(ratio)) outside \(lo)–\(hi)")
+        case .keep: break
+        }
+    }
+
     let caseNames = cases.map(\.name)
     var report: [String] = []
     for c in cases {
@@ -162,17 +205,7 @@ func runTidyPackerChecks() {
             check(f.x >= Double(rect.minX) - eps && f.y >= Double(rect.minY) - eps
                   && f.x + f.width <= Double(rect.maxX) + eps && f.y + f.height <= Double(rect.maxY) + eps,
                   "\(c.name): \(tile.kind!) outside the content rect: \(f) vs \(rect)")
-            switch tile.kind! {
-            case .browser:
-                // 16:9 to the 1/64 pt grid every tidy edge lands on.
-                check(abs(f.width - f.height * 16 / 9) <= 2 * CanvasTidyPacker.grid, "\(c.name): browser not 16:9: \(f)")
-            case .terminal:
-                check(f.height > f.width, "\(c.name): terminal not taller than wide: \(f)")
-            case .iosPreview:
-                let original = before.tiles.first { $0.id == tile.id }!.frame
-                check(f.width == original.width && f.height == original.height, "\(c.name): iOS preview was resized")
-            default: break
-            }
+            checkShape(c.name, tile, original: before.tiles.first { $0.id == tile.id }!.frame)
             // Edge to edge: every right edge meets the content edge or a
             // neighbour exactly one gap away; every bottom edge likewise
             // (a fixed-size tile may be shorter than its row).
@@ -276,6 +309,50 @@ func runTidyPackerChecks() {
         }
     }
 
+    // The film scene (`~/Movies/Array/auto-layout-night/tidy-before-canvas.json`):
+    // 3 browsers, 2 files, 3 notes in a 2300x1480 zone at 0,0, at the app's own
+    // gap (8), zone padding (24) and header (34).
+    do {
+        let filmGap = 8.0, filmPadding = 24.0, filmHeader = 34.0
+        let zoneId = uuid(70, 999)
+        let film: [(TileKind, Double, Double, Double, Double)] = [
+            (.browser, 40, 60, 900, 760), (.note, 948, 60, 520, 300), (.browser, 1476, 60, 700, 300),
+            (.file, 948, 368, 460, 640), (.note, 40, 828, 380, 420), (.browser, 428, 828, 480, 520),
+            (.file, 1476, 368, 720, 380), (.note, 1476, 828, 300, 560),
+        ]
+        let scene = CanvasAutoLayoutEngine.Scene(
+            tiles: film.enumerated().map { i, t in
+                .init(id: uuid(70, i), frame: TileFrame(x: t.1, y: t.2, width: t.3, height: t.4), zoneId: zoneId,
+                      minimumSize: TileGeometry.minimumSize(for: t.0), kind: t.0)
+            },
+            zones: [ZonePlacement(zoneId: zoneId, projectId: nil, origin: ZonePoint(x: 0, y: 0),
+                                  size: ZoneSize(width: 2300, height: 1480), color: "teal", collapsed: false,
+                                  hydrationPolicy: .automatic)])
+        func filmSolve(_ s: CanvasAutoLayoutEngine.Scene) -> CanvasLayoutTransaction {
+            CanvasAutoLayoutEngine.solve(scene: s, mutation: .tidy(zoneId: zoneId), gap: filmGap,
+                                         zonePadding: filmPadding, headerHeight: filmHeader)
+        }
+        let after = applied(scene, filmSolve(scene))
+        let zone = after.zones[0]
+        let contentArea = (zone.size.width - 2 * filmPadding) * (zone.size.height - filmHeader - 2 * filmPadding)
+        let filmFill = after.tiles.reduce(0.0) { $0 + $1.frame.width * $1.frame.height } / contentArea
+        report.append(String(format: "  film-scene: tiles 8 zone 2300x1480 -> %.0fx%.0f fill %.3f", zone.size.width, zone.size.height, filmFill))
+        check(filmFill >= 0.95, "film-scene: fill \(filmFill) below 0.95")
+        for tile in after.tiles { checkShape("film-scene", tile, original: scene.tiles.first { $0.id == tile.id }!.frame) }
+        for (i, a) in after.tiles.enumerated() {
+            for b in after.tiles.dropFirst(i + 1) {
+                let sepX = max(a.frame.x - (b.frame.x + b.frame.width), b.frame.x - (a.frame.x + a.frame.width))
+                let sepY = max(a.frame.y - (b.frame.y + b.frame.height), b.frame.y - (a.frame.y + a.frame.height))
+                check(max(sepX, sepY) >= filmGap - 0.05, "film-scene: tiles closer than the gap: \(a.frame) \(b.frame)")
+            }
+        }
+        let again = filmSolve(after)
+        check(again.tileFrames.isEmpty && again.zonePlacements.isEmpty, "film-scene: tidy is not idempotent")
+        if let pictureDir {
+            writeTidyPicture(before: scene, after: after, zoneId: zoneId, path: "\(pictureDir)/film-scene.png")
+        }
+    }
+
     // The zone grows only when it must: the eight-tile case keeps its width and
     // does not grow; the cramped zone grows taller; the roomy zone shrinks.
     func zoneAfter(_ name: String) -> (ZoneSize, ZoneSize) {
@@ -361,13 +438,13 @@ func runTidyPackerChecks() {
         "cost-60": "5690a4e2571787d5",
         "cost-89": "b737c4647b92cfc0",
         "cramped": "6d016e18ecc400ca",
-        "dust": "7763d41b85cd424c",
+        "dust": "9b11275806b0017b",
         "eight": "571b25d8afec5baf",
         "five": "03ea3c771b6ef0ce",
         "lead-five-helpers": "8a8d4d415d673daa",
         "lead-three-helpers": "1860f52c39abcb2e",
         "roomy": "65e14404e5d8d5a8",
-        "thirteen": "0bb09afd9c385746",
+        "thirteen": "67345f155dae5b57",
         "three": "03de6e777b49137b",
         "two": "43ad3d17d96b1b3e",
     ]
