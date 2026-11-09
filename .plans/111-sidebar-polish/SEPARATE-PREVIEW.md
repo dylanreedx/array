@@ -24,3 +24,44 @@ scripts/dev-app.sh --env ARRAY_SIDEBAR_PREVIEW=1
 ```
 
 For subsequent Finder opens, the bundle's sidebar identity enables the same sample mode. Targeted verification results are recorded alongside this guide after the merged build. No full matrix or push is part of this preview task.
+
+## Verification on the merged preview
+
+Builds: `swift build --product Array` and `swift build --product ContinuumRevivedCoreChecks` passed. 27 targeted app legs and 3 targeted Core legs passed. These cover the requested four flags, Classic/ownership/sort/shared-sidebar seams, 0.7.45 icon packs and their Settings/shared-menu/layout seams. No full matrix. Logs and per-leg results are under `qa-runs/sidebar-0745/verification.json`.
+
+- `--sidebar-screenshot-check`: PASS
+- `--inbox-parent-fold-check`: PASS
+- `--sidebar-indicator-settings-check`: PASS
+- `--agent-identity-color-check`: PASS
+- `--sidebar-ownership-check`: PASS
+- `--sidebar-sort-check`: PASS
+- `--shared-agent-sidebar-check`: PASS
+- `--sidebar-character-check`: PASS
+- `--character-settings-check`: PASS
+- `--character-size-check`: PASS
+- `--found-character-themes-check`: PASS
+- `--duckherd-theme-check`: PASS
+- `--character-sounds-check`: PASS
+- `--workspace-api-agent-character-check`: PASS
+- `--character-themes-live-check`: PASS
+- `--character-perf-check`: PASS
+- `--lead-character-check`: PASS
+- `--tile-character-check`: PASS
+- `--transcript-character-check`: PASS
+- `--character-sprite-check`: PASS
+- `--shared-agent-chrome-check`: PASS
+- `--settings-panel-check`: PASS
+- `--settings-modal-check`: PASS
+- `--settings-search-check`: PASS
+- `--update-channel-check`: PASS
+- `--agent-first-paint-check`: PASS
+- `--agent-tile-fit-check`: PASS
+- Core `--settings-schema-check`: PASS
+- Core `--agent-character-theme-check`: PASS
+- Core `--agent-character-pose-check`: PASS
+
+Extended verification exposed a stale active-group cache when the open agent changed without table membership changing. The real Settings witness now closes/reopens its active lead and asserts the shared light follows it: RED before the ownership-slice refresh, GREEN after. It retains the actual mouse-event and fresh isolated preference reads.
+
+The legacy ownership witness had two setup assumptions predating the preview defaults: an unspecified lead was expected folded, and helper tails were expected compact. It now explicitly folds that lead and chooses compact tails through real Show less controls. The expected row, rollup, timer and action assertions are unchanged. Initial failures and rerun results are retained in the verification report.
+
+The separate preview uses only synthetic sample rows; it starts no agent sessions. The colour-picker bug remains unreproduced; passing the identity-colour leg is not a claim that the reported intermittent bug is fixed.

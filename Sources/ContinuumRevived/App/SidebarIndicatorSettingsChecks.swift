@@ -148,6 +148,16 @@ enum SidebarIndicatorSettingsChecks {
                 card.indicatorReducesMotion = false
             }
             try expect(Set(renders).count == 4, "the four choices did not produce four rendered surfaces")
+            inbox.openAgentId = nil
+            inbox.layoutForQA()
+            fixture.settle()
+            try expect(descendants(inbox, InboxExpandedGroupLight.self).allSatisfy { $0.isHidden },
+                       "closing the active agent retained its shared group light")
+            inbox.openAgentId = id
+            inbox.layoutForQA()
+            fixture.settle()
+            try expect(descendants(inbox, InboxExpandedGroupLight.self).contains { !$0.isHidden },
+                       "reopening the active agent did not restore its shared group light")
             let finished = helpers.map { helper in
                 AgentInboxRow(id: helper.id, title: helper.displayTitle, state: .ready, depth: 1, createdAt: Date(), parentId: id)
             }

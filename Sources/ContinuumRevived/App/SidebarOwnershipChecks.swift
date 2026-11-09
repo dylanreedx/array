@@ -136,7 +136,7 @@ enum SidebarOwnershipChecks {
         inbox.currentWorkspaceId = workspaceId
         inbox.currentWorkspaceName = "personal"
         inbox.setScope(.all)
-        inbox.restoreParentFolds(folds ?? [uuid(quality): true, uuid(verify): true, uuid(quality + 1): true])
+        inbox.restoreParentFolds(folds ?? [uuid(quality): true, uuid(verify): true, uuid(quality + 1): true, uuid(collab): false])
         inbox.reload(rows: fixture ?? rows())
         inbox.layoutForQA()
         inbox.scrollToTopForQA()
@@ -493,6 +493,10 @@ enum SidebarOwnershipChecks {
         let visible = [busyLead, needsYou, working, recentDone, recentFailed, laterDone,
                        quietLead, quietLead + 1]
 
+        // Production now starts helper tails expanded. This witness exercises
+        // the compact age/attention policy, selected through its real affordance.
+        try click(busyLead, "prepare compact working family")
+        try click(quietLead, "prepare compact finished family")
         // 1. Needs you, working, then finished in the last 30 minutes, newest first.
         try expectRows(visible, "at rest")
         try expectFold(busyLead, "3 more · 1 failed", "at rest")

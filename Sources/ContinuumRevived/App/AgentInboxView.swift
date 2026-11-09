@@ -1310,6 +1310,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             guard openAgentId != oldValue else { return }
             let next = display(from: allRows)
             if next.map(\.identity) == items.map(\.identity) {
+                // The route can change without changing table membership. Refresh
+                // the shared family light alongside the row's interaction state.
+                if ownsSubagents {
+                    ownershipByTableRow = ownershipSlices()
+                    refreshVisibleOwnership()
+                }
                 applyHoverInPlace(tableRows: [oldValue, openAgentId].compactMap { $0 }.compactMap(tableRow(forAgentId:)))
             } else {
                 render(next, animateRows: false)
