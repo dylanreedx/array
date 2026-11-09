@@ -828,8 +828,7 @@ enum ContinuumApp {
             return
         }
         if (ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_PREVIEW"] == "1"
-            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"
-            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar"),
+            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"),
            Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier,
            !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) {
             SidebarRefinementsPreview.run()
