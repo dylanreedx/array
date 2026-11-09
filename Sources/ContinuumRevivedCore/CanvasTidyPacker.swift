@@ -1,38 +1,56 @@
 import CoreGraphics
 import Foundation
 
-/// The explicit Tidy: a pure, deterministic justified-row packer
-/// (`.plans/auto-layout-night`). It fills a zone's content rect edge to edge at
-/// the configured gap, shapes every tile by its kind (`TileGeometry.shapeRule`),
-/// keeps the reading order, and packs a lead agent with its helpers as one block.
+/// The explicit Tidy: a pure, deterministic packer (`.plans/auto-layout-night`).
+/// It fills a zone's content rect edge to edge at the configured gap and keeps
+/// every tile close to the size the user gave it.
 ///
-/// How it decides, in order:
-/// 1. Reading order: lines of tiles by top edge (a tile joins a line when its top
-///    sits within half the line's shortest tile of the line's top), then x. A
-///    lead and its helpers become ONE item where the first of them reads: the
-///    lead on the left at its agent shape, its helpers stacked top to bottom in
-///    one column on its right (two columns past four helpers), each column's
-///    heights (with gaps) summing to the lead's height, every helper in a
-///    column the same height. Helpers are exempt from the agent band; the
-///    column geometry shapes them (`.plans/auto-layout-night`).
-/// 2. For a uniform area scale `s` on a grid over [`areaFloor`, `areaCeiling`],
-///    a dynamic program picks the row breaks whose rows, each justified to the
-///    content width, keep every tile closest to `s` × its current area at its
-///    preferred ratio.
-/// 3. Rows then trade height inside each tile's ratio band (and below the
-///    per-tile cap, `tileAreaCap`) so the rows sum to the content height.
-/// 4. The cheapest candidate wins: the change to the tiles (mean squared log
-///    change of area and ratio, plus half the worst tile's) plus the change to
-///    the zone height (`growWeight` / `shrinkWeight`). So the zone grows in
-///    height when the tiles cannot fit without shrinking past the floor.
-/// 5. A zone too big for its tiles (mean stretch past the ceiling, or a fill
-///    that would lose a tenth of its height) also tries shorter heights.
-///
-/// The zone's width is the user's: tidy never changes it, except to widen a
-/// zone narrower than one tile at its minimum width.
-///
-/// A tidy result is its own fixed point: at s = 1 the current breaks cost exactly
-/// zero and fill exactly, so a second tidy changes nothing.
+/// The rules, as they ship:
+/// - **Shapes by kind** (`TileGeometry.shapeRule`). Browsers are exactly 16:9.
+///   Terminals are 0.6–0.9 w/h, taller than wide. Agents are 0.6–1.0. Text
+///   tiles (note, file, diff) never go narrower than 0.75 w/h, so an editor is
+///   never a tall strip. iOS previews and shared tiles keep their size and are
+///   only moved. No tile goes below its kind's minimum size.
+/// - **Per-tile area band.** Every tile stays within 0.5–2.0× its current area
+///   (`tileAreaFloor`, `tileAreaHardCap`). Only when no layout at the zone's
+///   width allows that does tidy relax the top to the per-tile cap, 2.56×
+///   (`tileAreaCap`).
+/// - **Size groups.** Tiles are ordered by the height that keeps each one's
+///   own area at its preferred ratio, tallest first, not by reading order.
+///   Tiles within 0.5% of the same height keep reading order among themselves.
+///   Rows stack tallest first. So a row's shared height can keep every tile in
+///   its band. Each row is the cheaper of two: a justified row, or an area-fit
+///   row where each tile's width is in proportion to √(ratio × area).
+/// - **Big-tile column.** Tiles at least 2× the zone's median area
+///   (`columnThreshold`) stack in one column at the left, at one shared width.
+///   The rows fill the rest. The big tiles stay visibly the largest instead of
+///   being traded for their neighbours. A column a previous tidy made is kept
+///   as it is.
+/// - **Lead and helpers.** A lead agent and its helpers are one block. The
+///   lead is on the left at its agent shape. Its helpers stack in one column
+///   on its right, two columns past four helpers (`helpersInOneColumn`). Each
+///   column's heights (with gaps) sum to the lead's height. Helpers are exempt
+///   from the agent band; the column geometry shapes them.
+/// - **The zone's width is the user's.** Tidy changes only the zone's height,
+///   growing it when the tiles cannot fit and shrinking it when they would
+///   stretch past `areaCeiling`. Two exceptions:
+///   - A zone narrower than one tile at its minimum width widens to just that.
+///   - A zone so wide that no layout at its width keeps every tile within the
+///     2.56× cap narrows, keeping its proportions. It never widens. One row
+///     cannot hold tiles whose areas differ by more than the band, and with
+///     fewer tiles per row each one grows wider.
+///   The order of attempts is in `packItems`.
+/// - **The cost.** Within those rules a dynamic program picks the row breaks
+///   for each area scale `s` on a grid over [`areaFloor`, `areaCeiling`]. The
+///   rows then trade height inside each tile's ratio band to fill the height.
+///   The cheapest result wins: the change to the tiles (mean squared log change
+///   of area and ratio, plus half the worst tile's) plus the change to the zone
+///   (`growWeight` / `shrinkWeight`).
+/// - **Idempotent.** A tidy result is its own fixed point. At s = 1 the
+///   current rows cost exactly zero and fill exactly, rows read back tallest
+///   first, and an existing column is kept. So a second tidy changes nothing.
+/// - Every edge lands on a 1/64 pt grid (`grid`), so world and zone-local
+///   frames convert exactly.
 public enum CanvasTidyPacker {
     public struct Member: Equatable, Sendable {
         public var id: UUID
@@ -150,43 +168,9 @@ public enum CanvasTidyPacker {
     /// this only bounds the column width.
     public static let helperRatioBand = (min: 0.9, max: 2.6)
 
-    /// Featured bands (`.plans/auto-layout-night`): a tile much larger than its
-    /// row mates spans two or three rows as a column at the left or right of a
-    /// band, the rows beside it justified into the rest of the width. Every
-    /// tile then keeps 0.5–2.0× its area: with that hard band a uniform grid is
-    /// infeasible for a zone whose big tiles are 3–4× the rest, so the span is
-    /// what fits. Off, tidy is the uniform justified-row packer.
-    ///
-    /// OFF (2026-11-09): on a real canvas the hard band has no layout at all
-    /// for the two zones it was meant for (40 widths × 3 heights scanned): its
-    /// rows follow reading order, and tiles of 333k–2.8M pt² sit side by side,
-    /// so no row height keeps every tile in band. Bands work where the band is
-    /// feasible (a 10-tile zone kept its kanban the largest, spanning two rows).
-    /// See `.plans/auto-layout-night/reports/tidy-engine.md`, round 7.
-    static let featuredBands = true
-    /// Size-grouped rows (`.plans/auto-layout-night`, experiment): tiles are
-    /// ordered by the height at which each keeps its own area at its preferred
-    /// ratio, tallest first, instead of by reading order, and rows are stacked
-    /// tallest first. A row's shared height can then keep every tile in its
-    /// hard area band, and a tile made several times the rest keeps its size.
-    /// Tiles within 2% of the same height keep reading order among themselves.
-    public static let sizeGroupedRows = true
     /// No tile below this share of its area, or above `tileAreaHardCap`.
     public static let tileAreaFloor = 0.5
     public static let tileAreaHardCap = 2.0
-    /// A tile at least this many times the median area may lead a band.
-    static let featureThreshold = 2.0
-    /// Most tiles a band's rows hold together.
-    static let featureMaxTiles = 12
-
-    /// A band: the big tile's column and the rows beside it.
-    private struct Featured {
-        var anchor: Int
-        var anchorLeft: Bool
-        var anchorWidth: Double
-        var subRows: [(start: Int, end: Int, height: Double)]
-    }
-
     /// A candidate row. Its geometry does not depend on the area scale; only
     /// its cost does: Σ (Lᵢ − ln s)² + shape, with Lᵢ = ln(areaᵢ / current areaᵢ).
     private struct Row {
@@ -199,7 +183,6 @@ public enum CanvasTidyPacker {
         var sumL2: Double = 0
         var flexCount: Double = 0
         var shapeCost: Double = 0
-        var featured: Featured? = nil
         /// An area-fit row: its tiles' widths are fixed whatever its height
         /// (`areaFitWidths`).
         var areaFit = false
@@ -212,7 +195,6 @@ public enum CanvasTidyPacker {
         var total: Double
         var scale: Double
         var cost: Double
-        var exact: Bool
         /// Geometric mean of every flexible tile's area against its current area.
         var stretch: Double
         /// Every tile within `tileAreaFloor`…`tileAreaHardCap` of its area.
@@ -224,8 +206,6 @@ public enum CanvasTidyPacker {
         guard !members.isEmpty else { return Result(frames: [:], content: content, scale: 1) }
         let items = orderedItems(members, gap: gap)
         let plain = packItems(items, content: content, gap: gap)
-        // Big tiles stacked in a column beside the rows, when that changes the
-        // tiles and the zone less, by the same score for both.
         // A column a tidy already made: tiles flush with the content's left edge,
         // one width, stacked top to bottom over its whole height, nothing else
         // beside them in that strip. Keeping exactly those is what makes a
@@ -249,14 +229,10 @@ public enum CanvasTidyPacker {
         // When the rows could not keep the zone's width (`packItems`, step 3),
         // neither need the column.
         let widthMoved = abs(plain.content.width - content.width) > grid
-        guard sizeGroupedRows,
-              let column = packWithColumn(items, content: content, gap: gap, keep: existingColumn(), freeWidth: widthMoved)
-        else { return plain }
         // Big tiles keep their size (the lead's decision, `.plans/auto-layout-night`):
         // an in-band column wins over rows that would trade a big tile's area
-        // for its neighbours'. The score still chooses the column's height.
-        if featuredBands { return column }
-        return score(column, items: items, content: content) < score(plain, items: items, content: content) - 1e-9 ? column : plain
+        // for its neighbours'. The score only chooses the column's width.
+        return packWithColumn(items, content: content, gap: gap, keep: existingColumn(), freeWidth: widthMoved) ?? plain
     }
 
     /// Tiles at least `columnThreshold` × the median area, stacked at the left
@@ -329,7 +305,7 @@ public enum CanvasTidyPacker {
         // The rows aim for the column's own height at that width.
         let restContent = CGRect(x: restLeft, y: top, width: right - restLeft, height: max(1, columnWidth * inverse + gaps))
         // The column is only worth having in band, so its rows are too.
-        guard let rows = packPass(rest, content: restContent, gap: gap, hard: featuredBands, lockWidth: true),
+        guard let rows = packPass(rest, content: restContent, gap: gap, hard: true, lockWidth: true),
               !rows.frames.isEmpty, abs(Double(rows.content.maxX) - right) <= grid else { return nil }
         let total = Double(rows.content.height)
         // The column fills the rows' height, each tile's share in proportion to
@@ -340,10 +316,8 @@ public enum CanvasTidyPacker {
             let ratio = columnWidth / h
             guard columnWidth >= tile.minW - 1e-6, h >= tile.minH - 1e-6,
                   ratio >= tile.ratioMin - 1e-6, ratio <= tile.ratioMax + 1e-6 else { return nil }
-            if featuredBands {
-                let change = columnWidth * h / tile.area
-                guard change >= tileAreaFloor - 1e-6, change <= tileAreaHardCap + 1e-6 else { return nil }
-            }
+            let change = columnWidth * h / tile.area
+            guard change >= tileAreaFloor - 1e-6, change <= tileAreaHardCap + 1e-6 else { return nil }
         }
         var frames = rows.frames
         let bottom = snap(top + total)
@@ -387,7 +361,7 @@ public enum CanvasTidyPacker {
         let restContent = CGRect(x: content.minX + CGFloat(columnGuess + gap), y: content.minY,
                                  width: CGFloat(max(1, guessHeight * aspect - columnGuess - gap)), height: CGFloat(guessHeight))
         // The column is only worth having in band, so its rows are too.
-        guard let rows = packPass(rest, content: restContent, gap: gap, hard: featuredBands, proportional: true),
+        guard let rows = packPass(rest, content: restContent, gap: gap, hard: true, proportional: true),
               !rows.frames.isEmpty else { return nil }
         func snap(_ v: Double) -> Double { (v / grid).rounded() * grid }
         let left = snap(Double(content.minX)), top = snap(Double(content.minY)), gridGap = snap(gap)
@@ -399,10 +373,8 @@ public enum CanvasTidyPacker {
         for tile in big {
             let h = columnWidth / tile.ratio
             guard columnWidth >= tile.minW - 1e-6, h >= tile.minH - 1e-6 else { return nil }
-            if featuredBands {
-                let change = columnWidth * h / tile.area
-                guard change >= tileAreaFloor - 1e-6, change <= tileAreaHardCap + 1e-6 else { return nil }
-            }
+            let change = columnWidth * h / tile.area
+            guard change >= tileAreaFloor - 1e-6, change <= tileAreaHardCap + 1e-6 else { return nil }
         }
         let dx = restLeft - snap(Double(rows.content.minX))
         var frames: [UUID: TileFrame] = [:]
@@ -431,7 +403,7 @@ public enum CanvasTidyPacker {
             let shape = log((f.width / f.height) / item.ratio)
             let change = l * l + 2 * shape * shape + capPenalty(l)
             total += change; worst = max(worst, change); counted += 1
-            if featuredBands, l < log(tileAreaFloor) - 0.01 || l > log(tileAreaHardCap) + 0.01 { total += 1e6 }
+            if l < log(tileAreaFloor) - 0.01 || l > log(tileAreaHardCap) + 0.01 { total += 1e6 }
         }
         var zone = 0.0
         for (now, was) in [(Double(result.content.width), Double(content.width)), (Double(result.content.height), Double(content.height))] where was > 0 {
@@ -441,7 +413,7 @@ public enum CanvasTidyPacker {
         return (counted > 0 ? total / counted + worst / 2 : 0) + zone
     }
 
-    /// The zone's width is the user's. With the hard band on, in order:
+    /// The zone's width is the user's. In order:
     /// 1. a layout at the zone's width keeping every tile inside its band;
     /// 2. a layout at the zone's width keeping every tile between the band's
     ///    floor and the per-tile cap (`tileAreaCap`);
@@ -451,13 +423,10 @@ public enum CanvasTidyPacker {
     ///    more than the band, and fewer tiles per row each grow wider);
     /// 4. failing all of those, the best layout at the zone's width.
     private static func packItems(_ items: [Item], content: CGRect, gap: Double) -> Result {
-        if featuredBands, let inBand = packPass(items, content: content, gap: gap, hard: true) { return inBand }
-        func soft() -> Result {
-            packPass(items, content: content, gap: gap, hard: false) ?? Result(frames: [:], content: content, scale: 1)
-        }
-        guard featuredBands else { return soft() }
+        if let inBand = packPass(items, content: content, gap: gap, hard: true) { return inBand }
         if let withinCap = packPass(items, content: content, gap: gap, hard: true, cap: tileAreaCap) { return withinCap }
-        return packPass(items, content: content, gap: gap, hard: true, widthSearch: true) ?? soft()
+        if let narrower = packPass(items, content: content, gap: gap, hard: true, widthSearch: true) { return narrower }
+        return packPass(items, content: content, gap: gap, hard: false) ?? Result(frames: [:], content: content, scale: 1)
     }
 
     private static func packPass(_ items: [Item], content: CGRect, gap: Double, hard: Bool,
@@ -587,40 +556,12 @@ public enum CanvasTidyPacker {
         let right = snap(left + width), bottom = snap(top + chosen.total)
         var frames: [UUID: TileFrame] = [:]
         var y = top
-        if sizeGroupedRows {
-            // Tallest row on top, so a re-tidy reads the rows back in order.
-            chosen.rows = chosen.rows.enumerated().sorted { a, b in
-                a.element.height != b.element.height ? a.element.height > b.element.height : a.offset < b.offset
-            }.map(\.element)
-        }
+        // Tallest row on top, so a re-tidy reads the rows back in order.
+        chosen.rows = chosen.rows.enumerated().sorted { a, b in
+            a.element.height != b.element.height ? a.element.height > b.element.height : a.offset < b.offset
+        }.map(\.element)
         for (rowIndex, row) in chosen.rows.enumerated() {
             let rowBottom = rowIndex == chosen.rows.count - 1 ? bottom : snap(y + row.height)
-            if let band = row.featured {
-                // The big tile's column, and the rows beside it justified into
-                // the rest of the width, the last ending on the band's bottom.
-                let anchorEdge = band.anchorLeft ? snap(left + band.anchorWidth) : snap(right - band.anchorWidth)
-                let anchorFrame = band.anchorLeft
-                    ? TileFrame(x: left, y: y, width: anchorEdge - left, height: rowBottom - y)
-                    : TileFrame(x: anchorEdge, y: y, width: right - anchorEdge, height: rowBottom - y)
-                frames[items[band.anchor].id] = anchorFrame
-                let runLeft = band.anchorLeft ? anchorEdge + gridGap : left
-                let runRight = band.anchorLeft ? right : anchorEdge - gridGap
-                var subY = y
-                for (subIndex, sub) in band.subRows.enumerated() {
-                    let subBottom = subIndex == band.subRows.count - 1 ? rowBottom : snap(subY + sub.height)
-                    let subRow = Row(start: sub.start, end: sub.end, height: sub.height, heightMin: sub.height, heightMax: sub.height)
-                    let widths = rowWidths(flat, row: subRow, height: sub.height, width: runRight - runLeft, gap: gap)
-                    var x = runLeft
-                    for (offset, index) in (sub.start..<sub.end).enumerated() {
-                        let edge = index == sub.end - 1 ? runRight : snap(x + widths.values[offset])
-                        frames[items[index].id] = TileFrame(x: x, y: subY, width: edge - x, height: subBottom - subY)
-                        x = edge + gridGap
-                    }
-                    subY = subBottom + gridGap
-                }
-                y = rowBottom + gridGap
-                continue
-            }
             let widths = rowWidths(flat, row: row, height: row.height, width: width, gap: gap)
             var x = left
             for (offset, index) in (row.start..<row.end).enumerated() {
@@ -728,7 +669,7 @@ public enum CanvasTidyPacker {
             helpers.forEach { emitted.insert($0.id) }
             items.append(blockItem(lead: lead, helpers: helpers, gap: gap))
         }
-        return sizeGroupedRows ? groupedBySize(items) : items
+        return groupedBySize(items)
     }
 
     /// Items tallest preferred height first; a run whose heights are each within
@@ -877,12 +818,6 @@ public enum CanvasTidyPacker {
             }
             cell += 1
         }
-        // Featured bands, by the item they end at.
-        var featuredByEnd = [[Row]](repeating: [], count: n + 1)
-        if hard && !sizeGroupedRows {
-            for band in featuredCandidates(f, width: width, gap: gap) { featuredByEnd[band.end].append(band) }
-        }
-        var featuredPool: [Row] = []
         var evaluated: [[Int]: Layout] = [:]
         var best: Layout?
         for scale in scaleGrid() {
@@ -901,31 +836,19 @@ public enum CanvasTidyPacker {
                     }
                     start += 1
                 }
-                for band in featuredByEnd[end] where cost[band.start].isFinite {
-                    let total = cost[band.start] + band.cost(logScale: ls)
-                    if total < cost[end] - 1e-12 {
-                        cost[end] = total
-                        featuredPool.append(band)
-                        choice[end] = -2 - (featuredPool.count - 1)
-                    }
-                }
                 end += 1
             }
             guard cost[n].isFinite else { continue }
             var rows: [Row] = []
             end = n
             while end > 0 {
-                let picked: Row?
-                if choice[end] >= 0 { picked = table[choice[end]] }
-                else if choice[end] <= -2 { picked = featuredPool[-2 - choice[end]] }
-                else { picked = nil }
-                guard let row = picked else { break }
+                guard choice[end] >= 0, let row = table[choice[end]] else { break }
                 rows.append(row)
                 end = row.start
             }
             rows.reverse()
             var layout: Layout
-            let key = rows.map { $0.featured == nil ? $0.start : -1 - $0.start * 1_000 - ($0.featured!.anchorLeft ? 0 : 500) - $0.featured!.subRows.count * 100 - $0.featured!.subRows[0].end }
+            let key = rows.map(\.start)
             if let known = evaluated[key] {
                 layout = known
             } else {
@@ -936,7 +859,7 @@ public enum CanvasTidyPacker {
                 let measured = measure(f, rows: fitted, width: width, gap: gap)
                 let zoneTerm = exact ? 0 : (total > height ? growWeight : shrinkWeight) * pow(log(total / height), 2)
                 layout = Layout(rows: fitted, total: total, scale: scale, cost: measured.deviation + zoneTerm,
-                                exact: exact, stretch: measured.stretch, withinBand: featuredBands ? measured.withinBand : true)
+                                stretch: measured.stretch, withinBand: measured.withinBand)
                 evaluated[key] = layout
             }
             layout.scale = scale
@@ -970,7 +893,7 @@ public enum CanvasTidyPacker {
             if lo > hi * (1 + 1e-9) { return nil }
         }
         let classic = evaluateClassicRow(f, start: start, end: end, width: width, gap: gap, hard: hard)
-        guard sizeGroupedRows, let fitted = evaluateAreaFitRow(f, start: start, end: end, width: width, gap: gap, hard: hard)
+        guard let fitted = evaluateAreaFitRow(f, start: start, end: end, width: width, gap: gap, hard: hard)
         else { return classic }
         guard let classic else { return fitted }
         return fitted.cost(logScale: 0) < classic.cost(logScale: 0) - 1e-12 ? fitted : classic
@@ -1158,109 +1081,6 @@ public enum CanvasTidyPacker {
             }
             i += 1
         }
-        return row
-    }
-
-    /// Every featured band worth trying at this width: a big tile (at least
-    /// `featureThreshold` × the median area, flexible, not a block) with two or
-    /// three rows beside it, on its left (it leads the band in reading order) or
-    /// its right (it follows the band's first row, which shares its top).
-    private static func featuredCandidates(_ f: Flat, width: Double, gap: Double) -> [Row] {
-        let n = f.count
-        guard n >= 3 else { return [] }
-        var areas: [Double] = []
-        for i in 0..<n { areas.append(f.area[i]) }
-        areas.sort()
-        let median = areas.count % 2 == 1 ? areas[n / 2] : (areas[n / 2 - 1] + areas[n / 2]) / 2
-        func plainFlex(_ i: Int) -> Bool { !f.isFixed[i] && f.extra[i] == 0 }
-        var bands: [Row] = []
-        // Splits of [start, end) into `parts` runs of 1…maxRowLength tiles.
-        func splits(_ start: Int, _ end: Int, _ parts: Int) -> [[(Int, Int)]] {
-            if parts == 1 { return end - start >= 1 && end - start <= maxRowLength ? [[(start, end)]] : [] }
-            var out: [[(Int, Int)]] = []
-            var cut = start + 1
-            while cut <= end - (parts - 1) && cut - start <= maxRowLength {
-                for rest in splits(cut, end, parts - 1) { out.append([(start, cut)] + rest) }
-                cut += 1
-            }
-            return out
-        }
-        for a in 0..<n where plainFlex(a) && f.area[a] >= featureThreshold * median {
-            // Anchor on the left: it leads; the rows follow it.
-            var end = a + 3
-            while end <= min(n, a + 1 + featureMaxTiles) {
-                if (a + 1..<end).allSatisfy(plainFlex) {
-                    for parts in 2...3 {
-                        for runs in splits(a + 1, end, parts) {
-                            if let band = evaluateFeatured(f, anchor: a, left: true, runs: runs, width: width, gap: gap) { bands.append(band) }
-                        }
-                    }
-                }
-                end += 1
-            }
-            // Anchor on the right: the first row precedes it.
-            var first = a - 1
-            while first >= max(0, a - maxRowLength) {
-                guard plainFlex(first) else { break }
-                var end = a + 2
-                while end <= min(n, first + featureMaxTiles + 1) {
-                    if (a + 1..<end).allSatisfy(plainFlex) {
-                        for parts in 1...2 {
-                            for rest in splits(a + 1, end, parts) {
-                                if let band = evaluateFeatured(f, anchor: a, left: false, runs: [(first, a)] + rest,
-                                                               width: width, gap: gap) { bands.append(band) }
-                            }
-                        }
-                    }
-                    end += 1
-                }
-                first -= 1
-            }
-        }
-        return bands
-    }
-
-    /// A band at the tiles' preferred ratios. The rows beside the column are
-    /// justified into W' = width − gap − anchorWidth; each row's height is
-    /// (W' − its gaps) / Σ ratios, and the column's height H is their sum plus
-    /// the gaps between them, with anchorWidth = ratio × H. That is linear in
-    /// H, so H is solved directly. Nil if any tile would leave its hard area
-    /// band or fall below its minimum.
-    private static func evaluateFeatured(_ f: Flat, anchor: Int, left: Bool, runs: [(Int, Int)],
-                                         width: Double, gap: Double) -> Row? {
-        var numerator = Double(runs.count - 1) * gap, inverse = 0.0
-        var sums: [Double] = []
-        for (start, end) in runs {
-            var ratioSum = 0.0
-            for i in start..<end { ratioSum += f.ratio[i] }
-            let fixed = Double(end - start - 1) * gap
-            sums.append(ratioSum)
-            numerator += (width - gap - fixed) / ratioSum
-            inverse += 1 / ratioSum
-        }
-        let height = numerator / (1 + f.ratio[anchor] * inverse)
-        let anchorWidth = f.ratio[anchor] * height
-        let rest = width - gap - anchorWidth
-        guard height > 0, rest > 0, anchorWidth >= f.minW[anchor], height >= f.minH[anchor] else { return nil }
-        let segmentStart = min(anchor, runs[0].0)
-        let segmentEnd = runs.last!.1
-        var row = Row(start: segmentStart, end: segmentEnd, height: height, heightMin: height, heightMax: height)
-        func add(_ i: Int, _ w: Double, _ h: Double) -> Bool {
-            let l = log(w * h / f.area[i])
-            guard l >= log(tileAreaFloor) - 1e-9, l <= log(tileAreaHardCap) + 1e-9,
-                  w >= f.minW[i] - 1e-6, h >= f.minH[i] - 1e-6 else { return false }
-            row.sumL += l; row.sumL2 += l * l; row.flexCount += 1
-            return true
-        }
-        guard add(anchor, anchorWidth, height) else { return nil }
-        var subRows: [(start: Int, end: Int, height: Double)] = []
-        for ((start, end), ratioSum) in zip(runs, sums) {
-            let h = (rest - Double(end - start - 1) * gap) / ratioSum
-            guard h > 0 else { return nil }
-            for i in start..<end { guard add(i, f.ratio[i] * h, h) else { return nil } }
-            subRows.append((start, end, h))
-        }
-        row.featured = Featured(anchor: anchor, anchorLeft: left, anchorWidth: anchorWidth, subRows: subRows)
         return row
     }
 
@@ -1524,16 +1344,6 @@ public enum CanvasTidyPacker {
             if areaDev < log(tileAreaFloor) - 0.01 || areaDev > log(f.hardCap) + 0.01 { withinBand = false }
         }
         for row in rows {
-            if let band = row.featured {
-                record(band.anchor, band.anchorWidth, row.height)
-                let rest = width - gap - band.anchorWidth
-                for sub in band.subRows {
-                    let subRow = Row(start: sub.start, end: sub.end, height: sub.height, heightMin: sub.height, heightMax: sub.height)
-                    let widths = rowWidths(f, row: subRow, height: sub.height, width: rest, gap: gap).values
-                    for (offset, index) in (sub.start..<sub.end).enumerated() { record(index, widths[offset], sub.height) }
-                }
-                continue
-            }
             let widths = rowWidths(f, row: row, height: row.height, width: width, gap: gap).values
             for (offset, index) in (row.start..<row.end).enumerated() where !f.isFixed[index] {
                 record(index, widths[offset] - f.extra[index], row.height)
