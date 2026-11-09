@@ -59,7 +59,7 @@ enum SidebarIndicatorSettingsChecks {
             }
             let initialButton = try control()
             try expect(initialButton.selectedID == "duplex", "Settings must show Duplex by default")
-            let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 360, height: 400), indicatorDefaults: defaults)
+            let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 360, height: 1000), indicatorDefaults: defaults)
             let window = NSWindow(contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.appearance = NSAppearance(named: appearance)
@@ -68,13 +68,22 @@ enum SidebarIndicatorSettingsChecks {
             defer { window.orderOut(nil) }
             let id = UUID()
             inbox.openAgentId = id
-            inbox.reload(rows: [AgentInboxRow(id: id, title: "Active indicator witness", state: .working, createdAt: Date(), identityColor: "teal")])
+            let lead = AgentInboxRow(id: id, title: "Active indicator witness", state: .working, createdAt: Date(), identityColor: "teal")
+            let helpers = (0..<24).map { index in
+                AgentInboxRow(id: UUID(), title: "Helper \(index)", state: .working,
+                              depth: 1, createdAt: Date(), parentId: id)
+            }
+            inbox.reload(rows: [lead] + helpers)
             inbox.layoutForQA()
             inbox.rebuildRowsForQA()
             fixture.settle()
             guard let card = descendants(inbox, AgentInboxCardView.self).first(where: { $0.isRouteActive }) else {
                 throw Failure(description: "sidebar did not render its real active card")
             }
+            guard let tail = descendants(inbox, AgentInboxRemainderView.self).first else {
+                throw Failure(description: "sidebar did not render the real N-more-helpers tail")
+            }
+            try expect(!tail.isSweepingForQA, "default Duplex left a Classic border slice on the helper tail")
             let builds = inbox.cellBuildCountForQA
             var renders: [Data] = []
             // Deliberately visit Gradient before Sheen: stale colour-stop counts
@@ -104,6 +113,8 @@ enum SidebarIndicatorSettingsChecks {
                 try expect(card.isRouteActive && card.window === window, "style switch lost the active card")
                 let layers = card.qaIndicatorLayers
                 let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                try expect(tail.isSweepingForQA == (style == .classic && !reduced),
+                           "the helper tail did not follow the live style's border policy")
                 switch style {
                 case .classic:
                     try expect(layers.wash.isHidden && layers.edge.isHidden, "Classic still paints an alternative surface")
