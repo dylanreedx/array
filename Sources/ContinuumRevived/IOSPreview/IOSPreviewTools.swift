@@ -224,13 +224,23 @@ actor IOSPreviewTools {
         catch { installationTask = nil; throw error }
     }
 
+    /// Never `Bundle.module`: it traps in a packaged app. Same lookup as
+    /// `BoardTaskDetailController.editorURL`.
+    static var bridgeURL: URL? {
+        let name = "continuum-revived_ContinuumRevived.bundle"
+        let candidates = [Bundle.main.resourceURL?.appendingPathComponent(name),
+                          Bundle.main.bundleURL.appendingPathComponent(name)].compactMap { $0 }
+        return candidates.lazy.compactMap(Bundle.init(url:)).first?
+            .url(forResource: "bridge", withExtension: "cjs", subdirectory: "IOSPreview")
+    }
+
     private func install() async throws -> Installation {
         let env = ToolEnvironment.shared.environment()
         guard let nodePath = (env["PATH"] ?? "").split(separator: ":").map({ String($0) + "/node" })
             .first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             throw IOSPreviewError.unavailable("Install Node.js to connect an iOS preview.")
         }
-        guard let bridge = Bundle.module.url(forResource: "bridge", withExtension: "cjs", subdirectory: "IOSPreview") else {
+        guard let bridge = Self.bridgeURL else {
             throw IOSPreviewError.unavailable("The iOS preview helper is missing. Reinstall Array.")
         }
         let base = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"].map { URL(fileURLWithPath: $0) }
