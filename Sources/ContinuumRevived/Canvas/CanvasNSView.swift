@@ -371,6 +371,18 @@ final class CanvasNSView: NSView, TokenThemed {
     private var autoLayoutBlockedZoneIds: Set<UUID> = []
     var autoLayoutReduceMotionProvider: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     var qaAutoLayoutUndoText: String { autoLayoutUndoToast.qaText }
+    /// QA: wall time of each stage of the auto-layout passes since the last
+    /// reset, in ms (`--auto-layout-tidy-latency-check`). Production pays two
+    /// clock reads per stage per pass — never per frame or per tile.
+    struct AutoLayoutStageTimes: Equatable {
+        var begin = 0.0, solve = 0.0, apply = 0.0, animate = 0.0, finish = 0.0
+        var capture = 0.0, persist = 0.0, notify = 0.0, undo = 0.0
+        var tidy = 0.0
+        var presentLayout = 0.0, presentDisplay = 0.0, presentFlush = 0.0
+        var solves = 0
+    }
+    var qaAutoLayoutStageTimes = AutoLayoutStageTimes()
+    private static func stageClock() -> Double { CACurrentMediaTime() * 1000 }
     @discardableResult func qaClickAutoLayoutUndo() -> Bool { autoLayoutUndoToast.clickUndoForQA() }
 
     /// Production membership write: the single sink every canvas membership
@@ -603,6 +615,8 @@ final class CanvasNSView: NSView, TokenThemed {
             guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
         }
         let scene = baseline ?? autoLayoutScene()
+        let solveStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.solves += 1 }
         let transaction = CanvasAutoLayoutEngine.solve(
             scene: scene,
             mutation: mutation,
@@ -631,6 +645,9 @@ final class CanvasNSView: NSView, TokenThemed {
                 return scope
             }()
         )
+        qaAutoLayoutStageTimes.solve += Self.stageClock() - solveStart
+        let applyStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.apply += Self.stageClock() - applyStart }
         autoLayoutBlockedZoneIds = transaction.blockedZoneIds
         if case .tile = mutation {
             autoLayoutMoveLatch = transaction.moveLatch
@@ -886,6 +903,8 @@ final class CanvasNSView: NSView, TokenThemed {
         layoutAllTiles(onlyChangedTiles: true)
 
         guard !autoLayoutReduceMotionProvider() else { return }
+        let animateStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.animate += Self.stageClock() - animateStart }
         let activeZoneMembers: Set<UUID> = activeZoneId.map { zoneId in
             Set(autoLayoutScene().tiles.lazy.filter { $0.zoneId == zoneId }.map(\.id))
         } ?? []
@@ -911,6 +930,8 @@ final class CanvasNSView: NSView, TokenThemed {
     @discardableResult
     func finishAutoLayoutGesture() -> CanvasLayoutTransaction? {
         guard let baseline = autoLayoutGestureBaseline else { return nil }
+        let finishStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.finish += Self.stageClock() - finishStart }
         autoLayoutGestureBaseline = nil
         resetAutoLayoutMoveLatch()
         let current = autoLayoutScene()
@@ -930,6 +951,8 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true) {
+        let tidyStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.tidy += Self.stageClock() - tidyStart }
         let baseline = autoLayoutScene()
         _ = beginGeometryEdit(
             .tidy,
@@ -1313,6 +1336,8 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func showAutoLayoutUndo(changedCount: Int) {
         guard changedCount > 0 else { return }
+        let undoStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.undo += Self.stageClock() - undoStart }
         autoLayoutUndoTimer?.invalidate()
         let noun = changedCount == 1 ? "item" : "items"
         autoLayoutUndoToast.show("Auto layout arranged \(changedCount) \(noun)")
@@ -2838,6 +2863,8 @@ final class CanvasNSView: NSView, TokenThemed {
         includeAllZones: Bool = false
     ) -> Bool {
         guard pendingGeometryEdit == nil else { return false }
+        let beginStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.begin += Self.stageClock() - beginStart }
         let capturesLayoutChain = isAutoLayoutEnabled && action != .resizeTileToPreset && action != .dockTile
         let capturedTileIds = includeAllTiles || capturesLayoutChain
             ? Set(allWorkspaceTiles().map(\.id))
@@ -2856,13 +2883,20 @@ final class CanvasNSView: NSView, TokenThemed {
     func commitGeometryEdit() -> CanvasGeometryTransaction? {
         guard let pending = pendingGeometryEdit else { return nil }
         pendingGeometryEdit = nil
+        let captureStart = Self.stageClock()
         let after = captureGeometry(tileIds: pending.tileIds, zoneIds: pending.zoneIds)
         let transaction = CanvasGeometryTransaction(action: pending.action, before: pending.before, after: after)
+        qaAutoLayoutStageTimes.capture += Self.stageClock() - captureStart
         guard !transaction.isNoOp else { return nil }
-        guard persistGeometrySnapshot(transaction.after, changedFrom: transaction.before) else {
+        let persistStart = Self.stageClock()
+        let persisted = persistGeometrySnapshot(transaction.after, changedFrom: transaction.before)
+        qaAutoLayoutStageTimes.persist += Self.stageClock() - persistStart
+        guard persisted else {
             _ = applyGeometrySnapshot(transaction.before, notifyCommit: false)
             return nil
         }
+        let notifyStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.notify += Self.stageClock() - notifyStart }
         if let workspaceId = activeUndoWorkspaceId {
             canvasHistories[workspaceId]?.record(transaction)
         }

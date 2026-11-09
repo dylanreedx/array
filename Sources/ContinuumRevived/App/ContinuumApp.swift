@@ -3683,6 +3683,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--auto-layout-tidy-latency-check") {
+            _ = NSApplication.shared
+            do {
+                _ = try AutoLayoutTidyLatencyChecks.run()
+                print("AutoLayoutTidyLatencyChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --auto-layout-tidy-latency-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--canvas-pointer-path-check") {
             _ = NSApplication.shared
             Task { @MainActor in
