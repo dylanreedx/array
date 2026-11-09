@@ -1228,6 +1228,7 @@ run_leg scripts/check-film-absent.sh
 run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks
+run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 fi
@@ -1510,6 +1511,7 @@ run_app_check .build/debug/Array --leader-modal-recovery-check
 run_app_check .build/debug/Array --palette-agent-harness-check
 run_app_check .build/debug/Array --reveal-in-finder-check
 run_app_check .build/debug/Array --spawn-arrange-commit-check
+run_app_check .build/debug/Array --spawn-sizing-check
 run_app_check .build/debug/Array --tile-insert-slide-check
 run_app_check .build/debug/Array --tile-multiselect-check
 run_app_check .build/debug/Array --settle-closes-tile-check
@@ -1550,6 +1552,12 @@ run_app_check .build/debug/Array --stranded-tile-recovery-check
 # Confidence pass S2: the layout commit skipped tiles it could place in no file
 # and still reported success. It now fails, the move rolls back, and it says so.
 run_app_check .build/debug/Array --layout-commit-truth-check
+# A drag or tidy commit reads and writes only the projects it touched, flat in
+# the workspace's project count (.plans/auto-layout-night).
+run_app_check .build/debug/Array --layout-commit-scope-check
+# A tidy that grows a zone pushes its neighbours clear as rigid bodies; a shrink
+# pulls nothing in; Tidy Canvas over a 2x3 grid fills and is a fixed point.
+run_app_check .build/debug/Array --tidy-zone-neighbours-check
 # Confidence pass S2: a refused or failed spawn left its web view running and
 # its tile drawn with nothing on disk. It now takes back what it made.
 run_app_check .build/debug/Array --refused-spawn-teardown-check
@@ -1593,6 +1601,11 @@ run_app_check .build/debug/Array --zone-close-keep-delete-check
 run_app_check .build/debug/Array --zone-chrome-zorder-check
 run_app_check .build/debug/Array --zone-resize-check
 run_app_check .build/debug/Array --jelly-auto-layout-check
+# Everyday drags in a tidied mixed zone stay legal (unequal swaps trade row
+# positions), and the jelly trajectory probe, now with a tidied mixed zone, finds
+# no ORTHO/FLIP/TELEPORT/STUCK frame and no overlapping drop (.plans/auto-layout-night).
+run_app_check .build/debug/Array --drag-in-tidy-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
 run_app_check .build/debug/Array --auto-layout-fanout-app-check
 run_app_check .build/debug/Array --zone-adaptive-bounds-check
 run_app_check .build/debug/Array --agent-status-check
@@ -2309,6 +2322,8 @@ run_app_check .build/debug/Array --browser-click-recency-check
 run_app_check .build/debug/Array --language-server-release-check
 run_app_check .build/debug/Array --zone-tier-transition-check
 run_app_check .build/debug/Array --spawn-placement-check
+run_app_check .build/debug/Array --spawn-framing-check
+run_app_check .build/debug/Array --spawn-live-framing-check
 run_app_check .build/debug/Array --focus-mode-check
 run_app_check .build/debug/Array --spawn-rate-limit-check
 run_app_check .build/debug/Array --file-tree-boot-persistence-check

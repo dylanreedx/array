@@ -805,7 +805,10 @@ final class GhosttyRuntimeContext {
         // A multiplayer preview never reads the user's Ghostty config: it can
         // be a symlink into a protected folder (~/Documents), and every rebuilt
         // ad-hoc preview bundle would then raise a consent dialog at boot.
-        if MultiplayerPreview.current == nil {
+        // An unattended capture run opts out the same way, because nobody is
+        // there to answer that dialog and it blocks boot.
+        if MultiplayerPreview.current == nil,
+           ProcessInfo.processInfo.environment["ARRAY_SKIP_USER_GHOSTTY_CONFIG"] != "1" {
             Self.ensureGhosttyXDGConfigBridge()
             ghostty_config_load_default_files(config)
             ghostty_config_load_recursive_files(config)

@@ -331,7 +331,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .terminal),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .terminal
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let wherePath = profile.cwd
@@ -1127,7 +1128,8 @@ final class TileSpawner {
                 worldPoint: worldPoint,
                 size: size,
                 in: canvasView,
-                targetZoneId: targetZoneId
+                targetZoneId: targetZoneId,
+                fitting: .browser
             )
         }
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
@@ -1628,6 +1630,10 @@ final class TileSpawner {
         guard let canvasView,
               canvasView.tileRecord(for: tileId) != nil
         else { return false }
+        if let reveal = canvasView.onUserTileReveal {
+            reveal(tileId)
+            return true
+        }
         canvasView.centerOnTile(tileId)
         if canvasView.focusBroker?.enterScope(.tile(tileId), reason: .userClick) != true {
             canvasView.bringToFront(tileId: tileId)
@@ -1884,7 +1890,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: size ?? CanvasEngine.defaultFrame(for: .managedAgent),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .managedAgent
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         // One resolution seeds every pre-attach projection. Cmd+K supplies its
@@ -2429,7 +2436,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .note),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .note
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
@@ -2550,7 +2558,8 @@ final class TileSpawner {
         switch placement {
         case let .automatic(worldPoint):
             frame = makeProjectTilePlacement(
-                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId)
+                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId,
+                fitting: .kanban)
         case let .beside(anchorTileId):
             let siblings = targetZoneId.flatMap { canvasView.tilesInWorldFrames(forZoneId: $0) } ?? []
             guard let anchor = siblings.first(where: { $0.id == anchorTileId }) else {
@@ -2669,7 +2678,7 @@ final class TileSpawner {
             let targetZoneId = creationScopeProvider?()?.zoneId
             let frame = makeProjectTilePlacement(
                 worldPoint: nil, size: CanvasEngine.defaultFrame(for: .kanban),
-                in: canvasView, targetZoneId: targetZoneId)
+                in: canvasView, targetZoneId: targetZoneId, fitting: .kanban)
             let tile = Tile(id: tileId, kind: .kanban, title: board.title, frame: frame,
                             zPosition: CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId)),
                             runtimeRef: nil, metadata: TileMetadata(boardId: boardId))
@@ -2718,7 +2727,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .diffReview),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .diffReview
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
@@ -2978,7 +2988,7 @@ final class TileSpawner {
     }
 
     /// Gap between an anchor tile and the file tile docked beside it.
-    static let anchoredFileGap: Double = 24
+    static var anchoredFileGap: Double { TileGapResolver.resolvedGap() }
 
     private func spawnFileImpl(
         location: DocumentLocation,
@@ -3006,6 +3016,9 @@ final class TileSpawner {
         // producing a tile belonging to no zone at all. One real store held exactly
         // that: notes.md at world (1246,-851) with `zoneId: nil`.
         let worldSiblings = canvasView.allTilesInWorldFrames()
+        let targetZoneId = targetZoneId
+            ?? anchorTileId.flatMap { id in worldSiblings.first(where: { $0.id == id })?.zoneId }
+            ?? canvasView.activeProjectZonePlacement?.zoneId
         if let existing = canvasView.allWorkspaceTiles().first(where: { $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == canonicalPath }) {
             return .alreadyOpen(tileId: existing.id)
         }
@@ -3028,7 +3041,8 @@ final class TileSpawner {
             frame = targetPlacement.map { CanvasEngine.worldToZoneLocal(world, zoneOrigin: $0.origin) } ?? world
         } else {
             frame = makeProjectTilePlacement(
-                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId)
+                worldPoint: worldPoint, size: size, in: canvasView, targetZoneId: targetZoneId,
+                fitting: .file)
         }
 
         let tile = Tile(
@@ -3137,7 +3151,7 @@ final class TileSpawner {
             // this project living in a zone below the live tier -- or in another
             // workspace -- on the next spawn. Only a zone that is actually
             // installed may delete a tile.
-            try projectStore.saveCanvas(
+            try projectStore.saveCanvasAfterVerifiedRead(
                 canvasView.canvasStateForPersistence(
                     projectId: projectId,
                     base: persisted,
@@ -3168,7 +3182,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .runArtifacts),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .runArtifacts
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
@@ -4827,6 +4842,17 @@ final class TileSpawner {
             return tile.frame
         }
 
+        // A spawn during a camera flight belongs at the destination, rather than
+        // the transient position at the time the command was handled.
+        let flightFixture = try makeFixture(name: "flight", zoneOrigin: ZonePoint(x: 0, y: 0), viewport: CanvasViewport(x: 0, y: 0, zoom: 1))
+        flightFixture.canvas.navigationFlightOverrideForQA = true
+        flightFixture.canvas.navigateViewport(to: CanvasViewport(x: 900, y: 400, zoom: 1))
+        let destination = flightFixture.canvas.navigationViewport
+        let flightNote = try spawnNote(flightFixture, "Flight destination")
+        try expectFrame(try placedFrame(flightFixture, flightNote),
+                        TileFrame(x: destination.x + 580, y: destination.y + 250, width: 640, height: 400),
+                        "a spawn during flight uses the camera destination")
+
         // MARK: Fixture 1 — flat canvas, zone at the world origin
         //
         // Viewport (0,0) over an 1800x900 canvas: the world centre is (900,450), so a
@@ -4894,11 +4920,11 @@ final class TileSpawner {
                         TileFrame(x: 914, y: 367, width: 640, height: 400),
                         "a caller-supplied world point stays centred on that point")
 
-        // Spawning is a placement change, not a camera effect.
+        // Bare spawners remain camera-free; the user focus route owns framing.
         try expect(originFixture.canvas.viewport == originViewportBefore,
-                   "spawning must not pan or zoom the viewport; \(originViewportBefore) -> \(originFixture.canvas.viewport)")
+                   "a bare spawner must leave framing to the user focus route; \(originViewportBefore) -> \(originFixture.canvas.viewport)")
         try expect(offsetFixture.canvas.viewport == offsetViewportBefore,
-                   "spawning must not pan or zoom the viewport; \(offsetViewportBefore) -> \(offsetFixture.canvas.viewport)")
+                   "a bare spawner must leave framing to the user focus route; \(offsetViewportBefore) -> \(offsetFixture.canvas.viewport)")
 
         // MARK: Fixture 3 — a migrated filesystem tile, in world space
         //
@@ -4994,9 +5020,16 @@ final class TileSpawner {
 
         // An explicit anchor keeps its relationship, in the layer's own space, and is
         // untouched by the centre policy: to the right of the anchor, top-aligned.
-        // File default size is 640x560. Under auto layout, post-spawn settle
-        // magnetizes zone members to the CONFIGURED gap (8), so the legacy
-        // `anchoredFileGap` (24) is compacted: x = 680 + 640 + 8.
+        // Capture the requested WORLD position before installation/settle.
+        // Beside intent uses the configured tile gap, never a historical literal.
+        guard let sourceWorld = layerFixture.canvas.allTilesInWorldFrames()
+            .first(where: { $0.id == layerNoteId })?.frame else {
+            throw CheckError.failed("beside source missing from world scene")
+        }
+        let fileSize = CanvasEngine.defaultFrame(for: .file)
+        let expectedBesideWorld = TileFrame(
+            x: sourceWorld.x + sourceWorld.width + TileGapResolver.resolvedGap(),
+            y: sourceWorld.y, width: Double(fileSize.width), height: Double(fileSize.height))
         let anchoredFilePath = layerFixture.root.appendingPathComponent("anchored.txt")
         try Data("anchored".utf8).write(to: anchoredFilePath)
         let anchoredFileId: UUID
@@ -5006,9 +5039,11 @@ final class TileSpawner {
         case .invalidPath: throw CheckError.failed("spawnFile rejected a valid anchored path")
         case let .failure(error): throw CheckError.failed("spawnFile beside anchor failed: \(error)")
         }
-        try expectFrame(try placedFrame(layerFixture, anchoredFileId),
-                        TileFrame(x: 1328, y: 300, width: 640, height: 560),
-                        "an explicitly anchored file stays gap-adjacent to its anchor")
+        guard let anchoredWorld = layerFixture.canvas.allTilesInWorldFrames().first(where: { $0.id == anchoredFileId })?.frame else {
+            throw CheckError.failed("anchored file missing from world scene")
+        }
+        try expectFrame(anchoredWorld, expectedBesideWorld,
+                        "pinned settle preserves explicit beside intent in world coordinates; scene=\(layerFixture.canvas.allTilesInWorldFrames().map(\.frame))")
 
         // A file opened with no anchor and no point is an automatic spawn. This zone
         // runs auto layout, so it fans out (.plans/107): edge-aligned slots around
@@ -5026,9 +5061,14 @@ final class TileSpawner {
         case .invalidPath: throw CheckError.failed("spawnFile rejected a valid automatic path")
         case let .failure(error): throw CheckError.failed("spawnFile automatic failed: \(error)")
         }
-        try expectFrame(try placedFrame(layerFixture, autoFileId),
-                        TileFrame(x: 32, y: 300, width: 640, height: 560),
-                        "an anchorless file open in an auto-layout zone docks edge-aligned beside the note")
+        guard let autoWorld = layerFixture.canvas.allTilesInWorldFrames().first(where: { $0.id == autoFileId })?.frame else {
+            throw CheckError.failed("automatic file missing from world scene")
+        }
+        try expect(autoWorld.width == 640 && autoWorld.height == 560,
+                   "automatic placement preserves the working size")
+        try expect(!CGRect(x: autoWorld.x,y: autoWorld.y,width: 640,height: 560).intersects(
+            CGRect(x: anchoredWorld.x,y: anchoredWorld.y,width: 640,height: 560)),
+            "the visible free slot avoids the explicitly anchored file")
 
         let manifest: [String: Any] = [
             "check": "spawn-placement",
@@ -6910,7 +6950,8 @@ final class TileSpawner {
             worldPoint: worldPoint,
             size: CanvasEngine.defaultFrame(for: .fileTree),
             in: canvasView,
-            targetZoneId: targetZoneId
+            targetZoneId: targetZoneId,
+            fitting: .fileTree
         )
         let nextZ = CanvasEngine.zPositionAbove(siblingTiles(in: canvasView, targetZoneId: targetZoneId))
         let tile = Tile(
@@ -8657,13 +8698,21 @@ final class TileSpawner {
     /// `targetZoneId` is important for child surfaces such as target-blank browser
     /// windows and inspectors: their opener's layer owns placement even when a
     /// different zone happens to be active by the time WebKit requests the child.
+    ///
+    /// `fitting` names the kind of a tile created at its DEFAULT size. In an
+    /// auto-layout zone with room, an automatic placement then takes the largest
+    /// of `TileGeometry.spawnFitSizes` that has a free slot inside the zone, so
+    /// the zone is not grown and its neighbours are not pushed
+    /// (`.plans/auto-layout-night`). An explicit point or size is never resized.
     private func makeProjectTilePlacement(
         worldPoint: CGPoint?,
         size: CGSize,
         in canvasView: CanvasNSView,
-        targetZoneId: UUID? = nil
+        targetZoneId: UUID? = nil,
+        fitting kind: TileKind? = nil
     ) -> TileFrame {
-        let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
+        let usable = canvasView.usableVisibleScreenRect
+        let zoom = canvasView.navigationViewport.zoom.isFinite && canvasView.navigationViewport.zoom > 0 ? canvasView.navigationViewport.zoom : 1
         // `installedZonePlacement`, not `zonePlacement`: the frame space has to match
         // the model `installProjectTile` will actually use. See its doc comment.
         let targetZone = targetZoneId.flatMap { canvasView.installedZonePlacement(for: $0) }
@@ -8680,8 +8729,8 @@ final class TileSpawner {
             }
             return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
                 newSize: size,
-                viewport: CanvasViewport(x: canvasView.viewport.x, y: canvasView.viewport.y, zoom: zoom),
-                visibleSize: canvasView.bounds.size,
+                viewport: CanvasViewport(x: canvasView.navigationViewport.x + Double(usable.minX)/zoom, y: canvasView.navigationViewport.y + Double(usable.minY)/zoom, zoom: zoom),
+                visibleSize: usable.size,
                 siblings: canvasView.canvasState.tiles,
                 gap: TileGapResolver.resolvedGap()
             ))
@@ -8707,17 +8756,21 @@ final class TileSpawner {
         // grew the zone across the entire canvas to reach it, swallowing the other
         // zones on the way. Before T4 this was unreachable, because framing always
         // used the zone the camera was already in.
-        let localViewport = clampedZoneLocalViewport(
+        var localViewport = clampedZoneLocalViewport(
             canvasView: canvasView, zone: zone, zoom: zoom)
-        return TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
+        localViewport.x += Double(usable.minX)/zoom
+        localViewport.y += Double(usable.minY)/zoom
+        let siblings = siblingTiles(in: canvasView, targetZoneId: zone.zoneId)
+        let autoLayoutActive = canvasView.isAutoLayoutActive(inZone: zone.zoneId)
+        let context = TileSpawnPlacement.Context(
             newSize: size,
             viewport: localViewport,
-            visibleSize: canvasView.bounds.size,
+            visibleSize: usable.size,
             // T4 (`.plans/47`): the TARGET zone's tiles, not the armed zone's.
             // `projectTiles()` reads `activeProjectZoneId`, so auto-placement used
             // to dodge the wrong zone's tiles and could stack the new tile straight
             // on top of an existing one.
-            siblings: siblingTiles(in: canvasView, targetZoneId: zone.zoneId),
+            siblings: siblings,
             gap: TileGapResolver.resolvedGap(),
             // The camera clamp above keeps the point of attention in the zone, not
             // the tile: a centre near the zone's edge framed an agent half a tile
@@ -8729,19 +8782,28 @@ final class TileSpawner {
             // every docked slot of a full zone into an overlap, and the settle
             // then sent the tile to the zone's far edge, off screen (0.7.30;
             // `--zone-arming-check` §10b).
-            bounds: canvasView.isAutoLayoutActive(inZone: zone.zoneId)
+            bounds: autoLayoutActive
                 ? nil : zoneLocalContentRect(zone, defaults: canvasView.autoLayoutDefaults),
             // Auto layout fans out around every tile of the zone, shaped for the
             // screen, instead of docking right of whatever the camera is on
             // (.plans/107).
-            fanOut: canvasView.isAutoLayoutActive(inZone: zone.zoneId)
+            fanOut: autoLayoutActive
                 ? TileSpawnPlacement.FanOut(
-                    hosts: siblingTiles(in: canvasView, targetZoneId: zone.zoneId).map(\.frame),
+                    hosts: siblings.map(\.frame),
                     targetAspect: canvasView.bounds.height > 0
                         ? Double(canvasView.bounds.width / canvasView.bounds.height) : 1.6,
                     growth: CanvasAutoLayoutConfig.growth(defaults: canvasView.autoLayoutDefaults))
-                : nil
-        ))
+                : nil,
+            preferredAnchor: CanvasEngine.zoneLocalPoint(world: canvasView.spawnAnchorWorldPoint, zone: zone)
+        )
+        if autoLayoutActive, let kind, size == CanvasEngine.defaultFrame(for: kind),
+           let fitted = TileSpawnPlacement.roomFit(
+               context,
+               room: zoneLocalContentRect(zone, defaults: canvasView.autoLayoutDefaults),
+               sizes: TileGeometry.spawnFitSizes(for: kind)) {
+            return fitted
+        }
+        return TileSpawnPlacement.automatic(context)
     }
 
     /// A zone's content rect in its own local space: inside the header and the
@@ -8768,8 +8830,8 @@ final class TileSpawner {
         zone: ZonePlacement,
         zoom: Double
     ) -> CanvasViewport {
-        let localX = canvasView.viewport.x - zone.origin.x
-        let localY = canvasView.viewport.y - zone.origin.y
+        let localX = canvasView.navigationViewport.x - zone.origin.x
+        let localY = canvasView.navigationViewport.y - zone.origin.y
         let visibleWidth = Double(canvasView.bounds.width) / zoom
         let visibleHeight = Double(canvasView.bounds.height) / zoom
         let overlaps = localX < zone.size.width && localX + visibleWidth > 0

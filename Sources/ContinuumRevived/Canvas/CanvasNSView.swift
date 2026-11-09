@@ -367,10 +367,27 @@ final class CanvasNSView: NSView, TokenThemed {
     private var autoLayoutMovePointerSample: (point: NSPoint, time: TimeInterval)?
     private var autoLayoutDeferredUntilEdit = false
     private let autoLayoutUndoToast = InboxUndoToast()
+    private var autoLayoutUndoToastCenterX: NSLayoutConstraint?
+    private var autoLayoutUndoToastBottom: NSLayoutConstraint?
+    /// The tidy undo toast's frame in this view, for checks.
+    var qaAutoLayoutUndoToastFrame: NSRect? { autoLayoutUndoToast.isHidden ? nil : autoLayoutUndoToast.frame }
+    var qaAutoLayoutUndoToastFittingWidth: CGFloat? { autoLayoutUndoToast.isHidden ? nil : autoLayoutUndoToast.fittingSize.width }
     private var autoLayoutUndoTimer: Timer?
     private var autoLayoutBlockedZoneIds: Set<UUID> = []
     var autoLayoutReduceMotionProvider: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     var qaAutoLayoutUndoText: String { autoLayoutUndoToast.qaText }
+    /// QA: wall time of each stage of the auto-layout passes since the last
+    /// reset, in ms (`--auto-layout-tidy-latency-check`). Production pays two
+    /// clock reads per stage per pass — never per frame or per tile.
+    struct AutoLayoutStageTimes: Equatable {
+        var begin = 0.0, solve = 0.0, apply = 0.0, animate = 0.0, finish = 0.0
+        var capture = 0.0, persist = 0.0, notify = 0.0, undo = 0.0
+        var tidy = 0.0
+        var presentLayout = 0.0, presentDisplay = 0.0, presentFlush = 0.0
+        var solves = 0
+    }
+    var qaAutoLayoutStageTimes = AutoLayoutStageTimes()
+    private static func stageClock() -> Double { CACurrentMediaTime() * 1000 }
     @discardableResult func qaClickAutoLayoutUndo() -> Bool { autoLayoutUndoToast.clickUndoForQA() }
 
     /// Production membership write: the single sink every canvas membership
@@ -507,7 +524,7 @@ final class CanvasNSView: NSView, TokenThemed {
         var layoutTiles = (flatCompatibilitySceneActive ? canvasState.tiles : []).map {
             CanvasAutoLayoutEngine.LayoutTile(
                 id: $0.id, frame: $0.frame, zoneId: tileZoneMembership[$0.id],
-                minimumSize: TileGeometry.minimumSize(for: $0.kind))
+                minimumSize: TileGeometry.minimumSize(for: $0.kind), kind: $0.kind)
         }
         let known = Set(layoutTiles.map(\.id))
         for layer in zoneLayers {
@@ -516,7 +533,8 @@ final class CanvasNSView: NSView, TokenThemed {
                     id: tile.id,
                     frame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
                     zoneId: layer.placement.zoneId,
-                    minimumSize: TileGeometry.minimumSize(for: tile.kind)
+                    minimumSize: TileGeometry.minimumSize(for: tile.kind),
+                    kind: tile.kind
                 ))
             }
         }
@@ -603,6 +621,8 @@ final class CanvasNSView: NSView, TokenThemed {
             guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
         }
         let scene = baseline ?? autoLayoutScene()
+        let solveStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.solves += 1 }
         let transaction = CanvasAutoLayoutEngine.solve(
             scene: scene,
             mutation: mutation,
@@ -631,6 +651,9 @@ final class CanvasNSView: NSView, TokenThemed {
                 return scope
             }()
         )
+        qaAutoLayoutStageTimes.solve += Self.stageClock() - solveStart
+        let applyStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.apply += Self.stageClock() - applyStart }
         autoLayoutBlockedZoneIds = transaction.blockedZoneIds
         if case .tile = mutation {
             autoLayoutMoveLatch = transaction.moveLatch
@@ -679,11 +702,12 @@ final class CanvasNSView: NSView, TokenThemed {
         preservingLayerMemberWorldFramesIn preservedZoneIds: Set<UUID> = [],
         preservingZoneSizes: Bool = false
     ) {
-        let oldTileOrigins = Dictionary(uniqueKeysWithValues: transaction.tileFrames.keys.compactMap { id in
-            tileView(for: id).map { (id, $0.layer?.presentation()?.frame.origin ?? $0.frame.origin) }
+        // What is on screen now, mid-animation included: the movement starts here.
+        let oldTileFrames = Dictionary(uniqueKeysWithValues: transaction.tileFrames.keys.compactMap { id in
+            tileView(for: id).map { (id, $0.layer?.presentation()?.frame ?? $0.frame) }
         })
-        let oldZoneOrigins = Dictionary(uniqueKeysWithValues: transaction.zonePlacements.keys.compactMap { id in
-            zoneChromeViews[id].map { (id, $0.frame.origin) }
+        let oldZoneFrames = Dictionary(uniqueKeysWithValues: transaction.zonePlacements.keys.compactMap { id in
+            zoneChromeViews[id].map { (id, $0.frame) }
         })
         // A ZoneLayer stores members zone-locally. Resizing/clamping a zone can
         // move its origin while the contract keeps every passive member fixed in
@@ -884,8 +908,11 @@ final class CanvasNSView: NSView, TokenThemed {
             staged.layer.tiles[staged.tileIndex].frame = staged.frame
         }
         layoutAllTiles(onlyChangedTiles: true)
+        returnFarParkedTiles(movedBy: transaction)
 
         guard !autoLayoutReduceMotionProvider() else { return }
+        let animateStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.animate += Self.stageClock() - animateStart }
         let activeZoneMembers: Set<UUID> = activeZoneId.map { zoneId in
             Set(autoLayoutScene().tiles.lazy.filter { $0.zoneId == zoneId }.map(\.id))
         } ?? []
@@ -893,24 +920,52 @@ final class CanvasNSView: NSView, TokenThemed {
             context.duration = 0.11
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             context.allowsImplicitAnimation = true
-            for (id, oldOrigin) in oldTileOrigins where id != activeTileId && !activeTileIds.contains(id) && !activeZoneMembers.contains(id) {
-                guard let view = tileView(for: id), view.frame.origin != oldOrigin else { continue }
-                let target = view.frame.origin
-                view.setFrameOrigin(oldOrigin)
-                view.animator().setFrameOrigin(target)
+            for (id, old) in oldTileFrames where id != activeTileId && !activeTileIds.contains(id) && !activeZoneMembers.contains(id) {
+                guard let view = tileView(for: id) else { continue }
+                if view.frame.origin != old.origin {
+                    let target = view.frame.origin
+                    view.setFrameOrigin(old.origin)
+                    view.animator().setFrameOrigin(target)
+                }
+                // A tidy resizes tiles too. The view already has its final size
+                // and its final layout; only the tile's own layer — background,
+                // border, corners and the clip — travels from the old size, so
+                // the content is never stretched, swapped or re-laid out per
+                // frame. A growing tile reveals its content the way a corner
+                // drag does.
+                if let layer = view.layer, old.size != view.frame.size {
+                    let resize = CABasicAnimation(keyPath: "bounds.size")
+                    resize.fromValue = NSValue(size: old.size)
+                    resize.toValue = NSValue(size: layer.bounds.size)
+                    resize.duration = context.duration
+                    resize.timingFunction = context.timingFunction
+                    layer.add(resize, forKey: Self.autoLayoutResizeAnimationKey)
+                }
             }
-            for (id, oldOrigin) in oldZoneOrigins where id != activeZoneId {
-                guard let view = zoneChromeViews[id], view.frame.origin != oldOrigin else { continue }
-                let target = view.frame.origin
-                view.setFrameOrigin(oldOrigin)
-                view.animator().setFrameOrigin(target)
+            for (id, old) in oldZoneFrames where id != activeZoneId {
+                guard let view = zoneChromeViews[id] else { continue }
+                if view.frame.origin != old.origin {
+                    let target = view.frame.origin
+                    view.setFrameOrigin(old.origin)
+                    view.animator().setFrameOrigin(target)
+                }
+                // A zone that tidy grew or shrank travels with its tiles rather
+                // than snapping to its new size before they arrive.
+                if old.size != view.frame.size {
+                    view.animateOutline(fromSize: old.size, duration: context.duration,
+                                        timingFunction: context.timingFunction)
+                }
             }
         }
     }
 
+    static let autoLayoutResizeAnimationKey = "autoLayoutResize"
+
     @discardableResult
     func finishAutoLayoutGesture() -> CanvasLayoutTransaction? {
         guard let baseline = autoLayoutGestureBaseline else { return nil }
+        let finishStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.finish += Self.stageClock() - finishStart }
         autoLayoutGestureBaseline = nil
         resetAutoLayoutMoveLatch()
         let current = autoLayoutScene()
@@ -929,8 +984,21 @@ final class CanvasNSView: NSView, TokenThemed {
         return transaction
     }
 
-    func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true) {
+    /// `framesZone`: the user tidied this one zone (its menu, ⌥⌘T, ⌘K). Tidy can
+    /// grow a zone, push it, or shrink it, so a zone that was wholly in view can
+    /// end up partly off screen; then the camera flies to frame its new rect,
+    /// starting in the same commit as the tidy's own movement. A zone that stays
+    /// in view never moves the camera, and Tidy canvas never does.
+    func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true,
+                        framesZone: Bool = false) {
+        let tidyStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.tidy += Self.stageClock() - tidyStart }
+        let zoneWasInView = framesZone && zoneId.flatMap(zoneWorldRect).map(isInUsableView) == true
         let baseline = autoLayoutScene()
+        // The explicit tidy keeps each lead agent's helpers in one block with it
+        // (`CanvasTidyPacker`). Only it reads lineage, so only it asks: once per
+        // agent tile per tidy, never on the per-frame scene path.
+        let tidyScene = compact ? sceneWithAgentClusters(baseline, zoneId: zoneId) : baseline
         _ = beginGeometryEdit(
             .tidy,
             tileIds: Set(baseline.tiles.map(\.id)),
@@ -938,11 +1006,16 @@ final class CanvasNSView: NSView, TokenThemed {
         )
         autoLayoutGestureBaseline = baseline
         if compact {
-            applyAutoLayout(.tidy(zoneId: zoneId), baseline: baseline)
+            applyAutoLayout(.tidy(zoneId: zoneId), baseline: tidyScene)
         } else {
             for id in zoneId.map({ [$0] }) ?? baseline.zones.map(\.zoneId) {
                 applyAutoLayout(.settle(zoneId: id, anchor: nil, pin: false), baseline: autoLayoutScene())
             }
+        }
+        pushPeersOfZonesGrown(since: baseline)
+        // Before the commit: the flight and the tidy's animations start together.
+        if zoneWasInView, let rect = zoneId.flatMap(zoneWorldRect), !isInUsableView(rect) {
+            navigateViewport(to: containingViewport(for: rect))
         }
         if commit {
             _ = finishAutoLayoutGesture()
@@ -952,6 +1025,70 @@ final class CanvasNSView: NSView, TokenThemed {
                 )
             }
         }
+    }
+
+    /// A tidy can GROW a zone (`CanvasTidyPacker`), and the engine resolves outer
+    /// collisions only for a zone being moved, so a grown zone was left over the
+    /// zone it grew into (`--tidy-zone-neighbours-check`). Each zone that grew now
+    /// pushes what it reached further into, as spawn growth does
+    /// (`CanvasAutoLayoutEngine.pushPeers(ofGrownZone:)`): neighbouring zones move
+    /// clear as rigid bodies with their members, bare tiles move clear, nothing
+    /// changes zone, and a zone that shrank pushes and pulls nothing.
+    ///
+    /// Reading order (top, then left) so a cascade runs the way growth does, down
+    /// and right. A zone's "before" is its pre-tidy size at its current origin: a
+    /// push it took from a zone above is not growth of its own.
+    private func pushPeersOfZonesGrown(since baseline: CanvasAutoLayoutEngine.Scene) {
+        let before = firstWinsDictionary(baseline.zones.map { ($0.zoneId, $0) })
+        let grown = autoLayoutScene().zones.filter { zone in
+            guard let previous = before[zone.zoneId] else { return false }
+            return zone.size.width > previous.size.width + 0.01 || zone.size.height > previous.size.height + 0.01
+        }.sorted { lhs, rhs in
+            if lhs.origin.y != rhs.origin.y { return lhs.origin.y < rhs.origin.y }
+            if lhs.origin.x != rhs.origin.x { return lhs.origin.x < rhs.origin.x }
+            return lhs.zoneId.uuidString < rhs.zoneId.uuidString
+        }.map(\.zoneId)
+        guard !grown.isEmpty else { return }
+        let gap = TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)
+        for zoneId in grown {
+            // A project zone below the live hydration tier has no layer, so its
+            // tiles are not in the scene: pushing its placement would leave them
+            // behind in canvas.json (night review, finding 1). It is a fixed
+            // obstacle instead; the grown zone may overlap it until it loads.
+            let loadedZoneIds = Set(zoneLayers.map(\.placement.zoneId))
+            var scene = autoLayoutScene()
+            scene.zones = scene.zones.filter { $0.projectId == nil || loadedZoneIds.contains($0.zoneId) }
+            guard var previous = scene.zones.first(where: { $0.zoneId == zoneId }),
+                  let original = before[zoneId] else { continue }
+            previous.size = original.size
+            let push = CanvasAutoLayoutEngine.pushPeers(ofGrownZone: zoneId, from: previous, scene: scene, gap: gap)
+            if !push.tileFrames.isEmpty || !push.zonePlacements.isEmpty {
+                applyLayoutTransaction(push)
+            }
+        }
+    }
+
+    /// `scene` with each lead agent and its helpers stamped with the lead's
+    /// tile id, for the zones a tidy touches. Lead and helpers must share a zone;
+    /// a helper elsewhere stays out of the block. Unlike `autoLayoutCluster(for:)`
+    /// this ignores the auto-layout switch: an explicit Tidy runs regardless.
+    private func sceneWithAgentClusters(_ scene: CanvasAutoLayoutEngine.Scene, zoneId: UUID?) -> CanvasAutoLayoutEngine.Scene {
+        guard let provider = autoLayoutClusterProvider else { return scene }
+        var index: [UUID: Int] = [:]
+        for (i, tile) in scene.tiles.enumerated() where index[tile.id] == nil { index[tile.id] = i }
+        var result = scene
+        var seen = Set<UUID>()
+        for tile in scene.tiles where tile.kind == .managedAgent && !seen.contains(tile.id) {
+            guard let zone = tile.zoneId, zoneId == nil || zone == zoneId else { continue }
+            seen.insert(tile.id)
+            guard let cluster = provider(tile.id), let leadIndex = index[cluster.lead],
+                  scene.tiles[leadIndex].zoneId == zone else { continue }
+            let helpers = cluster.helpers.filter { id in index[id].map { scene.tiles[$0].zoneId == zone } ?? false }
+            seen.formUnion(cluster.helpers + [cluster.lead])
+            guard !helpers.isEmpty else { continue }
+            for id in helpers + [cluster.lead] { result.tiles[index[id]!].clusterLead = cluster.lead }
+        }
+        return result
     }
 
     /// Whether a settle of `zoneId` will actually run (the engine's own gate).
@@ -1000,14 +1137,15 @@ final class CanvasNSView: NSView, TokenThemed {
             expandZoneToContainMembers(zoneId)
         }
         for id in zoneId.map({ [$0] }) ?? baseline.zones.map(\.zoneId) {
+            let settleScene = autoLayoutScene()
             let anchor = spawnedTileId.flatMap { tile in
-                autoLayoutScene().tiles.contains { $0.id == tile && $0.zoneId == id } ? tile : nil
+                settleScene.tiles.contains { $0.id == tile && $0.zoneId == id } ? tile : nil
             }
-            let zoom = viewport.zoom.isFinite && viewport.zoom > 0 ? viewport.zoom : 1
-            let view = TileFrame(x: viewport.x, y: viewport.y,
+            let zoom = navigationViewport.zoom.isFinite && navigationViewport.zoom > 0 ? navigationViewport.zoom : 1
+            let view = TileFrame(x: navigationViewport.x, y: navigationViewport.y,
                                  width: Double(bounds.width) / zoom, height: Double(bounds.height) / zoom)
-            applyAutoLayout(.settle(zoneId: id, anchor: anchor, pin: false, grow: anchor != nil, view: view),
-                            baseline: autoLayoutScene())
+            applyAutoLayout(.settle(zoneId: id, anchor: anchor, pin: anchor != nil, grow: anchor != nil, view: view),
+                            baseline: settleScene)
             if anchor != nil, let before = liveZones.first(where: { $0.zoneId == id }) {
                 expandZoneToContainMembers(id, roundingWhenInexact: true)
                 let push = CanvasAutoLayoutEngine.pushPeers(
@@ -1312,12 +1450,62 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func showAutoLayoutUndo(changedCount: Int) {
         guard changedCount > 0 else { return }
+        let undoStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.undo += Self.stageClock() - undoStart }
         autoLayoutUndoTimer?.invalidate()
         let noun = changedCount == 1 ? "item" : "items"
         autoLayoutUndoToast.show("Auto layout arranged \(changedCount) \(noun)")
+        placeAutoLayoutUndoToast()
         autoLayoutUndoTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.dismissAutoLayoutUndo() }
         }
+    }
+
+    /// Puts the tidy undo toast where no canvas chrome covers it. The floating
+    /// toolbar and the shortcut rail are siblings drawn ABOVE the canvas, and
+    /// the toolbar can rest on any edge, so a fixed bottom-centre toast sat
+    /// under a bottom bar. `spawnOverlayRects` is the app's live list of that
+    /// chrome (rail, getting-started card, the bar where it is and where it
+    /// rests). Called when the toast shows and when the bar lands somewhere new.
+    func placeAutoLayoutUndoToast() {
+        guard !autoLayoutUndoToast.isHidden, let centerX = autoLayoutUndoToastCenterX,
+              let bottom = autoLayoutUndoToastBottom else { return }
+        autoLayoutUndoToast.layoutSubtreeIfNeeded()
+        let fitting = autoLayoutUndoToast.fittingSize
+        let size = NSSize(width: min(fitting.width, max(0, bounds.width - Space.l * 2)), height: fitting.height)
+        let frame = Self.undoToastFrame(size: size, in: bounds, avoiding: spawnOverlayRects?() ?? [],
+                                        margin: Space.l, gap: Space.s)
+        centerX.constant = frame.midX - bounds.midX
+        bottom.constant = frame.maxY - bounds.maxY
+    }
+
+    /// In this (flipped) view: centred on the bottom edge; lifted above whatever
+    /// chrome that covers, again and again; if that runs off the top, centred on
+    /// the top edge and pushed down the same way. With no clear spot it keeps
+    /// the bottom-centre spot it always had.
+    static func undoToastFrame(size: NSSize, in bounds: NSRect, avoiding obstacles: [CGRect],
+                               margin: CGFloat, gap: CGFloat) -> NSRect {
+        let x = bounds.midX - size.width / 2
+        let home = NSRect(x: x, y: bounds.maxY - margin - size.height, width: size.width, height: size.height)
+        var rect = home
+        for _ in 0...obstacles.count {
+            let hits = obstacles.filter { $0.intersects(rect) }
+            if hits.isEmpty {
+                if rect.minY >= bounds.minY + margin { return rect }
+                break
+            }
+            rect.origin.y = hits.map(\.minY).min()! - gap - size.height
+        }
+        rect.origin.y = bounds.minY + margin
+        for _ in 0...obstacles.count {
+            let hits = obstacles.filter { $0.intersects(rect) }
+            if hits.isEmpty {
+                if rect.maxY <= bounds.maxY - margin { return rect }
+                break
+            }
+            rect.origin.y = hits.map(\.maxY).max()! + gap
+        }
+        return home
     }
 
     private func dismissAutoLayoutUndo() {
@@ -1969,9 +2157,20 @@ final class CanvasNSView: NSView, TokenThemed {
         autoLayoutUndoToast.onUndo = { [weak self] in self?.undoAutoLayout() }
         autoLayoutUndoToast.setAccessibilityIdentifier("ContinuumCanvasAutoLayoutUndoToast")
         addSubview(autoLayoutUndoToast, positioned: .above, relativeTo: nil)
+        let toastCenterX = autoLayoutUndoToast.centerXAnchor.constraint(equalTo: centerXAnchor)
+        let toastBottom = autoLayoutUndoToast.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.l)
+        autoLayoutUndoToastCenterX = toastCenterX
+        autoLayoutUndoToastBottom = toastBottom
+        // Its width was bounded only from above, so Auto Layout stretched it
+        // across the whole canvas: the message bottom-left, Undo bottom-right
+        // over the shortcut rail. The weakest pull to zero makes it hug its
+        // content; the label's compression resistance keeps the text whole.
+        let toastHug = autoLayoutUndoToast.widthAnchor.constraint(equalToConstant: 0)
+        toastHug.priority = NSLayoutConstraint.Priority(1)
         NSLayoutConstraint.activate([
-            autoLayoutUndoToast.centerXAnchor.constraint(equalTo: centerXAnchor),
-            autoLayoutUndoToast.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.l),
+            toastHug,
+            toastCenterX,
+            toastBottom,
             autoLayoutUndoToast.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -(Space.l * 2)),
         ])
         syncWorldPlaneToCamera()
@@ -2837,6 +3036,8 @@ final class CanvasNSView: NSView, TokenThemed {
         includeAllZones: Bool = false
     ) -> Bool {
         guard pendingGeometryEdit == nil else { return false }
+        let beginStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.begin += Self.stageClock() - beginStart }
         let capturesLayoutChain = isAutoLayoutEnabled && action != .resizeTileToPreset && action != .dockTile
         let capturedTileIds = includeAllTiles || capturesLayoutChain
             ? Set(allWorkspaceTiles().map(\.id))
@@ -2855,18 +3056,48 @@ final class CanvasNSView: NSView, TokenThemed {
     func commitGeometryEdit() -> CanvasGeometryTransaction? {
         guard let pending = pendingGeometryEdit else { return nil }
         pendingGeometryEdit = nil
+        let captureStart = Self.stageClock()
         let after = captureGeometry(tileIds: pending.tileIds, zoneIds: pending.zoneIds)
         let transaction = CanvasGeometryTransaction(action: pending.action, before: pending.before, after: after)
+        qaAutoLayoutStageTimes.capture += Self.stageClock() - captureStart
         guard !transaction.isNoOp else { return nil }
-        guard persistGeometrySnapshot(transaction.after, changedFrom: transaction.before) else {
+        presentGeometryBeforePersisting()
+        let persistStart = Self.stageClock()
+        let persisted = persistGeometrySnapshot(transaction.after, changedFrom: transaction.before)
+        qaAutoLayoutStageTimes.persist += Self.stageClock() - persistStart
+        guard persisted else {
             _ = applyGeometrySnapshot(transaction.before, notifyCommit: false)
             return nil
         }
+        let notifyStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.notify += Self.stageClock() - notifyStart }
         if let workspaceId = activeUndoWorkspaceId {
             canvasHistories[workspaceId]?.record(transaction)
         }
         notifyGeometryCommit(transaction)
         return transaction
+    }
+
+    /// Put the edited geometry, and the animations toward it, on screen BEFORE
+    /// the durable write. A movement starts at the CA commit that carries it, and
+    /// that commit used to wait for the end of the run-loop turn — behind the
+    /// write below (each project's `canvas.json` read and verified plus the
+    /// workspace document, 4–19 ms measured; more with more projects), the commit
+    /// notifications and the Undo toast. Animations run on the render server, so
+    /// the write no longer delays or stalls them. A refused write still rolls the
+    /// geometry back below, exactly as before; it is visible as a snap back.
+    /// Witness: `--auto-layout-tidy-latency-check` (movement start).
+    private func presentGeometryBeforePersisting() {
+        guard onLayoutCommitted != nil, let window else { return }
+        var t = Self.stageClock()
+        window.layoutIfNeeded()
+        qaAutoLayoutStageTimes.presentLayout += Self.stageClock() - t
+        t = Self.stageClock()
+        window.displayIfNeeded()
+        qaAutoLayoutStageTimes.presentDisplay += Self.stageClock() - t
+        t = Self.stageClock()
+        CATransaction.flush()
+        qaAutoLayoutStageTimes.presentFlush += Self.stageClock() - t
     }
 
     /// Stand down a move preview while a reference card owns the pointer.
@@ -3564,6 +3795,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     func markActive(tileId: UUID) {
+        focusIsNewerThanCamera = true
         canvasState.lastActiveTileId = tileId
         updateFocusBorder(borderedTileId: tileId)
         updateDocumentRelationshipOverlay()
@@ -4224,7 +4456,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // API reveal or a check is programmatic and must not defer itself.
         // A navigation flight's steps are the driver's, but programmatic: the jump
         // that started it already noted the user's interaction once.
-        if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { onUserCameraChange?() }
+        if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { focusIsNewerThanCamera = false; userCameraMovedSinceArming = true; onUserCameraChange?() }
         if !agentChromeRestedForMotion, cameraDriver.isApplying || pointerPanActive {
             agentChromeRestedForMotion = true
             restAgentChromeForCameraMotion()
@@ -5253,6 +5485,22 @@ final class CanvasNSView: NSView, TokenThemed {
                 }
                 budget -= 1
             }
+            view.promoteBodyToNative()
+            qaFarReturnCount += 1
+        }
+    }
+
+    /// A layout that moved a far-parked tile into (or near) view brings its body
+    /// back now, laid out at its new size before the commit that shows it — a
+    /// tidy can carry a parked tile on screen without any camera step. Only the
+    /// transaction's own tiles are asked (the caller already walks them), so a
+    /// drag event pays no visibility-index rebuild.
+    private func returnFarParkedTiles(movedBy transaction: CanvasLayoutTransaction) {
+        let visible = worldPlane.bounds
+        let lead = visible.insetBy(
+            dx: -visible.width * Self.farReturnMargin, dy: -visible.height * Self.farReturnMargin)
+        for id in transaction.tileFrames.keys {
+            guard let view = tileView(for: id), view.isFarParked, view.frame.intersects(lead) else { continue }
             view.promoteBodyToNative()
             qaFarReturnCount += 1
         }
@@ -6340,7 +6588,7 @@ final class CanvasNSView: NSView, TokenThemed {
         guard let snapshot = navigationTileSnapshot(for: tileId) else { return nil }
         let frame = snapshot.worldFrame
         let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
-        return CameraFraming.revealWorkViewport(for: rect, kind: snapshot.kind, currentViewport: canvasState.viewport, viewportSize: bounds.size)
+        return framedWorkViewport(for: rect, kind: snapshot.kind)
     }
 
     /// Frames the tile as a readable jump target. This first T07 slice snaps to
@@ -6363,6 +6611,115 @@ final class CanvasNSView: NSView, TokenThemed {
     /// The camera navigation should reason from: where an in-flight jump is
     /// going, else where the camera is. A jump made mid-flight records THIS as
     /// the view to go back to, not a point the camera was only passing through.
+    var onUserTileReveal: ((UUID) -> Void)?
+    var spawnOverlayRects: (() -> [CGRect])?
+    private var focusIsNewerThanCamera = false
+    private(set) var userCameraMovedSinceArming = false
+    var usableVisibleScreenRect: CGRect {
+        var result = bounds
+        for overlay in spawnOverlayRects?() ?? [] where overlay.intersects(result) {
+            let cut = overlay.intersection(result)
+            let candidates = [
+                CGRect(x: result.minX, y: result.minY, width: max(0, cut.minX-result.minX), height: result.height),
+                CGRect(x: cut.maxX, y: result.minY, width: max(0, result.maxX-cut.maxX), height: result.height),
+                CGRect(x: result.minX, y: result.minY, width: result.width, height: max(0, cut.minY-result.minY)),
+                CGRect(x: result.minX, y: cut.maxY, width: result.width, height: max(0, result.maxY-cut.maxY))]
+            result = candidates.max { $0.width*$0.height < $1.width*$1.height } ?? result
+        }
+        return result
+    }
+
+    func visibleSpawnSlot(size: CGSize, anchor: CGPoint, zoneId: UUID?) -> CGRect? {
+        let usable = usableVisibleScreenRect
+        let origin = CanvasEngine.screenToWorld(usable.origin, viewport: navigationViewport)
+        let visible = CGRect(x: origin.x, y: origin.y,
+                             width: usable.width / navigationViewport.zoom,
+                             height: usable.height / navigationViewport.zoom)
+        let placement = zoneId.flatMap { installedZonePlacement(for: $0) }
+        let zoneBounds = placement.map { CGRect(x: $0.origin.x, y: $0.origin.y,
+                                                 width: $0.size.width, height: $0.size.height) }
+        return TileSpawnPlacement.nearestVisibleSlot(size: size, anchor: anchor, visible: visible,
+            bounds: zoneBounds, obstacles: (zoneId.flatMap { tilesInWorldFrames(forZoneId: $0) } ?? allTilesInWorldFrames()).map {
+                CGRect(x: $0.frame.x,y: $0.frame.y,width: $0.frame.width,height: $0.frame.height)
+            }, gap: TileGapResolver.resolvedGap())
+    }
+
+    var spawnAnchorWorldPoint: CGPoint {
+        let usable = usableVisibleScreenRect
+        let visible = CanvasEngine.visibleWorldRect(viewport: navigationViewport, visibleSize: bounds.size)
+        if focusIsNewerThanCamera, let id = canvasState.lastActiveTileId,
+           let tile = navigationTileSnapshot(for: id), tile.zoneId == activeProjectZoneId {
+            let f = tile.worldFrame
+            let rect = CGRect(x: f.x, y: f.y, width: f.width, height: f.height)
+            if rect.intersects(visible) { return CGPoint(x: rect.midX, y: rect.midY) }
+        }
+        return CanvasEngine.screenToWorld(CGPoint(x: usable.midX, y: usable.midY), viewport: navigationViewport)
+    }
+
+    func framedWorkViewport(for rect: CGRect, kind: TileKind) -> CanvasViewport {
+        let usable = usableVisibleScreenRect
+        var current = navigationViewport
+        current.x += Double(usable.minX) / current.zoom
+        current.y += Double(usable.minY) / current.zoom
+        var target = CameraFraming.revealWorkViewport(for: rect, kind: kind,
+            currentViewport: current, viewportSize: usable.size)
+        target.x -= Double(usable.minX) / target.zoom
+        target.y -= Double(usable.minY) / target.zoom
+        return target
+    }
+
+    /// A zone's world rect as the canvas holds it now (its layer when installed).
+    func zoneWorldRect(_ zoneId: UUID) -> CGRect? {
+        allZonePlacements().first(where: { $0.zoneId == zoneId })
+            .map { Self.cgRect(from: CanvasEngine.zoneWorldFrame($0)) }
+    }
+
+    /// Whether `rect` lies wholly inside the part of the canvas no overlay
+    /// covers, at the camera navigation reasons from.
+    func isInUsableView(_ rect: CGRect) -> Bool {
+        let usable = usableVisibleScreenRect
+        let viewport = navigationViewport
+        let origin = CanvasEngine.screenToWorld(usable.origin, viewport: viewport)
+        let visible = CGRect(x: origin.x, y: origin.y,
+                             width: usable.width / viewport.zoom, height: usable.height / viewport.zoom)
+        return visible.insetBy(dx: -0.5, dy: -0.5).contains(rect)
+    }
+
+    /// The gentlest camera that shows `rect` whole in the usable rect. If it fits
+    /// at the current zoom, the zoom stays and the camera pans only along the
+    /// axes the zone crossed, by the least that brings it in with the standard
+    /// zone padding (or as much of it as fits) on the side it crossed. Only if it does not fit does the camera zoom
+    /// out, exactly far enough to hold it with the standard padding, centred.
+    /// Never zooms in. A tidy that grew a zone by 46 pt used to jump from 1.40
+    /// to the 0.80 zone-overview zoom.
+    func containingViewport(for rect: CGRect) -> CanvasViewport {
+        let usable = usableVisibleScreenRect
+        let current = navigationViewport
+        let padding = CameraFraming.zonePaddingScreenPx
+        let zoom = current.zoom
+        if Double(rect.width) * zoom <= Double(usable.width), Double(rect.height) * zoom <= Double(usable.height) {
+            /// Screen-space shift along one axis. An axis already in view does not
+            /// move; one the zone crosses brings it in with up to `padding` to
+            /// spare on that side.
+            func shift(_ low: Double, _ high: Double, _ lowBound: Double, _ highBound: Double) -> Double {
+                let pad = min(padding, max(0, ((highBound - lowBound) - (high - low)) / 2))
+                if low < lowBound { return lowBound + pad - low }
+                if high > highBound { return highBound - pad - high }
+                return 0
+            }
+            let dx = shift((Double(rect.minX) - current.x) * zoom, (Double(rect.maxX) - current.x) * zoom,
+                           Double(usable.minX), Double(usable.maxX))
+            let dy = shift((Double(rect.minY) - current.y) * zoom, (Double(rect.maxY) - current.y) * zoom,
+                           Double(usable.minY), Double(usable.maxY))
+            return CanvasViewport(x: current.x - dx / zoom, y: current.y - dy / zoom, zoom: zoom)
+        }
+        let fitted = min((Double(usable.width) - 2 * padding) / Double(rect.width),
+                         (Double(usable.height) - 2 * padding) / Double(rect.height))
+        let outZoom = max(CanvasEngine.defaultZoomRange.lowerBound, min(zoom, fitted))
+        return CanvasViewport(x: Double(rect.midX) - Double(usable.midX) / outZoom,
+                              y: Double(rect.midY) - Double(usable.midY) / outZoom, zoom: outZoom)
+    }
+
     var navigationViewport: CanvasViewport { cameraDriver.flightTarget ?? canvasState.viewport }
 
     /// QA: force navigation to fly (true) or cut (false) whatever the window's
@@ -6569,18 +6926,37 @@ final class CanvasNSView: NSView, TokenThemed {
                 || !Self.geometryNearlyEqual(view.frame.width, rect.width)
                 || !Self.geometryNearlyEqual(view.frame.height, rect.height)
         }
+        // A changed tile that only TRANSLATED draws nothing new: its pixels do
+        // not depend on where it sits. Redrawing it anyway (plus its affordance
+        // overlay) put every tidied or pushed tile's whole draw into the CA
+        // commit that starts the movement — 27 ms of an 89-tile tidy's commit
+        // (`--auto-layout-tidy-latency-check`). Size, visibility and every
+        // non-geometry field still invalidate.
+        func onlyTranslated(_ tile: Tile, view: TileNSView?, worldFrame: TileFrame, hidden: Bool) -> Bool {
+            guard onlyChangedTiles, let view else { return false }
+            var translated = view.tile
+            translated.frame.x = tile.frame.x
+            translated.frame.y = tile.frame.y
+            return translated == tile && view.isHidden == hidden
+                && Self.geometryNearlyEqual(view.frame.width, CGFloat(worldFrame.width))
+                && Self.geometryNearlyEqual(view.frame.height, CGFloat(worldFrame.height))
+        }
         for tile in canvasState.tiles {
-            guard needsLayout(tile, view: tileViews[tile.id], worldFrame: tile.frame,
-                              hidden: membershipPlacement(of: tile.id)?.collapsed == true) else { continue }
-            layoutTile(tile, invalidateTileDisplay: invalidateTileDisplay)
+            let view = tileViews[tile.id]
+            let hidden = membershipPlacement(of: tile.id)?.collapsed == true
+            guard needsLayout(tile, view: view, worldFrame: tile.frame, hidden: hidden) else { continue }
+            layoutTile(tile, invalidateTileDisplay: invalidateTileDisplay
+                && !onlyTranslated(tile, view: view, worldFrame: tile.frame, hidden: hidden))
         }
         // Lay out tiles for every installed ZoneLayer (T05).
         for layer in zoneLayers {
             for tile in layer.tiles {
-                guard needsLayout(tile, view: layer.tileViews[tile.id],
-                                  worldFrame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
+                let view = layer.tileViews[tile.id]
+                let worldFrame = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+                guard needsLayout(tile, view: view, worldFrame: worldFrame,
                                   hidden: layer.placement.collapsed) else { continue }
-                _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay)
+                _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay
+                    && !onlyTranslated(tile, view: view, worldFrame: worldFrame, hidden: layer.placement.collapsed))
             }
         }
         if navModeOverlayView != nil { qaCameraLayoutStats.chromeRepaints += 1 }
@@ -6955,7 +7331,7 @@ final class CanvasNSView: NSView, TokenThemed {
     @objc private func tidyZoneFromMenu(_ sender: NSMenuItem) {
         guard let idString = sender.representedObject as? String,
               let zoneId = UUID(uuidString: idString) else { return }
-        tidyAutoLayout(zoneId: zoneId)
+        tidyAutoLayout(zoneId: zoneId, framesZone: true)
     }
 
     func requestZoneScopeChange(zoneId: UUID) {
@@ -7941,6 +8317,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// QA (M1.10): exactly one chrome view per zone, no orphan from a departed
     /// workspace and no duplicate from a layer install.
     var qaZoneChromeViewCount: Int { zoneChromeViews.count }
+    func qaZoneOutlineResizeAnimating(_ zoneId: UUID) -> Bool { zoneChromeViews[zoneId]?.qaOutlineResizeAnimating == true }
 
     /// Test introspection: zoneIds of installed layers in z-order (back-to-front).
     var installedZoneLayerIds: [UUID] { zoneLayerOrder }
@@ -7990,6 +8367,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var activeProjectZoneId: UUID?
 
     func setActiveProjectZone(_ zoneId: UUID?) {
+        userCameraMovedSinceArming = false
         defer { applyArmedZoneChrome() }
         guard let zoneId,
               zoneLayers.contains(where: {
@@ -9987,7 +10365,7 @@ final class CanvasNSView: NSView, TokenThemed {
         canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
-        window.orderFrontRegardless()
+        window.orderFrontOffscreenForChecks()
         for tile in tiles { canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile) }
         canvas.layoutSubtreeIfNeeded()
 
@@ -10095,7 +10473,7 @@ final class CanvasNSView: NSView, TokenThemed {
         layerCanvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
         let layerWindow = NSWindow(contentRect: layerCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         layerWindow.contentView = layerCanvas
-        layerWindow.orderFrontRegardless()
+        layerWindow.orderFrontOffscreenForChecks()
         let layerFirstView = DescriptorTileNSView(tile: layerFirst)
         let layerSecondView = DescriptorTileNSView(tile: layerSecond)
         let layerThirdView = DescriptorTileNSView(tile: layerThird)
@@ -14122,8 +14500,7 @@ final class CanvasNSView: NSView, TokenThemed {
             return onProjectFolderDrop?(url, screenPoint) ?? false
         }
         let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: canvasState.viewport)
-        let spawnPoint = activeZone.map { CanvasEngine.zoneLocalPoint(world: worldPoint, zone: $0) } ?? worldPoint
-        onFileURLDrop?(url.path, spawnPoint)
+        onFileURLDrop?(url.path, worldPoint)
         return true
     }
 
@@ -14634,6 +15011,29 @@ final class ZoneChromeNSView: NSView {
         super.viewDidChangeEffectiveAppearance()
         refreshChrome()
     }
+
+    static let resizeAnimationKey = "zoneResize"
+
+    /// Morph the zone's fill and outline from `oldSize` (same top-left) to the
+    /// size it now has. Both are shape paths, so the zone's own geometry moves
+    /// with no raster stand-in; the header keeps its final width.
+    func animateOutline(fromSize oldSize: CGSize, duration: TimeInterval, timingFunction: CAMediaTimingFunction?) {
+        layoutSubtreeIfNeeded()
+        let radius = CornerRole.zone.cgRadius()
+        let from = CGPath(roundedRect: CGRect(origin: .zero, size: oldSize).insetBy(dx: 1, dy: 1),
+                          cornerWidth: radius, cornerHeight: radius, transform: nil)
+        for shape in [backgroundShape, outlineShape] {
+            let morph = CABasicAnimation(keyPath: "path")
+            morph.fromValue = from
+            morph.toValue = shape.path
+            morph.duration = duration
+            morph.timingFunction = timingFunction
+            shape.add(morph, forKey: Self.resizeAnimationKey)
+        }
+    }
+
+    /// QA: whether the outline carries a committed resize animation.
+    var qaOutlineResizeAnimating: Bool { outlineShape.animation(forKey: Self.resizeAnimationKey) != nil }
 
     /// Whether this is the zone new tiles will be created in. T5 (`.plans/47`).
     ///

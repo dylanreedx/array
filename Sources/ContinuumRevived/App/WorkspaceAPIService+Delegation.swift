@@ -369,8 +369,12 @@ extension WorkspaceAPIService {
         // in the target zone and the docked frame stays inside it; otherwise the
         // zone's own automatic, clamped placement.
         var worldPoint: CGPoint?
+        if let slot = canvas.visibleSpawnSlot(size: CanvasEngine.defaultFrame(for: .managedAgent),
+                                              anchor: canvas.spawnAnchorWorldPoint, zoneId: targetZoneId) {
+            worldPoint = CGPoint(x: slot.midX, y: slot.midY)
+        }
         let anchorId = placement?.nearTileId ?? parent.tileId
-        if let anchorId, canvas.zoneId(containing: anchorId) == targetZoneId,
+        if worldPoint == nil, let anchorId, canvas.zoneId(containing: anchorId) == targetZoneId,
            let anchor = canvas.navigationTileSnapshot(for: anchorId) {
             let size = CanvasEngine.defaultFrame(for: .managedAgent)
             let docked = CGRect(

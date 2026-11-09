@@ -902,7 +902,7 @@ public enum LaunchPaletteModel {
         case .toggleCurrentZoneAutoLayout: return item(row, .actions, "Auto Layout", "This Zone", "rectangle.3.group", ["zone", "toggle"], true, false, "zone-action:auto-layout")
         case .tidyCurrentZone: return item(row, .actions, "Tidy Now", "This Zone", "wand.and.stars", ["zone", "arrange"], true, false, "zone-action:tidy")
         case .replayGettingStarted: return item(row, .actions, "Replay Getting Started", "Reset learning tasks without changing the canvas", "arrow.counterclockwise", ["onboarding", "tutorial", "learn"], false, false, "action:replay-getting-started")
-        case .tidyCanvas: return item(row, .actions, "Tidy canvas", "Restore spacing without changing tile sizes", "rectangle.3.group", ["tidy", "arrange", "layout"], true, true, "action:tidy-canvas")
+        case .tidyCanvas: return item(row, .actions, "Tidy canvas", "Fill every zone and give each tile its shape", "rectangle.3.group", ["tidy", "arrange", "layout"], true, true, "action:tidy-canvas")
         case let .updateAgentCLI(harness): return item(row, .actions, "Update \(harness.rawValue)", "A newer version is available", "arrow.down.circle", ["upgrade", "cli", "version"], false, false, "cli-update:\(harness.rawValue)")
         case .checkAgentCLIUpdates: return item(row, .actions, "Check for CLI Updates", "Claude Code, Codex and Pi", "arrow.triangle.2.circlepath", ["update", "upgrade", "version"], false, false, "action:check-cli-updates")
         }

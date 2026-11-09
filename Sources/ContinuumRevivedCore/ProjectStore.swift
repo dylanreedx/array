@@ -157,6 +157,15 @@ public struct ProjectStore: Sendable {
         try gatedWrite(canvas, to: layout.canvasFile)
     }
 
+    /// `saveCanvas` for a caller whose `tryLoadCanvas` of this file, moments
+    /// ago on the same thread, is what `canvas` was merged from. That read was
+    /// the refusal gate: it threw for an unreadable file or a newer schema, and
+    /// nothing wrote the file in between. Running the gate again decoded the
+    /// same bytes a second time on every spawn and every layout commit.
+    public func saveCanvasAfterVerifiedRead(_ canvas: CanvasState) throws {
+        try gatedWrite(canvas, to: layout.canvasFile)
+    }
+
     public func loadCanvas() throws -> CanvasState {
         StoreReadProbe.shared.record()
         let canvas: CanvasState = try writer.read(at: layout.canvasFile, decoder: JSONCodec.makeCanvasDecoder())

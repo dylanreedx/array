@@ -91,6 +91,12 @@ if CommandLine.arguments.contains("--layout-pressure-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--uuid-string-order-check") {
+    runUUIDStringOrderChecks()
+    print("UUIDStringOrderChecks passed")
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--exact-rebase-performance-check") {
     let oldOrigin = -0.000_976_562_5
     let proposed = -0.334_309_895_833_333_3
@@ -401,6 +407,16 @@ if CommandLine.arguments.contains("--auto-layout-fanout-check") {
 
 if CommandLine.arguments.contains("--fanout-layout-probe") {
     runFanoutLayoutProbe()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--tidy-real-canvas-probe") {
+    runTidyRealCanvasProbe()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--tidy-packer-check") {
+    runTidyPackerChecks()
     Foundation.exit(0)
 }
 
@@ -5884,6 +5900,19 @@ do {
     expect(viewportRect.intersects(CGRect(x: placed.x, y: placed.y, width: placed.width, height: placed.height)), "Fallback from far-away last tile is clamped into visible viewport, got \(placed)")
 }
 
+// Spawn free-slot contract: hand-computed centre and bounds, plus occupied centre.
+do {
+    let area = CGRect(x: 100, y: 200, width: 800, height: 600)
+    let size = CGSize(width: 200, height: 100)
+    let centre = CGPoint(x: 500, y: 500)
+    let empty = TileSpawnPlacement.nearestVisibleSlot(size: size, anchor: centre, visible: area, bounds: nil, obstacles: [], gap: 8)
+    expect(empty == CGRect(x: 400, y: 450, width: 200, height: 100), "spawn free slot centres on the chosen anchor")
+    let blocker = CGRect(x: 400, y: 450, width: 200, height: 100)
+    let free = TileSpawnPlacement.nearestVisibleSlot(size: size, anchor: centre, visible: area, bounds: nil, obstacles: [blocker], gap: 8)
+    expect(free != nil && area.contains(free!) && !blocker.intersects(free!), "spawn free slot stays visible and avoids the focused tile")
+    expect(TileSpawnPlacement.nearestVisibleSlot(size: size, anchor: centre, visible: area, bounds: CGRect(x: 0,y: 0,width: 50,height: 50), obstacles: [], gap: 8) == nil, "no fitting zone intersection produces no visible slot")
+}
+
 // MARK: - TileSpawnPlacement: centre-aware spawn placement (.plans/18)
 //
 // Pure geometry only. Every expectation is written out by hand from the fixture
@@ -6347,18 +6376,18 @@ do {
 
 do {
     let terminal = TileGeometry.preset(for: .terminal)
-    expect(terminal.defaultSize == CGSize(width: 900, height: 584), "Terminal default is 100x28 grid at 9x20 plus 24pt chrome, got \(terminal.defaultSize)")
+    expect(terminal.defaultSize == CGSize(width: 720, height: 804), "Terminal default is 80x39 grid at 9x20 plus 24pt chrome, got \(terminal.defaultSize)")
     expect(terminal.aspect == .free, "Terminal aspect is free")
     expect(terminal.sizeQuantum == CGSize(width: 9, height: 20), "Terminal quantum is cell size, got \(String(describing: terminal.sizeQuantum))")
     expect(TileGeometry.minimumSize(for: .terminal) == CGSize(width: 180, height: 124), "Terminal minimum is 20x5 cells plus chrome")
 
     let customTerminal = TileGeometry.preset(for: .terminal, terminalCell: TerminalCellSize(width: 10, height: 18))
-    expect(customTerminal.defaultSize == CGSize(width: 1000, height: 528), "Terminal grid math honors injectable cell size, got \(customTerminal.defaultSize)")
+    expect(customTerminal.defaultSize == CGSize(width: 800, height: 726), "Terminal grid math honors injectable cell size, got \(customTerminal.defaultSize)")
     expect(customTerminal.sizeQuantum == CGSize(width: 10, height: 18), "Terminal quantum honors injectable cell size")
     expect(TileGeometry.minimumSize(for: .terminal, terminalCell: TerminalCellSize(width: 10, height: 18)) == CGSize(width: 200, height: 114), "Terminal min-cells floor honors injectable cell size")
 
     let browser = TileGeometry.preset(for: .browser)
-    expect(browser.defaultSize == CGSize(width: 1024, height: 640), "Browser default is 16:10 1024x640, got \(browser.defaultSize)")
+    expect(browser.defaultSize == CGSize(width: 1024, height: 576), "Browser default is 16:9 1024x576, got \(browser.defaultSize)")
     expect(browser.aspect == .free && browser.sizeQuantum == nil, "Browser carries free aspect and no quantum")
 
     struct TileGeometryPresetCase {
@@ -6370,8 +6399,8 @@ do {
     }
 
     let cases: [TileGeometryPresetCase] = [
-        TileGeometryPresetCase(kind: .terminal, defaultSize: CGSize(width: 900, height: 584), minimumSize: CGSize(width: 180, height: 124), aspect: .free, quantum: CGSize(width: 9, height: 20)),
-        TileGeometryPresetCase(kind: .browser, defaultSize: CGSize(width: 1024, height: 640), minimumSize: CGSize(width: 320, height: 220), aspect: .free, quantum: nil),
+        TileGeometryPresetCase(kind: .terminal, defaultSize: CGSize(width: 720, height: 804), minimumSize: CGSize(width: 180, height: 124), aspect: .free, quantum: CGSize(width: 9, height: 20)),
+        TileGeometryPresetCase(kind: .browser, defaultSize: CGSize(width: 1024, height: 576), minimumSize: CGSize(width: 320, height: 220), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .note, defaultSize: CGSize(width: 640, height: 400), minimumSize: CGSize(width: 240, height: 160), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .file, defaultSize: CGSize(width: 640, height: 560), minimumSize: CGSize(width: 200, height: 200), aspect: .free, quantum: nil),
         TileGeometryPresetCase(kind: .fileTree, defaultSize: CGSize(width: 360, height: 520), minimumSize: CGSize(width: 220, height: 240), aspect: .free, quantum: nil),
@@ -6387,6 +6416,68 @@ do {
         expect(CanvasEngine.defaultFrame(for: row.kind) == row.defaultSize, "CanvasEngine default delegates to TileGeometry for \(row.kind)")
         expect(CanvasEngine.minimumFrame(for: row.kind) == row.minimumSize, "CanvasEngine minimum delegates to TileGeometry for \(row.kind)")
     }
+}
+
+// MARK: - TileGeometry: a new tile is born in the shape tidy gives it (.plans/auto-layout-night)
+
+do {
+    func inRule(_ size: CGSize, _ kind: TileKind) -> Bool {
+        let ratio = Double(size.width / size.height)
+        switch TileGeometry.shapeRule(for: kind) {
+        case let .aspect(wanted): return abs(ratio - wanted) < 1e-9
+        case let .band(min, max): return ratio >= min && ratio <= max
+        case .keep: return true
+        }
+    }
+    let kinds: [TileKind] = [.terminal, .browser, .iosPreview, .browserInspector, .note, .file, .fileTree,
+                             .ticketQueue, .conductorQueue, .diffReview, .runArtifacts, .managedAgent,
+                             .sharedAgent, .sharedTile, .kanban, .sharedPortal]
+    for kind in kinds {
+        let base = TileGeometry.preset(for: kind).defaultSize
+        expect(inRule(base, kind), "\(kind) default \(base) must be inside its shape rule \(TileGeometry.shapeRule(for: kind))")
+        let fits = TileGeometry.spawnFitSizes(for: kind)
+        expect(fits.first == base, "\(kind) fit sizes must start at the default, got \(fits)")
+        let minimum = TileGeometry.minimumSize(for: kind)
+        for (index, size) in fits.enumerated() {
+            expect(inRule(size, kind), "\(kind) fit size \(size) must be inside its shape rule")
+            expect(size.width >= minimum.width && size.height >= minimum.height, "\(kind) fit size \(size) is below the minimum \(minimum)")
+            if index > 0 { expect(size.width < fits[index - 1].width, "\(kind) fit sizes must shrink, got \(fits)") }
+        }
+    }
+    expect(TileGeometry.spawnFitSizes(for: .browser) == [CGSize(width: 1024, height: 576), CGSize(width: 896, height: 504), CGSize(width: 768, height: 432)],
+           "browser fit sizes are exact 16:9 eighths, got \(TileGeometry.spawnFitSizes(for: .browser))")
+    expect(TileGeometry.spawnFitSizes(for: .terminal) == [CGSize(width: 720, height: 804)], "a terminal never shrinks below its 80 columns")
+    expect(TileGeometry.preset(for: .terminal).defaultSize.width >= 80 * 9, "the default terminal keeps 80 columns of the default cell")
+
+    // roomFit, by hand. Room x 0..1000, y 0..600; a 400x600 host at the left; gap 8.
+    // A 1024x576 browser has no in-room slot (only 592 right of the host), its
+    // 7/8 step 896x504 neither, its 3/4 step 768x432 neither: nil, and the caller
+    // grows the zone. A 576x640 agent is too tall for the 600 room; its 7/8 step
+    // (504x560) docks right of the host at x 408, top-aligned because the focus
+    // is the host's top edge.
+    let host = TileFrame(x: 0, y: 0, width: 400, height: 600)
+    let sibling = Tile(id: UUID(), kind: .note, title: "host", frame: host,
+                       zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+    let room = CGRect(x: 0, y: 0, width: 1000, height: 600)
+    func context(_ size: CGSize) -> TileSpawnPlacement.Context {
+        .init(newSize: size, viewport: CanvasViewport(x: -200, y: -200, zoom: 1), visibleSize: CGSize(width: 1600, height: 1200),
+              siblings: [sibling], gap: 8, fanOut: .init(hosts: [host], targetAspect: 1.6),
+              preferredAnchor: CGPoint(x: 200, y: 0))
+    }
+    let browserFit = TileSpawnPlacement.roomFit(context(CGSize(width: 1024, height: 576)), room: room,
+                                                sizes: TileGeometry.spawnFitSizes(for: .browser))
+    expect(browserFit == nil, "roomFit: no browser step fits beside the host, expected nil, got \(String(describing: browserFit))")
+    let agentFit = TileSpawnPlacement.roomFit(context(CGSize(width: 576, height: 640)), room: room,
+                                              sizes: TileGeometry.spawnFitSizes(for: .managedAgent))
+    expect(agentFit == TileFrame(x: 408, y: 0, width: 504, height: 560),
+           "roomFit: the agent's 7/8 step docks right of the host inside the room, got \(String(describing: agentFit))")
+    // An empty zone: centred on the focus, clamped into the room.
+    var empty = context(CGSize(width: 1024, height: 576))
+    empty.siblings = []; empty.fanOut = .init(hosts: [], targetAspect: 1.6); empty.preferredAnchor = CGPoint(x: 900, y: 300)
+    let emptyFit = TileSpawnPlacement.roomFit(empty, room: CGRect(x: 0, y: 0, width: 1200, height: 700),
+                                              sizes: TileGeometry.spawnFitSizes(for: .browser))
+    expect(emptyFit == TileFrame(x: 176, y: 12, width: 1024, height: 576),
+           "roomFit: an empty zone centres on the focus and clamps into the room, got \(String(describing: emptyFit))")
 }
 
 // MARK: - FocusDispatchChecks
@@ -11941,7 +12032,161 @@ func runJellyTrajectoryProbe() {
         }
         print("")
     }
+    anomalyCount += runTidiedMixedTrajectories()
     print("jelly trajectory probe complete")
+}
+
+/// The probe on a TIDIED zone of mixed tiles (`.plans/auto-layout-night`): rows of
+/// different widths at exact gap contact, as `CanvasTidyPacker` makes them. The
+/// same frame-by-frame anomaly rules as the three-tile fixtures, over every tile,
+/// plus the end state each drag would drop: no two tiles overlapping, every tile
+/// inside the content rect. App gap 8, padding 24, header 34. Returns the
+/// anomaly count.
+func runTidiedMixedTrajectories() -> Int {
+    let zoneId = UUID(uuidString: "B2300000-0000-4000-8000-000000000001")!
+    func id(_ n: Int) -> UUID { UUID(uuidString: String(format: "B2300000-0000-4000-8000-%012d", 10 + n))! }
+    let seeds: [(String, TileKind, CGSize)] = [
+        ("web1", .browser, CGSize(width: 640, height: 360)), ("note1", .note, CGSize(width: 300, height: 200)),
+        ("agent1", .managedAgent, CGSize(width: 400, height: 440)), ("term", .terminal, CGSize(width: 240, height: 320)),
+        ("web2", .browser, CGSize(width: 640, height: 360)), ("note2", .note, CGSize(width: 300, height: 200)),
+        ("agent2", .managedAgent, CGSize(width: 400, height: 440)), ("note3", .note, CGSize(width: 240, height: 200)),
+    ]
+    let gap = 8.0, padding = 24.0, header = 34.0
+    let zone = ZonePlacement(zoneId: zoneId, projectId: nil, origin: ZonePoint(x: 400, y: 300),
+                             size: ZoneSize(width: 1700, height: 1100), color: "teal", collapsed: false,
+                             hydrationPolicy: .automatic)
+    let content = CGRect(x: 424, y: 358, width: 1652, height: 1018)
+    var names: [UUID: String] = [:]
+    var members: [CanvasTidyPacker.Member] = []
+    for (index, seed) in seeds.enumerated() {
+        names[id(index)] = seed.0
+        members.append(.init(id: id(index), frame: TileFrame(x: 424 + Double(index % 4) * 420, y: 358 + Double(index / 4) * 470,
+                                                             width: Double(seed.2.width), height: Double(seed.2.height)),
+                             kind: seed.1, minimumSize: TileGeometry.minimumSize(for: seed.1)))
+    }
+    let packed = CanvasTidyPacker.pack(members: members, content: content, gap: gap)
+    var packedZone = zone
+    packedZone.size = ZoneSize(width: Double(packed.content.maxX) + padding - zone.origin.x,
+                               height: Double(packed.content.maxY) + padding - zone.origin.y)
+    let tiles = members.map { member in
+        CanvasAutoLayoutEngine.LayoutTile(id: member.id, frame: packed.frames[member.id]!, zoneId: zoneId,
+                                          minimumSize: member.minimumSize, kind: member.kind)
+    }
+    let byName = Dictionary(uniqueKeysWithValues: names.map { ($1, $0) })
+    let original = Dictionary(uniqueKeysWithValues: tiles.map { ($0.id, $0.frame) })
+    let packedContent = TileFrame(x: Double(packed.content.minX), y: Double(packed.content.minY),
+                                  width: Double(packed.content.width), height: Double(packed.content.height))
+    func centre(_ f: TileFrame) -> CGPoint { CGPoint(x: f.x + f.width / 2, y: f.y + f.height / 2) }
+    func describeRow() -> String {
+        tiles.sorted { (original[$0.id]!.y, original[$0.id]!.x) < (original[$1.id]!.y, original[$1.id]!.x) }
+            .map { "\(names[$0.id]!) \(Int(original[$0.id]!.x)),\(Int(original[$0.id]!.y)) \(Int(original[$0.id]!.width))x\(Int(original[$0.id]!.height))" }
+            .joined(separator: " | ")
+    }
+    print("=== tidied mixed zone: \(describeRow()) ===")
+    // Each drag carries the active tile's centre onto a target's centre (the
+    // probe's pointer), dwells, and the drop takes the latched slot.
+    let drags: [(String, String, String)] = [
+        ("swap wide web1 onto narrow note1 (one row)", "web1", "note1"),
+        ("swap narrow note1 onto wide web1 (one row)", "note1", "web1"),
+        ("swap web1 across rows onto note3", "web1", "note3"),
+        ("swap note1 across rows onto agent2", "note1", "agent2"),
+    ]
+    var anomalies = 0
+    for (label, activeName, targetName) in drags {
+        guard let active = byName[activeName], let target = byName[targetName],
+              let start = original[active], let goal = original[target] else { continue }
+        print("--- \(label) ---")
+        let baseline = CanvasAutoLayoutEngine.Scene(tiles: tiles, zones: [packedZone])
+        let delta = CGVector(dx: centre(goal).x - centre(start).x, dy: centre(goal).y - centre(start).y)
+        var previous = original
+        var latch: UUID?
+        var lastSlot: TileFrame?
+        var lastFrames = original
+        let frames = 28
+        for index in 0..<(frames + 2) {
+            let t = min(1, Double(index + 1) / Double(frames))
+            let requested = TileFrame(x: start.x + delta.dx * t, y: start.y + delta.dy * t, width: start.width, height: start.height)
+            let transaction = CanvasAutoLayoutEngine.solve(
+                scene: baseline, mutation: .tile(id: active, frame: requested),
+                gap: gap, zonePadding: padding, headerHeight: header, latched: latch.map { .swap($0) })
+            let latchChanged = transaction.swapTargetTileId != latch
+            latch = transaction.swapTargetTileId
+            lastSlot = transaction.latchedSlot
+            var current = original
+            for (id, frame) in transaction.tileFrames { current[id] = frame }
+            var found: [String] = []
+            for (id, now) in current where id != active && id != latch && !latchChanged {
+                guard let before = previous[id] else { continue }
+                let jump = max(abs(now.x - before.x), abs(now.y - before.y))
+                if jump > min(now.width, now.height) / 2 { found.append("TELEPORT \(names[id]!) \(String(format: "%.1f", jump))") }
+            }
+            if !found.isEmpty || index % 7 == 0 || index >= frames {
+                var line = String(format: "f%02d", index) + (latch.map { " ⇄" + names[$0]! } ?? "   ")
+                for tile in tiles where current[tile.id] != original[tile.id] {
+                    let f = current[tile.id]!
+                    line += "  \(names[tile.id]!)(\(Int(f.x)),\(Int(f.y)))"
+                }
+                if !found.isEmpty { line += "   !! " + found.joined(separator: ", ") }
+                print(line)
+            }
+            anomalies += found.count
+            previous = current
+            lastFrames = current
+        }
+        // The drop: the mover takes its latched slot; everything else stays where
+        // the last frame left it.
+        var dropped = lastFrames
+        if let slot = lastSlot { dropped[active] = slot }
+        var problems: [String] = []
+        let ids = dropped.keys.sorted { names[$0]! < names[$1]! }
+        for (i, a) in ids.enumerated() {
+            for b in ids.dropFirst(i + 1) {
+                let p = dropped[a]!, q = dropped[b]!
+                if p.x < q.x + q.width - 0.5 && q.x < p.x + p.width - 0.5 && p.y < q.y + q.height - 0.5 && q.y < p.y + p.height - 0.5 {
+                    problems.append("OVERLAP \(names[a]!)/\(names[b]!)")
+                }
+            }
+        }
+        // Past the content edge is the zone needing to grow (the drop grows it;
+        // a tidy restores the fill), not an anomaly: reported, not counted.
+        let rightmost = dropped.values.map { $0.x + $0.width }.max() ?? 0
+        let growth = max(0, rightmost - (packedContent.x + packedContent.width))
+        print("drop " + (lastSlot.map { "slot(\(Int($0.x)),\(Int($0.y)) \(Int($0.width))x\(Int($0.height)))" } ?? "no latch")
+              + (growth > 0.5 ? String(format: "  zone grows %.0fpt", growth) : "")
+              + (problems.isEmpty ? "  clean" : "   !! " + problems.joined(separator: ", ")))
+        anomalies += problems.count
+        print("")
+    }
+    // An UNLATCHED drop in the full zone: web1 carried 496pt right (its centre
+    // over note1, the pointer short of it), released with no latch. The drop
+    // settles the mover; it must stay in the zone's content, never be flung out.
+    if let web1 = byName["web1"], let start = original[web1] {
+        let baseline = CanvasAutoLayoutEngine.Scene(tiles: tiles, zones: [packedZone])
+        let requested = TileFrame(x: start.x + 496, y: start.y, width: start.width, height: start.height)
+        // The pointer the app passes: the title-bar grab point, 80pt in from
+        // the tile's left edge, which stops short of note1.
+        let pointer = CGPoint(x: requested.x + 80, y: requested.y + 16)
+        let live = CanvasAutoLayoutEngine.solve(scene: baseline, mutation: .tile(id: web1, frame: requested),
+                                                gap: gap, zonePadding: padding, headerHeight: header, pointer: pointer)
+        var droppedTiles = tiles
+        for index in droppedTiles.indices {
+            if droppedTiles[index].id == web1 { droppedTiles[index].frame = requested }
+        }
+        let settle = CanvasAutoLayoutEngine.solve(
+            scene: .init(tiles: droppedTiles, zones: [packedZone]),
+            mutation: .settle(zoneId: zoneId, anchor: web1, pin: false),
+            gap: gap, zonePadding: padding, headerHeight: header)
+        let landed = settle.tileFrames[web1] ?? requested
+        let inside = landed.y >= packedContent.y - 0.5 && landed.x >= packedContent.x - 0.5
+            && landed.x + landed.width <= packedContent.x + packedContent.width + 0.5
+            && landed.y + landed.height <= packedContent.y + packedContent.height + 0.5
+        print("--- unlatched drop of web1 over note1 ---")
+        print("live latch " + (live.swapTargetTileId.flatMap { names[$0] } ?? "none")
+              + "  settle -> web1(\(Int(landed.x)),\(Int(landed.y)))" + (inside ? "  inside" : "   !! OUTSIDE the content"))
+        if !inside { anomalies += 1 }
+        print("")
+    }
+    return anomalies
 }
 
 func runCanvasAutoLayoutChecks() {
@@ -12220,9 +12465,12 @@ func runCanvasAutoLayoutChecks() {
     expect(settled.tileFrames[swapLeftId] == nil && settled.tileFrames[swapRightId] == nil,
            "jelly settle never moves members already at gap-contact")
 
-    // Unequal sizes: the exchange is still origin-for-origin, and the drop
-    // settle shifts the row minimally when the bigger tile inherits a slot at
-    // the wall — pushes, never a lane reflow.
+    // Unequal sizes: the exchange trades ROW POSITIONS (`.plans/auto-layout-night`).
+    // The 340-wide tile takes the 260-wide tile's place at 108; the displaced one
+    // follows it at the gap, 108 + 340 + 8 = 456, where the raw origin exchange
+    // left it at 376 under the mover. The neighbour past both does not move,
+    // and the zone keeps its size. The drop settle below still shifts a row
+    // minimally — pushes, never a lane reflow.
     let unequalLeft = CanvasAutoLayoutEngine.LayoutTile(
         id: swapLeftId, frame: TileFrame(x: 108, y: 140, width: 260, height: 220), zoneId: swapZoneId)
     let unequalMiddle = CanvasAutoLayoutEngine.LayoutTile(
@@ -12237,8 +12485,11 @@ func runCanvasAutoLayoutChecks() {
         gap: 8, zonePadding: 8, headerHeight: 32)
     let unequalDisplaced = unequalSwap.tileFrames[swapLeftId] ?? unequalLeft.frame
     expect(unequalSwap.swapTargetTileId == swapLeftId
-               && unequalDisplaced.x == unequalMiddle.frame.x && unequalDisplaced.y == unequalMiddle.frame.y,
-           "jelly: unequal tiles exchange origins without changing lanes; got \(unequalDisplaced)")
+               && unequalDisplaced.x == unequalLeft.frame.x + unequalMiddle.frame.width + 8
+               && unequalDisplaced.y == unequalMiddle.frame.y,
+           "jelly: unequal tiles trade row positions without changing lanes; got \(unequalDisplaced)")
+    expect(unequalSwap.latchedSlot.map { $0.x == unequalLeft.frame.x && $0.width == unequalMiddle.frame.width } == true,
+           "jelly: the dragged tile's slot is the displaced tile's place at its own width; got \(String(describing: unequalSwap.latchedSlot))")
     expect(unequalSwap.tileFrames[swapRightId] == nil,
            "jelly: unequal slot exchange does not reflow an unrelated neighbor")
     expect(unequalSwap.zonePlacements.isEmpty,
@@ -12272,8 +12523,13 @@ func runCanvasAutoLayoutChecks() {
     let disabledResult = CanvasAutoLayoutEngine.solve(
         scene: .init(tiles: tiles, zones: [disabled]), mutation: .tidy(zoneId: zoneId),
         gap: 8, zonePadding: 8, headerHeight: 20)
-    expect(disabledResult.tileFrames.isEmpty && disabledResult.zonePlacements[zoneId]?.size == ZoneSize(width: 224, height: 108),
-           "jelly: explicit tidy fits a disabled zone without changing member dimensions")
+    // Explicit tidy fills even a disabled zone, edge to edge (`--tidy-packer-check`).
+    let disabledZone = disabledResult.zonePlacements[zoneId] ?? disabled
+    let disabledFrames = tiles.prefix(2).map { disabledResult.tileFrames[$0.id] ?? $0.frame }
+    expect(abs(disabledFrames.map { $0.x + $0.width }.max()! - (disabledZone.origin.x + disabledZone.size.width - 8)) < 0.01
+           && abs(disabledFrames.map { $0.y + $0.height }.max()! - (disabledZone.origin.y + disabledZone.size.height - 8)) < 0.01
+           && disabledZone.autoLayoutMode == .disabled,
+           "jelly: explicit tidy fills a disabled zone to its padded content edges")
 
     var compressedZone = zone
     compressedZone.size = ZoneSize(width: 204, height: 92)

@@ -791,7 +791,17 @@ enum ZoneTruthChecks {
                     throw Failure(message: "\(kind): zone A1's project has no spawner")
                 }
                 let before = Set(onScreen(m).keys)
+                let readsBefore = StoreReadProbe.shared.count
                 try expect(spawn(spawner), "\(kind): the spawn itself failed")
+                // The spawn's two canvas writes (the new tile, then the settle's
+                // commit) each read canvas.json once to merge into. Each also
+                // used to read it AGAIN inside `saveCanvas`, for the readability
+                // gate that read had just passed: note 7, terminal 9, browser 16.
+                let storeReads = StoreReadProbe.shared.count - readsBefore
+                let readBudget = [TileKind.note: 5, .terminal: 6, .browser: 13][tileKind] ?? 0
+                try expect(storeReads <= readBudget,
+                           "\(kind): the spawn made \(storeReads) registry/workspace/canvas read(s) on the main thread, "
+                           + "over its \(readBudget); a canvas.json is being decoded twice per write again")
                 m.canvas.layoutSubtreeIfNeeded()
                 let shown = onScreen(m)
                 guard let newId = Set(shown.keys).subtracting(before).first, let newFrame = shown[newId] else {
@@ -826,7 +836,8 @@ enum ZoneTruthChecks {
                     try expect(remounted[id] == frame,
                                "\(kind): after a remount tile \(id.uuidString.suffix(4)) is at \(String(describing: remounted[id])), not \(frame)")
                 }
-                manifest[kind] = ["newTile": [newFrame.x, newFrame.y, newFrame.width, newFrame.height]]
+                manifest[kind] = ["newTile": [newFrame.x, newFrame.y, newFrame.width, newFrame.height],
+                                  "storeReads": storeReads]
             } catch { failures.append("\(error)") }
         }
 

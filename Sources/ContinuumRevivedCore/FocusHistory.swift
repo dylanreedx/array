@@ -21,6 +21,7 @@ public enum FocusHistoryEventReason: Equatable, Sendable {
     case directTileActivation
     case completedTileJump
     case completedZoneJump
+    case tileSpawned
     case paletteJump
     case previousNavigation
 }
@@ -66,7 +67,7 @@ public struct FocusHistory: Equatable, Sendable {
 
     public mutating func recordTileFocus(_ tileId: UUID, zoneId: UUID? = nil, reason: FocusHistoryEventReason) {
         switch reason {
-        case .directTileActivation, .completedTileJump, .paletteJump, .previousNavigation:
+        case .directTileActivation, .completedTileJump, .tileSpawned, .paletteJump, .previousNavigation:
             recentTiles.record(tileId)
             if let zoneId { lastFocusedTileByZone[zoneId] = tileId }
         case .completedZoneJump:
@@ -78,7 +79,7 @@ public struct FocusHistory: Equatable, Sendable {
         switch reason {
         case .completedZoneJump, .paletteJump, .previousNavigation:
             recentZones.record(zoneId)
-        case .directTileActivation, .completedTileJump:
+        case .directTileActivation, .completedTileJump, .tileSpawned:
             break
         }
     }
