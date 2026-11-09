@@ -321,15 +321,11 @@ bench's regression set.
 
 ## Found on the night branch, not caused here
 
-`--subagent-tile-zone-check` fails on the night branch and on the
-spawn-sizing binary alike: "the first child must open docked beside its
-parent (2112, 880) 576x640; got (2112, 1528) 576x316". The lead is now
-576x640 (stream 3's new agent default) and its half-height helper docks
-below it instead of to its right, probably because `visibleSpawnSlot`
-picks the free slot nearest the lead's centre, which is below once the
-lead is taller than wide. Stream 3 (mine) missed it: the leg was not in
-that stream's check list. Helper geometry belongs to Stream 1, so it is
-left for the lead.
+`--subagent-tile-zone-check` (a helper opening below its lead instead of
+beside it) was first attributed here to stream 3's sizing. Correction from
+the lead: it was a spawn-framing-release base regression, fixed by
+0d5187d1 (helper docking before visible-slot proximity) and green on
+array/auto-layout-night since 932a6fee. Not stream 3, and not bare tiles.
 
 ## Open
 
