@@ -3705,6 +3705,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--layout-commit-scope-check") {
+            do {
+                _ = NSApplication.shared
+                try LayoutCommitScopeChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --layout-commit-scope-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--canvas-pointer-path-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -21816,11 +21827,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             for zone in document.zones {
                 if let projectId = zone.projectId { projectZones[projectId] = zone }
             }
-            var projectWrites: [(store: ProjectStore, original: CanvasState, updated: CanvasState)] = []
-            for (projectId, _) in projectZones.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
-                guard let entry = registry.projects.first(where: { $0.id == projectId }) else { continue }
+            // Scoped (`.plans/auto-layout-night`): load only the projects that own
+            // a committed tile. Every project canvas in the workspace used to be
+            // loaded and verified on each drag and tidy commit, just to find the
+            // owners: a cost that grew with the project count, on the main thread,
+            // right as the movement started. The live canvas knows each tile's
+            // zone, and so its project. Only a tile it cannot place falls back to
+            // the full scan below, so nothing the old commit saved is refused.
+            var ownerProjectIds = Set<UUID>()
+            for tileId in unplacedTileIds {
+                if let zoneId = canvasView?.zoneId(containing: tileId),
+                   let projectId = document.zones.first(where: { $0.zoneId == zoneId })?.projectId,
+                   projectZones[projectId] != nil {
+                    ownerProjectIds.insert(projectId)
+                }
+            }
+            var projectWrites: [(projectId: UUID, store: ProjectStore, original: CanvasState, updated: CanvasState)] = []
+            var loadedProjectIds: [UUID] = []
+            let orderedProjectIds = projectZones.keys.sorted { $0.uuidString < $1.uuidString }
+            func mergeProject(_ projectId: UUID) throws {
+                guard let entry = registry.projects.first(where: { $0.id == projectId }) else { return }
                 let projectStore = ProjectStore(projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
-                guard let original = try projectStore.tryLoadCanvas() else { continue }
+                loadedProjectIds.append(projectId)
+                guard let original = try projectStore.tryLoadCanvas() else { return }
                 unplacedTileIds.subtract(original.tiles.map(\.id))
                 var updated = original
                 var changed = false
@@ -21843,8 +21872,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                     changed = true
                 }
-                if changed { projectWrites.append((projectStore, original, updated)) }
+                if changed { projectWrites.append((projectId, projectStore, original, updated)) }
             }
+            for projectId in orderedProjectIds where ownerProjectIds.contains(projectId) {
+                try mergeProject(projectId)
+            }
+            if !unplacedTileIds.isEmpty {
+                for projectId in orderedProjectIds where !ownerProjectIds.contains(projectId) {
+                    try mergeProject(projectId)
+                    if unplacedTileIds.isEmpty { break }
+                }
+            }
+            qaLastLayoutCommitProjects = (loaded: loadedProjectIds, written: projectWrites.map(\.projectId))
 
             guard unplacedTileIds.isEmpty else {
                 let tiles = unplacedTileIds.sorted { $0.uuidString < $1.uuidString }.map { id in
@@ -23400,6 +23439,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (M1.11): drive a palette action the way the palette does.
     @discardableResult
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
+    /// QA: the projects the last layout commit loaded and wrote, in that order.
+    var qaLastLayoutCommitProjects: (loaded: [UUID], written: [UUID])?
     /// QA (`.plans/67` ARC-4a): the restart a terminal placeholder's button fires.
     func qaRestartTerminalTile(_ tileId: UUID) { restartTile(tileId: tileId) }
     /// QA: the agent-status write a stopped harness run lands through.
