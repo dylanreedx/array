@@ -132,6 +132,26 @@ func runTidyPackerChecks() {
     for i in dust.scene.tiles.indices { dust.scene.tiles[i].frame.x += dustShift; dust.scene.tiles[i].frame.y -= dustShift / 3 }
     cases.append(dust)
 
+    // Zones from a real canvas, anonymised to kinds and frames (zone at 0,0;
+    // `--tidy-real-canvas-probe`): two zones of mostly agents with a few made
+    // three to four times the rest, and one whose tiles overhang its edge.
+    let realZones: [(String, Double, Double, [(TileKind, Double, Double, Double, Double)])] = [
+        ("real-agents-22", 16289, 8298, [(.managedAgent, 4100, 2846, 1194, 1080), (.managedAgent, 5314, 3406, 640, 520), (.managedAgent, 5974, 3383, 894, 783), (.managedAgent, 7951, 2524, 1750, 1611), (.managedAgent, 9721, 2524, 771, 764), (.file, 6882, 2803, 640, 560), (.managedAgent, 9721, 3327, 1922, 1439), (.managedAgent, 9432, 738, 1049, 970), (.managedAgent, 4080, 1796, 1214, 1030), (.managedAgent, 11421, 1782, 856, 722), (.managedAgent, 11438, 2524, 839, 681), (.managedAgent, 12297, 2545, 838, 661), (.file, 24, 7714, 640, 560), (.managedAgent, 10352, 1735, 951, 697), (.managedAgent, 12126, 954, 1008, 808), (.browser, 13155, 954, 1024, 640), (.managedAgent, 14199, 718, 926, 896), (.browser, 11667, 3327, 1024, 640), (.browser, 15164, 718, 1063, 896), (.browser, 15144, 1634, 1024, 640), (.browser, 15164, 58, 1024, 640), (.browser, 9721, 4790, 1024, 640)]),
+        ("real-agents-24", 9330, 7106, [(.managedAgent, 4681, 2912, 1791, 1311), (.kanban, 3624, 2912, 1037, 897), (.managedAgent, 6492, 2912, 1826, 1606), (.managedAgent, 3864, 4729, 864, 934), (.managedAgent, 4749, 4243, 640, 520), (.kanban, 3044, 5688, 800, 854), (.managedAgent, 4790, 5684, 1242, 858), (.managedAgent, 3864, 5684, 906, 858), (.managedAgent, 4466, 6562, 640, 520), (.managedAgent, 6052, 5684, 981, 878), (.managedAgent, 2664, 2728, 940, 1080), (.managedAgent, 8338, 3714, 640, 619), (.managedAgent, 2004, 1628, 688, 1080), (.managedAgent, 1344, 1628, 640, 520), (.managedAgent, 2004, 2728, 640, 520), (.managedAgent, 1881, 3268, 763, 707), (.managedAgent, 24, 998, 1300, 1150), (.managedAgent, 684, 2168, 640, 520), (.managedAgent, 684, 2708, 640, 520), (.managedAgent, 684, 3248, 640, 520), (.kanban, 1344, 998, 800, 520), (.managedAgent, 290, 58, 939, 920), (.file, 1344, 2168, 640, 560), (.file, 24, 2168, 640, 560)]),
+        ("real-overhang-6", 3686, 2060, [(.managedAgent, 1489, 64, 804, 892), (.kanban, 2314, 64, 800, 520), (.managedAgent, 3126, 604, 640, 520), (.managedAgent, 3126, 1144, 640, 520), (.terminal, 2206, 1144, 900, 584), (.managedAgent, 3134, 64, 640, 520)]),
+    ]
+    for (number, real) in realZones.enumerated() {
+        let zoneId = uuid(80 + number, 999)
+        let tiles = real.3.enumerated().map { i, t in
+            CanvasAutoLayoutEngine.LayoutTile(id: uuid(80 + number, i), frame: TileFrame(x: t.1, y: t.2, width: t.3, height: t.4),
+                                              zoneId: zoneId, minimumSize: TileGeometry.minimumSize(for: t.0), kind: t.0)
+        }
+        let zone = ZonePlacement(zoneId: zoneId, projectId: nil, origin: ZonePoint(x: 0, y: 0),
+                                 size: ZoneSize(width: real.1, height: real.2), color: "teal", collapsed: false,
+                                 hydrationPolicy: .automatic)
+        cases.append(Case(name: real.0, scene: .init(tiles: tiles, zones: [zone]), zoneId: zoneId, lead: nil, helpers: []))
+    }
+
     // The shape every tidied tile must have, per kind. The numbers that are
     // decisions are written here rather than read from TileGeometry, so a
     // changed rule shows up as a failure: text tiles (note, file, diff) never
@@ -237,7 +257,9 @@ func runTidyPackerChecks() {
                 return sameLine ? a.frame.x < b.frame.x : ay < by
             }.map(\.id)
         }
-        if c.name != "cramped" {
+        // Not for real zones: their tops are staggered, and this comparison's
+        // "same line" is not transitive there, so its order is undefined.
+        if c.name != "cramped" && !c.name.hasPrefix("real-") {
             check(readingOrder(before) == readingOrder(after), "\(c.name): tidy shuffled the reading order")
         }
         // The lead and its helpers are one block: the lead on the left, the
@@ -289,6 +311,17 @@ func runTidyPackerChecks() {
         for tile in members {
             check(CanvasEngine.worldToZoneLocalPreservingWorld(tile.frame, zoneOrigin: zone.origin) != nil,
                   "\(c.name): \(tile.kind!) frame has no exact zone-local: \(tile.frame) in \(zone.origin)")
+        }
+        // Real zones: justified rows give a row's tiles one height, so a tile
+        // made three or four times the rest comes back near the others' size.
+        // Measured: 0.29x at worst, and 2.94x for a small tile in a tall row.
+        // These bounds hold that, so it cannot quietly get worse.
+        if c.name.hasPrefix("real-") {
+            for tile in members {
+                let original = before.tiles.first { $0.id == tile.id }!.frame
+                let change = tile.frame.width * tile.frame.height / (original.width * original.height)
+                check(change >= 0.25 && change <= 3.0, "\(c.name): a \(tile.kind!) changed area by \(change)x (bounds 0.25-3.0)")
+            }
         }
         // Idempotent.
         let again = solve(after, c.zoneId)
@@ -396,6 +429,8 @@ func runTidyPackerChecks() {
     // largest real canvas measured), the whole explicit tidy, best of five
     // (other work on the Mac only ever adds time). Budgets are debug builds.
     let budgets: [(Int, Double)] = [(30, 8), (60, 18), (89, 25)]
+    // Their own generator state: seeds added above must not reshape these.
+    seed = 0x7E1D_9ACC_E5ED_0089
     var costCases: [Case] = []
     for (count, budget) in budgets {
         let c = makeCase("cost-\(count)", number: 100 + count, kinds: (0..<count).map { palette[$0 % (palette.count - 1)] },
@@ -434,15 +469,18 @@ func runTidyPackerChecks() {
         for (name, value) in digests.sorted(by: { $0.key < $1.key }) { print("        \"\(name)\": \"\(value)\",") }
     }
     let pinned: [String: String] = [
-        "cost-30": "69cb9552480e5530",
-        "cost-60": "5690a4e2571787d5",
-        "cost-89": "b737c4647b92cfc0",
+        "cost-30": "95cbc4a6e7660d5a",
+        "cost-60": "2fcc519cca209def",
+        "cost-89": "c58297466af24911",
         "cramped": "6d016e18ecc400ca",
         "dust": "9b11275806b0017b",
         "eight": "571b25d8afec5baf",
         "five": "03ea3c771b6ef0ce",
         "lead-five-helpers": "8a8d4d415d673daa",
         "lead-three-helpers": "1860f52c39abcb2e",
+        "real-agents-22": "f68dc372982af660",
+        "real-agents-24": "e069649b8b5dae39",
+        "real-overhang-6": "05863b80712e03c9",
         "roomy": "65e14404e5d8d5a8",
         "thirteen": "67345f155dae5b57",
         "three": "03de6e777b49137b",
@@ -463,7 +501,7 @@ func runTidyPackerChecks() {
 }
 
 /// Before (left) and after (right), each zone scaled into a 900 pt panel.
-private func writeTidyPicture(before: CanvasAutoLayoutEngine.Scene, after: CanvasAutoLayoutEngine.Scene, zoneId: UUID, path: String) {
+func writeTidyPicture(before: CanvasAutoLayoutEngine.Scene, after: CanvasAutoLayoutEngine.Scene, zoneId: UUID, path: String) {
     try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
     let panel = 900.0, margin = 40.0
     func bounds(_ scene: CanvasAutoLayoutEngine.Scene) -> CGRect {

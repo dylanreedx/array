@@ -410,6 +410,11 @@ if CommandLine.arguments.contains("--fanout-layout-probe") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--tidy-real-canvas-probe") {
+    runTidyRealCanvasProbe()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--tidy-packer-check") {
     runTidyPackerChecks()
     Foundation.exit(0)

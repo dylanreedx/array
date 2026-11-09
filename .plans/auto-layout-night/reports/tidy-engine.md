@@ -374,6 +374,108 @@ Checks, all exit 0: `--tidy-packer-check`, `--layout-pressure-check`,
 `--spawn-sizing-check`, `--auto-layout-fanout-app-check`,
 `--undo-toast-placement-check` and `--jelly-auto-layout-check` (app).
 
+## Round 6: Dylan's real canvas, offline
+
+Commits:
+- `e6117eed` test(auto-layout): probe tidy on a copy of a real canvas
+- `648ddf96` merge of array/auto-layout-night at `65f1da43` (animated resizes); clean
+- `3911a037` fix(auto-layout): treat a sub-0.1 pt re-tidy as no change
+- `bb9e8f66` test(auto-layout): seed tidy with three anonymised real zones
+
+Source, read-only. I copied these files with `cp`/`copyfile` into
+`/tmp/aln/real-canvas/`:
+- the registry
+- 3 workspace documents
+- 9 project canvases (one of 10 projects has none)
+- 1,725 agent records
+
+Nothing was written to his state or opened with an app. The probe
+(`--tidy-real-canvas-probe <dir> <out> [--gap N]`) reads the copies through
+the production stores. It builds each zone's scene as the canvas does
+(kinds, minimums, lead clusters from the records) and runs the production
+tidy. It ran with his real gap of 20 (from `defaults read`), padding 24 and
+header 34. Zones are named z01… and the table and pictures carry no title,
+path or id.
+
+Every zone with 2 or more tiles (there are five):
+
+| zone | tiles | kinds | clusters | fill before | fill after | zone before → after | at band edge | at 2.56x cap | max stretch | min shrink | below min | solve ms | 2nd tidy no-op |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| z01 | 22 | 6 browser, 2 file, 14 managedAgent | 0 | 0.148 | 0.972 | 16289x8298 → 8751x3024 | 9 | 3 | 2.94 | 0.29 | 0 | 7.2 | yes |
+| z02 | 10 | 3 browser, 1 kanban, 6 managedAgent | 0 | 0.390 | 0.973 | 5855x4002 → 4931x1972 | 2 | 0 | 2.50 | 0.43 | 0 | 1.3 | yes |
+| z03 | 24 | 2 file, 3 kanban, 19 managedAgent | 0 | 0.290 | 0.966 | 9330x7106 → 6611x3141 | 2 | 3 | 2.56 | 0.29 | 0 | 2.9 | yes |
+| z04 | 2 | 1 kanban, 1 managedAgent | 0 | 0.558 | 0.992 | 2511x2049 → 2511x1685 | 0 | 1 | 2.56 | 0.96 | 0 | 0.2 | yes |
+| z05 | 6 | 1 kanban, 4 managedAgent, 1 terminal | 0 | 0.369 | 0.973 | 3686x2060 → 2804x1718 | 6 | 2 | 2.64 | 0.64 | 0 | 0.7 | yes |
+
+No clusters formed. That is not a probe bug: the four helper tiles on his
+canvas all have leads with no tile, and the app's rule then forms no block.
+
+Pictures (before on the left, after on the right, one file per zone) are in
+`~/Movies/Array/auto-layout-night/real-canvas/`, alongside `table.md`. With
+only five zones, the worst five are all of them.
+
+### Findings, worst first
+
+1. **Big tiles lose their size (z01, z03; z02 milder).** Dylan has made a few
+   agent tiles three to four times the rest (about 1,750×1,600 among
+   800×800s). Justified rows give a row's tiles one height, so after tidy the
+   big tiles come back near the others' size (0.29× area). A small tile in a
+   tall row stretches to 2.94× (z01), past the 2.56× cap, which is soft at
+   row level. The grid looks clean, but his emphasis is lost.
+   - **Tried, and rejected for now:** a big tile spanning a double-height row,
+     with the following tiles stacked two to a column beside it (reusing the
+     cluster block). With fixed rules for when to form it, z03 looked better,
+     but z01 and z02 got worse: companions at 0.14–0.15×, and the result was
+     not idempotent. Then I solved both arrangements and kept the cheaper
+     one, with every tile of the block counted. The plain rows won in all
+     five zones, because a big tile kept big pushes its companions to half
+     height, and that costs about as much as it saves. So justified rows that
+     fill the zone can't keep a big tile big without shrinking others as
+     much. A real fix is a different layout model (free mosaic or masonry),
+     not a tweak, so it's the lead's call. Reverted; nothing of it is
+     committed.
+   - **Now pinned:** the real seeds bound every tile's area change to
+     0.25–3.0×, so this cannot quietly get worse.
+2. **A second tidy moved tiles (fixed, `3911a037`).** On real-agents-22, at the
+   check's geometry, a re-tidy moved 4 tiles by 1/32 pt (two grid steps). The
+   cause: the re-solve starts from the first tidy's snapped frames, so its
+   unrounded answer differs by up to half a step, and edges can snap either
+   way. Snapping from the unrounded running total didn't remove it, so I
+   reverted that. The fix is a tolerance: less than 0.1 pt now counts as no
+   change, all or nothing. The witness failed at the old 0.02 tolerance.
+3. **The zone collapses in sparse zones (z01 16289×8298 → 8751×3024).** It is
+   the intended shrink of an oversized zone (fill 0.15 → 0.97), but its shape
+   goes from 2:1 to 2.9:1, because height shrinks after the proportional
+   shrink. Not ugly in the picture; noted.
+4. **z05: tiles hung out of the zone before the tidy.** After, all are inside,
+   in two full rows. Fine.
+5. **z04: two tiles become tall columns,** the kanban at the 2.56× cap. As
+   designed (fill the zone); noted.
+
+Nothing below its minimum, and every second tidy is a no-op. Solves take 0.2–7.2
+ms in a debug build.
+
+### Seeds and witnesses
+
+`--tidy-packer-check` now includes real-agents-22, real-agents-24 and
+real-overhang-6, as kinds and frames only. They go through every per-case
+assertion: fill, shapes, gaps, holes, bounds, idempotence, shuffled order,
+and pinned digests.
+- Reading order is not asserted for real zones. Their tops are staggered, and
+  that assertion's "same line" test isn't transitive there, so the order it
+  compares against is undefined. I looked at the pictures instead.
+- The cost seeds now have their own generator state, because the new seeds
+  changed them through the shared generator. The packer was unchanged then
+  (its file was identical to HEAD), and their digests were re-pinned for that
+  alone.
+
+Checks, all exit 0 on the merged tree: `--tidy-packer-check`,
+`--layout-pressure-check`, `--jelly-trajectory-probe` and
+`--auto-layout-fanout-check` (CoreChecks); `--auto-layout-fanout-app-check`,
+`--jelly-auto-layout-check`, `--undo-toast-placement-check`,
+`--spawn-sizing-check` and `--auto-layout-tidy-latency-check` (app; the last
+is green since the resize-animation merge).
+
 ## Open, for the lead
 
 1. **Tidy animation feel.** `applyLayoutTransaction` animates only origins,
