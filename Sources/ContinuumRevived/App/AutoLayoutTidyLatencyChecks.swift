@@ -75,6 +75,7 @@ enum AutoLayoutTidyLatencyChecks {
         var titleRedraws = 0       // title-bar invalidations on the moved tiles (a pure move draws nothing new)
         var tileInvalidations = 0  // `invalidateForCanvasLayout` on the moved tiles (same reason)
         var translatedOnly = 0     // tiles the trigger moved without resizing
+        var resizedInvalidations = 0 // positive control: invalidations on resized tiles
         var resizedTiles = 0       // tiles whose size the trigger changed
         var resizeAnimated = 0     // of those, how many carry the committed size animation
         var zoneResized = false
@@ -361,6 +362,13 @@ enum AutoLayoutTidyLatencyChecks {
             sample.titleRedraws = translatedOnly.reduce(0) { $0 + (titlesNow[$1] ?? 0) - (titleRedrawsBefore[$1] ?? 0) }
             sample.tileInvalidations = translatedOnly.reduce(0) { $0 + (invalidationsNow[$1] ?? 0) - (tileInvalidationsBefore[$1] ?? 0) }
             sample.translatedOnly = translatedOnly.count
+            // Positive control: the same counters on the RESIZED tiles, which must
+            // redraw. A zero here means the counters are dead, not that moves are free.
+            let resizedIds = m.ids.filter { id in
+                guard let a = before[id], let b = frames()[id] else { return false }
+                return a.width != b.width || a.height != b.height
+            }
+            sample.resizedInvalidations = resizedIds.reduce(0) { $0 + (invalidationsNow[$1] ?? 0) - (tileInvalidationsBefore[$1] ?? 0) }
             // Counted, not timed: what the end of the turn has to do.
             var needLayout: [String: Int] = [:], needDisplay: [String: Int] = [:], layersNeedDisplay = 0
             func walk(_ view: NSView) {
@@ -615,6 +623,7 @@ enum AutoLayoutTidyLatencyChecks {
         json["tileInvalidations"] = samples.map(\.tileInvalidations)
         json["resizedTiles"] = samples.map(\.resizedTiles)
         json["translatedOnly"] = samples.map(\.translatedOnly)
+        json["resizedInvalidations"] = samples.map(\.resizedInvalidations)
         json["resizeAnimated"] = samples.map(\.resizeAnimated)
         json["zoneResized"] = samples.map(\.zoneResized)
         json["zoneResizeAnimated"] = samples.map(\.zoneResizeAnimated)
@@ -657,6 +666,9 @@ enum AutoLayoutTidyLatencyChecks {
                 }
                 if sample.zoneResized && !sample.zoneResizeAnimated {
                     failures.append("\(label): the zone snapped to its new size")
+                }
+                if sample.resizedTiles > 0 && sample.resizedInvalidations == 0 {
+                    failures.append("\(label): positive control: \(sample.resizedTiles) resized tiles registered no invalidation; the counters are dead")
                 }
                 if sample.titleRedraws > 0 || sample.tileInvalidations > 0 {
                     failures.append("\(label): \(sample.translatedOnly) tiles that only moved invalidated \(sample.titleRedraws) "
