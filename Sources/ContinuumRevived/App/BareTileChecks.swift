@@ -71,7 +71,13 @@ enum BareTileChecks {
                                  width: start.width, height: start.height)
 
         // 1. Drag it out.
+        host.mounted.delegate.qaLastLayoutCommitProjects = nil
         try host.dragHeader(of: tile, byWorld: dragOut)
+        // The scoped layout save finds a bare tile's owner through its bare
+        // layer: only project A1 is read and written, no full scan.
+        let commit = host.mounted.delegate.qaLastLayoutCommitProjects
+        check(commit?.loaded == [Fixture.projectA1] && commit?.written == [Fixture.projectA1],
+              "\(mode) drag out: the save loaded \(String(describing: commit?.loaded)) and wrote \(String(describing: commit?.written)), expected only project A1")
         host.expectBare(tile, at: expected, "\(mode) after the drag out")
 
         // 1b. Undo puts it back in its zone where it started; redo takes it out again.

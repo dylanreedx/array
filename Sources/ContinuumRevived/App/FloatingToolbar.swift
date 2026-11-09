@@ -179,6 +179,11 @@ final class FloatingToolbarHostView: NSView {
 
     var isMoving: Bool { dragging || link != nil }
 
+    /// Where the bar rests (or is landing) on its edge, in this view's
+    /// coordinates. Mid-landing the bar's own frame is still in flight; other
+    /// chrome that must keep clear of the bar asks for this.
+    var restingBarFrame: NSRect { restingFrame }
+
     private var restingFrame: NSRect {
         FloatingToolbarGeometry.restingFrame(
             size: toolbar.preferredSize(for: edge.orientation), edge: edge, in: bounds, avoiding: obstacles())

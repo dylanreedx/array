@@ -410,6 +410,16 @@ if CommandLine.arguments.contains("--fanout-layout-probe") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--tidy-real-canvas-probe") {
+    runTidyRealCanvasProbe()
+    Foundation.exit(0)
+}
+
+if CommandLine.arguments.contains("--tidy-packer-check") {
+    runTidyPackerChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--jelly-trajectory-probe") {
     runJellyTrajectoryProbe()
     Foundation.exit(0)
@@ -12353,8 +12363,13 @@ func runCanvasAutoLayoutChecks() {
     let disabledResult = CanvasAutoLayoutEngine.solve(
         scene: .init(tiles: tiles, zones: [disabled]), mutation: .tidy(zoneId: zoneId),
         gap: 8, zonePadding: 8, headerHeight: 20)
-    expect(disabledResult.tileFrames.isEmpty && disabledResult.zonePlacements[zoneId]?.size == ZoneSize(width: 224, height: 108),
-           "jelly: explicit tidy fits a disabled zone without changing member dimensions")
+    // Explicit tidy fills even a disabled zone, edge to edge (`--tidy-packer-check`).
+    let disabledZone = disabledResult.zonePlacements[zoneId] ?? disabled
+    let disabledFrames = tiles.prefix(2).map { disabledResult.tileFrames[$0.id] ?? $0.frame }
+    expect(abs(disabledFrames.map { $0.x + $0.width }.max()! - (disabledZone.origin.x + disabledZone.size.width - 8)) < 0.01
+           && abs(disabledFrames.map { $0.y + $0.height }.max()! - (disabledZone.origin.y + disabledZone.size.height - 8)) < 0.01
+           && disabledZone.autoLayoutMode == .disabled,
+           "jelly: explicit tidy fills a disabled zone to its padded content edges")
 
     var compressedZone = zone
     compressedZone.size = ZoneSize(width: 204, height: 92)

@@ -1,0 +1,5 @@
+lead (me)        F6CD3569-101A-4E49-9ADC-1524F993D71F
+conductor        ae7ac9c9-4eec-4229-b53a-847ec2b4ec44
+tidy-engine      9A582E7B-3140-4563-8D04-BBD2BA357F87  .worktrees/aln-tidy-engine  array/aln-tidy-engine
+tidy-latency     F53A1986-C3CF-4A08-9A68-9040ABC76080  .worktrees/aln-tidy-latency array/aln-tidy-latency
+spawn-sizing     81BE2ED5-C25E-4C14-8CA2-61C2CF5DCCEE  .worktrees/aln-spawn-sizing array/aln-spawn-sizing

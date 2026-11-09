@@ -2988,7 +2988,7 @@ final class TileSpawner {
     }
 
     /// Gap between an anchor tile and the file tile docked beside it.
-    static let anchoredFileGap: Double = 24
+    static var anchoredFileGap: Double { TileGapResolver.resolvedGap() }
 
     private func spawnFileImpl(
         location: DocumentLocation,
@@ -5020,9 +5020,16 @@ final class TileSpawner {
 
         // An explicit anchor keeps its relationship, in the layer's own space, and is
         // untouched by the centre policy: to the right of the anchor, top-aligned.
-        // File default size is 640x560. Under auto layout, post-spawn settle
-        // magnetizes zone members to the CONFIGURED gap (8), so the legacy
-        // `anchoredFileGap` (24) is compacted: x = 680 + 640 + 8.
+        // Capture the requested WORLD position before installation/settle.
+        // Beside intent uses the configured tile gap, never a historical literal.
+        guard let sourceWorld = layerFixture.canvas.allTilesInWorldFrames()
+            .first(where: { $0.id == layerNoteId })?.frame else {
+            throw CheckError.failed("beside source missing from world scene")
+        }
+        let fileSize = CanvasEngine.defaultFrame(for: .file)
+        let expectedBesideWorld = TileFrame(
+            x: sourceWorld.x + sourceWorld.width + TileGapResolver.resolvedGap(),
+            y: sourceWorld.y, width: Double(fileSize.width), height: Double(fileSize.height))
         let anchoredFilePath = layerFixture.root.appendingPathComponent("anchored.txt")
         try Data("anchored".utf8).write(to: anchoredFilePath)
         let anchoredFileId: UUID
@@ -5035,7 +5042,7 @@ final class TileSpawner {
         guard let anchoredWorld = layerFixture.canvas.allTilesInWorldFrames().first(where: { $0.id == anchoredFileId })?.frame else {
             throw CheckError.failed("anchored file missing from world scene")
         }
-        try expectFrame(anchoredWorld, TileFrame(x: 5344, y: 2300, width: 640, height: 560),
+        try expectFrame(anchoredWorld, expectedBesideWorld,
                         "pinned settle preserves explicit beside intent in world coordinates; scene=\(layerFixture.canvas.allTilesInWorldFrames().map(\.frame))")
 
         // A file opened with no anchor and no point is an automatic spawn. This zone

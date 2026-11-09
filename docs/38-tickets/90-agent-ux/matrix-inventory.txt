@@ -175,6 +175,7 @@ check --ios-preview-tile-check
 check --jelly-auto-layout-check
 check --keybind-edit-check
 check --language-server-release-check
+check --layout-commit-scope-check
 check --layout-commit-truth-check
 check --lead-character-check
 check --leader-activation-check
@@ -313,6 +314,7 @@ check --terminal-tmux-persistence-check
 check --terminal-tmux-unresponsive-check
 check --throbber-timeline-check
 check --ticket-queue-tile-check
+check --tidy-zone-neighbours-check
 check --tile-action-check
 check --tile-character-check
 check --tile-chrome-canvas-check
@@ -607,6 +609,7 @@ leg run_app_check .build/debug/Array --ios-preview-tile-check
 leg run_app_check .build/debug/Array --jelly-auto-layout-check
 leg run_app_check .build/debug/Array --keybind-edit-check
 leg run_app_check .build/debug/Array --language-server-release-check
+leg run_app_check .build/debug/Array --layout-commit-scope-check
 leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --lead-character-check
 leg run_app_check .build/debug/Array --leader-activation-check
@@ -741,6 +744,7 @@ leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
 leg run_app_check .build/debug/Array --terminal-tmux-unresponsive-check
 leg run_app_check .build/debug/Array --throbber-timeline-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
+leg run_app_check .build/debug/Array --tidy-zone-neighbours-check
 leg run_app_check .build/debug/Array --tile-action-check
 leg run_app_check .build/debug/Array --tile-character-check
 leg run_app_check .build/debug/Array --tile-chrome-canvas-check
@@ -934,7 +938,7 @@ count ContinuumRevivedAgentContentChecks 23
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 204
+count ContinuumRevivedCoreChecks 205
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

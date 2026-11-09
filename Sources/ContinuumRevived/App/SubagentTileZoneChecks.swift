@@ -41,14 +41,28 @@ enum SubagentTileZoneChecks {
     /// framed, so only the OFF pass can see whether the frame itself is beside
     /// the parent.
     static func run() throws {
-        for autoLayout in [true, false] {
+        // Independent of creation presets and of the helper's height.
+        let preset = CanvasEngine.defaultFrame(for: .managedAgent)
+        let lead = TileFrame(x: 113, y: 227, width: Double(preset.width), height: Double(preset.height))
+        let configuredGap = TileGapResolver.resolvedGap()
+        for height in [lead.height / 4, (lead.height-configuredGap)/2, lead.height * 1.5] {
+            let placed = TileSpawnPlacement.besideLead(newSize: CGSize(width: lead.width,height: height),
+                lead: lead, helpers: [], siblings: [lead], gap: configuredGap)
+            try expect(abs(placed.x-(lead.x+lead.width+configuredGap)) < 0.001
+                       && abs(placed.y-lead.y) < 0.001
+                       && placed.width == lead.width && placed.height == height,
+                       "explicit first helper must keep its size and dock right, top-aligned, at the standard gap")
+        }
+
+        for (autoLayout, growth) in [(true, CanvasGrowthDirection.fan), (true, .right), (true, .down), (false, .fan)] {
             let suite = "subagent-tile-zone-\(UUID().uuidString)"
             guard let defaults = UserDefaults(suiteName: suite) else {
                 throw Failure(message: "could not open a private defaults suite")
             }
             defer { defaults.removePersistentDomain(forName: suite) }
             defaults.set(autoLayout, forKey: CanvasAutoLayoutConfig.enabledKey)
-            try runScenario(autoLayoutDefaults: defaults, mode: autoLayout ? "auto-layout on" : "auto-layout off")
+            defaults.set(growth.rawValue, forKey: CanvasAutoLayoutConfig.growthKey)
+            try runScenario(autoLayoutDefaults: defaults, mode: "\(autoLayout ? "auto-layout on" : "auto-layout off"), growth \(growth.rawValue)")
         }
     }
 
@@ -261,7 +275,7 @@ enum SubagentTileZoneChecks {
         }
         // The gap is the canvas's tile gap, which auto-layout re-settles to.
         let gap = first.x - (parentFrame.x + parentFrame.width)
-        try expect(gap >= 0 && gap <= TileGapResolver.defaultGap * 3 && abs(first.y - parentFrame.y) < 0.5,
+        try expect(abs(gap - TileGapResolver.resolvedGap()) < 0.5 && first.x > parentFrame.x && abs(first.y - parentFrame.y) < 0.5,
                    "\(mode): the first child must open docked beside its parent \(describe(parentFrame)); got \(describe(first))")
         func adjacent(_ a: TileFrame, _ b: TileFrame) -> Bool {
             let sepX = max(a.x - (b.x + b.width), b.x - (a.x + a.width))
@@ -279,9 +293,17 @@ enum SubagentTileZoneChecks {
                            "\(mode): a child opened beside its parent must be \(parentFrame.width)x\(expectedHeight); "
                            + "got \(describe(child))")
             }
-            // Auto layout fans children out around the parent (.plans/107): the
-            // second docks against the parent or the first child, and does not
-            // continue the row to the right. That row is the shipped defect.
+            // Preserve the model-B helper column independently of tile presets.
+            if first.height + TileGapResolver.resolvedGap() + second.height <= parentFrame.height + 0.5 {
+                try expect(abs(second.x-first.x) < 0.5
+                           && abs(second.y-(first.y+first.height+TileGapResolver.resolvedGap())) < 0.5,
+                           "\(mode): the second helper must fill the lead's right column below the first")
+            } else {
+                try expect(abs(second.y-parentFrame.y) < 0.5
+                           && abs(second.x-(first.x+first.width+TileGapResolver.resolvedGap())) < 0.5,
+                           "\(mode): a helper taller than the column must wrap right at the lead's top")
+            }
+            // Keep the independent adjacency and no-single-row witness.
             try expect((adjacent(second, parentFrame) || adjacent(second, first))
                            && !(abs(second.y - first.y) < 0.5 && second.x > first.x),
                        "\(mode): the second child must fan out against the parent or the first child, not "
@@ -300,11 +322,11 @@ enum SubagentTileZoneChecks {
         // Children past the column's last row start the next column at the
         // parent's top, and no child ever overlaps another tile of the zone.
         let rowHeight = first.height + gap
-        // Auto layout has no column to fill (children fan out, .plans/107), and
-        // half-height children would ask for more than the helper tile cap of
-        // three: there it opens exactly three children, the third the overflow.
+        // Model-B columns use the lead's actual height; ordinary columns use
+        // the zone's available height. Neither depends on a creation preset.
         let rowsInColumn = autoLayoutDefaults.bool(forKey: CanvasAutoLayoutConfig.enabledKey)
-            ? 2 : Int((fanOutRect.y + fanOutRect.height - parentFrame.y + gap) / rowHeight)
+            ? max(1, Int((parentFrame.height + gap) / rowHeight))
+            : Int((fanOutRect.y + fanOutRect.height - parentFrame.y + gap) / rowHeight)
         let overflow = mintChild("child-overflow")
         for index in 2..<rowsInColumn {
             let filler = mintChild("child-\(index + 1)")

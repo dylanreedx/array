@@ -3672,6 +3672,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--undo-toast-placement-check") {
+            do {
+                _ = NSApplication.shared
+                try UndoToastPlacementChecks.run()
+                print("UndoToastPlacementChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --undo-toast-placement-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--auto-layout-fanout-app-check") {
             do {
                 _ = NSApplication.shared
@@ -3690,6 +3701,49 @@ enum ContinuumApp {
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL --bare-tile-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--auto-layout-tidy-latency-check") {
+            _ = NSApplication.shared
+            do {
+                _ = try AutoLayoutTidyLatencyChecks.run()
+                print("AutoLayoutTidyLatencyChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --auto-layout-tidy-latency-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--layout-commit-scope-check") {
+            do {
+                _ = NSApplication.shared
+                try LayoutCommitScopeChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --layout-commit-scope-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--tidy-zone-shortcut-check") {
+            _ = NSApplication.shared
+            do {
+                try AutoLayoutTidyLatencyChecks.runShortcut()
+                print("TidyZoneShortcutChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --tidy-zone-shortcut-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--tidy-zone-neighbours-check") {
+            do {
+                _ = NSApplication.shared
+                try TidyNeighbourChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --tidy-zone-neighbours-check: \(error)\n", stderr)
                 Foundation.exit(1)
             }
         }
@@ -7240,6 +7294,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA: stands in for bringing another app forward ("Show Ghostty").
     var activateExternalSessionHostForQA: ((_ pid: Int32?, _ hostName: String) -> Void)?
     private var canvasShortcutRailView: CanvasShortcutRailView?
+    var qaCanvasShortcutRailView: CanvasShortcutRailView? { canvasShortcutRailView }
+    var qaFloatingToolbar: FloatingToolbarHostView? { floatingToolbar }
+    /// Where the floating toolbar keeps its edge and settings. A check points it
+    /// at an isolated suite before the content view is made.
+    var floatingToolbarDefaults: UserDefaults = .standard
     private var canvasGettingStartedView: CanvasGettingStartedView?
     private var workspaceSplitView: NSSplitView?
     private var isApplyingWorkspaceSidebarVisibility = false
@@ -12067,7 +12126,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func recordViewBeforeProgrammaticJumpIfNeeded(targetViewport: CanvasViewport) {
         guard let canvasView else { return }
         let current = canvasView.navigationViewport
-        guard Self.viewportChangeExceedsJumpEpsilon(from: current, to: targetViewport) else { return }
+        // A second jump can share the first flight's destination. It still
+        // departs from that destination for history, rather than the old start.
+        guard canvasView.cameraDriver.isFlightActive
+            || Self.viewportChangeExceedsJumpEpsilon(from: current, to: targetViewport) else { return }
         focusHistory.recordViewBeforeProgrammaticJump(CameraSnapshot(viewport: current, focusedTileId: canvasView.canvasState.lastActiveTileId, focusedZoneId: navSelectedZoneId))
     }
 
@@ -12240,10 +12302,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             toggleWorkspaceSidebar()
         case "tile.revealInFinder":
             return revealFocusedTileInFinder()
+        case "zone.tidy":
+            guard let canvasView, let zoneId = zoneIdForZoneCommands() else { return false }
+            canvasView.tidyAutoLayout(zoneId: zoneId)
         default:
             return false
         }
         return true
+    }
+
+    /// The zone a "This Zone" command acts on: the focused tile's zone, else the
+    /// armed zone, else the active one. The ⌘K zone rows and the zone shortcuts
+    /// resolve it the same way.
+    private func zoneIdForZoneCommands(focusedTileId: UUID? = nil) -> UUID? {
+        let tileId = focusedTileId ?? focusedTileIdForPaletteContext()
+        return tileId.flatMap { canvasView?.zoneId(containing: $0) }
+            ?? canvasView?.activeProjectZonePlacement?.zoneId
+            ?? canvasView?.activeZone?.zoneId
     }
 
     func qaPerformRegisteredGlobalCommand(_ commandID: CommandID) -> Bool { performRegisteredGlobalCommand(commandID) }
@@ -12503,9 +12578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let palette = profilePalette ?? makeProfilePalette()
         let wasVisible = palette.isVisible
         let focusedTileId = focusedTileIdForPaletteContext()
-        let focusedZoneId = focusedTileId.flatMap { canvasView?.zoneId(containing: $0) }
-            ?? canvasView?.activeProjectZonePlacement?.zoneId
-            ?? canvasView?.activeZone?.zoneId
+        let focusedZoneId = zoneIdForZoneCommands(focusedTileId: focusedTileId)
         let contextualActions = contextualPaletteActions(for: focusedTileId)
         profilePalette = palette
         paletteContextTileId = focusedTileId
@@ -14774,14 +14847,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // The creation toolbar is canvas chrome: an overlay over this pane, never
         // a window of its own (see `FloatingToolbarHostView`).
         let toolbarQAOptIn = ProcessInfo.processInfo.environment["CONTINUUM_TOOLBAR_QA"] == "1"
-        if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }),
-           toolbarQAOptIn || (!smokeTestEnabled && ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"] == nil) {
-            let toolbar = FloatingToolbarHostView(terminalProfiles: {
+        // A check opts in explicitly (and isolates `floatingToolbarDefaults`).
+        if toolbarQAOptIn || (!CommandLine.arguments.contains(where: { $0.hasSuffix("-check") })
+            && !smokeTestEnabled && ProcessInfo.processInfo.environment["CONTINUUM_QA_FLOW"] == nil) {
+            let toolbar = FloatingToolbarHostView(defaults: floatingToolbarDefaults, terminalProfiles: {
                 LaunchProfileRegistry().all().map { FloatingToolbarProfile(id: $0.id, title: $0.displayName) }
             }, onSelection: { [weak self] selection in
                 self?.handleFloatingToolbarSelection(selection)
             })
-            toolbar.onPositionChanged = { [weak self] in self?.demonstrateOnboarding(.toolbarDragged) }
+            toolbar.onPositionChanged = { [weak self, weak canvasView] in
+                self?.demonstrateOnboarding(.toolbarDragged)
+                canvasView?.placeAutoLayoutUndoToast()
+            }
             toolbar.zoneDrawing = canvasView
             toolbar.obstacles = { [weak toolbar, weak shortcutRail] in
                 guard let toolbar, let shortcutRail, !shortcutRail.isHidden, let pane = shortcutRail.superview else { return [] }
@@ -14800,6 +14877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             if let toolbar = self.floatingToolbar {
                 rects.append(toolbar.toolbar.convert(toolbar.toolbar.bounds, to: canvasView).insetBy(dx: -8, dy: -8))
+                rects.append(toolbar.convert(toolbar.restingBarFrame, to: canvasView).insetBy(dx: -8, dy: -8))
             }
             return rects
         }
@@ -16395,11 +16473,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let gap = TileGapResolver.resolvedGap()
         let zoneRect = CGRect(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
         let zoneTiles = canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []
-        // Auto layout fans a helper out around its lead and the lead's other
-        // helpers, shaped for the screen (.plans/107). The column scan below
-        // always started right of the lead and only searched inside the zone's
-        // current rect, so a snug zone sent every helper down the right-hand
-        // fallback and the cluster grew in a line.
+        // Helpers carry explicit beside intent. Fill columns to the lead's
+        // right and let auto layout grow the zone; automatic fan-out visibility
+        // and growth ranking must never move the first helper below its lead.
         if canvasView.isAutoLayoutActive(inZone: zoneId) {
             // Size-aware (.plans/107 model B): a helper is its lead's width and
             // half its height, never below an agent's minimum, so two helpers
@@ -16408,34 +16484,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let helperSize = CGSize(
                 width: max(Double(minimum.width), parent.worldFrame.width),
                 height: max(Double(minimum.height), (parent.worldFrame.height - gap) / 2))
-            if let slot = canvasView.visibleSpawnSlot(size: helperSize,
-                anchor: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width/2,
-                                y: parent.worldFrame.y + parent.worldFrame.height/2), zoneId: zoneId) {
-                return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), helperSize)
-            }
             let familyTileIds = Set(agentSupervisor.records.values
                 .filter { $0.parentAgentID == parentId && $0.id != agentId }
                 .compactMap(\.tileId))
-            let hosts = [parent.worldFrame] + zoneTiles.filter { familyTileIds.contains($0.id) }.map(\.frame)
-            let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
-            let placed = TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
-                newSize: helperSize,
-                viewport: CanvasViewport(x: canvasView.viewport.x, y: canvasView.viewport.y, zoom: zoom),
-                visibleSize: canvasView.bounds.size,
-                siblings: zoneTiles,
-                gap: gap,
-                fanOut: TileSpawnPlacement.FanOut(
-                    hosts: hosts,
-                    targetAspect: canvasView.bounds.height > 0 ? Double(canvasView.bounds.width / canvasView.bounds.height) : 1.6,
-                    growth: CanvasAutoLayoutConfig.growth(defaults: canvasView.autoLayoutDefaults),
-                    focus: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width / 2,
-                                   y: parent.worldFrame.y + parent.worldFrame.height / 2))))
+            let placed = TileSpawnPlacement.besideLead(
+                newSize: helperSize, lead: parent.worldFrame,
+                helpers: zoneTiles.filter { familyTileIds.contains($0.id) }.map(\.frame),
+                siblings: zoneTiles.map(\.frame), gap: gap)
             return (spawner, scope, CGPoint(x: placed.x + placed.width / 2, y: placed.y + placed.height / 2), helperSize)
-        }
-        if let slot = canvasView.visibleSpawnSlot(size: size,
-            anchor: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width/2,
-                            y: parent.worldFrame.y + parent.worldFrame.height/2), zoneId: zoneId) {
-            return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), nil)
         }
         let occupied = zoneTiles.map {
             CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height)
@@ -21802,11 +21858,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             for zone in document.zones {
                 if let projectId = zone.projectId { projectZones[projectId] = zone }
             }
-            var projectWrites: [(store: ProjectStore, original: CanvasState, updated: CanvasState)] = []
-            for (projectId, _) in projectZones.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
-                guard let entry = registry.projects.first(where: { $0.id == projectId }) else { continue }
+            // Scoped (`.plans/auto-layout-night`): load only the projects that own
+            // a committed tile. Every project canvas in the workspace used to be
+            // loaded and verified on each drag and tidy commit, just to find the
+            // owners: a cost that grew with the project count, on the main thread,
+            // right as the movement started. The live canvas knows each tile's
+            // zone, and so its project. Only a tile it cannot place falls back to
+            // the full scan below, so nothing the old commit saved is refused.
+            var ownerProjectIds = Set<UUID>()
+            for tileId in unplacedTileIds {
+                if let zoneId = canvasView?.zoneId(containing: tileId),
+                   let projectId = document.zones.first(where: { $0.zoneId == zoneId })?.projectId,
+                   projectZones[projectId] != nil {
+                    ownerProjectIds.insert(projectId)
+                } else if let projectId = canvasView?.projectId(ofBareTile: tileId), projectZones[projectId] != nil {
+                    // A bare tile lives in no zone; its project still owns it.
+                    ownerProjectIds.insert(projectId)
+                }
+            }
+            var projectWrites: [(projectId: UUID, store: ProjectStore, original: CanvasState, updated: CanvasState)] = []
+            var loadedProjectIds: [UUID] = []
+            let orderedProjectIds = projectZones.keys.sorted { $0.uuidString < $1.uuidString }
+            func mergeProject(_ projectId: UUID) throws {
+                guard let entry = registry.projects.first(where: { $0.id == projectId }) else { return }
                 let projectStore = ProjectStore(projectRoot: URL(fileURLWithPath: entry.rootPath, isDirectory: true))
-                guard let original = try projectStore.tryLoadCanvas() else { continue }
+                loadedProjectIds.append(projectId)
+                guard let original = try projectStore.tryLoadCanvas() else { return }
                 unplacedTileIds.subtract(original.tiles.map(\.id))
                 var updated = original
                 var changed = false
@@ -21833,8 +21910,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                     changed = true
                 }
-                if changed { projectWrites.append((projectStore, original, updated)) }
+                if changed { projectWrites.append((projectId, projectStore, original, updated)) }
             }
+            for projectId in orderedProjectIds where ownerProjectIds.contains(projectId) {
+                try mergeProject(projectId)
+            }
+            if !unplacedTileIds.isEmpty {
+                for projectId in orderedProjectIds where !ownerProjectIds.contains(projectId) {
+                    try mergeProject(projectId)
+                    if unplacedTileIds.isEmpty { break }
+                }
+            }
+            qaLastLayoutCommitProjects = (loaded: loadedProjectIds, written: projectWrites.map(\.projectId))
 
             guard unplacedTileIds.isEmpty else {
                 let tiles = unplacedTileIds.sorted { $0.uuidString < $1.uuidString }.map { id in
@@ -23370,6 +23457,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (`--canvas-pointer-path-check`): the production click monitor, which a
     /// headless mount leaves out.
     func qaInstallTileFocusMonitor() { if tileFocusMonitor == nil { installTileFocusMonitor() } }
+    /// QA: the production key-down monitor, so a check's `NSApp.sendEvent`
+    /// reaches registered shortcuts the way a keypress does.
+    func qaInstallHotkeyMonitor() { if hotkeyMonitor == nil { installHotkeyMonitor() } }
+    func qaRemoveHotkeyMonitor() {
+        if let monitor = hotkeyMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = flagsMonitor { NSEvent.removeMonitor(monitor) }
+        hotkeyMonitor = nil
+        flagsMonitor = nil
+    }
     func qaRemoveTileFocusMonitor() {
         if let monitor = tileFocusMonitor { NSEvent.removeMonitor(monitor) }
         tileFocusMonitor = nil
@@ -23390,6 +23486,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// QA (M1.11): drive a palette action the way the palette does.
     @discardableResult
     func qaPerformPaletteAction(_ action: LaunchPaletteAction) -> Bool { performPaletteAction(action) }
+    /// QA: the projects the last layout commit loaded and wrote, in that order.
+    var qaLastLayoutCommitProjects: (loaded: [UUID], written: [UUID])?
     /// QA (`.plans/67` ARC-4a): the restart a terminal placeholder's button fires.
     func qaRestartTerminalTile(_ tileId: UUID) { restartTile(tileId: tileId) }
     /// QA: the agent-status write a stopped harness run lands through.
