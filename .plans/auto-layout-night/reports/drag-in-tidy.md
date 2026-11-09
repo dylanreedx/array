@@ -106,3 +106,18 @@ timeout seen on every branch tonight.
 - f7e5d97c fix(auto-layout): swap tiles of different widths by row position
 - 6293d018 test(auto-layout): register the drag-in-tidy leg and the trajectory probe
 - 5f7f2c2a test(auto-layout): cover an unlatched drop over a neighbour in a tidied zone
+
+## On-screen legs (rule update after this stream ran)
+
+Before the on-screen rule reached this stream, the regression run above
+included six legs now on the on-screen list: --jelly-auto-layout-check,
+--canvas-undo-check, --spawn-placement-check, --leader-jump-check,
+--tile-reveal-work-check and --agent-local-file-link-check. All exited 0,
+but they may have put windows on screen. No on-screen leg has run since.
+`--drag-in-tidy-check` uses `orderFrontOffscreenForChecks` and stays offscreen.
+
+For the lead's screen slot, this change needs:
+- --jelly-auto-layout-check (its swap window drives the engine swap this
+  change rewrote): the one that matters most;
+- --canvas-undo-check (undo of drag and swap geometry).
+The others above do not touch the swap and need no rerun for it.
