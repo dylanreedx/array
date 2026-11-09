@@ -394,6 +394,32 @@ func runTidyPackerChecks() {
         if let pictureDir {
             writeTidyPicture(before: scene, after: after, zoneId: zoneId, path: "\(pictureDir)/film-scene.png")
         }
+        // Offscreen footage (`.plans/auto-layout-night`): this scene's tidy as a
+        // `--fanout-film-render` run — hold, the 110 ms ease-out at 30 fps, hold.
+        if let runDir = ProcessInfo.processInfo.environment["ALN_TIDY_FILM_RUN_DIR"] {
+            func rect(_ f: TileFrame) -> [Double] { [f.x, f.y, f.width, f.height] }
+            func zoneRect(_ z: ZonePlacement) -> [Double] { [z.origin.x, z.origin.y, z.size.width, z.size.height] }
+            func lerp(_ a: [Double], _ b: [Double], _ t: Double) -> [Double] { zip(a, b).map { $0 + ($1 - $0) * t } }
+            let beforeZone = zoneRect(scene.zones[0]), afterZone = zoneRect(after.zones[0])
+            let view = [-80.0, -90.0, 2460, 1640]
+            func frame(_ label: String, _ t: Double) -> [String: Any] {
+                let tiles: [[String: Any]] = scene.tiles.enumerated().map { i, tile in
+                    let r = lerp(rect(tile.frame), rect(after.tiles.first { $0.id == tile.id }!.frame), t)
+                    return ["id": tile.id.uuidString, "name": "\(film[i].0.rawValue) \(i + 1)", "kind": film[i].0.rawValue,
+                            "x": r[0], "y": r[1], "w": r[2], "h": r[3]]
+                }
+                return ["label": label, "tiles": tiles, "zone": lerp(beforeZone, afterZone, t), "view": view]
+            }
+            var frames: [[String: Any]] = (0..<15).map { _ in frame("before", 0) }
+            for step in 1...4 { let u = Double(step) / 4; frames.append(frame("tidy", 1 - pow(1 - u, 3))) }
+            frames += (0..<30).map { _ in frame("after", 1) }
+            let run: [String: Any] = ["model": "night", "scenario": "film-scene-tidy", "frames": frames,
+                                      "metrics": ["fill": filmFill], "notes": ["offscreen render of the shipped tidy on the film scene"]]
+            try? FileManager.default.createDirectory(atPath: runDir, withIntermediateDirectories: true)
+            if let data = try? JSONSerialization.data(withJSONObject: run, options: [.sortedKeys]) {
+                FileManager.default.createFile(atPath: "\(runDir)/night--film-scene-tidy.json", contents: data)
+            }
+        }
     }
 
     // The zone grows only when it must: the eight-tile case keeps its width and
