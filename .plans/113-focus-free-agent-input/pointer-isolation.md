@@ -66,3 +66,19 @@ See [pointer-active-launch.md](pointer-active-launch.md) for the dedicated bundl
 
 
 Restoration follow-up: the approved active log again showed requested=false and no PID restoration before exit. No working public route has been established here. Both active check implementations now explicitly report that foreground restoration is unsupported, and no longer emit PASS/restored claims or attempt the unsuccessful cooperative handoff. No activated check was rerun.
+
+## READ IN SOURCE: why the synthetic hover result is inconclusive
+
+Read upstream WebKit main on 2026-11-08; this is not a source/binary version match or a traced rejecting branch on the installed framework. The approved log measured zero DOM mousemoves, not zero entries into native WebKit.
+
+[WKWebViewMac.mm](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/API/mac/WKWebViewMac.mm) forwards mouseDown/up/dragged and keyDown, but has no public mouseMoved/entered/exited forwarding methods. Its simulation methods use a separate internal route. A plain synthetic mouseMoved sent to a window therefore does not recreate WebKit's real tracking delivery.
+
+[WebViewImpl.mm](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/mac/WebViewImpl.mm) gives its primary tracking area to WKMouseTrackingObserver, an NSObject rather than the WKWebView. Its options include mouseMoved, entered/exited, cursorUpdate and inVisibleRect, normally activeInKeyWindow. The observer hit-tests for the topmost descendant before forwarding moves/enters; exits depend on its previous topmost state. mouseMoved additionally rejects ignore flags and, for a first-responder view, coordinates outside visibleRect. Making an off-screen window active/key does not put the physical pointer into those tracking areas. Which AppKit/installed-WebKit guard rejected our synthetic stimulus was not measured; attributing the result specifically to an empty visibleRect would be unjustified.
+
+Ordinary real hover disturbance requires the physical pointer over the driven tile or crossing its boundary. Moving around an unrelated tile does not continuously deliver ordinary hover moves to this page. This is NOT an absolute “only while currently over it” guarantee: captured drags/exit state can outlive departure, and [EventHandler.cpp](https://github.com/WebKit/WebKit/blob/main/Source/WebCore/page/EventHandler.cpp) schedules synthetic hover updates from cached last-known coordinates after layout/scroll, guarded by page visibility/activity. Modifier handling in WebViewImpl can also sample the window's real mouse location. No real-mouse interference mechanism was proven by the failed synthetic stimulus.
+
+## Deliberate key diagnosis: check counter doubled, not the native key
+
+The approved failure happened with candidates=false, before any atomic buffering could be enabled. The click-only case left a once-keydown listener attached to document. Replacing body did not remove it. The following key case reset the shared takeKeys variable and added a second listener, so one key could increment it twice.
+
+The exact registration sequence was reproduced in the inactive Tier A key-window fixture at the production click seam, delivering one native NSEvent via window.sendEvent. RED `/tmp/pointer-key-counter-red.log`: actual trusted page keydowns=1, field value=q, check counter=2; exit 1. The shared probe now replaces/removes its own listener. GREEN `/tmp/pointer-key-counter-green.log`: actual=1, value=q, counter=1, unchanged after a further settling read; exit 0. Build logs `/tmp/pointer-key-counter-red-build.log` and `-green-build.log` both exit 0. This is a check bug, not a demonstrated product lost/doubled/late key. The approved log itself omitted the count; its exact numeric value was not recorded. No active run was repeated.
