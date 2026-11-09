@@ -58,16 +58,21 @@ the height so they fill the zone. The cheapest result wins.
   height-only one, so the zone keeps its shape. Before this rule, the zone
   became a one-row strip (3301×2801 → 3301×589). Before that, with
   width-only narrowing, it became a tall column (4328×4040 → 2171×4040).
-- **Clusters (round 2, the lead's rule).** A lead and its helpers are ONE
-  item in the row packing. The lead is on the left, at the block's height.
-  Its helpers stack beside it, three per column, and each column's heights
-  (with gaps) sum to the lead's height. A helper column is q × the lead's
-  width, where q is the helpers' mean width over the lead's (clamped to
-  0.5–1.25; a fresh 576×316 helper gives q = 1). Only the lead takes the
-  agent band (0.6–1.0). Helpers are shaped by the block, never by the band.
-  A lone agent, or a helper whose lead is not in the zone, takes the band.
-  Helper columns are read back by x, then y, so a tidied block reads into
-  the same columns and the tidy stays idempotent.
+- **Clusters (round 3, the lead's final rule, model B).** A lead and its
+  helpers are ONE item in the row packing. The lead keeps its agent shape and
+  sits on the left at the block's height. Its helpers stack top to bottom in
+  one column on its right, or two columns past four helpers (the first
+  column takes the extra one). Each column's heights, with gaps, sum to the
+  lead's height. Helpers in a column share one width and are equal in height.
+  The column width is q × the lead's width, where q is the helpers' current
+  width over the lead's (0.5–1.5; 576 wide at creation gives the lead's
+  width). Helpers are exempt from the agent band. Their own band, 0.9–2.6,
+  limits the lead's ratio inside the block: a helper in a column of m is
+  about q × (lead ratio) × m. Every bound is a constant, q or a count, so a
+  tidied block reads back the same block. My first version took the bound
+  from the lead's current height and the gaps; that drifted by two grid
+  steps on a re-tidy, so I rejected it. A lone agent, or a helper whose lead
+  is not in the zone, takes the agent band.
 - **Idempotent by construction.** At s = 1, the current row breaks of a tidy
   layout cost exactly zero and fill exactly, so a second tidy picks them
   again. The engine treats a re-solve as all-or-nothing: if every frame and
@@ -209,6 +214,27 @@ Checks on the merged tree. All exit 0: `--tidy-packer-check`,
 block assertions (helpers one gap right of the lead, each column spanning
 the lead's height, no other tile inside the block, lead and lone agents in
 the band) went red with the grouping disabled.
+
+## Round 3 (the lead's model-B helper column)
+
+- `a093c6a0` feat(auto-layout): stack helpers in one column beside their lead
+
+New witness assertions in `--tidy-packer-check`, for the lead-plus-3-helpers
+zone and a new lead-plus-5-helpers zone:
+- one column (two for five helpers, as a literal four-helper limit, not read
+  from the packer), starting one gap right of the lead
+- the column's top and bottom match the lead's within the 1/64 pt grid
+- equal heights within two grid steps, one shared width, one gap apart
+- the helper ratio inside 0.9–2.6, ignoring the gaps between helpers
+- the lead in the agent band, and no other tile inside the block
+
+All exit 0: `--tidy-packer-check`, `--layout-pressure-check`,
+`--jelly-trajectory-probe`, `--auto-layout-fanout-check` and
+`--fanout-layout-probe` (CoreChecks); `--auto-layout-fanout-app-check`
+(9.5 ms, fill 0.986), `--jelly-auto-layout-check`, `--zone-arming-check`,
+`--layout-commit-truth-check` and `--spawn-sizing-check` (app). Pictures were
+re-emitted to `qa-runs/aln-tidy-engine/pictures/` (5-lead-three-helpers,
+6-lead-five-helpers).
 
 ## Open, for the lead
 
