@@ -1015,7 +1015,7 @@ final class CanvasNSView: NSView, TokenThemed {
         pushPeersOfZonesGrown(since: baseline)
         // Before the commit: the flight and the tidy's animations start together.
         if zoneWasInView, let rect = zoneId.flatMap(zoneWorldRect), !isInUsableView(rect) {
-            navigateViewport(to: framedZoneViewport(for: rect))
+            navigateViewport(to: containingViewport(for: rect))
         }
         if commit {
             _ = finishAutoLayoutGesture()
@@ -6679,15 +6679,39 @@ final class CanvasNSView: NSView, TokenThemed {
         return visible.insetBy(dx: -0.5, dy: -0.5).contains(rect)
     }
 
-    /// The zone overview camera (`CameraFraming.zoneOverviewViewport`, which the
-    /// sidebar and leader zone jumps use) fitted to the usable rect rather than
-    /// the whole canvas, as `framedWorkViewport` does for tiles.
-    func framedZoneViewport(for rect: CGRect) -> CanvasViewport {
+    /// The gentlest camera that shows `rect` whole in the usable rect. If it fits
+    /// at the current zoom, the zoom stays and the camera pans only along the
+    /// axes the zone crossed, by the least that brings it in with the standard
+    /// zone padding (or as much of it as fits) on the side it crossed. Only if it does not fit does the camera zoom
+    /// out, exactly far enough to hold it with the standard padding, centred.
+    /// Never zooms in. A tidy that grew a zone by 46 pt used to jump from 1.40
+    /// to the 0.80 zone-overview zoom.
+    func containingViewport(for rect: CGRect) -> CanvasViewport {
         let usable = usableVisibleScreenRect
-        var target = CameraFraming.zoneOverviewViewport(for: rect, viewportSize: usable.size)
-        target.x -= Double(usable.minX) / target.zoom
-        target.y -= Double(usable.minY) / target.zoom
-        return target
+        let current = navigationViewport
+        let padding = CameraFraming.zonePaddingScreenPx
+        let zoom = current.zoom
+        if Double(rect.width) * zoom <= Double(usable.width), Double(rect.height) * zoom <= Double(usable.height) {
+            /// Screen-space shift along one axis. An axis already in view does not
+            /// move; one the zone crosses brings it in with up to `padding` to
+            /// spare on that side.
+            func shift(_ low: Double, _ high: Double, _ lowBound: Double, _ highBound: Double) -> Double {
+                let pad = min(padding, max(0, ((highBound - lowBound) - (high - low)) / 2))
+                if low < lowBound { return lowBound + pad - low }
+                if high > highBound { return highBound - pad - high }
+                return 0
+            }
+            let dx = shift((Double(rect.minX) - current.x) * zoom, (Double(rect.maxX) - current.x) * zoom,
+                           Double(usable.minX), Double(usable.maxX))
+            let dy = shift((Double(rect.minY) - current.y) * zoom, (Double(rect.maxY) - current.y) * zoom,
+                           Double(usable.minY), Double(usable.maxY))
+            return CanvasViewport(x: current.x - dx / zoom, y: current.y - dy / zoom, zoom: zoom)
+        }
+        let fitted = min((Double(usable.width) - 2 * padding) / Double(rect.width),
+                         (Double(usable.height) - 2 * padding) / Double(rect.height))
+        let outZoom = max(CanvasEngine.defaultZoomRange.lowerBound, min(zoom, fitted))
+        return CanvasViewport(x: Double(rect.midX) - Double(usable.midX) / outZoom,
+                              y: Double(rect.midY) - Double(usable.midY) / outZoom, zoom: outZoom)
     }
 
     var navigationViewport: CanvasViewport { cameraDriver.flightTarget ?? canvasState.viewport }
