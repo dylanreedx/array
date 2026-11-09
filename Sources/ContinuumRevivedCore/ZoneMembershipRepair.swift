@@ -34,6 +34,13 @@ public extension CanvasEngine {
     ///    converts to zone-local against the *rescuing* zone's origin — so
     ///    `local + origin == world` and the tile paints on exactly the pixel it
     ///    already occupied. Membership changes; position does not.
+    /// 6. **Bare tiles** (`keepsBare`, `.plans/auto-layout-night`): a nil stamp
+    ///    whose centre lies outside every one of this project's zones is a tile
+    ///    the user dragged out of its zone. It stays bare: returned in `bare`,
+    ///    stamp still nil, never restamped. A nil stamp inside a zone is still
+    ///    rescued into it, and a foreign stamp is still rescued as rule 2 says.
+    ///    Off by default: a caller with nowhere to render a bare tile must keep
+    ///    rescuing it, or it is drawn nowhere.
     ///
     /// The result is durable (callers persist it), which is why it is a pure
     /// function with its own witnesses rather than a branch inside the runtime.
@@ -52,15 +59,17 @@ public extension CanvasEngine {
         tiles: [Tile],
         projectZones: [ZonePlacement],
         documentZoneIds: Set<UUID>,
-        homeZoneId: UUID
-    ) -> (byZone: [UUID: [Tile]], restamped: [UUID], deferred: [UUID]) {
-        guard !projectZones.isEmpty else { return ([:], [], tiles.map(\.id)) }
+        homeZoneId: UUID,
+        keepsBare: Bool = false
+    ) -> (byZone: [UUID: [Tile]], restamped: [UUID], deferred: [UUID], bare: [Tile]) {
+        guard !projectZones.isEmpty else { return ([:], [], tiles.map(\.id), []) }
         let owned = Set(projectZones.map(\.zoneId))
         let home = owned.contains(homeZoneId) ? homeZoneId : projectZones[0].zoneId
 
         var byZone: [UUID: [Tile]] = [:]
         var restamped: [UUID] = []
         var deferred: [UUID] = []
+        var bare: [Tile] = []
 
         for tile in tiles {
             if let stamped = tile.zoneId {
@@ -87,6 +96,10 @@ public extension CanvasEngine {
                 return centreX >= frame.x && centreX <= frame.x + frame.width
                     && centreY >= frame.y && centreY <= frame.y + frame.height
             }
+            if containing == nil, keepsBare, tile.zoneId == nil {
+                bare.append(tile)
+                continue
+            }
             let destination = containing?.zoneId ?? home
             restamped.append(tile.id)
             var placed = tile
@@ -94,6 +107,6 @@ public extension CanvasEngine {
             byZone[destination, default: []].append(placed)
         }
 
-        return (byZone, restamped, deferred)
+        return (byZone, restamped, deferred, bare)
     }
 }
