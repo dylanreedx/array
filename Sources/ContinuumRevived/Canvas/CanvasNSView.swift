@@ -10077,7 +10077,7 @@ final class CanvasNSView: NSView, TokenThemed {
         canvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
-        window.orderFrontRegardless()
+        window.orderFrontOffscreenForChecks()
         for tile in tiles { canvas.install(tileView: DescriptorTileNSView(tile: tile), for: tile) }
         canvas.layoutSubtreeIfNeeded()
 
@@ -10185,7 +10185,7 @@ final class CanvasNSView: NSView, TokenThemed {
         layerCanvas.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
         let layerWindow = NSWindow(contentRect: layerCanvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         layerWindow.contentView = layerCanvas
-        layerWindow.orderFrontRegardless()
+        layerWindow.orderFrontOffscreenForChecks()
         let layerFirstView = DescriptorTileNSView(tile: layerFirst)
         let layerSecondView = DescriptorTileNSView(tile: layerSecond)
         let layerThirdView = DescriptorTileNSView(tile: layerThird)

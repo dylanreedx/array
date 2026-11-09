@@ -66,6 +66,7 @@ enum AutoLayoutFanoutChecks {
         do { failures += try dragAcrossRaggedZone() } catch { failures.append("drag: \(error)") }
         do { failures += try spawnWithCameraFollowing() } catch { failures.append("spawn: \(error)") }
         do { failures += try leadCluster() } catch { failures.append("cluster: \(error)") }
+        do { failures += try tidyFillsZone() } catch { failures.append("tidy: \(error)") }
         guard failures.isEmpty else {
             throw Failure(description: "\(failures.count) failed:\n  " + failures.joined(separator: "\n  "))
         }
@@ -86,7 +87,7 @@ enum AutoLayoutFanoutChecks {
     ]
 
     private static func reseed(_ fixture: Fixture, zoneSize: ZoneSize, tiles: [(String, TileFrame)],
-                               agents: Set<String> = []) throws -> [String: UUID] {
+                               agents: Set<String> = [], browsers: Set<String> = []) throws -> [String: UUID] {
         let store = WorkspaceStore(workspaceId: Fixture.workspaceA, applicationSupportDirectory: fixture.appSupport)
         var document = try store.load()
         for (index, zone) in document.zones.enumerated() {
@@ -106,14 +107,14 @@ enum AutoLayoutFanoutChecks {
         for (rank, (name, frame)) in tiles.enumerated() {
             let id = UUID()
             ids[name] = id
-            let agent = agents.contains(name)
-            var tile = Tile(id: id, kind: agent ? .managedAgent : .note, title: name, frame: frame,
+            let agent = agents.contains(name), browser = browsers.contains(name)
+            var tile = Tile(id: id, kind: agent ? .managedAgent : browser ? .browser : .note, title: name, frame: frame,
                             zPosition: .fromLegacyRank(20 + rank), runtimeRef: nil,
                             metadata: agent ? TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: ".")
-                                            : TileMetadata(noteId: id))
+                                : browser ? TileMetadata(url: "about:blank") : TileMetadata(noteId: id))
             tile.zoneId = Fixture.zoneA1
             canvas.tiles.append(tile)
-            if !agent { try project.saveNoteBody(id: id, text: name) }
+            if !agent && !browser { try project.saveNoteBody(id: id, text: name) }
         }
         try project.saveCanvas(canvas)
         return ids
@@ -337,6 +338,126 @@ enum AutoLayoutFanoutChecks {
     /// pressed right against the cluster. (1) A helper dragged across its
     /// cluster and into a note moves no note, ever: only the cluster reacts.
     /// (2) The lead dragged away carries both helpers, rigidly, every frame.
+    /// 3. Tidy (`.plans/auto-layout-night`): the zone's "Tidy Zone Now" entry,
+    /// `CanvasNSView.tidyAutoLayout(zoneId:)`, on a mounted layered zone holding
+    /// a lead with two helpers (real `AgentRecord` lineage), a browser and notes
+    /// scattered with holes. The commit lands (no rejected transaction), the
+    /// browser is 16:9, the lead and helpers form one block, the zone is filled
+    /// edge to edge, the persisted canvas carries the tidied frames, and a
+    /// second Tidy changes nothing.
+    private static func tidyFillsZone() throws -> [String] {
+        let tiles: [(String, TileFrame)] = [
+            ("Web", TileFrame(x: 40, y: 90, width: 900, height: 700)),
+            ("Lead", TileFrame(x: 1100, y: 60, width: 640, height: 520)),
+            ("NoteA", TileFrame(x: 1900, y: 120, width: 520, height: 380)),
+            ("H1", TileFrame(x: 80, y: 1000, width: 560, height: 480)),
+            ("NoteB", TileFrame(x: 900, y: 1100, width: 640, height: 400)),
+            ("H2", TileFrame(x: 1800, y: 1050, width: 600, height: 500)),
+        ]
+        let fixture = try Fixture(label: "fanout-tidy")
+        defer { fixture.dispose() }
+        let ids = try reseed(fixture, zoneSize: ZoneSize(width: 2_600, height: 1_800), tiles: tiles,
+                             agents: ["Lead", "H1", "H2"], browsers: ["Web"])
+        let root = fixture.projectRoots[Fixture.projectA1]!
+        let appSupport = fixture.appSupport
+        var agents: [String: AgentID] = [:]
+        fixture.configureMount = { delegate, _ in
+            delegate.agentSupervisor = AgentSupervisor(
+                store: AgentStore(applicationSupportDirectory: appSupport),
+                makeRunner: { _ in ScriptedAgentRunner(script: [], holdUntilStopped: true) })
+            let lead = delegate.agentSupervisor.spawn(
+                role: nil, prompt: nil, cwd: root, harness: .claudeCode, model: "fixture/cluster", thinking: "medium",
+                projectId: Fixture.projectA1, projectRoot: root, tileId: ids["Lead"], displayName: "Lead")
+            agents["Lead"] = lead
+            for name in ["H1", "H2"] {
+                agents[name] = delegate.agentSupervisor.spawn(
+                    role: nil, prompt: nil, cwd: root, harness: .claudeCode, model: "fixture/cluster", thinking: "medium",
+                    projectId: Fixture.projectA1, projectRoot: root, parentAgentID: lead, tileId: ids[name], displayName: name)
+            }
+        }
+        try fixture.mount()
+        let m = try fixture.requireMounted("fanout tidy")
+        defer { m.delegate.qaAgentSupervisor.stopAll() }
+        let canvas = m.canvas
+        // Tidy is explicit: it must run with automatic layout switched off.
+        TileInsertSlideChecks.pin(canvas, autoLayout: false)
+        canvas.frame = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+        canvas.setViewport(CanvasViewport(x: -60, y: -60, zoom: 0.5))
+        let window = KeyWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
+        for name in ["Lead", "H1", "H2"] { m.delegate.wireManagedAgentTile(ids[name]!, agentID: agents[name]) }
+        canvas.layoutSubtreeIfNeeded()
+
+        func frames() -> [String: TileFrame] {
+            var out: [String: TileFrame] = [:]
+            for tile in canvas.allTilesInWorldFrames() {
+                if let name = ids.first(where: { $0.value == tile.id })?.key { out[name] = tile.frame }
+            }
+            return out
+        }
+        var failures: [String] = []
+        let rejectedBefore = canvas.qaRejectedLayoutTransactions
+        let start = DispatchTime.now().uptimeNanoseconds
+        canvas.tidyAutoLayout(zoneId: Fixture.zoneA1)
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+        canvas.layoutSubtreeIfNeeded()
+        print(String(format: "  tidy: tidyAutoLayout(zoneId:) on the main thread %.1f ms (6 tiles, debug build)", elapsed))
+        if canvas.qaRejectedLayoutTransactions != rejectedBefore { failures.append("tidy: the canvas rejected the tidy transaction") }
+        let after = frames()
+        guard after.count == tiles.count, let zone = canvas.qaLiveZonePlacement(Fixture.zoneA1) else {
+            throw Failure(description: "tidy: lost tiles or the zone (\(after.count) of \(tiles.count))")
+        }
+        let padding = ZoneBoundsConfig.padding(defaults: canvas.autoLayoutDefaults)
+        let header = Double(ZoneChromeNSView.headerHeight)
+        let content = CGRect(x: zone.origin.x + padding, y: zone.origin.y + header + padding,
+                             width: zone.size.width - 2 * padding, height: zone.size.height - header - 2 * padding)
+        let area = after.values.reduce(0.0) { $0 + $1.width * $1.height }
+        let fill = area / Double(content.width * content.height)
+        print(String(format: "  tidy: zone %.0fx%.0f -> %.0fx%.0f, fill %.3f", 2_600.0, 1_800.0, zone.size.width, zone.size.height, fill))
+        if fill < 0.8 { failures.append("tidy: the zone is not filled: \(fill)") }
+        for (name, f) in after {
+            if f.x < Double(content.minX) - 0.05 || f.y < Double(content.minY) - 0.05
+                || f.x + f.width > Double(content.maxX) + 0.05 || f.y + f.height > Double(content.maxY) + 0.05 {
+                failures.append("tidy: \(name) is outside the zone's content: \(f) vs \(content)")
+            }
+        }
+        if let web = after["Web"], abs(web.width - web.height * 16 / 9) > 1.0 / 32 {
+            failures.append("tidy: the browser is not 16:9: \(web)")
+        }
+        let block = ["Lead", "H1", "H2"].compactMap { after[$0] }
+        let rows = Set(block.map(\.y))
+        if rows.count == 1 {
+            let xs = block.map(\.x)
+            if after["Lead"]!.x != xs.min()! { failures.append("tidy: the lead is not first in its block") }
+            if after.contains(where: { !["Lead", "H1", "H2"].contains($0.key) && $0.value.y == after["Lead"]!.y
+                && $0.value.x > xs.min()! && $0.value.x < xs.max()! }) {
+                failures.append("tidy: a tile sits between the lead and its helpers")
+            }
+        } else if after.contains(where: { !["Lead", "H1", "H2"].contains($0.key) && rows.contains($0.value.y) }) {
+            failures.append("tidy: the lead's rows are shared with other tiles")
+        }
+        // Persisted through the production store, in world frames.
+        if let saved = try ProjectStore(projectRoot: root).tryLoadCanvas() {
+            for (name, id) in ids {
+                guard let tile = saved.tiles.first(where: { $0.id == id }) else { failures.append("tidy: \(name) not persisted"); continue }
+                if let f = after[name], abs(tile.frame.x - f.x) > 0.01 || abs(tile.frame.width - f.width) > 0.01
+                    || abs(tile.frame.y - f.y) > 0.01 || abs(tile.frame.height - f.height) > 0.01 {
+                    failures.append("tidy: \(name) persisted \(tile.frame), shows \(f)")
+                }
+            }
+        } else {
+            failures.append("tidy: no persisted canvas")
+        }
+        canvas.tidyAutoLayout(zoneId: Fixture.zoneA1)
+        canvas.layoutSubtreeIfNeeded()
+        if frames() != after || canvas.qaLiveZonePlacement(Fixture.zoneA1) != zone {
+            failures.append("tidy: a second Tidy moved tiles or the zone")
+        }
+        return failures
+    }
+
     private static func leadCluster() throws -> [String] {
         let tiles: [(String, TileFrame)] = [
             ("Lead", TileFrame(x: 24, y: 58, width: 640, height: 520)),
