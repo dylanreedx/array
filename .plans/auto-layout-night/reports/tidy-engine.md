@@ -58,9 +58,16 @@ the height so they fill the zone. The cheapest result wins.
   height-only one, so the zone keeps its shape. Before this rule, the zone
   became a one-row strip (3301×2801 → 3301×589). Before that, with
   width-only narrowing, it became a tall column (4328×4040 → 2171×4040).
-- **Clusters.** Lead first, then its helpers, gathered where the cluster's
-  first member reads. A row may not cut a cluster unless the row lies wholly
-  inside it. So the cluster is either inside one row or a run of whole rows.
+- **Clusters (round 2, the lead's rule).** A lead and its helpers are ONE
+  item in the row packing. The lead is on the left, at the block's height.
+  Its helpers stack beside it, three per column, and each column's heights
+  (with gaps) sum to the lead's height. A helper column is q × the lead's
+  width, where q is the helpers' mean width over the lead's (clamped to
+  0.5–1.25; a fresh 576×316 helper gives q = 1). Only the lead takes the
+  agent band (0.6–1.0). Helpers are shaped by the block, never by the band.
+  A lone agent, or a helper whose lead is not in the zone, takes the band.
+  Helper columns are read back by x, then y, so a tidied block reads into
+  the same columns and the tidy stays idempotent.
 - **Idempotent by construction.** At s = 1, the current row breaks of a tidy
   layout cost exactly zero and fill exactly, so a second tidy picks them
   again. The engine treats a re-solve as all-or-nothing: if every frame and
@@ -172,6 +179,37 @@ App legs (`.build/debug/Array`, disposable `CONTINUUM_APP_SUPPORT` and
 - The old `compactMembers` / `compactMembersOnce` had no other callers and
   are gone.
 
+## Round 2 (after the lead's cluster rule and the creation-sizing merge)
+
+Commits:
+- `94c6f89f` feat(auto-layout): tidy a lead and its helpers as one block
+- `1d973d68` merge of array/auto-layout-night (creation sizing, `ceb37f6c`); clean
+- `738dfb9e` fix(auto-layout): hold the per-tile tidy cap in oversized zones
+
+With the new spawn presets, a note in the oversized seed reached 2.61× its
+area, past the 2.56× cap. The cause was the coarse ten-step zone shrink,
+which skipped the width that keeps it under the cap. With 40 steps it passed,
+but 60 tiles took 363 ms. Now tidy tries 10 coarse steps plus 7 between the
+best step's neighbours: 60 tiles take 127 ms at best (debug). Also, a fitted
+row that pushes a tile past the cap now gets its exact limit by bisection.
+On its own, that did not fix this case.
+
+Numbers on the merged tree, with the new presets (fill before → after): two
+0.59 → 0.99, five 0.43 → 0.98, thirteen 0.33 → 0.97, lead + 3 helpers
+0.39 → 0.97, roomy 0.13 → 0.99 (zone 4090×2832 → 2206×773), cramped grows
+700 → 927. In the app: 9.3 ms for 6 tiles, zone 2600×1800 → 1882×1316,
+fill 0.986.
+
+Checks on the merged tree. All exit 0: `--tidy-packer-check`,
+`--layout-pressure-check`, `--jelly-trajectory-probe`,
+`--auto-layout-fanout-check` and `--fanout-layout-probe` (CoreChecks);
+`--auto-layout-fanout-app-check`, `--jelly-auto-layout-check`,
+`--zone-arming-check`, `--layout-commit-truth-check` and
+`--spawn-sizing-check` (app, disposable app support and TMUX_TMPDIR). The
+block assertions (helpers one gap right of the lead, each column spanning
+the lead's height, no other tile inside the block, lead and lone agents in
+the band) went red with the grouping disabled.
+
 ## Open, for the lead
 
 1. **Tidy animation feel.** `applyLayoutTransaction` animates only origins,
@@ -186,8 +224,6 @@ App legs (`.build/debug/Array`, disposable `CONTINUUM_APP_SUPPORT` and
 3. **A wide zone with two or three tiles** cannot be filled by shape alone
    (rows justify to the width). Its height grows instead: up to 13% in the
    seeds, and the witness caps it at 15%.
-4. **Lead emphasis.** A cluster in one row gives the lead the same height as
-   its helpers. Lead first, but not bigger. Making the lead bigger would need
-   a composite block (lead | stacked helpers). I did not build it.
+4. ~~Lead emphasis~~: done in round 2 (the composite block).
 5. Shared build log: another helper also writes `/tmp/aln-tidy-build.log`, so
    I moved to `/tmp/aln-tidy-engine-*.log`.
