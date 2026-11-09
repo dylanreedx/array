@@ -18,15 +18,20 @@ performance feel and practicality."
 
 ## What changed
 
-1. **Tidy fills the zone.** The old tidy closed gaps and then shrank the zone
-   around the result. It never resized a tile, so a messy zone stayed full of
-   holes. Tidy is now `CanvasTidyPacker`, a deterministic justified-row packer.
-   - Tiles go into rows in reading order. Each row is stretched to the zone's
-     full width, and the rows share out its height.
-   - Each tile is shaped by its kind.
-   - When the tiles cannot fit, the zone grows downward. An oversized zone
-     shrinks in proportion.
+1. **Tidy fills the zone, and big tiles stay big.** The old tidy closed gaps
+   and then shrank the zone around the result. It never resized a tile, so a
+   messy zone stayed full of holes. Tidy is now `CanvasTidyPacker`, a
+   deterministic packer.
+   - Tiles are grouped by size into rows that fill the zone's width.
+   - A tile much bigger than the rest gets a column that spans several rows,
+     so it stays the biggest.
+   - Each tile stays within 0.5–2.0× its current area, and is shaped by its
+     kind.
+   - **The zone keeps its width** and changes only its height. The one
+     exception: when keeping the width would stretch tiles past 2.56×, the
+     zone narrows in proportion. It never widens.
    - A second tidy changes nothing.
+   - Reading order is not kept; size grouping wins.
 2. **Each kind has a shape** (`TileGeometry.shapeRule`, table below). Tidy and
    creation use the same rule, so a new tile is born in the shape tidy would
    give it.
@@ -83,8 +88,12 @@ Area limits:
 - On the seeded zones (`--tidy-packer-check`): 32–80% before, 96–99% after.
 - In the real app, on the eight-tile film zone: 98%.
 - On Dylan's real canvas, five zones tidied offline from read-only copies: 15–56%
-  before, 97–99% after. A second tidy changes nothing, and the solve takes at
-  most 7 ms.
+  before, 97–99% after.
+  - Every tile stays within 0.5–2.0×.
+  - The agents he made big stay the biggest after tidy: 2.79× the next tile in
+    one zone, 1.34× in another.
+  - A second tidy changes nothing.
+  - 89 tiles take about 22 ms to solve (debug build).
 
 **Latency from trigger to first movement.** This uses the production mount
 with menu dispatch, in a debug build on a loaded Mac
@@ -143,20 +152,21 @@ All in `~/Movies/Array/auto-layout-night/`.
 - **Committing the motion before the resized content is laid out:** it would
   start about 60 ms sooner at 89 tiles, but content would pop mid-motion,
   which is a visible picture swap.
-- **Featured bands (a big tile spans 2–3 rows) with a hard per-tile limit of
-  0.5–2.0×:** this cannot fill Dylan's two most mixed zones, where tiles of
-  333k–2.8M pt² sit in reading order. The code is kept off this branch on
-  `array/aln-tidy-engine` (`64a67ce5`). It costs ~3 ms even when switched off.
+- **Featured bands within strict reading order (a big tile spans 2–3 rows)
+  with a hard per-tile limit of 0.5–2.0×:** this cannot fill Dylan's two most
+  mixed zones, where tiles of 333k–2.8M pt² sit side by side in reading order.
+  Grouping by size solved it. The code is kept off this branch on
+  `array/aln-tidy-engine` (`64a67ce5`).
+- **The first masonry round changed the zone's width:** a wide two-tile zone
+  became a tall stack. Rejected; the width belongs to the user.
 
 ## Open questions for Dylan
 
-1. **Big tiles are flattened (the main one).** On the real canvas, agents you
-   made 3–4× bigger come out of tidy at roughly the same size as everything
-   else (down to 0.29× their area). The result is a clean, uniform grid, but
-   it loses the size difference you set up. A different layout model can keep
-   it: rows grouped by size, or masonry columns. That is being tried on
-   `array/aln-tidy-masonry`; see its report. Which do you want: the uniform
-   grid, or big tiles staying big at some cost in fill and neatness?
+1. **Big tiles stay big, and reading order goes.** The first packer made a
+   clean uniform grid but shrank your big agents to 0.29×. I chose the
+   size-grouped packer instead. It keeps them biggest, at the cost of
+   reading order. If you'd rather have the uniform grid, the earlier
+   behaviour is in history at `3ade43f7`.
 2. **A zone can shrink rather than stretch its tiles.** In the film zone, the
    height went from 1480 to 1084, because browsers at a fixed 16:9 allow only a
    few row layouts. Is shrinking acceptable, or should tidy keep the zone's
@@ -218,5 +228,5 @@ tmux namespace.
 ## Stream reports
 
 `reports/tidy-engine.md`, `reports/tidy-latency.md`, `reports/spawn-sizing.md`,
-`reports/persist-scope.md`, `reports/zone-growth.md`, `reports/offscreen-defer.md`. Bare tiles: `reports/bare-tiles.md` on
+`reports/persist-scope.md`, `reports/zone-growth.md`, `reports/offscreen-defer.md`, `reports/tidy-masonry.md`. Bare tiles: `reports/bare-tiles.md` on
 `array/bare-tiles`.
