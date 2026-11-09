@@ -520,6 +520,14 @@ final class CanvasNSView: NSView, TokenThemed {
                 ))
             }
         }
+        // Bare tiles are bare peers: zones push them, tidy never targets them.
+        for layer in bareLayers {
+            for tile in layer.tiles where !known.contains(tile.id) {
+                layoutTiles.append(.init(
+                    id: tile.id, frame: tile.frame, zoneId: nil,
+                    minimumSize: TileGeometry.minimumSize(for: tile.kind)))
+            }
+        }
         var placements = liveZones
         let liveIds = Set(placements.map(\.zoneId))
         placements += zoneLayers.map(\.placement).filter { !liveIds.contains($0.zoneId) }
@@ -709,7 +717,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // mutation attached to the exact occurrence selected here.
         var occurrences: [LayerTileOccurrence] = []
         var occurrencesByTileId: [UUID: [LayerTileOccurrence]] = [:]
-        for (layerIndex, layer) in zoneLayers.enumerated() {
+        for (layerIndex, layer) in tileLayers.enumerated() {
             for tileIndex in layer.tiles.indices {
                 let occurrence = LayerTileOccurrence(
                     layer: layer,
@@ -1388,7 +1396,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// the flat collection and each `ZoneLayer` (see the zone-unify note on
     /// `layoutTile`). A camera step pays for all of them.
     var qaTotalInstalledTileCount: Int {
-        tileViews.count + zoneLayers.reduce(0) { $0 + $1.tileViews.count }
+        tileViews.count + tileLayers.reduce(0) { $0 + $1.tileViews.count }
     }
 
     /// The single view whose geometry carries the camera. Tiles and zone chrome
@@ -1682,7 +1690,7 @@ final class CanvasNSView: NSView, TokenThemed {
         for tile in canvasState.tiles {
             if let view = tileViews[tile.id] { check(view, worldFrame: tile.frame) }
         }
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for tile in layer.tiles {
                 if let view = layer.tileViews[tile.id] {
                     check(view, worldFrame: CanvasEngine.worldFrame(tile: tile, in: layer.placement))
@@ -1770,7 +1778,7 @@ final class CanvasNSView: NSView, TokenThemed {
         for tile in canvasState.tiles where tileViews[tile.id] != nil {
             if CanvasEngine.tileScreenFrame(tile.frame, viewport: canvasState.viewport).intersects(visible) { count += 1 }
         }
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for tile in layer.tiles where layer.tileViews[tile.id] != nil {
                 let world = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
                 if CanvasEngine.tileScreenFrame(world, viewport: canvasState.viewport).intersects(visible) { count += 1 }
@@ -2217,7 +2225,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // Once the flat scene is retired a tile lives in a layer, and the flat
         // snapshot this used to read held only the boot project's launch-time
         // tiles: a layer tile returned false here, so it could never change zone.
-        if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }) {
+        if let layer = tileLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }) {
             return reevaluateLayerMembership(forMovedTile: tileId, in: layer, notifyChange: notifyChange)
         }
         guard flatCompatibilitySceneActive,
@@ -2278,10 +2286,14 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// The layer half of `reevaluateZoneMembership`: a drop whose centre lands in
     /// another zone of the SAME project moves the record to that zone's layer at
-    /// an unchanged WORLD frame. A layer tile cannot break out to bare canvas
-    /// (unzoned project tiles have nowhere to live) and cannot change project
-    /// here (that is a storage transfer between two `.array/` stores), so both
-    /// leave membership as it was.
+    /// an unchanged WORLD frame. A tile cannot change project here (that is a
+    /// storage transfer between two `.array/` stores).
+    ///
+    /// Bare tiles (`.plans/auto-layout-night`): a drop whose centre lies in no
+    /// zone and more than the break-out distance past its own zone's edge moves
+    /// the record to its project's bare layer, stamp cleared. A bare tile
+    /// dropped with its centre in a zone of its project is adopted by it. One
+    /// dropped in another project's zone stays bare.
     private func reevaluateLayerMembership(forMovedTile tileId: UUID, in layer: ZoneLayer, notifyChange: Bool) -> Bool {
         guard let tile = layer.tiles.first(where: { $0.id == tileId }) else { return false }
         let world = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
@@ -2292,14 +2304,31 @@ final class CanvasNSView: NSView, TokenThemed {
             let f = CanvasEngine.zoneWorldFrame(z)
             return cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
         }
-        guard let containing, containing.zoneId != current,
+        if containing == nil, !layer.isBare, layer.placement.projectId != nil,
+           let zone = liveZones.first(where: { $0.zoneId == current }) {
+            let f = CanvasEngine.zoneWorldFrame(zone)
+            let outsideBy = max(f.x - cx, cx - (f.x + f.width), f.y - cy, cy - (f.y + f.height))
+            guard outsideBy >= ZoneBreakoutConfig.distance(defaults: breakoutDefaults),
+                  transferLayerTileToBare(tileId) else { return false }
+            if isAutoLayoutEnabled {
+                applyAutoLayout(.settle(zoneId: current, anchor: nil, pin: false), baseline: autoLayoutScene())
+            } else {
+                layoutAllTiles()
+            }
+            if notifyChange { delegate?.canvasDidChange(self) }
+            return true
+        }
+        guard let containing, layer.isBare || containing.zoneId != current,
               let projectId = layer.placement.projectId,
               containing.projectId == projectId,
               transferLayerTile(tileId, toZone: containing.zoneId)
         else { return false }
         growZoneToFitMembers(containing.zoneId, notifyChange: notifyChange)
         if isAutoLayoutEnabled {
-            applyAutoLayout(.settle(zoneId: current, anchor: nil, pin: false), baseline: autoLayoutScene())
+            // A bare tile left no zone behind: nothing to close up.
+            if !layer.isBare {
+                applyAutoLayout(.settle(zoneId: current, anchor: nil, pin: false), baseline: autoLayoutScene())
+            }
         } else {
             layoutAllTiles()
         }
@@ -2329,8 +2358,8 @@ final class CanvasNSView: NSView, TokenThemed {
     /// into the same `canvas.json`, so this changes the stamp and nothing else.
     @discardableResult
     private func transferLayerTile(_ tileId: UUID, toZone zoneId: UUID) -> Bool {
-        guard let source = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }),
-              source.placement.zoneId != zoneId,
+        guard let source = tileLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }),
+              source.isBare || source.placement.zoneId != zoneId,
               let destination = zoneLayers.first(where: { $0.placement.zoneId == zoneId }),
               destination.placement.projectId != nil,
               destination.placement.projectId == source.placement.projectId,
@@ -2489,7 +2518,7 @@ final class CanvasNSView: NSView, TokenThemed {
         for view in tileViews.values {
             (view as? RunArtifactsTileNSView)?.reloadRunArtifacts()
         }
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for view in layer.tileViews.values {
                 (view as? RunArtifactsTileNSView)?.reloadRunArtifacts()
             }
@@ -2551,7 +2580,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// the underlying view at any time and a cached pointer will go stale.
     func tileView(for tileId: UUID) -> TileNSView? {
         if flatCompatibilitySceneActive, let v = tileViews[tileId] { return v }
-        for layer in zoneLayers {
+        for layer in tileLayers {
             if let v = layer.tileViews[tileId] { return v }
         }
         return lentTile(tileId)?.tile.view
@@ -2751,7 +2780,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let focused = canvasState.lastActiveTileId
         var viewsByTileId = tileViews
         qaDocumentRelationshipStats.tileIndexVisits += tileViews.count
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for (tileId, view) in layer.tileViews {
                 qaDocumentRelationshipStats.tileIndexVisits += 1
                 viewsByTileId[tileId] = view
@@ -2944,7 +2973,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 tilesById[tile.id] = CanvasTileGeometry(tileId: tile.id, frame: tile.frame, zoneId: tile.zoneId)
             }
         }
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for tile in layer.tiles where tileIds.contains(tile.id) && tilesById[tile.id] == nil {
                 tilesById[tile.id] = CanvasTileGeometry(
                     tileId: tile.id,
@@ -2977,12 +3006,18 @@ final class CanvasNSView: NSView, TokenThemed {
         // left. Put the record back in that zone's layer first; the frames below
         // are then planned against the layer that really holds it.
         for value in snapshot.tiles {
-            guard let zoneId = value.zoneId,
-                  let holder = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == value.tileId }) }),
-                  holder.placement.zoneId != zoneId else { continue }
-            transferLayerTile(value.tileId, toZone: zoneId)
+            guard let holder = tileLayers.first(where: { $0.tiles.contains(where: { $0.id == value.tileId }) }) else { continue }
+            if let zoneId = value.zoneId {
+                guard holder.isBare || holder.placement.zoneId != zoneId else { continue }
+                transferLayerTile(value.tileId, toZone: zoneId)
+            } else if !holder.isBare,
+                      holder.tiles.first(where: { $0.id == value.tileId })?.zoneId != nil {
+                // Redo of a break-out: the snapshot's tile was bare. A zone record
+                // that was never stamped captures nil too, and stays where it is.
+                transferLayerTileToBare(value.tileId)
+            }
         }
-        let layerWorldFramesBeforeSnapshot = zoneLayers.flatMap { layer in
+        let layerWorldFramesBeforeSnapshot = tileLayers.flatMap { layer in
             layer.tiles.indices.map { index in
                 (layer: layer, index: index, frame: CanvasEngine.worldFrame(
                     tile: layer.tiles[index], in: layer.placement))
@@ -3038,7 +3073,7 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         var plannedLayerFrames: [(layer: ZoneLayer, index: Int, frame: TileFrame)] = []
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for index in layer.tiles.indices {
                 guard let value = tileValues[layer.tiles[index].id],
                       plannedTileIds.insert(layer.tiles[index].id).inserted else { continue }
@@ -3145,7 +3180,8 @@ final class CanvasNSView: NSView, TokenThemed {
         var layout = CanvasLayoutTransaction(
             tileFrames: firstWinsDictionary(changedTiles.map { ($0.tileId, $0.frame) }),
             zonePlacements: [:],
-            tileZoneIds: firstWinsDictionary(changedTiles.compactMap { tile in tile.zoneId.map { (tile.tileId, $0) } })
+            tileZoneIds: firstWinsDictionary(changedTiles.compactMap { tile in tile.zoneId.map { (tile.tileId, $0) } }),
+            bareTileIds: Set(changedTiles.filter { $0.zoneId == nil && bareTileIds.contains($0.tileId) }.map(\.tileId))
         )
         for zone in snapshot.zones {
             guard var placement = placements[zone.zoneId] else { continue }
@@ -3181,7 +3217,7 @@ final class CanvasNSView: NSView, TokenThemed {
             previousTile = canvasState.tiles[idx]
             canvasState.tiles[idx] = tile
             requestedWorldFrame = tile.frame
-        } else if let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
+        } else if let layer = tileLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
                   let idx = layer.tiles.firstIndex(where: { $0.id == tile.id }) {
             previousTile = layer.tiles[idx]
             var updated = tile
@@ -3224,7 +3260,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 flat.append((index, frame))
             }
         }
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for index in layer.tiles.indices {
                 let id = layer.tiles[index].id
                 guard let frame = frames[id], seen.insert(id).inserted else { continue }
@@ -3388,7 +3424,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// frame in its owner's coordinate system without hiding layered neighbors.
     func worldFrame(forTileFrame frame: TileFrame, tileId: UUID) -> TileFrame {
         if flatCompatibilitySceneActive, canvasState.tiles.contains(where: { $0.id == tileId }) { return frame }
-        guard let placement = zoneLayers.first(where: { layer in
+        guard let placement = tileLayers.first(where: { layer in
             layer.tiles.contains(where: { $0.id == tileId })
         })?.placement else { return frame }
         return CanvasEngine.zoneLocalToWorld(frame, zoneOrigin: placement.origin)
@@ -3396,7 +3432,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     func tileFrame(fromWorldFrame frame: TileFrame, tileId: UUID) -> TileFrame {
         if flatCompatibilitySceneActive, canvasState.tiles.contains(where: { $0.id == tileId }) { return frame }
-        guard let placement = zoneLayers.first(where: { layer in
+        guard let placement = tileLayers.first(where: { layer in
             layer.tiles.contains(where: { $0.id == tileId })
         })?.placement else { return frame }
         return CanvasEngine.worldToZoneLocal(frame, zoneOrigin: placement.origin)
@@ -3514,7 +3550,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // ZoneLayer, not the flat collection — clearing only `canvasState.tiles`
         // took its VIEW away while leaving the model entry to be persisted and
         // rehydrated on the next load. The layer owns its own view map too.
-        for layer in zoneLayers {
+        for layer in tileLayers {
             if let view = layer.tileViews[id] {
                 retireTileView(view)
                 layer.tileViews.removeValue(forKey: id)
@@ -3640,7 +3676,7 @@ final class CanvasNSView: NSView, TokenThemed {
             hideDragGhost()
             hideResizeDimensions()
             for view in tileViews.values { view.cancelActiveGeometryGesture() }
-            for layer in zoneLayers {
+            for layer in tileLayers {
                 for view in layer.tileViews.values { view.cancelActiveGeometryGesture() }
             }
         }
@@ -3661,7 +3697,7 @@ final class CanvasNSView: NSView, TokenThemed {
         hideDragGhost()
         hideResizeDimensions()
         for view in tileViews.values { view.cancelActiveGeometryGesture() }
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for view in layer.tileViews.values { view.cancelActiveGeometryGesture() }
         }
     }
@@ -4311,7 +4347,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Once per gesture, never per step: the live agent chrome the pointer was
     /// holding awake rests for the gesture (`restChromeForCameraMotion`).
     private func restAgentChromeForCameraMotion() {
-        let views = Array(tileViews.values) + zoneLayers.flatMap { Array($0.tileViews.values) }
+        let views = Array(tileViews.values) + tileLayers.flatMap { Array($0.tileViews.values) }
         for case let agent as ManagedAgentTileNSView in views where !agent.isChromeResting {
             agent.restChromeForCameraMotion(pressBelongsToPan: pointerPanActive)
         }
@@ -6023,6 +6059,15 @@ final class CanvasNSView: NSView, TokenThemed {
         // Idle selected tiles have a temporary presentation origin. Focus must
         // hit the visible tile, including the few points outside its rest frame.
         let posed = tileSelection.presentationFrames
+        for layer in bareLayers.reversed() {
+            let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: posed.isEmpty ? canvasState.viewport : viewport)
+            let tiles = layer.tiles.map { tile -> Tile in
+                var visible = tile
+                visible.frame = posed[tile.id] ?? tile.frame
+                return visible
+            }
+            if let hit = CanvasEngine.hitTest(worldPoint: worldPoint, tiles: tiles) { return hit.id }
+        }
         if !posed.isEmpty {
             let worldPoint = CanvasEngine.screenToWorld(screenPoint, viewport: viewport)
             if !zoneLayers.isEmpty {
@@ -6246,6 +6291,12 @@ final class CanvasNSView: NSView, TokenThemed {
                     worldFrame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
                     zoneId: layer.placement.zoneId
                 ))
+            }
+        }
+        for layer in bareLayers {
+            for tile in layer.tiles where seen.insert(tile.id).inserted {
+                snapshots.append(NavigationTileSnapshot(
+                    tileId: tile.id, title: tile.title, kind: tile.kind, worldFrame: tile.frame, zoneId: nil))
             }
         }
         // Tiles lent to a shared zone are on the canvas too, in that zone: a
@@ -6541,6 +6592,10 @@ final class CanvasNSView: NSView, TokenThemed {
             let zoneRank = (zoneLayerOrder.firstIndex(of: layer.placement.zoneId) ?? 0) + 1
             tileEntries += layer.tileViews.values.map { ($0, zoneRank, $0.tile.zPosition.value, $0.tile.id.uuidString) }
         }
+        // Bare tiles sit above every zone's tiles: they belong to none.
+        for layer in bareLayers {
+            tileEntries += layer.tileViews.values.map { ($0, zoneLayerOrder.count + 1, $0.tile.zPosition.value, $0.tile.id.uuidString) }
+        }
         // Lent tiles sit in their area, above the project layers.
         for layer in sharedAreaLayers.values {
             tileEntries += layer.lent.map { ($0.view, zoneLayerOrder.count + 1, $0.view.tile.zPosition.value, $0.view.tile.id.uuidString) }
@@ -6636,7 +6691,7 @@ final class CanvasNSView: NSView, TokenThemed {
             layoutTile(tile, invalidateTileDisplay: invalidateTileDisplay)
         }
         // Lay out tiles for every installed ZoneLayer (T05).
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for tile in layer.tiles {
                 guard needsLayout(tile, view: layer.tileViews[tile.id],
                                   worldFrame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
@@ -7419,6 +7474,27 @@ final class CanvasNSView: NSView, TokenThemed {
         var renderModel: ZoneRenderModel
         var tiles: [Tile]
         var tileViews: [UUID: TileNSView] = [:]
+        /// A project's bare tiles (`.plans/auto-layout-night`): placed at the
+        /// origin so local frames ARE world frames, never a zone. Its placement's
+        /// zoneId is private to this canvas and is never written to a tile.
+        private(set) var isBare = false
+        /// Built from the project's resolved membership, so it holds EVERY bare
+        /// tile of the project: only then may a persisted bare tile absent from
+        /// it be read as deleted (`mergeProjectTilesForPersistence(bareCovered:)`).
+        var coversPersistedBareTiles = false
+
+        static func bare(projectId: UUID, tiles: [Tile] = []) -> ZoneLayer {
+            let placement = ZonePlacement(
+                zoneId: UUID(), projectId: projectId,
+                origin: ZonePoint(x: 0, y: 0), size: ZoneSize(width: 0, height: 0),
+                color: "", collapsed: false, hydrationPolicy: .automatic)
+            let layer = ZoneLayer(
+                placement: placement,
+                renderModel: ZoneRenderModel(placement: placement, displayName: ""),
+                tiles: tiles.map { tile in var bare = tile; bare.zoneId = nil; return bare })
+            layer.isBare = true
+            return layer
+        }
 
         init(placement: ZonePlacement, renderModel: ZoneRenderModel, tiles: [Tile] = []) {
             self.placement = placement
@@ -7429,6 +7505,14 @@ final class CanvasNSView: NSView, TokenThemed {
 
     // Installed layers (excluding the activeZone single-zone path).
     private var zoneLayers: [ZoneLayer] = []
+    /// One layer per mounted project for its bare tiles (`.plans/auto-layout-night`).
+    /// Kept OUT of `zoneLayers` on purpose: every zone surface (Model B, chrome,
+    /// arming, zone lookups, lending) reads `zoneLayers` and must never see one.
+    /// Tile surfaces (lookup, layout, hit-test, stacking, geometry, persistence)
+    /// read `tileLayers`, which includes them.
+    private var bareLayers: [ZoneLayer] = []
+    /// Every layer that holds tiles: the zone layers, then the bare ones.
+    private var tileLayers: [ZoneLayer] { bareLayers.isEmpty ? zoneLayers : zoneLayers + bareLayers }
     // z-order: back-to-front (index 0 = bottom, last = top).
     private var zoneLayerOrder: [UUID] = []
 
@@ -7443,7 +7527,11 @@ final class CanvasNSView: NSView, TokenThemed {
     ///   snapshot-tier zones vanish from framing, hit-testing and chrome. Caught by
     ///   `--workspace-sidebar-actions-check`. Defaults to the layer set for callers
     ///   that have no document (PerfScenarios and the older zone fixtures).
-    func setZones(_ layers: [ZoneLayer], documentZones: [ZoneRenderModel]? = nil) {
+    func setZones(_ incoming: [ZoneLayer], documentZones: [ZoneRenderModel]? = nil) {
+        // A project's bare layer travels with its zone layers (built, parked and
+        // hydrated together) but is installed apart from them: it is not a zone.
+        let incomingBare = incoming.filter(\.isBare)
+        let layers = incoming.filter { !$0.isBare }
         tileSelection.clear()
         // Unregister + remove all currently installed layers.
         for layer in zoneLayers {
@@ -7458,6 +7546,12 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         zoneLayers = []
         zoneLayerOrder = []
+        // Bare layers belong to the departing scene too; the runtime installs the
+        // arriving scene's after this (`installBareLayer`).
+        for layer in bareLayers {
+            for (_, view) in layer.tileViews { retireTileView(view) }
+        }
+        bareLayers = []
         // The departing zone set owns the spawn target; the caller re-declares it.
         activeProjectZoneId = nil
 
@@ -7511,6 +7605,10 @@ final class CanvasNSView: NSView, TokenThemed {
         for layer in orderedLayers {
             _installLayer(layer)
         }
+        for layer in incomingBare {
+            bareLayers.append(layer)
+            for (tileId, view) in layer.tileViews { adoptTileView(view, tileId: tileId) }
+        }
 
         layoutAllTiles()
         reorderTileSubviewsByZIndex()
@@ -7530,7 +7628,8 @@ final class CanvasNSView: NSView, TokenThemed {
     /// surface, a web view its page and an agent tile its subscription. `setZones`
     /// re-adopts them; the runtime retires them if it evicts the workspace.
     func parkZoneLayers() -> [ZoneLayer] {
-        let parked = zoneLayers
+        let parked = zoneLayers + bareLayers
+        bareLayers = []
         for layer in parked {
             for view in layer.tileViews.values {
                 view.prepareForParking()
@@ -7598,6 +7697,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// Add or replace a single layer by zoneId. Unregisters old tile adapters before registering new ones.
     func upsertZoneLayer(_ layer: ZoneLayer) {
+        if layer.isBare { installBareLayer(layer); return }
         let zoneId = layer.placement.zoneId
         qaZoneLayerInstallCount += 1
         if let existing = zoneLayers.first(where: { $0.placement.zoneId == zoneId }) {
@@ -7656,6 +7756,68 @@ final class CanvasNSView: NSView, TokenThemed {
         zoneLayerOrder.removeAll { $0 == zoneId }
         if activeProjectZoneId == zoneId { activeProjectZoneId = nil }
         reorderTileSubviewsByZIndex()
+    }
+
+    // MARK: - Bare project tiles (`.plans/auto-layout-night`)
+
+    /// Install (or replace) a project's bare layer. Its tiles are WORLD frames
+    /// with a nil stamp; they have no zone membership, no chrome, and no zone
+    /// move carries them.
+    func installBareLayer(_ layer: ZoneLayer) {
+        guard layer.isBare, let projectId = layer.placement.projectId else { return }
+        if let existing = bareLayers.first(where: { $0.placement.projectId == projectId }) {
+            for (tileId, view) in existing.tileViews where layer.tileViews[tileId] !== view {
+                retireTileView(view)
+            }
+            bareLayers.removeAll { $0 === existing }
+        }
+        bareLayers.append(layer)
+        for tile in layer.tiles { tileZoneMembership.removeValue(forKey: tile.id) }
+        for (tileId, view) in layer.tileViews { adoptTileView(view, tileId: tileId) }
+        layoutAllTiles()
+        reorderTileSubviewsByZIndex()
+    }
+
+    /// The bare layer of a project, creating an empty one when the runtime has
+    /// not built it. One created here does not cover persisted bare tiles.
+    private func bareLayer(forProjectId projectId: UUID) -> ZoneLayer {
+        if let existing = bareLayers.first(where: { $0.placement.projectId == projectId }) { return existing }
+        let layer = ZoneLayer.bare(projectId: projectId)
+        bareLayers.append(layer)
+        return layer
+    }
+
+    /// Whether the runtime has installed this project's bare layer from its
+    /// resolved membership (one a drag created on demand does not count).
+    func hasResolvedBareLayer(forProjectId projectId: UUID) -> Bool {
+        bareLayers.contains { $0.placement.projectId == projectId && $0.coversPersistedBareTiles }
+    }
+
+    /// The ids of every installed bare tile.
+    var bareTileIds: Set<UUID> { Set(bareLayers.flatMap { $0.tiles.map(\.id) }) }
+
+    /// Move a zone layer's record into its project's bare layer at the same
+    /// WORLD frame, clearing its stamp and membership. Keeps its view.
+    @discardableResult
+    private func transferLayerTileToBare(_ tileId: UUID) -> Bool {
+        guard let source = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }),
+              let projectId = source.placement.projectId,
+              !source.placement.isSharedArea,
+              let index = source.tiles.firstIndex(where: { $0.id == tileId })
+        else { return false }
+        let destination = bareLayer(forProjectId: projectId)
+        var record = source.tiles[index]
+        record.frame = CanvasEngine.worldFrame(tile: record, in: source.placement)
+        record.zoneId = nil
+        source.tiles.remove(at: index)
+        let view = source.tileViews.removeValue(forKey: tileId)
+        destination.tiles.append(record)
+        if let view { destination.tileViews[tileId] = view }
+        tileZoneMembership.removeValue(forKey: tileId)
+        _layoutLayerTile(record, in: destination)
+        reorderTileSubviewsByZIndex()
+        delegate?.canvasSidebarLabelsDidChange(self)
+        return true
     }
 
     // MARK: - Shared area layers (.plans/105-collaboration/IN-CANVAS.md, option A)
@@ -8102,7 +8264,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func allWorkspaceTiles() -> [Tile] {
         var seen = Set<UUID>()
         let flatTiles = flatCompatibilitySceneActive ? canvasState.tiles : []
-        return (flatTiles + zoneLayers.flatMap(\.tiles)).filter { seen.insert($0.id).inserted }
+        return (flatTiles + tileLayers.flatMap(\.tiles)).filter { seen.insert($0.id).inserted }
     }
 
     /// Resolve one tile from the model that currently owns it. App-level
@@ -8121,7 +8283,7 @@ final class CanvasNSView: NSView, TokenThemed {
     func allTilesInWorldFrames() -> [Tile] {
         var seen = Set<UUID>()
         var result: [Tile] = []
-        for layer in zoneLayers {
+        for layer in tileLayers {
             for tile in layer.tiles where seen.insert(tile.id).inserted {
                 var world = tile
                 world.frame = CanvasEngine.zoneLocalToWorld(tile.frame, zoneOrigin: layer.placement.origin)
@@ -8137,7 +8299,7 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     func tileRecord(for tileId: UUID) -> Tile? {
-        if let tile = zoneLayers.lazy.compactMap({ layer in
+        if let tile = tileLayers.lazy.compactMap({ layer in
             layer.tiles.first(where: { $0.id == tileId })
         }).first {
             return tile
@@ -8152,7 +8314,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// never replace the project canvas with only the last zone that changed.
     func tiles(forProjectId projectId: UUID) -> [Tile] {
         var seen = Set<UUID>()
-        return zoneLayers
+        return tileLayers
             .filter { $0.placement.projectId == projectId }
             .flatMap(\.tiles)
             .filter { seen.insert($0.id).inserted }
@@ -8169,7 +8331,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// builds a layer's `memberTiles`.
     func tilesInWorldFrames(forProjectId projectId: UUID) -> [Tile] {
         var seen = Set<UUID>()
-        let installed = zoneLayers
+        let installed = tileLayers
             .filter { $0.placement.projectId == projectId }
             .flatMap { layer in
                 layer.tiles.map { tile -> Tile in
@@ -8262,7 +8424,8 @@ final class CanvasNSView: NSView, TokenThemed {
         state.tiles = CanvasEngine.mergeProjectTilesForPersistence(
             persisted: persistedTiles,
             installed: tilesInWorldFrames(forProjectId: projectId),
-            coveredZoneIds: covered
+            coveredZoneIds: covered,
+            bareCovered: bareLayers.contains { $0.placement.projectId == projectId && $0.coversPersistedBareTiles }
         )
         return state
     }
@@ -8308,7 +8471,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Update only the persisted URL, without running geometry or auto-layout.
     /// The caller has already checked project scope and owns persistence.
     func setBrowserURL(_ url: String, tileId: UUID) -> Bool {
-        let layers = zoneLayers.filter { $0.tiles.contains(where: { $0.id == tileId }) }
+        let layers = tileLayers.filter { $0.tiles.contains(where: { $0.id == tileId }) }
         guard layers.count == 1, let layer = layers.first,
               let index = layer.tiles.firstIndex(where: { $0.id == tileId }),
               layer.tiles[index].kind == .browser else { return false }
@@ -8470,7 +8633,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// `installProjectTile`.
     @discardableResult
     func materializeProjectTile(tileView: TileNSView, for tile: Tile) -> ProjectTileTarget {
-        guard let layer = zoneLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
+        guard let layer = tileLayers.first(where: { $0.tiles.contains(where: { $0.id == tile.id }) }),
               let index = layer.tiles.firstIndex(where: { $0.id == tile.id })
         else {
             var record = tile
