@@ -637,7 +637,17 @@ public enum CanvasAutoLayoutEngine {
             var slot: TileFrame?
             switch latch {
             case let .swap(sibling)?:
-                if var displaced = frames[sibling], let target = baseline[sibling] {
+                if let reflow = unequalSwapReflow(
+                    active: activeTile, sibling: sibling, home: originalFrame,
+                    baseline: baseline, members: memberIds.filter { !frozen.contains($0) }) {
+                    // Different widths: exchange the two ROW POSITIONS, and let the
+                    // tiles after them close up or make room, instead of dropping
+                    // a wide tile on a narrow tile's origin.
+                    for (id, frame) in reflow.frames { frames[id] = frame }
+                    pushNeighbors(of: sibling, frames: &frames, baseline: baseline,
+                                  exclude: frozen.union([activeTile]), content: content, gap: gap, reserved: stillDisplaced)
+                    slot = reflow.slot
+                } else if var displaced = frames[sibling], let target = baseline[sibling] {
                     displaced.x = originalFrame.x
                     displaced.y = originalFrame.y
                     frames[sibling] = clampIntoContent(displaced, content: content)
@@ -689,9 +699,15 @@ public enum CanvasAutoLayoutEngine {
         var arranged = latch == latched ? shownArrangement : arrange(latch)
         // A new swap that would move more than the budget at once (its partner
         // plus every push relaxing) waits one frame: this frame only relaxes.
-        if case .swap? = latch, latch != latched, let previous {
+        if case let .swap(sibling)? = latch, latch != latched, let previous {
+            // The tiles an unequal exchange shifts along its rows ARE the
+            // exchange, not pushes relaxing: counting them deferred every
+            // cross-row swap of unequal widths forever.
+            let exchanged = Set(unequalSwapReflow(
+                active: activeTile, sibling: sibling, home: originalFrame,
+                baseline: baseline, members: memberIds.filter { !frozen.contains($0) })?.frames.keys ?? [:].keys)
             let changes = memberIds.filter { id in
-                id != activeTile && previous[id] != nil && previous[id] != arranged.frames[id]
+                id != activeTile && !exchanged.contains(id) && previous[id] != nil && previous[id] != arranged.frames[id]
             }.count
             if changes > livePushBudget {
                 latch = latched
@@ -699,6 +715,61 @@ public enum CanvasAutoLayoutEngine {
             }
         }
         return (arranged.frames, latch, arranged.slot)
+    }
+
+    /// An exchange of two tiles of DIFFERENT widths, as row positions
+    /// (`.plans/auto-layout-night`). Tidy makes rows of tiles of different
+    /// widths at exact gap contact; a raw origin exchange there drops a wide tile
+    /// on a narrow tile's origin, over its new neighbours, and leaves a hole where
+    /// the wide tile was. Here each tile takes the other's place in its row, and
+    /// the tiles after that place in the row shift by the difference in width.
+    /// Every row keeps its own gap sequence, so a hand-placed row keeps its
+    /// spacing, and the tiles before the exchanged place do not move. A row that
+    /// gets longer may run past the content edge: that is the zone needing to
+    /// grow, which the drop does. Sizes never change.
+    ///
+    /// Nil for equal widths: the origin exchange is already exact.
+    private static func unequalSwapReflow(
+        active: UUID, sibling: UUID, home: TileFrame,
+        baseline: [UUID: TileFrame], members: [UUID]
+    ) -> (frames: [UUID: TileFrame], slot: TileFrame)? {
+        guard let target = baseline[sibling], abs(target.width - home.width) > 0.5 else { return nil }
+        var rest = baseline
+        rest[active] = home
+        let rows = memberRows(members.filter { rest[$0] != nil }, frames: rest)
+        guard let rowA = rows.firstIndex(where: { $0.contains(active) }),
+              let rowB = rows.firstIndex(where: { $0.contains(sibling) }) else { return nil }
+        /// Lay `row` out again with `substitute` standing in for some of its tiles:
+        /// positions before the first substitution keep their exact x; from it on,
+        /// each place keeps the gap that followed it.
+        func relay(_ row: [UUID], substitute: [UUID: UUID]) -> [UUID: TileFrame] {
+            var out: [UUID: TileFrame] = [:]
+            var cursor: Double?
+            for (index, original) in row.enumerated() {
+                guard let slot = rest[original] else { continue }
+                let tile = substitute[original] ?? original
+                guard var frame = rest[tile] else { continue }
+                if cursor == nil, tile != original { cursor = slot.x }
+                frame.x = cursor ?? slot.x
+                if tile != original { frame.y = slot.y }
+                out[tile] = frame
+                if cursor != nil {
+                    let gapAfter = index + 1 < row.count
+                        ? (rest[row[index + 1]].map { $0.x - (slot.x + slot.width) } ?? 0) : 0
+                    cursor = frame.x + frame.width + gapAfter
+                }
+            }
+            return out
+        }
+        var frames: [UUID: TileFrame] = [:]
+        if rowA == rowB {
+            frames = relay(rows[rowA], substitute: [active: sibling, sibling: active])
+        } else {
+            frames = relay(rows[rowA], substitute: [active: sibling])
+            for (id, frame) in relay(rows[rowB], substitute: [sibling: active]) { frames[id] = frame }
+        }
+        guard let slot = frames.removeValue(forKey: active) else { return nil }
+        return (frames, slot)
     }
 
     /// Zone members grouped into rows, top to bottom, each left to right. A

@@ -3760,6 +3760,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--drag-in-tidy-check") {
+            do {
+                _ = NSApplication.shared
+                try DragInTidyChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --drag-in-tidy-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--canvas-pointer-path-check") {
             _ = NSApplication.shared
             Task { @MainActor in
