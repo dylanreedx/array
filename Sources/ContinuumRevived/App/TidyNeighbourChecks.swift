@@ -85,6 +85,22 @@ enum TidyNeighbourChecks {
             host.expectRigid(neighbour, before: before, after: after, label)
             host.expectMembershipUnchanged(before: before, after: after, label)
             host.expectOnDisk(after, label)
+            // One tidy is one edit: undo puts the grown zone AND the neighbour it
+            // pushed back where they were; redo pushes it again.
+            host.undo()
+            let undone = host.snapshot()
+            for id in [grower.zoneId, neighbour.zoneId] {
+                check(undone.zones[id] == before.zones[id],
+                      "\(label) undo: zone \(id == grower.zoneId ? grower.name : neighbour.name) is \(String(describing: undone.zones[id])), was \(String(describing: before.zones[id]))")
+            }
+            for tile in neighbour.tileIds {
+                check(undone.tiles[tile]?.frame == before.tiles[tile]?.frame, "\(label) undo: a tile of \(neighbour.name) did not return")
+            }
+            host.redo()
+            let redone = host.snapshot()
+            check(redone.zones[neighbour.zoneId] == after.zones[neighbour.zoneId],
+                  "\(label) redo: neighbour \(neighbour.name) is \(String(describing: redone.zones[neighbour.zoneId])), expected \(String(describing: after.zones[neighbour.zoneId]))")
+            host.expectOnDisk(redone, "\(label) redo")
         }
     }
 
@@ -363,6 +379,19 @@ enum TidyNeighbourChecks {
             NSApp.sendAction(action, to: item.target, from: item)
             canvas.layoutSubtreeIfNeeded()
             scene.fixture.drain(0.4)
+        }
+
+        func undo() {
+            _ = mounted.delegate.qaFocusBroker.enterScope(.canvas, reason: .userClick)
+            canvas.undo(nil)
+            canvas.layoutSubtreeIfNeeded()
+            scene.fixture.drain(0.3)
+        }
+        func redo() {
+            _ = mounted.delegate.qaFocusBroker.enterScope(.canvas, reason: .userClick)
+            canvas.redo(nil)
+            canvas.layoutSubtreeIfNeeded()
+            scene.fixture.drain(0.3)
         }
 
         func tidyCanvas() throws {
