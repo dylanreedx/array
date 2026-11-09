@@ -1369,9 +1369,10 @@ public enum CanvasAutoLayoutEngine {
     }
 
     private static func squaredDistance(_ a: TileFrame, _ b: TileFrame) -> Double { let dx = a.x - b.x, dy = a.y - b.y; return dx * dx + dy * dy }
-    /// Just over one 1/64 pt grid step: re-solving a tidy layout can land one
-    /// step away.
-    private static let tidyTolerance = 0.02
+    /// A re-tidy solves from the first tidy's snapped frames, so its answer can
+    /// land a grid step or two (1/64 pt each) from where tiles are: a real
+    /// 22-tile zone moved 4 tiles by 1/32 pt. Less than 0.1 pt is no change.
+    private static let tidyTolerance = 0.1
     private static func nearlyEqual(_ a: TileFrame, _ b: TileFrame) -> Bool {
         abs(a.x - b.x) <= tidyTolerance && abs(a.y - b.y) <= tidyTolerance
             && abs(a.width - b.width) <= tidyTolerance && abs(a.height - b.height) <= tidyTolerance
