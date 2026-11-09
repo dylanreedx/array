@@ -89,6 +89,9 @@ enum SidebarIndicatorSettingsChecks {
                 guard let list = button.qaPresentedList, let row = list.rowView(id: style.rawValue) else {
                     throw Failure(description: "real choice popover did not offer \(style.title); presented=\(button.qaIsPopoverPresented), items=\(button.items.map(\.id))")
                 }
+                // Production choice panels take key focus. Keep that input state
+                // while the QA placement remains outside every display.
+                button.qaPresentedPanel?.makeKey()
                 try click(row)
                 fixture.settle()
                 inbox.layoutForQA()
