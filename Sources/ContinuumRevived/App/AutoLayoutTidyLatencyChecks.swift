@@ -52,7 +52,7 @@ enum AutoLayoutTidyLatencyChecks {
 
     /// Budgets, in ms, on the app-side work between the trigger and the commit
     /// that starts the movement (see the gate in `summarize`).
-    static let appSideBudgetMs: [Int: Double] = [4: 8, 12: 10, 30: 16, 89: 40]
+    static let appSideBudgetMs: [Int: Double] = [4: 6, 12: 10, 30: 20, 89: 50]
 
     struct Sample {
         var trigger = 0.0          // synchronous: the menu action / mouse-up returns
@@ -285,8 +285,8 @@ enum AutoLayoutTidyLatencyChecks {
         for repetition in 0..<repetitions {
             let before = frames()
             animatedAtPersist = 0
-            let titleRedrawsBefore = titleRedraws()
-            let tileInvalidationsBefore = tileInvalidations()
+            var titleRedrawsBefore = titleRedraws()
+            var tileInvalidationsBefore = tileInvalidations()
             var sample = Sample()
             var triggerAt = 0.0
             switch scenario {
@@ -304,6 +304,9 @@ enum AutoLayoutTidyLatencyChecks {
                     canvas.layoutSubtreeIfNeeded(); canvas.displayIfNeeded(); CATransaction.flush()
                     m.fixture.drain(0.3)
                     canvas.qaAutoLayoutStageTimes = .init()
+                    // The undo re-lays out every tile; count from here.
+                    titleRedrawsBefore = titleRedraws()
+                    tileInvalidationsBefore = tileInvalidations()
                 }
                 // The dispatch the menu makes once it has done its own work.
                 triggerAt = CACurrentMediaTime()
@@ -494,12 +497,13 @@ enum AutoLayoutTidyLatencyChecks {
             // Wall-clock budget on the app side of the pre-movement path: the
             // canvas stages around the solve plus the presentation's layout and
             // display. The solve (the packer's own cost) and the CA flush
-            // (compositor) are published above, never gated here. Generous
-            // against a loaded machine; a regression back to synchronous disk
-            // or per-tile redraw before the movement trips it.
-            let budget = appSideBudgetMs[count] ?? 30
-            let appSide = med { $0.stages.begin + $0.stages.apply + $0.stages.finish + $0.stages.capture
-                + $0.stages.presentLayout + $0.stages.presentDisplay }
+            // (compositor) are published above, never gated here. The FASTEST
+            // repetition is gated, the estimator least moved by a loaded Mac
+            // (a run under load doubled every median); the counted assertions
+            // above are the deterministic half of this witness.
+            let budget = appSideBudgetMs[count] ?? 50
+            let appSide = samples.map { $0.stages.begin + $0.stages.apply + $0.stages.finish + $0.stages.capture
+                + $0.stages.presentLayout + $0.stages.presentDisplay }.min() ?? 0
             if appSide > budget {
                 failures.append("\(name) n=\(count): the app-side work before the movement took \(f(appSide)) ms (budget \(budget))")
             }
