@@ -3399,6 +3399,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--compact-status-row-skip-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    try runCompactStatusRowSkipChecks()
+                    print("CompactStatusRowSkipChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-compaction-ui-check") {
             _ = NSApplication.shared
             Task { @MainActor in

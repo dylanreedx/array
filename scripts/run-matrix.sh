@@ -1433,6 +1433,9 @@ run_app_check .build/debug/Array --agent-tile-reference-check
 # that direct `mouseDown` calls skipped while all four regressed in 0.7.31.
 run_app_check .build/debug/Array --canvas-pointer-path-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
+# The compact status row skips an identical apply and repaints any change it
+# shows: presentation, last prompt, background jobs or a quarter-point width.
+run_app_check .build/debug/Array --compact-status-row-skip-check
 # Offline seed replay shares the live acceptance tile fixture, without CLI usage.
 run_app_check .build/debug/Array --live-compaction-replay-check
 run_app_check .build/debug/Array --agent-account-usage-check

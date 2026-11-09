@@ -409,6 +409,7 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         appliedBackgroundJobs = backgroundJobs
         appliedLastPrompt = lastPrompt
         appliedWidth = bounds.width
+        qaFullApplyCount += 1
         presentation = next
         applySymbol(next.location.symbolName, to: locationIcon)
         locationLabel.stringValue = next.location.text
@@ -595,6 +596,8 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         guard let presentation else { return }
         apply(presentation)
     }
+    /// Applies that got past the identical-request skip and repainted the row.
+    private(set) var qaFullApplyCount = 0
     var qaLastPromptText: String? { lastPromptPill.isHidden ? nil : lastPromptPill.qaValueText }
     var qaLastPromptFill: CGColor? { lastPromptPill.layer?.backgroundColor }
 
