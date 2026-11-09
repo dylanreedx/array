@@ -702,11 +702,12 @@ final class CanvasNSView: NSView, TokenThemed {
         preservingLayerMemberWorldFramesIn preservedZoneIds: Set<UUID> = [],
         preservingZoneSizes: Bool = false
     ) {
-        let oldTileOrigins = Dictionary(uniqueKeysWithValues: transaction.tileFrames.keys.compactMap { id in
-            tileView(for: id).map { (id, $0.layer?.presentation()?.frame.origin ?? $0.frame.origin) }
+        // What is on screen now, mid-animation included: the movement starts here.
+        let oldTileFrames = Dictionary(uniqueKeysWithValues: transaction.tileFrames.keys.compactMap { id in
+            tileView(for: id).map { (id, $0.layer?.presentation()?.frame ?? $0.frame) }
         })
-        let oldZoneOrigins = Dictionary(uniqueKeysWithValues: transaction.zonePlacements.keys.compactMap { id in
-            zoneChromeViews[id].map { (id, $0.frame.origin) }
+        let oldZoneFrames = Dictionary(uniqueKeysWithValues: transaction.zonePlacements.keys.compactMap { id in
+            zoneChromeViews[id].map { (id, $0.frame) }
         })
         // A ZoneLayer stores members zone-locally. Resizing/clamping a zone can
         // move its origin while the contract keeps every passive member fixed in
@@ -918,20 +919,46 @@ final class CanvasNSView: NSView, TokenThemed {
             context.duration = 0.11
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             context.allowsImplicitAnimation = true
-            for (id, oldOrigin) in oldTileOrigins where id != activeTileId && !activeTileIds.contains(id) && !activeZoneMembers.contains(id) {
-                guard let view = tileView(for: id), view.frame.origin != oldOrigin else { continue }
-                let target = view.frame.origin
-                view.setFrameOrigin(oldOrigin)
-                view.animator().setFrameOrigin(target)
+            for (id, old) in oldTileFrames where id != activeTileId && !activeTileIds.contains(id) && !activeZoneMembers.contains(id) {
+                guard let view = tileView(for: id) else { continue }
+                if view.frame.origin != old.origin {
+                    let target = view.frame.origin
+                    view.setFrameOrigin(old.origin)
+                    view.animator().setFrameOrigin(target)
+                }
+                // A tidy resizes tiles too. The view already has its final size
+                // and its final layout; only the tile's own layer — background,
+                // border, corners and the clip — travels from the old size, so
+                // the content is never stretched, swapped or re-laid out per
+                // frame. A growing tile reveals its content the way a corner
+                // drag does.
+                if let layer = view.layer, old.size != view.frame.size {
+                    let resize = CABasicAnimation(keyPath: "bounds.size")
+                    resize.fromValue = NSValue(size: old.size)
+                    resize.toValue = NSValue(size: layer.bounds.size)
+                    resize.duration = context.duration
+                    resize.timingFunction = context.timingFunction
+                    layer.add(resize, forKey: Self.autoLayoutResizeAnimationKey)
+                }
             }
-            for (id, oldOrigin) in oldZoneOrigins where id != activeZoneId {
-                guard let view = zoneChromeViews[id], view.frame.origin != oldOrigin else { continue }
-                let target = view.frame.origin
-                view.setFrameOrigin(oldOrigin)
-                view.animator().setFrameOrigin(target)
+            for (id, old) in oldZoneFrames where id != activeZoneId {
+                guard let view = zoneChromeViews[id] else { continue }
+                if view.frame.origin != old.origin {
+                    let target = view.frame.origin
+                    view.setFrameOrigin(old.origin)
+                    view.animator().setFrameOrigin(target)
+                }
+                // A zone that tidy grew or shrank travels with its tiles rather
+                // than snapping to its new size before they arrive.
+                if old.size != view.frame.size {
+                    view.animateOutline(fromSize: old.size, duration: context.duration,
+                                        timingFunction: context.timingFunction)
+                }
             }
         }
     }
+
+    static let autoLayoutResizeAnimationKey = "autoLayoutResize"
 
     @discardableResult
     func finishAutoLayoutGesture() -> CanvasLayoutTransaction? {
@@ -8168,6 +8195,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// QA (M1.10): exactly one chrome view per zone, no orphan from a departed
     /// workspace and no duplicate from a layer install.
     var qaZoneChromeViewCount: Int { zoneChromeViews.count }
+    func qaZoneOutlineResizeAnimating(_ zoneId: UUID) -> Bool { zoneChromeViews[zoneId]?.qaOutlineResizeAnimating == true }
 
     /// Test introspection: zoneIds of installed layers in z-order (back-to-front).
     var installedZoneLayerIds: [UUID] { zoneLayerOrder }
@@ -14861,6 +14889,29 @@ final class ZoneChromeNSView: NSView {
         super.viewDidChangeEffectiveAppearance()
         refreshChrome()
     }
+
+    static let resizeAnimationKey = "zoneResize"
+
+    /// Morph the zone's fill and outline from `oldSize` (same top-left) to the
+    /// size it now has. Both are shape paths, so the zone's own geometry moves
+    /// with no raster stand-in; the header keeps its final width.
+    func animateOutline(fromSize oldSize: CGSize, duration: TimeInterval, timingFunction: CAMediaTimingFunction?) {
+        layoutSubtreeIfNeeded()
+        let radius = CornerRole.zone.cgRadius()
+        let from = CGPath(roundedRect: CGRect(origin: .zero, size: oldSize).insetBy(dx: 1, dy: 1),
+                          cornerWidth: radius, cornerHeight: radius, transform: nil)
+        for shape in [backgroundShape, outlineShape] {
+            let morph = CABasicAnimation(keyPath: "path")
+            morph.fromValue = from
+            morph.toValue = shape.path
+            morph.duration = duration
+            morph.timingFunction = timingFunction
+            shape.add(morph, forKey: Self.resizeAnimationKey)
+        }
+    }
+
+    /// QA: whether the outline carries a committed resize animation.
+    var qaOutlineResizeAnimating: Bool { outlineShape.animation(forKey: Self.resizeAnimationKey) != nil }
 
     /// Whether this is the zone new tiles will be created in. T5 (`.plans/47`).
     ///

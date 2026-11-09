@@ -206,3 +206,97 @@ code changed here.
 
 Not run: the full matrix (team rule), and the change has not been seen in the
 preview app.
+
+## Round 2: on the new tidy engine (2026-11-09)
+
+The branch fast-forwarded onto `array/auto-layout-night` at `5e1accbd`
+(stream 1's packer plus the lead's merge of round 1).
+
+### Sizes no longer snap
+
+The new packer resizes tiles and zones, but the app animated only origins.
+Every tile jumped to its new size at its old place and then slid, and the zone
+outline snapped before its tiles arrived (the lead's film showed this too).
+
+- `80e9ae89` fix(auto-layout): animate tidy resizes with the move instead of snapping
+- `b49958be` test(auto-layout): hold resized tiles and zones to an animated resize
+
+How:
+- A resized tile's own layer (background, border, corners, clip) animates
+  `bounds.size` from the old size over the same 110 ms ease-out as the slide.
+- The view already has its final size and layout. Content is revealed and
+  clipped from the top-left, as in a corner-drag resize. It is never
+  stretched, never a picture stand-in, and never re-laid out per frame.
+- A resized zone morphs its fill and outline shape paths the same way. Its
+  34 pt header keeps its final width.
+
+Looked at before keeping it: the presentation tree was rendered at 18%, 45%
+and 72% of a 20×-slowed tidy, in light and dark
+(`ALN_TIDY_FRAMES_DIR=…`, 12 tiles). Tiles grow from their top-left with the
+zone travelling alongside, and the last frame equals the final layout.
+
+Some note bodies render without text mid-animation. That's
+`CALayer.render(in:)` dropping layer contents, not the app. Probed
+mid-animation, the text fragment layers have contents and sit at their correct
+top-left frames in both the model and the presentation tree.
+
+This has not been seen on a real screen yet. That needs the lead's screen slot.
+
+Witness: every resized tile and resized zone carries a committed size
+animation. With both animations disabled it fails 20 times at 4 and 12 tiles
+(10 tiles snapped, 10 zones snapped).
+
+### Numbers on the new engine (debug, loaded Mac, medians)
+
+| tidy, tiles | movement start | solve | relayout of resized tiles | commit (redraw) | persist (after start) |
+|---|---|---|---|---|---|
+| 4 | 7.4 | 2.5 | 2.2 | 2.0 | 4.0 |
+| 12 | 23.5 | 12.8 | 5.4 | 4.0 | 4.1 |
+| 30 | 89.7 | 47.2 | 24.3 | 17.7 | 5.4 |
+| 89 | 255 | 149 | 58 | 38 | 6.5 |
+
+Drag release is unchanged: 1.9 / 3.2 / 9.9 / 15.7 ms.
+
+What this says:
+- **The solve is again the largest cost.** Stream 1 is cutting it (targets
+  8 ms at 30 tiles, 25 ms at 89).
+- **The second cost is resizing real views once.** Sampled, the relayout is
+  AppKit re-tiling each note's `NSScrollView` at its new width
+  (`-[NSScrollView tile]`), and the commit is their redraw. No Array hotspot.
+  It's inherent to resizing every tile, and smaller in release builds, where
+  our Swift layout code is optimised.
+- **Option not taken: commit the motion before the relayout.** That would
+  start the movement about 60 ms sooner at 89 tiles, but resized content would
+  pop to its new layout mid-motion. Lead's call; not built.
+
+### The ~120 ms the film sees before first motion
+
+Offscreen, from the action's dispatch to the commit that starts the movement
+takes 2–7 ms at 4 tiles, and the old 130 ms-before-change film was taken
+without the round 1 fixes. My hypothesis for the film's gap: it's macOS's own
+menu-selection feedback. The chosen item blinks and the menu fades before
+AppKit sends the action, and that runs before any of our code.
+
+- I can't drive real menu tracking offscreen to prove it.
+- **How to check:** step the film frames between the click and the first tile
+  motion. If the menu is still visible blinking or fading through those
+  frames, that's the gap.
+- **The fix, if so:** a tidy entry that doesn't go through a menu. A keyboard
+  shortcut on "Tidy This Zone" would do it; the command palette has none
+  today. That's a feature decision, not made here.
+
+### Copy now stale
+
+The palette's "Tidy canvas" subtitle still says "Restore spacing without
+changing tile sizes" (`LaunchPaletteModel.swift:905`). With the new engine,
+tidy changes sizes.
+
+### Checks (round 2, exit codes)
+
+On `b49958be`: `--auto-layout-tidy-latency-check` 0, `--jelly-auto-layout-check`
+0, `--layout-commit-truth-check` 0, `--canvas-pointer-path-check` 0,
+`--auto-layout-fanout-app-check` 0, `--spawn-sizing-check` 0,
+`--spawn-arrange-commit-check` 0, `--canvas-undo-check` 0,
+`--tile-insert-slide-check` 0, `--camera-chrome-redraw-check` 0,
+`--zone-arming-check` 0, `--zone-layer-move-check` 0,
+`--zone-move-unified-check` 0.
