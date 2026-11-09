@@ -1722,6 +1722,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let next = SidebarActiveIndicatorStyle.resolve(in: indicatorDefaults)
         guard next != activeIndicatorStyle else { return }
         activeIndicatorStyle = next
+        for tail in fanoutRemainderCellsByParent.values {
+            tail.activeIndicatorStyle = next.rawValue
+        }
         // Update existing views in place; no row rebuild, selection or scroll change.
         for row in 0..<tableView.numberOfRows {
             if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
@@ -3903,6 +3906,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 return footer
             case .fanoutRemainder(let remainder):
                 let cell = fanoutRemainderCellsByParent[remainder.parentId] ?? AgentInboxRemainderView()
+                cell.activeIndicatorStyle = activeIndicatorStyle.rawValue
                 cell.identifier = NSUserInterfaceItemIdentifier(
                     "agent-inbox-fanout-\(remainder.parentId.uuidString)")
                 cell.onExpand = { [weak self] in self?.toggleFanout(parentId: remainder.parentId) }
@@ -8183,6 +8187,15 @@ final class AgentInboxSettledMoreView: NSTableCellView, TokenThemed {
 /// use.
 @MainActor
 final class AgentInboxRemainderView: NSTableCellView {
+    var isSweepingForQA: Bool { ownershipChrome.sweep.isMovingForQA }
+    var activeIndicatorStyle = SidebarActiveIndicatorStyle.fallback.rawValue {
+        didSet {
+            guard activeIndicatorStyle != oldValue else { return }
+            fill.indicatorStyle = activeIndicatorStyle
+            needsLayout = true
+        }
+    }
+
     private let label = NSTextField(labelWithString: "")
     private let button = InboxPressReportingButton(frame: .zero)
     private var remainder: FanoutRemainder?
@@ -8350,7 +8363,7 @@ final class AgentInboxRemainderView: NSTableCellView {
                 ownership, bounds: bounds, gutter: CGFloat(AgentInbox96CellView.outerGutter),
                 gap: SidebarDensityProposal.production.gapBetweenRows,
                 spacing: CGFloat(AgentInboxView.rowSpacing), laneTop: 0,
-                rowMid: InboxOwnershipChrome.subagentHeight / 2)
+                rowMid: InboxOwnershipChrome.subagentHeight / 2, indicatorStyle: activeIndicatorStyle)
             // A subagent row's card footprint (`AgentInbox96CellView.layoutOwnership`).
             let gutter = CGFloat(AgentInbox96CellView.outerGutter)
             let spacing = CGFloat(AgentInboxView.rowSpacing)

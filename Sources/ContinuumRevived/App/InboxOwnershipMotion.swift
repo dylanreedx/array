@@ -466,7 +466,7 @@ struct InboxOwnershipChrome {
     /// Lay the three out in a cell of `bounds`. `laneTop` is where the lead's
     /// stem begins (its row only); `rowMid` is the subagent line's centre.
     func layout(_ slice: InboxOwnershipSlice, bounds: NSRect, gutter: CGFloat, gap: CGFloat,
-                spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat, indicatorStyle: String = "current") {
+                spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat, indicatorStyle: String) {
         let bleed = spacing / 2
         let top = slice.continuesAbove ? -bleed : 0
         let bottom = bounds.height + (slice.continuesBelow ? bleed : 0)

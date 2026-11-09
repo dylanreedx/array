@@ -9,3 +9,5 @@ Witness: `--sidebar-indicator-settings-check` opens the real Settings choice in 
 Motion review stills and clips: [round 3](indicator/round3/README.md), [minute-long gradient](indicator/round4/README.md).
 
 Verification for this change: `swift build --product Array` passed; `--sidebar-indicator-settings-check` was RED before the control existed and is GREEN in both appearances after implementation; `--sidebar-screenshot-check` passed with 48 images. The new app leg and its inventory entries were added without renaming any existing invocation. Existing Classic-specific motion fixtures now select Classic explicitly; the shared-agent fixture expects the quiet default Duplex surface. Those other legs and the full matrix were not run, as requested; the full gate remains part of release verification.
+
+The settings witness includes 24 helpers and the real “N more” tail: its border policy changes with the active style too, so a Classic border fragment cannot remain after choosing another look. Offscreen choice panels take key focus for the mouse event, matching the production popover's input state.
