@@ -300,3 +300,116 @@ On `b49958be`: `--auto-layout-tidy-latency-check` 0, `--jelly-auto-layout-check`
 `--tile-insert-slide-check` 0, `--camera-chrome-redraw-check` 0,
 `--zone-arming-check` 0, `--zone-layer-move-check` 0,
 `--zone-move-unified-check` 0.
+
+## Round 3: shortcut, merged-tree check, the five known-red legs (2026-11-09)
+
+Base: `array/auto-layout-night` at `65f1da43`, fast-forwarded. The worktree
+was clean, with nothing half-finished from before the outage.
+
+### ⌥⌘T tidies this zone
+
+- `b7b4fa44` feat(auto-layout): tidy the current zone with option-command-T
+- `fe15483d` test(auto-layout): require resized tiles to redraw as a positive control
+
+Why: the film's ~120 ms before first motion is the zone menu's own selection
+blink and fade-out, which happens before AppKit sends the action. A chord skips
+that wait.
+
+What it does:
+- **Registered command.** `zone.tidy`, titled "Tidy This Zone", global context,
+  default ⌥⌘T. It lives in `CommandRegistry`, which Settings › Shortcuts and the
+  registry's conflict validation read, so it is listed and can be rebound.
+- **Which zone.** The focused tile's zone, else the armed zone, else the active
+  zone. That is the resolution the ⌘K zone rows use; both now share
+  `zoneIdForZoneCommands`.
+- **Palette hint.** ⌘K action rows now show the binding their registered
+  command has, read through `ShortcutBindingStore` so a rebinding shows. Side
+  effect, deliberate: rows whose commands already had shortcuts now show them
+  too — New Agent ⌘N, Note ⇧⌘N, Activity dock ⇧⌘S, Share S.
+
+Why ⌥⌘T:
+- ⌘T is New Terminal; ⌃⌘T is the agent tile's face switch.
+- Nothing else uses T with ⌥⌘: not the registry, the tile action catalog, the
+  nav keymap, main-menu key equivalents, or the known system and Rectangle
+  chords.
+- One residual risk, shared with the existing ⌥⌘R (Reveal in Finder): someone
+  who holds ⌥ alone past the nav-leader dwell before adding ⌘ opens the leader
+  first.
+
+Witness: `--tidy-zone-shortcut-check` mounts production, installs the real
+hotkey monitor, and sends a ⌥⌘T key-down through `NSApp.sendEvent`. It asserts:
+- the armed zone's 12 tiles are tidied, one layout commit, Undo offered;
+- ⌥T alone does nothing (the negative control);
+- the binding has no registered or system clash;
+- the ⌘K row shows ⌥⌘T.
+
+Teeth: with the dispatch case removed, it fails with "⌥⌘T tidied 0 of the
+armed zone's 12 tiles".
+
+### The size-animation decision, with numbers
+
+Chosen: animate the tile layer's size alongside the slide, on the final
+layout. That landed as `80e9ae89`, merged in `65f1da43`.
+
+- **Rejected (a), animating the whole frame with per-frame relayout.** One
+  relayout of resized tiles already costs 14 ms at 30 tiles and 37 ms at 89
+  (debug, AppKit re-tiling scroll views), before the commit's redraw (10 / 27
+  ms). A 110 ms animation at 120 Hz is about 13 frames, so per-frame relayout
+  would cost ~14 ms per frame at 30 tiles: over the 8.3 ms frame budget, and
+  O(resized tiles) per frame.
+- **Rejected (b), one decisive step with no animation.** It costs the same
+  single relayout and gives up the motion that shows where each tile went.
+- **The chosen way pays one relayout, then CA interpolates** background,
+  border, corners and clip on the render server. There's no per-frame main
+  thread work and no picture stand-in. Content is revealed or clipped from
+  the top-left.
+
+### `--auto-layout-tidy-latency-check` on the merged tree: green, budgets unchanged
+
+- **Redraw assertions.** Translated-only tiles must not redraw. Resized tiles
+  must redraw: every resized tile registered one invalidation (the positive
+  control, which proves the counters are live).
+- **Budgets.** All met at 4/12/30/89 with the 10× faster packer: none fails.
+
+| tidy, tiles | movement start | solve | relayout (resized) | commit | persist (after start) |
+|---|---|---|---|---|---|
+| 30 | 28.3 | 2.7 | 14.0 | 10.5 | 3.6 |
+| 89 | 80.0 | 11.2 | 37.2 | 27.1 | 5.2 |
+
+At 30 and 89 tiles the remaining time before motion is resizing real views
+once, not the solve. Drag release is unchanged: 2.0 / 3.1 / 6.9 / 11.9 ms.
+
+### The five known-red legs: all pass now
+
+| leg | exit | baseline failure message |
+|---|---|---|
+| `--subagent-tile-zone-check` | 0, prints passed | no longer reproduces |
+| `--leader-jump-check` | 0, prints passed | no longer reproduces |
+| `--tile-reveal-work-check` | 0, prints passed | no longer reproduces |
+| `--agent-local-file-link-check` | 0, prints passed | no longer reproduces |
+| `--canvas-zoom-momentum-check` | 0, prints passed | no longer reproduces |
+
+Their fixes are in the merged base (`2977836f`, `507d1365`, `cf86ae08`), not
+in my changes. Logs: `qa-runs/aln-tidy-latency/regr/`.
+
+### Other checks (exit codes)
+
+All 0:
+- shortcut and latency: `--tidy-zone-shortcut-check`,
+  `--auto-layout-tidy-latency-check`;
+- keybindings and palette: `--keybind-edit-check`,
+  `--palette-agent-harness-check`, `--palette-duplicate-root-check`,
+  `--palette-first-responder-restore-check`, `--palette-jump-check`,
+  `--palette-zone-check`, `--palette-browser-spawn-check`,
+  `--reveal-in-finder-check`;
+- auto-layout and canvas: `--jelly-auto-layout-check`,
+  `--auto-layout-fanout-app-check`, `--layout-commit-truth-check`,
+  `--canvas-pointer-path-check`, `--zone-arming-check`, `--spawn-sizing-check`,
+  `--canvas-undo-check`;
+- CoreChecks `--onboarding-foundation-check` (includes ProductRegistry checks).
+
+My mistake, stopped:
+- I started `--palette-captures-keys-over-browser-check`. It is a live leg that
+  launches the full app with a real window, which the night's rules forbid. I
+  stopped it by PID after 9.5 min (exit 143). It is not a result.
+- The live `/Applications/Array.app` was untouched (PID 91419 still running).
