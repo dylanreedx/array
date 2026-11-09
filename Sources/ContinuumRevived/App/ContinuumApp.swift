@@ -1452,6 +1452,19 @@ enum ContinuumApp {
             }
             RunLoop.main.run()
         }
+        if CommandLine.arguments.contains("--sidebar-row-presentation-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await SidebarRowPresentationChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("sidebar-row-presentation check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
         if CommandLine.arguments.contains("--sidebar-indicator-options-check") {
             _ = NSApplication.shared
             do {
