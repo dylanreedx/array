@@ -16419,11 +16419,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let gap = TileGapResolver.resolvedGap()
         let zoneRect = CGRect(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
         let zoneTiles = canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []
-        // Auto layout fans a helper out around its lead and the lead's other
-        // helpers, shaped for the screen (.plans/107). The column scan below
-        // always started right of the lead and only searched inside the zone's
-        // current rect, so a snug zone sent every helper down the right-hand
-        // fallback and the cluster grew in a line.
+        // Helpers carry explicit beside intent. Fill columns to the lead's
+        // right and let auto layout grow the zone; automatic fan-out visibility
+        // and growth ranking must never move the first helper below its lead.
         if canvasView.isAutoLayoutActive(inZone: zoneId) {
             // Size-aware (.plans/107 model B): a helper is its lead's width and
             // half its height, never below an agent's minimum, so two helpers
@@ -16435,20 +16433,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let familyTileIds = Set(agentSupervisor.records.values
                 .filter { $0.parentAgentID == parentId && $0.id != agentId }
                 .compactMap(\.tileId))
-            let hosts = [parent.worldFrame] + zoneTiles.filter { familyTileIds.contains($0.id) }.map(\.frame)
-            let zoom = canvasView.viewport.zoom.isFinite && canvasView.viewport.zoom > 0 ? canvasView.viewport.zoom : 1
-            let placed = TileSpawnPlacement.automatic(TileSpawnPlacement.Context(
-                newSize: helperSize,
-                viewport: CanvasViewport(x: canvasView.viewport.x, y: canvasView.viewport.y, zoom: zoom),
-                visibleSize: canvasView.bounds.size,
-                siblings: zoneTiles,
-                gap: gap,
-                fanOut: TileSpawnPlacement.FanOut(
-                    hosts: hosts,
-                    targetAspect: canvasView.bounds.height > 0 ? Double(canvasView.bounds.width / canvasView.bounds.height) : 1.6,
-                    growth: CanvasAutoLayoutConfig.growth(defaults: canvasView.autoLayoutDefaults),
-                    focus: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width / 2,
-                                   y: parent.worldFrame.y + parent.worldFrame.height / 2))))
+            let placed = TileSpawnPlacement.besideLead(
+                newSize: helperSize, lead: parent.worldFrame,
+                helpers: zoneTiles.filter { familyTileIds.contains($0.id) }.map(\.frame),
+                siblings: zoneTiles.map(\.frame), gap: gap)
             return (spawner, scope, CGPoint(x: placed.x + placed.width / 2, y: placed.y + placed.height / 2), helperSize)
         }
         let occupied = zoneTiles.map {
