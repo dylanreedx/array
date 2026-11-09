@@ -463,7 +463,7 @@ func runTidyPackerChecks() {
 }
 
 /// Before (left) and after (right), each zone scaled into a 900 pt panel.
-private func writeTidyPicture(before: CanvasAutoLayoutEngine.Scene, after: CanvasAutoLayoutEngine.Scene, zoneId: UUID, path: String) {
+func writeTidyPicture(before: CanvasAutoLayoutEngine.Scene, after: CanvasAutoLayoutEngine.Scene, zoneId: UUID, path: String) {
     try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
     let panel = 900.0, margin = 40.0
     func bounds(_ scene: CanvasAutoLayoutEngine.Scene) -> CGRect {
