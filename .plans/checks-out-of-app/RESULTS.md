@@ -68,3 +68,14 @@ during compilation while removing the residency dispatch gates. This was an
 execution error, not a release compiler incompatibility. No after binary/size or
 bundle result from that attempt is valid. The queued verifier continued into the
 full matrix; release verification must be repeated after its lock is released.
+
+## Full matrix result
+
+Detached full matrix PASS: 429 legs, 1821 seconds (30m21s), zero unexpected
+failures, one expected KNOWN-RED: --empty-workspace-creation-check (registered Beta
+project absent from palette). Final source's first-paint, active-context file-open
+and transcript-rhythm legs explicitly PASS in the matrix. CoreChecks passed in
+212 seconds. Display baselines were skipped as requested. Matrix notes: app-theme
+surface-cache witness and shared-agent baseline comparison skipped with display
+checks; iOS preview proof uses labeled fixtures rather than a live simulator
+interaction. CONTINUUM_ARRAY_MANAGED_AGENT was preserved.
