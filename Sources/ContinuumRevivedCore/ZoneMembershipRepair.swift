@@ -34,11 +34,12 @@ public extension CanvasEngine {
     ///    converts to zone-local against the *rescuing* zone's origin — so
     ///    `local + origin == world` and the tile paints on exactly the pixel it
     ///    already occupied. Membership changes; position does not.
-    /// 6. **Bare tiles** (`keepsBare`, `.plans/auto-layout-night`): a nil stamp
-    ///    whose centre lies outside every one of this project's zones is a tile
-    ///    the user dragged out of its zone. It stays bare: returned in `bare`,
-    ///    stamp still nil, never restamped. A nil stamp inside a zone is still
-    ///    rescued into it, and a foreign stamp is still rescued as rule 2 says.
+    /// 6. **Bare tiles** (`keepsBare`, `.plans/auto-layout-night`): a tile marked
+    ///    `isBare` with a nil stamp, whose centre lies outside every one of this
+    ///    project's zones, is one the user dragged out. It stays bare: returned
+    ///    in `bare`, never restamped. An UNMARKED nil stamp is a legacy tile and
+    ///    is rescued exactly as rule 2 says; so is a marked one inside a zone
+    ///    (and it loses the mark), and a foreign stamp.
     ///    Off by default: a caller with nowhere to render a bare tile must keep
     ///    rescuing it, or it is drawn nowhere.
     ///
@@ -96,7 +97,7 @@ public extension CanvasEngine {
                 return centreX >= frame.x && centreX <= frame.x + frame.width
                     && centreY >= frame.y && centreY <= frame.y + frame.height
             }
-            if containing == nil, keepsBare, tile.zoneId == nil {
+            if containing == nil, keepsBare, tile.zoneId == nil, tile.isBare {
                 bare.append(tile)
                 continue
             }
@@ -104,6 +105,7 @@ public extension CanvasEngine {
             restamped.append(tile.id)
             var placed = tile
             placed.zoneId = destination
+            placed.isBare = false
             byZone[destination, default: []].append(placed)
         }
 

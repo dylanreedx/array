@@ -21826,8 +21826,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     if let zoneId = transaction.tileZoneIds[updated.tiles[index].id],
                        document.zones.contains(where: { $0.zoneId == zoneId && $0.projectId == projectId }) {
                         updated.tiles[index].zoneId = zoneId
+                        updated.tiles[index].isBare = false
                     } else if transaction.bareTileIds.contains(updated.tiles[index].id) {
                         updated.tiles[index].zoneId = nil
+                        updated.tiles[index].isBare = true
                     }
                     changed = true
                 }

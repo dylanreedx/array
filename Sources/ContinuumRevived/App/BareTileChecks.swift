@@ -123,6 +123,7 @@ enum BareTileChecks {
         let persisted = host.persisted(tile)
         check(persisted?.zoneId == Fixture.zoneA1,
               "\(mode) drag back in: canvas.json stamps \(String(describing: persisted?.zoneId)), expected zone A1")
+        check(persisted?.isBare == false, "\(mode) drag back in: canvas.json still marks the adopted tile bare")
         if let frame = host.world(tile), let zoneNow = host.canvas.qaLiveZonePlacement(Fixture.zoneA1) {
             let rect = CanvasEngine.zoneWorldFrame(zoneNow)
             check(frame.x >= rect.x - 0.5 && frame.y >= rect.y - 0.5
@@ -218,6 +219,7 @@ enum BareTileChecks {
             BareTileChecks.check(saved != nil, "\(context): canvas.json lost the tile")
             if let saved {
                 BareTileChecks.check(saved.zoneId == nil, "\(context): canvas.json stamps it into \(String(describing: saved.zoneId))")
+                BareTileChecks.check(saved.isBare, "\(context): canvas.json does not mark it bare, so a relaunch would rescue it")
                 BareTileChecks.check(near(saved.frame, expected), "\(context): canvas.json WORLD frame is \(saved.frame), expected \(expected)")
             }
         }

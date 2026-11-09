@@ -2371,6 +2371,7 @@ final class CanvasNSView: NSView, TokenThemed {
         else { return false }
         record.frame = local
         record.zoneId = zoneId
+        record.isBare = false
         source.tiles.remove(at: index)
         let view = source.tileViews.removeValue(forKey: tileId)
         destination.tiles.append(record)
@@ -7491,7 +7492,7 @@ final class CanvasNSView: NSView, TokenThemed {
             let layer = ZoneLayer(
                 placement: placement,
                 renderModel: ZoneRenderModel(placement: placement, displayName: ""),
-                tiles: tiles.map { tile in var bare = tile; bare.zoneId = nil; return bare })
+                tiles: tiles.map { tile in var bare = tile; bare.zoneId = nil; bare.isBare = true; return bare })
             layer.isBare = true
             return layer
         }
@@ -7809,6 +7810,7 @@ final class CanvasNSView: NSView, TokenThemed {
         var record = source.tiles[index]
         record.frame = CanvasEngine.worldFrame(tile: record, in: source.placement)
         record.zoneId = nil
+        record.isBare = true
         source.tiles.remove(at: index)
         let view = source.tileViews.removeValue(forKey: tileId)
         destination.tiles.append(record)
