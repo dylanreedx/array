@@ -47,12 +47,20 @@ public enum CanvasAutoLayoutEngine {
         public var frame: TileFrame
         public var zoneId: UUID?
         public var minimumSize: CGSize
+        /// What the tile is: the shape an explicit Tidy gives it
+        /// (`TileGeometry.shapeRule`). Nil reads as a loose band.
+        public var kind: TileKind?
+        /// The lead agent's tile id, on the lead and on each helper. Only an
+        /// explicit Tidy reads it, and only the Tidy entry point fills it in.
+        public var clusterLead: UUID?
 
-        public init(id: UUID, frame: TileFrame, zoneId: UUID?, minimumSize: CGSize? = nil) {
+        public init(id: UUID, frame: TileFrame, zoneId: UUID?, minimumSize: CGSize? = nil, kind: TileKind? = nil, clusterLead: UUID? = nil) {
             self.id = id
             self.frame = frame
             self.zoneId = zoneId
             self.minimumSize = minimumSize ?? CGSize(width: frame.width, height: frame.height)
+            self.kind = kind
+            self.clusterLead = clusterLead
         }
     }
 
@@ -235,15 +243,33 @@ public enum CanvasAutoLayoutEngine {
             var settleMover: (mover: UUID?, pin: Bool, grow: Bool, view: TileFrame?)?
             if case let .settle(_, anchor, pin, grow, view) = mutation { settleMover = (anchor, pin, grow, view) }
             if explicitTidy {
-                let compacted = compactMembers(memberIds: memberIds, tiles: tiles, gap: gap)
-                for (id, frame) in compacted { tiles[id]?.frame = frame }
-                if let minX = compacted.values.map(\.x).min(), let minY = compacted.values.map(\.y).min(),
-                   let maxX = compacted.values.map({ $0.x + $0.width }).max(),
-                   let maxY = compacted.values.map({ $0.y + $0.height }).max() {
-                    zone.origin = ZonePoint(x: minX - padding, y: minY - header - padding)
-                    zone.size = ZoneSize(width: maxX - minX + 2 * padding, height: maxY - minY + header + 2 * padding)
-                    zones[zoneId] = zone
+                // The packer's frames sit on its 1/64 pt grid; so must the
+                // origin they are made zone-local against (moves ≤ 1/128 pt).
+                let snappedOrigin = ZonePoint(x: (zone.origin.x / CanvasTidyPacker.grid).rounded() * CanvasTidyPacker.grid,
+                                              y: (zone.origin.y / CanvasTidyPacker.grid).rounded() * CanvasTidyPacker.grid)
+                if snappedOrigin != zone.origin { zone.origin = snappedOrigin; zones[zoneId] = zone }
+                let content = contentRect(zone: zone, padding: padding, header: header)
+                let packed = CanvasTidyPacker.pack(
+                    members: memberIds.compactMap { id in tiles[id].map {
+                        CanvasTidyPacker.Member(id: id, frame: $0.frame, kind: $0.kind,
+                                                minimumSize: $0.minimumSize, clusterLead: $0.clusterLead)
+                    } },
+                    content: content, gap: gap)
+                // A tidy of a tidy zone re-solves to within a grid step of where
+                // everything already is: that is no change, and reports nothing.
+                // All or nothing, so old and new frames never mix.
+                let size = ZoneSize(width: Double(packed.content.maxX) + padding - zone.origin.x,
+                                    height: Double(packed.content.maxY) + padding - zone.origin.y)
+                let unchanged = abs(size.width - zone.size.width) <= tidyTolerance
+                    && abs(size.height - zone.size.height) <= tidyTolerance
+                    && packed.frames.allSatisfy { id, frame in tiles[id].map { nearlyEqual($0.frame, frame) } ?? true }
+                if unchanged {
+                    if let original = scene.zones.first(where: { $0.zoneId == zoneId }) { zones[zoneId] = original }
+                    continue
                 }
+                for (id, frame) in packed.frames { tiles[id]?.frame = frame }
+                zone.size = size
+                zones[zoneId] = zone
                 continue
             }
             if let (mover, pin, grow, view) = settleMover {
@@ -419,61 +445,6 @@ public enum CanvasAutoLayoutEngine {
                 }
             }
             if !changed { break }
-        }
-        return frames
-    }
-
-    /// Compact a partial order, never a bin pack. Existing separation on either
-    /// axis is retained. Overlapping legacy rectangles get one deterministic
-    /// horizontal relation so an explicit tidy can repair them as well.
-    private static func compactMembers(memberIds: [UUID], tiles: [UUID: LayoutTile], gap: Double) -> [UUID: TileFrame] {
-        var working = tiles
-        var frames = autoLayoutFirstWinsDictionary(memberIds.compactMap { id in tiles[id].map { (id, $0.frame) } })
-        // Compaction can expose another separating relation in an irregular
-        // layout. Close those relations in this operation, not on the next click.
-        // Existing relations never disappear; at most n*(n-1) can be added.
-        for _ in 0...memberIds.count * memberIds.count {
-            let next = compactMembersOnce(memberIds: memberIds, tiles: working, gap: gap)
-            if next == frames { return frames }
-            frames = next
-            for (id, frame) in frames { working[id]?.frame = frame }
-        }
-        return frames
-    }
-
-    private static func compactMembersOnce(memberIds: [UUID], tiles: [UUID: LayoutTile], gap: Double) -> [UUID: TileFrame] {
-        var frames = autoLayoutFirstWinsDictionary(memberIds.compactMap { id in tiles[id].map { (id, $0.frame) } })
-        guard let minX = frames.values.map(\.x).min(), let minY = frames.values.map(\.y).min() else { return frames }
-        let baseline = frames
-        var horizontal: [(UUID, UUID)] = [], vertical: [(UUID, UUID)] = []
-        for (index, aID) in memberIds.enumerated() {
-            for bID in memberIds.dropFirst(index + 1) {
-                guard let a = baseline[aID], let b = baseline[bID] else { continue }
-                var separated = false
-                if a.x + a.width <= b.x { horizontal.append((aID, bID)); separated = true }
-                else if b.x + b.width <= a.x { horizontal.append((bID, aID)); separated = true }
-                if a.y + a.height <= b.y { vertical.append((aID, bID)); separated = true }
-                else if b.y + b.height <= a.y { vertical.append((bID, aID)); separated = true }
-                if !separated {
-                    horizontal.append(a.x < b.x || (a.x == b.x && uuidLess(aID, bID)) ? (aID, bID) : (bID, aID))
-                }
-            }
-        }
-        for axis in [true, false] {
-            let ordered = memberIds.sorted {
-                let a = baseline[$0]!, b = baseline[$1]!
-                let av = axis ? a.x : a.y, bv = axis ? b.x : b.y
-                return av == bv ? uuidLess($0, $1) : av < bv
-            }
-            let edges = axis ? horizontal : vertical
-            for id in ordered {
-                var coordinate = axis ? minX : minY
-                for (before, after) in edges where after == id {
-                    let f = frames[before]!
-                    coordinate = max(coordinate, (axis ? f.x + f.width : f.y + f.height) + gap)
-                }
-                if axis { frames[id]?.x = coordinate } else { frames[id]?.y = coordinate }
-            }
         }
         return frames
     }
@@ -1398,5 +1369,12 @@ public enum CanvasAutoLayoutEngine {
     }
 
     private static func squaredDistance(_ a: TileFrame, _ b: TileFrame) -> Double { let dx = a.x - b.x, dy = a.y - b.y; return dx * dx + dy * dy }
+    /// Just over one 1/64 pt grid step: re-solving a tidy layout can land one
+    /// step away.
+    private static let tidyTolerance = 0.02
+    private static func nearlyEqual(_ a: TileFrame, _ b: TileFrame) -> Bool {
+        abs(a.x - b.x) <= tidyTolerance && abs(a.y - b.y) <= tidyTolerance
+            && abs(a.width - b.width) <= tidyTolerance && abs(a.height - b.height) <= tidyTolerance
+    }
     private static func uuidLess(_ lhs: UUID, _ rhs: UUID) -> Bool { UUID.isOrderedBeforeByString(lhs, rhs) }
 }

@@ -54,17 +54,29 @@ func runLayoutPressureChecks() {
     sparse.zones[0].autoLayoutMode = .disabled
     sparse.tiles[1].frame.x += 100
     sparse.tiles[2].frame.x += 200
+    // Explicit tidy is the zone-filling packer (`--tidy-packer-check` owns the
+    // composition contract); here: it runs with auto layout off, leaves the mode
+    // alone, fills the zone edge to edge and reaches its fixed point at once.
+    func filled(_ scene: CanvasAutoLayoutEngine.Scene, _ t: CanvasLayoutTransaction) -> CanvasAutoLayoutEngine.Scene {
+        var next = scene
+        for i in next.tiles.indices { next.tiles[i].frame = t.tileFrames[next.tiles[i].id] ?? next.tiles[i].frame }
+        next.zones[0] = t.zonePlacements[zoneId] ?? next.zones[0]
+        return next
+    }
+    func fillRatio(_ scene: CanvasAutoLayoutEngine.Scene) -> Double {
+        let z = scene.zones[0]
+        let content = (z.size.width - 32) * (z.size.height - 32 - 32)
+        return scene.tiles.filter { $0.zoneId == zoneId }.reduce(0.0) { $0 + $1.frame.width * $1.frame.height } / content
+    }
     let tidy = solve(sparse, .tidy(zoneId: zoneId))
-    expect(tidy.tileFrames[ids[1]]?.x == 232 && tidy.tileFrames[ids[2]]?.x == 388, "explicit tidy closes gaps with auto layout disabled")
-    expect(tidy.zonePlacements[zoneId]?.size == ZoneSize(width: 504, height: 164), "tidy fits zone to compacted members")
-    var compacted = sparse
-    for i in compacted.tiles.indices { compacted.tiles[i].frame = tidy.tileFrames[compacted.tiles[i].id] ?? compacted.tiles[i].frame }
-    compacted.zones[0] = tidy.zonePlacements[zoneId] ?? zone
+    let compacted = filled(sparse, tidy)
+    expect(!tidy.tileFrames.isEmpty, "explicit tidy runs with auto layout disabled")
+    expect(fillRatio(compacted) > 0.85, "explicit tidy fills the zone: \(fillRatio(compacted))")
+    expect(compacted.tiles[3].frame == tiles[3].frame, "explicit tidy leaves a tile outside the zone alone")
     let again = solve(compacted, .tidy(zoneId: zoneId))
     expect(again.tileFrames.isEmpty && again.zonePlacements.isEmpty, "tidy is idempotent")
     expect(compacted.zones[0].autoLayoutMode == .disabled, "explicit tidy preserves disabled mode")
-    // A connected U has a genuine empty cavity. Tidy closes excess vertical
-    // space while preserving left/right and above/below relations.
+    // A connected U with an empty cavity: tidy leaves no cavity.
     var cavity = scene
     cavity.tiles = [
         .init(id: ids[0], frame: TileFrame(x: 116, y: 148, width: 300, height: 100), zoneId: zoneId),
@@ -72,10 +84,9 @@ func runLayoutPressureChecks() {
         .init(id: ids[2], frame: TileFrame(x: 432, y: 148, width: 100, height: 352), zoneId: zoneId)
     ]
     let cavityResult = solve(cavity, .tidy(zoneId: zoneId))
-    expect(cavityResult.tileFrames[ids[1]]?.y == 264, "tidy closes a hole in a connected arrangement")
-    for i in cavity.tiles.indices { cavity.tiles[i].frame = cavityResult.tileFrames[cavity.tiles[i].id] ?? cavity.tiles[i].frame }
-    cavity.zones[0] = cavityResult.zonePlacements[zoneId] ?? zone
-    expect(solve(cavity, .tidy(zoneId: zoneId)).tileFrames.isEmpty, "connected compaction is stable")
+    cavity = filled(cavity, cavityResult)
+    expect(fillRatio(cavity) > 0.85, "tidy closes a cavity: fill \(fillRatio(cavity))")
+    expect(solve(cavity, .tidy(zoneId: zoneId)).tileFrames.isEmpty, "a tidy zone is stable")
     var irregular = scene
     let irregularFrames: [[Double]] = [[629,496,150,158],[360,232,160,113],[984,154,74,61],[413,3,164,160],[994,665,87,110],[551,182,98,118],[183,837,141,71],[214,293,129,185]]
     irregular.tiles = irregularFrames.enumerated().map { index, f in
@@ -87,8 +98,12 @@ func runLayoutPressureChecks() {
     irregular.zones[0] = irregularTidy.zonePlacements[zoneId] ?? zone
     let irregularAgain = solve(irregular, .tidy(zoneId: zoneId))
     expect(irregularAgain.tileFrames.isEmpty && irregularAgain.zonePlacements.isEmpty, "irregular tidy reaches its fixed point on the first click")
-    let single = solve(.init(tiles: [tiles[0]], zones: [zone]), .tidy(zoneId: zoneId))
-    expect(single.tileFrames.isEmpty && single.zonePlacements[zoneId]?.size == ZoneSize(width: 132, height: 164), "one tile fits its zone")
+    let singleScene = CanvasAutoLayoutEngine.Scene(tiles: [tiles[0]], zones: [zone])
+    let single = filled(singleScene, solve(singleScene, .tidy(zoneId: zoneId)))
+    let singleZone = single.zones[0], singleFrame = single.tiles[0].frame
+    expect(abs(singleFrame.x - (singleZone.origin.x + 16)) < 0.01 && abs(singleFrame.y - (singleZone.origin.y + 48)) < 0.01
+           && abs(singleFrame.width - (singleZone.size.width - 32)) < 0.01 && abs(singleFrame.height - (singleZone.size.height - 64)) < 0.01,
+           "one tile fills its zone's content exactly: \(singleFrame) in \(singleZone.origin) \(singleZone.size)")
     expect(solve(.init(tiles: [], zones: [zone]), .tidy(zoneId: zoneId)) == CanvasLayoutTransaction(), "empty tidy does nothing")
     // Each corner sends independent pressure into horizontal and vertical lanes.
     for left in [false, true] {
