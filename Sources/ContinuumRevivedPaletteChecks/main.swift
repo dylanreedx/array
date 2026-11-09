@@ -261,14 +261,23 @@ expect(Array(homeIDs.prefix(2)) == ["action:new-agent", "action:new-agent:claude
            && !homeIDs.contains("action:new-agent:codex") && !homeIDs.contains("action:new-agent:pi"),
        "the empty-query home offers each ready non-default CLI under New Agent: \(homeIDs)")
 
-let build = try runSwift(["build", "--product", "Array"])
-guard build.status == 0 else { Foundation.exit(build.status) }
 
-let binPath = try runSwift(["build", "--show-bin-path"], captureOutput: true)
-guard binPath.status == 0 else { Foundation.exit(binPath.status) }
+let zoneNavigationRows: [LaunchPaletteRow] = [
+    .action(.createZone), .jumpToZone(JumpZoneRow(id: UUID(), title: "Alpha"))
+]
+expect(LaunchPaletteModel.makeSections(rows: zoneNavigationRows, query: "zone").flatMap(\.items).first?.title == "Alpha",
+       "zone navigation must rank existing Alpha before Create Zone")
 
-let appPath = URL(fileURLWithPath: binPath.output.trimmingCharacters(in: .whitespacesAndNewlines))
-    .appendingPathComponent("Array")
+let appPath: URL
+if ProcessInfo.processInfo.environment["ARRAY_MATRIX_PREBUILT"] == "1" {
+    appPath = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/debug/Array")
+} else {
+    let build = try runSwift(["build", "--product", "Array"])
+    guard build.status == 0 else { Foundation.exit(build.status) }
+    let binPath = try runSwift(["build", "--show-bin-path"], captureOutput: true)
+    guard binPath.status == 0 else { Foundation.exit(binPath.status) }
+    appPath = URL(fileURLWithPath: binPath.output.trimmingCharacters(in: .whitespacesAndNewlines)).appendingPathComponent("Array")
+}
 
 for flag in ["--palette-duplicate-root-check", "--palette-first-responder-restore-check", "--palette-zone-check"] {
     let process = Process()

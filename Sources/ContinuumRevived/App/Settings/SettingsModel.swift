@@ -42,6 +42,9 @@ final class SettingsModel {
     @ObservationIgnored var customViews: [String: () -> NSView] = [:]
     /// The Appearance pane's canvas background rows.
     @ObservationIgnored var canvasBackground: CanvasBackgroundEditor?
+    /// The Agent characters pane's one state: rows re-render on every write, so
+    /// they read it from here rather than building their own.
+    @ObservationIgnored lazy var agentCharacters = AgentCharacterSettingsModel(defaults: defaults, loadNow: false)
     /// Presents the import panel for custom sounds; nil runs it app-modally.
     @ObservationIgnored weak var hostWindow: NSWindow?
 

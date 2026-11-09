@@ -1,3 +1,4 @@
+#if ARRAY_CHECKS
 import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
@@ -2850,3 +2851,5 @@ extension AgentFirstPaintChecks {
         }
     }
 }
+
+#endif

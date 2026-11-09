@@ -1,8 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-"$(dirname "$0")/check-agent-tile-ux-program.sh" --check
-"$(dirname "$0")/check-sidebar-native-ux-program.sh" --check
+# Share the release-build guard's regular-file flock for the entire process
+# lifetime. macOS has no system flock command; Python's flock uses the same
+# kernel lock. Exec preserves both the PID and the inheritable descriptor.
+if [[ "${ARRAY_MATRIX_LOCK_OWNER:-}" != "$$" ]]; then
+  exec python3 - "$0" "$@" <<'MATRIX_LOCK_PY'
+import fcntl
+import os
+import stat
+import sys
+
+path = os.environ.get("ARRAY_MATRIX_LOCK", "/tmp/array-matrix.lock")
+try:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise OSError("lock path must be a regular file")
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(f"Refusing matrix: another matrix or release build holds {path}")
+except OSError as error:
+    sys.exit(f"Refusing matrix: cannot lock {path}: {error}")
+os.set_inheritable(fd, True)
+env = dict(os.environ, ARRAY_MATRIX_LOCK_OWNER=str(os.getpid()))
+os.execvpe("bash", ["bash", sys.argv[1], *sys.argv[2:]], env)
+MATRIX_LOCK_PY
+fi
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
 
@@ -75,9 +99,16 @@ NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
 MANAGED_MODE_ONLY=0
 PERMISSION_UX_ONLY=0
+MATRIX_MODE=full
+FOCUS_SAFE_INPUT_ONLY=0
+BROWSER_SCHEDULING_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --awake-only) MATRIX_MODE=awake-only; shift ;;
+    --skip-awake) MATRIX_MODE=skip-awake; shift ;;
+    --browser-scheduling) BROWSER_SCHEDULING_ONLY=1; shift ;;
+    --focus-safe-input) FOCUS_SAFE_INPUT_ONLY=1; shift ;;
     --permission-ux)
       PERMISSION_UX_ONLY=1
       shift
@@ -184,8 +215,10 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
 
+
+--focus-safe-input runs only the browser input witnesses and their contract/catalog neighbors.
 --permission-ux rebuilds the app and MCP helper, then reports permission scope, browser, simulator, grants and session witnesses. This is a targeted development gate.
 
 --agent-schedules rebuilds the app and reports native cron lifetime and durable schedule queue/restart witnesses.
@@ -195,6 +228,11 @@ Usage: scripts/run-matrix.sh [--permission-ux | --agent-schedules | --share-revo
 --composer-send rebuilds the app and reports native composer acceptance, refusal and in-flight edit checks.
 
 --boards rebuilds app/CoreChecks and reports the board library, lifecycle, API and reference witnesses.
+
+--awake-only runs only serial display/focus/perf/terminal legs.
+--skip-awake runs the independent group unattended.
+ARRAY_MATRIX_JOBS sets parallel workers (default: core count clamped to 4–6).
+ARRAY_MATRIX_RESULTS sets the results directory (logs plus results.json).
 
 Runs the project verification matrix. --fast skips the slower packaging bundle
 probe and keeps the build/check/app-flag/git hygiene gates used by the opt-in
@@ -252,16 +290,26 @@ if [[ $# -gt 0 ]]; then
   exit 2
 fi
 
+MATRIX_RESULTS=${ARRAY_MATRIX_RESULTS:-"$ROOT_DIR/qa-runs/matrix-$(date -u +%Y%m%dT%H%M%SZ)-$$"}
+mkdir -p "$MATRIX_RESULTS"
+MATRIX_RESULTS=$(cd "$MATRIX_RESULTS" && pwd)
+: > "$MATRIX_RESULTS/results.tsv"
+: > "$MATRIX_RESULTS/awake.sh"
+
 run() {
-  printf '\n==> %s\n' "$*"
-  "$@"
+  local log status=0
+  log=$(mktemp "$MATRIX_RESULTS/build.XXXXXX")
+  printf '\n==> %s (log: %s)\n' "$*" "$log"
+  "$@" >"$log" 2>&1 || status=$?
+  if [[ "$status" != 0 ]]; then tail -40 "$log"; fi
+  return "$status"
 }
 
 # A non-app leg (checks executable or hygiene script) that must NOT abort the run.
 # Builds keep using `run`, because a failed build makes every later result
 # meaningless — but one red checks executable must not hide the other seventeen.
-run_leg() {
-  local status
+matrix_run_leg_now() {
+  local status started=$SECONDS
   printf '\n==> %s\n' "$*"
   matrix_focus_watch_start
   set +e
@@ -271,6 +319,7 @@ run_leg() {
   if ! matrix_focus_watch_stop && [[ $status -eq 0 ]]; then
     status=1
   fi
+  MATRIX_LEG_SECONDS=$((SECONDS - started))
   matrix_classify "$(matrix_leg_name "$@")" "$status"
 }
 
@@ -285,101 +334,7 @@ run_leg() {
 # written without anyone noticing. Two documented reds must cost two results, not
 # a hundred and thirty.
 MATRIX_KNOWN_RED=(
-  # Pixel-baseline drift on this host: both compare renders against committed
-  # baselines and fail identically at unmodified HEAD (docs/38-tickets/95-go-live.md,
-  # 2026-08-09 and 2026-08-12). The fix is a supervised re-bless with Dylan
-  # reviewing the diffs; never CONTINUUM_UPDATE_BASELINES=1 from a session.
-  --component-lab-check
-  --ui-baseline-check
-  # A real product defect, documented in 95-go-live.md: ⌘K ranks its default
-  # row on text alone, so "Create Zone…" outranks a zone named Alpha for "z".
-  # Re-confirmed at 81fc32f5 (2026-09-28): "nav z should default-select the
-  # first jump-to-zone row (Alpha); selected=Create Zone…". Fixed by ranking.
-  --nav-mode-check
-  # Pre-existing on the 0.7.17 release commit and reproduced byte-for-byte in
-  # a clean detached 0.7.17 worktree on this host. The empty-workspace fixture
-  # omits the already-registered Beta project from the palette; this release
-  # does not touch project-picker or palette enumeration code.
-  --empty-workspace-creation-check
-  # Pre-existing frontmost/focus fixture red, reproduced byte-for-byte at the
-  # 0.7.17 release commit: the note keeps focus while the palette is open.
-  --palette-captures-keys-over-browser-check
-  # CoreChecks' arm64 seed-1 canonical-byte baseline is already 5 bytes behind
-  # the clean 0.7.17 release commit; no sync/materialize code is in this slice.
-  swift\ run\ ContinuumRevivedCoreChecks
-  # RE-RED on 2026-08-14, and it is the witness that changed, not the code. This
-  # leg went green when the content inset stopped reflowing tile bodies, and Dylan
-  # then reported that a real pinch over 9 live tiles still felt choppy while
-  # panning felt great. He was right and the scenario was wrong: it drives
-  # setViewport + layoutSubtreeIfNeeded on a headless harness, so it measures
-  # LAYOUT and never rasterizes — but a zoom changes SCALE, and re-rendering
-  # layer-backed content at the new scale is the cost that dominates. A 30-second
-  # sample of the real gesture put ~2,600 samples in CA::Layer::display_if_needed
-  # and ~960 in the forced subtree layout beneath it, against ~380 in the camera.
-  # The scenario now counts chrome redraw invalidations, which pan scores 0 on and
-  # zoom scores 1,392 on against a bucket-shaped bound of 192. Quantising the
-  # chrome floor into 1/8 scale buckets takes it to 132 (measured, not committed —
-  # it is product-visible). That only addresses chrome; the content rasterization
-  # is Slice 5's semantic-zoom work. Published in
-  # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
-  --perf-budget-zoom-check
-  # Zoom's complexity witness, publishing the one number the visible-only chrome
-  # refresh could not move: durationSlope. The WORK slopes gate at zero — a zoom
-  # step performs the same chrome refreshes and layout passes at 128 installed
-  # tiles as at 16 — but going 16 -> 128 still adds ~2 ms/step of AppKit's own
-  # view-tree traversal (any bounds write on the plane makes the next layout
-  # pass walk every installed subtree, even when zero tiles lay out; the
-  # invalidation probe's condition B pins the write itself at 0 passes). Not
-  # reachable from our code without culling installed views, which the
-  # always-render-live constraint forbids. Published in
-  # docs/internals/performance-budgets.md; do NOT bisect it as a regression.
-  --perf-budget-magnify-slope-check
-  # Inherited host-calibration red on macOS 26.6.1 / SDK 26.5 (2026-08-21).
-  # The exact 0.5.7 release commit fails 3/3 at 8.93-10.20 ms and this candidate
-  # fails 3/3 at 10.80-11.35 ms against the 8.3 ms coarse worst-step alarm.
-  # Every structural transition budget is green in both: zero inherited pan
-  # chrome/layout work, zero interleave excess, and <=0.31 ms handoff overhead.
-  # Keep the strict target; remove this only after a display/OS-calibrated
-  # witness replaces the single worst-sample alarm.
-  # RE-JUDGED on a quiet machine, 2026-08-25, because the run reported it as an
-  # unexpected PASS and this script says to remove such a leg. Do NOT: five
-  # consecutive runs measured worstStepDuration at 7.878 / 7.737 / 7.817 / 8.041 /
-  # 8.296 ms against a budget of 8.300. It passes by four MICROseconds at the top
-  # of its own spread, so it is a coin flip, not a fixed leg — removing it makes
-  # the gate red on any run that is not idle. It leaves this list when the
-  # measurement has headroom, not when one run happens to land under.
-  --perf-budget-gesture-transition-check
-  # Host-state reds, NOT code (2026-09-28). All three fail byte-for-byte at
-  # 81fc32f5 AND at e97b4156, the commit .plans/62 recorded them green on
-  # 2026-09-08 on this same OS build (macOS 27.0 26A428, SDK 26.5). The code
-  # did not change their outcome; the host did. Measured inside the fixtures:
-  # the process is never the active app (NSApp.isActive=false, window not key,
-  # NSTextInputContext.current=nil). The matrix now runs from agent shells
-  # under a daemonised tmux server; the checks never activate themselves, and
-  # must not, because activating would take Dylan's keyboard focus.
-  #
-  # Focus fixtures: the real hit view IS the target (AgentComposerView at the
-  # padding point) but acceptsFirstMouse is false, so AppKit spends the click on
-  # window activation and never delivers mouseDown: "padding click alone should
-  # focus the editor; firstResponder=<NSWindow>". The note body keeps first
-  # responder but keyDown reaches no text input context: "keyDown should edit
-  # note text; got """. Fix: run them where the checks process can be the
-  # active app (a GUI-launched terminal in the supervised pass), or decide
-  # whether the composer should accept first mouse (a product call).
-  --note-click-focus-check
-  --agent-tile-click-focus-check
-  # "title compositor drift; difference 2.439717294900222" against <= 2. Not a
-  # shift: an offset search over the two captured headers (164x11 px) puts the
-  # best alignment at (0,0), and every 1 px shift is worse (2.46-3.99). The
-  # cached header carries ~11% less alpha (57,530 vs 64,387): shading, not
-  # placement. With this gate bypassed (measurement only, not committed) every
-  # later assertion passes, including "zoom must preserve every tile's world
-  # frame", with pinch p95 24.0 ms. Most likely the same inactive-app state as
-  # the focus fixtures; unconfirmed, since confirming means activating the app
-  # over Dylan's session. Fix: confirm in an active-app run, or split the
-  # metric into placement (offset must be zero) and shading.
-  --file-tile-zoom-check
-
+  --empty-workspace-creation-check # Fixture omits the already-registered Beta project.
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
 # keep returning their real status or that handling silently stops working.
@@ -415,6 +370,18 @@ matrix_list_contains() {
 # is an advisory leg, whose real status its caller captures itself.
 matrix_classify() {
   local leg=$1 status=$2
+  if [[ -n "${MATRIX_JOB_STATUS_FILE:-}" ]]; then
+    printf '%s\n' "$status" > "$MATRIX_JOB_STATUS_FILE"
+    return 0
+  fi
+  local classification=pass
+  if [[ "$status" != 0 ]]; then classification=fail; fi
+  if matrix_list_contains "$leg" "${MATRIX_KNOWN_RED[@]}"; then
+    if [[ "$status" != 0 ]]; then classification=known-red; else classification=known-red-passed; fi
+  elif matrix_list_contains "$leg" "${MATRIX_ADVISORY[@]}"; then
+    classification=advisory
+  fi
+  printf '%s\t%s\t%s\n' "$leg" "$classification" "${MATRIX_LEG_SECONDS:-0}" >> "$MATRIX_RESULTS/results.tsv"
   MATRIX_LEGS_RUN=$((MATRIX_LEGS_RUN + 1))
 
   if matrix_list_contains "$leg" "${MATRIX_ADVISORY[@]}"; then
@@ -536,8 +503,8 @@ matrix_focus_watch_stop() {
   return 0
 }
 
-run_app_check() {
-  local project_root app_support status stdout_log
+matrix_run_app_now() {
+  local project_root app_support status stdout_log started=$SECONDS
   local tmux_args=()
   project_root=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-project.XXXXXX")
   app_support=$(mktemp -d "${TMPDIR:-/tmp}/continuum-matrix-appsupport.XXXXXX")
@@ -579,7 +546,139 @@ run_app_check() {
   matrix_collect_notes "$(matrix_leg_name "$@")" "$stdout_log"
   rm -rf "$project_root" "$app_support" "$stdout_log"
 
+  MATRIX_LEG_SECONDS=$((SECONDS - started))
   matrix_classify "$(matrix_leg_name "$@")" "$status"
+}
+
+# Full runs queue independent legs; display and shared terminal legs are replayed
+# serially after all workers finish. Targeted modes retain their direct runner.
+MATRIX_SCHEDULING=0
+MATRIX_JOB_PIDS=()
+MATRIX_JOB_IDS=()
+MATRIX_JOB_NEXT=0
+MATRIX_QUEUED_LEGS=0
+MATRIX_JOB_JOIN=0
+matrix_awake_leg() {
+  case "$*" in
+    *check-ios-preview-proof*|*CoreChecks*|*PaletteChecks*|*PerfChecks*|*check-app-bundle*|*multiplayer-journey*|*collaboration-pair*|*--ui-tour-check*|*--nav-mode-check*|*--agent-face-switch-check*|*--tile-surface-residency-check*|*--inbox-parent-fold-check*|*--share-agent-relay-check*|*--shell-open-as-agent-check*|*terminal*|*tmux*|*session-resume*|*focus*|*perf*|*gesture*|*pointer*|*browser*|*magnify*|*snapshot*|*appearance*|*pixel*|*geometry*|*outline*|*residency*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+matrix_join_one() {
+  local id=${MATRIX_JOB_IDS[$MATRIX_JOB_JOIN]} pid=${MATRIX_JOB_PIDS[$MATRIX_JOB_JOIN]}
+  local status=0 leg seconds
+  wait "$pid" || status=$?
+  leg=$(cat "$MATRIX_RESULTS/$id.leg")
+  seconds=$(cat "$MATRIX_RESULTS/$id.seconds" 2>/dev/null || printf 0)
+  if [[ -f "$MATRIX_RESULTS/$id.status" ]]; then
+    status=$(cat "$MATRIX_RESULTS/$id.status")
+  elif [[ "$status" == 0 ]]; then
+    status=1 # A worker that never classified its outcome is not green.
+  fi
+  MATRIX_LEG_SECONDS=$seconds
+  matrix_collect_notes "$leg" "$MATRIX_RESULTS/$id.log"
+  matrix_classify "$leg" "$status" || true
+  printf '  %5ss  %s  %s\n' "$seconds" "$([[ $status == 0 ]] && printf PASS || printf RED)" "$leg"
+  if [[ "$status" != 0 ]]; then tail -25 "$MATRIX_RESULTS/$id.log"; fi
+  MATRIX_JOB_JOIN=$((MATRIX_JOB_JOIN + 1))
+}
+matrix_drain() {
+  while (( MATRIX_JOB_JOIN < ${#MATRIX_JOB_PIDS[@]} )); do matrix_join_one; done
+}
+
+matrix_launch() {
+  local runner=$1; shift
+  local id=$MATRIX_JOB_NEXT
+  MATRIX_JOB_NEXT=$((MATRIX_JOB_NEXT + 1))
+  matrix_leg_name "$@" > "$MATRIX_RESULTS/$id.leg"
+  (
+    trap - EXIT
+    MATRIX_JOB_STATUS_FILE="$MATRIX_RESULTS/$id.status"
+    started=$SECONDS
+    "$runner" "$@"
+    printf '%s\n' "$((SECONDS - started))" > "$MATRIX_RESULTS/$id.seconds"
+  ) </dev/null > "$MATRIX_RESULTS/$id.log" 2>&1 &
+  MATRIX_JOB_PIDS+=("$!")
+  MATRIX_JOB_IDS+=("$id")
+}
+
+matrix_queue() {
+  local runner=$1; shift
+  if matrix_awake_leg "$@"; then
+    if [[ "$MATRIX_MODE" == skip-awake ]]; then
+      printf 'SKIPPED awake: %s\n' "$(matrix_leg_name "$@")"
+      return 0
+    fi
+    MATRIX_QUEUED_LEGS=$((MATRIX_QUEUED_LEGS + 1))
+    printf '%q ' "$runner" "$@" >> "$MATRIX_RESULTS/awake.sh"
+    printf '\n' >> "$MATRIX_RESULTS/awake.sh"
+  elif [[ "$MATRIX_MODE" != awake-only ]]; then
+    MATRIX_QUEUED_LEGS=$((MATRIX_QUEUED_LEGS + 1))
+    if (( ${#MATRIX_JOB_PIDS[@]} - MATRIX_JOB_JOIN >= MATRIX_JOBS )); then matrix_join_one; fi
+    matrix_launch "$runner" "$@"
+  fi
+}
+run_leg() {
+  if [[ "$MATRIX_SCHEDULING" == 1 ]]; then matrix_queue matrix_run_leg_now "$@"
+  else matrix_run_leg_now "$@"; fi
+}
+run_app_check() {
+  if [[ "$MATRIX_SCHEDULING" == 1 ]]; then matrix_queue matrix_run_app_now "$@"
+  else matrix_run_app_now "$@"; fi
+}
+matrix_require_awake() {
+  python3 - <<'AWAKE_PY'
+import ctypes, os, plistlib, subprocess, sys
+try:
+    session = plistlib.loads(subprocess.check_output(['/usr/sbin/ioreg', '-n', 'Root', '-d', '1', '-a']))
+    if isinstance(session, list): session = session[0]
+    if session.get('IOConsoleLocked'):
+        sys.exit('Refusing awake group: the console is locked. Unlock the Mac or use --skip-awake.')
+    if not any(u.get('kCGSSessionOnConsoleKey') and u.get('kCGSSessionUserIDKey') == os.getuid()
+               for u in session.get('IOConsoleUsers', [])):
+        sys.exit('Refusing awake group: this user has no active console session. Use --skip-awake.')
+    cg = ctypes.CDLL('/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+    cg.CGMainDisplayID.restype = ctypes.c_uint32
+    cg.CGDisplayIsAsleep.argtypes = [ctypes.c_uint32]
+    display = cg.CGMainDisplayID()
+    if not display or cg.CGDisplayIsAsleep(display):
+        sys.exit('Refusing awake group: the main display is asleep or unavailable. Wake it or use --skip-awake.')
+except (OSError, ValueError, subprocess.SubprocessError) as error:
+    sys.exit(f'Refusing awake group: cannot verify display state: {error}')
+print('Awake preflight: console unlocked, main display awake.')
+AWAKE_PY
+}
+
+matrix_finish_jobs() {
+  matrix_drain
+  if [[ -s "$MATRIX_RESULTS/awake.sh" ]]; then
+    matrix_require_awake
+    printf '\n==> Serial awake group\n'
+    # Only shell-escaped invocations written by matrix_queue are evaluated.
+    while IFS= read -r command; do
+      eval "matrix_launch $command"
+      matrix_drain
+    done < "$MATRIX_RESULTS/awake.sh"
+  fi
+  if [[ "$MATRIX_JOB_NEXT" != "$MATRIX_QUEUED_LEGS" ]]; then
+    printf 'RUNNER FAILURE: queued %s legs but launched %s\n' "$MATRIX_QUEUED_LEGS" "$MATRIX_JOB_NEXT"
+    MATRIX_LEG_SECONDS=0 matrix_classify matrix-runner-completeness 1
+  fi
+  python3 - "$MATRIX_RESULTS" <<'RESULTS_PY'
+import csv, json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+rows = []
+for leg, status, seconds in csv.reader((root / 'results.tsv').open(), delimiter='\t'):
+    rows.append(dict(leg=leg, status=status, seconds=int(seconds)))
+(root / 'results.json').write_text(json.dumps(rows, indent=2) + '\n')
+print('\nPer-leg wall times:')
+for row in rows:
+    print(f"  {row['seconds']:5}s  {row['status']:4}  {row['leg']}")
+print(f"JSON results: {root / 'results.json'}")
+RESULTS_PY
+  printf 'Full run wall time: %ss\n' "$SECONDS"
+  MATRIX_SCHEDULING=0
 }
 
 # Ticket P0.1: compile the iOS app, not just the macOS package. Core is shared
@@ -596,6 +695,8 @@ run_ios_build() {
     -scheme Continuum
     -sdk iphonesimulator
     -destination 'generic/platform=iOS Simulator'
+    ARCHS=arm64
+    ONLY_ACTIVE_ARCH=YES
     # Keep Xcode's build cache inside this checkout's .build, so it goes when
     # the bench goes; the default DerivedData path leaked ~2GB per worktree.
     -derivedDataPath .build/ios-derived-data
@@ -633,13 +734,60 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$BROWSER_SCHEDULING_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run_app_check .build/debug/Array --browser-background-scheduling-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-focus-restoration-check
+  run_app_check .build/debug/Array --browser-focus-restoration-check
+  run_app_check .build/debug/Array --browser-automation-engine-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
+  run_app_check .build/debug/Array --browser-native-select-preflight-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --workspace-api-browser-check
+  matrix_report 'Focus-free backend Tier A matrix (targeted; faked key state)'
+  exit $?
+
+fi
+if [[ "$FOCUS_SAFE_INPUT_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+  run_app_check .build/debug/Array --browser-background-scheduling-check
+  run_app_check .build/debug/Array --browser-focus-restoration-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-focus-restoration-check
+  run_app_check .build/debug/Array --browser-select-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
+  run_app_check .build/debug/Array --browser-native-select-preflight-check
+  run_app_check .build/debug/Array --browser-automation-engine-check
+  run_app_check .build/debug/Array --workspace-api-browser-check
+  run_app_check .build/debug/Array --browser-unrelated-input-check
+  run_app_check .build/debug/Array --browser-ref-identity-check
+  run_app_check .build/debug/Array --browser-action-results-check
+  run_app_check .build/debug/Array --browser-writer-transfer-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --browser-action-queue-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
+  run git diff --check
+  matrix_report 'Stage 1 browser input matrix (targeted)'
+  exit $?
+fi
 if [[ "$PERMISSION_UX_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp
   run swift build --disable-sandbox --skip-update --product Array
   run_app_check .build/debug/Array --workspace-api-free-permissions-check
   run_app_check .build/debug/Array --workspace-api-session-permissions-check
   run_app_check .build/debug/Array --workspace-api-grants-check
+  run_app_check .build/debug/Array --workspace-api-agent-camera-check
   run_app_check .build/debug/Array --workspace-api-browser-check
+  run_app_check .build/debug/Array --browser-focus-restoration-check
+  run_app_check .build/debug/Array --browser-select-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
+  run_app_check .build/debug/Array --browser-native-select-preflight-check
   run_app_check .build/debug/Array --browser-automation-engine-check
   run_app_check .build/debug/Array --workspace-api-device-check
   run git diff --check
@@ -1043,11 +1191,10 @@ if [[ "$TILE_SELECTION_ONLY" -eq 1 ]]; then
   matrix_report 'Tile selection matrix (targeted)'
   exit $?
 fi
-# Program 91 setup: keep the 50-ticket agent-tile queue, dependency order,
-# packet structure, ledger rows, and supervised review gates from drifting.
-run scripts/check-agent-tile-ux-program.sh
-run scripts/check-sidebar-native-ux-program.sh
-run_leg scripts/check-ios-preview-proof.sh
+# Fail before building when the requested awake pass cannot run. Check again
+# immediately before its serial group, since independent legs can take minutes.
+if [[ "$MATRIX_MODE" != skip-awake ]]; then matrix_require_awake; fi
+run env IOS_PREVIEW_PROOF_OUT="$MATRIX_RESULTS/ios-preview-proof" scripts/check-ios-preview-proof.sh --prepare-only
 # Ticket P1.7: colour hygiene. A pure grep lint over the view layers, so it runs
 # before the build for the same reason as the inventory guard — a new raw colour
 # should be named in seconds, not after a full build. Red on any raw colour or
@@ -1057,146 +1204,50 @@ run_leg scripts/check-ios-preview-proof.sh
 run_leg scripts/check-color-hygiene.sh
 run swift build
 run_ios_build
-# .plans/73-film-studio: the film recorder is compiled only into the film build
-# (-DARRAY_FILM). The normal binary must carry none of it and refuse --film.
-run_leg scripts/check-film-absent.sh
-run_leg swift run ContinuumRevivedCollaborationChecks
-run_leg swift run ContinuumRevivedCollaborationServiceChecks
+run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
+run_leg scripts/check-cursor-contrast.sh
 # .plans/73-film-studio: every scene in film/scenes/ still runs on this checkout's
 # app, so a UI change that breaks filming is red the day it lands. Builds the film
 # build in its own scratch path (.build-film).
-run_leg scripts/check-film-scenes.sh
-run_leg swift run ContinuumRevivedCoreChecks
-# Directory-aware document identity, symlink-safe/longest-root classification,
-# workspace-v5 migration, and durable agent-document relationship cleanup.
-run_leg .build/debug/ContinuumRevivedCoreChecks --document-location-check
-# An unreadable canvas.json throws instead of loading as empty, and the store
-# refuses to write over it.
-run_leg .build/debug/ContinuumRevivedCoreChecks --unreadable-canvas-store-check
-# Worst-case cost of the exact zone-origin correction on the resize input path
-# (it runs per zone per mouseDragged). Registered so the bound is gated, not
-# merely measurable: the leg existed with a failing exit path no gate ran.
-run_leg .build/debug/ContinuumRevivedCoreChecks --exact-rebase-performance-check
-# Provider-native compaction lifecycle, opaque-payload discipline, and token
-# precision semantics. Standalone so unrelated long-running CoreChecks failures
-# cannot prevent this contract from running.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-compaction-check
-# Standalone: the bare CoreChecks run is KNOWN-RED before the meter sections.
-run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
-# DI-01: the dictation state machine and waveform arithmetic over the fake
-# engine. Standalone: the bare CoreChecks run is KNOWN-RED before it.
-run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-parity-check
-# Standalone for the same reason: the runner half (incl. the real 0.159.3
-# manual-compaction turn, which once left a tile "Working" forever) only ran
-# inside the KNOWN-RED bare CoreChecks run.
-run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
-run_leg scripts/capture-cli-fixtures.sh check
-# ST-01. Standalone for the same reason as the compaction leg above: the bare
-# CoreChecks run holds an unrelated pre-existing failure (the codex argv drift),
-# and a witness only counts if the gate reports IT rather than the first red
-# thing ahead of it.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-quota-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-account-usage-check
-# 0.7.30: which agent owns a running process (owner tag, then ancestry), its
-# listening ports, Stop, and that agents no longer inherit the app's
-# descriptors. Real processes: a setsid'd job and a scrubbed-environment job.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-process-tracking-check
-# Complete request clocks and original restore timestamps must run even when
-# an earlier full-CoreChecks section is KNOWN-RED.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --transcript-rehydration-check
-# .plans/79: which Claude and Codex sessions run on this Mac, where, and who
-# owns each. Synthetic session files, rollouts and process table; a stale pid,
-# Claude's background host and an unreadable format are all dropped.
-run_leg .build/debug/ContinuumRevivedCoreChecks --external-session-discovery-check
-# .plans/79: agents messaging each other — the envelope parser, every
-# provider's restore of an agent's message as a card, and the sender's
-# "Messaged …" row. Neither section it draws from is a leg of its own.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-message-transcript-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --layout-pressure-check
-# .plans/107: a live drag moves at most three other tiles a frame and nothing
-# teleports; spawns fan out screen-shaped; the jelly trajectory fails on any
-# ORTHO/FLIP/TELEPORT/STUCK frame.
-run_leg .build/debug/ContinuumRevivedCoreChecks --auto-layout-fanout-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
-run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --live-model-catalog-check
-# Film phase 1: the pairing page and the user-facing copy that must say Array.
-# Standalone because the bare CoreChecks run stops at its KNOWN-RED pin first.
-run_leg .build/debug/ContinuumRevivedCoreChecks --local-pairing-endpoint-check
-# Confidence pass S4: the record/context/row-builder sections sit after the
-# KNOWN-RED seed-1 pin in the bare run and never reported; this arm runs them.
-run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-lifecycle-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --file-document-session-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --file-content-foundation-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --file-format-backends-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --onboarding-foundation-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --language-service-check
-# T3 (0.7.26): Claude/Codex get pi's workspace tools over array-workspace-mcp.
-# Parity against pi's allowlist, one catalog for both transports, the Claude and
-# Codex guidance/allowance/timeout projections, and the capability token kept out
-# of every agent's environment, argv and config. Its own arm because the bare
-# CoreChecks run is KNOWN-RED and never reached this section.
-run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
-# .plans/102 P1: a Claude agent with workspace tools gets Array's observation
-# hooks through one --settings value: exactly seven events, a short timeout,
-# earlier flags unchanged, never --setting-sources (it drops the user's hooks).
-run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
-# Duckherd stays off inside a Managed Claude lead (pluginConfigs startOn false
-# under every installed key, plus one unpublished /duckherd off on a resume
-# Duckherd saved as on), declines /duckherd on there, and Free is untouched.
-run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
-# The same through real claude with Duckherd loaded by --plugin-dir, plus the
-# push-back shortening a real helper's report. Spends a little usage; opt in
-# with CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE=1 and CONTINUUM_DUCKHERD_PLUGIN_DIR.
+if [[ "${CONTINUUM_CHECK_FILM_SCENES:-0}" == "1" ]]; then
+  run_leg scripts/check-film-scenes.sh
+fi
+MATRIX_JOBS=${ARRAY_MATRIX_JOBS:-$(sysctl -n hw.logicalcpu | awk '{ n=int($1/2); if(n<4)n=4; if(n>6)n=6; print n }')}
+[[ "$MATRIX_JOBS" =~ ^[1-9][0-9]*$ ]] || { echo 'ARRAY_MATRIX_JOBS must be a positive integer' >&2; exit 2; }
+run scripts/make-app-bundle.sh --skip-build --configuration debug --output "$MATRIX_RESULTS/Array.app"
+for journey in ShareKinds ShareTerminal; do
+  run python3 scripts/check-multiplayer-journey.py --relay local --name "$journey" --prepare-only
+ done
+export ARRAY_MATRIX_PREBUILT=1
+MATRIX_SCHEDULING=1
+run_leg env IOS_PREVIEW_PROOF_OUT="$MATRIX_RESULTS/ios-preview-proof" scripts/check-ios-preview-proof.sh --skip-build
+printf '\n==> Independent group (%s workers), then serial awake group; mode=%s\n' "$MATRIX_JOBS" "$MATRIX_MODE"
+# .plans/73-film-studio: the film recorder is compiled only into the film build
+# (-DARRAY_FILM). The normal binary must carry none of it and refuse --film.
+run_leg scripts/check-film-absent.sh
+run_leg .build/debug/ContinuumRevivedCollaborationChecks
+run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
+run_leg .build/debug/ContinuumRevivedCoreChecks
 if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 fi
-run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
-# .plans/102 P2a: array_report/array_status bounds, the once-only push-back
-# decision and its wording, the courier unchanged without a report, and the
-# Settings toggle off by default.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
-# T5 (0.7.26): steering, interrupt-not-kill and the persistent Claude process,
-# through the production Claude/Codex/Pi runners against reactive fakes of each
-# CLI that record the exact argv and stdin frames. Its own arm for the same
-# reason as the one above: the bare CoreChecks run is KNOWN-RED.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-steering-runner-check
-# A pi provider refusal (model not on the plan) read "error" on the card. Real
-# captured rpc frames through the translator and projection; own arm because
-# the bare CoreChecks run is KNOWN-RED.
-run_leg .build/debug/ContinuumRevivedCoreChecks --pi-provider-failure-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --board-task-transcript-check
-# Plan 110 (agent characters): the theme format against the reference parser's
-# recorded corpus, the built-in set with its MIT notice, and the atlas pixels.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-character-theme-check
-# Plan 110, slice 2: which loop, clip or still each agent state plays.
-run_leg .build/debug/ContinuumRevivedCoreChecks --agent-character-pose-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --cli-update-runner-check
-# Ticket P1.1: the shared agent-UI module's own leg. It links AgentUI alone, so
-# it also proves the dependency direction — a token that reaches back into Core
-# cannot compile here. StatusChip's assertions moved here from
-# ContinuumRevivedCoreChecks unchanged.
-run_leg swift run ContinuumRevivedAgentUIChecks
+run_leg scripts/capture-cli-fixtures.sh check
+run_leg .build/debug/ContinuumRevivedAgentUIChecks
 # Ticket 91/P0.2: the semantic agent-content module's own leg. It links
 # AgentContent alone, so it proves the dependency direction the same way the
 # AgentUI leg does, and it scans the module's sources and both manifest target
 # blocks so a forbidden import or declared dependency is red before it is ever
 # used. Fast and pure: no app bundle, no display, no provider process.
-run_leg swift run ContinuumRevivedAgentContentChecks
-run_leg swift run ContinuumRevivedSyncChecks
+run_leg .build/debug/ContinuumRevivedAgentContentChecks
+run_leg .build/debug/ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
-run_leg swift run ContinuumRevivedRelayChecks
+run_leg .build/debug/ContinuumRevivedRelayChecks
 # Friends-alpha relay: Foundation wire schema, durable per-instance core, and
 # real NIO public/admin listener startup plus graceful shutdown.
-run_leg swift run ContinuumRevivedRelayProtocolChecks
-run_leg swift run ContinuumRevivedRelayCoreChecks
+run_leg .build/debug/ContinuumRevivedRelayProtocolChecks
+run_leg .build/debug/ContinuumRevivedRelayCoreChecks
 run_leg python3 scripts/check-notification-map.py --self-test
-run_leg swift run ContinuumRevivedRelayIntegrationChecks
+run_leg .build/debug/ContinuumRevivedRelayIntegrationChecks
 # Ticket 57: gated real-CloudKit backend leg. Skips gracefully (exit 0,
 # cloudkit_available=false in the manifest) unless CLOUDKIT_ENABLED=1 is set
 # — never set in this matrix; the real leg is device-gate-owed. Explicitly
@@ -1204,10 +1255,10 @@ run_leg swift run ContinuumRevivedRelayIntegrationChecks
 # accidentally go live against a real, unentitled CKContainer just because
 # CLOUDKIT_ENABLED=1 happens to be exported in the ambient shell environment
 # the matrix runs in.
-CLOUDKIT_ENABLED=0 run swift run ContinuumRevivedSyncIntegrationChecks
-run_leg swift run ContinuumRevivedPaletteChecks
-run_leg swift run ContinuumRevivedFileTreeChecks
-run_leg swift run ContinuumRevivedPerfChecks
+CLOUDKIT_ENABLED=0 run_leg .build/debug/ContinuumRevivedSyncIntegrationChecks
+run_leg .build/debug/ContinuumRevivedPaletteChecks
+run_leg .build/debug/ContinuumRevivedFileTreeChecks
+run_leg .build/debug/ContinuumRevivedPerfChecks
 run_app_check .build/debug/Array --companion-sync-health-check
 run_app_check .build/debug/Array --push-payload-dump-check
 run_app_check .build/debug/Array --palette-duplicate-root-check
@@ -1275,7 +1326,19 @@ run_app_check .build/debug/Array --sidebar-agent-status-line-check
 # dialogs answered for the agent, and screenshots hidden and off-window.
 run_app_check .build/debug/Array --browser-automation-engine-check
 run_app_check .build/debug/Array --workspace-api-browser-check
+run_app_check .build/debug/Array --browser-background-scheduling-check
+ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-focus-restoration-check
+run_app_check .build/debug/Array --browser-focus-restoration-check
+run_app_check .build/debug/Array --browser-select-check
+ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
+run_app_check .build/debug/Array --browser-native-select-preflight-check
 run_app_check .build/debug/Array --agent-browser-spawn-check
+run_app_check .build/debug/Array --browser-unrelated-input-check
+run_app_check .build/debug/Array --browser-ref-identity-check
+run_app_check .build/debug/Array --browser-action-results-check
+run_app_check .build/debug/Array --browser-writer-transfer-check
+ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-durable-takeover-check
+run_app_check .build/debug/Array --browser-durable-takeover-check
 run_app_check .build/debug/Array --browser-action-queue-check
 run_app_check .build/debug/Array --browser-lease-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check
@@ -1301,11 +1364,6 @@ run_app_check .build/debug/Array --composer-outline-check
 run_app_check .build/debug/Array --corner-style-check
 # Channel split: the bare binary must resolve the DEV store ("Array Dev").
 run_app_check .build/debug/Array --app-support-channel-check
-if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
-  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --component-lab-check — baseline comparison deferred to a supervised Retina-Main visual gate.\n'
-else
-  run_app_check .build/debug/Array --component-lab-check
-fi
 # Ticket P0.2: the UIProbe substrate every later phase-0 gate layers on — asserts a
 # component really renders at the requested size in the requested NSAppearance, and
 # that .aqua vs .darkAqua produce different pixels.
@@ -1329,11 +1387,6 @@ run_app_check .build/debug/Array --ui-pixel-check
 # Ticket P0.6: committed PNG baselines for every static Component Lab card in both
 # appearances. Catches regressions nobody wrote an assertion for; blessing is
 # explicit (CONTINUUM_UPDATE_BASELINES=1 ./scripts/run-matrix.sh) and never implicit.
-if [[ "${CONTINUUM_SKIP_UI_BASELINES:-0}" == "1" ]]; then
-  printf '\n==> SKIPPED (display-dependent, CONTINUUM_SKIP_UI_BASELINES=1): --ui-baseline-check — baseline comparison deferred to a supervised Retina-Main visual gate.\n'
-else
-  run_app_check .build/debug/Array --ui-baseline-check
-fi
 # Ticket P0.9: the advisory tour — a labelled contact sheet of the agent surfaces
 # (managed-agent tile in four states x three widths, transcript cards at three
 # widths, status chips, sidebar, settings) in both appearances, written to
@@ -1357,8 +1410,6 @@ run_app_check .build/debug/Array --ui-test-support-check
 # Also source-scans Sources/ContinuumRevived so no view can construct its own
 # PiAgentRunner and become a second owner.
 run_app_check .build/debug/Array --agent-supervisor-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-check
 run_leg .build/debug/ContinuumRevivedSyncChecks --companion-task-publication-check
 run_app_check .build/debug/Array --companion-task-host-check
 run_app_check .build/debug/Array --agent-notify-check
@@ -1523,7 +1574,6 @@ run_app_check .build/debug/Array --zone-unacquired-project-check
 run_app_check .build/debug/Array --ambient-tile-frame-space-check
 run_app_check .build/debug/Array --tile-reveal-work-check
 run_app_check .build/debug/Array --leader-snap-check
-run_app_check .build/debug/Array --palette-captures-keys-over-browser-check
 run_app_check .build/debug/Array --zindex-relaunch-hit-test-check
 run_app_check .build/debug/Array --single-zone-compat-check
 run_app_check .build/debug/Array --unified-model-boot-check
@@ -1556,10 +1606,8 @@ run_app_check .build/debug/Array --agent-tile-fit-check
 run_app_check .build/debug/Array --camera-chrome-redraw-check
 run_app_check .build/debug/Array --resize-dimensions-hud-check
 run_app_check .build/debug/Array --bring-to-front-focus-check
-run_app_check .build/debug/Array --note-click-focus-check
 # P5.5 correction: the same click-focus contract for the v2 agent composer — the
 # broker steal, an editor-glyph click, and a padding-ring click all land in the editor.
-run_app_check .build/debug/Array --agent-tile-click-focus-check
 # Dead air: the two failures behind "I send a message and nothing happens". The
 # prompt echo must precede the action sink (it used to sit behind an actor hop, a
 # draft-journal write, a store flock and a role-directory scan), a refused
@@ -1676,7 +1724,6 @@ run_app_check .build/debug/Array --window-chrome-check
 run_app_check .build/debug/Array --top-bar-icons-check
 run_app_check .build/debug/Array --workspace-selector-check
 run_app_check .build/debug/Array --browser-profile-persistence-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --browser-profile-registry-check
 # Hidden note autosave plus Preview/Edit and same-identity Save-as-Markdown conversion.
 run_app_check .build/debug/Array --note-file-tile-spawn-check
 run_app_check .build/debug/Array --run-artifacts-tile-check
@@ -1690,12 +1737,10 @@ run_app_check .build/debug/Array --board-task-workflow-check
 # ERR_MODULE_NOT_FOUND on every bench. Install exactly the lockfile, OFFLINE:
 # npm never touches the network here, and a package missing from the local npm
 # cache fails this leg by name (ENOTCACHED) rather than hiding in the test leg.
-run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 run_leg npm test --prefix Tools/TaskEditor
 run_app_check .build/debug/Array --board-interaction-check
 run_app_check .build/debug/Array --board-tile-lifecycle-check
 run_app_check .build/debug/Array --board-library-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
 run_app_check .build/debug/Array --zone-registry-refcount-check
 run_app_check .build/debug/Array --agent-message-bus-check
 run_app_check .build/debug/Array --workspace-runtime-install-check
@@ -1709,7 +1754,6 @@ run_app_check .build/debug/Array --zone-tile-hydration-check
 run_app_check .build/debug/Array --collaboration-native-check
 run_app_check .build/debug/Array --collaboration-full-access-check
 run_app_check .build/debug/Array --collaboration-cursor-motion-check
-run_leg scripts/check-cursor-contrast.sh
 run_app_check .build/debug/Array --shared-area-zone-check
 # Mode A (share one agent, .plans/105): the one-agent zone migration, a real
 # header Share against a local continuum-relay, and the tile in light and dark.
@@ -1745,7 +1789,7 @@ run_app_check .build/debug/Array --portal-kinds-check
 # classes, rendered elements and pixels, light and dark.
 run_app_check .build/debug/Array --shared-tile-parity-check
 run_app_check .build/debug/Array --portal-board-check
-run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
+run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --skip-build
 # A shared terminal streamed from its tmux pane (.plans/114-terminal-sharing):
 # the follower and the stream lane, the guest's Ghostty mirror in light and
 # dark, and two real apps through a local relay.
@@ -1754,8 +1798,7 @@ run_app_check .build/debug/Array --shared-terminal-render-check
 # Sharing a terminal whose tmux never answers must not freeze the app; a
 # stand-in tmux, never a real server.
 run_app_check .build/debug/Array --shared-terminal-tmux-unresponsive-check
-run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
-run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
+run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --skip-build
 run_leg python3 scripts/check-collaboration-pair.py
 # M1.10 (.plans/46): WorkspaceRuntime.canvasView is written in exactly one place,
 # install(into:appRegistry:), and NOTHING in production has ever called it -- so
@@ -1844,6 +1887,7 @@ run_app_check .build/debug/Array --workspace-lifecycle-check
 # forgery, revocation and all five presentation dimensions under user input.
 run_app_check .build/debug/Array --workspace-api-open-check
 run_app_check .build/debug/Array --workspace-api-grants-check
+run_app_check .build/debug/Array --workspace-api-agent-camera-check
 # CX-01 Phase 2a: agent.find / agent.inspect — ranking, ambiguity, self-inspect
 # preset, other-agent approval, byte caps, zero lifecycle side effects.
 # Agent colour: durable record update through the real workspace API.
@@ -1857,7 +1901,6 @@ run_app_check .build/debug/Array --workspace-api-agent-rename-check
 # Agent rename from the tile: double-click the title (or the menu's Rename),
 # type, Enter / Escape / empty, through NSApp.sendEvent into a production mount.
 run_app_check .build/debug/Array --agent-tile-rename-check
-run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 run_app_check .build/debug/Array --workspace-api-agents-check
 # CX-01 Phase 4: canvas.query paging/coverage/byte cap, and canvas.apply through
 # the drag's own owner route — the persisted WORLD frame, untouched and
@@ -1961,13 +2004,11 @@ run_app_check .build/debug/Array --canvas-persistence-model-check
 # phase, adaptive stride hysteresis, Fill/Fit, the malformed corpus, the managed
 # asset contract) is exhaustive and fast, and a long process-heavy binary is a
 # bad place to bisect it.
-run_leg .build/debug/ContinuumRevivedCoreChecks --canvas-background-model-check
 # .plans/70 S5: project ownership is recorded once. Both field registry shapes
 # (2026-10-05 consistent, 2026-09-27 four-of-seven disagreeing) decode through
 # RegistryStore without an ownership throw and migrate losslessly and
 # idempotently; deleting a workspace never un-owns another workspace's project
 # and falls back to the most recently mounted survivor.
-run_leg .build/debug/ContinuumRevivedCoreChecks --registry-ownership-check
 # The RENDERER, in pixels, in an offscreen fixture window: it sits below
 # worldPlane and hit-transparent, base+image are screen-fixed while the grid is
 # world-aligned (sampled before and after a pan into negative world space), a
@@ -2101,7 +2142,6 @@ run_app_check .build/debug/Array --file-markdown-perf-check
 # KNOWN-RED on purpose — its number is published every run so the gap stays
 # visible while the camera still resizes tile views.
 run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
-run_app_check .build/debug/Array --perf-budget-zoom-check
 # The fractional-pan leg gates the float-tolerance trap: AppKit keeps the
 # bounds/frame SCALE and recomputes bounds from it, so at any zoom != 1 an
 # exact "skip unchanged writes" compare reads 420 back as 420.00000000000006
@@ -2136,7 +2176,6 @@ run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 # which is our own per-tile-per-step call, not the camera mechanism. KNOWN-RED
 # against that product target until the chrome floor stops moving every step.
 run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
-run_app_check .build/debug/Array --file-tile-zoom-check
 # The Slice 2 contract (.plans/22): N input events inside one display interval
 # cause a bounded number of camera commits and preserve the final desired
 # viewport. The control condition drives 6 direct setViewport calls and must
@@ -2160,11 +2199,9 @@ run_app_check .build/debug/Array --canvas-zoom-momentum-check
 # zero work over the same zoom sequence run pure. Own leg name so a
 # transition regression can be known-red without dragging the gating pan
 # legs with it.
-run_app_check .build/debug/Array --perf-budget-gesture-transition-check
 # Zoom's O(1)-in-tiles contract: installed 16 -> 128 with visible pinned at 12,
 # work slopes must be exactly zero. KNOWN-RED on durationSlope only — the AppKit
 # traversal residual documented in MATRIX_KNOWN_RED above.
-run_app_check .build/debug/Array --perf-budget-magnify-slope-check
 # The RASTERIZATION witness. Every other camera leg counts asks (invalidations,
 # layout) and never renders — which is how canvas.zoom reported green while a
 # real pinch was visibly bad. This pumps window.displayIfNeeded per camera step
@@ -2372,6 +2409,7 @@ else
   run_app_check .build/debug/Array --terminal-cmd-w-check
 fi
 run_app_check .build/debug/Array --stray-window-audit-check
+run_app_check .build/debug/Array --update-channel-check
 if [[ "$FAST" -eq 0 ]]; then
   # `run_leg`, not `run`: a red bundle probe used to abort the whole script under
   # `set -e`, so `matrix_report` never ran. A real 216-leg run therefore printed
@@ -2379,14 +2417,16 @@ if [[ "$FAST" -eq 0 ]]; then
   # the two legs after this one never executed. That is the "matrix halts hide
   # legs" hazard, which classify-and-continue already fixed everywhere else.
   # The bundle probe is a leg like any other: it must be REPORTED, not fatal.
-  run_leg scripts/check-app-bundle.sh --configuration debug
+  run_leg scripts/check-app-bundle.sh --configuration debug --bundle "$MATRIX_RESULTS/Array.app"
 else
   printf '\n==> skipping scripts/check-app-bundle.sh --configuration debug (--fast)\n'
 fi
 run_leg scripts/check-root-docs.sh
-run git diff --check
+run_leg git diff --check
 
 run_app_check .build/debug/Array --board-comments-check
+
+matrix_finish_jobs
 
 if [[ "$FAST" -eq 1 ]]; then
   matrix_report "Fast matrix"

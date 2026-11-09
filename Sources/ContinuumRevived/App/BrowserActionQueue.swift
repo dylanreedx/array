@@ -1,5 +1,6 @@
 import ContinuumRevivedCore
 import Foundation
+import CryptoKit
 
 /// Owns action ordering and retry identity for the browser API. The caller
 /// supplies a fresh runtime lookup and non-prompting grant check for every
@@ -62,11 +63,72 @@ final class BrowserActionQueue {
         }
     }
 
+    private struct Tombstone: Codable {
+        var tile: UUID
+        var operation: String
+        var payloadDigest: String
+        var action: BrowserActionResult
+    }
+    private var retryStoreURL: URL?
+    private var retryStoreFailed = false
+    private var tombstones: [String: Tombstone] = [:]
+
+    func configureRetryStore(at url: URL) {
+        guard retryStoreURL == nil else { return }
+        retryStoreURL = url
+        if FileManager.default.fileExists(atPath: url.path) {
+            do { tombstones = try JSONDecoder().decode([String: Tombstone].self, from: Data(contentsOf: url)) }
+            catch { retryStoreFailed = true }
+        }
+    }
+    private func digest(_ payload: String) -> String { SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined() }
+    private func saveTombstones() throws {
+        guard let url = retryStoreURL else { return }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(tombstones).write(to: url, options: .atomic)
+    }
+    private func prepareForDispatch(_ entry: Entry) -> WorkspaceAPIError? {
+        guard retryStoreURL != nil, !BrowserActionReporting.isReadOnly(operation: entry.operation, payload: entry.payload) else { return nil }
+        guard !retryStoreFailed else { return WorkspaceAPIError(code: .durabilityFailed, message: "Browser retry history could not be read. Restore that history before sending more mutations.") }
+        let id = actionIdentity(agentId: entry.key.agent, key: entry.key.key)
+        guard tombstones.keys.filter({ $0.hasPrefix(entry.key.agent.rawValue.uuidString + ":") }).count < capacity else {
+            return WorkspaceAPIError(code: .busy, message: "Browser retry history contains too many uncertain actions. Observe their effects before requesting more input.")
+        }
+        tombstones[id] = Tombstone(tile: entry.tile, operation: entry.operation, payloadDigest: digest(entry.payload),
+            action: BrowserActionResult(actionId: id, retrySessionId: retrySessionId, state: .outcomeUnknown,
+                effects: .unknown, retry: .sameKeyOnly, freshSnapshotRequired: true))
+        do { try saveTombstones(); return nil }
+        catch { tombstones[id] = nil; return WorkspaceAPIError(code: .durabilityFailed, message: "Browser retry identity could not be saved, so no input was dispatched. Repair storage before retrying.") }
+    }
+
+    private struct RetiredResult {
+        var tombstone: Tombstone
+        var authorizationGeneration: UInt64
+        var authorizationContext: String
+    }
+    // The response cache is bounded; lightweight used-key identities live for
+    // the whole declared retry session so eviction never replays settled input.
+    private var retiredResults: [Key: RetiredResult] = [:]
+    private func retireSettledResult(_ key: Key) {
+        guard let entry = entries[key], case .result(let fields)? = entry.reply else { return }
+        var report = BrowserActionResult(actionId: actionIdentity(agentId: key.agent, key: key.key), retrySessionId: retrySessionId,
+            state: .completed, effects: .committed, retry: .observeBeforeNewAction, freshSnapshotRequired: true)
+        if let object = fields["action"]?.object,
+           let data = try? JSONSerialization.data(withJSONObject: WorkspaceAPIService.plain(object)),
+           let decoded = try? JSONDecoder().decode(BrowserActionResult.self, from: data) { report = decoded }
+        report.retry = .observeBeforeNewAction
+        report.freshSnapshotRequired = true
+        retiredResults[key] = RetiredResult(tombstone: Tombstone(tile: entry.tile, operation: entry.operation,
+            payloadDigest: digest(entry.payload), action: report), authorizationGeneration: entry.authorizationGeneration,
+            authorizationContext: entry.authorizationContext)
+    }
     private var entries: [Key: Entry] = [:]
     private var pending: [UUID: [Key]] = [:]
     private var active: [UUID: Key] = [:]
     private var completed: [AgentID: [Key]] = [:]
     private var nextCompletionOrdinal: UInt64 = 0
+    let retrySessionId = UUID().uuidString
+    func actionIdentity(agentId: AgentID, key: String) -> String { agentId.rawValue.uuidString + ":" + key }
     private let capacity = 64
     static let imageCacheByteLimit = 8 * 1_024 * 1_024
     var qaCachedImageBytes: Int {
@@ -77,15 +139,47 @@ final class BrowserActionQueue {
         }
     }
 
+    func isActive(tileId: UUID) -> Bool { active[tileId] != nil }
+    func isQuiescent(tileId: UUID) -> Bool { active[tileId] == nil && (pending[tileId]?.isEmpty ?? true) }
+
+    /// Only effect metadata escapes here, never a cached page result. This lets a
+    /// transport retry remain uncertain even while new mutations are paused.
+    func uncertainReply(agentId: AgentID, key: String, tileId: UUID, operation: String, payload: String) -> Reply? {
+        let identity = Key(agent: agentId, key: key)
+        let report: BrowserActionResult
+        if let entry = entries[identity] {
+            guard case .error(let error)? = entry.reply,
+                  error.code == .outcomeUnknown || error.action?.effects == .partial,
+                  let action = error.action else { return nil }
+            guard entry.tile == tileId, entry.operation == operation, entry.payload == payload else {
+                return .error(WorkspaceAPIError(code: .idempotencyConflict, message: "This retry key identifies a different browser action."))
+            }
+            report = action
+        } else if let prior = tombstones[actionIdentity(agentId: agentId, key: key)] {
+            guard prior.tile == tileId, prior.operation == operation, prior.payloadDigest == digest(payload) else {
+                return .error(WorkspaceAPIError(code: .idempotencyConflict, message: "This retry key identifies a different durable browser action."))
+            }
+            report = prior.action
+        } else { return nil }
+        return .error(WorkspaceAPIError(code: .outcomeUnknown,
+            message: "Previous input may have had effects. Take a fresh snapshot; do not replay it with a new key.", action: report))
+    }
+
     /// Whether a retry of this key would be answered from the queue's history.
-    func holds(agentId: AgentID, key: String) -> Bool { entries[Key(agent: agentId, key: key)] != nil }
+    func holds(agentId: AgentID, key: String) -> Bool {
+        let identity = Key(agent: agentId, key: key)
+        return entries[identity] != nil || retiredResults[identity] != nil
+    }
 
     func submit(tileId: UUID, agentId: AgentID, key: String, operation: String, payload: String,
                 deadline: Date, inputCount: Int, authorizationGeneration: UInt64 = 0, authorizationContext: String = "",
                 approvalTime: (@MainActor () -> TimeInterval)? = nil,
                 currentInputCount: @escaping @MainActor () -> Int?,
                 authorize: @escaping @MainActor () -> WorkspaceAPIError?,
-                action: @escaping Action, completion: @escaping Completion) {
+                action: @escaping Action, completion rawCompletion: @escaping Completion) {
+        let completion: Completion = { reply in rawCompletion(BrowserActionReporting.decorate(reply,
+            id: self.actionIdentity(agentId: agentId, key: key), session: self.retrySessionId,
+            readOnly: BrowserActionReporting.isReadOnly(operation: operation, payload: payload))) }
         let identity = Key(agent: agentId, key: key)
         if let existing = entries[identity] {
             guard existing.authorizationGeneration == authorizationGeneration, existing.authorizationContext == authorizationContext else {
@@ -116,6 +210,28 @@ final class BrowserActionQueue {
             }
             if let reply = existing.reply { completion(reply) }
             else { existing.waiters.append(Waiter(authorize: authorize, completion: completion)) }
+            return
+        }
+        if let retired = retiredResults[identity] {
+            if let error = authorize() { completion(.error(error)); return }
+            guard retired.authorizationGeneration == authorizationGeneration, retired.authorizationContext == authorizationContext else {
+                completion(.error(WorkspaceAPIError(code: .permissionDenied, message: "Browser access changed since this completed action."))); return
+            }
+            let prior = retired.tombstone
+            guard prior.tile == tileId, prior.operation == operation, prior.payloadDigest == digest(payload) else {
+                completion(.error(WorkspaceAPIError(code: .idempotencyConflict, message: "This key already identifies a different completed browser action."))); return
+            }
+            completion(.error(WorkspaceAPIError(code: .outcomeUnknown,
+                message: "This action completed, but its cached result expired. No input was replayed. Take a fresh snapshot before deciding on a new action.", action: prior.action)))
+            return
+        }
+        if let prior = tombstones[actionIdentity(agentId: agentId, key: key)] {
+            guard prior.tile == tileId, prior.operation == operation, prior.payloadDigest == digest(payload) else {
+                completion(.error(WorkspaceAPIError(code: .idempotencyConflict, message: "This key identifies a different browser action in durable retry history."))); return
+            }
+            if let error = authorize() { completion(.error(error)); return }
+            completion(.error(WorkspaceAPIError(code: .outcomeUnknown,
+                message: "This action may have taken effect before the browser service restarted. Take a fresh snapshot; do not repeat with a new key.", action: prior.action)))
             return
         }
         let remaining = deadline.timeIntervalSinceNow
@@ -153,7 +269,7 @@ final class BrowserActionQueue {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak entry] in
             guard let self, let entry, entry.reply == nil else { return }
             if entry.effectiveDeadline > Date() { self.watchDeadline(entry); return }
-            if self.active[entry.tile] == entry.key {
+            if entry.actionStarted {
                 self.finish(entry, .error(WorkspaceAPIError(code: .outcomeUnknown,
                     message: "The browser action timed out and may have taken effect. Take a fresh snapshot before deciding what to do.")))
             } else {
@@ -181,9 +297,12 @@ final class BrowserActionQueue {
                     if let failure = self.validationFailure(entry) {
                         self.finish(entry, failure)
                     } else if let action = entry.action {
-                        entry.actionStarted = true
-                        let reply = await action(entry.effectiveDeadline)
-                        if entry.reply == nil { self.finish(entry, reply) }
+                        if let error = self.prepareForDispatch(entry) { self.finish(entry, .error(error)) }
+                        else {
+                            entry.actionStarted = true
+                            let reply = await action(entry.effectiveDeadline)
+                            if entry.reply == nil { self.finish(entry, reply) }
+                        }
                     }
                 }
                 if self.active[tile] == key { self.active[tile] = nil }
@@ -221,7 +340,25 @@ final class BrowserActionQueue {
         // returns. Do not cache or deliver a page result produced after that.
         let accessChanged = entry.actionStarted && entry.authorize?() != nil
         let userTookOver = entry.actionStarted && entry.currentInputCount?() != entry.inputCount
-        let finalReply: Reply = accessChanged || userTookOver ? Self.revokedInFlight : reply
+        let uncertain: Reply
+        if accessChanged || userTookOver {
+            if case .error(let error) = reply, error.action?.effects == .partial { uncertain = reply }
+            else { uncertain = Self.revokedInFlight }
+        } else { uncertain = reply }
+        let finalReply = BrowserActionReporting.decorate(uncertain, id: actionIdentity(agentId: entry.key.agent, key: entry.key.key),
+            session: retrySessionId, started: entry.actionStarted, expired: entry.effectiveDeadline <= Date(),
+            readOnly: BrowserActionReporting.isReadOnly(operation: entry.operation, payload: entry.payload))
+        let durableId = actionIdentity(agentId: entry.key.agent, key: entry.key.key)
+        if tombstones[durableId] != nil {
+            switch finalReply {
+            case .result: tombstones[durableId] = nil
+            case .error(let error):
+                if let action = error.action, action.effects == .unknown || action.effects == .partial { tombstones[durableId]?.action = action }
+                else { tombstones[durableId] = nil }
+            case .cancelled: break
+            }
+            try? saveTombstones() // A failed cleanup leaves the pre-dispatch unknown tombstone on disk.
+        }
         entry.reply = finalReply
         nextCompletionOrdinal &+= 1
         entry.completionOrdinal = nextCompletionOrdinal
@@ -237,7 +374,8 @@ final class BrowserActionQueue {
         trimCompleted(for: entry.key.agent)
         for waiter in waiters {
             if let error = waiter.authorize() {
-                waiter.completion(entry.actionStarted ? Self.revokedInFlight : .error(error))
+                waiter.completion(BrowserActionReporting.decorate(entry.actionStarted ? finalReply : .error(error),
+                    id: actionIdentity(agentId: entry.key.agent, key: entry.key.key), session: retrySessionId, started: entry.actionStarted))
             } else {
                 waiter.completion(finalReply)
             }
@@ -266,7 +404,7 @@ final class BrowserActionQueue {
     private func mayEvict(_ key: Key) -> Bool {
         guard let entry = entries[key] else { return true }
         if active[entry.tile] == key { return false }
-        if case let .error(error)? = entry.reply, error.code == .outcomeUnknown { return false }
+        if case let .error(error)? = entry.reply, error.code == .outcomeUnknown || error.action?.effects == .partial { return false }
         return entry.reply != nil
     }
 
@@ -274,6 +412,7 @@ final class BrowserActionQueue {
         while entries.keys.lazy.filter({ $0.agent == agent }).count >= capacity {
             guard let index = completed[agent]?.firstIndex(where: mayEvict) else { return false }
             let key = completed[agent]!.remove(at: index)
+            retireSettledResult(key)
             entries[key] = nil
         }
         return true
@@ -283,6 +422,7 @@ final class BrowserActionQueue {
         while (completed[agent]?.count ?? 0) > capacity {
             guard let index = completed[agent]?.firstIndex(where: mayEvict) else { break }
             let key = completed[agent]!.remove(at: index)
+            retireSettledResult(key)
             entries[key] = nil
         }
         if completed[agent]?.isEmpty == true { completed[agent] = nil }

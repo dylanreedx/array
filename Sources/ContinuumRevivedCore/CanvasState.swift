@@ -313,6 +313,8 @@ public struct TileMetadata: Codable, Equatable, Sendable {
     public var iosPreviewAutomationOwnership: IOSPreviewAutomationOwnership?
     /// Host-stamped owner of an agent-created browser; never model-controlled.
     public var browserOwnerAgentId: AgentID?
+    /// true: user controls; false: handback awaits a fresh snapshot; nil: ready.
+    public var browserControlPaused: Bool?
     public var linearTeamKey: String?
     public var linearTeamId: String?
     public var linearQuery: String?
@@ -428,6 +430,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         case iosPreviewDeviceID
         case iosPreviewAutomationOwnership
         case browserOwnerAgentId
+        case browserControlPaused
         case linearTeamKey
         case linearTeamId
         case linearQuery
@@ -463,6 +466,7 @@ public struct TileMetadata: Codable, Equatable, Sendable {
         try container.encodeIfPresent(iosPreviewDeviceID, forKey: .iosPreviewDeviceID)
         try container.encodeIfPresent(iosPreviewAutomationOwnership, forKey: .iosPreviewAutomationOwnership)
         try container.encodeIfPresent(browserOwnerAgentId, forKey: .browserOwnerAgentId)
+        try container.encodeIfPresent(browserControlPaused, forKey: .browserControlPaused)
         try container.encodeIfPresent(linearTeamKey, forKey: .linearTeamKey)
         try container.encodeIfPresent(linearTeamId, forKey: .linearTeamId)
         try container.encodeIfPresent(linearQuery, forKey: .linearQuery)

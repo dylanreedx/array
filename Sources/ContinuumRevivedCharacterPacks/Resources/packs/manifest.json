@@ -1,0 +1,27 @@
+[
+  {
+    "id": "ducks-classic",
+    "title": "Ducks",
+    "characters": 8
+  },
+  {
+    "id": "street-sigils",
+    "title": "Street Sigils",
+    "characters": 12
+  },
+  {
+    "id": "living-chords",
+    "title": "Living Chords",
+    "characters": 12
+  },
+  {
+    "id": "ascii-morph",
+    "title": "ASCII morph",
+    "characters": 14
+  },
+  {
+    "id": "signal-ghosts",
+    "title": "Signal Ghosts",
+    "characters": 12
+  }
+]

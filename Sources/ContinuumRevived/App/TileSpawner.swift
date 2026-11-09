@@ -5754,6 +5754,7 @@ final class TileSpawner {
             )
         }
         final class MalformedPaneTmuxControl: TmuxControl, @unchecked Sendable {
+            let malformedCleanup = DispatchSemaphore(value: 0)
             let malformedTarget: String
             var sessions: Set<String> = []
             var log: [InMemoryTmuxControl.TmuxCall] = []
@@ -5775,6 +5776,7 @@ final class TileSpawner {
 
             func killWindow(target: String) async throws {
                 log.append(.killWindow(target: target))
+                malformedCleanup.signal()
             }
 
             func killSession(name: String) async throws {
@@ -6223,6 +6225,10 @@ final class TileSpawner {
         default:
             throw CheckError.failed("project spawn should fail when tmux returns malformed pane id")
         }
+        // Invalid-pane cleanup runs in a detached task; observe its completion
+        // before reading the fake's log rather than racing its dispatch.
+        try expect(malformedTmux.malformedCleanup.wait(timeout: .now() + 1) == .success,
+                   "malformed pane cleanup did not complete within one second")
         try expect(
             malformedTmux.log.contains(.killWindow(target: "not-a-pane-id")),
             "malformed pane-id capture should issue compensating kill-window for the created target, log=\(malformedTmux.log)"

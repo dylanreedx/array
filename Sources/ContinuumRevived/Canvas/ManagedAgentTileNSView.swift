@@ -1905,9 +1905,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let controller = AgentCharacterController.shared
         guard controller.isEnabled, let theme = controller.theme, let agentID = attachedAgentID,
               let record = agentSource?.records[agentID] else { return [] }
-        let root = NSMenuItem(title: "Character", action: nil, keyEquivalent: "")
+        let root = NSMenuItem(title: AgentCharacterCopy.menu, action: nil, keyEquivalent: "")
         root.identifier = NSUserInterfaceItemIdentifier("agentTile.character")
-        let menu = NSMenu(title: "Character")
+        let menu = NSMenu(title: AgentCharacterCopy.menu)
         let current = record.characterName.flatMap { AgentCharacterController.index(of: $0, in: theme) }
         let automatic = NSMenuItem(title: "Automatic", action: #selector(selectCharacter(_:)), keyEquivalent: "")
         automatic.target = self

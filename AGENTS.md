@@ -31,33 +31,31 @@ section in
 
 ### 2. Witnessed behavior, not plausible behavior
 
-Every substantive change carries a deterministic witness: a `--*-check`
-self-check flag on the app binary, a CoreChecks section, or a bundle-harness
-assertion — RED before the fix, GREEN after, runnable offline. If a claim has
-no witness, it isn't verified. The matrix (`scripts/run-matrix.sh`) is the
-release gate; the KNOWN-RED legs are listed in `MATRIX_KNOWN_RED` inside that script
-(7 as of 0.4.13, explained in the go-live doc) — do not chase them as
-regressions and do not add new ones silently.
+Every change shows behavioural proof while it is built: run a targeted leg or
+drive the real app. A leg joins the nightly suite only if it guards a whole bug
+class; legs may be deleted when they stop earning their keep. If a claim has no
+observed outcome, it isn't verified. The matrix (`scripts/run-matrix.sh`) is the
+full cross-feature pass. `MATRIX_KNOWN_RED` has 1 entry as of this cleanup:
+`--empty-workspace-creation-check` (its fixture omits registered Beta). Do not add
+new expected failures silently.
 
-**A witness only counts if the gate reports it, and only if it watches
-behaviour.** Both halves have failed here expensively. A check registered in
-`run-matrix.sh` but sitting after a red leg never ran at all — the matrix used to
-halt on the first failure, so a real run reported **4 of 135 app legs**, and a
-check that had failed since the day it was written went unnoticed while every
-image pasted into a composer was silently discarded (fixed in `865b0d3`; read the
-summary the matrix now prints at the end, not the exit code alone). And a check
-that asserted the app's *source contained a string* stayed green while a reviewer
-inverted the exact behaviour it claimed to guard. Assert outcomes, and confirm a
-real matrix run (the release gate) prints your leg.
+**A witness must drive production and assert outcomes.** A check which calls a
+checks-only entry point does not establish production behaviour. A source-string
+assertion stayed green while a reviewer inverted the behaviour it claimed to
+guard. And a registered check sitting after a red leg never ran: the old matrix
+reported **4 of 135 app legs**, hiding discarded composer images until `865b0d3`.
+Read the actual targeted result or the matrix's end report; registration alone
+proves nothing. Keep continue-on-red accounting so a failure cannot hide later
+checks.
 
 **Who runs a witness, and when to stop.**
 
-- The agent making a change writes its witness once, and while building runs
+- The agent making a change supplies behavioural proof, and while building runs
   only the targeted legs that change touches.
 - Reviewers and leads read the report and the diff. They do not re-run checks
   reported as passing; they act on a named failure or gap.
-- The full matrix runs once, before a release, by whoever runs the release
-  ([RELEASE.md](RELEASE.md)). Never mid-feature.
+- The full matrix runs nightly or once before a release by its owner
+  ([RELEASE.md](RELEASE.md)). Use targeted proof during feature work.
 - Cosmetic or text-only changes (copy, docs, comments) get no test run.
 
 ### 3. CLIs own their auth — never API keys
@@ -342,7 +340,7 @@ scripts/dev-app.sh --no-launch  # rebuild only
 cost a session to learn:
 
 1. **Debug, never `--configuration release`.** Release is whole-module
-   optimization — every edit recompiles the world, ~6 minutes, to look at a UI
+   optimization — every edit recompiles the world, 12–16 minutes, to look at a UI
    change. Debug is incremental: ~15s. Release configuration is for shipping.
 2. **`CONTINUUM_PROJECT_ROOT` pins the project**, and it is the first rung of
    `ProjectRootResolver.resolve()` — ahead of the registry's last-active
@@ -420,17 +418,20 @@ External terminal/CI runs do not carry the marker and retain the complete
 crash-witness gate. Never unset or override the marker from an Array-managed
 agent to force those witnesses; run them externally instead.
 
-- Full gate: `scripts/run-matrix.sh`, once per release (see non-negotiable #2
-  for who runs what). It runs every leg and ends with a report —
-  legs run, expected KNOWN-RED (from `MATRIX_KNOWN_RED`), any KNOWN-RED that
-  unexpectedly PASSED, and real failures. Judge a run by that summary. Builds
-  still halt on purpose; a failed build makes later results meaningless.
-  `CONTINUUM_SKIP_UI_BASELINES=1` skips the two display-dependent baseline legs
-  without touching a baseline. **Never** `CONTINUUM_UPDATE_BASELINES=1`.
-  Editing that script: two program checks pin lines in it verbatim with
-  `grep -Fxc` (one also locks its first four lines), and the committed inventory
-  records legs by literal invocation, so renaming a wrapper reads as deleted
-  checks.
+- Full gate: `scripts/run-matrix.sh`. One build phase precedes independent legs
+  (4–6 workers by default; `ARRAY_MATRIX_JOBS` overrides), followed by a serial
+  awake group. `--skip-awake` is the unattended mode; `--awake-only` runs that
+  group at the Mac. The awake group refuses a locked or sleeping display.
+  The exclusive regular-file flock at `${ARRAY_MATRIX_LOCK:-/tmp/array-matrix.lock}`
+  lasts for the whole run and is shared with the release-build guard.
+  The end report lists every leg, expected failures, unexpected passes, failures
+  and wall seconds; `results.json` in the printed results directory contains
+  `leg`, `status`, `seconds`. `ARRAY_MATRIX_RESULTS` selects that directory.
+  Builds halt on failure; checks continue on red. Film scenes are opt-in via
+  `CONTINUUM_CHECK_FILM_SCENES=1`. The two stale pixel-baseline legs were retired;
+  **never** `CONTINUUM_UPDATE_BASELINES=1` to silence drift. The committed matrix
+  inventory records additions and removals; regenerate it alongside those changes
+  with `CONTINUUM_UPDATE_MATRIX_INVENTORY=1 scripts/check-matrix-inventory.sh`.
 - Targeted, the default while building: `swift run ContinuumRevivedCoreChecks`,
   or a single app leg like
   `.build/debug/Array --onboarding-panel-check`. **Never guess a flag** — an

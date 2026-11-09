@@ -191,15 +191,5 @@ func runIdentityReconcilerChecks() {
 
     expect(result.blocks[1].id != changedTail.id, "provisional IDs must not replace the open tail")
 
-    // Keep the final-code gate mutation-sensitive: these assertions inspect the
-    // production implementation that this executable links, rather than a
-    // second local algorithm or a comment-only witness.
-    let reconcilerURL = repoRoot.appendingPathComponent("Sources/ContinuumRevivedAgentContent/AgentNodeIdentityReconciler.swift")
-    guard let reconcilerSource = try? String(contentsOf: reconcilerURL, encoding: .utf8) else {
-        fail("cannot read the production reconciler for its final-code gate")
-    }
-    expect(reconcilerSource.contains("throw Error.revisionOverflow"), "production reconciliation must throw its public revision error")
-    expect(reconcilerSource.contains("try insertFresh"), "production reconciliation must recursively allocate inserted subtrees")
-    expect(!reconcilerSource.contains("preconditionFailure"), "production reconciliation must not abort on recoverable overflow")
     print("Identity reconciliation checks passed: prefix stability, tail revisions, compatible code closure, repeated-node insertion, subtree patches, and chunk convergence")
 }

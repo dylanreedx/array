@@ -205,7 +205,7 @@ enum SharedAgentChromeChecks {
 
         // The ⋯ menu: the host's items, each disabled with a reason; Stop too.
         let menu = guestTile.qaTileContextMenu()?.items ?? []
-        let named = ["Rename", "Color", "Character", "Sounds", "Workspace Tools", "Stop agent run"]
+        let named = ["Rename", "Color", AgentCharacterCopy.menu, "Sounds", "Workspace Tools", "Stop agent run"]
         let shownItems = menu.filter { named.contains($0.title) }
         try expect(shownItems.count == named.count && shownItems.allSatisfy {
             !$0.isEnabled && (($0 as? ChoiceDetailMenuItem)?.detail?.isEmpty == false)

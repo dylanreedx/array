@@ -436,7 +436,7 @@ struct NeutralThemePickerRow: View {
 
     var body: some View {
         let binding = model.binding(for: row.field)
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+        SettingsPreviewCardGrid {
             ForEach(AppTheme.allCases, id: \.self) { theme in
                 Button { binding.set(.string(theme.rawValue)) } label: {
                     ThemePreviewCard(theme: theme, selected: binding.string == theme.rawValue)
@@ -448,14 +448,12 @@ struct NeutralThemePickerRow: View {
                 .accessibilityIdentifier("ArraySettingsTheme.\(theme.rawValue)")
             }
         }
-        .padding(.vertical, 4)
     }
 }
 
 struct ThemePreviewCard: View {
     let theme: AppTheme
     let selected: Bool
-    @State private var cornerStyle = CornerStyle.current
 
     private func surface(_ token: SurfaceToken) -> Color {
         Color(nsColor: token.color(for: theme).nsColor(for: theme.appearance))
@@ -466,8 +464,8 @@ struct ThemePreviewCard: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            surface(.tileBody)
+        SettingsPreviewCard(title: theme.title, selected: selected, appearance: theme.appearance,
+                            background: surface(.tileBody)) {
             GeometryReader { geometry in
                 VStack(alignment: .leading, spacing: 8) {
                     Rectangle().fill(surface(.tileChrome)).frame(width: geometry.size.width * 0.62, height: 11)
@@ -481,22 +479,59 @@ struct ThemePreviewCard: View {
             }
             LinearGradient(colors: [surface(.tileBody).opacity(0), surface(.tileBody)], startPoint: .top, endPoint: .bottom)
                 .frame(height: 94)
+        } footer: {
+            HStack(spacing: -3) {
+                ForEach([SurfaceToken.canvas, .panel, .tileChrome, .cardMessage, .overlay], id: \.self) { token in
+                    Circle().fill(surface(token))
+                        .overlay(Circle().stroke(foreground.opacity(0.5), lineWidth: 0.5))
+                        .frame(width: 11, height: 11)
+                }
+            }
+            .accessibilityHidden(true)
+        }
+    }
+}
+
+/// The three-column grid of selectable preview cards.
+struct SettingsPreviewCardGrid<Cards: View>: View {
+    @ViewBuilder let cards: () -> Cards
+
+    var body: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+            cards()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+/// One selectable preview card: its art over a surface, then a title with the
+/// selected mark, then a footer. The theme and agent character pickers share it.
+struct SettingsPreviewCard<Art: View, Footer: View>: View {
+    let title: String
+    let selected: Bool
+    let appearance: TokenTheme
+    let background: Color
+    /// A full, even outline, for cards on a surface close to their own.
+    var outlined = false
+    @ViewBuilder let art: () -> Art
+    @ViewBuilder let footer: () -> Footer
+    @State private var cornerStyle = CornerStyle.current
+
+    private var foreground: Color { Color(nsColor: TextToken.textPrimary.color.nsColor(for: appearance)) }
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            background
+            art()
             VStack(alignment: .leading, spacing: 9) {
                 HStack(spacing: 6) {
-                    ThemeCardTitle(theme: theme).fixedSize()
+                    SettingsPreviewCardTitle(title: title, appearance: appearance).fixedSize()
                     Spacer()
                     if selected {
                         Image(systemName: "checkmark.circle.fill").font(.system(size: 13))
                     }
                 }
-                HStack(spacing: -3) {
-                    ForEach([SurfaceToken.canvas, .panel, .tileChrome, .cardMessage, .overlay], id: \.self) { token in
-                        Circle().fill(surface(token))
-                            .overlay(Circle().stroke(foreground.opacity(0.5), lineWidth: 0.5))
-                            .frame(width: 11, height: 11)
-                    }
-                }
-                .accessibilityHidden(true)
+                footer()
             }
             .foregroundStyle(foreground)
             .padding(16)
@@ -504,19 +539,25 @@ struct ThemePreviewCard: View {
         .frame(maxWidth: .infinity)
         .frame(height: 150)
         .clipShape(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(12), style: .continuous))
+        .overlay {
+            if outlined {
+                RoundedRectangle(cornerRadius: cornerStyle.cgRadius(12), style: .continuous)
+                    .strokeBorder(foreground.opacity(selected ? 0.7 : 0.1), lineWidth: selected ? 1.5 : 1)
+            }
+        }
         .contentShape(RoundedRectangle(cornerRadius: cornerStyle.cgRadius(12), style: .continuous))
         .onCornerStyleChange($cornerStyle)
     }
 }
 
-
 /// Native label keeps its intrinsic width through AppKit appearance flips inside
 /// the mixed light/dark preview grid. The parent button owns accessibility.
-private struct ThemeCardTitle: NSViewRepresentable {
-    let theme: AppTheme
+private struct SettingsPreviewCardTitle: NSViewRepresentable {
+    let title: String
+    let appearance: TokenTheme
 
     func makeNSView(context: Context) -> NSTextField {
-        let label = NSTextField(labelWithString: theme.title)
+        let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 13, weight: .semibold)
         label.setContentHuggingPriority(.required, for: .horizontal)
         label.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -525,9 +566,9 @@ private struct ThemeCardTitle: NSViewRepresentable {
     }
 
     func updateNSView(_ label: NSTextField, context: Context) {
-        label.stringValue = theme.title
-        label.appearance = NSAppearance(named: theme.appearance == .dark ? .darkAqua : .aqua)
-        label.textColor = TextToken.textPrimary.color.nsColor(for: theme.appearance)
+        label.stringValue = title
+        label.appearance = NSAppearance(named: appearance == .dark ? .darkAqua : .aqua)
+        label.textColor = TextToken.textPrimary.color.nsColor(for: appearance)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextField, context: Context) -> CGSize? {

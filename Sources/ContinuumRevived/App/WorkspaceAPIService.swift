@@ -163,7 +163,7 @@ final class WorkspaceAPIService {
     var browserAuditPresentation: ((UUID, [BrowserAuditEntry]) -> Void)?
     func browserAudit(for tileId: UUID) -> [BrowserAuditEntry] { browserAudits[tileId] ?? [] }
     func clearBrowserAudit(for tileId: UUID) { browserAudits[tileId] = nil }
-    let browserActionQueue = BrowserActionQueue()
+    var browserActionQueue = BrowserActionQueue()
     let browserOpenAdmission = BrowserOpenAdmission()
     struct BrowserHandOver {
         let agentId: AgentID
@@ -173,6 +173,7 @@ final class WorkspaceAPIService {
     }
     var browserHandOvers: [UUID: BrowserHandOver] = [:]
     var browserUserTakenOver: Set<UUID> = []
+    var browserNeedsHandbackSnapshot: Set<UUID> = []
     enum BrowserDomainDecision { case deny, allowOnce, allowForSession, allowForProjectSession }
     /// Closes a browser approval that is still on screen. Its request answers
     /// "denied" on its own; this only removes the stale sheet.
@@ -204,6 +205,13 @@ final class WorkspaceAPIService {
         browserLeaseLedger = ledger
         ledger.onEngagementChanged = { [weak self] tile, agent, engaged in
             self?.browserControlPresentation?(tile, agent, engaged, false)
+            if !engaged {
+                // Ledger callbacks may be iterating leases. Eviction releases
+                // runtimes/leases too, so trim after that iteration unwinds.
+                DispatchQueue.main.async { [weak self] in
+                    self?.runtimeProvider()?.trimWarmScenesToCapacity()
+                }
+            }
         }
         if browserLeaseEventObserver == nil {
             browserLeaseEventObserver = supervisor.addDeliveredEventObserver { [weak self] agentId, event in
@@ -391,6 +399,7 @@ final class WorkspaceAPIService {
         case let .error(error):
             var details: [String: Any] = [:]
             if let id = error.approvalRequestId { details["approvalRequestId"] = id }
+            if let action = error.action, let encoded = Self.jsonObject(action) { details["action"] = Self.plain(encoded) }
             if let effects = error.requiredEffects, let encoded = Self.jsonObject(effects) {
                 details["requiredEffects"] = Self.plain(encoded)
             }
@@ -426,7 +435,7 @@ final class WorkspaceAPIService {
             return
         }
         if let operation = WorkspaceAPIOp(rawValue: op), [.browserNavigate, .browserSnapshot, .browserClick, .browserType,
-            .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole].contains(operation) {
+            .browserSelect, .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole].contains(operation) {
             dispatchBrowserAction(agentId: agentId, requestId: requestId, operation: operation, payload: payload,
                                   isCancelled: isCancelled, completion: completion)
             return
@@ -507,7 +516,7 @@ final class WorkspaceAPIService {
                                requestId: requestId, payload: payload, runtime: runtime,
                                canvas: canvas, isCancelled: isCancelled)
         case .browserOpen, .browserNavigate, .browserSnapshot, .browserClick, .browserType,
-             .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole:
+             .browserSelect, .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole:
             return .error(WorkspaceAPIError(code: .unsupported, message: "Browser tools are not available yet."))
         case .agentReport:
             return fileReport(agentId: agentId, ownHandle: ownHandle, payload: payload)
@@ -947,12 +956,13 @@ final class WorkspaceAPIService {
         tileId: UUID, policy: WorkspacePresentationPolicy, generationAtDispatch: UInt64,
         runtime: WorkspaceRuntime, canvas: CanvasNSView
     ) -> (ArtifactOpenResult.Presentation, WorkspacePresentationEffects) {
+        canvas.trackAgentResult(tileId)
         var effects = WorkspacePresentationEffects.allPreserved
         guard policy.requestsAnyChange else { return (.deferred, effects) }
 
         // Newer user intent wins: a stale request never restores old state over it.
         let expected = policy.expectedInteractionGeneration ?? generationAtDispatch
-        if runtime.interactionGeneration != expected {
+        if runtime.interactionGeneration != expected || runtime.isUserEngaged {
             if policy.workspace != .preserve { effects.workspace = .deferred }
             if policy.armedZone != .preserve { effects.armedZone = .deferred }
             if policy.selection != .preserve { effects.selection = .deferred }

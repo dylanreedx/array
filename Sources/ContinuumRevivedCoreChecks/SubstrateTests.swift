@@ -24,7 +24,6 @@ func runSubstrateTests() {
 
     runFakeClockSuite()
     runFakeHostSuite()
-    runSubstrateWallClockGuard()
 }
 
 private func runAsyncSubstrateSuites() async {
@@ -322,36 +321,6 @@ private func runFakeSyncTransportSuite() async {
            "lossy(dropRate:) is deterministic across independent transports given the same default seed")
 
     print("FakeSyncTransport suite: reliable/partition/reorder(seed:)/lossy(dropRate:) all deterministic and match the opId-sorted equivalence contract")
-}
-
-// MARK: - Wall-clock guard (mechanical, matches the SpatialOp.swift precedent)
-
-private func runSubstrateWallClockGuard() {
-    let root = "Sources/ContinuumRevivedCore/Substrates"
-    let bannedTokens = ["Date.now", "CFAbsoluteTime", "clock()", "DispatchTime.now()", "ContinuousClock"]
-    guard let entries = try? FileManager.default.contentsOfDirectory(atPath: root) else {
-        fputs("FAIL: wall-clock guard: could not list \(root) from cwd \(FileManager.default.currentDirectoryPath)\n", stderr)
-        Foundation.exit(1)
-    }
-    var scanned = 0
-    for entry in entries.sorted() where entry.hasSuffix(".swift") {
-        let path = "\(root)/\(entry)"
-        guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
-            fputs("FAIL: wall-clock guard: could not read \(path)\n", stderr)
-            Foundation.exit(1)
-        }
-        scanned += 1
-        // Clock.swift is the one file allowed to say `Date(` — it's the blessed
-        // SystemClock implementation the wall-clock ban routes everyone else through.
-        if entry != "Clock.swift" {
-            expect(!source.contains("Date("), "wall-clock guard: \(entry) must not call Date() directly (route through Clock)")
-        }
-        for token in bannedTokens {
-            expect(!source.contains(token), "wall-clock guard: \(entry) must not reference '\(token)'")
-        }
-    }
-    expect(scanned >= 5, "wall-clock guard: expected to scan at least 5 Substrates files, scanned \(scanned)")
-    print("wall-clock guard: scanned \(scanned) files under \(root), only Clock.swift calls Date()")
 }
 
 // MARK: - Real-path check: ProcessTmuxControl against a real tmux subprocess

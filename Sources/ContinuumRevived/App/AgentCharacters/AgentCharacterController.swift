@@ -6,8 +6,9 @@ import ContinuumRevivedCore
 /// One character's atlas as an image every sprite of that character shares.
 ///
 /// A class so a sprite can tell "the same picture" by identity: the render server
-/// uploads one `CGImage` once, however many layers point at it.
-final class AgentCharacterSpriteAtlas {
+/// uploads one `CGImage` once, however many layers point at it. Immutable, so a
+/// picture built off the main thread can be handed to a view.
+final class AgentCharacterSpriteAtlas: @unchecked Sendable {
     let atlas: AgentCharacterAtlas
     let image: CGImage
     /// Seconds per frame of each loop, at the theme's own pace, never faster than 12 fps.
@@ -155,8 +156,8 @@ final class AgentCharacterController {
         for file in files {
             switch file.result {
             case let .success(theme):
-                // One set per id; the built-in id is never shadowed.
-                guard theme.id != AgentCharacterBundled.themeID, next[theme.id] == nil else { continue }
+                // One set per id; a built-in id is never shadowed.
+                guard !AgentCharacterBundled.isBuiltIn(theme.id), next[theme.id] == nil else { continue }
                 next[theme.id] = theme
                 byFile[file.url] = theme.id
             case .failure:
@@ -222,9 +223,13 @@ final class AgentCharacterController {
         if changed { NotificationCenter.default.post(name: Self.didChangeNotification, object: self) }
     }
 
-    /// The selected set: an imported one by id, else the built-in ducks.
+    /// The selected set: a built-in one by id, an imported one by id, else the
+    /// built-in ducks.
     private func resolveTheme(id: String?) -> AgentCharacterTheme? {
-        if let id, id != AgentCharacterBundled.themeID {
+        if let id, AgentCharacterBundled.isBuiltIn(id) {
+            return AgentCharacterBundled.theme(id: id) ?? AgentCharacterBundled.theme()
+        }
+        if let id {
             // Selected the moment it was imported: the watcher may not have
             // reported the file yet, so read the folder now.
             if lastGoodUserThemes[id] == nil { rescanUserThemes() }

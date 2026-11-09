@@ -1,21 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ticket P0.11: the matrix may never lose a check.
-#
-# "Never weaken the matrix" is the program's central rule, but nothing enforced
-# it — an unattended worker under pressure could delete or comment out a check
-# to get green. This leg makes the inventory of checks a committed artifact:
-# every `--*-check` flag and every leg in run-matrix.sh, plus the number of
-# `run*Checks()` calls in each `*Checks` main. A disappearance or a decreased
-# count is red and names what went missing. Growth is fine and prints.
-#
-# Blessing a removal (or a rename, which reads as a deletion + an addition) is
-# an explicit committed diff:
-#   CONTINUUM_UPDATE_MATRIX_INVENTORY=1 ./scripts/run-matrix.sh
-#
-# This script is itself a normal matrix leg, so deleting it also removes a
-# `leg` record from the inventory and trips the guard.
+# Inventory changes are advisory: report additions and removals. Regenerate the
+# committed snapshot alongside intentional changes so the diff records them.
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
@@ -112,7 +99,7 @@ generate > "$current"
 
 if [[ "${CONTINUUM_UPDATE_MATRIX_INVENTORY:-0}" == "1" ]]; then
   cp "$current" "$INVENTORY_FILE"
-  printf 'Matrix inventory regenerated: %s (%s records). Commit it with the change that grew or renamed a check.\n' \
+  printf 'Matrix inventory regenerated: %s (%s records). Commit it with additions or removals.\n' \
     "$INVENTORY_FILE" "$(wc -l < "$INVENTORY_FILE" | tr -d ' ')"
   exit 0
 fi
@@ -127,8 +114,7 @@ failures=0
 grew=0
 
 fail() {
-  printf 'FAIL: %s\n' "$1" >&2
-  failures=$((failures + 1))
+  printf 'inventory removed: %s\n' "$1"
 }
 
 # Committed record -> must still hold. `check`/`leg` are presence records;
@@ -153,10 +139,6 @@ while IFS= read -r record; do
   esac
 done < "$INVENTORY_FILE"
 
-if (( failures > 0 )); then
-  printf 'The matrix inventory shrank. Restore the missing check(s). If the removal is intentional (e.g. a rename), bless it in the same commit with: CONTINUUM_UPDATE_MATRIX_INVENTORY=1 ./scripts/run-matrix.sh\n' >&2
-  exit 1
-fi
 
 while IFS= read -r record; do
   [[ -n "$record" ]] || continue

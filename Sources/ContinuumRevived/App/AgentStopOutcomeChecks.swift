@@ -293,6 +293,13 @@ enum AgentStopOutcomeChecks {
                    "B1: a pi turn stopped before its session was ever written said nothing — the "
                    + "user keeps a transcript on screen for a conversation the provider discarded")
 
+        try expect(exposed.filter {
+            if case let .itemStarted(_, itemId, _, _) = $0 {
+                return itemId.hasPrefix("pi-session-discarded:")
+            }
+            return false
+        }.count == 1, "B1: a stopped Pi conversation must show its loss notice exactly once")
+
         let past = try act("pi-past-watermark", harness: .pi, producesAssistantOutput: true)
         try expect(!mentionsLoss(past),
                    "B1: a pi session past its persistence watermark was warned anyway; a notice on "

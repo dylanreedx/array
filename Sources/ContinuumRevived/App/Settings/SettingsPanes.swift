@@ -282,6 +282,8 @@ private struct SettingsPaneForm: View {
                         } else {
                             Section(group.title ?? "") { InfoRow(text: "The canvas background is not available here.") }
                         }
+                    } else if group.rows.count == 1, case .custom("agentCharacters", _) = group.rows[0].field {
+                        AgentCharacterSections(model: model.agentCharacters, settings: model, field: group.rows[0].field)
                     } else {
                         Section {
                             ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
@@ -331,9 +333,6 @@ struct SettingsFieldRow: View {
                 SettingsHarnessRows(model: model)
             case .custom("agentAccounts", _):
                 SettingsAccountRows(model: model)
-            case .custom("agentCharacters", _):
-                AgentCharacterSettingsRows(model: AgentCharacterSettingsModel(defaults: model.defaults), settings: model)
-                    .settingsAnchor(SettingsRegistry.anchor(for: field) ?? field.label, model: model)
             case .shortcuts:
                 EmptyView()
             default:
@@ -357,6 +356,12 @@ struct SettingsFieldRow: View {
             SidebarActiveIndicatorSettingsRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == CornerStyle.defaultsKey:
             PickerRow(row: row, model: model, segmented: true)
+        case let .choice(key, _, _, _, _) where key == "array.updateChannel":
+            HStack {
+                SettingsRowLabel(title: row.field.label, help: row.help)
+                Spacer()
+                UpdateChannelChoice(row: row, model: model).frame(width: 160, height: 28)
+            }
         case .choice:
             PickerRow(row: row, model: model)
         case .slider:
@@ -771,8 +776,8 @@ private struct SettingsSoundRows: View {
         }
 
         Toggle(isOn: Binding(get: { model.characterSoundsEnabled }, set: { model.characterSoundsEnabled = $0 })) {
-            SettingsRowLabel(title: "Character sounds",
-                             help: "While characters show, they quack when an agent hands back to you, chirp when it needs you and honk when it fails, or use their set's own voices. A sound turned on above for the same moment plays instead.")
+            SettingsRowLabel(title: AgentCharacterCopy.sounds,
+                             help: "While \(AgentCharacterCopy.many) show, they quack when an agent hands back to you, chirp when it needs you and honk when it fails, or use their pack's own voices. A sound turned on above for the same moment plays instead.")
         }
         .toggleStyle(.switch)
         .disabled(!model.soundsEnabled)
@@ -916,4 +921,20 @@ private struct ChordCaptureRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: ChordCaptureView, context: Context) {}
+}
+
+private struct UpdateChannelChoice: NSViewRepresentable {
+    let row: SettingsRow
+    let model: SettingsModel
+    func makeNSView(context: Context) -> ChoiceButton {
+        let button = ChoiceButton(title: "Stable")
+        button.setAccessibilityLabel("Update channel")
+        return button
+    }
+    func updateNSView(_ button: ChoiceButton, context: Context) {
+        let binding = model.binding(for: row.field)
+        button.items = [ChoiceItem(id: "Stable", title: "Stable"), ChoiceItem(id: "Tip", title: "Tip")]
+        button.selectedID = binding.string
+        button.onSelection = { item in binding.set(.string(item.id)) }
+    }
 }

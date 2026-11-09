@@ -5,6 +5,8 @@ func runWorkspaceAPIExposureChecks() {
     // The bare CoreChecks run has an inherited RED before the API suites.
     // Keep the exposed operation's request/result coding reachable in the gate.
     runWorkspaceAPIContractChecks()
+    expect(WorkspaceMCPToolCatalog.tools.contains { $0.operation == .browserSelect } &&
+        WorkspaceAPIOp.approvalGatedOperations.contains(.browserSelect), "browser.select remains published and control-granted")
     let failures = WorkspaceAPIExposure.violations()
     for failure in failures { expect(false, "WorkspaceAPIExposure: \(failure)") }
     let sample: Set<String> = ["field"]

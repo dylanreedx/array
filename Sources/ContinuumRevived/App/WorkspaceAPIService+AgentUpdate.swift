@@ -16,7 +16,7 @@ extension WorkspaceAPIService {
             request = try JSONDecoder().decode(AgentUpdateRequest.self,
                 from: JSONSerialization.data(withJSONObject: payload))
         } catch {
-            return .error(WorkspaceAPIError(code: .invalidRequest, message: "agentId and at least one of identityColor (palette name or null), displayName with nameIntent (requested or proactive), or character (a character name or null) are required."))
+            return .error(WorkspaceAPIError(code: .invalidRequest, message: "agentId and at least one of identityColor (palette name or null), displayName with nameIntent (requested or proactive), or character (the name of an icon in the selected agent icon pack, or null) are required."))
         }
         // Plan 110: a character is named from the selected set, exactly as the set
         // spells it; the stored value is that spelling.
@@ -25,7 +25,7 @@ extension WorkspaceAPIService {
             guard let theme = AgentCharacterController.shared.selectedTheme,
                   let index = AgentCharacterController.index(of: wanted, in: theme) else {
                 let names = AgentCharacterController.shared.selectedTheme?.characters.map(\.name) ?? []
-                return .error(WorkspaceAPIError(code: .invalidRequest, message: "character must be one of the selected set's characters or null. Allowed: \(names.joined(separator: ", "))."))
+                return .error(WorkspaceAPIError(code: .invalidRequest, message: "character must name an icon in the selected agent icon pack, or be null. Allowed: \(names.joined(separator: ", "))."))
             }
             characterName = theme.characters[index].name
         }
@@ -138,7 +138,7 @@ extension WorkspaceAPIService {
         if request.setsCharacter, target.characterName != characterName {
             guard supervisor.setCharacterName(agentID: request.agentId, characterName) else {
                 remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentUpdate, outcome: "durabilityFailed"))
-                return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "durability_failed: the character could not be saved. Re-query before retrying."))
+                return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "durability_failed: the icon could not be saved. Re-query before retrying."))
             }
             durability = .committed
         }

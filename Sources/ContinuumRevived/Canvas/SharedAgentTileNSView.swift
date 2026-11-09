@@ -121,7 +121,7 @@ final class SharedAgentTileNSView: TileNSView {
             unavailable("Sounds", "This agent's sounds play on \(host)'s Mac."),
             unavailable("Rename", "Only \(host) can rename it."),
             unavailable("Color", "Only \(host) can change its colour."),
-            unavailable("Character", "Only \(host) can choose its character."),
+            unavailable(AgentCharacterCopy.menu, "Only \(host) can choose its \(AgentCharacterCopy.one)."),
             unavailable("Workspace Tools", "\(host) decides what tools it has."),
             unavailable("Show Background Processes", "Its processes run on \(host)'s Mac."),
         ]

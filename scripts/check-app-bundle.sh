@@ -83,6 +83,7 @@ mkdir -p "$OUTPUT_DIR"
 OUTPUT_DIR=$(cd "$OUTPUT_DIR" && pwd)
 
 if [[ -z "$BUNDLE_PATH" ]]; then
+  [[ "$CONFIGURATION" != release ]] || { echo "Release verification requires --bundle <built bundle>" >&2; exit 2; }
   BUNDLE_PATH="$OUTPUT_DIR/Array.app"
   "$ROOT_DIR/scripts/make-app-bundle.sh" --configuration "$CONFIGURATION" --channel "$CHANNEL" --output "$BUNDLE_PATH"
 fi
@@ -202,6 +203,15 @@ SPAWN_AGENT_EXTENSION_BUNDLED="$CORE_RESOURCE_BUNDLE_PATH/PiExtensions/continuum
 [[ -f "$SPAWN_AGENT_EXTENSION_BUNDLED" ]] || { echo "FAIL: missing bundled spawn_agent extension at $SPAWN_AGENT_EXTENSION_BUNDLED" >&2; exit 1; }
 if ! cmp -s "$SPAWN_AGENT_EXTENSION_SOURCE" "$SPAWN_AGENT_EXTENSION_BUNDLED"; then
   echo "FAIL: bundled spawn_agent extension differs from the committed source" >&2
+  exit 1
+fi
+
+# The built-in character packs ship in their own bundle, so the iOS app can leave
+# them out. Each pack's theme and card must reach the app, byte-identical.
+CHARACTER_PACKS_SOURCE="$ROOT_DIR/Sources/ContinuumRevivedCharacterPacks/Resources/packs"
+CHARACTER_PACKS_BUNDLED="$RESOURCES/continuum-revived_ContinuumRevivedCharacterPacks.bundle/packs"
+if ! diff -rq "$CHARACTER_PACKS_SOURCE" "$CHARACTER_PACKS_BUNDLED" >/dev/null; then
+  echo "FAIL: bundled character packs differ from the committed source" >&2
   exit 1
 fi
 

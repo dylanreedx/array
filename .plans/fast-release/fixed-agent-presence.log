@@ -1,0 +1,105 @@
+AgentSupervisor.requestGeneratedName: agent D863869A-BF25-49FF-8446-1CB566600460 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D863869A-BF25-49FF-8446-1CB566600460 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D863869A-BF25-49FF-8446-1CB566600460 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent FC269BBB-0C9A-4037-8170-584B3C2E4CBC harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent FC269BBB-0C9A-4037-8170-584B3C2E4CBC harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent FC269BBB-0C9A-4037-8170-584B3C2E4CBC harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 48C7F7EF-A250-42AC-9A15-25F1BBAE6D8A harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 48C7F7EF-A250-42AC-9A15-25F1BBAE6D8A harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 48C7F7EF-A250-42AC-9A15-25F1BBAE6D8A harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.accept: Claude Code is signed out — run `claude` in a terminal and use /login, then send again.
+AgentSupervisor.accept: Claude Code is signed out — run `claude` in a terminal and use /login, then send again.
+AgentSupervisor.requestGeneratedName: agent 7DFD0D96-6762-470A-846E-E4CA7E5CDA7D harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 7DFD0D96-6762-470A-846E-E4CA7E5CDA7D harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.accept: Codex is signed out — run `codex login` in a terminal, then send again.
+AgentSupervisor.accept: Codex is signed out — run `codex login` in a terminal, then send again.
+AgentSupervisor.requestGeneratedName: agent 39635552-7178-43B7-A9BB-C603FED13084 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 39635552-7178-43B7-A9BB-C603FED13084 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.accept: Pi is signed out — run `pi` in a terminal and use /login <provider>, then send again.
+AgentSupervisor.accept: Pi is signed out — run `pi` in a terminal and use /login <provider>, then send again.
+AgentSupervisor.requestGeneratedName: agent 24473BED-2F3B-497D-BA8A-2E0F9E5AFC9A harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 24473BED-2F3B-497D-BA8A-2E0F9E5AFC9A harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 540A6D1B-D553-4CF1-811A-B1CFD2FD8329 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 540A6D1B-D553-4CF1-811A-B1CFD2FD8329 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor: runner failed for agent 540A6D1B-D553-4CF1-811A-B1CFD2FD8329: claudeFailed(exitCode: 3, stderr: fatal: lost connection to the model provider (ECONNRESET)
+)
+AgentSupervisor.requestGeneratedName: agent 540A6D1B-D553-4CF1-811A-B1CFD2FD8329 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent BD998165-4B6C-441E-81CB-B3E5223BCE67 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent BD998165-4B6C-441E-81CB-B3E5223BCE67 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor: runner failed for agent BD998165-4B6C-441E-81CB-B3E5223BCE67: appServerFailed(unexpected status 401 Unauthorized: your access token has expired)
+AgentSupervisor: runner failed for agent BD998165-4B6C-441E-81CB-B3E5223BCE67: exitedMidTurn(stderr: fatal: lost connection to the model provider (ECONNRESET)
+)
+AgentSupervisor.requestGeneratedName: agent BD998165-4B6C-441E-81CB-B3E5223BCE67 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor: runner failed for agent BD998165-4B6C-441E-81CB-B3E5223BCE67: exitedMidTurn(stderr: )
+AgentSupervisor.requestGeneratedName: agent 4561C278-13DF-43F4-AF64-C6CBF7CC7033 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 4561C278-13DF-43F4-AF64-C6CBF7CC7033 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor: runner failed for agent 4561C278-13DF-43F4-AF64-C6CBF7CC7033: exitedMidTurn(turn, stderr: fatal: lost connection to the model provider (ECONNRESET)
+)
+AgentSupervisor.requestGeneratedName: agent 4561C278-13DF-43F4-AF64-C6CBF7CC7033 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor: runner failed for agent 4561C278-13DF-43F4-AF64-C6CBF7CC7033: exitedMidTurn(turn, stderr: )
+AgentSupervisor.requestGeneratedName: agent 17803658-1F30-46EA-8845-CB6605326D6B harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 17803658-1F30-46EA-8845-CB6605326D6B harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 17803658-1F30-46EA-8845-CB6605326D6B harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent DA85F27B-06C0-40EC-8E7A-527BD4E8F8E5 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent DA85F27B-06C0-40EC-8E7A-527BD4E8F8E5 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent DA85F27B-06C0-40EC-8E7A-527BD4E8F8E5 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 642019FA-D730-4FC2-9186-D5F172BC8138 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 642019FA-D730-4FC2-9186-D5F172BC8138 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 642019FA-D730-4FC2-9186-D5F172BC8138 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 3C7E5389-590F-4FCD-951E-C5E7DA949607 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 3C7E5389-590F-4FCD-951E-C5E7DA949607 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 3C7E5389-590F-4FCD-951E-C5E7DA949607 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 8870C5B1-E02E-48B1-8140-C89B44F40510 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 8870C5B1-E02E-48B1-8140-C89B44F40510 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 8870C5B1-E02E-48B1-8140-C89B44F40510 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 8ED8DAB7-6A74-4401-BBF1-F6398EAC9605 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 8ED8DAB7-6A74-4401-BBF1-F6398EAC9605 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 8ED8DAB7-6A74-4401-BBF1-F6398EAC9605 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 4A514AD8-ED70-43B5-A24F-B71617616022 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 4A514AD8-ED70-43B5-A24F-B71617616022 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 4A514AD8-ED70-43B5-A24F-B71617616022 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 14EEC003-5354-4476-841E-DB8EDE66F1C5 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 14EEC003-5354-4476-841E-DB8EDE66F1C5 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 14EEC003-5354-4476-841E-DB8EDE66F1C5 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D99D5281-EBA7-4E6C-AC31-BF0EB02BCA2E harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D99D5281-EBA7-4E6C-AC31-BF0EB02BCA2E harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D99D5281-EBA7-4E6C-AC31-BF0EB02BCA2E harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent BDCA8C9D-A1A0-4F9D-908E-7348B2961F46 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent BDCA8C9D-A1A0-4F9D-908E-7348B2961F46 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent BDCA8C9D-A1A0-4F9D-908E-7348B2961F46 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 8CC0E255-15C2-4C23-813A-51E5E946A09A harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 8CC0E255-15C2-4C23-813A-51E5E946A09A harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 4D663F78-61A8-4883-A900-7C88587BD4AC harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 3C6EDD76-B4B1-4388-96F7-2C463B1F8110 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 3C6EDD76-B4B1-4388-96F7-2C463B1F8110 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent FA08CF42-4D21-4A8C-AC3D-0BFCB6D5F8BB harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent FA08CF42-4D21-4A8C-AC3D-0BFCB6D5F8BB harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D523326E-47FC-49A4-A0FC-AA3D51AD99C4 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D523326E-47FC-49A4-A0FC-AA3D51AD99C4 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent BBC97188-46FD-43E5-A7C3-23BC12C43194 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent BBC97188-46FD-43E5-A7C3-23BC12C43194 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent B85069C7-64DD-44E6-88B3-04D8737C3351 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent B85069C7-64DD-44E6-88B3-04D8737C3351 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent CF4F5AA4-BF71-4DC9-993E-B904417D0818 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent CF4F5AA4-BF71-4DC9-993E-B904417D0818 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 6A486B3C-E488-4169-9684-F8C748EE6D2D harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 6A486B3C-E488-4169-9684-F8C748EE6D2D harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent FAFC8645-191D-47E2-89A6-D1BB2A4AC085 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent FAFC8645-191D-47E2-89A6-D1BB2A4AC085 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 67CA5FF3-B0F1-43BA-8806-455F99963A90 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 67CA5FF3-B0F1-43BA-8806-455F99963A90 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 4797766F-17BC-469B-A7C9-B7E28FD08007 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 4797766F-17BC-469B-A7C9-B7E28FD08007 harness=Codex titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent C88F82CC-7235-43B8-8103-CDD7771080C7 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+Context window unknown for anthropic/fixture-claude. Prompt tokens remain visible.
+AgentSupervisor.requestGeneratedName: agent C88F82CC-7235-43B8-8103-CDD7771080C7 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent C88F82CC-7235-43B8-8103-CDD7771080C7 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 42280BDD-A3C9-41BC-B42A-E6AE10BD81A3 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 42280BDD-A3C9-41BC-B42A-E6AE10BD81A3 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 42280BDD-A3C9-41BC-B42A-E6AE10BD81A3 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+PASS schedules: cron-keeps-session; native background schedule keeps task completion quiet
+PASS schedules: cron-deleted-reaps
+PASS schedules: durable API retry, self scope, stopped-session queue delivery and deletion
+PASS schedules: turn completion cannot drain an unacknowledged wakeup; concurrent delete cancels it
+PASS schedules: persisted outbox/queue restart delivers exactly one pending wakeup
+AgentPresenceChecks passed: the spawn window read Starting on the supervisor, header, compact row and tail through every harness's real ready-before-start prefix (claude#1 50/0, claude#2 45/0, codex#1 45/42, codex#2 43/42, pi#1 45/42, pi#2 44/0 samples/after-ready); a signed-out claude, codex and pi each refused twice with two 'Not sent' notices naming their own login and withdrew the bubble; a prompt sent while each CLI was starting was held, read 'Waiting for … to finish starting', and ran once readiness landed; an expired login on claude, codex and pi each showed one error row with the provider's own 401 and read Failed; a CLI that died mid-turn showed its stderr in one error row, and one that vanished without a result said the process left — neither ever read 'You stopped'; claude, codex and pi each read 'Retrying (2/5)' through a provider retry and 'No output for 1m · still running' after a quiet minute with no tool open; a claude or pi session process that left between turns said so with its stderr, and the next message started a fresh one; two rendered rows with one reused node ID kept independent clocks; settling one left the other row and its elapsed time live; on claude, codex and pi a failed tool mid-turn never turned the status line Failed, a minute into an open tool the tail kept its verb and clock, and the running row carried its own live clock; on claude, codex and pi Return brought a scrolled-up reader to their own message, a steer was in the transcript the moment it was accepted and once after the provider took it, and /status answered in the live tile; an unsolicited turn after a Stop that ended without a result settled as process-lost instead of Working forever; persistent Claude children survive a parent result, settle on their own result, and interrupt only on an owning session exit/reap or a result without background work; a background child stays working past its launch acknowledgement and the parent's result and settles on its own notification, and a shell job never holds a child open but keeps its idle session alive; a Codex descendant still open when its session ends settles interrupted; a finished one keeps its outcome; Claude and Codex children that died mid-turn come back interrupted; finished ones keep their outcome; CronCreate keeps its production session alive; CronDelete permits idle reaping; Array-owned schedules persist and restart stopped sessions through the existing queue; last activity moves on frames and streaming, once a second, and not on meter readings

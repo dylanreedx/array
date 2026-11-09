@@ -13,7 +13,7 @@ public enum SettingsSchema {
 
     public static func sections() -> [SettingsSection] {
         [
-            general(), appearance(), canvas(),
+            general(), appearance(), agentCharacters(), canvas(),
             agents(), editor(), terminal(), browser(),
             notificationsAndSounds(), keyboard(), iPhone(), advanced(),
         ]
@@ -43,6 +43,8 @@ public enum SettingsSchema {
                             keywords: ["sidebar"]),
             ]),
             SettingsGroup(id: "general.updates", title: "Updates", rows: [
+                SettingsRow(.choice(key: "array.updateChannel", label: "Update channel", options: ["Stable", "Tip"], default: "Stable"),
+                            help: "Tip includes prerelease updates. Applies to the released app only.", keywords: ["sparkle", "beta"]),
                 SettingsRow(.action(id: "checkForUpdates", label: "Software update", buttonTitle: "Check for Updates…"),
                             keywords: ["update", "upgrade", "version", "sparkle"]),
             ]),
@@ -89,32 +91,40 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: ResizeHUDConfig.enabledKey, label: "Show size while resizing", default: ResizeHUDConfig.defaultEnabled),
                             keywords: ["resize", "dimensions", "hud"]),
             ]),
-            // Plan 110: small characters beside each agent's provider mark.
-            SettingsGroup(id: "appearance.agentCharacters", title: "Agent characters", rows: [
-                SettingsRow(.toggle(key: AgentCharacterConfig.enabledKey, label: "Show agent characters",
-                                    default: AgentCharacterConfig.defaultEnabled),
-                            help: "A small character beside each agent's provider mark acts out what the agent is doing.",
-                            keywords: ["characters", "sprites", "ducks", "animation", "mascot"]),
-                SettingsRow(.choice(key: AgentCharacterConfig.motionKey, label: "Motion",
-                                    options: AgentCharacterConfig.Motion.allCases.map(\.rawValue),
-                                    default: AgentCharacterConfig.defaultMotion.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Motion.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Resting agents always hold still. Reduce Motion in System Settings stills every character.",
-                            keywords: ["characters", "animation", "reduce motion"]),
-                SettingsRow(.choice(key: AgentCharacterConfig.sizeKey, label: "Character size",
-                                    options: AgentCharacterConfig.Size.allCases.map(\.rawValue),
-                                    default: AgentCharacterConfig.defaultSize.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Size.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Larger characters make the sidebar row and the agent tile's title bar taller to fit them.",
-                            keywords: ["characters", "size", "scale", "bigger", "larger"]),
-                SettingsRow(.custom(id: "agentCharacters", label: "Character set"),
-                            keywords: ["characters", "theme", "import", "ducks"]),
-            ]),
             SettingsGroup(id: "appearance.commandMenu", title: "Command menu", rows: [
                 SettingsRow(.choice(key: CommandCenterAppearanceConfig.glassinessKey, label: "Background", options: CommandCenterAppearanceConfig.options, default: CommandCenterAppearanceConfig.defaultGlassiness.rawValue),
                             keywords: ["command center", "palette", "glass", "blur", "frosted", "transparency"]),
                 SettingsRow(.slider(key: CommandCenterAppearanceConfig.customOpacityKey, label: "Opacity", range: CommandCenterAppearanceConfig.customOpacityRange, default: CommandCenterAppearanceConfig.defaultCustomOpacity, visibleWhen: SettingsVisibility(key: CommandCenterAppearanceConfig.glassinessKey, equals: CommandCenterGlassiness.custom.rawValue), format: .percent),
                             keywords: ["command center", "palette", "transparency"]),
+            ]),
+        ])
+    }
+
+    // Plan 110: small characters beside each agent's provider mark.
+    private static func agentCharacters() -> SettingsSection {
+        SettingsSection(id: "agentCharacters", title: AgentCharacterCopy.feature, iconSystemName: "face.smiling",
+                        keywords: ["icons", "icon packs", "characters", "sprites", "ducks", "mascot", "symbols"], groups: [
+            SettingsGroup(id: "agentCharacters.display", title: nil, rows: [
+                SettingsRow(.toggle(key: AgentCharacterConfig.enabledKey, label: AgentCharacterCopy.show,
+                                    default: AgentCharacterConfig.defaultEnabled),
+                            help: "A small \(AgentCharacterCopy.one) beside each agent's provider mark acts out what the agent is doing.",
+                            keywords: ["icons", "characters", "sprites", "ducks", "animation", "mascot"]),
+                SettingsRow(.choice(key: AgentCharacterConfig.motionKey, label: "Motion",
+                                    options: AgentCharacterConfig.Motion.allCases.map(\.rawValue),
+                                    default: AgentCharacterConfig.defaultMotion.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Motion.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Resting agents always hold still. Reduce Motion in System Settings stills every \(AgentCharacterCopy.one).",
+                            keywords: ["icons", "characters", "animation", "reduce motion"]),
+                SettingsRow(.choice(key: AgentCharacterConfig.sizeKey, label: AgentCharacterCopy.size,
+                                    options: AgentCharacterConfig.Size.allCases.map(\.rawValue),
+                                    default: AgentCharacterConfig.defaultSize.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Size.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Larger \(AgentCharacterCopy.many) make the sidebar row and the agent tile's title bar taller to fit them.",
+                            keywords: ["icons", "characters", "size", "scale", "bigger", "larger"]),
+            ]),
+            SettingsGroup(id: "agentCharacters.sets", title: AgentCharacterCopy.set, rows: [
+                SettingsRow(.custom(id: "agentCharacters", label: AgentCharacterCopy.set),
+                            keywords: ["icons", "icon packs", "characters", "character sets", "theme", "import", "ducks", "symbols"]),
             ]),
         ])
     }
@@ -474,8 +484,8 @@ public enum SettingsSchema {
             ] + AgentSignalKind.allCases.sorted(by: { $0.priority > $1.priority }).map { kind in
                 CustomEntry(anchor: "sounds.kind.\(kind.rawValue)", label: "\(kind.displayName) sound", keywords: sound)
             } + [
-                CustomEntry(anchor: "sounds.characters", label: "Character sounds",
-                            keywords: sound + ["characters", "ducks", "quack", "voices", "duckherd"]),
+                CustomEntry(anchor: "sounds.characters", label: AgentCharacterCopy.sounds,
+                            keywords: sound + ["icons", "characters", "ducks", "quack", "voices", "duckherd"]),
                 CustomEntry(anchor: "sounds.library", label: "Custom sounds", keywords: sound + ["import", "library"]),
             ]
         case .custom("harnessStatus", _):

@@ -32,7 +32,7 @@ public extension WorkspaceAPIOp {
         .canvasApply, .agentDelegate, .agentMessage, .boardManage,
         .deviceList, .deviceOpen, .deviceObserve, .deviceAct, .deviceClose, .deviceBuildRun,
         .browserOpen, .browserNavigate,
-        .browserClick, .browserType, .browserPressKey, .browserScroll, .browserWaitFor, .browserEvaluate,
+        .browserClick, .browserType, .browserSelect, .browserPressKey, .browserScroll, .browserWaitFor, .browserEvaluate,
     ]
 }
 

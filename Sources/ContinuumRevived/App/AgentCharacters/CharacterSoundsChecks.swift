@@ -123,7 +123,7 @@ enum CharacterSoundsChecks {
         ]
         try expect(settingsModel.droppedSounds == expectedDrops,
                    "each left-out sound says why: \(settingsModel.droppedSounds)")
-        try expect(settingsModel.message == "Imported Voiced set: \(names.count) characters, 5 sounds.",
+        try expect(settingsModel.message == "Imported Voiced set: \(names.count) icons, 5 sounds.",
                    "the import says how many sounds came: \(settingsModel.message ?? "nil")")
         for file in ["voice/not-audio.wav", "voice/huge.wav", "voice/long.wav", "escape.wav"] {
             try expect(!fm.fileExists(atPath: store.appendingPathComponent(file).path), "\(file) is not copied")

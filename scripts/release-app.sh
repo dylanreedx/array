@@ -11,6 +11,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CONFIGURATION=release
+BUILT_BUNDLE=""
 OUTPUT_DIR=""
 IDENTITY="${ARRAY_CODESIGN_IDENTITY:-}"
 NOTARY_PROFILE="${ARRAY_NOTARY_PROFILE:-}"
@@ -24,6 +25,7 @@ usage() {
 Usage: scripts/release-app.sh [options]
 
 Options:
+  --bundle <path>                Required prebuilt prod bundle; never compiles
   --configuration debug|release   SwiftPM configuration (default: release)
   --output-dir <dir>              Artifact directory (default: qa-runs/<stamp>/release)
   --identity <identity>           Developer ID Application identity
@@ -42,7 +44,7 @@ Options:
   -h, --help                      Show this help
 
 Typical release:
-  scripts/release-app.sh \
+  scripts/release-app.sh --bundle releases/candidate/Array.app \
     --identity "Developer ID Application: Dylan Reed (TEAMID)" \
     --notary-profile array-notary \
     --set-version 0.2.0 --set-build 2
@@ -51,6 +53,7 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --bundle) [[ $# -ge 2 ]] || { echo "missing value for --bundle" >&2; exit 2; }; BUILT_BUNDLE="$2"; shift 2 ;;
     --configuration) [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }; CONFIGURATION="$2"; shift 2 ;;
     --output-dir)    [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }; OUTPUT_DIR="$2"; shift 2 ;;
     --identity)      [[ $# -ge 2 ]] || { echo "missing value for $1" >&2; exit 2; }; IDENTITY="$2"; shift 2 ;;
@@ -126,8 +129,10 @@ if [[ -n "$PASSKEYS_PROFILE" ]]; then
   log "passkeys: profile grants $PASSKEYS_ENTITLEMENT for $APP_IDENTIFIER"
 fi
 
-log "==> build + assemble bundle ($CONFIGURATION, prod channel)"
-"$ROOT_DIR/scripts/make-app-bundle.sh" --configuration "$CONFIGURATION" --channel prod --output "$APP" >>"$LOG" 2>&1
+[[ -d "$BUILT_BUNDLE" ]] || { echo "Supply --bundle <preview release bundle>; publishing never builds" >&2; exit 2; }
+[[ "$BUILT_BUNDLE" != "$APP" ]] || { echo "Input bundle must differ from output" >&2; exit 2; }
+ditto "$BUILT_BUNDLE" "$APP"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" == dev.arrayapp.macos ]] || exit 2
 
 PLIST="$APP/Contents/Info.plist"
 if [[ -n "$SET_VERSION" ]]; then

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ORIGINAL_ARGS=("$@")
 CONFIGURATION=release
 OUTPUT=""
 CHANNEL=dev
@@ -21,6 +22,8 @@ inert) — only the release pipeline passes --channel prod. This bundle is
 unsigned/unprovisioned CloudKit-wise; use scripts/provisioned-cloudkit-app.sh
 for real iCloud/CloudKit proof.
 
+--skip-build assembles already-built binaries without invoking Swift.
+
 --film builds the FILM bundle for scripts/film-capture.sh: the film recorder
 compiled in (-DARRAY_FILM), in its own scratch path (.build-film) so ordinary
 builds never rebuild for the flag, stamped with its own identity
@@ -34,8 +37,10 @@ the same TCC reason. Never the prod or the shared dev id.
 USAGE
 }
 
+SKIP_BUILD=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --skip-build) SKIP_BUILD=1; shift ;;
     --configuration)
       [[ $# -ge 2 ]] || { echo "missing value for --configuration" >&2; exit 2; }
       CONFIGURATION="$2"
@@ -109,8 +114,25 @@ if [[ "$FILM" == 1 ]]; then
 fi
 
 cd "$ROOT_DIR"
+if [[ "$SKIP_BUILD" == 0 && "$CONFIGURATION" == release && "${ARRAY_RELEASE_LOCK_OWNER:-}" != "$$" ]]; then
+  exec python3 - "$0" "${ORIGINAL_ARGS[@]}" <<'RELEASE_LOCK_PY'
+import fcntl, os, stat, sys
+path = os.environ.get("ARRAY_MATRIX_LOCK", "/tmp/array-matrix.lock")
+try:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise OSError("lock path must be a regular file")
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (OSError, BlockingIOError) as error:
+    sys.exit(f"Refusing release build: cannot lock {path}: {error}")
+os.set_inheritable(fd, True)
+os.execvpe("bash", ["bash", sys.argv[1], *sys.argv[2:]], dict(os.environ, ARRAY_RELEASE_LOCK_OWNER=str(os.getpid())))
+RELEASE_LOCK_PY
+fi
+if [[ "$SKIP_BUILD" == 0 ]]; then
 swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product Array
 swift build -c "$CONFIGURATION" ${BUILD_FLAGS[@]+"${BUILD_FLAGS[@]}"} --product array-workspace-mcp
+fi
 
 BUILD_DIR="$SCRATCH/$CONFIGURATION"
 EXECUTABLE="$BUILD_DIR/Array"
@@ -145,6 +167,8 @@ GHOSTTY_TERMINFO_SOURCE="$GHOSTTY_SHARE_SOURCE/terminfo"
 # exactly the shipped-but-not-bundled failure this ticket exists to end.
 CORE_RESOURCE_BUNDLE="continuum-revived_ContinuumRevivedCore.bundle"
 CORE_RESOURCE_BUNDLE_SOURCE="$BUILD_DIR/$CORE_RESOURCE_BUNDLE"
+CHARACTER_PACKS_BUNDLE="continuum-revived_ContinuumRevivedCharacterPacks.bundle"
+CHARACTER_PACKS_BUNDLE_SOURCE="$BUILD_DIR/$CHARACTER_PACKS_BUNDLE"
 APP_RESOURCE_BUNDLE="continuum-revived_ContinuumRevived.bundle"
 APP_RESOURCE_BUNDLE_SOURCE="$BUILD_DIR/$APP_RESOURCE_BUNDLE"
 
@@ -156,6 +180,7 @@ APP_RESOURCE_BUNDLE_SOURCE="$BUILD_DIR/$APP_RESOURCE_BUNDLE"
 [[ -f "$AGENT_SOUND_SOURCE/manifest.json" ]] || { echo "agent sound manifest not found" >&2; exit 1; }
 [[ -d "$SPARKLE_FRAMEWORK" ]] || { echo "Sparkle.framework not found: $SPARKLE_FRAMEWORK (run swift build first)" >&2; exit 1; }
 [[ -d "$CORE_RESOURCE_BUNDLE_SOURCE" ]] || { echo "Core resource bundle not found: $CORE_RESOURCE_BUNDLE_SOURCE (run swift build first)" >&2; exit 1; }
+[[ -d "$CHARACTER_PACKS_BUNDLE_SOURCE" ]] || { echo "Character packs bundle not found: $CHARACTER_PACKS_BUNDLE_SOURCE (run swift build first)" >&2; exit 1; }
 [[ -d "$APP_RESOURCE_BUNDLE_SOURCE" ]] || { echo "App resource bundle not found: $APP_RESOURCE_BUNDLE_SOURCE (run swift build first)" >&2; exit 1; }
 [[ -s "$GHOSTTY_TERMINFO_SOURCE/78/xterm-ghostty" ]] || { echo "Ghostty terminfo not found: $GHOSTTY_TERMINFO_SOURCE/78/xterm-ghostty" >&2; exit 1; }
 [[ -s "$GHOSTTY_RESOURCE_SOURCE/shell-integration/zsh/ghostty-integration" ]] || { echo "Ghostty shell integration not found: $GHOSTTY_RESOURCE_SOURCE/shell-integration" >&2; exit 1; }
@@ -169,6 +194,7 @@ chmod 0755 "$OUTPUT/Contents/MacOS/array-workspace-mcp"
 cp "$PLIST_SOURCE" "$OUTPUT/Contents/Info.plist"
 cp "$ICON_SOURCE" "$OUTPUT/Contents/Resources/AppIcon.icns"
 ditto "$CORE_RESOURCE_BUNDLE_SOURCE" "$OUTPUT/Contents/Resources/$CORE_RESOURCE_BUNDLE"
+ditto "$CHARACTER_PACKS_BUNDLE_SOURCE" "$OUTPUT/Contents/Resources/$CHARACTER_PACKS_BUNDLE"
 ditto "$APP_RESOURCE_BUNDLE_SOURCE" "$OUTPUT/Contents/Resources/$APP_RESOURCE_BUNDLE"
 mkdir -p "$OUTPUT/Contents/Resources/BrandMarks"
 for mark in anthropic.svg gemini.svg openai-light.svg pi.svg xai-light.svg; do

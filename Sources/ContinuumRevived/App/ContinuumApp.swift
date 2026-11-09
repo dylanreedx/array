@@ -1187,6 +1187,10 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--update-channel-check") {
+            UpdateChannelDelegate.check()
+            return
+        }
         if CommandLine.arguments.contains("--menu-contract-check") {
             do {
                 _ = NSApplication.shared
@@ -1392,6 +1396,7 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--transcript-rhythm-check") {
             do {
                 _ = NSApplication.shared
@@ -1402,6 +1407,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
         if CommandLine.arguments.contains("--file-card-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -2248,6 +2254,17 @@ enum ContinuumApp {
         }
         // CX-01: grants, trusted approval, forgery, revocation, and the five
         // presentation dimensions including concurrent user interaction.
+        if CommandLine.arguments.contains("--workspace-api-agent-camera-check") {
+            do {
+                _ = NSApplication.shared
+                try WorkspaceAPIChecks.runAgentCameraCheck()
+                print("WorkspaceAPIAgentCameraChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-api-grants-check") {
             do {
                 _ = NSApplication.shared
@@ -2550,6 +2567,7 @@ enum ContinuumApp {
             }
         }
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--file-open-active-context-check") {
             do {
                 _ = NSApplication.shared
@@ -2561,6 +2579,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
         if CommandLine.arguments.contains("--project-file-operation-check") {
             do {
@@ -2628,6 +2647,7 @@ enum ContinuumApp {
             }
         }
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--file-markdown-perf-check") {
             do {
                 _ = NSApplication.shared
@@ -2639,7 +2659,9 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--agent-local-file-link-check") {
             do {
                 _ = NSApplication.shared
@@ -2651,6 +2673,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
         if CommandLine.arguments.contains("--file-image-check") {
             do { try FileImageChecks.run(); print("PASS: file-image-check") }
@@ -2688,6 +2711,7 @@ enum ContinuumApp {
             catch { fputs("FAIL: editor-web-bridge-check: \(error)\n", stderr); exit(1) }
             return
         }
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--file-markdown-preview-check") {
             do {
                 _ = NSApplication.shared
@@ -2699,6 +2723,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
         if CommandLine.arguments.contains("--topology-migration-check") {
             do {
@@ -2771,7 +2796,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
-        // Plan 110, slice 6: Settings › Appearance › Agent characters.
+        // Plan 110, slice 6: Settings › Agent characters.
         if CommandLine.arguments.contains("--character-settings-check") {
             _ = NSApplication.shared
             do {
@@ -5315,6 +5340,7 @@ enum ContinuumApp {
             }
         }
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--agent-first-paint-check") {
             do {
                 _ = NSApplication.shared
@@ -5326,6 +5352,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
         if CommandLine.arguments.contains("--provider-request-response-check") {
             _ = NSApplication.shared
@@ -6189,10 +6216,107 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-unrelated-input-check") {
+            do { _ = NSApplication.shared; try runBrowserUnrelatedInputCheck(); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
+        if CommandLine.arguments.contains("--browser-ref-identity-check") {
+            do { _ = NSApplication.shared; try runBrowserRefIdentityCheck(); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
+        if CommandLine.arguments.contains("--browser-action-results-check") {
+            do { _ = NSApplication.shared; try runBrowserActionResultsCheck(); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
+        if CommandLine.arguments.contains("--browser-writer-transfer-check") {
+            do { _ = NSApplication.shared; try runBrowserWriterTransferCheck(); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
+        if CommandLine.arguments.contains("--browser-durable-takeover-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserDurableTakeoverCheck(experimental: ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_TIER_A"] == "1")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-action-queue-check") {
             do {
                 _ = NSApplication.shared
                 try runBrowserActionQueueCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-native-select-preflight-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserNativeSelectPreflightCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-select-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserSelectCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-pointer-real-active-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserPointerRealActiveCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-focus-free-real-key-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserFocusFreeRealKeyCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-background-scheduling-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserBackgroundSchedulingCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-focus-restoration-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserFocusRestorationCheck(experimental: ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_TIER_A"] == "1")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -6672,7 +6796,7 @@ enum ContinuumApp {
         application.delegate = delegate
         application.setActivationPolicy(.regular)
         if updaterPermitted() {
-            updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+            updaterController = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: updateChannelDelegate, userDriverDelegate: nil)
         }
         installMainMenu()
         application.run()
@@ -6683,6 +6807,8 @@ enum ContinuumApp {
     // binary (bundleIdentifier == nil), self-check legs pass `--*-check` flags,
     // and isolated QA runs of the bundle mark themselves with CONTINUUM_* env —
     // in all of those the updater must stay inert: no network, no prompts.
+    @MainActor
+    private static let updateChannelDelegate = UpdateChannelDelegate()
     @MainActor
     private static var updaterController: SPUStandardUpdaterController?
 
@@ -7378,9 +7504,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func presentBrowserControl(tileId: UUID, agentId: AgentID, engaged: Bool, userDriving: Bool) {
         guard let view = canvasView?.tileView(for: tileId) as? BrowserTileNSView else { return }
         let record = agentSupervisor.records[agentId]
+        let ownsTile = canvasView?.tileRecord(for: tileId)?.metadata.browserControllingAgentId == agentId
+        let writerChoices: [ChoiceItem] = ownsTile ? agentSupervisor.records.values
+            .filter { $0.id != agentId && $0.workspaceToolsEnabled && $0.projectId == record?.projectId }
+            .sorted { $0.displayName < $1.displayName }
+            .map { ChoiceItem(id: "writer-" + $0.id.rawValue.uuidString, title: "Give control to " + $0.displayName) } : []
         view.setAgentControl(name: record?.displayName ?? "Agent",
             colour: record?.identityColor.map { ZoneChromeNSView.color(named: $0) }, engaged: engaged, userDriving: userDriving,
             takeControl: { [weak self] in self?.workspaceAPI.takeBackBrowser(tileId: tileId) },
+            returnToAgent: canvasView?.tileRecord(for: tileId)?.metadata.browserControllingAgentId == agentId ? { [weak self] in _ = self?.workspaceAPI.returnBrowserToAgent(tileId: tileId, agentId: agentId) } : nil,
+            writerChoices: writerChoices,
+            transferWriter: { [weak self] selection in
+                guard let id = UUID(uuidString: String(selection.dropFirst(7))) else { return }
+                _ = self?.workspaceAPI.transferBrowserWriter(tileId: tileId, from: agentId, to: AgentID(rawValue: id))
+            },
             revealAgent: { [weak self] in _ = self?.revealAgentFromInbox(agentId.rawValue) },
             close: { [weak self] in self?.deleteTile(id: tileId) })
     }
@@ -23681,6 +23818,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // missing zone may be the result of an intentional delete.
         if let runtime = workspaceRuntime {
             runtime.adoptCanvas(canvasView)
+            canvasView.onVisitAgentResult = { [weak self] tileId in
+                _ = self?.revealTileForWork(tileId, historyReason: .completedTileJump, scopeReason: .tileSpawned)
+            }
             if persistedWorkspaceRegistry == nil, let controller = runtime.activeController {
                 runtime.ensureZoneForActiveProject(controller: controller)
             }
@@ -32298,6 +32438,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 CanvasNSView.ZoneRenderModel(placement: zoneB, displayName: "Beta")
             ]
         )
+        // Fixed directional geometry is this fixture's subject; deletion must
+        // not compact its hand-placed neighbors under the default auto-layout.
+        let navDefaultsName = "array.qa.nav-mode.\(UUID().uuidString)"
+        let navDefaults = UserDefaults(suiteName: navDefaultsName)!
+        defer { navDefaults.removePersistentDomain(forName: navDefaultsName) }
+        navDefaults.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
+        overlayCanvas.autoLayoutDefaults = navDefaults
         overlayCanvas.frame = CGRect(x: 0, y: 0, width: 900, height: 520)
         overlayCanvas.setNavModeOverlayVisible(true)
         let openOverlay = overlayCanvas.navModeOverlayQASnapshot()
@@ -32400,6 +32547,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileA, launchProfileId: "claude", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent A", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: tempProjectRoot.path, status: .working, statusUpdatedAt: now)))
         try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: agentTileB, launchProfileId: "codex", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Agent B", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .codex, worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
         try tempStore.saveSession(TerminalSessionDescriptor(id: UUID(), tileId: orphanAgentTile, launchProfileId: "old", command: "/bin/zsh", args: [], cwd: tempProjectRoot.path, env: [:], title: "Orphan", createdAt: now, lastStartedAt: now, lastExit: nil, agentDescriptor: AgentDescriptor(agentKind: .claude, worktreePath: tempProjectRoot.path, status: .needsAttention, statusUpdatedAt: now)))
+        // Activity reads registered project canvases, as it does at boot. Session
+        // files alone are deliberately insufficient: orphan sessions are excluded.
+        try tempStore.saveProject(tempProject)
+        try tempStore.saveCanvas(overlayCanvas.canvasState)
+        let cycleRegistryStore = RegistryStore(applicationSupportDirectory: tempProjectRoot)
+        var cycleRegistry = Registry.empty()
+        cycleRegistry.projects = [ProjectEntry(id: tempProject.id, name: tempProject.name,
+            rootPath: tempProjectRoot.path, workspaceId: nil, lastOpenedAt: now, pinned: false)]
+        try cycleRegistryStore.save(cycleRegistry)
+        navApp.registryStore = cycleRegistryStore
+        try navApp.reconciledManagedSessionSource.reconcile(
+            registry: cycleRegistry, reason: .continuumRestarted, now: now)
         overlayCanvas.markActive(tileId: selectedTileId)
         navApp.openNavMode()
         navApp.handleNavModeKey(keyEvent("a", keyCode: 0))

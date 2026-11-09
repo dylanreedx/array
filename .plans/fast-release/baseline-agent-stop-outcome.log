@@ -1,0 +1,14 @@
+AgentSupervisor.requestGeneratedName: agent CAD79850-1853-4249-90E0-5C750B5E1BF7 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent CAD79850-1853-4249-90E0-5C750B5E1BF7 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 64A5D04D-51E7-455A-A76D-29020767FA3E harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 64A5D04D-51E7-455A-A76D-29020767FA3E harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent AC8641B6-B8FC-4DDA-839F-06583F147791 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor: runner failed for agent AC8641B6-B8FC-4DDA-839F-06583F147791: claude exited with code 143
+AgentSupervisor.requestGeneratedName: agent AC8641B6-B8FC-4DDA-839F-06583F147791 harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D614856B-F6BD-4473-8F74-27924A3F808C harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor: runner failed for agent D614856B-F6BD-4473-8F74-27924A3F808C: claude exited with code 143
+AgentSupervisor.requestGeneratedName: agent 001CE32C-07B6-4B9F-8293-4C6C632E0392 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent D614856B-F6BD-4473-8F74-27924A3F808C harness=Claude Code titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 001CE32C-07B6-4B9F-8293-4C6C632E0392 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+AgentSupervisor.requestGeneratedName: agent 001CE32C-07B6-4B9F-8293-4C6C632E0392 harness=Pi titler unavailable (CLI not resolved or no model); no process spawned
+FAIL: B1: a pi turn stopped before its session was ever written said nothing — the user keeps a transcript on screen for a conversation the provider discarded
