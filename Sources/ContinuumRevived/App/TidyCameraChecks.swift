@@ -223,13 +223,20 @@ enum TidyCameraChecks {
             if let target, landed != target { failures.append("A \(trigger): the flight landed at \(landed), not its target \(target)") }
             if landed.zoom != camera.zoom { failures.append("A \(trigger): the zoom changed \(camera.zoom) -> \(landed.zoom) though the zone fits at it") }
             if landed.x != camera.x { failures.append("A \(trigger): the camera moved sideways (\(camera.x) -> \(landed.x)) for a zone that grew down") }
-            let bottomOnScreen = (Double(after.maxY) - landed.y) * landed.zoom
-            if abs(bottomOnScreen - (Double(usable.maxY) - padding)) > 0.01 {
-                failures.append("A \(trigger): not the least pan: the zone's bottom sits at \(bottomOnScreen), want \(Double(usable.maxY) - padding)")
+            // Derived from the zone's FINAL rect: the standard padding, or as much
+            // of it as fits beside a zone that nearly fills the view's height.
+            let final = canvas.zoneWorldRect(a1)!
+            let fitPadding = min(padding, max(0, (Double(usable.height) - Double(final.height) * landed.zoom) / 2))
+            let bottomOnScreen = (Double(final.maxY) - landed.y) * landed.zoom
+            if abs(bottomOnScreen - (Double(usable.maxY) - fitPadding)) > 0.01 {
+                failures.append("A \(trigger): not the least pan to the final rect \(final): the zone's bottom sits at \(bottomOnScreen), want \(Double(usable.maxY) - fitPadding)")
+            }
+            if final != after {
+                failures.append("A \(trigger): the zone kept changing after the tidy returned (\(after) -> \(final))")
             }
             if !canvas.isInUsableView(after) { failures.append("A \(trigger): the grown zone is still not wholly in view") }
-            notes.append(String(format: "A %@: zone %.0f→%.0f tall; zoom kept %.2f, panned %.1f pt down, landed exactly", trigger,
-                                before.height, after.height, landed.zoom, landed.y - camera.y))
+            notes.append(String(format: "A %@: zone %.0f→%.0f tall; zoom kept %.2f, panned %.1f pt down, %.1f px padding, landed exactly", trigger,
+                                before.height, after.height, landed.zoom, landed.y - camera.y, fitPadding))
         }
 
         // E. A zone that tidy grows past what the current zoom can hold: the camera
