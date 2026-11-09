@@ -133,7 +133,8 @@ final class SharedAgentChromeBuilder {
                     terminalEvent: record.latestTerminalEvent, latestPromptAt: record.latestPromptAt),
                 title: name)
             let reference: Chrome.ThemeReference
-            if theme.id == AgentCharacterBundled.themeID {
+            // A built-in set travels by id alone: the guest's app ships it too.
+            if AgentCharacterBundled.isBuiltIn(theme.id) {
                 reference = .init(id: theme.id, hash: nil)
             } else {
                 file = themeFile(for: theme)

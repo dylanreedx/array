@@ -2775,7 +2775,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
-        // Plan 110, slice 6: Settings › Appearance › Agent characters.
+        // Plan 110, slice 6: Settings › Agent characters.
         if CommandLine.arguments.contains("--character-settings-check") {
             _ = NSApplication.shared
             do {

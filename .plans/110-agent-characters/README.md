@@ -813,3 +813,47 @@ locally). The Bleach file and its art are never committed.
 Follow-ups: voices (spawn/done/any mp3s) would be a new notification path and need
 an entry in `docs/internals/notification-paths.md` first; `shift` as a level-change
 transition; shipping large sets to guests in chunks.
+
+## Built-in symbol packs
+
+Added 2026-11-05, reshaped 2026-11-06. Four more built-in sets ship beside the
+ducks: Street Sigils, Living Chords, ASCII morph and Signal Ghosts
+(`AgentCharacterBundled.packIDs`). The ducks keep their own route
+(`ducks.theme.json` and the base sounds in Core). Each pack is `packs/<id>/theme.json`
+with only the audio its `voices` and `sounds` name: the same layout an imported set
+has, so the same parser reads it and the same sound resolver speaks from its folder.
+No Swift defines a pack.
+
+- **Mac only.** The packs are their own resource target,
+  `ContinuumRevivedCharacterPacks`, which the app and CoreChecks depend on. SwiftPM
+  resources cannot be conditioned on a platform and the iOS app links Core, so in
+  Core they shipped to iOS too. `make-app-bundle.sh` copies the bundle beside Core's;
+  `check-app-bundle.sh` compares it with the source. On iOS `packsFolderURL()` is
+  nil and only the ducks exist.
+- **Settings parses no pack to open.** `packs/manifest.json` holds each built-in
+  set's title and count. `packs/<id>/card.json` is a valid theme cut down to what a
+  card draws: two helpers, one loop each, one frame of everything else, and the
+  lead's first level, under 200 KB against a pack's 2 to 3 MB. Run
+  `scripts/make-character-pack-cards.py` after changing a pack;
+  `--agent-character-theme-check` goes RED if either drifts. Choosing a pack parses
+  it off the main thread and only then commits the setting, so the controller's
+  synchronous read finds it cached.
+- All five ids are reserved. An import with one is refused. A file in the themes
+  folder with one is listed there as a problem, and never shadows the built-in set.
+- A shared agent drawing a built-in set sends only the id. The guest draws its own
+  copy of that set.
+- Character names only have to be unique within their own set. Curly is in Street
+  Sigils and ASCII morph; Square is in ASCII morph and Signal Ghosts. A manual pick
+  is a name, so it carries over when the set changes.
+
+Settings › Agent characters is its own pane: the switch, Motion and size, then a
+card per set in the theme picker's card (`SettingsPreviewCard`), then the set's
+detail, import and folder rows, Found on this Mac, and the chosen set in every
+state. Cards and the grid move only while they can be seen (`CharacterPreviewMotion`).
+The words live in `AgentCharacterCopy`, so a rename is one edit there.
+
+Witnesses: `--agent-character-theme-check` (every pack loads, every clip resolves,
+cards and manifest match their packs, Core holds no pack, ids reserved) and
+`--character-settings-check` (the real modal: opening parses no pack, cards draw,
+scrolled-off cards and grid hold still, clicking each card draws it off the main
+thread and it speaks from its folder).

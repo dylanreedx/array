@@ -116,7 +116,7 @@ enum WorkspaceAPIAgentCharacterChecks {
         try expect(tileShows(hashed) && rowShows(hashed), "cleared, both surfaces return to the hashed character")
 
         // The tile's own menu writes the same record.
-        guard let root = tile.makeAdditionalTitleBarMenuItems().first(where: { $0.title == "Character" }),
+        guard let root = tile.makeAdditionalTitleBarMenuItems().first(where: { $0.title == AgentCharacterCopy.menu }),
               let menu = root.submenu,
               let index = menu.items.firstIndex(where: { $0.title == pick }) else {
             throw Failure(description: "the tile menu offers no Character submenu with \(pick)")
@@ -126,7 +126,7 @@ enum WorkspaceAPIAgentCharacterChecks {
         menu.performActionForItem(at: index)
         try expect(supervisor.records[f.agentId]?.characterName == pick && tileShows(pickIndex),
                    "picking from the tile menu saves and shows the character")
-        let automatic = tile.makeAdditionalTitleBarMenuItems().first(where: { $0.title == "Character" })!.submenu!
+        let automatic = tile.makeAdditionalTitleBarMenuItems().first(where: { $0.title == AgentCharacterCopy.menu })!.submenu!
         automatic.performActionForItem(at: 0)
         try expect(supervisor.records[f.agentId]?.characterName == nil && tileShows(hashed), "Automatic clears the pick")
 
@@ -134,7 +134,7 @@ enum WorkspaceAPIAgentCharacterChecks {
         _ = try result(update(pick))
         suite.set(false, forKey: AgentCharacterConfig.enabledKey)
         controller.reload()
-        try expect(!tile.makeAdditionalTitleBarMenuItems().contains(where: { $0.title == "Character" }),
+        try expect(!tile.makeAdditionalTitleBarMenuItems().contains(where: { $0.title == AgentCharacterCopy.menu }),
                    "with characters off the tile offers no Character menu")
         try expect(supervisor.records[f.agentId]?.characterName == pick, "turning characters off keeps the pick")
         return "Workspace API agent character checks passed: agent.update saves the set's spelling, the header and the row show it, a fresh store reads it, replay and unchanged, unknown names refused with the allowed list, null clears, and the tile's Character menu writes the same record"

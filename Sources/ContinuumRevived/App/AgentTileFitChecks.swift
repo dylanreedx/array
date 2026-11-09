@@ -9,7 +9,7 @@ import ContinuumRevivedCore
 //
 // A real managed Codex agent tile, attached to a real supervisor, on a real
 // canvas in an offscreen window, swept over canvas zooms, tile widths and the
-// three character sizes (Settings › Appearance › Agent characters › Character
+// three character sizes (Settings › Agent characters › Character
 // size, posted through the setting's own change notification). At every point:
 // (a) zoomed-out screen text stays at its natural chrome role size (or yields
 //     to real width pressure), never exceeding its 100% screen size;

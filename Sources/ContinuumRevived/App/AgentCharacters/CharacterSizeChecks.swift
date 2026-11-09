@@ -4,7 +4,7 @@ import ContinuumRevivedCore
 
 // Plan: .plans/110-agent-characters/README.md › character size (0.7.40 polish).
 //
-// `--character-size-check`: Settings › Appearance › Agent characters › Character
+// `--character-size-check`: Settings › Agent characters › Character
 // size, driven through the setting's own change notification (what the Settings
 // pane posts), on a real agent tile attached to a real supervisor and the real
 // sidebar. At Small, Medium and Large (1, 1.5, 2.25):

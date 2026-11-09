@@ -282,6 +282,8 @@ private struct SettingsPaneForm: View {
                         } else {
                             Section(group.title ?? "") { InfoRow(text: "The canvas background is not available here.") }
                         }
+                    } else if group.rows.count == 1, case .custom("agentCharacters", _) = group.rows[0].field {
+                        AgentCharacterSections(model: model.agentCharacters, settings: model, field: group.rows[0].field)
                     } else {
                         Section {
                             ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
@@ -331,9 +333,6 @@ struct SettingsFieldRow: View {
                 SettingsHarnessRows(model: model)
             case .custom("agentAccounts", _):
                 SettingsAccountRows(model: model)
-            case .custom("agentCharacters", _):
-                AgentCharacterSettingsRows(model: AgentCharacterSettingsModel(defaults: model.defaults), settings: model)
-                    .settingsAnchor(SettingsRegistry.anchor(for: field) ?? field.label, model: model)
             case .shortcuts:
                 EmptyView()
             default:
@@ -775,8 +774,8 @@ private struct SettingsSoundRows: View {
         }
 
         Toggle(isOn: Binding(get: { model.characterSoundsEnabled }, set: { model.characterSoundsEnabled = $0 })) {
-            SettingsRowLabel(title: "Character sounds",
-                             help: "While characters show, they quack when an agent hands back to you, chirp when it needs you and honk when it fails, or use their set's own voices. A sound turned on above for the same moment plays instead.")
+            SettingsRowLabel(title: AgentCharacterCopy.sounds,
+                             help: "While \(AgentCharacterCopy.many) show, they quack when an agent hands back to you, chirp when it needs you and honk when it fails, or use their pack's own voices. A sound turned on above for the same moment plays instead.")
         }
         .toggleStyle(.switch)
         .disabled(!model.soundsEnabled)
