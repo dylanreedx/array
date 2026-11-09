@@ -2988,7 +2988,7 @@ final class TileSpawner {
     }
 
     /// Gap between an anchor tile and the file tile docked beside it.
-    static let anchoredFileGap: Double = 24
+    static var anchoredFileGap: Double { TileGapResolver.resolvedGap() }
 
     private func spawnFileImpl(
         location: DocumentLocation,
