@@ -6,8 +6,36 @@ F6CD3569, with three Claude helpers. Board card: "Tidy fills the zone, fast,
 with proper tile shapes" (79EE3C01). The card's comments are the night's full
 history.
 
-Status at the time of writing: DRAFT, updated as streams land. The final
-version comes with the morning build.
+**Final state, 08:30 local.** The branch is at the commit that adds this
+README, on top of `83021eb6`. `~/Desktop/Array Dev.app` is rebuilt from it;
+launch it to try tidy. Most of a tidy's delay was the zone menu, so use ⌥⌘T to
+tidy the current zone without it.
+
+### Branches for review (all local, nothing pushed)
+
+- **`array/auto-layout-night`**: everything below. This is the one to try.
+- **`array/bare-tiles`**: dragging a tile out of its zone, and it stays out
+  (card 516DB43F). Kept out of the night branch by the conductor's ruling,
+  because it touches the hazard 9 model. It merges the night branch as of
+  `47ba6fa5`. Read `reports/bare-tiles.md` there.
+- **`array/aln-drag-in-tidy`**: already merged here. It made swaps between
+  tiles of different widths trade row positions. Listed only so its report
+  (`reports/drag-in-tidy.md`) can be found.
+- **`array/aln-night-review`**: a read-only review of the night's diff
+  (`reports/night-review.md`), with 10 findings. Finding 1 is fixed here. The
+  rest are listed below.
+
+### Unfinished when the second outage hit (uncommitted, in their worktrees)
+
+- **`.worktrees/aln-escape-slot`**: a drop with no swap in a full tidied zone
+  should prefer the tile's own vacated slot, then any free slot inside the
+  zone, before growing the zone. The core of it was written; not finished.
+- **`.worktrees/aln-review-perf`**: review finding 3 (the ⌘K palette rebuilds
+  the command registry on every keystroke) and finding 5 (put
+  `--tidy-packer-check` in the matrix). Started, not finished.
+- **`.worktrees/aln-review-fixes`**: finding 1 is fixed and merged. Finding 2
+  (⌥⌘T in the middle of a drag takes over the drag's undo entry) is not
+  started.
 
 ## What Dylan asked for
 
@@ -54,12 +82,20 @@ performance feel and practicality."
 7. **⌥⌘T tidies the current zone.** It is a registered command you can rebind,
    and it shows on its ⌘K row. It skips the ~120 ms the zone menu spends
    blinking and fading before AppKit fires the action.
-8. **A zone that tidy grows pushes its neighbours clear.** Neighbouring zones
+8. **The camera follows a tidied zone that left the view.** It pans first at
+   the current zoom, and zooms out only as far as needed. If the zone stays in
+   view, or for "Tidy canvas", the camera doesn't move. Witness:
+   `--tidy-camera-check`.
+9. **Swapping tiles of different widths in a tidied zone** trades their row
+   positions. Before, the wide tile was dropped on the narrow one's origin,
+   over its neighbours. Witness: `--drag-in-tidy-check` and the trajectory
+   probe.
+10. **A zone that tidy grows pushes its neighbours clear.** Neighbouring zones
    move as rigid bodies, carrying their tiles, and nothing changes zone. Before
    this fix, a grown zone was left lying over the zone it grew into, with auto
    layout either on or off. Undo restores everything. Witness:
    `--tidy-zone-neighbours-check`.
-9. **The undo toast after a tidy** hugs its message and stays clear of the
+11. **The undo toast after a tidy** hugs its message and stays clear of the
    floating toolbar, whichever edge it sits on, and of the shortcut rail.
    Before, it stretched across the whole canvas.
 
@@ -131,12 +167,23 @@ off-screen one still resizes in the commit. Witness:
 ## Films
 
 All in `~/Movies/Array/auto-layout-night/`.
-- `tidy-before.mov` and `tidy-after.mov`, each with an end frame (`-end.png`)
-  and its `canvas.json`. Both are real-app window-server captures of the same
-  messy eight-tile zone. Each film app ran with its own bundle id and
-  app-support folder.
-- `real-canvas/`: before and after pictures of tidy on each of Dylan's real
-  zones, plus `table.md`.
+- **`tidy-before.mov`** (with `-end.png` and `-canvas.json`): the old tidy, a
+  real-app window-server capture at 01:01 of a messy eight-tile zone.
+- **`tidy-after-offscreen.mp4`** (with `-end.png`): the shipped tidy on the same
+  scene, made with the offscreen renderer (`--fanout-film-render`). The run
+  comes from `ALN_TIDY_FILM_RUN_DIR=<dir> ContinuumRevivedCoreChecks
+  --tidy-packer-check`. The renderer draws every tile as a note, so the
+  positions and sizes are the real tidy but the tile contents are not.
+- **No real-app "after" film yet.** The 05:00 and 06:00 screen slots were lost
+  to the second outage. Once on screen, the size animation and the camera
+  follow are still only witnessed in checks, never seen. When the Mac is free:
+  `/tmp/aln/tools/film.sh "$HOME/array-scratch/apps/Array After.app" after`,
+  with `ALN_TRIGGER=key` for ⌥⌘T. The scripts in `/tmp` won't survive a
+  reboot; their logic is described in the board card's comments.
+- **`tidy-after-interim-0105.mov`**: the first engine at 01:05, kept for the
+  record only. It predates masonry, the size animation and the latency work.
+- **`real-canvas/`**: before and after pictures of tidy on each of Dylan's real
+  zones: `table.md`, `-masonry2` (shipped) and `-before-after` (first engine).
 
 ## Tried and rejected
 
@@ -173,9 +220,30 @@ All in `~/Movies/Array/auto-layout-night/`.
    height and leave a strip empty?
 3. **Should tidy also run on its own** (after a close or a spawn), or stay an
    explicit action? It stays explicit tonight.
-4. **Holding ⌥ alone past the nav-leader delay** before pressing ⌘ opens the
+4. **Sidebar for bare tiles** (on `array/bare-tiles`): a bare tile is listed
+   under its home zone. The proposed fix is an "outside zones" group per
+   project. It touches agent reachability and the phone wire format, so it was
+   designed but not built.
+5. **"Tidy canvas" tidies only the loaded zones** (`maxLiveZones`, 4 by
+   default). Zones that aren't loaded keep their rect.
+6. **A grown zone may now overlap an unloaded neighbour** until that neighbour
+   loads (finding 1, fixed here). Before the fix, tidy pushed the unloaded
+   zone and left its tiles behind on disk. Doing it properly means loading
+   the neighbour first.
+7. **New terminals are 720×804**, taller than the 664 pt that used to fit a
+   1000×700 window at zoom 1 (review finding 4). Terminals have no smaller
+   size to fall back on.
+8. **Remaining review findings** (`reports/night-review.md` on
+    `array/aln-night-review`):
+    - finding 2: ⌥⌘T in the middle of a drag;
+    - finding 3: the palette rebuilds the registry on every keystroke;
+    - finding 5: put `--tidy-packer-check` in the matrix, with its timing as
+      an opt-in;
+    - the low ones: animations aren't removed when a refused write rolls back,
+      the zone morph starts from the stored size, and some copy is stale.
+9. **Holding ⌥ alone past the nav-leader delay** before pressing ⌘ opens the
    leader first. The existing ⌥⌘R has the same race.
-5. **The website demo** (`website/src/components/demo/command/CommandCenter.tsx`)
+10. **The website demo** (`website/src/components/demo/command/CommandCenter.tsx`)
    still describes "Tidy canvas" with the old wording. The site deploys from
    main, so it was left alone.
 
@@ -194,14 +262,44 @@ All in `~/Movies/Array/auto-layout-night/`.
   (`8a6eae35`) lets capture runs skip the Ghostty config, which links into
   `~/Documents`. A Documents prompt still appeared once, probably when the
   palette checked CLI configs. It was dismissed without being answered.
-- **Outage.** Every Claude agent failed from about 06:56Z to 08:20Z, about 80
-  minutes lost. Work resumed cleanly.
+- **Two outages.** Every Claude agent failed from about 06:56Z to 08:20Z, and
+  again from about 10:00Z to 13:19Z. About 4.5 hours were lost in total,
+  including both morning screen slots.
+- **Screen rule breaches.** Several regression legs open real windows on
+  screen: `--spawn-placement-check`, `--canvas-undo-check`,
+  `--leader-jump-check`, `--tile-reveal-work-check`,
+  `--agent-local-file-link-check`, `--jelly-auto-layout-check` and
+  `--palette-captures-keys-over-browser-check`. The lead and the helpers ran
+  them during the performance lead's screen time, for a few seconds per run,
+  between 00:55 and 04:35. Each run was disclosed. These legs were not run
+  this morning, because Dylan may be at the Mac.
 
 ## Checks run
 
 Targeted only. There was no full matrix tonight, because a release had the
 machine. Every run used a debug build, its own app-support dir and its own
 tmux namespace.
+
+**Final pass at `8461a3db`, all exit 0, 19 legs, all offscreen.** These are
+the 4 CoreChecks legs below, plus 15 app legs:
+- `--auto-layout-fanout-app-check`, `--undo-toast-placement-check`,
+  `--spawn-sizing-check`, `--auto-layout-tidy-latency-check`,
+  `--zone-arming-check`;
+- `--tidy-zone-neighbours-check`, which includes the unloaded-neighbour case.
+  It was red with the fix removed;
+- `--tidy-offscreen-defer-check`, `--tidy-zone-shortcut-check`,
+  `--layout-commit-scope-check`, `--tidy-camera-check`,
+  `--drag-in-tidy-check`;
+- `--subagent-tile-zone-check`, `--canvas-zoom-momentum-check`,
+  `--spawn-framing-check`, `--workspace-scene-owner-check`.
+
+**Not rerun on the final tree, because they open windows on screen:**
+`--spawn-placement-check`, `--canvas-undo-check`, `--jelly-auto-layout-check`,
+`--leader-jump-check`, `--tile-reveal-work-check`,
+`--agent-local-file-link-check`. Each one last passed at the merges between
+`2977836f` and `8cdecf1f`.
+
+Earlier passes:
 
 - **CoreChecks:** `--tidy-packer-check`, `--layout-pressure-check`,
   `--jelly-trajectory-probe` (no ORTHO, FLIP, TELEPORT or STUCK flags),
@@ -228,5 +326,6 @@ tmux namespace.
 ## Stream reports
 
 `reports/tidy-engine.md`, `reports/tidy-latency.md`, `reports/spawn-sizing.md`,
-`reports/persist-scope.md`, `reports/zone-growth.md`, `reports/offscreen-defer.md`, `reports/tidy-masonry.md`. Bare tiles: `reports/bare-tiles.md` on
+`reports/persist-scope.md`, `reports/zone-growth.md`, `reports/offscreen-defer.md`, `reports/tidy-masonry.md`, `reports/tidy-camera.md`,
+`reports/drag-in-tidy.md`. Bare tiles: `reports/bare-tiles.md` on
 `array/bare-tiles`.

@@ -45,6 +45,6 @@ Lead: the agent that delegated you (auto-layout-night lead). Integration branch:
   --layout-commit-scope-check. Known pre-existing red, not ours: --agent-tile-click-focus-check.
 - ON-SCREEN LEGS (put a real window on screen or take key focus): --spawn-placement-check, --canvas-undo-check,
   --leader-jump-check, --tile-reveal-work-check, --palette-zone-check, --agent-local-file-link-check,
-  --palette-captures-keys-over-browser-check, and any leg whose source calls makeKeyAndOrderFront/orderFrontRegardless
+  --palette-captures-keys-over-browser-check, --jelly-auto-layout-check (its swap window), and any leg whose source calls makeKeyAndOrderFront/orderFrontRegardless
   WITHOUT orderFrontOffscreenForChecks. Do NOT run these. The lead runs them only in his screen slots
   (05:00–05:25, 06:00–06:30) and will run them for you; list which ones your change needs.
