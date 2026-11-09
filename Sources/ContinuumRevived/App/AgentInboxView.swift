@@ -6574,13 +6574,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         wantsLayer = true
         tableView.wantsLayer = true
     }
-    func rowPresentationFramesForQA() -> [(UUID, NSRect, NSRect, [String])] {
+    func rowPresentationFramesForQA(cardBounds: Bool = false) -> [(UUID, NSRect, NSRect, [String])] {
         guard let destination = layer?.presentation() else { return [] }
         return cellsByRow.compactMap { index, cell in
             guard items.indices.contains(index), let id = items[index].agentRow?.id,
                   let presentation = cell.layer?.presentation() else { return nil }
             let slot = tableView.convert(tableView.rect(ofRow: index), to: self)
-            let frame = (cell as? AgentInbox96CellView)?.contentPresentationForQA(in: destination)
+            let frame = (cell as? AgentInbox96CellView)?.contentPresentationForQA(in: destination, cardBounds: cardBounds)
                 ?? presentation.convert(presentation.bounds, to: destination)
             let keys = (cell.layer?.animationKeys() ?? []) + (cell.superview?.layer?.animationKeys() ?? [])
             return (id, slot, frame, keys)

@@ -30,11 +30,13 @@ enum SidebarRowPresentationChecks {
             }
         }
         for style in ["current", "gradient", "sheen", "duplex"] {
+            for startsCollapsed in [false, true] {
             let suite = "array.row-presentation.\(UUID().uuidString)"
             let defaults = QAIsolatedDefaults(isolatedSuiteName: suite)!
             defer { defaults.removePersistentDomain(forName: suite) }
             defaults.set(style, forKey: SidebarActiveIndicatorStyle.defaultsKey)
             let inbox = AgentInboxView(frame: NSRect(x: 0,y: 0,width: 380,height: 700), indicatorDefaults: defaults)
+            if startsCollapsed { inbox.restoreParentFolds([lead: false]) }
             inbox.prepareRowPresentationCaptureForQA()
             inbox.prefersReducedMotion = { false }
             inbox.openAgentId = lead
@@ -44,6 +46,62 @@ enum SidebarRowPresentationChecks {
             window.contentView = inbox
             window.orderFrontOffscreenForChecks()
             defer { window.orderOut(nil) }
+            func press() throws {
+                guard let control = inbox.cellForQA(id: lead)?.qaFoldControlForQA else {
+                    throw Failure(description: "missing disclosure")
+                }
+                let point = control.convert(NSPoint(x: control.bounds.midX, y: control.bounds.midY), to: nil)
+                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                    guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { throw Failure(description: "event") }
+                    NSApp.sendEvent(event)
+                }
+            }
+            inbox.reload(rows: fixture(done: false, arrival: false))
+            inbox.layoutViewportForQA()
+            try await Task.sleep(for: .milliseconds(250))
+            for cycle in 0..<2 {
+                // Cycle zero is the first interaction with default-expanded rows;
+                // subsequent cycles also cover a settled collapsed starting state.
+                if !startsCollapsed || cycle > 0 { try press() }
+                try await Task.sleep(for: .milliseconds(250))
+                guard children.prefix(3).allSatisfy({ !inbox.rowIdsForQA.contains($0) }) else {
+                    throw Failure(description: "disclosure did not collapse the group")
+                }
+                try press()
+                guard children.prefix(3).allSatisfy(inbox.rowIdsForQA.contains) else {
+                    throw Failure(description: "disclosure did not expand the group")
+                }
+                var restingCards: [UUID: NSRect] = [:]
+                for id in [lead] + Array(children.prefix(3)) {
+                    guard let cell = inbox.cellForQA(id: id) else { throw Failure(description: "missing model card") }
+                    restingCards[id] = cell.convert(cell.qaTuckedCardsForQA.card, to: inbox)
+                }
+                for frame in 0..<32 {
+                    CATransaction.flush()
+                    try await Task.sleep(for: .nanoseconds(8_333_333))
+                    let samples = inbox.rowPresentationFramesForQA(cardBounds: true)
+                    let helpers = samples.filter { children.contains($0.0) }.sorted { $0.1.minY < $1.1.minY }
+                    if helpers.count != 3 { throw Failure(description: "missing helper presentation") }
+                    for pair in zip(helpers, helpers.dropFirst()) {
+                        let finalGap = restingCards[pair.1.0]!.minY - restingCards[pair.0.0]!.maxY
+                        let actualGap = pair.1.2.minY - pair.0.2.maxY
+                        if abs(finalGap - actualGap) > 0.5, failures.count < 12 {
+                            failures.append("\(style)/initial-collapsed-\(startsCollapsed)-cycle-\(cycle) frame \(frame): gap \(actualGap), final \(finalGap)")
+                        }
+                    }
+                    for (id, slot, presented, animations) in helpers {
+                        log.append("\(style),initial-collapsed-\(startsCollapsed)-cycle-\(cycle),\(frame),\(CACurrentMediaTime()),\(id),\(slot.minY),\(presented.minY),\(presented.height),\(animations.joined(separator: ";"))")
+                        let final = restingCards[id]!
+                        let origin = restingCards[lead]!
+                        let envelope = final.union(origin).insetBy(dx: -0.5, dy: -0.5)
+                        if presented.minY < envelope.minY || presented.maxY > envelope.maxY, failures.count < 12 {
+                            failures.append("\(style)/initial-collapsed-\(startsCollapsed)-cycle-\(cycle): helper escaped its origin-to-slot span")
+                        }
+                    }
+                }
+            }
             for phase in ["expanded", "reload", "route", "sorted", "unfolding", "unfolding-reload", "unfolding-route", "unfolding-stable"] {
                 stableWorkingPair = phase == "unfolding-stable"
                 inbox.openAgentId = lead
@@ -99,6 +157,7 @@ enum SidebarRowPresentationChecks {
                 if measured == 0 { throw Failure(description: "\(style)/\(phase): no presentation layers sampled") }
             }
         }
+            }
         if !failures.isEmpty { throw Failure(description: failures.joined(separator: "\n") + "\nframes: \(directory.path)") }
         return "SidebarRowPresentationChecks passed: all four styles, status completion and arrival, expanded and unfolding; presentation frames stayed in their slots or intentional unfold/reflow envelope; \(directory.path)"
     }

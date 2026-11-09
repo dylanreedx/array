@@ -2949,8 +2949,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         layer.add(fade, forKey: "emphasis")
     }
 
-    func contentPresentationForQA(in destination: CALayer) -> CGRect? {
-        guard let presentation = titleLabel.layer?.presentation() else { return nil }
+    func contentPresentationForQA(in destination: CALayer, cardBounds: Bool = false) -> CGRect? {
+        guard let presentation = (cardBounds ? card.layer : titleLabel.layer)?.presentation() else { return nil }
         return presentation.convert(presentation.bounds, to: destination)
     }
 
