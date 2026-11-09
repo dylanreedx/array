@@ -182,12 +182,8 @@ final class BrowserAutomation {
     var _afterAgentCharacterForChecks: (() -> Void)?
     private(set) var lastUserKeyAt: Date?
     private var inputSurfaceIds: Set<ObjectIdentifier> = []
-    // Guarded active-pointer experiment only. Normal launches keep both off.
+    // Guarded pointer experiment only. Normal launches keep this off.
     static var _pointerFilterForChecks = false
-    static var _atomicClicksForChecks = false
-    private static weak var activeClickEngine: BrowserAutomation?
-    private static var replayingPointerEvents: Set<ObjectIdentifier> = []
-    private var deferredUserEvents: [NSEvent] = []
     private var agentDeliveryDepth = 0
     private struct AgentInputFingerprint: Hashable {
         let type: NSEvent.EventType
@@ -809,25 +805,12 @@ final class BrowserAutomation {
         let point = webView.convert(local, to: nil)
         let responder = self.supportsFocusFreeInput ? nil : window.firstResponder
         let focusInput = self.supportsFocusFreeInput ? 0 : Self.focusInputGeneration
-        let previousClick = Self.activeClickEngine
-        Self.activeClickEngine = self
-        defer {
-            Self.activeClickEngine = previousClick
-            let events = deferredUserEvents
-            deferredUserEvents.removeAll()
-            for event in events {
-                Self.replayingPointerEvents.insert(ObjectIdentifier(event))
-                NSApp.sendEvent(event)
-                Self.replayingPointerEvents.remove(ObjectIdentifier(event))
-            }
-        }
         for clickCount in 1...count {
             let down = Self.mouseEvent(.leftMouseDown, at: point, window: window, clickCount: clickCount)
             rememberAgentInput(down)
             webView.mouseDown(with: down)
             _duringAgentClickForChecks?()
             let up = Self.mouseEvent(.leftMouseUp, at: point, window: window, clickCount: clickCount)
-            if Self._atomicClicksForChecks { rememberAgentInput(up) }
             webView.mouseUp(with: up)
         }
         if restoreFocus && !supportsFocusFreeInput { restore(responder, in: window, inputGeneration: focusInput) }
@@ -972,18 +955,10 @@ final class BrowserAutomation {
             .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate,
             .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]) { event in
             let suppress = MainActor.assumeIsolated {
-                if replayingPointerEvents.contains(ObjectIdentifier(event)) { return false }
-                // WebKit can re-route an agent event through AppKit. It must
-                // never become a deferred user event and be delivered twice.
+                // A re-routed agent event is not user input.
                 if consumeAgentInput(event) { return false }
                 if _pointerFilterForChecks, passivePointerTypes.contains(event.type),
                    eventEngine(event)?.isEngaged == true { return true }
-                if _atomicClicksForChecks, let engine = activeClickEngine,
-                   event.window === engine.webView.window {
-                    noteUserEvent(event)
-                    engine.deferredUserEvents.append(event)
-                    return true
-                }
                 if !passivePointerTypes.contains(event.type),
                    ![NSEvent.EventType.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type) {
                     noteUserEvent(event)
@@ -1056,7 +1031,7 @@ final class BrowserAutomation {
         }
         while let current = view {
             if let engine = registry[ObjectIdentifier(current)]?.engine {
-                guard engine.agentDeliveryDepth == 0 || engine.supportsFocusFreeInput || Self._atomicClicksForChecks else { return }
+                guard engine.agentDeliveryDepth == 0 || engine.supportsFocusFreeInput else { return }
                 engine.suppressionInterrupted = true
                 engine.setResponderSuppression(false)
                 engine.userInputCount += 1

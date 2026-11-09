@@ -58,3 +58,8 @@ Physical-pointer coexistence, genuine tracking-area exit delivery, native toolti
 ## Guarded active proof prepared (not run)
 
 See [pointer-active-launch.md](pointer-active-launch.md) for the dedicated bundle, exact one-run LaunchServices command, per-case red/green/KILLED contract, cooperative foreground restoration, watchdogs and preparation results. The candidates are check-only and default false. The inactive conclusions above remain the current behavioral evidence; no activation was performed during preparation.
+
+
+## Approved active result and atomic removal (2026-11-08)
+
+`/tmp/array-pointer-active.log`: native active/key setup passed, synthetic hover stimulus was zero, and the split-click control was KILLED: one clean agent click, no drag/selection, and one intended user click. The atomic buffering/replay candidate has been removed. No active check was rerun. The deliberate-key failure occurred with candidates=false, before any buffering could be enabled. Its event counter is under investigation separately.

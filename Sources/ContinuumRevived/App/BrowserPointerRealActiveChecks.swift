@@ -50,7 +50,6 @@ func runBrowserPointerRealActiveCheck() throws {
     defer {
         BrowserAutomation.focusFreeInputEnabled = originalBackend
         BrowserAutomation._pointerFilterForChecks = false
-        BrowserAutomation._atomicClicksForChecks = false
     }
     let start = Date()
     let end = start.addingTimeInterval(23)
@@ -124,7 +123,6 @@ func runBrowserPointerRealActiveCheck() throws {
             do { try body() } catch { failures.append("\(name): \(error)"); print("FAIL: \(name): \(error)") }
             progress.insert(name)
             BrowserAutomation._pointerFilterForChecks = false
-            BrowserAutomation._atomicClicksForChecks = false
         }
         // A real tracking tag routes the synthetic exit to WKWebView. No
         // pointer is moved and no system event is posted.
@@ -197,47 +195,13 @@ func runBrowserPointerRealActiveCheck() throws {
             }
         }
         scenario("click atomicity") {
-            @MainActor func attempt(_ atomic: Bool) throws -> Bool {
-                BrowserAutomation._atomicClicksForChecks = atomic
-                try eval("""
-                    document.body.innerHTML='<style>body{margin:0}button{width:150px;height:40px}</style><button draggable=true id=target>Agent click</button><p>Selectable text</p>';
-                    window.picked=0;window.drags=0;window.order=[];
-                    document.getElementById('target').onclick=e=>{if(e.isTrusted)picked++};
-                    document.addEventListener('dragstart',e=>{if(e.isTrusted)drags++;e.preventDefault()});
-                    for(const t of ['mousedown','mouseup','mousemove','click']) document.addEventListener(t,e=>{if(e.isTrusted)order.push(t)})
-                    """)
-                let before = try read(user, "({picks:window.picks})")["picks"] as? Int ?? -1
-                browser.automation._duringAgentClickForChecks = {
-                    mouse(.mouseMoved, browser, 350, 180)
-                    mouse(.leftMouseDragged, browser, 350, 180)
-                    mouse(.leftMouseDown, user, 30, 15)
-                    mouse(.leftMouseUp, user, 30, 15)
-                }
-                defer { browser.automation._duringAgentClickForChecks = nil }
-                try click(35, 20)
-                let state = try read(browser, "({picked:window.picked,drags:window.drags,selection:window.getSelection().toString(),order:window.order})")
-                let after = try read(user, "({picks:window.picks})")["picks"] as? Int ?? -1
-                print("INFO: atomic=\(atomic) agent=\(state) userClicks=\(after-before)")
-                try require(after == before + 1, "synthetic user click did not reach its intended unowned tile exactly once")
-                let order = state["order"] as? [String] ?? []
-                let down = order.firstIndex(of: "mousedown"), up = order.firstIndex(of: "mouseup")
-                let cleanOrder = down != nil && up != nil && up! == down! + 1
-                return state["picked"] as? Int == 1 && state["drags"] as? Int == 0 && state["selection"] as? String == "" && cleanOrder
-            }
-            if try attempt(false) { print("KILLED: effective user move/drag/click did not split agent click; candidate not enabled") }
-            else {
-                print("PASS: RED user input split the agent click")
-                try require(try attempt(true), "candidate atomic delivery failed")
-                print("PASS: GREEN one clean agent click and intended user click")
-            }
+            print("KILLED: approved active run observed one clean agent click and one intended user click; atomic candidate removed")
         }
         scenario("deliberate takeover") {
             BrowserAutomation._pointerFilterForChecks = true
-            BrowserAutomation._atomicClicksForChecks = true
             defer { browser.automation._duringAgentClickForChecks = nil }
             for enabled in [false, true] {
             BrowserAutomation._pointerFilterForChecks = enabled
-            BrowserAutomation._atomicClicksForChecks = enabled
             for key in [false, true] {
                 try eval("document.body.innerHTML='<input style=\"width:200px;height:40px\" id=field>'; window.takeKeys=0; document.addEventListener('keydown',e=>{if(e.isTrusted)window.takeKeys++},{once:true})")
                 let before = browser.automation.userInputCount
@@ -257,7 +221,7 @@ func runBrowserPointerRealActiveCheck() throws {
                 try require(h.errorCode(paused) == "target_conflict", "takeover did not remain durable")
                 if key {
                     let state = try read(browser, "({keys:window.takeKeys})")
-                    try require(state["keys"] as? Int == 1, "queued deliberate key did not reach the driven page exactly once")
+                    try require(state["keys"] as? Int == 1, "deliberate key did not reach the driven page exactly once")
                 }
                 print("PASS: \(key ? "key" : "click") takes over immediately during native click and stays fenced; candidates=\(enabled)")
                 guard let surface = h.f.canvas.tileView(for: tileID) as? BrowserTileNSView else { throw WorkspaceAPIChecks.Failure(message: "missing handback surface") }
@@ -269,7 +233,6 @@ func runBrowserPointerRealActiveCheck() throws {
     } catch { failures.append("setup: \(error)"); print("FAIL: setup: \(error)") }
     for name in names where !progress.contains(name) { print("FAIL: \(name): setup prevented execution") }
     BrowserAutomation._pointerFilterForChecks = false
-    BrowserAutomation._atomicClicksForChecks = false
     // Cooperatively yield the foreground, rather than only asking a background
     // process to take it. Confirm the PID, not the request's Bool.
     if #available(macOS 14.0, *) {
