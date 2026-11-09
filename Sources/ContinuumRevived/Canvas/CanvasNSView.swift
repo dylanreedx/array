@@ -367,6 +367,11 @@ final class CanvasNSView: NSView, TokenThemed {
     private var autoLayoutMovePointerSample: (point: NSPoint, time: TimeInterval)?
     private var autoLayoutDeferredUntilEdit = false
     private let autoLayoutUndoToast = InboxUndoToast()
+    private var autoLayoutUndoToastCenterX: NSLayoutConstraint?
+    private var autoLayoutUndoToastBottom: NSLayoutConstraint?
+    /// The tidy undo toast's frame in this view, for checks.
+    var qaAutoLayoutUndoToastFrame: NSRect? { autoLayoutUndoToast.isHidden ? nil : autoLayoutUndoToast.frame }
+    var qaAutoLayoutUndoToastFittingWidth: CGFloat? { autoLayoutUndoToast.isHidden ? nil : autoLayoutUndoToast.fittingSize.width }
     private var autoLayoutUndoTimer: Timer?
     private var autoLayoutBlockedZoneIds: Set<UUID> = []
     var autoLayoutReduceMotionProvider: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
@@ -1369,9 +1374,57 @@ final class CanvasNSView: NSView, TokenThemed {
         autoLayoutUndoTimer?.invalidate()
         let noun = changedCount == 1 ? "item" : "items"
         autoLayoutUndoToast.show("Auto layout arranged \(changedCount) \(noun)")
+        placeAutoLayoutUndoToast()
         autoLayoutUndoTimer = Timer.scheduledTimer(withTimeInterval: 6, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.dismissAutoLayoutUndo() }
         }
+    }
+
+    /// Puts the tidy undo toast where no canvas chrome covers it. The floating
+    /// toolbar and the shortcut rail are siblings drawn ABOVE the canvas, and
+    /// the toolbar can rest on any edge, so a fixed bottom-centre toast sat
+    /// under a bottom bar. `spawnOverlayRects` is the app's live list of that
+    /// chrome (rail, getting-started card, the bar where it is and where it
+    /// rests). Called when the toast shows and when the bar lands somewhere new.
+    func placeAutoLayoutUndoToast() {
+        guard !autoLayoutUndoToast.isHidden, let centerX = autoLayoutUndoToastCenterX,
+              let bottom = autoLayoutUndoToastBottom else { return }
+        autoLayoutUndoToast.layoutSubtreeIfNeeded()
+        let fitting = autoLayoutUndoToast.fittingSize
+        let size = NSSize(width: min(fitting.width, max(0, bounds.width - Space.l * 2)), height: fitting.height)
+        let frame = Self.undoToastFrame(size: size, in: bounds, avoiding: spawnOverlayRects?() ?? [],
+                                        margin: Space.l, gap: Space.s)
+        centerX.constant = frame.midX - bounds.midX
+        bottom.constant = frame.maxY - bounds.maxY
+    }
+
+    /// In this (flipped) view: centred on the bottom edge; lifted above whatever
+    /// chrome that covers, again and again; if that runs off the top, centred on
+    /// the top edge and pushed down the same way. With no clear spot it keeps
+    /// the bottom-centre spot it always had.
+    static func undoToastFrame(size: NSSize, in bounds: NSRect, avoiding obstacles: [CGRect],
+                               margin: CGFloat, gap: CGFloat) -> NSRect {
+        let x = bounds.midX - size.width / 2
+        let home = NSRect(x: x, y: bounds.maxY - margin - size.height, width: size.width, height: size.height)
+        var rect = home
+        for _ in 0...obstacles.count {
+            let hits = obstacles.filter { $0.intersects(rect) }
+            if hits.isEmpty {
+                if rect.minY >= bounds.minY + margin { return rect }
+                break
+            }
+            rect.origin.y = hits.map(\.minY).min()! - gap - size.height
+        }
+        rect.origin.y = bounds.minY + margin
+        for _ in 0...obstacles.count {
+            let hits = obstacles.filter { $0.intersects(rect) }
+            if hits.isEmpty {
+                if rect.maxY <= bounds.maxY - margin { return rect }
+                break
+            }
+            rect.origin.y = hits.map(\.maxY).max()! + gap
+        }
+        return home
     }
 
     private func dismissAutoLayoutUndo() {
@@ -2023,9 +2076,20 @@ final class CanvasNSView: NSView, TokenThemed {
         autoLayoutUndoToast.onUndo = { [weak self] in self?.undoAutoLayout() }
         autoLayoutUndoToast.setAccessibilityIdentifier("ContinuumCanvasAutoLayoutUndoToast")
         addSubview(autoLayoutUndoToast, positioned: .above, relativeTo: nil)
+        let toastCenterX = autoLayoutUndoToast.centerXAnchor.constraint(equalTo: centerXAnchor)
+        let toastBottom = autoLayoutUndoToast.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.l)
+        autoLayoutUndoToastCenterX = toastCenterX
+        autoLayoutUndoToastBottom = toastBottom
+        // Its width was bounded only from above, so Auto Layout stretched it
+        // across the whole canvas: the message bottom-left, Undo bottom-right
+        // over the shortcut rail. The weakest pull to zero makes it hug its
+        // content; the label's compression resistance keeps the text whole.
+        let toastHug = autoLayoutUndoToast.widthAnchor.constraint(equalToConstant: 0)
+        toastHug.priority = NSLayoutConstraint.Priority(1)
         NSLayoutConstraint.activate([
-            autoLayoutUndoToast.centerXAnchor.constraint(equalTo: centerXAnchor),
-            autoLayoutUndoToast.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Space.l),
+            toastHug,
+            toastCenterX,
+            toastBottom,
             autoLayoutUndoToast.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -(Space.l * 2)),
         ])
         syncWorldPlaneToCamera()

@@ -236,6 +236,104 @@ All exit 0: `--tidy-packer-check`, `--layout-pressure-check`,
 re-emitted to `qa-runs/aln-tidy-engine/pictures/` (5-lead-three-helpers,
 6-lead-five-helpers).
 
+## Round 4: solve cost and the undo toast
+
+### Solve cost (`c6e6ed8d`)
+
+Tidy runs on the main thread. Debug build, whole `solve(.tidy)`, best of 5:
+
+| tiles | before | after | target |
+|---|---|---|---|
+| 30 | 56 ms | 6–7 ms | ≤ 8 ms |
+| 60 | 104 ms | 9–10 ms | — (witness: 18) |
+| 89 | 161 ms | 16–19 ms | ≤ 25 ms |
+
+The after numbers held at a load average of 37. The output is unchanged, and
+that is pinned: `--tidy-packer-check` keeps an FNV digest of every frame and
+the zone for all 13 seeds (the 10 composition zones plus the 30/60/89 cost
+zones). Changing the grid to 1/32 pt flagged 11 of the 13; the other two land
+on whole points, so that change doesn't move them. To re-pin after a
+deliberate change, run with `TIDY_PACKER_PRINT_DIGESTS=1`.
+
+What the profile showed, and what each fix did:
+1. Nearly all the time went to the zone-shrink attempts (a full solve each),
+   inside `evaluateRow`. In a debug build that meant struct copies,
+   closures and allocations. Fix: the row solver reads flat buffers (raw
+   pointers), and a row with no ratio clamp allocates nothing. It does the
+   same arithmetic in the same order as `rowRatios` + `waterFill`; the
+   clamped case still goes through them.
+2. The `narrowest` 60-step bisection is now solved exactly at its corners
+   (the function is piecewise linear). The digests are unchanged.
+3. Shrink attempts are pruned exactly: an attempt can never cost less than
+   its shrink charge, so it is skipped once that charge reaches the best
+   cost so far. They are also tried nearest first to k ≈ √(1.6/stretch), so
+   pruning starts early. The minimum over the same set does not depend on
+   order.
+4. The dynamic program reads plain cost terms (the same expression as
+   `Row.cost`) and stores its choices as integers, not `Row?`.
+5. `waterFill` works on stack buffers.
+
+Rejected: 40 shrink steps; cutting bisection iterations or scale-grid
+points (that changes output); moving the solve off the main thread (the
+latency stream's seam).
+
+In the app, `tidyAutoLayout` on 6 tiles still takes 9–12 ms in debug, but the
+packer is a small part of that now. The rest is the apply and persist path.
+
+### Undo toast (`e8577f98`)
+
+Cause: the toast's width was bounded only from above (≤ canvas − 2·l), so
+Auto Layout stretched it across the whole canvas. Its message sat
+bottom-left and its Undo bottom-right, over the shortcut rail. It was also
+fixed at bottom-centre, under a toolbar resting on the bottom edge.
+
+Fix:
+- A priority-1 zero-width pull makes it hug its message. The shared
+  `InboxUndoToast` is untouched, so the inbox's toast is unaffected.
+- `placeAutoLayoutUndoToast()` starts it at bottom-centre and lifts it
+  above any canvas chrome it covers. If that runs off the top, it starts
+  top-centre and steps down instead.
+- The obstacles come from the app's `spawnOverlayRects`: the rail, the
+  getting-started card, and the bar both where it is and where it rests. The
+  resting frame is new (`FloatingToolbarHostView.restingBarFrame`), so the
+  rects are right while the bar is still landing.
+- It is placed when it shows, and again from the toolbar's
+  `onPositionChanged`.
+
+New app leg, `--undo-toast-placement-check [render dir]`. It runs the
+production `makeWorkspaceWindow`, borderless and offscreen, with the real
+toolbar and the real shortcut rail. The toolbar is opted in through
+`CONTINUUM_TOOLBAR_QA=1`, which now also works in check runs, on an isolated
+`floatingToolbarDefaults` suite, so it never touches `.standard`. The toast
+is shown through a real Tidy with the bar on each of the four edges, then
+with the bar dragged to the bottom while the toast is up, then in a narrow
+window. It asserts no intersection with the bar or the rail, that the toast
+stays inside the canvas, and that its width equals its content's. Teeth:
+with placement disabled it reports 8 collisions. The light and dark renders
+look right: compact, centred, above the bottom bar, clear of the rail. The
+leg is not added to the matrix; that's the lead's call.
+
+Checks (all exit 0): `--undo-toast-placement-check`, `--floating-toolbar-check`,
+`--spawn-placement-check`, `--spawn-framing-check`, `--spawn-sizing-check`,
+`--auto-layout-fanout-app-check`, `--jelly-auto-layout-check`,
+`--zone-arming-check` and `--layout-commit-truth-check` (app); `--tidy-packer-check`,
+`--layout-pressure-check`, `--jelly-trajectory-probe`, `--auto-layout-fanout-check`
+and `--fanout-layout-probe` (CoreChecks).
+
+### Merged with the latency stream (`96f9b6c2`)
+
+I merged array/auto-layout-night at `5e1accbd`, which carries the latency
+fixes, cleanly. On the merged tree, all four CoreChecks legs and 8 of the 9
+app legs exit 0. The exception is `--auto-layout-tidy-latency-check`, which
+the lead already recorded as red after merging the latency work. Its 22
+failures:
+- 21 come from its "a move draws nothing new" assertion. Tidy now resizes
+  tiles, so they have to redraw; the latency helper is narrowing that
+  assertion.
+- 1 is "app-side work before the movement 91.9 ms at 89 tiles (budget 50)".
+  In that same run the solve column reads 14.9 ms (it was about 232 ms
+  before this round). The rest is the app's apply and commit path.
+
 ## Open, for the lead
 
 1. **Tidy animation feel.** `applyLayoutTransaction` animates only origins,
