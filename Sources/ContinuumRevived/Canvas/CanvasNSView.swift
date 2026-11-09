@@ -6687,18 +6687,37 @@ final class CanvasNSView: NSView, TokenThemed {
                 || !Self.geometryNearlyEqual(view.frame.width, rect.width)
                 || !Self.geometryNearlyEqual(view.frame.height, rect.height)
         }
+        // A changed tile that only TRANSLATED draws nothing new: its pixels do
+        // not depend on where it sits. Redrawing it anyway (plus its affordance
+        // overlay) put every tidied or pushed tile's whole draw into the CA
+        // commit that starts the movement — 27 ms of an 89-tile tidy's commit
+        // (`--auto-layout-tidy-latency-check`). Size, visibility and every
+        // non-geometry field still invalidate.
+        func onlyTranslated(_ tile: Tile, view: TileNSView?, worldFrame: TileFrame, hidden: Bool) -> Bool {
+            guard onlyChangedTiles, let view else { return false }
+            var translated = view.tile
+            translated.frame.x = tile.frame.x
+            translated.frame.y = tile.frame.y
+            return translated == tile && view.isHidden == hidden
+                && Self.geometryNearlyEqual(view.frame.width, CGFloat(worldFrame.width))
+                && Self.geometryNearlyEqual(view.frame.height, CGFloat(worldFrame.height))
+        }
         for tile in canvasState.tiles {
-            guard needsLayout(tile, view: tileViews[tile.id], worldFrame: tile.frame,
-                              hidden: membershipPlacement(of: tile.id)?.collapsed == true) else { continue }
-            layoutTile(tile, invalidateTileDisplay: invalidateTileDisplay)
+            let view = tileViews[tile.id]
+            let hidden = membershipPlacement(of: tile.id)?.collapsed == true
+            guard needsLayout(tile, view: view, worldFrame: tile.frame, hidden: hidden) else { continue }
+            layoutTile(tile, invalidateTileDisplay: invalidateTileDisplay
+                && !onlyTranslated(tile, view: view, worldFrame: tile.frame, hidden: hidden))
         }
         // Lay out tiles for every installed ZoneLayer (T05).
         for layer in zoneLayers {
             for tile in layer.tiles {
-                guard needsLayout(tile, view: layer.tileViews[tile.id],
-                                  worldFrame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
+                let view = layer.tileViews[tile.id]
+                let worldFrame = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+                guard needsLayout(tile, view: view, worldFrame: worldFrame,
                                   hidden: layer.placement.collapsed) else { continue }
-                _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay)
+                _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay
+                    && !onlyTranslated(tile, view: view, worldFrame: worldFrame, hidden: layer.placement.collapsed))
             }
         }
         if navModeOverlayView != nil { qaCameraLayoutStats.chromeRepaints += 1 }

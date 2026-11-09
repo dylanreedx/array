@@ -2247,7 +2247,14 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     // chrome scale is a function of the bar's height, and `layoutChrome`
     // invalidates explicitly when that height changes.
     //
-    var tile: Tile { didSet { if tile != oldValue { invalidateChrome() } } }
+    // The bar draws `title` and `kind` and nothing else of the record. Comparing
+    // the whole `Tile` also redrew it whenever the tile MOVED (the frame is part
+    // of the record), which made a tidy re-typeset every moved tile's title
+    // inside the CA commit that starts the movement — the largest single cost of
+    // that commit (`--auto-layout-tidy-latency-check`, sampled).
+    var tile: Tile {
+        didSet { if tile.title != oldValue.title || tile.kind != oldValue.kind { invalidateChrome() } }
+    }
     var agentStatus: AgentStatus? {
         didSet {
             guard agentStatus != oldValue else { return }
