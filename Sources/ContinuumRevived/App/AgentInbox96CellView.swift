@@ -2898,6 +2898,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         onSettleNudge = shown ? onSettle : nil
         guard settleNudge.isHidden == shown else { return }
         settleNudge.isHidden = !shown
+        reconcileOptionalChrome()
         needsLayout = true
         guard shown, !prefersReducedMotion(), let layer = settleNudge.layer else { return }
         let slide = CABasicAnimation(keyPath: "transform.translation.x")
