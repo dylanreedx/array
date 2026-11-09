@@ -24,11 +24,12 @@ import Foundation
 /// 4. The cheapest candidate wins: the change to the tiles (mean squared log
 ///    change of area and ratio, plus half the worst tile's) plus the change to
 ///    the zone height (`growWeight` / `shrinkWeight`). So the zone grows in
-///    height when the tiles cannot fit without shrinking past the floor, and
-///    width grows only for a tile that cannot fit across at its minimum.
+///    height when the tiles cannot fit without shrinking past the floor.
 /// 5. A zone too big for its tiles (mean stretch past the ceiling, or a fill
-///    that would lose a tenth of its height) also tries uniform shrinks k < 1,
-///    which keep the zone's proportions.
+///    that would lose a tenth of its height) also tries shorter heights.
+///
+/// The zone's width is the user's: tidy never changes it, except to widen a
+/// zone narrower than one tile at its minimum width.
 ///
 /// A tidy result is its own fixed point: at s = 1 the current breaks cost exactly
 /// zero and fill exactly, so a second tidy changes nothing.
@@ -116,9 +117,13 @@ public enum CanvasTidyPacker {
         let count: Int
         let ratio, ratioMin, ratioMax, minW, minH, area, extra, fixedW, fixedH: UnsafeMutablePointer<Double>
         let isFixed: UnsafeMutablePointer<Bool>
+        /// The hard pass's area ceiling: `tileAreaHardCap`, or `tileAreaCap`
+        /// when no layout at the zone's width keeps that (`packItems`, step 2).
+        let hardCap: Double
 
-        init(_ items: [Item]) {
+        init(_ items: [Item], hardCap: Double = tileAreaHardCap) {
             count = items.count
+            self.hardCap = hardCap
             let capacity = max(count, 1)
             ratio = .allocate(capacity: capacity); ratioMin = .allocate(capacity: capacity); ratioMax = .allocate(capacity: capacity)
             minW = .allocate(capacity: capacity); minH = .allocate(capacity: capacity); area = .allocate(capacity: capacity)
@@ -236,10 +241,17 @@ public enum CanvasTidyPacker {
             let ids = Set(flush.map(\.id))
             let strip = first.frame.x + first.frame.width
             guard !members.contains(where: { !ids.contains($0.id) && $0.frame.x < strip - 0.5 }) else { return nil }
+            // One row is not a column beside rows: its first tile is flush
+            // and full height too.
+            guard members.contains(where: { !ids.contains($0.id) && $0.frame.y > top + 0.5 }) else { return nil }
             return ids.count < members.count ? flush.map(\.id) : nil
         }
+        // When the rows could not keep the zone's width (`packItems`, step 3),
+        // neither need the column.
+        let widthMoved = abs(plain.content.width - content.width) > grid
         guard sizeGroupedRows,
-              let column = packWithColumn(items, content: content, gap: gap, keep: existingColumn()) else { return plain }
+              let column = packWithColumn(items, content: content, gap: gap, keep: existingColumn(), freeWidth: widthMoved)
+        else { return plain }
         // Big tiles keep their size (the lead's decision, `.plans/auto-layout-night`):
         // an in-band column wins over rows that would trade a big tile's area
         // for its neighbours'. The score still chooses the column's height.
@@ -249,21 +261,24 @@ public enum CanvasTidyPacker {
 
     /// Tiles at least `columnThreshold` × the median area, stacked at the left
     /// at one shared width and their preferred ratios, the other tiles in
-    /// size-grouped rows beside them. The column's width is set so its height
-    /// equals the rows' height, so the zone fills edge to edge. Nil when there
-    /// is no big tile, too few others, or a column tile would leave its band.
+    /// size-grouped rows beside them. The zone keeps its width; the column's
+    /// tiles share the rows' height, so the zone fills edge to edge. Nil when
+    /// there is no big tile, too few others, or a column tile would leave its
+    /// band or its ratio band.
     static let columnThreshold = 2.0
 
-    /// The column for each of a few heights around the big tiles' own, the rows'
-    /// region shaped to keep the zone's proportions; the best by `score`.
-    private static func packWithColumn(_ items: [Item], content: CGRect, gap: Double, keep: [UUID]?) -> Result? {
-        // Heights 0.7…1.75 of the big tiles' own: start at 1, then walk toward
+    /// The column at each of a few widths around the big tiles' own, the rows
+    /// in the rest of the zone's width; the best by `score`.
+    private static func packWithColumn(_ items: [Item], content: CGRect, gap: Double, keep: [UUID]?, freeWidth: Bool) -> Result? {
+        // Widths 0.7…1.75 of the big tiles' own: start at 1, then walk toward
         // whichever neighbour scores better until neither does.
         let factors = [0.7, 0.85, 1.0, 1.2, 1.45, 1.75]
         var cache: [Int: (Result, Double)?] = [:]
         func value(_ k: Int) -> (Result, Double)? {
             if let known = cache[k] { return known }
-            let result = packWithColumn(items, content: content, gap: gap, heightFactor: factors[k], keep: keep)
+            let result = freeWidth
+                ? packWithFreeColumn(items, content: content, gap: gap, heightFactor: factors[k], keep: keep)
+                : packWithColumn(items, content: content, gap: gap, widthFactor: factors[k], keep: keep)
             let entry = result.map { ($0, score($0, items: items, content: content)) }
             cache[k] = entry
             return entry
@@ -281,7 +296,71 @@ public enum CanvasTidyPacker {
         return best?.0
     }
 
-    private static func packWithColumn(_ items: [Item], content: CGRect, gap: Double, heightFactor: Double, keep: [UUID]?) -> Result? {
+    private static func packWithColumn(_ items: [Item], content: CGRect, gap: Double, widthFactor: Double, keep: [UUID]?) -> Result? {
+        let areas = items.map(\.area).sorted()
+        let median = areas[areas.count / 2]
+        let big = items.filter { item in
+            // A browser's 16:9 cannot follow a shared column width.
+            guard item.fixed == nil, item.extraWidth == 0, item.ratioMin < item.ratioMax else { return false }
+            if let keep { return keep.contains(item.id) }
+            return item.area >= columnThreshold * median
+        }.sorted { a, b in
+            // A kept column keeps its own top-to-bottom order; a new one goes
+            // largest first.
+            if let keep { return keep.firstIndex(of: a.id)! < keep.firstIndex(of: b.id)! }
+            return a.area != b.area ? a.area > b.area : UUID.isOrderedBeforeByString(a.id, b.id)
+        }
+        guard !big.isEmpty else { return nil }
+        let bigIds = Set(big.map(\.id))
+        let rest = items.filter { !bigIds.contains($0.id) }
+        guard rest.count >= 2 else { return nil }
+        let inverse = big.reduce(0.0) { $0 + 1 / $1.ratio }
+        let gaps = Double(big.count - 1) * gap
+        // The column's width: the big tiles' own (every column tile at its
+        // current area and preferred ratio) × the factor. The zone keeps its
+        // width, so the rows take the rest of it.
+        func snap(_ v: Double) -> Double { (v / grid).rounded() * grid }
+        let left = snap(Double(content.minX)), top = snap(Double(content.minY)), gridGap = snap(gap)
+        let right = snap(left + Double(content.width))
+        let ownWidth = exp(big.reduce(0.0) { $0 + 0.5 * log($1.area * $1.ratio) } / Double(big.count))
+        let restLeft = snap(left + ownWidth * widthFactor + gridGap)
+        let columnWidth = restLeft - gridGap - left
+        guard columnWidth > 0, right - restLeft > 0 else { return nil }
+        // The rows aim for the column's own height at that width.
+        let restContent = CGRect(x: restLeft, y: top, width: right - restLeft, height: max(1, columnWidth * inverse + gaps))
+        // The column is only worth having in band, so its rows are too.
+        guard let rows = packPass(rest, content: restContent, gap: gap, hard: featuredBands, lockWidth: true),
+              !rows.frames.isEmpty, abs(Double(rows.content.maxX) - right) <= grid else { return nil }
+        let total = Double(rows.content.height)
+        // The column fills the rows' height, each tile's share in proportion to
+        // its preferred height at the column's width.
+        let stretch = (total - gaps) / (columnWidth * inverse)
+        for tile in big {
+            let h = columnWidth / tile.ratio * stretch
+            let ratio = columnWidth / h
+            guard columnWidth >= tile.minW - 1e-6, h >= tile.minH - 1e-6,
+                  ratio >= tile.ratioMin - 1e-6, ratio <= tile.ratioMax + 1e-6 else { return nil }
+            if featuredBands {
+                let change = columnWidth * h / tile.area
+                guard change >= tileAreaFloor - 1e-6, change <= tileAreaHardCap + 1e-6 else { return nil }
+            }
+        }
+        var frames = rows.frames
+        let bottom = snap(top + total)
+        var y = top
+        for (k, tile) in big.enumerated() {
+            let end = k == big.count - 1 ? bottom : snap(y + columnWidth / tile.ratio * stretch)
+            frames[tile.id] = TileFrame(x: left, y: y, width: columnWidth, height: end - y)
+            y = end + gridGap
+        }
+        return Result(frames: frames, content: CGRect(x: left, y: top, width: right - left, height: bottom - top),
+                      scale: rows.scale)
+    }
+
+    /// The column for a zone whose width had to move anyway (`packItems`,
+    /// step 3): the rows' region keeps the zone's proportions, and the zone
+    /// takes whatever width the column and rows come to.
+    private static func packWithFreeColumn(_ items: [Item], content: CGRect, gap: Double, heightFactor: Double, keep: [UUID]?) -> Result? {
         let areas = items.map(\.area).sorted()
         let median = areas[areas.count / 2]
         let big = items.filter { item in
@@ -308,7 +387,7 @@ public enum CanvasTidyPacker {
         let restContent = CGRect(x: content.minX + CGFloat(columnGuess + gap), y: content.minY,
                                  width: CGFloat(max(1, guessHeight * aspect - columnGuess - gap)), height: CGFloat(guessHeight))
         // The column is only worth having in band, so its rows are too.
-        guard let rows = packPass(rest, content: restContent, gap: gap, hard: featuredBands, scan: false),
+        guard let rows = packPass(rest, content: restContent, gap: gap, hard: featuredBands, proportional: true),
               !rows.frames.isEmpty else { return nil }
         func snap(_ v: Double) -> Double { (v / grid).rounded() * grid }
         let left = snap(Double(content.minX)), top = snap(Double(content.minY)), gridGap = snap(gap)
@@ -362,14 +441,28 @@ public enum CanvasTidyPacker {
         return (counted > 0 ? total / counted + worst / 2 : 0) + zone
     }
 
-    /// With the hard band on, first a pass that accepts only layouts keeping
-    /// every tile inside its band; the soft pass only when none exists.
+    /// The zone's width is the user's. With the hard band on, in order:
+    /// 1. a layout at the zone's width keeping every tile inside its band;
+    /// 2. a layout at the zone's width keeping every tile between the band's
+    ///    floor and the per-tile cap (`tileAreaCap`);
+    /// 3. only then, a narrower zone in band: a zone many times wider than its
+    ///    tiles cannot be filled at its width without stretching some of them
+    ///    several times over (one row cannot hold tiles whose areas differ by
+    ///    more than the band, and fewer tiles per row each grow wider);
+    /// 4. failing all of those, the best layout at the zone's width.
     private static func packItems(_ items: [Item], content: CGRect, gap: Double) -> Result {
         if featuredBands, let inBand = packPass(items, content: content, gap: gap, hard: true) { return inBand }
-        return packPass(items, content: content, gap: gap, hard: false) ?? Result(frames: [:], content: content, scale: 1)
+        func soft() -> Result {
+            packPass(items, content: content, gap: gap, hard: false) ?? Result(frames: [:], content: content, scale: 1)
+        }
+        guard featuredBands else { return soft() }
+        if let withinCap = packPass(items, content: content, gap: gap, hard: true, cap: tileAreaCap) { return withinCap }
+        return packPass(items, content: content, gap: gap, hard: true, widthSearch: true) ?? soft()
     }
 
-    private static func packPass(_ items: [Item], content: CGRect, gap: Double, hard: Bool, scan: Bool = true) -> Result? {
+    private static func packPass(_ items: [Item], content: CGRect, gap: Double, hard: Bool,
+                                 lockWidth: Bool = false, widthSearch: Bool = false, proportional: Bool = false,
+                                 cap: Double = tileAreaHardCap) -> Result? {
         var height = max(Double(content.height), 1)
 
         // Width grows only for a tile that cannot fit across at its minimum.
@@ -378,23 +471,62 @@ public enum CanvasTidyPacker {
             if let fixed = item.fixed { minimumWidth = max(minimumWidth, Double(fixed.width)) }
             else { minimumWidth = max(minimumWidth, max(item.minW, item.minH * item.ratioMin) + item.extraWidth) }
         }
+        // Rows beside a column cannot widen: the column takes what is left.
+        if lockWidth && minimumWidth > Double(content.width) + 1e-6 { return nil }
         var width = max(Double(content.width), minimumWidth)
-        let flat = Flat(items)
+        let flat = Flat(items, hardCap: cap)
         defer { flat.free() }
         func solveOne(_ w: Double, _ h: Double) -> Layout? {
             guard let layout = solve(flat, width: w, height: h, gap: gap, hard: hard) else { return nil }
             return !hard || layout.withinBand ? layout : nil
         }
-        var chosen = solveOne(width, height)
+        var chosen = widthSearch ? nil : solveOne(width, height)
         var bestCost = chosen?.cost ?? .infinity
-        // A zone too big for its tiles shrinks, keeping its proportions: try
+        // A zone too big for its tiles shrinks: only when the tiles would be
+        // stretched past the ceiling, the zone would lose more than a tenth of
+        // its height, or nothing fit yet. At the zone's own width a hard pass
+        // with no layout has none at any height either: the rows, not the
+        // height they are fitted to, rule it out.
+        let needsSearch = chosen.map { $0.stretch > areaCeiling || $0.total < 0.9 * height } ?? (!hard || proportional)
+        if needsSearch && !widthSearch && !proportional {
+            // The zone's width is the user's: only its height moves. Try
+            // shorter heights (whole points), each charged the shrink weight.
+            let originalHeight = height
+            var bestStep: Double?
+            let kMin = 0.25
+            func attempt(_ step: Double) {
+                let h = max(1, (originalHeight * pow(kMin, step / 10)).rounded(.down))
+                // A layout's own cost is never negative, so the shrink charge
+                // alone bounds this attempt: skip any that cannot win.
+                let charge = shrinkWeight * pow(log(h / originalHeight), 2)
+                guard charge < bestCost - 1e-12 else { return }
+                guard let layout = solveOne(width, h) else { return }
+                let cost = layout.cost + charge
+                if cost < bestCost - 1e-12 { bestCost = cost; chosen = layout; height = h; bestStep = step }
+            }
+            // Ten coarse steps, then seven between the best one's neighbours,
+            // each set tried nearest first to where the best is likely (areas
+            // scale with h at a fixed width), so the charge prunes the rest.
+            func nearestFirst(_ steps: [Double], to centre: Double) -> [Double] {
+                steps.sorted { a, b in
+                    let da = abs(a - centre), db = abs(b - centre)
+                    return da < db || (da == db && a < b)
+                }
+            }
+            let stretch = chosen?.stretch ?? 0
+            let guess: Double = stretch > areaCeiling ? 10 * log(areaCeiling / stretch) / log(kMin) : (chosen == nil ? 5 : 1)
+            for step in nearestFirst((1...10).map { Double($0) }, to: guess) { attempt(step) }
+            if let coarse = bestStep {
+                let fine: [Double] = [1, 2, 3, 5, 6, 7, 8].map { coarse - 1 + Double($0) / 4 }
+                for step in nearestFirst(fine, to: coarse) { attempt(step) }
+            }
+        }
+        // A zone whose width moves anyway (`packItems`, step 3, and the rows
+        // beside a free column) shrinks keeping its proportions instead: try
         // uniform scales k < 1 (whole points), each charged the shrink weight
         // once per dimension, so for the same area a proportional shrink is
-        // cheaper than a height-only one and the zone keeps its shape. Only
-        // when the tiles would be stretched past the ceiling, the zone would
-        // lose more than a tenth of its height, or (in band) nothing fit yet.
-        let needsSearch = chosen.map { $0.stretch > areaCeiling || $0.total < 0.9 * height } ?? true
-        if needsSearch {
+        // cheaper than a height-only one and the zone keeps its shape.
+        if widthSearch || (proportional && needsSearch) {
             let originalWidth = width, originalHeight = height
             let kMin = max(minimumWidth / originalWidth, 0.25)
             if kMin < 1 {
@@ -411,7 +543,7 @@ public enum CanvasTidyPacker {
                     let cost = layout.cost + charge
                     if cost < bestCost - 1e-12 { bestCost = cost; chosen = layout; width = w; height = h; bestStep = step }
                 }
-                // Ten coarse steps, then seven between the best one's neighbours.
+                // Ten coarse steps, then four within half a step of the best.
                 // Each set is tried nearest first to where the best is likely
                 // (areas scale with k², so k ≈ √(ceiling / stretch)), so the
                 // shrink charge prunes the rest early. The minimum over the
@@ -426,13 +558,13 @@ public enum CanvasTidyPacker {
                 let guess: Double = stretch > areaCeiling ? 10 * log(sqrt(areaCeiling / stretch)) / log(kMin) : (chosen == nil ? 5 : 1)
                 for step in nearestFirst((1...10).map { Double($0) }, to: guess) { attempt(step) }
                 if let coarse = bestStep {
-                    let fine: [Double] = [1, 2, 3, 5, 6, 7, 8].map { coarse - 1 + Double($0) / 4 }
+                    let fine: [Double] = [2, 3, 5, 6].map { coarse - 1 + Double($0) / 4 }
                     for step in nearestFirst(fine, to: coarse) { attempt(step) }
                 }
                 // In-band layouts come and go with the width (a row must justify
                 // exactly), so when the steps above found none, look evenly
                 // between the smallest width and the zone's.
-                if hard && scan && chosen == nil {
+                if hard && widthSearch && chosen == nil {
                     for step in 0..<20 {
                         let w = (minimumWidth + (originalWidth - minimumWidth) * Double(step) / 19).rounded(.down)
                         let h = max(1, (originalHeight * w / originalWidth).rounded(.down))
@@ -831,7 +963,7 @@ public enum CanvasTidyPacker {
             while i < end {
                 if !f.isFixed[i] && f.extra[i] == 0 {
                     lo = max(lo, (tileAreaFloor * f.area[i] / f.ratioMax[i]).squareRoot())
-                    hi = min(hi, (tileAreaHardCap * f.area[i] / f.ratioMin[i]).squareRoot())
+                    hi = min(hi, (f.hardCap * f.area[i] / f.ratioMin[i]).squareRoot())
                 }
                 i += 1
             }
@@ -870,7 +1002,7 @@ public enum CanvasTidyPacker {
             hi = min(hi, w / f.ratioMin[i])
             if hard {
                 lo = max(lo, tileAreaFloor * f.area[i] / w)
-                hi = min(hi, tileAreaHardCap * f.area[i] / w)
+                hi = min(hi, f.hardCap * f.area[i] / w)
             }
             logSum += log(f.area[i] / w)
             i += 1
@@ -986,7 +1118,7 @@ public enum CanvasTidyPacker {
                 if !f.isFixed[i] {
                     let w = ratio(i, k) * natural
                     bandLo = max(bandLo, tileAreaFloor * f.area[i] / w)
-                    bandHi = min(bandHi, tileAreaHardCap * f.area[i] / w)
+                    bandHi = min(bandHi, f.hardCap * f.area[i] / w)
                     k += 1
                 }
                 i += 1
@@ -1141,7 +1273,7 @@ public enum CanvasTidyPacker {
         var row = Row(start: start, end: end, height: height, heightMin: height, heightMax: height)
         for (k, i) in flex.enumerated() {
             let l = log(ratios[k] * height * height / f.area[i])
-            guard l >= log(tileAreaFloor) - 1e-9, l <= log(tileAreaHardCap) + 1e-9, height >= f.minH[i] - 1e-6 else { return nil }
+            guard l >= log(tileAreaFloor) - 1e-9, l <= log(f.hardCap) + 1e-9, height >= f.minH[i] - 1e-6 else { return nil }
             let shape = log(ratios[k] / f.ratio[i])
             row.sumL += l
             row.sumL2 += l * l
@@ -1389,7 +1521,7 @@ public enum CanvasTidyPacker {
             worst = max(worst, change)
             logSum += areaDev
             flex += 1
-            if areaDev < log(tileAreaFloor) - 0.01 || areaDev > log(tileAreaHardCap) + 0.01 { withinBand = false }
+            if areaDev < log(tileAreaFloor) - 0.01 || areaDev > log(f.hardCap) + 0.01 { withinBand = false }
         }
         for row in rows {
             if let band = row.featured {
@@ -1410,3 +1542,4 @@ public enum CanvasTidyPacker {
         return (total / Double(max(f.count, 1)) + worst / 2, flex > 0 ? exp(logSum / flex) : 1, withinBand)
     }
 }
+

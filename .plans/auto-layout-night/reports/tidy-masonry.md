@@ -109,3 +109,90 @@ Other checks, all exit 0:
   - Sharing a row with the giants: z01 tied at 1.00× under an honest cost.
   - A 2% size class: it fixed a fixed-tile reorder, but made 89 tiles take
     34 ms.
+
+## Round 2: the zone keeps its width
+
+The lead's condition after reviewing round 1: the zone's width belongs to the
+user. Tidy changes only the height, unless a tile cannot fit across at its
+minimum.
+
+**What changed in the packer.**
+- The size search now moves only the height. The old search scaled width and
+  height together, which is why the two-tile zone turned tall and narrow and
+  the film zone went from 2300 to about 2000 wide.
+- The big-tile column takes a width; the rows fill the rest of the zone's
+  width. The column tiles then share the rows' height, each in its own shape
+  band and within 0.5–2.0× of its area.
+- Order of attempts (`packItems`):
+  1. At the zone's width, every tile within 0.5–2.0× of its area.
+  2. At the zone's width, every tile within 0.5–2.56× (the per-tile cap).
+  3. Only then a narrower zone, keeping its proportions (round 1's search).
+  4. Failing all three, the best layout at the zone's width.
+- A one-row layout is no longer mistaken for an existing column on a second
+  tidy (that broke idempotence for the three-tile seed).
+
+**Why step 3 exists.** It does not meet the strict rule, so the lead has to
+accept it. Some zones are far wider than their tiles can fill:
+- z01 is 16289 wide for 22 tiles, at fill 0.148.
+- At that width, no layout keeps every tile within 0.5–2.56×. One row
+  cannot hold tiles whose areas differ by more than about 4×. With fewer
+  tiles per row, each tile grows wider than its cap.
+- Kept at its width, z01's tiles stretch up to 8.7×, and z03's up to 4×.
+
+The alternative is to keep the width and leave the zone partly empty, which
+fails the 0.90 fill bar. Step 3 only ever narrows a zone and never widens it.
+The narrowed zones (z01, z03, and seeds five, lead-three-helpers,
+lead-five-helpers, roomy, real-agents-22, real-agents-24, cost-30, cost-60
+and cost-89) have the same layouts as round 1. Their fingerprints are
+unchanged.
+
+**Results on Dylan's real canvas (gap 20):**
+
+| zone | width | fill | area range | big ÷ next | 2nd tidy |
+|---|---|---|---|---|---|
+| z01 | 16289 → 7462 (step 3) | 0.973 | 0.97–2.00 | 2.79 | no-op |
+| z02 | 5855 kept | 0.976 | 0.61–1.54 | 2.02 (kanban now in a column) | no-op |
+| z03 | 9330 → 6317 (step 3) | 0.972 | 0.77–2.00 | 1.34 | no-op |
+| z04 | 2511 kept | 0.992 | 0.75–2.00 | — | no-op |
+| z05 | 3686 kept | 0.973 | 0.83–1.43 | — | no-op |
+
+- Two-tile seed: 2100 wide kept, side by side, 985 → 838 tall. Its browser
+  sits at 2.31× (step 2). Side by side at that width, a browser below 2.0×
+  cannot exist.
+- Film scene: 2300 wide kept, 1480 → 972 tall, fill 0.980.
+
+**What `--tidy-packer-check` asserts now.**
+- Every seed's zone keeps its width to 1/64 pt, except:
+  - `narrow`, a new seed: two terminals in a zone narrower than a terminal
+    at its minimum. It widens to exactly that minimum.
+  - The step-3 seeds named in `widthMoves`. Each must narrow and never
+    widen.
+- The film scene keeps 2300.
+- The round-1 15%-area rule for the two-tile seed is gone. Width-kept
+  replaces it.
+- Fingerprints are re-pinned for two, three, eight, thirteen,
+  lead-three-helpers, real-overhang-6, cost-30, cost-60 and the new narrow.
+- The probe gains a "width kept" column.
+
+**Cost (debug, best of five):**
+- 30 tiles: 8.1 ms (budget 12)
+- 60 tiles: 12–13 ms (budget 18)
+- 89 tiles: 21–23 ms (budget 25)
+
+The step-2 check runs as a hard pass at the looser cap rather than a full
+soft solve, which saved 14 ms at 89 tiles. The width search's fine pass went
+from 7 steps to 4, and z01 and z03 came out identical either way.
+
+**Also green:**
+- CoreChecks: `--layout-pressure-check`, `--auto-layout-fanout-check` and
+  `--jelly-trajectory-probe`.
+- The 7 app legs: `--auto-layout-fanout-app-check`, `--jelly-auto-layout-check`,
+  `--undo-toast-placement-check`, `--spawn-sizing-check`,
+  `--auto-layout-tidy-latency-check`, `--zone-arming-check` and
+  `--canvas-undo-check`.
+
+**Pictures:**
+- Real canvas: `~/Movies/Array/auto-layout-night/real-canvas/z0N-masonry2.png`
+  and `table-masonry2.md`.
+- Seeds, including `0-two.png` and `film-scene.png`:
+  `~/Movies/Array/auto-layout-night/seeds-masonry2/`.

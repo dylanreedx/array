@@ -131,6 +131,15 @@ func runTidyPackerChecks() {
     dust.scene.zones[0].origin.y -= dustShift / 3
     for i in dust.scene.tiles.indices { dust.scene.tiles[i].frame.x += dustShift; dust.scene.tiles[i].frame.y -= dustShift / 3 }
     cases.append(dust)
+    // Narrow: two terminals in a zone narrower than a terminal at its minimum
+    // width, the one case where tidy widens a zone.
+    var narrow = makeCase("narrow", number: 46, kinds: [.terminal, .terminal], columns: 1, slack: .zero)
+    let terminalMinimum = TileGeometry.minimumSize(for: .terminal)
+    // The packer's own narrowest terminal: its minimum width, or its minimum
+    // height at the band's narrowest ratio (0.6), whichever is wider.
+    let narrowNeeded = max(Double(terminalMinimum.width), Double(terminalMinimum.height) * 0.6)
+    narrow.scene.zones[0].size.width = (narrowNeeded - 60).rounded() + 2 * padding
+    cases.append(narrow)
 
     // Zones from a real canvas, anonymised to kinds and frames (zone at 0,0;
     // `--tidy-real-canvas-probe`): two zones of mostly agents with a few made
@@ -383,6 +392,7 @@ func runTidyPackerChecks() {
         let contentArea = (zone.size.width - 2 * filmPadding) * (zone.size.height - filmHeader - 2 * filmPadding)
         let filmFill = after.tiles.reduce(0.0) { $0 + $1.frame.width * $1.frame.height } / contentArea
         report.append(String(format: "  film-scene: tiles 8 zone 2300x1480 -> %.0fx%.0f fill %.3f", zone.size.width, zone.size.height, filmFill))
+        check(abs(zone.size.width - 2300) <= CanvasTidyPacker.grid, "film-scene: tidy changed the zone's width: 2300 -> \(zone.size.width)")
         check(filmFill >= 0.95, "film-scene: fill \(filmFill) below 0.95")
         for tile in after.tiles { checkShape("film-scene", tile, original: scene.tiles.first { $0.id == tile.id }!.frame) }
         for (i, a) in after.tiles.enumerated() {
@@ -405,13 +415,27 @@ func runTidyPackerChecks() {
         let c = cases.first { $0.name == name }!
         return (c.scene.zones[0].size, applied(c.scene, solve(c.scene, c.zoneId)).zones[0].size)
     }
-    // A zone the tiles cannot fill by shape alone may change shape (with the
-    // hard band, two tiles too few to span a wide zone stack instead), but its
-    // area never grows by more than 15%.
-    for name in ["two", "three", "five", "eight", "thirteen", "lead-three-helpers", "lead-five-helpers"] {
-        let (b, a) = zoneAfter(name)
-        check(a.width * a.height <= b.width * b.height * 1.15, "\(name): zone grew more than needed: \(b) -> \(a)")
+    // The zone's width is the user's (the lead, `.plans/auto-layout-night`):
+    // tidy changes only its height. Two exceptions, each named here:
+    // - "narrow", narrower than one tile at its minimum, widens to just that;
+    // - zones no layout at their own width can fill with every tile between
+    //   0.5x and 2.56x its area (one row cannot hold tiles whose areas differ
+    //   by more than that, and fewer tiles per row each grow wider). These
+    //   only ever narrow, keeping their proportions.
+    let widthMoves: Set<String> = ["five", "lead-three-helpers", "lead-five-helpers", "roomy",
+                                   "real-agents-22", "real-agents-24", "cost-30", "cost-60", "cost-89"]
+    func checkWidth(_ c: Case) {
+        let b = c.scene.zones[0].size, a = applied(c.scene, solve(c.scene, c.zoneId)).zones[0].size
+        if c.name == "narrow" {
+            check(a.width > b.width && a.width <= narrowNeeded + 2 * padding + CanvasTidyPacker.grid,
+                  "narrow: the zone must widen to fit a terminal at its minimum, no more: \(b) -> \(a)")
+        } else if widthMoves.contains(c.name) {
+            check(a.width < b.width, "\(c.name): a zone too wide to fill must narrow, never widen: \(b) -> \(a)")
+        } else {
+            check(abs(a.width - b.width) <= CanvasTidyPacker.grid, "\(c.name): tidy changed the zone's width: \(b) -> \(a)")
+        }
     }
+    cases.forEach(checkWidth)
     // Tiles that already fit the zone exactly at their own sizes, scattered and
     // out of order: the zone keeps its size and every tile its size.
     let fitsId = uuid(50, 999)
@@ -452,6 +476,7 @@ func runTidyPackerChecks() {
         let c = makeCase("cost-\(count)", number: 100 + count, kinds: (0..<count).map { palette[$0 % (palette.count - 1)] },
                          columns: count >= 60 ? 9 : 6, slack: .zero)
         costCases.append(c)
+        checkWidth(c)
         var samples: [Double] = []
         for _ in 0..<5 {
             let start = DispatchTime.now().uptimeNanoseconds
@@ -485,22 +510,23 @@ func runTidyPackerChecks() {
         for (name, value) in digests.sorted(by: { $0.key < $1.key }) { print("        \"\(name)\": \"\(value)\",") }
     }
     let pinned: [String: String] = [
-        "cost-30": "9394eca16578c47c",
-        "cost-60": "113769d4a6f7d529",
+        "cost-30": "5b89f3eade1cc4f7",
+        "cost-60": "c10d5db57cef326a",
         "cost-89": "8bf1a54c85d93cf2",
         "cramped": "a1d0d984adfe7cb2",
         "dust": "878e3315a351e681",
-        "eight": "a6b882fc2005f242",
+        "eight": "0382f1c8ac951e75",
         "five": "50204bdc875ebf24",
         "lead-five-helpers": "f6362fdac966084c",
-        "lead-three-helpers": "378163cbe1bd21f0",
+        "lead-three-helpers": "b2650ddcd9482ee3",
+        "narrow": "dcae70cd0dda589b",
         "real-agents-22": "3d59a413644bd9d8",
         "real-agents-24": "4c72ea829f235922",
-        "real-overhang-6": "d8aa912ab38a8f29",
+        "real-overhang-6": "cf1ea4240c2baffd",
         "roomy": "c12f0af008fce981",
-        "thirteen": "cc03197d84ccd826",
-        "three": "099ba643b1a2c5ec",
-        "two": "c076533efc8c1cc0",
+        "thirteen": "d9bcfeb8256cd0b5",
+        "three": "fcc4ce4ebc20b8c8",
+        "two": "2d76c6a697a7638d",
     ]
     for (name, value) in pinned where digests[name] != value {
         check(false, "\(name): tidy output changed (digest \(digests[name] ?? "none"), pinned \(value))")

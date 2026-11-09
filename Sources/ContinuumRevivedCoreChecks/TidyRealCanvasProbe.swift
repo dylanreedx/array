@@ -62,6 +62,8 @@ func runTidyRealCanvasProbe() {
         /// Tiles at least twice the zone's median area before the tidy, and
         /// how many of them are still at least as large as every other tile.
         var bigTiles: Int = 0, bigStillLargest: Int = 0, bigMargin: Double = 0
+        /// The zone's width after tidy, against before: tidy keeps it unless it must move.
+        var widthKept: Bool = true
     }
     var rows: [ZoneRow] = []
     var index = 0
@@ -152,7 +154,8 @@ func runTidyRealCanvasProbe() {
                 zoneAfter: String(format: "%.0fx%.0f", zoneAfter.size.width, zoneAfter.size.height),
                 atBandEdge: atEdge, atCap: atCap, maxStretch: maxStretch, minShrink: minShrink,
                 belowMinimum: below, solveMs: ms, idempotent: again.tileFrames.isEmpty && again.zonePlacements.isEmpty,
-                bigTiles: big.count, bigStillLargest: bigStill, bigMargin: largestOther > 0 ? smallestBig / largestOther : 0))
+                bigTiles: big.count, bigStillLargest: bigStill, bigMargin: largestOther > 0 ? smallestBig / largestOther : 0,
+                widthKept: abs(zoneAfter.size.width - zone.size.width) <= CanvasTidyPacker.grid))
             writeTidyPicture(before: scene, after: after, zoneId: zone.zoneId, path: out.appendingPathComponent("\(name).png").path)
             // Anonymised shape for seeding: kinds, frames and clusters only.
             let ids = Dictionary(uniqueKeysWithValues: members.enumerated().map { ($1.id, $0) })
@@ -170,13 +173,13 @@ func runTidyRealCanvasProbe() {
         }
     }
 
-    var table = "| zone | tiles | kinds | clusters | fill before | fill after | zone before → after | at band edge | at 2.56x cap | max stretch | min shrink | below min | solve ms | 2nd tidy no-op | big tiles still largest | smallest big ÷ largest other |\n"
-    table += "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+    var table = "| zone | tiles | kinds | clusters | fill before | fill after | zone before → after | at band edge | at 2.56x cap | max stretch | min shrink | below min | solve ms | 2nd tidy no-op | big tiles still largest | smallest big ÷ largest other | width kept |\n"
+    table += "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
     for r in rows {
-        table += String(format: "| %@ | %d | %@ | %d | %.3f | %.3f | %@ → %@ | %d | %d | %.2f | %.2f | %d | %.1f | %@ | %d of %d | %.2f |\n",
+        table += String(format: "| %@ | %d | %@ | %d | %.3f | %.3f | %@ → %@ | %d | %d | %.2f | %.2f | %d | %.1f | %@ | %d of %d | %.2f | %@ |\n",
                         r.name, r.tiles, r.kinds, r.clusters, r.fillBefore, r.fillAfter, r.zoneBefore, r.zoneAfter,
                         r.atBandEdge, r.atCap, r.maxStretch, r.minShrink, r.belowMinimum, r.solveMs, r.idempotent ? "yes" : "NO",
-                        r.bigStillLargest, r.bigTiles, r.bigMargin)
+                        r.bigStillLargest, r.bigTiles, r.bigMargin, r.widthKept ? "yes" : "no")
     }
     try? table.write(to: out.appendingPathComponent("table.md"), atomically: true, encoding: .utf8)
     if let data = try? JSONEncoder().encode(rows) { try? data.write(to: out.appendingPathComponent("zones.json")) }
