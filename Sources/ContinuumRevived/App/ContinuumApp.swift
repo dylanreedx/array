@@ -3716,6 +3716,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tidy-offscreen-defer-check") {
+            _ = NSApplication.shared
+            do {
+                try TidyOffscreenDeferChecks.run()
+                print("TidyOffscreenDeferChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --tidy-offscreen-defer-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--tidy-zone-shortcut-check") {
             _ = NSApplication.shared
             do {
