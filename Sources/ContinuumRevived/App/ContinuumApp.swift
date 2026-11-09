@@ -16385,11 +16385,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let helperSize = CGSize(
                 width: max(Double(minimum.width), parent.worldFrame.width),
                 height: max(Double(minimum.height), (parent.worldFrame.height - gap) / 2))
-            if let slot = canvasView.visibleSpawnSlot(size: helperSize,
-                anchor: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width/2,
-                                y: parent.worldFrame.y + parent.worldFrame.height/2), zoneId: zoneId) {
-                return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), helperSize)
-            }
             let familyTileIds = Set(agentSupervisor.records.values
                 .filter { $0.parentAgentID == parentId && $0.id != agentId }
                 .compactMap(\.tileId))
@@ -16408,11 +16403,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     focus: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width / 2,
                                    y: parent.worldFrame.y + parent.worldFrame.height / 2))))
             return (spawner, scope, CGPoint(x: placed.x + placed.width / 2, y: placed.y + placed.height / 2), helperSize)
-        }
-        if let slot = canvasView.visibleSpawnSlot(size: size,
-            anchor: CGPoint(x: parent.worldFrame.x + parent.worldFrame.width/2,
-                            y: parent.worldFrame.y + parent.worldFrame.height/2), zoneId: zoneId) {
-            return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), nil)
         }
         let occupied = zoneTiles.map {
             CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height)
