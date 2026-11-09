@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
 
 /// Opt-in dev preview: production sidebar views, isolated sample rows, no runners
 /// or project/store acquisition. Invoked only by ARRAY_SIDEBAR_PREVIEW=1.
@@ -9,6 +10,10 @@ final class SidebarRefinementsPreview: NSObject, NSApplicationDelegate {
     private var windows: [NSWindow] = []
     private var inboxes: [AgentInboxView] = []
     private var rows = WorkspaceFilterSheet.rows()
+    private var settingsWindow: NSWindow?
+    private lazy var settingsModal = SettingsModal(model: SettingsModel(
+        defaults: .standard, navKeymap: .resolve(defaults: .standard, warn: { _ in }),
+        initialPaneID: "appearance"))
 
     static func run() {
         let app = NSApplication.shared
@@ -26,6 +31,9 @@ final class SidebarRefinementsPreview: NSObject, NSApplicationDelegate {
         let mainMenu = NSMenu()
         let applicationItem = NSMenuItem()
         let applicationMenu = NSMenu(title: "Array Sidebar")
+        let settingsItem = applicationMenu.addItem(withTitle: "Settings…", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        applicationMenu.addItem(.separator())
         applicationMenu.addItem(withTitle: "Quit Array Sidebar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         applicationItem.submenu = applicationMenu
         mainMenu.addItem(applicationItem)
@@ -91,6 +99,24 @@ final class SidebarRefinementsPreview: NSObject, NSApplicationDelegate {
                 try? data.write(to: URL(fileURLWithPath: support).appendingPathComponent("sidebar-preview.json"))
             }
         }
+    }
+
+    @objc private func openSettings(_ sender: Any?) {
+        let window: NSWindow
+        if let existing = settingsWindow {
+            window = existing
+        } else {
+            window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 820),
+                styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.title = "Array Sidebar — Settings"
+            window.minSize = NSSize(width: 700, height: 560)
+            window.center()
+            settingsWindow = window
+            settingsModal.onClose = { [weak self] in self?.settingsWindow?.orderOut(nil) }
+        }
+        window.makeKeyAndOrderFront(nil)
+        settingsModal.show(in: window, paneID: "appearance")
     }
 
     private func update(_ ids: [UUID], lifecycle: InboxLifecycle) {

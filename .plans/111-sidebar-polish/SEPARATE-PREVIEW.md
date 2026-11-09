@@ -10,6 +10,8 @@ Open the app with Finder or:
 open "$HOME/array-scratch/apps/Array Sidebar.app"
 ```
 
+Switch styles using **Array Sidebar → Settings…** (**⌘,**) → **Appearance → Sidebar → Active agent**. This presents the real Settings modal and changes both sample sidebars immediately through the normal setting event. It writes only this app's own defaults domain.
+
 Quit with **⌘Q**, **Array Sidebar → Quit Array Sidebar**, or close both sample windows. The Desktop auto-layout app is a different bundle and remains independently usable.
 
 Rebuild/relaunch from this bench when needed:
