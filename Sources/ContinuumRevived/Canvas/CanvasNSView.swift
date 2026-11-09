@@ -916,6 +916,7 @@ final class CanvasNSView: NSView, TokenThemed {
             staged.layer.tiles[staged.tileIndex].frame = staged.frame
         }
         layoutAllTiles(onlyChangedTiles: true)
+        returnFarParkedTiles(movedBy: transaction)
 
         guard !autoLayoutReduceMotionProvider() else { return }
         let animateStart = Self.stageClock()
@@ -991,9 +992,16 @@ final class CanvasNSView: NSView, TokenThemed {
         return transaction
     }
 
-    func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true) {
+    /// `framesZone`: the user tidied this one zone (its menu, ⌥⌘T, ⌘K). Tidy can
+    /// grow a zone, push it, or shrink it, so a zone that was wholly in view can
+    /// end up partly off screen; then the camera flies to frame its new rect,
+    /// starting in the same commit as the tidy's own movement. A zone that stays
+    /// in view never moves the camera, and Tidy canvas never does.
+    func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true,
+                        framesZone: Bool = false) {
         let tidyStart = Self.stageClock()
         defer { qaAutoLayoutStageTimes.tidy += Self.stageClock() - tidyStart }
+        let zoneWasInView = framesZone && zoneId.flatMap(zoneWorldRect).map(isInUsableView) == true
         let baseline = autoLayoutScene()
         // The explicit tidy keeps each lead agent's helpers in one block with it
         // (`CanvasTidyPacker`). Only it reads lineage, so only it asks: once per
@@ -1013,6 +1021,10 @@ final class CanvasNSView: NSView, TokenThemed {
             }
         }
         pushPeersOfZonesGrown(since: baseline)
+        // Before the commit: the flight and the tidy's animations start together.
+        if zoneWasInView, let rect = zoneId.flatMap(zoneWorldRect), !isInUsableView(rect) {
+            navigateViewport(to: containingViewport(for: rect))
+        }
         if commit {
             _ = finishAutoLayoutGesture()
             if let transaction = commitGeometryEdit(), offerUndo {
@@ -1047,7 +1059,13 @@ final class CanvasNSView: NSView, TokenThemed {
         guard !grown.isEmpty else { return }
         let gap = TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)
         for zoneId in grown {
-            let scene = autoLayoutScene()
+            // A project zone below the live hydration tier has no layer, so its
+            // tiles are not in the scene: pushing its placement would leave them
+            // behind in canvas.json (night review, finding 1). It is a fixed
+            // obstacle instead; the grown zone may overlap it until it loads.
+            let loadedZoneIds = Set(zoneLayers.map(\.placement.zoneId))
+            var scene = autoLayoutScene()
+            scene.zones = scene.zones.filter { $0.projectId == nil || loadedZoneIds.contains($0.zoneId) }
             guard var previous = scene.zones.first(where: { $0.zoneId == zoneId }),
                   let original = before[zoneId] else { continue }
             previous.size = original.size
@@ -5509,6 +5527,22 @@ final class CanvasNSView: NSView, TokenThemed {
         }
     }
 
+    /// A layout that moved a far-parked tile into (or near) view brings its body
+    /// back now, laid out at its new size before the commit that shows it — a
+    /// tidy can carry a parked tile on screen without any camera step. Only the
+    /// transaction's own tiles are asked (the caller already walks them), so a
+    /// drag event pays no visibility-index rebuild.
+    private func returnFarParkedTiles(movedBy transaction: CanvasLayoutTransaction) {
+        let visible = worldPlane.bounds
+        let lead = visible.insetBy(
+            dx: -visible.width * Self.farReturnMargin, dy: -visible.height * Self.farReturnMargin)
+        for id in transaction.tileFrames.keys {
+            guard let view = tileView(for: id), view.isFarParked, view.frame.intersects(lead) else { continue }
+            view.promoteBodyToNative()
+            qaFarReturnCount += 1
+        }
+    }
+
     /// Park a settled pass's worth, then come back for the rest. Deferred off the
     /// settle frame; a gesture starting first simply wins, and its settle re-arms.
     private func scheduleFarParkingPass() {
@@ -6686,6 +6720,58 @@ final class CanvasNSView: NSView, TokenThemed {
         return target
     }
 
+    /// A zone's world rect as the canvas holds it now (its layer when installed).
+    func zoneWorldRect(_ zoneId: UUID) -> CGRect? {
+        allZonePlacements().first(where: { $0.zoneId == zoneId })
+            .map { Self.cgRect(from: CanvasEngine.zoneWorldFrame($0)) }
+    }
+
+    /// Whether `rect` lies wholly inside the part of the canvas no overlay
+    /// covers, at the camera navigation reasons from.
+    func isInUsableView(_ rect: CGRect) -> Bool {
+        let usable = usableVisibleScreenRect
+        let viewport = navigationViewport
+        let origin = CanvasEngine.screenToWorld(usable.origin, viewport: viewport)
+        let visible = CGRect(x: origin.x, y: origin.y,
+                             width: usable.width / viewport.zoom, height: usable.height / viewport.zoom)
+        return visible.insetBy(dx: -0.5, dy: -0.5).contains(rect)
+    }
+
+    /// The gentlest camera that shows `rect` whole in the usable rect. If it fits
+    /// at the current zoom, the zoom stays and the camera pans only along the
+    /// axes the zone crossed, by the least that brings it in with the standard
+    /// zone padding (or as much of it as fits) on the side it crossed. Only if it does not fit does the camera zoom
+    /// out, exactly far enough to hold it with the standard padding, centred.
+    /// Never zooms in. A tidy that grew a zone by 46 pt used to jump from 1.40
+    /// to the 0.80 zone-overview zoom.
+    func containingViewport(for rect: CGRect) -> CanvasViewport {
+        let usable = usableVisibleScreenRect
+        let current = navigationViewport
+        let padding = CameraFraming.zonePaddingScreenPx
+        let zoom = current.zoom
+        if Double(rect.width) * zoom <= Double(usable.width), Double(rect.height) * zoom <= Double(usable.height) {
+            /// Screen-space shift along one axis. An axis already in view does not
+            /// move; one the zone crosses brings it in with up to `padding` to
+            /// spare on that side.
+            func shift(_ low: Double, _ high: Double, _ lowBound: Double, _ highBound: Double) -> Double {
+                let pad = min(padding, max(0, ((highBound - lowBound) - (high - low)) / 2))
+                if low < lowBound { return lowBound + pad - low }
+                if high > highBound { return highBound - pad - high }
+                return 0
+            }
+            let dx = shift((Double(rect.minX) - current.x) * zoom, (Double(rect.maxX) - current.x) * zoom,
+                           Double(usable.minX), Double(usable.maxX))
+            let dy = shift((Double(rect.minY) - current.y) * zoom, (Double(rect.maxY) - current.y) * zoom,
+                           Double(usable.minY), Double(usable.maxY))
+            return CanvasViewport(x: current.x - dx / zoom, y: current.y - dy / zoom, zoom: zoom)
+        }
+        let fitted = min((Double(usable.width) - 2 * padding) / Double(rect.width),
+                         (Double(usable.height) - 2 * padding) / Double(rect.height))
+        let outZoom = max(CanvasEngine.defaultZoomRange.lowerBound, min(zoom, fitted))
+        return CanvasViewport(x: Double(rect.midX) - Double(usable.midX) / outZoom,
+                              y: Double(rect.midY) - Double(usable.midY) / outZoom, zoom: outZoom)
+    }
+
     var navigationViewport: CanvasViewport { cameraDriver.flightTarget ?? canvasState.viewport }
 
     /// QA: force navigation to fly (true) or cut (false) whatever the window's
@@ -7301,7 +7387,7 @@ final class CanvasNSView: NSView, TokenThemed {
     @objc private func tidyZoneFromMenu(_ sender: NSMenuItem) {
         guard let idString = sender.representedObject as? String,
               let zoneId = UUID(uuidString: idString) else { return }
-        tidyAutoLayout(zoneId: zoneId)
+        tidyAutoLayout(zoneId: zoneId, framesZone: true)
     }
 
     func requestZoneScopeChange(zoneId: UUID) {

@@ -68,7 +68,13 @@ class TileNSView: NSView, TokenThemed {
     }
 
     override func setFrameSize(_ newSize: NSSize) {
-        if surfaceResidency == .surfaced,
+        // A baked picture would be stale at the new size, so a surfaced body comes
+        // back. A FAR-PARKED body has no picture, only an empty stand-in nobody can
+        // see: it stays parked, and returns at the new size, laid out once, when
+        // the camera nears it (`CanvasNSView.returnFarParkedTiles`). Promoting it
+        // here made an 89-tile tidy re-tile every offscreen body's scroll views
+        // inside the commit that starts the movement.
+        if surfaceResidency == .surfaced, !isFarParked,
            abs(frame.width - newSize.width) > 0.0001 || abs(frame.height - newSize.height) > 0.0001 {
             promoteBodyToNative()
         }
@@ -657,11 +663,12 @@ class TileNSView: NSView, TokenThemed {
     func promoteBodyToNative() {
         guard surfaceResidency == .surfaced, let body = parkedBody else { return }
         let start = ProcessInfo.processInfo.systemUptime
+        // Not parked from here on: the install below lays the real body out.
+        isFarParked = false
         body.removeFromSuperview()
         installContentView(body)
         Self.qaPromoteMs += (ProcessInfo.processInfo.systemUptime - start) * 1_000
         parkedBody = nil
-        isFarParked = false
         titleBar?.setCharacterHeld(false)
         // `surfaceHost` tracks what is INSTALLED; `retainedSurfaceHost` keeps the
         // view and its uploaded texture alive for the next gesture.
@@ -993,12 +1000,19 @@ class TileNSView: NSView, TokenThemed {
     /// counter.
     private(set) var qaChromeZOrderRepairCount = 0
 
+    /// QA: times the real body (not a parked stand-in) was given a new size,
+    /// which is what re-tiles its scroll views (`--tidy-offscreen-defer-check`).
+    private(set) var qaBodyResizeCount = 0
+    /// QA: the installed body's frame (a parked tile's is its empty stand-in).
+    var qaContentViewFrame: CGRect? { isFarParked ? nil : contentView?.frame }
+
     private func layoutContentView() {
         // An under-bar reserves its readable chrome growth. Plain tiles retain
         // the stable body origin; no-op assignments still leave layout alone.
         let barHeight = contentTopInsetWorldHeight
         let nextFrame = NSRect(x: 0, y: barHeight, width: bounds.width, height: max(0, bounds.height - barHeight))
         if contentView?.frame != nextFrame {
+            if !isFarParked, contentView?.frame.size != nextFrame.size { qaBodyResizeCount += 1 }
             contentView?.frame = nextFrame
         }
     }
