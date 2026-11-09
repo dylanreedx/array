@@ -1051,7 +1051,13 @@ final class CanvasNSView: NSView, TokenThemed {
         guard !grown.isEmpty else { return }
         let gap = TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)
         for zoneId in grown {
-            let scene = autoLayoutScene()
+            // A project zone below the live hydration tier has no layer, so its
+            // tiles are not in the scene: pushing its placement would leave them
+            // behind in canvas.json (night review, finding 1). It is a fixed
+            // obstacle instead; the grown zone may overlap it until it loads.
+            let loadedZoneIds = Set(zoneLayers.map(\.placement.zoneId))
+            var scene = autoLayoutScene()
+            scene.zones = scene.zones.filter { $0.projectId == nil || loadedZoneIds.contains($0.zoneId) }
             guard var previous = scene.zones.first(where: { $0.zoneId == zoneId }),
                   let original = before[zoneId] else { continue }
             previous.size = original.size
