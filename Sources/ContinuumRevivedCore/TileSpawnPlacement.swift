@@ -412,6 +412,31 @@ public enum TileSpawnPlacement {
         return false
     }
 
+    // MARK: - Explicit helper columns
+
+    /// Explicit helper intent: fill columns to the lead's right, starting at
+    /// its top. Camera visibility and automatic growth direction cannot change
+    /// the side. Candidates come from actual frames, independent of presets.
+    public static func besideLead(newSize: CGSize, lead: TileFrame, helpers: [TileFrame],
+                                  siblings: [TileFrame], gap: Double) -> TileFrame {
+        let size = sanitizedSize(newSize)
+        let gap = gap.isFinite ? max(0, gap) : 0
+        let firstX = lead.x + lead.width + gap
+        let lastY = max(lead.y, lead.y + lead.height - Double(size.height))
+        let xs = ([firstX] + siblings.map { $0.x + $0.width + gap })
+            .filter { $0 >= firstX }.sorted()
+        let ys = ([lead.y] + helpers.map { $0.y + $0.height + gap })
+            .filter { $0 >= lead.y && $0 <= lastY + 0.001 }.sorted()
+        let obstacles = siblings.map { rect(for: $0) }
+        for x in xs { for y in ys {
+            let frame = TileFrame(x: x, y: y, width: Double(size.width), height: Double(size.height))
+            let guarded = rect(for: frame).insetBy(dx: -max(0, gap - 0.5), dy: -max(0, gap - 0.5))
+            if !obstacles.contains(where: { $0.intersects(guarded) }) { return frame }
+        } }
+        // The furthest sibling edge always offers an unoccupied top slot.
+        return TileFrame(x: xs.last ?? firstX, y: lead.y, width: Double(size.width), height: Double(size.height))
+    }
+
     // MARK: - Geometry helpers
 
     /// `rect` moved the least distance that puts it inside `bounds`. On an axis
