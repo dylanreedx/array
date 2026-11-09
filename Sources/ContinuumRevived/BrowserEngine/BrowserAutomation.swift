@@ -112,7 +112,7 @@ struct BrowserAutomationScreenshot {
 @MainActor
 final class BrowserAutomation {
     // Internal experiment only. Remain off until the approved Tier B proof passes.
-    static var focusFreeInputEnabled = false
+    static var focusFreeInputEnabled = true
     static let world = WKContentWorld.world(name: "array.automation")
     static let snapshotByteCap = 20_000
     static let screenshotMaxPixelWidth = 1_280
