@@ -908,6 +908,7 @@ final class CanvasNSView: NSView, TokenThemed {
             staged.layer.tiles[staged.tileIndex].frame = staged.frame
         }
         layoutAllTiles(onlyChangedTiles: true)
+        returnFarParkedTiles(movedBy: transaction)
 
         guard !autoLayoutReduceMotionProvider() else { return }
         let animateStart = Self.stageClock()
@@ -5431,6 +5432,22 @@ final class CanvasNSView: NSView, TokenThemed {
                 }
                 budget -= 1
             }
+            view.promoteBodyToNative()
+            qaFarReturnCount += 1
+        }
+    }
+
+    /// A layout that moved a far-parked tile into (or near) view brings its body
+    /// back now, laid out at its new size before the commit that shows it — a
+    /// tidy can carry a parked tile on screen without any camera step. Only the
+    /// transaction's own tiles are asked (the caller already walks them), so a
+    /// drag event pays no visibility-index rebuild.
+    private func returnFarParkedTiles(movedBy transaction: CanvasLayoutTransaction) {
+        let visible = worldPlane.bounds
+        let lead = visible.insetBy(
+            dx: -visible.width * Self.farReturnMargin, dy: -visible.height * Self.farReturnMargin)
+        for id in transaction.tileFrames.keys {
+            guard let view = tileView(for: id), view.isFarParked, view.frame.intersects(lead) else { continue }
             view.promoteBodyToNative()
             qaFarReturnCount += 1
         }
