@@ -100,6 +100,13 @@ enum DragInTidyChecks {
         if let (first, last) = host.rowEnds() {
             attempt { try host.slide("slide \(names[first]!) to the row's end past \(names[last]!)", first, pastRightOf: last) }
         }
+        // 5. A wide tile dropped half over its neighbour with NO latch (its
+        // centre over the neighbour, the pointer short of it): the magnet's
+        // escape slot owns the drop. Legal is what is asserted; where it lands
+        // is reported.
+        if let (wide, narrow) = host.pairInOneRow(wideKind: .browser, narrowKind: .note) {
+            attempt { try host.unlatchedOverlap("drop wide \(names[wide]!) half over \(names[narrow]!) with no latch", wide, over: narrow) }
+        }
         // 4. To the zone's right edge (still inside) and back.
         if let tile = host.rowEnds()?.0 {
             attempt { try host.edgeAndBack("drag \(names[tile]!) to the zone's edge and back", tile) }
@@ -363,6 +370,17 @@ enum DragInTidyChecks {
                 DragInTidyChecks.check(traded, "\(name): the pair did not exchange places: \(DragInTidyChecks.names[id] ?? "?") \(a0) -> \(a1), \(DragInTidyChecks.names[target] ?? "?") \(b0) -> \(b1)")
             }
             return assess(name, before: before, swap: sameRow)
+        }
+
+        func unlatchedOverlap(_ name: String, _ id: UUID, over neighbour: UUID) throws -> DropReport {
+            let before = frames()
+            guard let a = before[id], let b = before[neighbour] else { throw Failure(message: "\(name): missing tiles") }
+            let delta = CGVector(dx: (b.x + b.width / 2) - (a.x + a.width / 2), dy: (b.y + b.height / 2) - (a.y + a.height / 2))
+            try drag(id, worldPath: ramp(to: delta))
+            if let landed = frames()[id] {
+                print(String(format: "drag-in-tidy: %@: landed at (%.0f, %.0f) from (%.0f, %.0f)", name, landed.x, landed.y, a.x, a.y))
+            }
+            return assess(name, before: before)
         }
 
         func slide(_ name: String, _ id: UUID, pastRightOf last: UUID) throws -> DropReport {

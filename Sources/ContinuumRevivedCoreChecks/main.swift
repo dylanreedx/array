@@ -12157,6 +12157,35 @@ func runTidiedMixedTrajectories() -> Int {
         anomalies += problems.count
         print("")
     }
+    // An UNLATCHED drop in the full zone: web1 carried 496pt right (its centre
+    // over note1, the pointer short of it), released with no latch. The drop
+    // settles the mover; it must stay in the zone's content, never be flung out.
+    if let web1 = byName["web1"], let start = original[web1] {
+        let baseline = CanvasAutoLayoutEngine.Scene(tiles: tiles, zones: [packedZone])
+        let requested = TileFrame(x: start.x + 496, y: start.y, width: start.width, height: start.height)
+        // The pointer the app passes: the title-bar grab point, 80pt in from
+        // the tile's left edge, which stops short of note1.
+        let pointer = CGPoint(x: requested.x + 80, y: requested.y + 16)
+        let live = CanvasAutoLayoutEngine.solve(scene: baseline, mutation: .tile(id: web1, frame: requested),
+                                                gap: gap, zonePadding: padding, headerHeight: header, pointer: pointer)
+        var droppedTiles = tiles
+        for index in droppedTiles.indices {
+            if droppedTiles[index].id == web1 { droppedTiles[index].frame = requested }
+        }
+        let settle = CanvasAutoLayoutEngine.solve(
+            scene: .init(tiles: droppedTiles, zones: [packedZone]),
+            mutation: .settle(zoneId: zoneId, anchor: web1, pin: false),
+            gap: gap, zonePadding: padding, headerHeight: header)
+        let landed = settle.tileFrames[web1] ?? requested
+        let inside = landed.y >= packedContent.y - 0.5 && landed.x >= packedContent.x - 0.5
+            && landed.x + landed.width <= packedContent.x + packedContent.width + 0.5
+            && landed.y + landed.height <= packedContent.y + packedContent.height + 0.5
+        print("--- unlatched drop of web1 over note1 ---")
+        print("live latch " + (live.swapTargetTileId.flatMap { names[$0] } ?? "none")
+              + "  settle -> web1(\(Int(landed.x)),\(Int(landed.y)))" + (inside ? "  inside" : "   !! OUTSIDE the content"))
+        if !inside { anomalies += 1 }
+        print("")
+    }
     return anomalies
 }
 
