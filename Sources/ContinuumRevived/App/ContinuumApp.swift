@@ -3716,6 +3716,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--tidy-camera-check") {
+            _ = NSApplication.shared
+            do {
+                try TidyCameraChecks.run()
+                print("TidyCameraChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --tidy-camera-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--tidy-offscreen-defer-check") {
             _ = NSApplication.shared
             do {
