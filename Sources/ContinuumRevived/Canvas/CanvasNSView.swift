@@ -2888,6 +2888,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let transaction = CanvasGeometryTransaction(action: pending.action, before: pending.before, after: after)
         qaAutoLayoutStageTimes.capture += Self.stageClock() - captureStart
         guard !transaction.isNoOp else { return nil }
+        presentGeometryBeforePersisting()
         let persistStart = Self.stageClock()
         let persisted = persistGeometrySnapshot(transaction.after, changedFrom: transaction.before)
         qaAutoLayoutStageTimes.persist += Self.stageClock() - persistStart
@@ -2902,6 +2903,28 @@ final class CanvasNSView: NSView, TokenThemed {
         }
         notifyGeometryCommit(transaction)
         return transaction
+    }
+
+    /// Put the edited geometry, and the animations toward it, on screen BEFORE
+    /// the durable write. A movement starts at the CA commit that carries it, and
+    /// that commit used to wait for the end of the run-loop turn — behind the
+    /// write below (each project's `canvas.json` read and verified plus the
+    /// workspace document, 4–19 ms measured; more with more projects), the commit
+    /// notifications and the Undo toast. Animations run on the render server, so
+    /// the write no longer delays or stalls them. A refused write still rolls the
+    /// geometry back below, exactly as before; it is visible as a snap back.
+    /// Witness: `--auto-layout-tidy-latency-check` (movement start).
+    private func presentGeometryBeforePersisting() {
+        guard onLayoutCommitted != nil, let window else { return }
+        var t = Self.stageClock()
+        window.layoutIfNeeded()
+        qaAutoLayoutStageTimes.presentLayout += Self.stageClock() - t
+        t = Self.stageClock()
+        window.displayIfNeeded()
+        qaAutoLayoutStageTimes.presentDisplay += Self.stageClock() - t
+        t = Self.stageClock()
+        CATransaction.flush()
+        qaAutoLayoutStageTimes.presentFlush += Self.stageClock() - t
     }
 
     /// Stand down a move preview while a reference card owns the pointer.

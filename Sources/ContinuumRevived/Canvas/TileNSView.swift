@@ -1420,11 +1420,14 @@ class TileNSView: NSView, TokenThemed {
 
         if !wasClick, case .move = completedDragKind { _ = canvas?.finishAutoLayoutGesture() }
         if case .resize = completedDragKind { _ = canvas?.finishAutoLayoutGesture() }
-        if case .move = completedDragKind { _ = canvas?.commitGeometryEdit() }
-        if case .resize = completedDragKind { _ = canvas?.commitGeometryEdit() }
+        // The landing animates before the commit: the commit puts the geometry on
+        // screen ahead of its durable write, and a landing set up after that would
+        // show the tile at its destination for one frame before it slid in.
         if case .move = completedDragKind, committedSnap {
             canvas?.animateSnapLanding(tileId: tile.id, from: snapStartOrigin)
         }
+        if case .move = completedDragKind { _ = canvas?.commitGeometryEdit() }
+        if case .resize = completedDragKind { _ = canvas?.commitGeometryEdit() }
 
         super.mouseUp(with: event)
     }
@@ -2243,6 +2246,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     // false` contract `setViewport` states one call up. Zoom is unaffected: the
     // chrome scale is a function of the bar's height, and `layoutChrome`
     // invalidates explicitly when that height changes.
+    //
     var tile: Tile { didSet { if tile != oldValue { invalidateChrome() } } }
     var agentStatus: AgentStatus? {
         didSet {
