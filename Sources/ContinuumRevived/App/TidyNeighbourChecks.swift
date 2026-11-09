@@ -119,21 +119,24 @@ enum TidyNeighbourChecks {
 
     // MARK: - 2: Tidy Canvas over a 2x3 grid
 
-    /// Six zones, three columns by two rows, 100pt apart: cramped ones (six
-    /// 400x300 notes in 1000x800) and roomy ones (one note). Returns the result,
+    /// Six 1000x400 zones, three columns 100pt apart by two rows 20pt apart: cramped ones
+    /// (six 400x300 notes, which must grow) and roomy ones (one note, which
+    /// shrink). Returns the result,
     /// keyed by the scene's stable ids, for the determinism comparison.
     private static func tidyCanvasGrid(label: String) throws -> [String: TileFrame] {
         let scene = try Scene(seed: 3)
         var zones: [SceneZone] = []
         for row in 0..<2 {
             for column in 0..<3 {
-                let origin = CGPoint(x: 12000 + Double(column) * 1100, y: Double(row) * 900)
+                let origin = CGPoint(x: 12000 + Double(column) * 1100, y: Double(row) * 420)
                 let cramped = (row + column) % 2 == 0
+                // Six 400x300 notes in a 1000x400 zone (952x318 of content): it
+                // must grow in height, into the row 20pt below it.
                 let notes = cramped
-                    ? (0..<6).map { CGRect(x: origin.x + 24 + Double($0 % 3) * 320, y: origin.y + 58 + Double($0 / 3) * 340,
+                    ? (0..<6).map { CGRect(x: origin.x + 24 + Double($0 % 3) * 310, y: origin.y + 58 + Double($0 / 3) * 20,
                                            width: 400, height: 300) }
                     : [CGRect(x: origin.x + 24, y: origin.y + 58, width: 300, height: 200)]
-                zones.append(scene.zone("grid\(row)\(column)", CGRect(origin: origin, size: CGSize(width: 1000, height: 800)), notes: notes))
+                zones.append(scene.zone("grid\(row)\(column)", CGRect(origin: origin, size: CGSize(width: 1000, height: 400)), notes: notes))
             }
         }
         let host = try scene.mount(autoLayout: true, label: label)
@@ -141,6 +144,12 @@ enum TidyNeighbourChecks {
         let before = host.snapshot()
         try host.tidyCanvas()
         let after = host.snapshot()
+        let grew = zones.filter { (after.zones[$0.zoneId]?.height ?? 0) > (before.zones[$0.zoneId]?.height ?? 0) + 1
+            || (after.zones[$0.zoneId]?.width ?? 0) > (before.zones[$0.zoneId]?.width ?? 0) + 1 }.count
+        let shrank = zones.filter { (after.zones[$0.zoneId]?.height ?? 0) < (before.zones[$0.zoneId]?.height ?? 0) - 1
+            || (after.zones[$0.zoneId]?.width ?? 0) < (before.zones[$0.zoneId]?.width ?? 0) - 1 }.count
+        check(grew > 0 && shrank > 0, "\(label) precondition: the grid must both grow and shrink zones; grew \(grew), shrank \(shrank)")
+        print("tidy-zone-neighbours: \(label) Tidy Canvas grew \(grew) zone(s), shrank \(shrank)")
         host.expectNoZoneOverlaps(after, "\(label) Tidy Canvas")
         host.expectMembershipUnchanged(before: before, after: after, "\(label) Tidy Canvas")
         for zone in zones {
