@@ -1,81 +1,91 @@
-# Checks out of the release app: first slice
+# Checks out of the release app: measured first slice
 
-Base: c476ced9. Branch: array/checks-out-of-app.
+Base c476ced9; local branch array/checks-out-of-app. No push or landing.
 
-Use ARRAY_CHECKS, defined by SwiftPM for debug only. This keeps witnesses in the
-same module as the real production entry points without copying implementations
-or expanding their access levels. Explicit release witness builds can opt in with
--Xswiftc -DARRAY_CHECKS. Ordinary release builds omit this slice.
+## Change and remaining scope
 
-Scope: TileSurfaceResidencyChecks (3,248 lines), TranscriptRhythmChecks (2,902),
-AgentFirstPaintChecks (2,852), FileOpenChecks (1,992): 10,994 lines, plus eight
-main dispatch branches. Debug contains identical witness implementations. Normal
-production paths are unchanged. Probe/lab types have production references (for
-example Component Lab uses SidebarScreenshotChecks); gating the entire 100k lines
-requires a separate review of these boundaries and the inline AppDelegate checks.
+SwiftPM defines ARRAY_CHECKS for debug. Ordinary release omits three pure-check
+files and their six main() dispatch branches: TranscriptRhythmChecks (2,902
+lines), AgentFirstPaintChecks (2,852), FileOpenChecks (1,992): 7,746 lines total.
+Debug uses the identical witness bodies against the same production entry points.
+Production implementations are unchanged. Explicit release witness builds can
+opt in with -Xswiftc -DARRAY_CHECKS.
 
-Release flags: the eight removed branches fall through to the existing unknown
-check guard, which exits 1 before normal boot. Other check branches remain in this
-first slice, including those required by check-app-bundle.sh. Consequently a
-zero-count strings search for '-check' is NOT achieved by this slice.
+A compile-time flag avoids copying production code or expanding internal access
+across a separate target. Full extraction was deliberately stopped at a small
+slice: probe/lab code has production references (Component Lab uses
+SidebarScreenshotChecks), and inline AppDelegate checks need separate boundaries.
+TileSurfaceResidencyChecks also serves AppThemeChecks and
+CanvasZoomInvalidationProbeChecks, so it remains compiled. Most of the estimated
+100k lines and the main cascade remain. This is not completion of full gating.
 
-Packaging blocker: release's lock re-exec discarded arguments already consumed by
-its parser and immediately failed '--output <path> is required'. Preserve original
-argv for the re-exec. This failure was observed before the fix; the baseline
-packaging command completed after the fix. No new verifier tooling.
+Release rejects the six omitted flags through the existing unknown-check guard:
+exit 1 before normal startup. Other existing checks remain available, including
+the bundle verifier's eight checks. A made-up --unknown-witness-check also exits 1.
 
-## Measurements and verification
+The release packaging lock's re-exec lost already-parsed arguments and failed
+'--output <path> is required' before compilation. Preserving original argv fixes
+that observed blocker. The same packaging command then succeeded.
 
-Logs: qa-runs/checks-out-of-app (untracked, disposable).
-Baseline command: /usr/bin/time -p scripts/make-app-bundle.sh --configuration release
---channel prod --output ~/array-scratch/checks-out-of-app/Before.app.
-Fresh worktree with no build products; GhosttyKit prepared by existing script.
-Before release: 1115.32 seconds; raw executable 150802488 bytes.
-Before initial debug: 119.99 seconds. One-comment edit in ContinuumApp.swift:
-before incremental 36.41 seconds, after incremental 39.44 seconds.
-Gated debug build: PASS (86.05 seconds). No debug speed gain demonstrated.
+## Measurements
 
-IMPORTANT: two unrelated Swift builds started during baseline compilation; Array
-and Chrome were also using CPU. These are observed timings, NOT a controlled
-quiet-machine performance comparison. Dependency checkout happened only before
-the baseline. After release retains checkouts but starts with no release products.
+Same machine, /usr/bin/time -p. Output ~/array-scratch/checks-out-of-app/{Before,After}.app.
+Command scripts/make-app-bundle.sh --configuration release --channel prod --output <scratch>.
 
-Targeted debug: 9/10 passed. Transcript rhythm, active-context file open, Markdown
-performance, agent local-file links, Markdown preview, gesture telemetry, agent
-first paint, workspace API open, app-support channels passed. Surface residency
-failed: 'flag off must still pay the native cascade — a gesture that laid nothing
-out was not a gesture'. Cause unresolved; do not label it pre-existing without a
-baseline witness. All targeted runs use isolated roots/app support, disable tmux,
-and unset inherited TMUX/TMUX_PANE. Full matrix owns its verified private socket.
+| Measurement | Before | After final slice |
+|---|---:|---:|
+| Release bundle build wall seconds | 1115.32 | 771.12 |
+| Raw .build/release/Array bytes | 150802488 | 149747112 |
+| One-comment edit in ContinuumApp.swift, incremental debug seconds | 36.41 | 57.43 |
 
-The packaging script performs its normal mandatory ad hoc signing; no Developer
-ID signing, notarization, release assets, pushes or /Applications changes.
+Binary reduction: 1055376 bytes (about 1.01 MiB, 0.70%). No incremental debug
+improvement demonstrated. Initial debug was 119.99s; candidate gated debug 86.05s.
+A four-file candidate's incremental debug took 39.44s before narrowing scope.
 
-## Scope correction after release compile
+These release times are NOT a controlled clean before/after comparison:
+- Before was a fresh worktree with dependency resolution and no build products.
+- Two unrelated Swift builds started during the baseline; Array and Chrome also
+  consumed CPU. No matrix overlapped either release build.
+- After removed release products but an unsuccessful compile warmed dependencies;
+  final retry rebuilt the app with those dependencies retained.
+A quiet-machine, equally clean comparison remains unverified; do not claim the
+observed wall-time difference as a speedup attributable to this patch.
 
-The first release attempt failed in AppThemeChecks.swift:23 and
-CanvasZoomInvalidationProbeChecks.swift:223 because both depend on
-TileSurfaceResidencyChecks. That file and its two dispatch branches are now
-left unchanged. Final scope is THREE pure-check files, 7,746 lines, SIX branches.
-The final release retry reuses dependencies compiled during the failed clean
-attempt; its wall time is not a clean-build comparison. Earlier scope and
-incremental measurements above describe the four-file candidate. Debug bodies
-are unchanged between these candidates. The full 100k-line extraction is not
-complete, and no release-speed improvement is established by these measurements.
+## Verification
 
-The release retry ran 894.18 seconds but FAILED: ContinuumApp.swift was modified
-during compilation while removing the residency dispatch gates. This was an
-execution error, not a release compiler incompatibility. No after binary/size or
-bundle result from that attempt is valid. The queued verifier continued into the
-full matrix; release verification must be repeated after its lock is released.
+- Final debug build: PASS; git diff --check: PASS.
+- Ten targeted debug legs: 9 PASS. Rhythm, active-context file open, Markdown perf,
+  local-file links, Markdown preview, gesture telemetry, first paint, workspace API
+  open and app-support channel passed. Surface residency FAILED: 'flag off must
+  still pay the native cascade — a gesture that laid nothing out was not a gesture'.
+  Cause unresolved; its implementation is unchanged in the final patch.
+- Final release build: PASS (771.12s).
+- check-app-bundle.sh --configuration release --channel prod --bundle <After.app>:
+  PASS, including signature verification, self-checks and LaunchServices probe.
+- All six omitted flag strings have zero occurrences in release strings output;
+  all six flag invocations and an unknown flag return 1 without booting.
+- Overall strings search for '-check': 796 matching lines. Zero overall check
+  strings is NOT achieved by this partial slice.
+- Detached full matrix: PASS, 429 legs, 1821s (30m21s), zero unexpected failures.
+  One expected KNOWN-RED: --empty-workspace-creation-check (palette omits the
+  registered Beta project). All six gated branches explicitly PASS in its report.
+  CoreChecks passed in 212s. Display baselines skipped as requested; surface
+  residency was skipped too, so the targeted failure remains unresolved.
+- Matrix notes: app-theme surface-cache witness and shared-agent baseline
+  comparison skipped with display checks; iOS preview uses labeled fixture frames.
 
-## Full matrix result
+Full matrix invocation: env -u ARRAY_AGENT_ID -u TMUX -u TMUX_PANE TERM=xterm-256color
+CONTINUUM_SKIP_UI_BASELINES=1 caffeinate -u -i scripts/run-matrix.sh </dev/null,
+detached with a new session. CONTINUUM_ARRAY_MANAGED_AGENT was preserved. Matrix
+verified its disposable tmux socket; targeted checks disabled tmux and isolated
+project/app-support dirs. No default tmux socket or /Applications app was touched.
 
-Detached full matrix PASS: 429 legs, 1821 seconds (30m21s), zero unexpected
-failures, one expected KNOWN-RED: --empty-workspace-creation-check (registered Beta
-project absent from palette). Final source's first-paint, active-context file-open
-and transcript-rhythm legs explicitly PASS in the matrix. CoreChecks passed in
-212 seconds. Display baselines were skipped as requested. Matrix notes: app-theme
-surface-cache witness and shared-agent baseline comparison skipped with display
-checks; iOS preview proof uses labeled fixtures rather than a live simulator
-interaction. CONTINUUM_ARRAY_MANAGED_AGENT was preserved.
+Two unsuccessful release attempts preceded the final build: missing residency
+check dependencies (160.95s), then input modified during build (894.18s), caused
+by removing the residency gates after the compiler started. The final build ran
+with production sources unchanged throughout. These times are not after results.
+
+Packaging performed its standard ad hoc signing. No Developer ID signing,
+notarization, release assets, new verifier tooling, stash or git config changes.
+Evidence is archived at ~/array-scratch/checks-out-of-app/evidence; the worktree
+bench is returned after commits, leaving this local branch available for review.
