@@ -49,7 +49,12 @@ performance feel and practicality."
 7. **⌥⌘T tidies the current zone.** It is a registered command you can rebind,
    and it shows on its ⌘K row. It skips the ~120 ms the zone menu spends
    blinking and fading before AppKit fires the action.
-8. **The undo toast after a tidy** hugs its message and stays clear of the
+8. **A zone that tidy grows pushes its neighbours clear.** Neighbouring zones
+   move as rigid bodies, carrying their tiles, and nothing changes zone. Before
+   this fix, a grown zone was left lying over the zone it grew into, with auto
+   layout either on or off. Undo restores everything. Witness:
+   `--tidy-zone-neighbours-check`.
+9. **The undo toast after a tidy** hugs its message and stays clear of the
    floating toolbar, whichever edge it sits on, and of the shortcut rail.
    Before, it stretched across the whole canvas.
 
@@ -189,7 +194,7 @@ tmux namespace.
     `--jelly-auto-layout-check`, `--zone-arming-check`, `--canvas-undo-check`,
     `--undo-toast-placement-check`, `--layout-commit-scope-check`,
     `--auto-layout-tidy-latency-check`, `--tidy-zone-shortcut-check`,
-    `--workspace-scene-owner-check`;
+    `--workspace-scene-owner-check`, `--tidy-zone-neighbours-check`;
   - spawn: `--spawn-sizing-check`, `--spawn-placement-check`,
     `--spawn-framing-check`;
   - the former regressions: `--subagent-tile-zone-check`,
@@ -202,5 +207,5 @@ tmux namespace.
 ## Stream reports
 
 `reports/tidy-engine.md`, `reports/tidy-latency.md`, `reports/spawn-sizing.md`,
-`reports/persist-scope.md`. Bare tiles: `reports/bare-tiles.md` on
+`reports/persist-scope.md`, `reports/zone-growth.md`. Bare tiles: `reports/bare-tiles.md` on
 `array/bare-tiles`.
