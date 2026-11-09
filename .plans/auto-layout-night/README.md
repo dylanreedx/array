@@ -93,13 +93,20 @@ with menu dispatch, in a debug build on a loaded Mac
 | | Before tonight | After |
 |---|---|---|
 | Tidy, 30 tiles | 34 ms | 27 ms |
-| Tidy, 89 tiles | 145 ms | 105 ms |
+| Tidy, 89 tiles, all in view | 145 ms | 90 ms |
+| Tidy, 89 tiles, camera on 12 | 95–101 ms (night, before the deferral) | 62–72 ms |
 | Drag release, 89 tiles | 37 ms | 17 ms |
 
 At 89 tiles the solve is 13 ms. Most of the rest is AppKit laying out and
 redrawing the scroll views of every resized tile once. That cost comes with
-resizing at all, and it is smaller in release builds. Deferring it for tiles
-that are off screen is in progress; see below.
+resizing at all, and it is smaller in release builds.
+
+Tiles far off screen are now left parked when tidy resizes them. Each comes
+back laid out once, at its new size, before it comes into view. With 12 of 89
+tiles in view, a tidy lays out 37 tile bodies before moving instead of 89.
+Terminals and browsers cannot park (Ghostty surface, WKWebView), so an
+off-screen one still resizes in the commit. Witness:
+`--tidy-offscreen-defer-check`.
 
 **Real app, filmed at 60 fps:**
 - About 130 ms passed between the menu click and the first tile movement, and
@@ -194,18 +201,22 @@ tmux namespace.
     `--jelly-auto-layout-check`, `--zone-arming-check`, `--canvas-undo-check`,
     `--undo-toast-placement-check`, `--layout-commit-scope-check`,
     `--auto-layout-tidy-latency-check`, `--tidy-zone-shortcut-check`,
-    `--workspace-scene-owner-check`, `--tidy-zone-neighbours-check`;
+    `--workspace-scene-owner-check`, `--tidy-zone-neighbours-check`,
+    `--tidy-offscreen-defer-check`;
   - spawn: `--spawn-sizing-check`, `--spawn-placement-check`,
     `--spawn-framing-check`;
   - the former regressions: `--subagent-tile-zone-check`,
     `--leader-jump-check`, `--tile-reveal-work-check`,
     `--agent-local-file-link-check`, `--canvas-zoom-momentum-check`.
 - **Known to fail before tonight, not from this work:**
-  `--agent-tile-click-focus-check`, which fails the same way on untouched
-  `c476ced9`.
+  - `--agent-tile-click-focus-check`, which fails the same way on untouched
+    `c476ced9`;
+  - `--tile-surface-residency-check` ("flag off must still pay the native
+    cascade"), which fails the same way on base `f52c85bb`, with this change
+    reverted and with the display awake. It needs an owner.
 
 ## Stream reports
 
 `reports/tidy-engine.md`, `reports/tidy-latency.md`, `reports/spawn-sizing.md`,
-`reports/persist-scope.md`, `reports/zone-growth.md`. Bare tiles: `reports/bare-tiles.md` on
+`reports/persist-scope.md`, `reports/zone-growth.md`, `reports/offscreen-defer.md`. Bare tiles: `reports/bare-tiles.md` on
 `array/bare-tiles`.
