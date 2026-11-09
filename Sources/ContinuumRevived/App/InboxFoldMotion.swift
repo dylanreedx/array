@@ -148,6 +148,8 @@ final class InboxFoldMotion: NSObject {
         let from: Pose
         let to: Pose
         let isGhost: Bool
+        let clippingOwner: NSView?
+        let clipped: Bool
     }
     private var liveTracks: [LiveTrack] = []
     private var manuallyAdvanced = false
@@ -229,6 +231,9 @@ final class InboxFoldMotion: NSObject {
                 host = ghost
             }
             host.wantsLayer = true
+            let clippingOwner = after[key] != nil ? host.superview : nil
+            let clipped = clippingOwner?.clipsToBounds ?? false
+            clippingOwner?.clipsToBounds = false
             if after[key] != nil {
                 // AppKit's insertion transaction may animate a recycled row host
                 // from its previous slot. The unfold exclusively owns movement.
@@ -239,7 +244,8 @@ final class InboxFoldMotion: NSObject {
             }
             guard let layer = host.layer else { continue }
             liveTracks.append(LiveTrack(key: key, view: host, layer: layer, coordinates: container,
-                                        from: from, to: to, isGhost: after[key] == nil))
+                                        from: from, to: to, isGhost: after[key] == nil,
+                                        clippingOwner: clippingOwner, clipped: clipped))
         }
         guard !liveTracks.isEmpty else { cancel(); return }
         installLiveAnimations()
@@ -443,6 +449,9 @@ final class InboxFoldMotion: NSObject {
         retirement = nil
         for track in liveTracks {
             track.layer.removeAnimation(forKey: Self.liveAnimationKey)
+            if let owner = track.clippingOwner, track.view.superview === owner {
+                owner.clipsToBounds = track.clipped
+            }
             if track.isGhost, track.view.superview === overlay {
                 track.view.removeFromSuperview()
             }
