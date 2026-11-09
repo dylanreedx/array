@@ -414,3 +414,37 @@ canvas-persistence-model, zone-runtime-duplication, layout-commit-truth,
 zone-breakout, stranded-tile-recovery, jelly-auto-layout.
 
 Stays unmerged into the night branch, as the conductor ruled.
+
+## Combined with the night branch
+
+Merging the night branch at `a509de97` (merge `70e21a82`) made
+`--drag-in-tidy-check` fail. Three ordinary in-zone drags in a tidied zone
+ejected the dragged tile to bare:
+- swap agent1 across rows onto note3;
+- slide note3 to the end of its row;
+- drop the wide web2 half over note3, with no latch.
+
+**Cause.** The break-out test compared the tile's centre with the zone at the
+moment of the drop. In these cases that centre sits past the zone's edge
+while the drop itself is an in-zone choice.
+- A latched swap or slide places the tile in a slot inside the zone, but the
+  settle that puts it there runs after the test.
+- An unlatched drop is snapped to the magnet's escape slot, which can lie
+  outside the zone.
+
+**Fix (`90e620d4`).** A latched drop never breaks out. A snapped drop is
+judged by where the user let go, not by the snap.
+
+**Checks.**
+- `--drag-in-tidy-check` failed 2 cases with neither fix, 1 with the first
+  fix only, and passes with both.
+- `--bare-tile-check` still passes. A real drag out of the zone still goes
+  bare.
+- 14 other offscreen app legs pass: the tidy, zone, camera, latency, spawn and
+  scene legs.
+- CoreChecks `--tidy-packer-check`, `--jelly-trajectory-probe`,
+  `--layout-pressure-check` and `--auto-layout-fanout-check` pass.
+
+**Not run, because they put windows on screen:** `--jelly-auto-layout-check`,
+`--canvas-undo-check`, `--spawn-placement-check`, `--leader-jump-check`,
+`--tile-reveal-work-check` and `--agent-local-file-link-check`.
