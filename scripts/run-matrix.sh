@@ -2182,6 +2182,11 @@ run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 # which is our own per-tile-per-step call, not the camera mechanism. KNOWN-RED
 # against that product target until the chrome floor stops moving every step.
 run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
+# A zoom step moves the device-pixel grid, and AppKit retiled every scroll view
+# to re-snap its clip view to it: 128 code-block retiles per step in the motion
+# workload's four visible Markdown tiles, each reflowing its document. They wait
+# for the settle now. Off-screen window, production camera driver entry.
+run_app_check .build/debug/Array --canvas-zoom-step-cost-check
 # The Slice 2 contract (.plans/22): N input events inside one display interval
 # cause a bounded number of camera commits and preserve the final desired
 # viewport. The control condition drives 6 direct setViewport calls and must

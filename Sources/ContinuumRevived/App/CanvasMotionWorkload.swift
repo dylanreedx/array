@@ -69,7 +69,9 @@ final class CanvasMotionWorkload {
     private var bareTiles: (stripped: Int, of: Int)?
     private(set) var replayWindowSize: NSSize?
 
-    init(root: URL, support: URL, markdownCount: Int, agentCount: Int) throws {
+    /// `offscreen`: headless counters (`--canvas-zoom-step-cost-check`) park the
+    /// window far off every display and never activate, so they never take the screen.
+    init(root: URL, support: URL, markdownCount: Int, agentCount: Int, offscreen: Bool = false) throws {
         let env = ProcessInfo.processInfo.environment
         guard CanvasMotionVariants.isValid else {
             throw Failure(description: "CANVAS_MOTION_VARIANT must be full, baseline, no-code, no-diff, no-prose, no-pacing or a mask from 0 through 15")
@@ -320,9 +322,16 @@ final class CanvasMotionWorkload {
         markdownTileIDs = fileIDs
         defaults = isolatedDefaults
         defaultsName = suiteName
-        host.makeKeyAndOrderFront(nil)
-        host.makeFirstResponder(scene)
-        NSApp.activate(ignoringOtherApps: true)
+        if offscreen {
+            host.setContentSize(NSSize(width: 1_400, height: 900))
+            host.setFrameOrigin(CGPoint(x: -60_000, y: -60_000))
+            host.orderFrontRegardless()
+            host.makeFirstResponder(scene)
+        } else {
+            host.makeKeyAndOrderFront(nil)
+            host.makeFirstResponder(scene)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         // Construction only. All measured rendering is the ordinary AppKit cycle.
         scene.layoutSubtreeIfNeeded()
     }

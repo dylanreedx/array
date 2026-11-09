@@ -844,6 +844,23 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // Headless per-step zoom cost: an off-screen window, never the screen.
+        if CommandLine.arguments.contains("--canvas-zoom-step-cost-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                do {
+                    try await CanvasZoomStepCostChecks.run()
+                    print("ContinuumRevivedCanvasZoomStepCostChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains(ChildCrashIsolationChecks.trapChildFlag) {
             ChildCrashIsolationChecks.trapChild()
         }

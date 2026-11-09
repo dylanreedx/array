@@ -98,6 +98,7 @@ check --canvas-unreadable-check
 check --canvas-visibility-index-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
+check --canvas-zoom-step-cost-check
 check --character-perf-check
 check --character-settings-check
 check --character-size-check
@@ -548,6 +549,7 @@ leg run_app_check .build/debug/Array --canvas-unreadable-check
 leg run_app_check .build/debug/Array --canvas-visibility-index-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
+leg run_app_check .build/debug/Array --canvas-zoom-step-cost-check
 leg run_app_check .build/debug/Array --character-perf-check
 leg run_app_check .build/debug/Array --character-settings-check
 leg run_app_check .build/debug/Array --character-size-check

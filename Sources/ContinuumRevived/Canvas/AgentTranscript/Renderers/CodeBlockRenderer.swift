@@ -219,6 +219,52 @@ final class CodeBlockView: NSView {
 /// and capped multiline blocks keep their own vertical scrolling.
 @MainActor
 final class CodeBlockScrollView: NSScrollView {
+    /// What `tile()` lays out from. A zoom step changes none of these — every
+    /// value is in this view's own (world) units — yet AppKit retiles every scroll
+    /// view on every step, because the backing-properties cascade moves the
+    /// device-pixel grid its clip view is snapped to. That re-snap nudges the clip
+    /// by a fraction of a point, which reflows the document and the scrollers: 128
+    /// retiles per zoom step in the motion workload's four visible Markdown tiles.
+    private struct TileInputs: Equatable {
+        let size: NSSize
+        let documentSize: NSSize?
+        let contentInsets: NSEdgeInsets
+        let scrollerStyle: NSScroller.Style
+        let hasHorizontalScroller: Bool
+        let hasVerticalScroller: Bool
+        let autohidesScrollers: Bool
+
+        static func == (lhs: TileInputs, rhs: TileInputs) -> Bool {
+            lhs.size == rhs.size && lhs.documentSize == rhs.documentSize
+                && NSEdgeInsetsEqual(lhs.contentInsets, rhs.contentInsets)
+                && lhs.scrollerStyle == rhs.scrollerStyle
+                && lhs.hasHorizontalScroller == rhs.hasHorizontalScroller
+                && lhs.hasVerticalScroller == rhs.hasVerticalScroller
+                && lhs.autohidesScrollers == rhs.autohidesScrollers
+        }
+    }
+
+    private var lastTiledInputs: TileInputs?
+
+    /// While a camera gesture moves, a retile whose inputs are unchanged only
+    /// re-snaps to the moving pixel grid, so it waits: the canvas retiles every
+    /// deferred scroll view once at settle, which is when the grid stops moving and
+    /// resting text must sit on whole device pixels again. Anything that really
+    /// changed (a resize, new content, a scroller change) tiles at once.
+    override func tile() {
+        let inputs = TileInputs(size: bounds.size, documentSize: documentView?.frame.size,
+                                contentInsets: contentInsets, scrollerStyle: scrollerStyle,
+                                hasHorizontalScroller: hasHorizontalScroller,
+                                hasVerticalScroller: hasVerticalScroller,
+                                autohidesScrollers: autohidesScrollers)
+        if inputs == lastTiledInputs, let canvas = CanvasNSView.enclosing(self), canvas.defersPixelGridRetile {
+            canvas.deferPixelGridRetile(self)
+            return
+        }
+        super.tile()
+        lastTiledInputs = inputs
+    }
+
     override func scrollWheel(with event: NSEvent) {
         let vertical = abs(event.scrollingDeltaY)
         let horizontal = abs(event.scrollingDeltaX)
