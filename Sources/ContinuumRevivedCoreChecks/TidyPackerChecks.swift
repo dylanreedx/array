@@ -315,18 +315,65 @@ func runTidyPackerChecks() {
         check(ratio <= CanvasTidyPacker.tileAreaCap + 0.01, "roomy: \(tile.kind!) stretched \(ratio)x")
     }
 
-    // Cost: 60 tiles in one zone, the whole explicit tidy.
-    let big = makeCase("sixty", number: 60, kinds: (0..<60).map { palette[$0 % (palette.count - 1)] }, columns: 8, slack: .zero)
-    var samples: [Double] = []
-    for _ in 0..<5 {
-        let start = DispatchTime.now().uptimeNanoseconds
-        _ = solve(big.scene, big.zoneId)
-        samples.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6)
+    // Cost on the main thread: 30, 60 and 89 tiles in one zone (89 is the
+    // largest real canvas measured), the whole explicit tidy, best of five
+    // (other work on the Mac only ever adds time). Budgets are debug builds.
+    let budgets: [(Int, Double)] = [(30, 8), (60, 18), (89, 25)]
+    var costCases: [Case] = []
+    for (count, budget) in budgets {
+        let c = makeCase("cost-\(count)", number: 100 + count, kinds: (0..<count).map { palette[$0 % (palette.count - 1)] },
+                         columns: count >= 60 ? 9 : 6, slack: .zero)
+        costCases.append(c)
+        var samples: [Double] = []
+        for _ in 0..<5 {
+            let start = DispatchTime.now().uptimeNanoseconds
+            _ = solve(c.scene, c.zoneId)
+            samples.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6)
+        }
+        let best = samples.min()!
+        report.append("  \(c.name): 5 solves " + samples.map { String(format: "%.1fms", $0) }.joined(separator: " "))
+        check(best <= budget, "a \(count)-tile tidy took \(best)ms at best (budget \(budget)ms, debug build)")
     }
-    // Best of five: other work on the Mac only ever adds time.
-    let best = samples.min()!
-    report.append("  sixty: 5 solves " + samples.map { String(format: "%.1fms", $0) }.joined(separator: " "))
-    check(best < 250, "a 60-tile tidy took \(best)ms at best (budget 250ms, debug build)")
+
+    // The output is pinned: a digest of every frame and the zone, per seed.
+    // A speed-up must not move a single tile.
+    func digest(_ t: CanvasLayoutTransaction) -> String {
+        var text = ""
+        for (id, f) in t.tileFrames.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            text += "\(id.uuidString) \(f.x) \(f.y) \(f.width) \(f.height)\n"
+        }
+        for (id, z) in t.zonePlacements.sorted(by: { $0.key.uuidString < $1.key.uuidString }) {
+            text += "\(id.uuidString) \(z.origin.x) \(z.origin.y) \(z.size.width) \(z.size.height)\n"
+        }
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in text.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+        return String(format: "%016llx", hash)
+    }
+    var digests: [String: String] = [:]
+    for c in cases + costCases { digests[c.name] = digest(solve(c.scene, c.zoneId)) }
+    // A deliberate change to tidy's output re-pins these: run with
+    // TIDY_PACKER_PRINT_DIGESTS=1 and paste the printed lines below.
+    if ProcessInfo.processInfo.environment["TIDY_PACKER_PRINT_DIGESTS"] != nil {
+        for (name, value) in digests.sorted(by: { $0.key < $1.key }) { print("        \"\(name)\": \"\(value)\",") }
+    }
+    let pinned: [String: String] = [
+        "cost-30": "69cb9552480e5530",
+        "cost-60": "5690a4e2571787d5",
+        "cost-89": "b737c4647b92cfc0",
+        "cramped": "6d016e18ecc400ca",
+        "dust": "7763d41b85cd424c",
+        "eight": "571b25d8afec5baf",
+        "five": "03ea3c771b6ef0ce",
+        "lead-five-helpers": "8a8d4d415d673daa",
+        "lead-three-helpers": "1860f52c39abcb2e",
+        "roomy": "65e14404e5d8d5a8",
+        "thirteen": "0bb09afd9c385746",
+        "three": "03de6e777b49137b",
+        "two": "43ad3d17d96b1b3e",
+    ]
+    for (name, value) in pinned where digests[name] != value {
+        check(false, "\(name): tidy output changed (digest \(digests[name] ?? "none"), pinned \(value))")
+    }
 
     print("tidy packer:")
     report.forEach { print($0) }

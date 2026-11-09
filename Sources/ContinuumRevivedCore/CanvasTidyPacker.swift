@@ -108,6 +108,34 @@ public enum CanvasTidyPacker {
         var q: Double
     }
 
+    /// The items' numbers as flat arrays: the row solver reads these, so a debug
+    /// build pays no struct copies or closures per row (`.plans/auto-layout-night`).
+    private struct Flat {
+        let count: Int
+        let ratio, ratioMin, ratioMax, minW, minH, area, extra, fixedW, fixedH: UnsafeMutablePointer<Double>
+        let isFixed: UnsafeMutablePointer<Bool>
+
+        init(_ items: [Item]) {
+            count = items.count
+            let capacity = max(count, 1)
+            ratio = .allocate(capacity: capacity); ratioMin = .allocate(capacity: capacity); ratioMax = .allocate(capacity: capacity)
+            minW = .allocate(capacity: capacity); minH = .allocate(capacity: capacity); area = .allocate(capacity: capacity)
+            extra = .allocate(capacity: capacity); fixedW = .allocate(capacity: capacity); fixedH = .allocate(capacity: capacity)
+            isFixed = .allocate(capacity: capacity)
+            for (i, item) in items.enumerated() {
+                ratio[i] = item.ratio; ratioMin[i] = item.ratioMin; ratioMax[i] = item.ratioMax
+                minW[i] = item.minW; minH[i] = item.minH; area[i] = item.area; extra[i] = item.extraWidth
+                fixedW[i] = Double(item.fixed?.width ?? 0); fixedH[i] = Double(item.fixed?.height ?? 0)
+                isFixed[i] = item.fixed != nil
+            }
+        }
+
+        func free() {
+            for pointer in [ratio, ratioMin, ratioMax, minW, minH, area, extra, fixedW, fixedH] { pointer.deallocate() }
+            isFixed.deallocate()
+        }
+    }
+
     /// Up to this many helpers stack in one column beside their lead; more
     /// take two columns.
     public static let helpersInOneColumn = 4
@@ -154,7 +182,9 @@ public enum CanvasTidyPacker {
             else { minimumWidth = max(minimumWidth, max(item.minW, item.minH * item.ratioMin) + item.extraWidth) }
         }
         var width = max(Double(content.width), minimumWidth)
-        guard var chosen = solve(items: items, width: width, height: height, gap: gap) else {
+        let flat = Flat(items)
+        defer { flat.free() }
+        guard var chosen = solve(flat, width: width, height: height, gap: gap) else {
             return Result(frames: [:], content: content, scale: 1)
         }
         // A zone too big for its tiles shrinks, keeping its proportions: try
@@ -173,14 +203,31 @@ public enum CanvasTidyPacker {
                     let k = pow(kMin, step / 10)
                     let w = max(minimumWidth, (originalWidth * k).rounded(.down))
                     let h = max(1, (originalHeight * k).rounded(.down))
-                    guard let layout = solve(items: items, width: w, height: h, gap: gap) else { return }
-                    let cost = layout.cost + shrinkWeight * (pow(log(w / originalWidth), 2) + pow(log(h / originalHeight), 2))
+                    // A layout's own cost is never negative, so the shrink charge
+                    // alone bounds this attempt: skip any that cannot win.
+                    let charge = shrinkWeight * (pow(log(w / originalWidth), 2) + pow(log(h / originalHeight), 2))
+                    guard charge < bestCost - 1e-12 else { return }
+                    guard let layout = solve(flat, width: w, height: h, gap: gap) else { return }
+                    let cost = layout.cost + charge
                     if cost < bestCost - 1e-12 { bestCost = cost; chosen = layout; width = w; height = h; bestStep = step }
                 }
-                // Ten coarse steps, then eight between the best one's neighbours.
-                for step in 1...10 { attempt(Double(step)) }
+                // Ten coarse steps, then seven between the best one's neighbours.
+                // Each set is tried nearest first to where the best is likely
+                // (areas scale with k², so k ≈ √(ceiling / stretch)), so the
+                // shrink charge prunes the rest early. The minimum over the
+                // set is the same in any order.
+                func nearestFirst(_ steps: [Double], to centre: Double) -> [Double] {
+                    steps.sorted { a, b in
+                        let da = abs(a - centre), db = abs(b - centre)
+                        return da < db || (da == db && a < b)
+                    }
+                }
+                let guess: Double = chosen.stretch > areaCeiling
+                    ? 10 * log(sqrt(areaCeiling / chosen.stretch)) / log(kMin) : 1
+                for step in nearestFirst((1...10).map { Double($0) }, to: guess) { attempt(step) }
                 if let coarse = bestStep {
-                    for i in 1...8 where i != 4 { attempt(coarse - 1 + Double(i) / 4) }
+                    let fine: [Double] = [1, 2, 3, 5, 6, 7, 8].map { coarse - 1 + Double($0) / 4 }
+                    for step in nearestFirst(fine, to: coarse) { attempt(step) }
                 }
             }
         }
@@ -197,7 +244,7 @@ public enum CanvasTidyPacker {
         var y = top
         for (rowIndex, row) in chosen.rows.enumerated() {
             let rowBottom = rowIndex == chosen.rows.count - 1 ? bottom : snap(y + row.height)
-            let widths = rowWidths(items: items, row: row, height: row.height, width: width, gap: gap)
+            let widths = rowWidths(flat, row: row, height: row.height, width: width, gap: gap)
             var x = left
             for (offset, index) in (row.start..<row.end).enumerated() {
                 let item = items[index]
@@ -380,42 +427,73 @@ public enum CanvasTidyPacker {
     /// heights fitted to the content height, and the cheapest result kept: the
     /// change to the tiles plus the change to the zone height; ties go to the
     /// scale nearest 1.
-    private static func solve(items: [Item], width: Double, height: Double, gap: Double) -> Layout? {
-        let n = items.count
-        var table = [[Row?]](repeating: [], count: n)
-        for start in 0..<n {
-            table[start] = (1...min(maxRowLength, n - start)).map { length in
-                evaluateRow(items: items, start: start, end: start + length, width: width, gap: gap)
+    private static func solve(_ f: Flat, width: Double, height: Double, gap: Double) -> Layout? {
+        let n = f.count
+        // Every candidate row, once: table[start * maxRowLength + length - 1].
+        var table = [Row?](repeating: nil, count: n * maxRowLength)
+        var start = 0
+        while start < n {
+            var length = 1
+            while length <= maxRowLength && start + length <= n {
+                table[start * maxRowLength + length - 1] = evaluateRow(f, start: start, end: start + length, width: width, gap: gap)
+                length += 1
             }
+            start += 1
+        }
+        // The dynamic program reads plain numbers: Row.cost's terms, per row.
+        let cells = n * maxRowLength
+        let valid = UnsafeMutablePointer<Bool>.allocate(capacity: cells)
+        let sumL = UnsafeMutablePointer<Double>.allocate(capacity: cells), sumL2 = UnsafeMutablePointer<Double>.allocate(capacity: cells)
+        let flexCount = UnsafeMutablePointer<Double>.allocate(capacity: cells), shapeCost = UnsafeMutablePointer<Double>.allocate(capacity: cells)
+        let cost = UnsafeMutablePointer<Double>.allocate(capacity: n + 1), choice = UnsafeMutablePointer<Int>.allocate(capacity: n + 1)
+        defer {
+            valid.deallocate(); sumL.deallocate(); sumL2.deallocate(); flexCount.deallocate(); shapeCost.deallocate()
+            cost.deallocate(); choice.deallocate()
+        }
+        var cell = 0
+        while cell < cells {
+            if let row = table[cell] {
+                valid[cell] = true
+                sumL[cell] = row.sumL; sumL2[cell] = row.sumL2; flexCount[cell] = row.flexCount; shapeCost[cell] = row.shapeCost
+            } else {
+                valid[cell] = false
+            }
+            cell += 1
         }
         var evaluated: [[Int]: Layout] = [:]
         var best: Layout?
         for scale in scaleGrid() {
             let ls = log(scale)
-            var cost = [Double](repeating: .infinity, count: n + 1)
-            var choice = [Row?](repeating: nil, count: n + 1)
+            var reset = 0
+            while reset <= n { cost[reset] = .infinity; choice[reset] = -1; reset += 1 }
             cost[0] = 0
-            for end in 1...n {
-                for start in max(0, end - maxRowLength)..<end where cost[start].isFinite {
-                    guard let row = table[start][end - start - 1] else { continue }
-                    let total = cost[start] + row.cost(logScale: ls)
-                    if total < cost[end] - 1e-12 { cost[end] = total; choice[end] = row }
+            var end = 1
+            while end <= n {
+                var start = max(0, end - maxRowLength)
+                while start < end {
+                    let index = start * maxRowLength + end - start - 1
+                    if cost[start].isFinite && valid[index] {
+                        let total = cost[start] + (sumL2[index] - 2 * ls * sumL[index] + flexCount[index] * ls * ls + shapeCost[index])
+                        if total < cost[end] - 1e-12 { cost[end] = total; choice[end] = index }
+                    }
+                    start += 1
                 }
+                end += 1
             }
             guard cost[n].isFinite else { continue }
             var rows: [Row] = []
-            var end = n
-            while end > 0, let row = choice[end] { rows.append(row); end = row.start }
+            end = n
+            while end > 0, choice[end] >= 0, let row = table[choice[end]] { rows.append(row); end = row.start }
             rows.reverse()
             var layout: Layout
             if let known = evaluated[rows.map(\.start)] {
                 layout = known
             } else {
-                let fitted = fitHeightsUnderCap(items: items, rows: rows, target: height - Double(rows.count - 1) * gap,
+                let fitted = fitHeightsUnderCap(f, rows: rows, target: height - Double(rows.count - 1) * gap,
                                                 width: width, gap: gap)
                 let total = fitted.reduce(0) { $0 + $1.height } + Double(rows.count - 1) * gap
                 let exact = abs(total - height) < 0.5
-                let measured = measure(items: items, rows: fitted, width: width, gap: gap)
+                let measured = measure(f, rows: fitted, width: width, gap: gap)
                 let zoneTerm = exact ? 0 : (total > height ? growWeight : shrinkWeight) * pow(log(total / height), 2)
                 layout = Layout(rows: fitted, total: total, scale: scale, cost: measured.deviation + zoneTerm,
                                 exact: exact, stretch: measured.stretch)
@@ -431,18 +509,19 @@ public enum CanvasTidyPacker {
         return best
     }
 
-    private static func evaluateRow(items: [Item], start: Int, end: Int, width: Double, gap: Double) -> Row? {
-        let slice = items[start..<end]
-        var fixedWidth = 0.0, fixedHeight = 0.0
-        for item in slice {
-            fixedWidth += item.extraWidth
-            if let f = item.fixed { fixedWidth += Double(f.width); fixedHeight = max(fixedHeight, Double(f.height)) }
+    /// One candidate row. The common case, where no tile's ratio clamps, does
+    /// the same arithmetic as `rowRatios` + `waterFill`, in the same order,
+    /// without allocating; a row where a clamp binds goes through them.
+    private static func evaluateRow(_ f: Flat, start: Int, end: Int, width: Double, gap: Double) -> Row? {
+        var fixedWidth = 0.0, fixedHeight = 0.0, flexCount = 0
+        var i = start
+        while i < end {
+            fixedWidth += f.extra[i]
+            if f.isFixed[i] { fixedWidth += f.fixedW[i]; fixedHeight = max(fixedHeight, f.fixedH[i]) } else { flexCount += 1 }
+            i += 1
         }
         let available = width - Double(end - start - 1) * gap - fixedWidth
-        var flex: [Item] = []
-        flex.reserveCapacity(end - start)
-        for item in slice where item.fixed == nil { flex.append(item) }
-        if flex.isEmpty {
+        if flexCount == 0 {
             // Only fixed-size tiles: the row cannot be justified, and the width
             // it leaves is a hole. Allowed, but dear.
             guard available >= -0.5 else { return nil }
@@ -451,31 +530,85 @@ public enum CanvasTidyPacker {
                        shapeCost: Double(end - start) * 40 * unused * unused)
         }
         guard available > 0 else { return nil }
-        let ratioSum = flex.reduce(0.0) { $0 + $1.ratio }
-        guard let band = heightBand(flex: flex, fixedHeight: fixedHeight, available: available) else { return nil }
+        var ratioSum = 0.0
+        i = start
+        while i < end { if !f.isFixed[i] { ratioSum += f.ratio[i] }; i += 1 }
+        guard let band = heightBand(f, start: start, end: end, fixedHeight: fixedHeight, available: available) else { return nil }
         let (lo, hi) = band
         let natural = min(max(available / ratioSum, lo), hi)
-        guard let ratios = rowRatios(flex: flex, height: natural, available: available) else { return nil }
+
+        // rowRatios(natural), inline.
+        let target = available / natural
+        var loSum = 0.0, hiSum = 0.0, baseSum = 0.0
+        i = start
+        while i < end {
+            if !f.isFixed[i] {
+                let l = max(f.ratioMin[i], f.minW[i] / natural)
+                loSum += l; hiSum += max(l, f.ratioMax[i])
+            }
+            i += 1
+        }
+        let slack = 1e-6 * max(target, 1)
+        guard loSum <= target + slack, hiSum >= target - slack else { return nil }
+        i = start
+        while i < end { if !f.isFixed[i] { baseSum += f.ratio[i] }; i += 1 }
+        let plain = target / baseSum
+        var plainSum = 0.0
+        i = start
+        while i < end {
+            if !f.isFixed[i] {
+                let l = max(f.ratioMin[i], f.minW[i] / natural)
+                plainSum += min(max(f.ratio[i] * plain, l), max(l, f.ratioMax[i]))
+            }
+            i += 1
+        }
+        let clampFree = baseSum > 0 && abs(plainSum - target) <= 1e-9 * max(target, 1)
+        let clamped: [Double] = clampFree ? [] : (rowRatios(f, flex: (start..<end).filter { !f.isFixed[$0] },
+                                                            height: natural, available: available) ?? [])
+        if !clampFree && clamped.isEmpty { return nil }
+        func ratio(_ i: Int, _ k: Int) -> Double {
+            guard clampFree else { return clamped[k] }
+            let l = max(f.ratioMin[i], f.minW[i] / natural)
+            return min(max(f.ratio[i] * plain, l), max(l, f.ratioMax[i]))
+        }
+
         // Fitting the heights may not push any tile past the per-tile cap; a
         // tile's area grows about linearly with its row's height at fixed width.
         var capHeight = Double.infinity
-        for (item, ratio) in zip(flex, ratios) {
-            capHeight = min(capHeight, natural * tileAreaCap * item.area / (ratio * natural * natural))
+        var k = 0
+        i = start
+        while i < end {
+            if !f.isFixed[i] {
+                capHeight = min(capHeight, natural * tileAreaCap * f.area[i] / (ratio(i, k) * natural * natural))
+                k += 1
+            }
+            i += 1
         }
         var row = Row(start: start, end: end, height: natural, heightMin: lo,
                       heightMax: max(natural, min(hi, capHeight)))
-        for (item, ratio) in zip(flex, ratios) {
-            let l = log(ratio * natural * natural / item.area)
-            let shape = log(ratio / item.ratio)
-            row.sumL += l
-            row.sumL2 += l * l
-            row.flexCount += 1
-            row.shapeCost += 2 * shape * shape + capPenalty(l)
+        k = 0
+        i = start
+        while i < end {
+            if !f.isFixed[i] {
+                let r = ratio(i, k)
+                let l = log(r * natural * natural / f.area[i])
+                let shape = log(r / f.ratio[i])
+                row.sumL += l
+                row.sumL2 += l * l
+                row.flexCount += 1
+                row.shapeCost += 2 * shape * shape + capPenalty(l)
+                k += 1
+            }
+            i += 1
         }
-        for item in slice { if let f = item.fixed {
-            let slack = log(max(natural, 1) / max(Double(f.height), 1))
-            row.shapeCost += 0.5 * slack * slack
-        } }
+        i = start
+        while i < end {
+            if f.isFixed[i] {
+                let slack = log(max(natural, 1) / max(f.fixedH[i], 1))
+                row.shapeCost += 0.5 * slack * slack
+            }
+            i += 1
+        }
         return row
     }
 
@@ -483,21 +616,45 @@ public enum CanvasTidyPacker {
     /// exactly: at least every fixed tile, minimum height, and the height at
     /// which the widest allowed ratios fill the width; at most the height at
     /// which the narrowest allowed ratios (or minimum widths) fill it.
-    private static func heightBand(flex: [Item], fixedHeight: Double, available: Double) -> (Double, Double)? {
-        let ratioMaxSum = flex.reduce(0.0) { $0 + $1.ratioMax }
-        let ratioMinSum = flex.reduce(0.0) { $0 + $1.ratioMin }
+    private static func heightBand(_ f: Flat, start: Int, end: Int, fixedHeight: Double, available: Double) -> (Double, Double)? {
+        var ratioMaxSum = 0.0, ratioMinSum = 0.0
+        var i = start
+        while i < end { if !f.isFixed[i] { ratioMaxSum += f.ratioMax[i] }; i += 1 }
+        i = start
+        while i < end { if !f.isFixed[i] { ratioMinSum += f.ratioMin[i] }; i += 1 }
         var lo = max(fixedHeight, available / ratioMaxSum)
-        for item in flex { lo = max(lo, item.minH, item.minW / item.ratioMax) }
-        func narrowest(_ h: Double) -> Double { flex.reduce(0.0) { $0 + max($1.ratioMin * h, $1.minW) } }
+        i = start
+        while i < end { if !f.isFixed[i] { lo = max(lo, f.minH[i], f.minW[i] / f.ratioMax[i]) }; i += 1 }
+        func narrowest(_ h: Double) -> Double {
+            var total = 0.0
+            var i = start
+            while i < end { if !f.isFixed[i] { total += max(f.ratioMin[i] * h, f.minW[i]) }; i += 1 }
+            return total
+        }
         var hi = available / ratioMinSum
         if narrowest(hi) > available + 1e-9 {
-            var low = lo, high = hi
-            guard narrowest(low) <= available + 1e-9 else { return nil }
-            for _ in 0..<60 {
-                let middle = (low + high) / 2
-                if narrowest(middle) <= available { low = middle } else { high = middle }
+            guard narrowest(lo) <= available + 1e-9 else { return nil }
+            // narrowest(h) = Σ max(ratioMinᵢ·h, minWᵢ) is piecewise linear and
+            // increasing, with a corner at each minWᵢ / ratioMinᵢ: walk the
+            // corners to the segment where it reaches `available`, solve there.
+            var corners: [(at: Double, ratioMin: Double, minW: Double)] = []
+            var constant = 0.0, slope = 0.0
+            for i in start..<end where !f.isFixed[i] {
+                corners.append((f.minW[i] / f.ratioMin[i], f.ratioMin[i], f.minW[i]))
+                constant += f.minW[i]
             }
-            hi = low
+            corners.sort { $0.at < $1.at }
+            var root = Double.nan
+            for corner in corners {
+                if slope * corner.at + constant >= available {
+                    root = slope > 0 ? (available - constant) / slope : corner.at
+                    break
+                }
+                slope += corner.ratioMin
+                constant -= corner.minW
+            }
+            if root.isNaN { root = (available - constant) / slope }
+            hi = min(max(root, lo), hi)
         }
         guard lo <= hi + 1e-9 else { return nil }
         return (lo, max(lo, hi))
@@ -506,14 +663,37 @@ public enum CanvasTidyPacker {
     /// Ratios for the flexible tiles of a row of `height` so they sum to
     /// `available / height`: each the preferred ratio × λ, clamped into its band
     /// and its minimum width.
-    private static func rowRatios(flex: [Item], height: Double, available: Double) -> [Double]? {
+    private static func rowRatios(_ f: Flat, flex: [Int], height: Double, available: Double) -> [Double]? {
         let target = available / height
+        // Clamp-free first, as `waterFill` would find it, without its arrays.
+        var quickLo = 0.0, quickHi = 0.0, quickBase = 0.0
+        for i in flex {
+            let l = max(f.ratioMin[i], f.minW[i] / height)
+            quickLo += l; quickHi += max(l, f.ratioMax[i])
+        }
+        let quickSlack = 1e-6 * max(target, 1)
+        guard quickLo <= target + quickSlack, quickHi >= target - quickSlack else { return nil }
+        for i in flex { quickBase += f.ratio[i] }
+        if quickBase > 0 {
+            let plain = target / quickBase
+            var sum = 0.0
+            for i in flex {
+                let l = max(f.ratioMin[i], f.minW[i] / height)
+                sum += min(max(f.ratio[i] * plain, l), max(l, f.ratioMax[i]))
+            }
+            if abs(sum - target) <= 1e-9 * max(target, 1) {
+                return flex.map { i in
+                    let l = max(f.ratioMin[i], f.minW[i] / height)
+                    return min(max(f.ratio[i] * plain, l), max(l, f.ratioMax[i]))
+                }
+            }
+        }
         var base = [Double](), lo = [Double](), hi = [Double]()
         base.reserveCapacity(flex.count); lo.reserveCapacity(flex.count); hi.reserveCapacity(flex.count)
         var loSum = 0.0, hiSum = 0.0
-        for item in flex {
-            let l = max(item.ratioMin, item.minW / height), h = item.ratioMax
-            base.append(item.ratio); lo.append(l); hi.append(max(l, h))
+        for i in flex {
+            let l = max(f.ratioMin[i], f.minW[i] / height), h = f.ratioMax[i]
+            base.append(f.ratio[i]); lo.append(l); hi.append(max(l, h))
             loSum += l; hiSum += max(l, h)
         }
         let slack = 1e-6 * max(target, 1)
@@ -526,55 +706,78 @@ public enum CanvasTidyPacker {
     /// breakpoints loᵢ/baseᵢ and hiᵢ/baseᵢ, so walking them finds λ exactly.
     private static func waterFill(base: [Double], lo: [Double], hi: [Double], target: Double) -> [Double] {
         let n = base.count
-        func values(_ lambda: Double) -> [Double] {
-            var out = [Double](repeating: 0, count: n)
-            for i in 0..<n { out[i] = min(max(base[i] * lambda, lo[i]), hi[i]) }
-            return out
-        }
-        func sum(_ lambda: Double) -> Double {
-            var total = 0.0
-            for i in 0..<n { total += min(max(base[i] * lambda, lo[i]), hi[i]) }
-            return total
-        }
-        var baseSum = 0.0
-        for b in base { baseSum += b }
-        if baseSum > 0 {
-            let plain = target / baseSum
-            if abs(sum(plain) - target) <= 1e-9 * max(target, 1) { return values(plain) }
-        }
-        var points: [Double] = [0]
-        for i in 0..<n where base[i] > 0 { points.append(lo[i] / base[i]); points.append(hi[i] / base[i]) }
-        points.sort()
-        if sum(points[points.count - 1]) <= target { return values(points[points.count - 1]) }
-        var previous = points[0], previousSum = sum(previous)
-        if previousSum >= target { return values(previous) }
-        for point in points.dropFirst() where point > previous {
-            let pointSum = sum(point)
-            if pointSum >= target {
-                let lambda = previous + (point - previous) * (target - previousSum) / (pointSum - previousSum)
-                return values(lambda)
+        return base.withUnsafeBufferPointer { b in lo.withUnsafeBufferPointer { l in hi.withUnsafeBufferPointer { h in
+            func sum(_ lambda: Double) -> Double {
+                var total = 0.0, i = 0
+                while i < n { total += min(max(b[i] * lambda, l[i]), h[i]); i += 1 }
+                return total
             }
-            previous = point
-            previousSum = pointSum
-        }
-        return values(previous)
+            func values(_ lambda: Double) -> [Double] {
+                [Double](unsafeUninitializedCapacity: n) { out, initialized in
+                    var i = 0
+                    while i < n { out[i] = min(max(b[i] * lambda, l[i]), h[i]); i += 1 }
+                    initialized = n
+                }
+            }
+            var baseSum = 0.0, i = 0
+            while i < n { baseSum += b[i]; i += 1 }
+            if baseSum > 0 {
+                let plain = target / baseSum
+                if abs(sum(plain) - target) <= 1e-9 * max(target, 1) { return values(plain) }
+            }
+            return withUnsafeTemporaryAllocation(of: Double.self, capacity: 2 * n + 1) { storage in
+                var count = 1
+                storage[0] = 0
+                var i = 0
+                while i < n {
+                    if b[i] > 0 { storage[count] = l[i] / b[i]; storage[count + 1] = h[i] / b[i]; count += 2 }
+                    i += 1
+                }
+                var points = UnsafeMutableBufferPointer(rebasing: storage[0..<count])
+                points.sort()
+                if sum(points[count - 1]) <= target { return values(points[count - 1]) }
+                var previous = points[0], previousSum = sum(previous)
+                if previousSum >= target { return values(previous) }
+                var k = 1
+                while k < count {
+                    let point = points[k]
+                    k += 1
+                    guard point > previous else { continue }
+                    let pointSum = sum(point)
+                    if pointSum >= target {
+                        let lambda = previous + (point - previous) * (target - previousSum) / (pointSum - previousSum)
+                        return values(lambda)
+                    }
+                    previous = point
+                    previousSum = pointSum
+                }
+                return values(previous)
+            }
+        } } }
     }
 
-    private static func rowWidths(items: [Item], row: Row, height: Double, width: Double, gap: Double)
+    private static func rowWidths(_ f: Flat, row: Row, height: Double, width: Double, gap: Double)
         -> (values: [Double], justified: Bool)
     {
-        let slice = Array(items[row.start..<row.end])
-        let fixedWidth = slice.reduce(0.0) { $0 + Double($1.fixed?.width ?? 0) + $1.extraWidth }
-        let available = width - Double(slice.count - 1) * gap - fixedWidth
-        let flex = slice.filter { $0.fixed == nil }
-        guard !flex.isEmpty, let ratios = rowRatios(flex: flex, height: height, available: available) else {
-            return (slice.map { Double($0.fixed?.width ?? 0) + $0.extraWidth }, false)
+        var fixedWidth = 0.0
+        var flex: [Int] = []
+        for i in row.start..<row.end {
+            fixedWidth = fixedWidth + f.fixedW[i] + f.extra[i]
+            if !f.isFixed[i] { flex.append(i) }
         }
-        var next = ratios.makeIterator()
-        let values = slice.map { item in item.fixed.map { Double($0.width) } ?? next.next()! * height + item.extraWidth }
+        let available = width - Double(row.end - row.start - 1) * gap - fixedWidth
+        guard !flex.isEmpty, let ratios = rowRatios(f, flex: flex, height: height, available: available) else {
+            return ((row.start..<row.end).map { f.fixedW[$0] + f.extra[$0] }, false)
+        }
+        var values: [Double] = []
+        values.reserveCapacity(row.end - row.start)
+        var k = 0
+        for i in row.start..<row.end {
+            if f.isFixed[i] { values.append(f.fixedW[i]) } else { values.append(ratios[k] * height + f.extra[i]); k += 1 }
+        }
         // A row ending in a fixed tile is left-aligned exactly; the flexible
         // tiles already sum to the width.
-        return (values, slice.last?.fixed == nil)
+        return (values, !f.isFixed[row.end - 1])
     }
 
     /// Spread `target` over the rows inside each row's height band: every row
@@ -595,14 +798,13 @@ public enum CanvasTidyPacker {
     /// `tileAreaCap` (band clamps move width between tiles as a row grows, so the
     /// row's own estimate can miss) gets its exact limit, found by bisection
     /// between its natural height and the fitted one, and the fit runs again.
-    private static func fitHeightsUnderCap(items: [Item], rows: [Row], target: Double, width: Double, gap: Double) -> [Row] {
+    private static func fitHeightsUnderCap(_ f: Flat, rows: [Row], target: Double, width: Double, gap: Double) -> [Row] {
         var bounded = rows
         var fitted = fitHeights(rows: bounded, target: target)
         func exceeds(_ row: Row, _ h: Double) -> Bool {
-            let widths = rowWidths(items: items, row: row, height: h, width: width, gap: gap).values
-            for (offset, index) in (row.start..<row.end).enumerated() where items[index].fixed == nil {
-                let item = items[index]
-                if (widths[offset] - item.extraWidth) * h > tileAreaCap * item.area * (1 + 1e-9) { return true }
+            let widths = rowWidths(f, row: row, height: h, width: width, gap: gap).values
+            for (offset, index) in (row.start..<row.end).enumerated() where !f.isFixed[index] {
+                if (widths[offset] - f.extra[index]) * h > tileAreaCap * f.area[index] * (1 + 1e-9) { return true }
             }
             return false
         }
@@ -627,15 +829,14 @@ public enum CanvasTidyPacker {
     /// Squared log change of every tile's area plus twice its ratio change,
     /// against the tile as it is now: the mean, plus half the worst so no single
     /// tile is sacrificed to the rest; and the geometric mean area change.
-    private static func measure(items: [Item], rows: [Row], width: Double, gap: Double) -> (deviation: Double, stretch: Double) {
+    private static func measure(_ f: Flat, rows: [Row], width: Double, gap: Double) -> (deviation: Double, stretch: Double) {
         var total = 0.0, worst = 0.0, logSum = 0.0, flex = 0.0
         for row in rows {
-            let widths = rowWidths(items: items, row: row, height: row.height, width: width, gap: gap).values
-            for (offset, index) in (row.start..<row.end).enumerated() where items[index].fixed == nil {
-                let item = items[index]
-                let w = widths[offset] - item.extraWidth, h = row.height
-                let areaDev = log(max(w * h, 1e-9) / item.area)
-                let shapeDev = log(max(w / h, 1e-9) / item.ratio)
+            let widths = rowWidths(f, row: row, height: row.height, width: width, gap: gap).values
+            for (offset, index) in (row.start..<row.end).enumerated() where !f.isFixed[index] {
+                let w = widths[offset] - f.extra[index], h = row.height
+                let areaDev = log(max(w * h, 1e-9) / f.area[index])
+                let shapeDev = log(max(w / h, 1e-9) / f.ratio[index])
                 let change = areaDev * areaDev + 2 * shapeDev * shapeDev + capPenalty(areaDev)
                 total += change
                 worst = max(worst, change)
@@ -643,6 +844,6 @@ public enum CanvasTidyPacker {
                 flex += 1
             }
         }
-        return (total / Double(max(items.count, 1)) + worst / 2, flex > 0 ? exp(logSum / flex) : 1)
+        return (total / Double(max(f.count, 1)) + worst / 2, flex > 0 ? exp(logSum / flex) : 1)
     }
 }
