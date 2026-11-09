@@ -193,6 +193,7 @@ let package = Package(
                 .copy("Resources/IOSPreview"),
                 .copy("Resources/TaskEditor")
             ],
+            swiftSettings: [.define("ARRAY_CHECKS", .when(configuration: .debug))],
             linkerSettings: [
                 .linkedFramework("Carbon"),
                 .linkedLibrary("stdc++")

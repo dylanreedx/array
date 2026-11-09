@@ -1396,6 +1396,7 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--transcript-rhythm-check") {
             do {
                 _ = NSApplication.shared
@@ -1406,6 +1407,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
         if CommandLine.arguments.contains("--file-card-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -2554,6 +2556,7 @@ enum ContinuumApp {
             }
         }
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--file-open-active-context-check") {
             do {
                 _ = NSApplication.shared
@@ -2565,6 +2568,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
         if CommandLine.arguments.contains("--project-file-operation-check") {
             do {
@@ -2632,6 +2636,7 @@ enum ContinuumApp {
             }
         }
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--file-markdown-perf-check") {
             do {
                 _ = NSApplication.shared
@@ -2643,7 +2648,9 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--agent-local-file-link-check") {
             do {
                 _ = NSApplication.shared
@@ -2655,6 +2662,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
         if CommandLine.arguments.contains("--file-image-check") {
             do { try FileImageChecks.run(); print("PASS: file-image-check") }
@@ -2692,6 +2700,7 @@ enum ContinuumApp {
             catch { fputs("FAIL: editor-web-bridge-check: \(error)\n", stderr); exit(1) }
             return
         }
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--file-markdown-preview-check") {
             do {
                 _ = NSApplication.shared
@@ -2703,6 +2712,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
         if CommandLine.arguments.contains("--topology-migration-check") {
             do {
@@ -3897,6 +3907,7 @@ enum ContinuumApp {
             catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
         }
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--gesture-telemetry-check") {
             do {
                 _ = NSApplication.shared
@@ -3908,7 +3919,9 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--tile-surface-residency-check") {
             do {
                 _ = NSApplication.shared
@@ -3920,6 +3933,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
         if CommandLine.arguments.contains("--canvas-camera-coalesce-check") {
             do {
@@ -5308,6 +5322,7 @@ enum ContinuumApp {
             }
         }
 
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--agent-first-paint-check") {
             do {
                 _ = NSApplication.shared
@@ -5319,6 +5334,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        #endif
 
         if CommandLine.arguments.contains("--provider-request-response-check") {
             _ = NSApplication.shared

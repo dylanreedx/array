@@ -1,3 +1,4 @@
+#if ARRAY_CHECKS
 import AppKit
 import ContinuumRevivedCore
 import ContinuumRevivedAgentUI
@@ -3246,3 +3247,5 @@ enum TileSurfaceResidencyChecks {
         }
     }
 }
+
+#endif
