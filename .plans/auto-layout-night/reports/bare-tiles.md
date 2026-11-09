@@ -3,7 +3,7 @@
 Date: 2026-11-09. Branch: array/bare-tiles (local, not pushed, not merged).
 Base: ceb37f6c (array/auto-layout-night).
 
-## Outcome (updated 02:50)
+## Outcome (updated 01:50)
 
 Fix A is built and the witness is green. A tile dragged clearly outside
 every zone becomes bare: its stamp is cleared on screen and in
@@ -23,6 +23,8 @@ Commits (array/bare-tiles, local, not pushed, not merged):
 - f655189f feat(canvas): give bare project tiles a layer and let a drag break out (Phases 2-3)
 - 5274378e feat(canvas): mount each project's bare tiles from its membership (Phase 4)
 - 214578f5 test(canvas): cover undo of a drag out and register the bare tile leg (Phase 5)
+- 1afdcbd2 docs(canvas): this report's build section and classification
+- bd8a6c06 fix(canvas): mark a dragged-out tile bare so legacy tiles still rescue
 
 Phases 2-3 and 4 were built and tested together, then committed apart.
 f655189f alone was not built or run on its own; the tree at 5274378e was.
@@ -254,6 +256,62 @@ hasResolvedBareLayer, bareTileIds, transferLayerTileToBare.
 Outside CanvasNSView: WorkspaceRuntime builds, parks and hydrates the bare
 layer with the zone layers. SidebarTree and SharedAreaInventory still call
 the resolver with keepsBare off (see Open).
+
+## The bare marker (bd8a6c06), found by the sweep
+
+What it is: `--workspace-runtime-install-check` failed ("zoneB layer should
+contain noteB"). Its note has never been stamped (nil `zoneId`, the legacy
+shape) and sits outside its zone, so the first design left it bare.
+Why it happened: a nil stamp alone cannot tell "dragged out" from "never
+stamped". In real data every legacy unstamped tile outside its zone would
+have floated free of its project on the next mount.
+
+Fix: `Tile.isBare`, persisted as `"bare": true` only when set (every
+existing canvas.json decodes unchanged). A break-out sets it, an adoption
+or a rescue clears it. The resolver keeps a tile bare only when it is
+marked, and the merge deletes only marked tiles. Classified in
+`WorkspaceAPIExposure` as `tile.bare: notExposed` (the exposure audit
+passes, 127 keys). CoreChecks gained the legacy case in both sections, and
+`--bare-tile-check` now asserts the mark on disk after a drag out and its
+absence after a drag back in.
+
+## Checks on the final tree (bd8a6c06)
+
+All offscreen, each with its own CONTINUUM_APP_SUPPORT and TMUX_TMPDIR,
+ARRAY_AGENT_ID unset, managed-agent marker inherited, stdin /dev/null.
+
+- `--bare-tile-check`: exit 0, both auto-layout modes, every step.
+- Regression set: zone-arming, workspace-scene-owner, spawn-framing,
+  spawn-placement, canvas-undo, auto-layout-fanout-app,
+  canvas-persistence-model, zone-runtime-duplication, workspace-runtime-install,
+  helper-tile-lifecycle, helper-tile-auto-fold: all exit 0.
+  CoreChecks `--unreadable-canvas-store-check`: exit 0.
+- Full CoreChecks (isolated tmux, socket path verified): exit 1 on one line
+  only, "bridge concurrency: turn completes" (a 15 s wait in the pi host
+  bridge, unrelated, load). Membership, merge and exposure sections pass.
+- Sweep, 70 more offscreen app legs over zones, tiles, layout, workspace,
+  persistence and sharing: 66 exit 0 (39 before the marker, 34 after it;
+  zone-breakout, zone-layer-move, zone-close-*, zone-tier-transition,
+  workspace-switch*, workspace-restart-fault, stranded-tile-recovery,
+  shared-area-zone and tile-insert-slide among them).
+- Failures shared with the binary that has no bare-tile code (8ae82646),
+  so not caused here: `--note-click-focus-check` ("keyDown should edit note
+  text"), `--tile-reveal-work-check` (padding 16.00000000000002),
+  `--tile-surface-residency-check` (idle display), and
+  `--previous-focus-navigation-check`, which hangs on both binaries and was
+  stopped by PID after 3 minutes.
+
+## Found on the night branch, not caused here
+
+`--subagent-tile-zone-check` fails on the night branch and on the
+spawn-sizing binary alike: "the first child must open docked beside its
+parent (2112, 880) 576x640; got (2112, 1528) 576x316". The lead is now
+576x640 (stream 3's new agent default) and its half-height helper docks
+below it instead of to its right, probably because `visibleSpawnSlot`
+picks the free slot nearest the lead's centre, which is below once the
+lead is taller than wide. Stream 3 (mine) missed it: the leg was not in
+that stream's check list. Helper geometry belongs to Stream 1, so it is
+left for the lead.
 
 ## Open
 
