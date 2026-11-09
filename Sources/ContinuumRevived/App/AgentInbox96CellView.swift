@@ -2043,6 +2043,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         groupBackground.setDeck(nil, animated: false)
         spine.isHidden = true
         let sub = isSubagentRow
+        card.indicatorStyle = activeIndicatorStyle
+        card.sharesGroupLight = ownership.activeGroup && activeIndicatorStyle != "current"
         let pad = InboxOwnershipChrome.pad
         if sub {
             let left = gutter + InboxOwnershipChrome.subagentLeading - 6

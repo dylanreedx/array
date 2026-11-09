@@ -115,34 +115,54 @@ enum SidebarIndicatorSettingsChecks {
                 let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
                 try expect(tail.isSweepingForQA == (style == .classic && !reduced),
                            "the helper tail did not follow the live style's border policy")
-                switch style {
-                case .classic:
-                    try expect(layers.wash.isHidden && layers.edge.isHidden, "Classic still paints an alternative surface")
-                    try expect(layers.wash.animationKeys() == nil && layers.sheen.animationKeys() == nil, "Classic retained alternative motion")
-                case .duplex:
-                    try expect(!layers.wash.isHidden && layers.wash.type == .radial && layers.wash.colors?.count == 2, "Duplex did not paint radial light")
-                    try expect((layers.sheen.animation(forKey: "indicator.focus") != nil) == !reduced, "Duplex motion policy is wrong")
-                case .gradient:
-                    try expect(!layers.wash.isHidden && layers.wash.type == .axial && layers.wash.colors?.count == 3, "Gradient did not paint its wash")
-                    for key in ["startPoint", "endPoint"] {
-                        let animation = layers.wash.animation(forKey: "indicator.orbit." + key)
-                        try expect(reduced ? animation == nil : animation?.duration == 60, "Gradient must circle over 60s, or hold still under Reduce Motion")
-                    }
-                case .sheen:
-                    try expect(!layers.wash.isHidden && layers.wash.type == .axial && layers.wash.colors?.count == 2 && layers.edge.borderWidth == 0, "Sheen did not paint its flush tinted surface")
-                    try expect(layers.wash.locations == nil, "Sheen retained Gradient's three stops")
-                    try expect((layers.sheen.animation(forKey: "indicator.sheen") != nil) == !reduced, "Sheen motion policy is wrong")
+                guard let shared = descendants(card.superview ?? card, InboxExpandedGroupLight.self).first else {
+                    throw Failure(description: "expanded card has no shared light renderer")
                 }
-                guard let rep = SettingsFixtureWindow.capture(card), let png = rep.representation(using: .png, properties: [:]) else {
+                let painted = shared.renderedLayersForChecks
+                let gradients = painted.compactMap { $0 as? CAGradientLayer }
+                try expect(shared.isHidden == (style == .classic), "shared group light visibility did not follow Settings")
+                try expect(layers.wash.isHidden && layers.wash.animationKeys() == nil && layers.sheen.animationKeys() == nil,
+                           "expanded group retained duplicate row-local light or motion")
+                switch style {
+                case .classic: break
+                case .duplex:
+                    try expect(gradients.filter { $0.type == .radial }.count == 2, "Duplex must paint two shared light fields")
+                    try expect(gradients.contains { $0.animation(forKey: "group.focus") != nil } == !reduced, "shared Duplex breath policy wrong")
+                case .gradient:
+                    try expect(gradients.contains { $0.colors?.count == 3 && $0.mask is CAGradientLayer }, "Gradient lost its shared cascading wash")
+                    try expect(gradients.contains { $0.animation(forKey: "group.orbit.startPoint")?.duration == 60 } == !reduced, "shared Gradient loop policy wrong")
+                case .sheen:
+                    try expect(painted.contains { $0 is CAShapeLayer }, "Sheen lost the even satin rim")
+                    try expect(painted.contains { $0.animation(forKey: "group.sheen") != nil } == !reduced, "shared Sheen sweep policy wrong")
+                }
+                guard let rep = SettingsFixtureWindow.capture(card.superview ?? card), let png = rep.representation(using: .png, properties: [:]) else {
                     throw Failure(description: "active row could not render")
                 }
                 renders.append(png)
+                shared.reducesMotionForChecks = true
+                try expect(shared.renderedLayersForChecks.allSatisfy { $0.animationKeys() == nil }, "shared Reduce Motion retained an animation")
+                shared.reducesMotionForChecks = false
                 card.indicatorReducesMotion = true
                 try expect(layers.wash.animationKeys() == nil && layers.sheen.animationKeys() == nil,
                            "Reduce Motion retained an alternative animation")
                 card.indicatorReducesMotion = false
             }
             try expect(Set(renders).count == 4, "the four choices did not produce four rendered surfaces")
+            let finished = helpers.map { helper in
+                AgentInboxRow(id: helper.id, title: helper.displayTitle, state: .ready, depth: 1, createdAt: Date(), parentId: id)
+            }
+            inbox.reload(rows: [lead] + finished)
+            inbox.layoutForQA()
+            fixture.settle()
+            guard let resting = descendants(inbox, InboxExpandedGroupLight.self).first(where: { !$0.isHidden }),
+                  let light = resting.renderedLayersForChecks.compactMap({ $0 as? CAGradientLayer }).last else {
+                throw Failure(description: "finishing helpers lost the shared Duplex field")
+            }
+            try expect(light.startPoint.y < 0.5, "Duplex did not return focus to the lead when helpers finished")
+            if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                try expect((light.animation(forKey: "group.settle.startPoint")?.duration ?? 0) > 0
+                    || inbox.ownershipSliceForQA(id: id)?.focusChangedAt.map { CACurrentMediaTime() - $0 >= 0.6 } == true, "Duplex focus relocation did not ease on the render server")
+            }
             let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("qa-runs/sidebar-indicator-settings")
             try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
             if let snapshot = fixture.snapshot()?.representation(using: .png, properties: [:]) {
