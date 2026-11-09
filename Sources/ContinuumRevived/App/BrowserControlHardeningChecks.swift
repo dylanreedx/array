@@ -566,6 +566,36 @@ func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
     h.window.setContentSize(NSSize(width: 6000, height: 4000))
     h.f.canvas.frame = NSRect(x: 0, y: 0, width: 6000, height: 4000)
     h.pump(0.1)
+    if experimental {
+        _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { document.body.innerHTML='<input style=\"width:200px;height:40px\">'; window.actualKeys=[]; document.addEventListener('keydown',e=>{if(e.isTrusted)actualKeys.push(e.timeStamp)}); \(browserTakeoverKeyProbeScript); return true }"])
+        // The click-only active case leaves its once-listener waiting. The
+        // following key case used to add another listener to that document.
+        _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { \(browserTakeoverKeyProbeScript); return true }"])
+        browser.automation._duringAgentClickForChecks = {
+            h.window.makeFirstResponder(browser.webView)
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: h.window.windowNumber,
+                context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12)!
+            h.window.sendEvent(event)
+        }
+        _ = try h.raw("browser.click", ["tileId":tile.uuidString,"x":20,"y":20])
+        browser.automation._duringAgentClickForChecks = nil
+        var probe: [String: Any]?
+        browser.webView.evaluateJavaScript("({count:takeKeys,actual:actualKeys.length,value:document.querySelector('input').value})") { value, _ in probe = value as? [String: Any] }
+        h.pump(2) { probe != nil }
+        print("Key takeover counter probe: \(probe ?? [:])")
+        try expect(probe?["actual"] as? Int == 1 && probe?["value"] as? String == "q", "one native window key must reach the intended field exactly once: \(probe ?? [:])")
+        try expect(probe?["count"] as? Int == 1, "takeover check must count one real key once: \(probe ?? [:])")
+        h.pump(0.2)
+        probe = nil
+        browser.webView.evaluateJavaScript("({count:takeKeys,actual:actualKeys.length,value:document.querySelector('input').value})") { value, _ in probe = value as? [String: Any] }
+        h.pump(2) { probe != nil }
+        try expect(probe?["actual"] as? Int == 1 && probe?["value"] as? String == "q" && probe?["count"] as? Int == 1,
+            "key must remain single after settling: \(probe ?? [:])")
+        print("PASS: one native window key, one page keydown, one q retained after settling; probe listeners replaced")
+        if let surface = h.f.canvas.tileView(for:tile) as? BrowserTileNSView { surface.qaChooseAgentControl("return") }
+        _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    }
     _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": """
         () => {
           document.body.innerHTML = '<style>#choice{display:none}#menu:hover #choice,#menu.open #choice{display:block}</style><div id="menu"><button id="opener">Pointer opener</button><button id="choice">Pointer choice</button></div><p title="Pointer tooltip">Tooltip</p><p draggable="true">Draggable text and selection</p>';

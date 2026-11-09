@@ -1,3 +1,6 @@
+// Shared by the active fixture and its inactive counter regression witness.
+let browserTakeoverKeyProbeScript = "window.takeKeys=0; if(window.takeKeyHandler) document.removeEventListener('keydown',window.takeKeyHandler); window.takeKeyHandler=e=>{if(e.isTrusted)window.takeKeys++}; document.addEventListener('keydown',window.takeKeyHandler)"
+
 import AppKit
 import Darwin
 import ContinuumRevivedCore
@@ -203,7 +206,7 @@ func runBrowserPointerRealActiveCheck() throws {
             for enabled in [false, true] {
             BrowserAutomation._pointerFilterForChecks = enabled
             for key in [false, true] {
-                try eval("document.body.innerHTML='<input style=\"width:200px;height:40px\" id=field>'; window.takeKeys=0; document.addEventListener('keydown',e=>{if(e.isTrusted)window.takeKeys++},{once:true})")
+                try eval("document.body.innerHTML='<input style=\"width:200px;height:40px\" id=field>'; \(browserTakeoverKeyProbeScript)")
                 let before = browser.automation.userInputCount
                 var immediate = false
                 browser.automation._duringAgentClickForChecks = {
