@@ -305,6 +305,20 @@ ARRAY_AGENT_ID unset, managed-agent marker inherited, stdin /dev/null.
   `--previous-focus-navigation-check`, which hangs on both binaries and was
   stopped by PID after 3 minutes.
 
+## Base regressions from spawn-framing-release (lead's list)
+
+Run on the final tree (ca8ab536) and compared line for line with the
+baseline messages in .worktrees/auto-layout-night/qa-runs/aln-int/regr*.log:
+
+- `--subagent-tile-zone-check`: exit 1, message UNCHANGED from baseline.
+- `--leader-jump-check`: exit 1, message UNCHANGED.
+- `--tile-reveal-work-check`: exit 1, message UNCHANGED.
+- `--agent-local-file-link-check`: exit 1, message UNCHANGED.
+- `--canvas-zoom-momentum-check`: exit 1, message UNCHANGED.
+
+No new or different failure from bare tiles. All five are now in this
+bench's regression set.
+
 ## Found on the night branch, not caused here
 
 `--subagent-tile-zone-check` fails on the night branch and on the
