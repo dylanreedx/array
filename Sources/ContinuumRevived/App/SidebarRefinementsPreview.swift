@@ -77,6 +77,12 @@ final class SidebarRefinementsPreview: NSObject, NSApplicationDelegate {
             inbox.reload(rows: rows)
             window.makeKeyAndOrderFront(nil)
         }
+        // Settle the real table viewport after both windows are exposed. The
+        // first offscreen-sized pass can otherwise leave a stale row layer.
+        for inbox in inboxes {
+            inbox.layoutForQA()
+            inbox.rebuildRowsForQA()
+        }
         NSApp.activate(ignoringOtherApps: true)
         if let support = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] {
             let state: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier,
