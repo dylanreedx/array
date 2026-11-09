@@ -59,7 +59,8 @@ enum InboxParentFoldChecks {
 
     static func makeInbox(_ rows: [AgentInboxRow], appearance: NSAppearance.Name, height: CGFloat = 1_100,
                           windows: inout [NSWindow]) -> AgentInboxView {
-        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: height))
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: height),
+                                  indicatorDefaults: ClassicSidebarDefaultsForChecks.make())
         view.clock = { epoch }
         // What the app's sidebar sets (`configureWorkspaceSidebar`); the
         // production-wiring section below asserts it does.

@@ -4268,6 +4268,17 @@ enum ContinuumApp {
 
         // Program 96/P0.2: the offscreen screenshot set + density proposals. Async
         // because it drives the corpus, whose events hop `DispatchQueue.main.async`.
+        if CommandLine.arguments.contains("--sidebar-indicator-settings-check") {
+            _ = NSApplication.shared
+            do {
+                try SidebarIndicatorSettingsChecks.run()
+                print("SidebarIndicatorSettingsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: sidebar-indicator-settings: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-screenshot-check") {
             _ = NSApplication.shared
             Task { @MainActor in

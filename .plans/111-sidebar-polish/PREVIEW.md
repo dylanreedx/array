@@ -1,0 +1,11 @@
+# Sidebar polish preview / next release
+
+Settings → Appearance → Sidebar → Active agent offers **Duplex** (the default), Gradient, Sheen and Classic. Choices persist and apply immediately; Reduce Motion keeps the highlight still.
+
+The old dev-only `SidebarActiveIndicatorStyle` switch is retired. The normal app preference is `continuum.sidebar.activeAgentStyle`, in the app's own prod or dev defaults domain. Existing users with no saved preference start on Duplex too.
+
+Witness: `--sidebar-indicator-settings-check` opens the real Settings choice in offscreen windows, queues mouse-up before dispatching mouse-down through `NSApp.sendEvent`, and checks all four visible sidebar surfaces and fresh isolated-suite persistence in light and dark. It also confirms the active card and row build count survive the change. The pre-feature run was RED because Appearance had no Active agent ChoiceButton. The witness uses only explicit isolated preference suites and temporary app support.
+
+Motion review stills and clips: [round 3](indicator/round3/README.md), [minute-long gradient](indicator/round4/README.md).
+
+Verification for this change: `swift build --product Array` passed; `--sidebar-indicator-settings-check` was RED before the control existed and is GREEN in both appearances after implementation; `--sidebar-screenshot-check` passed with 48 images. The new app leg and its inventory entries were added without renaming any existing invocation. Existing Classic-specific motion fixtures now select Classic explicitly; the shared-agent fixture expects the quiet default Duplex surface. Those other legs and the full matrix were not run, as requested; the full gate remains part of release verification.

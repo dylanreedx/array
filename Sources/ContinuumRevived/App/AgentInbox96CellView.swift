@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import ContinuumRevivedCore
 import ContinuumRevivedAgentUI
 
 /// The "All set?" settle nudge: a real button on the row's meta line.
@@ -596,6 +597,15 @@ enum BrandMark96 {
 /// same arithmetic `SidebarDensityProposal` reports and the two cannot drift.
 @MainActor
 final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
+    var activeIndicatorStyle = SidebarActiveIndicatorStyle.fallback.rawValue {
+        didSet {
+            guard activeIndicatorStyle != oldValue else { return }
+            card.indicatorStyle = activeIndicatorStyle
+            applyOwnershipMotion()
+            needsLayout = true
+        }
+    }
+
     /// The folded parent's rollup shares this lane with the branch.
     var branchLaneTextForQA: String {
         // Plan 106: a folded lead's facts follow its project on line 2.
@@ -1946,7 +1956,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         guard proposal.isTwoLine, let row = shown?.row else { return }
         // Waiting is not progress: a row that asks stops pulsing and shimmering.
         let working = row.state == .working && Self.ask(row) == nil
-        let reduced = prefersReducedMotion() || AgentInboxCardView.indicatorStyle != "current"
+        let reduced = prefersReducedMotion() || activeIndicatorStyle != "current"
         let phase = InboxOwnershipClock.phase(for: row.id)
         let foldsHelpers = (shown?.disclosure ?? .none) != .none
         pulseDots.show(colour: TextToken.textSecondary.color.nsColor(in: self),
@@ -2030,7 +2040,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         ownershipChrome.layout(
             ownership, bounds: bounds, gutter: gutter, gap: gap, spacing: spacing,
             laneTop: gap / 2 + l1 + SwarmPose.stemBottom,
-            rowMid: InboxOwnershipChrome.subagentHeight / 2)
+            rowMid: InboxOwnershipChrome.subagentHeight / 2, indicatorStyle: activeIndicatorStyle)
         decorations.workspaceSlot = nil
         if !sub, workspaceMarkColour != nil,
            workspaceTreatmentForQA == .outline || workspaceTreatmentForQA == .wash {

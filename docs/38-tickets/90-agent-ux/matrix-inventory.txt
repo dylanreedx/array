@@ -307,6 +307,7 @@ check --sidebar-character-check
 check --sidebar-fold-expand-check
 check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
+check --sidebar-indicator-settings-check
 check --sidebar-lifecycle-check
 check --sidebar-liveness-check
 check --sidebar-ownership-check
@@ -739,6 +740,7 @@ leg run_app_check .build/debug/Array --sidebar-character-check
 leg run_app_check .build/debug/Array --sidebar-fold-expand-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
+leg run_app_check .build/debug/Array --sidebar-indicator-settings-check
 leg run_app_check .build/debug/Array --sidebar-liveness-check
 leg run_app_check .build/debug/Array --sidebar-ownership-check
 leg run_app_check .build/debug/Array --sidebar-pills-check

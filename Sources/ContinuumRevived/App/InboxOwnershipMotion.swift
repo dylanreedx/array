@@ -466,7 +466,7 @@ struct InboxOwnershipChrome {
     /// Lay the three out in a cell of `bounds`. `laneTop` is where the lead's
     /// stem begins (its row only); `rowMid` is the subagent line's centre.
     func layout(_ slice: InboxOwnershipSlice, bounds: NSRect, gutter: CGFloat, gap: CGFloat,
-                spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat) {
+                spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat, indicatorStyle: String = "current") {
         let bleed = spacing / 2
         let top = slice.continuesAbove ? -bleed : 0
         let bottom = bounds.height + (slice.continuesBelow ? bleed : 0)
@@ -482,7 +482,7 @@ struct InboxOwnershipChrome {
             card.minY >= clip.minY - 0.5, card.maxY <= clip.maxY + 0.5)
 
         sweep.frame = clip
-        sweep.show(card: slice.sweepPhase == nil || AgentInboxCardView.indicatorStyle != "current" ? nil : card.offsetBy(dx: 0, dy: -top),
+        sweep.show(card: slice.sweepPhase == nil || indicatorStyle != "current" ? nil : card.offsetBy(dx: 0, dy: -top),
                    colour: slice.sweepColour.map(AgentInboxView.identityDotColour(named:)),
                    phase: slice.sweepPhase ?? 0,
                    moving: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
