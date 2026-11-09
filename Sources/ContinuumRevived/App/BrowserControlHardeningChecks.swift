@@ -3,6 +3,9 @@ import ContinuumRevivedCore
 import Foundation
 import WebKit
 
+// The owned listener replaces any previous case's listener before counting.
+let browserTakeoverKeyProbeScript = "window.takeKeys=0; if(window.takeKeyHandler) document.removeEventListener('keydown',window.takeKeyHandler); window.takeKeyHandler=e=>{if(e.isTrusted)window.takeKeys++}; document.addEventListener('keydown',window.takeKeyHandler)"
+
 /// Review findings on the agent browser API, each driven through the
 /// provider entry (`handleMCPRequest`) on the production-mounted fixture.
 /// Every scenario gets its own fixture and all of them run, so one failure
@@ -37,15 +40,15 @@ func runBrowserControlHardeningChecks() throws {
 }
 
 @MainActor
-final class BrowserHardeningHarness {
+private final class BrowserHardeningHarness {
     let f: WorkspaceAPIChecks.Fixture
     let window: NSWindow
     var permission: WorkspaceToolsPermission = .free
 
-    init(fakedKey: Bool = false, realKey: Bool = false) throws {
+    init(fakedKey: Bool = false) throws {
         f = try WorkspaceAPIChecks.makeFixture()
         _ = f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
-        window = fakedKey ? BrowserFakedKeyCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false) : (realKey ? BrowserFocusCheckWindow(contentRect: f.canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false) : NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false))
+        window = fakedKey ? BrowserFakedKeyCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false) : NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = f.canvas
         window.orderFrontOffscreenForChecks()
         f.delegate.qaAgentSupervisor.workspaceToolsPermission = { [unowned self] in self.permission }
@@ -631,17 +634,20 @@ func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
             NSApp.sendEvent(event)
             // Exercise window routing as well when inactive NSApp routing drops input.
             h.window.sendEvent(event)
+            if type == .mouseMoved { browser.webView.mouseMoved(with: event) }
         }
         for type: NSEvent.EventType in [.mouseEntered, .mouseExited] {
             let event = NSEvent.enterExitEvent(with: type, location: point, modifierFlags: [],
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: h.window.windowNumber,
                 context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!
             NSApp.sendEvent(event)
+            if type == .mouseEntered { browser.webView.mouseEntered(with: event) }
+            else { browser.webView.mouseExited(with: event) }
         }
     }
     h.pump(0.1)
     let pointerState = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => JSON.stringify({events:pointerEvents,hover:document.getElementById('menu').matches(':hover'),open:document.getElementById('menu').classList.contains('open')})"])
-    print("Pointer fixture observation (synthetic off-screen only): \(pointerState["value"] ?? "missing")")
+    print("Pointer fixture observation (NSApp/window plus direct public WebKit move/enter/exit, off-screen): \(pointerState["value"] ?? "missing")")
     _ = try h.ok("browser.click", ["tileId": tile.uuidString, "ref": try pointerRef("Pointer choice")])
     let picked = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => pointerChoice"])
     try expect(picked["value"] as? Int == 1, "agent next click must still reach the dropdown choice")

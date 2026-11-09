@@ -22,7 +22,7 @@ final class BrowserFakedKeyCheckWindow: BrowserFocusCheckWindow {
     override var isKeyWindow: Bool { true }
 }
 
-final class BrowserRealKeyProofProgress: @unchecked Sendable {
+private final class BrowserRealKeyProofProgress: @unchecked Sendable {
     private let lock = NSLock()
     private var passed: Set<String> = []
     func insert(_ name: String) { lock.lock(); defer { lock.unlock() }; passed.insert(name) }

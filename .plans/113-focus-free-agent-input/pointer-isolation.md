@@ -57,12 +57,12 @@ Physical-pointer coexistence, genuine tracking-area exit delivery, native toolti
 
 ## Guarded active proof prepared (not run)
 
-See [pointer-active-launch.md](pointer-active-launch.md) for the dedicated bundle, exact one-run LaunchServices command, per-case red/green/KILLED contract, cooperative foreground restoration, watchdogs and preparation results. The candidates are check-only and default false. The inactive conclusions above remain the current behavioral evidence; no activation was performed during preparation.
+That preparation was followed by the one approved run and retirement; see [pointer-active-launch.md](pointer-active-launch.md). No further launch command or candidate remains.
 
 
 ## Approved active result and atomic removal (2026-11-08)
 
-`/tmp/array-pointer-active.log`: native active/key setup passed, synthetic hover stimulus was zero, and the split-click control was KILLED: one clean agent click, no drag/selection, and one intended user click. The atomic buffering/replay candidate has been removed. No active check was rerun. The deliberate-key failure occurred with candidates=false, before any buffering could be enabled. Its event counter is under investigation separately.
+`/tmp/array-pointer-active.log`: native active/key setup passed, synthetic hover stimulus was zero, and the split-click control was KILLED: one clean agent click, no drag/selection, and one intended user click. The atomic buffering/replay candidate has been removed. No active check was rerun. The deliberate-key failure occurred with candidates=false, before any buffering could be enabled. Its counter was subsequently diagnosed and fixed as described below.
 
 
 Restoration follow-up: the approved active log again showed requested=false and no PID restoration before exit. No working public route has been established here. Both active check implementations now explicitly report that foreground restoration is unsupported, and no longer emit PASS/restored claims or attempt the unsuccessful cooperative handoff. No activated check was rerun.
@@ -83,8 +83,16 @@ The approved failure happened with candidates=false, before any atomic buffering
 
 The exact registration sequence was reproduced in the inactive Tier A key-window fixture at the production click seam, delivering one native NSEvent via window.sendEvent. RED `/tmp/pointer-key-counter-red.log`: actual trusted page keydowns=1, field value=q, check counter=2; exit 1. The shared probe now replaces/removes its own listener. GREEN `/tmp/pointer-key-counter-green.log`: actual=1, value=q, counter=1, unchanged after a further settling read; exit 0. Build logs `/tmp/pointer-key-counter-red-build.log` and `-green-build.log` both exit 0. This is a check bug, not a demonstrated product lost/doubled/late key. The approved log itself omitted the count; its exact numeric value was not recorded. No active run was repeated.
 
-## Debug preview comparison prepared
+## Final disposition after cancellation
 
-The passive filter now has a DEBUG-only, exact-dev-ID defaults toggle, `array.debug.browserPassivePointerIsolation`, default off. Production/release never read the dev suite; a behavioral resolver check verifies the read closure is not called for prod or bare binaries. A one-second refresh allows live flips without per-move preference I/O. Public tracking-area identity also resolves WebKit's NSObject tracking owner, including exits already outside tile geometry.
+The proposed manual comparison was cancelled. Its debug defaults toggle, page, scratch copy and prompt/instructions have been removed. The Desktop preview was deliberately neither rebuilt nor launched during this cancellation task; its previous bundle is not a current verification artifact.
 
-The local fixture and under-ten-step instructions are in [pointer-manual-test.md](pointer-manual-test.md). The file is copied to `~/array-scratch/array-pointer-isolation-fixture.html`; the preview was rebuilt with the required default `scripts/dev-app.sh --no-launch`, checked exit 0, and not launched. Final inactive targeted checks passed both backend modes. Real-pointer filter effectiveness and rendered tooltip/menu behavior remain unverified until the manual test. No automatic foreground restoration is promised.
+One further off-screen experiment added public direct WKWebView.mouseMoved, mouseEntered and mouseExited calls to the existing NSApp/window fixture. Debug build `/tmp/pointer-direct-attempt-build.log` exited 0 (73.10s). Both backend modes exited 0: `/tmp/pointer-direct-attempt-0.log` and `-1.log`. Each observed events=[], hover=false, open=true: no trusted pointer stimulation and no valid red control. This experiment does not establish a real-pointer safety guarantee.
+
+Without a red-then-green behavioral witness the passive filter is removed entirely, including its event routing helpers and active prototype. Atomic buffering was already removed after its effective split-click control was KILLED. The retired active-pointer flag now unconditionally refuses, preventing old commands from accidentally booting the full app. No active check was run again.
+
+Hover risk stays OPEN/UNTESTED. READ IN SOURCE: ordinary tracking can act while the physical pointer is over a driven tile or leaving its boundary; unrelated-tile mouse movement does not continuously track into this page. This is not an absolute only-while-currently-over rule: captured drag/exit state and cached hover updates after layout/scroll can outlive departure. The exact source/installed-framework rejection point for synthetic moves remains unmeasured. The failed stimulation does not prove the risk absent.
+
+The verified camera-scroll and zero-delta-boundary fixes remain. The key failure was reproduced as a check listener leak (one real key/one q but counter=2), fixed to count=1 with no late change; no product key loss/doubling was demonstrated. Arbitrary delayed/cached showPicker remains outside the witnessed select-preflight boundary. Foreground restoration has no verified public route here, and the surviving key check explicitly makes no restoration claim. No merge or push occurred.
+
+Final validation after removal: `/tmp/pointer-removed-final-build.log` exited 0 (75.36s), rebuilding only the debug Array executable in this bench. `/tmp/pointer-removed-final-0.log` and `-1.log` both exited 0; they retain the native key-counter regression, durable takeover and scroll phase/momentum coverage. The direct public pointer calls still observe no DOM events or CSS hover. `git diff --check` passed. No full matrix, activated run, preview rebuild/launch, integration merge or push was performed. The cancelled scratch fixture is absent. The bench is retained for the separate landing step.

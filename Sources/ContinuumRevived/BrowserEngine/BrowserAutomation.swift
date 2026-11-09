@@ -182,8 +182,6 @@ final class BrowserAutomation {
     var _afterAgentCharacterForChecks: (() -> Void)?
     private(set) var lastUserKeyAt: Date?
     private var inputSurfaceIds: Set<ObjectIdentifier> = []
-    // Guarded pointer experiment only. Normal launches keep this off.
-    static var _pointerFilterForChecks = false
     private var agentDeliveryDepth = 0
     private struct AgentInputFingerprint: Hashable {
         let type: NSEvent.EventType
@@ -810,8 +808,7 @@ final class BrowserAutomation {
             rememberAgentInput(down)
             webView.mouseDown(with: down)
             _duringAgentClickForChecks?()
-            let up = Self.mouseEvent(.leftMouseUp, at: point, window: window, clickCount: clickCount)
-            webView.mouseUp(with: up)
+            webView.mouseUp(with: Self.mouseEvent(.leftMouseUp, at: point, window: window, clickCount: clickCount))
         }
         if restoreFocus && !supportsFocusFreeInput { restore(responder, in: window, inputGeneration: focusInput) }
         onAgentClick?(local)
@@ -950,57 +947,14 @@ final class BrowserAutomation {
         guard monitor == nil else { return }
         // One monitor for every engine. It sees only events that pass
         // `NSApp.sendEvent`, which an engine's own direct delivery never does.
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown,
-            .leftMouseUp, .rightMouseUp, .otherMouseUp, .scrollWheel,
-            .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate,
-            .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]) { event in
-            let suppress = MainActor.assumeIsolated {
-                // A re-routed agent event is not user input.
-                if consumeAgentInput(event) { return false }
-                if _pointerFilterForChecks, passivePointerTypes.contains(event.type),
-                   eventEngine(event)?.isEngaged == true { return true }
-                if !passivePointerTypes.contains(event.type),
-                   ![NSEvent.EventType.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type) {
-                    noteUserEvent(event)
-                }
-                return false
-            }
-            return suppress ? nil : event
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel]) { event in
+            MainActor.assumeIsolated { BrowserAutomation.noteUserEvent(event) }
+            return event
         }
-    }
-
-    private static let passivePointerTypes: Set<NSEvent.EventType> = [
-        .mouseMoved, .mouseEntered, .mouseExited, .cursorUpdate,
-        .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
-    ]
-
-    private static func eventEngine(_ event: NSEvent) -> BrowserAutomation? {
-        var view: NSView?
-        if event.type == .keyDown { view = event.window?.firstResponder as? NSView }
-        else if [.mouseEntered, .mouseExited, .cursorUpdate].contains(event.type) {
-            if let area = event.trackingArea {
-                // WKMouseTrackingObserver owns WebKit's area and is not an
-                // NSView. Match the public area identity before ancestry;
-                // exits can already be outside the tile's geometry.
-                for entry in registry.values {
-                    if let engine = entry.engine, engine.webView.trackingAreas.contains(where: { $0 === area }) { return engine }
-                }
-                view = area.owner as? NSView
-            }
-        }
-        if view == nil, let content = event.window?.contentView {
-            view = content.hitTest(content.superview?.convert(event.locationInWindow, from: nil) ?? event.locationInWindow)
-        }
-        while let current = view {
-            if let engine = registry[ObjectIdentifier(current)]?.engine { return engine }
-            view = current.superview
-        }
-        return nil
     }
 
     private static func noteUserEvent(_ event: NSEvent) {
-        guard !registry.isEmpty, !passivePointerTypes.contains(event.type),
-              ![NSEvent.EventType.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type) else { return }
+        guard !registry.isEmpty else { return }
         if consumeAgentInput(event) { return }
         // Trackpads send phase/momentum boundaries with no displacement,
         // sometimes after the camera session expires. They carry no browser
