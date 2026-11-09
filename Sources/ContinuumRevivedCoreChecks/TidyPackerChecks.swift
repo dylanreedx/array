@@ -114,6 +114,15 @@ func runTidyPackerChecks() {
     roomy.scene.zones[0].size.width += 1200
     cases.append(roomy)
 
+    // Float dust far from the origin, as pointer drags leave it: the zone and
+    // every tile shifted by an awkward fraction in a coarse binade.
+    var dust = makeCase("dust", number: 45, kinds: Array(palette.prefix(8)), columns: 3, slack: .zero)
+    let dustShift = 81_234.567_891_234_5
+    dust.scene.zones[0].origin.x += dustShift
+    dust.scene.zones[0].origin.y -= dustShift / 3
+    for i in dust.scene.tiles.indices { dust.scene.tiles[i].frame.x += dustShift; dust.scene.tiles[i].frame.y -= dustShift / 3 }
+    cases.append(dust)
+
     let caseNames = cases.map(\.name)
     var report: [String] = []
     for c in cases {
@@ -132,7 +141,9 @@ func runTidyPackerChecks() {
                              c.name, members.count, fillBefore, fillAfter, zoneBefore.size.width, zoneBefore.size.height,
                              zone.size.width, zone.size.height, elapsed))
 
-        check(zone.origin == zoneBefore.origin, "\(c.name): tidy keeps the zone's origin")
+        check(abs(zone.origin.x - zoneBefore.origin.x) <= CanvasTidyPacker.grid / 2
+              && abs(zone.origin.y - zoneBefore.origin.y) <= CanvasTidyPacker.grid / 2,
+              "\(c.name): tidy keeps the zone's origin (to its 1/64 pt grid)")
         check(fillAfter >= fillFloor, "\(c.name): fill \(fillAfter) below \(fillFloor)")
         let eps = 0.05
         for tile in members {
@@ -144,7 +155,8 @@ func runTidyPackerChecks() {
                   "\(c.name): \(tile.kind!) outside the content rect: \(f) vs \(rect)")
             switch tile.kind! {
             case .browser:
-                check(abs(f.width / f.height - 16.0 / 9.0) < 1e-6, "\(c.name): browser not 16:9: \(f)")
+                // 16:9 to the 1/64 pt grid every tidy edge lands on.
+                check(abs(f.width - f.height * 16 / 9) <= 2 * CanvasTidyPacker.grid, "\(c.name): browser not 16:9: \(f)")
             case .terminal:
                 check(f.height > f.width, "\(c.name): terminal not taller than wide: \(f)")
             case .iosPreview:
@@ -204,10 +216,16 @@ func runTidyPackerChecks() {
                       "\(c.name): the cluster's rows are shared with other tiles")
             }
         }
+        // Every frame converts to zone-local and back exactly: the canvas
+        // rejects a layered commit that cannot.
+        for tile in members {
+            check(CanvasEngine.worldToZoneLocalPreservingWorld(tile.frame, zoneOrigin: zone.origin) != nil,
+                  "\(c.name): \(tile.kind!) frame has no exact zone-local: \(tile.frame) in \(zone.origin)")
+        }
         // Idempotent.
         let again = solve(after, c.zoneId)
         check(again.tileFrames.isEmpty && again.zonePlacements.isEmpty,
-              "\(c.name): tidy is not idempotent: \(again.tileFrames.count) tiles, zone \(again.zonePlacements.values.map(\.size))")
+              "\(c.name): tidy is not idempotent: \(again.tileFrames.count) tiles, zone \(again.zonePlacements.values.map(\.size)); largest move \(again.tileFrames.map { id, f in let o = after.tiles.first { $0.id == id }!.frame; return max(abs(f.x - o.x), abs(f.y - o.y), abs(f.width - o.width), abs(f.height - o.height)) }.max() ?? 0)")
         // Deterministic across input order.
         var shuffled = before
         for i in stride(from: shuffled.tiles.count - 1, to: 0, by: -1) {

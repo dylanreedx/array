@@ -67,6 +67,9 @@ public enum CanvasTidyPacker {
         return excess > 0 ? 40 * excess * excess : 0
     }
 
+    /// Every tidy edge lands on this grid (see the placement).
+    public static let grid = 1.0 / 64
+
     /// What changing the zone's height costs against changing the tiles, per
     /// squared log of the change. Shrinking costs more: the point is to fill.
     public static let growWeight = 2.0
@@ -155,28 +158,37 @@ public enum CanvasTidyPacker {
             }
         }
 
-        // Place. The last tile of a justified row and the last row take the
-        // exact remainder, so the right and bottom edges land on the content rect.
+        // Place, every edge on the 1/64 pt grid: world and zone-local frames
+        // then convert exactly both ways, which the canvas requires before it
+        // commits a layered tile. The last tile of a justified row and the last
+        // row end exactly on the content edge.
+        func snap(_ v: Double) -> Double { (v / grid).rounded() * grid }
+        let left = snap(Double(content.minX)), top = snap(Double(content.minY))
+        let gridGap = snap(gap)
+        let right = snap(left + width), bottom = snap(top + chosen.total)
         var frames: [UUID: TileFrame] = [:]
-        var y = Double(content.minY)
-        let bottom = Double(content.minY) + chosen.total
+        var y = top
         for (rowIndex, row) in chosen.rows.enumerated() {
-            let rowHeight = rowIndex == chosen.rows.count - 1 ? bottom - y : row.height
+            let rowBottom = rowIndex == chosen.rows.count - 1 ? bottom : snap(y + row.height)
             let widths = rowWidths(items: items, row: row, height: row.height, width: width, gap: gap)
-            var x = Double(content.minX)
+            var x = left
             for (offset, index) in (row.start..<row.end).enumerated() {
                 let item = items[index]
-                var w = index == row.end - 1 && widths.justified ? Double(content.minX) + width - x : widths.values[offset]
-                var h = rowHeight
-                if let fixed = item.fixed { w = Double(fixed.width); h = Double(fixed.height) }
-                frames[item.id] = TileFrame(x: x, y: y, width: w, height: h)
-                x += w + gap
+                let frame: TileFrame
+                if let fixed = item.fixed {
+                    frame = TileFrame(x: x, y: y, width: Double(fixed.width), height: Double(fixed.height))
+                } else {
+                    let edge = index == row.end - 1 && widths.justified ? right : snap(x + widths.values[offset])
+                    frame = TileFrame(x: x, y: y, width: edge - x, height: rowBottom - y)
+                }
+                frames[item.id] = frame
+                x = snap(frame.x + frame.width) + gridGap
             }
-            y += rowHeight + gap
+            y = rowBottom + gridGap
         }
         return Result(
             frames: frames,
-            content: CGRect(x: content.minX, y: content.minY, width: CGFloat(width), height: CGFloat(chosen.total)),
+            content: CGRect(x: left, y: top, width: right - left, height: bottom - top),
             scale: chosen.scale)
     }
 

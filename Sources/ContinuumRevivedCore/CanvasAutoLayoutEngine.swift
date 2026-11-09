@@ -243,6 +243,11 @@ public enum CanvasAutoLayoutEngine {
             var settleMover: (mover: UUID?, pin: Bool, grow: Bool, view: TileFrame?)?
             if case let .settle(_, anchor, pin, grow, view) = mutation { settleMover = (anchor, pin, grow, view) }
             if explicitTidy {
+                // The packer's frames sit on its 1/64 pt grid; so must the
+                // origin they are made zone-local against (moves ≤ 1/128 pt).
+                let snappedOrigin = ZonePoint(x: (zone.origin.x / CanvasTidyPacker.grid).rounded() * CanvasTidyPacker.grid,
+                                              y: (zone.origin.y / CanvasTidyPacker.grid).rounded() * CanvasTidyPacker.grid)
+                if snappedOrigin != zone.origin { zone.origin = snappedOrigin; zones[zoneId] = zone }
                 let content = contentRect(zone: zone, padding: padding, header: header)
                 let packed = CanvasTidyPacker.pack(
                     members: memberIds.compactMap { id in tiles[id].map {
@@ -250,18 +255,21 @@ public enum CanvasAutoLayoutEngine {
                                                 minimumSize: $0.minimumSize, clusterLead: $0.clusterLead)
                     } },
                     content: content, gap: gap)
-                // Float dust from re-solving a tidy layout is not a change: a
-                // tidy of a tidy zone reports nothing.
-                for (id, frame) in packed.frames {
-                    guard let current = tiles[id]?.frame else { continue }
-                    if !nearlyEqual(current, frame) { tiles[id]?.frame = frame }
+                // A tidy of a tidy zone re-solves to within a grid step of where
+                // everything already is: that is no change, and reports nothing.
+                // All or nothing, so old and new frames never mix.
+                let size = ZoneSize(width: Double(packed.content.maxX) + padding - zone.origin.x,
+                                    height: Double(packed.content.maxY) + padding - zone.origin.y)
+                let unchanged = abs(size.width - zone.size.width) <= tidyTolerance
+                    && abs(size.height - zone.size.height) <= tidyTolerance
+                    && packed.frames.allSatisfy { id, frame in tiles[id].map { nearlyEqual($0.frame, frame) } ?? true }
+                if unchanged {
+                    if let original = scene.zones.first(where: { $0.zoneId == zoneId }) { zones[zoneId] = original }
+                    continue
                 }
-                let size = ZoneSize(width: Double(packed.content.width) + 2 * padding,
-                                    height: Double(packed.content.height) + header + 2 * padding)
-                if abs(size.width - zone.size.width) > tidyTolerance || abs(size.height - zone.size.height) > tidyTolerance {
-                    zone.size = size
-                    zones[zoneId] = zone
-                }
+                for (id, frame) in packed.frames { tiles[id]?.frame = frame }
+                zone.size = size
+                zones[zoneId] = zone
                 continue
             }
             if let (mover, pin, grow, view) = settleMover {
@@ -1361,7 +1369,9 @@ public enum CanvasAutoLayoutEngine {
     }
 
     private static func squaredDistance(_ a: TileFrame, _ b: TileFrame) -> Double { let dx = a.x - b.x, dy = a.y - b.y; return dx * dx + dy * dy }
-    private static let tidyTolerance = 0.01
+    /// Just over one 1/64 pt grid step: re-solving a tidy layout can land one
+    /// step away.
+    private static let tidyTolerance = 0.02
     private static func nearlyEqual(_ a: TileFrame, _ b: TileFrame) -> Bool {
         abs(a.x - b.x) <= tidyTolerance && abs(a.y - b.y) <= tidyTolerance
             && abs(a.width - b.width) <= tidyTolerance && abs(a.height - b.height) <= tidyTolerance
