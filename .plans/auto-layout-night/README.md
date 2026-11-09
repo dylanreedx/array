@@ -177,9 +177,10 @@ All in `~/Movies/Array/auto-layout-night/`.
 - **No real-app "after" film yet.** The 05:00 and 06:00 screen slots were lost
   to the second outage. Once on screen, the size animation and the camera
   follow are still only witnessed in checks, never seen. When the Mac is free:
-  `/tmp/aln/tools/film.sh "$HOME/array-scratch/apps/Array After.app" after`,
-  with `ALN_TRIGGER=key` for ⌥⌘T. The scripts in `/tmp` won't survive a
-  reboot; their logic is described in the board card's comments.
+  run `.plans/auto-layout-night/tools/setup.sh`, then follow
+  `tools/README.md`: make a film app, set up the scene, then
+  `/tmp/aln/tools/film.sh "$HOME/array-scratch/apps/Array After.app" after`.
+  Use `ALN_TRIGGER=key` for ⌥⌘T.
 - **`tidy-after-interim-0105.mov`**: the first engine at 01:05, kept for the
   record only. It predates masonry, the size animation and the latency work.
 - **`real-canvas/`**: before and after pictures of tidy on each of Dylan's real
