@@ -3683,6 +3683,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--bare-tile-check") {
+            do {
+                _ = NSApplication.shared
+                try BareTileChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --bare-tile-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--canvas-pointer-path-check") {
             _ = NSApplication.shared
             Task { @MainActor in
