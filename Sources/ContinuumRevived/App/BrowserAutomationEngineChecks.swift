@@ -17,6 +17,10 @@ private struct BrowserAutomationEngineCheckError: Error, CustomStringConvertible
 /// point S3's workspace API calls. Outcomes are read back from the page.
 @MainActor
 func runBrowserAutomationEngineCheck() throws {
+    // This witness exercises Stage 1 trusted key delivery explicitly.
+    let previousBackend = BrowserAutomation.focusFreeInputEnabled
+    BrowserAutomation.focusFreeInputEnabled = false
+    defer { BrowserAutomation.focusFreeInputEnabled = previousBackend }
     var outcome: Result<String, Error>?
     Task { @MainActor in
         do { outcome = .success(try await BrowserAutomationEngineCheck().run()) } catch { outcome = .failure(error) }
