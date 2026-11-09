@@ -44373,6 +44373,9 @@ extension AppDelegate {
         app.refreshAgentSurfaces(notify: false)
         sidebar.layoutSubtreeIfNeeded()
         let inbox = sidebar.inboxForQA
+        // This scenario exercises hidden helpers; untouched groups now start open.
+        inbox.restoreParentFolds([parent.rawValue: true])
+        sidebar.layoutSubtreeIfNeeded()
         try expect(inbox.pushedRowForQA(id: children[0].rawValue) != nil,
                    "fixture: the headless child must be a pushed row")
         try expect(inbox.onScreenCardForQA(id: parent.rawValue) != nil,

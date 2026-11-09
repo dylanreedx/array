@@ -1922,10 +1922,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             case let .checks(_, total)?:
                 facts.append(run(total == 1 ? "1 check passed" : "all \(total) checks passed", secondary))
             default:
-                // A folded lead speaks for the subagents it hides.
-                if shown?.disclosure == .collapsed, let working = shown?.rollup?.working, working > 0 {
-                    facts.append(run("\(working) working", secondary))
-                }
+                break
+            }
+            // Live hidden work must remain visible even when the idle lead has
+            // an older report of its own (for example, passed checks).
+            if shown?.disclosure == .collapsed, let working = shown?.rollup?.working, working > 0 {
+                facts.append(run("\(working) working", secondary))
             }
         }
         // Open or folded, a lead says "1 failed" until you have opened the
