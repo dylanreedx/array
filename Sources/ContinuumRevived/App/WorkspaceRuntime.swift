@@ -187,6 +187,14 @@ final class WorkspaceRuntime {
             guard let index = document.ambientTiles.firstIndex(where: { $0.id == tileId }) else { continue }
             document.ambientTiles[index].frame = worldFrame
         }
+        // A commit that moved only project tiles leaves the document as it was:
+        // writing it anyway cost a document save on every drag and tidy
+        // (`.plans/auto-layout-night`). The gesture is still a structural change
+        // for issued workspace.context revisions (CX-01).
+        guard document != previous else {
+            noteStructuralCommit()
+            return
+        }
         do { try persistWorkspaceDocument() } catch {
             document = previous
             throw error
