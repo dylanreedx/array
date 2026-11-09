@@ -1406,6 +1406,9 @@ class TileNSView: NSView, TokenThemed {
         if canvas?.autoLayoutLatchedSlot != nil { dragSnapTarget = nil }
         let committedSnap = dragSnapTarget != nil
         let snapStartOrigin = layer?.presentation()?.frame.origin ?? frame.origin
+        // Where the user let go, before any magnet snap: only that can break a
+        // tile out of its zone.
+        let releasedFrame = tile.frame
         // Commit exactly the previewed world destination before settling.
         if case .move = completedDragKind, let target = dragSnapTarget {
             var snapped = tile
@@ -1428,7 +1431,8 @@ class TileNSView: NSView, TokenThemed {
         // zone-unify P4: a committed move can change zone membership — drop a tile
         // into a zone to adopt it, or pull a member far past the edge to break out.
         if case .move = completedDragKind, !wasClick {
-            canvas?.reevaluateZoneMembership(forMovedTile: tile.id, notifyChange: false)
+            canvas?.reevaluateZoneMembership(forMovedTile: tile.id, notifyChange: false,
+                                             releasedFrame: committedSnap ? releasedFrame : nil)
             canvas?.settleAutoLayoutAfterMove(tileId: tile.id, honorSnap: committedSnap)
         }
 
