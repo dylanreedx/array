@@ -45,6 +45,7 @@ enum TidyNeighbourChecks {
         let second = try tidyCanvasGrid(label: "grid run 2")
         check(first == second, "Tidy Canvas is not deterministic: two identical workspaces tidied to different frames")
         bareTilesArePushedNotAdopted()
+        try growIntoUnloadedNeighbour()
 
         guard failures.isEmpty else {
             throw Failure(message: "\(failures.count) failed:\n  " + failures.joined(separator: "\n  "))
@@ -102,6 +103,59 @@ enum TidyNeighbourChecks {
                   "\(label) redo: neighbour \(neighbour.name) is \(String(describing: redone.zones[neighbour.zoneId])), expected \(String(describing: after.zones[neighbour.zoneId]))")
             host.expectOnDisk(redone, "\(label) redo")
         }
+    }
+
+    // MARK: - 6: an unloaded neighbour is a fixed obstacle
+
+    /// A zone below the live hydration tier has no layer, so its tiles are not
+    /// in the scene a push moves (night review, finding 1). Pushing its
+    /// placement left its tiles behind in canvas.json. Four zones are pinned
+    /// live with a budget of four, so U, 40pt below the cramped zone G, is
+    /// unloaded. Tidy G: U's rect and its canvas.json must not change, and no
+    /// two zones may overlap.
+    private static func growIntoUnloadedNeighbour() throws {
+        let saved = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        var arguments = saved
+        arguments[ZoneHydrationBudgetConfig.maxLiveZonesKey] = 4
+        UserDefaults.standard.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defer { UserDefaults.standard.setVolatileDomain(saved, forName: UserDefaults.argumentDomain) }
+
+        let scene = try Scene(seed: 6)
+        let g = scene.zone("G", CGRect(x: 6000, y: 0, width: 900, height: 420),
+                           notes: (0..<4).map { CGRect(x: 6024 + Double($0 % 2) * 420, y: 58 + Double($0 / 2) * 170, width: 400, height: 300) },
+                           pinnedLive: true)
+        let u = scene.zone("U", CGRect(x: 6000, y: 460, width: 900, height: 500),
+                           notes: [CGRect(x: 6024, y: 518, width: 300, height: 200), CGRect(x: 6340, y: 518, width: 300, height: 200)])
+        for (index, x) in [7000.0, 7700, 8400].enumerated() {
+            scene.zone("P\(index)", CGRect(x: x, y: 0, width: 600, height: 420),
+                       notes: [CGRect(x: x + 24, y: 58, width: 300, height: 200)], pinnedLive: true)
+        }
+        let host = try scene.mount(autoLayout: true, label: "unloaded", unloaded: [u.zoneId])
+        defer { host.close() }
+        check(host.canvas.tiles(inZone: u.zoneId) == nil, "unloaded: precondition: U must have no live layer")
+        check(host.canvas.tiles(inZone: g.zoneId) != nil, "unloaded: precondition: G must be live")
+
+        func uOnDisk() -> (zone: TileFrame?, tiles: Data?) {
+            try? host.mounted.runtime.flushPendingArmingSave()
+            let document = try? WorkspaceStore(workspaceId: Fixture.workspaceA,
+                                               applicationSupportDirectory: scene.fixture.appSupport).load()
+            return (document?.zones.first { $0.zoneId == u.zoneId }.map(CanvasEngine.zoneWorldFrame),
+                    try? Data(contentsOf: ProjectStoreLayout(projectRoot: u.root).canvasFile))
+        }
+        let before = host.snapshot()
+        let diskBefore = uOnDisk()
+        try host.tidyFromZoneMenu(g.zoneId)
+        let after = host.snapshot()
+        scene.fixture.drain(0.3)
+        let diskAfter = uOnDisk()
+        check(after.zones[u.zoneId] == before.zones[u.zoneId],
+              "unloaded: tidy moved the unloaded zone U on screen: \(String(describing: before.zones[u.zoneId])) -> \(String(describing: after.zones[u.zoneId]))")
+        check(diskAfter.zone == diskBefore.zone,
+              "unloaded: the workspace document moved U: \(String(describing: diskBefore.zone)) -> \(String(describing: diskAfter.zone))")
+        check(diskAfter.tiles != nil && diskAfter.tiles == diskBefore.tiles, "unloaded: U's canvas.json changed")
+        // Accepted trade-off: G may overlap U on screen until U loads; moving U
+        // without its tiles is the data loss this guards against.
+        check(host.canvas.tiles(inZone: u.zoneId) == nil, "unloaded: U became live during the check; the scenario no longer holds")
     }
 
     // MARK: - 3: a zone that shrinks leaves its neighbours
@@ -244,6 +298,7 @@ enum TidyNeighbourChecks {
         private var counter = 0
         private let seed: Int
         private var pending: [(SceneZone, CGRect, [Tile])] = []
+        private var pinned = Set<UUID>()
 
         init(seed: Int) throws {
             self.seed = seed
@@ -256,7 +311,8 @@ enum TidyNeighbourChecks {
         }
 
         @discardableResult
-        func zone(_ name: String, _ rect: CGRect, notes: [CGRect], inspectors: [CGRect] = []) -> SceneZone {
+        func zone(_ name: String, _ rect: CGRect, notes: [CGRect], inspectors: [CGRect] = [],
+                  pinnedLive: Bool = false) -> SceneZone {
             let projectId = nextId(), zoneId = nextId()
             let root = fixture.root.appendingPathComponent("zone-\(name)", isDirectory: true)
             var tiles: [Tile] = []
@@ -278,10 +334,11 @@ enum TidyNeighbourChecks {
             let zone = SceneZone(name: name, projectId: projectId, zoneId: zoneId, tileIds: tiles.map(\.id), root: root)
             zones.append(zone)
             pending.append((zone, rect, tiles))
+            if pinnedLive { pinned.insert(zoneId) }
             return zone
         }
 
-        func mount(autoLayout: Bool, label: String) throws -> Host {
+        func mount(autoLayout: Bool, label: String, unloaded: Set<UUID> = []) throws -> Host {
             let now = Date(timeIntervalSince1970: 1_900_000_000)
             var registry = try fixture.registryStore.loadOrEmpty()
             let workspaceStore = WorkspaceStore(workspaceId: Fixture.workspaceA, applicationSupportDirectory: fixture.appSupport)
@@ -301,7 +358,8 @@ enum TidyNeighbourChecks {
                     zoneId: zone.zoneId, projectId: zone.projectId,
                     origin: ZonePoint(x: Double(rect.minX), y: Double(rect.minY)),
                     size: ZoneSize(width: Double(rect.width), height: Double(rect.height)),
-                    color: "blue", collapsed: false, hydrationPolicy: .automatic, name: zone.name)
+                    color: "blue", collapsed: false,
+                    hydrationPolicy: pinned.contains(zone.zoneId) ? .pinnedLive : .automatic, name: zone.name)
                 placement.zPosition = FracIndex.after(document.zones.map(\.zPosition).max() ?? .first)
                 document.zones.append(placement)
                 registry.projects.append(ProjectEntry(
@@ -320,7 +378,7 @@ enum TidyNeighbourChecks {
             try workspaceStore.save(document)
             try fixture.mount()
             fixture.drain(0.4)
-            return try Host(scene: self, autoLayout: autoLayout, label: label)
+            return try Host(scene: self, autoLayout: autoLayout, label: label, unloaded: unloaded)
         }
     }
 
@@ -332,7 +390,7 @@ enum TidyNeighbourChecks {
         let label: String
         var canvas: CanvasNSView { mounted.canvas }
 
-        init(scene: Scene, autoLayout: Bool, label: String) throws {
+        init(scene: Scene, autoLayout: Bool, label: String, unloaded: Set<UUID> = []) throws {
             self.scene = scene
             self.label = label
             mounted = try scene.fixture.requireMounted("tidy neighbours \(label)")
@@ -342,7 +400,7 @@ enum TidyNeighbourChecks {
             window.contentView = mounted.canvas
             window.orderFrontOffscreenForChecks()
             mounted.canvas.layoutSubtreeIfNeeded()
-            for zone in scene.zones where mounted.canvas.tiles(inZone: zone.zoneId) == nil {
+            for zone in scene.zones where !unloaded.contains(zone.zoneId) && mounted.canvas.tiles(inZone: zone.zoneId) == nil {
                 TidyNeighbourChecks.check(false, "\(label): precondition: zone \(zone.name) has no live layer")
             }
         }
