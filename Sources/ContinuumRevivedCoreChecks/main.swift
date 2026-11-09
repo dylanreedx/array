@@ -12032,7 +12032,132 @@ func runJellyTrajectoryProbe() {
         }
         print("")
     }
+    anomalyCount += runTidiedMixedTrajectories()
     print("jelly trajectory probe complete")
+}
+
+/// The probe on a TIDIED zone of mixed tiles (`.plans/auto-layout-night`): rows of
+/// different widths at exact gap contact, as `CanvasTidyPacker` makes them. The
+/// same frame-by-frame anomaly rules as the three-tile fixtures, over every tile,
+/// plus the end state each drag would drop: no two tiles overlapping, every tile
+/// inside the content rect. App gap 8, padding 24, header 34. Returns the
+/// anomaly count.
+func runTidiedMixedTrajectories() -> Int {
+    let zoneId = UUID(uuidString: "B2300000-0000-4000-8000-000000000001")!
+    func id(_ n: Int) -> UUID { UUID(uuidString: String(format: "B2300000-0000-4000-8000-%012d", 10 + n))! }
+    let seeds: [(String, TileKind, CGSize)] = [
+        ("web1", .browser, CGSize(width: 640, height: 360)), ("note1", .note, CGSize(width: 300, height: 200)),
+        ("agent1", .managedAgent, CGSize(width: 400, height: 440)), ("term", .terminal, CGSize(width: 240, height: 320)),
+        ("web2", .browser, CGSize(width: 640, height: 360)), ("note2", .note, CGSize(width: 300, height: 200)),
+        ("agent2", .managedAgent, CGSize(width: 400, height: 440)), ("note3", .note, CGSize(width: 240, height: 200)),
+    ]
+    let gap = 8.0, padding = 24.0, header = 34.0
+    let zone = ZonePlacement(zoneId: zoneId, projectId: nil, origin: ZonePoint(x: 400, y: 300),
+                             size: ZoneSize(width: 1700, height: 1100), color: "teal", collapsed: false,
+                             hydrationPolicy: .automatic)
+    let content = CGRect(x: 424, y: 358, width: 1652, height: 1018)
+    var names: [UUID: String] = [:]
+    var members: [CanvasTidyPacker.Member] = []
+    for (index, seed) in seeds.enumerated() {
+        names[id(index)] = seed.0
+        members.append(.init(id: id(index), frame: TileFrame(x: 424 + Double(index % 4) * 420, y: 358 + Double(index / 4) * 470,
+                                                             width: Double(seed.2.width), height: Double(seed.2.height)),
+                             kind: seed.1, minimumSize: TileGeometry.minimumSize(for: seed.1)))
+    }
+    let packed = CanvasTidyPacker.pack(members: members, content: content, gap: gap)
+    var packedZone = zone
+    packedZone.size = ZoneSize(width: Double(packed.content.maxX) + padding - zone.origin.x,
+                               height: Double(packed.content.maxY) + padding - zone.origin.y)
+    let tiles = members.map { member in
+        CanvasAutoLayoutEngine.LayoutTile(id: member.id, frame: packed.frames[member.id]!, zoneId: zoneId,
+                                          minimumSize: member.minimumSize, kind: member.kind)
+    }
+    let byName = Dictionary(uniqueKeysWithValues: names.map { ($1, $0) })
+    let original = Dictionary(uniqueKeysWithValues: tiles.map { ($0.id, $0.frame) })
+    let packedContent = TileFrame(x: Double(packed.content.minX), y: Double(packed.content.minY),
+                                  width: Double(packed.content.width), height: Double(packed.content.height))
+    func centre(_ f: TileFrame) -> CGPoint { CGPoint(x: f.x + f.width / 2, y: f.y + f.height / 2) }
+    func describeRow() -> String {
+        tiles.sorted { (original[$0.id]!.y, original[$0.id]!.x) < (original[$1.id]!.y, original[$1.id]!.x) }
+            .map { "\(names[$0.id]!) \(Int(original[$0.id]!.x)),\(Int(original[$0.id]!.y)) \(Int(original[$0.id]!.width))x\(Int(original[$0.id]!.height))" }
+            .joined(separator: " | ")
+    }
+    print("=== tidied mixed zone: \(describeRow()) ===")
+    // Each drag carries the active tile's centre onto a target's centre (the
+    // probe's pointer), dwells, and the drop takes the latched slot.
+    let drags: [(String, String, String)] = [
+        ("swap wide web1 onto narrow note1 (one row)", "web1", "note1"),
+        ("swap narrow note1 onto wide web1 (one row)", "note1", "web1"),
+        ("swap web1 across rows onto note3", "web1", "note3"),
+        ("swap note1 across rows onto agent2", "note1", "agent2"),
+    ]
+    var anomalies = 0
+    for (label, activeName, targetName) in drags {
+        guard let active = byName[activeName], let target = byName[targetName],
+              let start = original[active], let goal = original[target] else { continue }
+        print("--- \(label) ---")
+        let baseline = CanvasAutoLayoutEngine.Scene(tiles: tiles, zones: [packedZone])
+        let delta = CGVector(dx: centre(goal).x - centre(start).x, dy: centre(goal).y - centre(start).y)
+        var previous = original
+        var latch: UUID?
+        var lastSlot: TileFrame?
+        var lastFrames = original
+        let frames = 28
+        for index in 0..<(frames + 2) {
+            let t = min(1, Double(index + 1) / Double(frames))
+            let requested = TileFrame(x: start.x + delta.dx * t, y: start.y + delta.dy * t, width: start.width, height: start.height)
+            let transaction = CanvasAutoLayoutEngine.solve(
+                scene: baseline, mutation: .tile(id: active, frame: requested),
+                gap: gap, zonePadding: padding, headerHeight: header, latched: latch.map { .swap($0) })
+            let latchChanged = transaction.swapTargetTileId != latch
+            latch = transaction.swapTargetTileId
+            lastSlot = transaction.latchedSlot
+            var current = original
+            for (id, frame) in transaction.tileFrames { current[id] = frame }
+            var found: [String] = []
+            for (id, now) in current where id != active && id != latch && !latchChanged {
+                guard let before = previous[id] else { continue }
+                let jump = max(abs(now.x - before.x), abs(now.y - before.y))
+                if jump > min(now.width, now.height) / 2 { found.append("TELEPORT \(names[id]!) \(String(format: "%.1f", jump))") }
+            }
+            if !found.isEmpty || index % 7 == 0 || index >= frames {
+                var line = String(format: "f%02d", index) + (latch.map { " ⇄" + names[$0]! } ?? "   ")
+                for tile in tiles where current[tile.id] != original[tile.id] {
+                    let f = current[tile.id]!
+                    line += "  \(names[tile.id]!)(\(Int(f.x)),\(Int(f.y)))"
+                }
+                if !found.isEmpty { line += "   !! " + found.joined(separator: ", ") }
+                print(line)
+            }
+            anomalies += found.count
+            previous = current
+            lastFrames = current
+        }
+        // The drop: the mover takes its latched slot; everything else stays where
+        // the last frame left it.
+        var dropped = lastFrames
+        if let slot = lastSlot { dropped[active] = slot }
+        var problems: [String] = []
+        let ids = dropped.keys.sorted { names[$0]! < names[$1]! }
+        for (i, a) in ids.enumerated() {
+            for b in ids.dropFirst(i + 1) {
+                let p = dropped[a]!, q = dropped[b]!
+                if p.x < q.x + q.width - 0.5 && q.x < p.x + p.width - 0.5 && p.y < q.y + q.height - 0.5 && q.y < p.y + p.height - 0.5 {
+                    problems.append("OVERLAP \(names[a]!)/\(names[b]!)")
+                }
+            }
+        }
+        // Past the content edge is the zone needing to grow (the drop grows it;
+        // a tidy restores the fill), not an anomaly: reported, not counted.
+        let rightmost = dropped.values.map { $0.x + $0.width }.max() ?? 0
+        let growth = max(0, rightmost - (packedContent.x + packedContent.width))
+        print("drop " + (lastSlot.map { "slot(\(Int($0.x)),\(Int($0.y)) \(Int($0.width))x\(Int($0.height)))" } ?? "no latch")
+              + (growth > 0.5 ? String(format: "  zone grows %.0fpt", growth) : "")
+              + (problems.isEmpty ? "  clean" : "   !! " + problems.joined(separator: ", ")))
+        anomalies += problems.count
+        print("")
+    }
+    return anomalies
 }
 
 func runCanvasAutoLayoutChecks() {
@@ -12311,9 +12436,12 @@ func runCanvasAutoLayoutChecks() {
     expect(settled.tileFrames[swapLeftId] == nil && settled.tileFrames[swapRightId] == nil,
            "jelly settle never moves members already at gap-contact")
 
-    // Unequal sizes: the exchange is still origin-for-origin, and the drop
-    // settle shifts the row minimally when the bigger tile inherits a slot at
-    // the wall — pushes, never a lane reflow.
+    // Unequal sizes: the exchange trades ROW POSITIONS (`.plans/auto-layout-night`).
+    // The 340-wide tile takes the 260-wide tile's place at 108; the displaced one
+    // follows it at the gap, 108 + 340 + 8 = 456, where the raw origin exchange
+    // left it at 376 under the mover. The neighbour past both does not move,
+    // and the zone keeps its size. The drop settle below still shifts a row
+    // minimally — pushes, never a lane reflow.
     let unequalLeft = CanvasAutoLayoutEngine.LayoutTile(
         id: swapLeftId, frame: TileFrame(x: 108, y: 140, width: 260, height: 220), zoneId: swapZoneId)
     let unequalMiddle = CanvasAutoLayoutEngine.LayoutTile(
@@ -12328,8 +12456,11 @@ func runCanvasAutoLayoutChecks() {
         gap: 8, zonePadding: 8, headerHeight: 32)
     let unequalDisplaced = unequalSwap.tileFrames[swapLeftId] ?? unequalLeft.frame
     expect(unequalSwap.swapTargetTileId == swapLeftId
-               && unequalDisplaced.x == unequalMiddle.frame.x && unequalDisplaced.y == unequalMiddle.frame.y,
-           "jelly: unequal tiles exchange origins without changing lanes; got \(unequalDisplaced)")
+               && unequalDisplaced.x == unequalLeft.frame.x + unequalMiddle.frame.width + 8
+               && unequalDisplaced.y == unequalMiddle.frame.y,
+           "jelly: unequal tiles trade row positions without changing lanes; got \(unequalDisplaced)")
+    expect(unequalSwap.latchedSlot.map { $0.x == unequalLeft.frame.x && $0.width == unequalMiddle.frame.width } == true,
+           "jelly: the dragged tile's slot is the displaced tile's place at its own width; got \(String(describing: unequalSwap.latchedSlot))")
     expect(unequalSwap.tileFrames[swapRightId] == nil,
            "jelly: unequal slot exchange does not reflow an unrelated neighbor")
     expect(unequalSwap.zonePlacements.isEmpty,
