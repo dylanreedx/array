@@ -1,5 +1,53 @@
 # Stream 1: tidy engine
 
+## Final state (2026-11-09, `array/auto-layout-night` at b4c6614c, cleaned on `array/aln-tidy-cleanup`)
+
+**What ships.** Explicit Tidy is `CanvasTidyPacker`; its header comment holds
+the full rules. In short:
+- **Shapes by kind.** Browsers are exactly 16:9. Terminals are 0.6–0.9 w/h.
+  Agents are 0.6–1.0. Text tiles never go narrower than 0.75 w/h. iOS previews
+  and shared tiles keep their size. No tile goes below its kind's minimum.
+- **Area band.** Every tile stays within 0.5–2.0× its area. The top relaxes to
+  2.56× only when no layout at the zone's width allows 2.0×.
+- **Size groups.** Tiles are ordered by size, not reading order, and rows
+  stack tallest first.
+- **Big-tile column.** Tiles at least 2× the zone's median area stack in a
+  column at the left, so they stay the largest.
+- **Lead and helpers.** A lead with its helpers is one block: the lead on the
+  left, helpers in one column (two past four helpers).
+- **The width is the user's.** Tidy changes only the height. Two exceptions:
+  - a zone narrower than one tile at its minimum widens to just fit it;
+  - a zone too wide to fill with every tile under the 2.56× cap narrows,
+    keeping its proportions, and never widens.
+- **Idempotent.** A second tidy changes nothing.
+- **Cost.** 89 tiles take 21–23 ms in a debug build (budget 25).
+
+**Rejected.**
+- The uniform justified-row packer in reading order (rounds 1–6). On Dylan's
+  canvas it shrank his two big agents to 0.29× their area.
+- Featured bands: a big tile spanning rows, in reading order. No layout keeps
+  z01 and z03 in band at any width. The code was deleted in the cleanup.
+- Area-fit-only rows: slower, and not idempotent.
+- Sharing a row with the giants: z01 tied at 1.00× under an honest cost.
+- A 2% size class: 89 tiles took 34 ms.
+- Keeping z01 and z03 at their width: tiles stretch up to 8.7×, or the zone
+  is left part empty and fails fill 0.90.
+
+**Dylan's real canvas** (offline copy, gap 20, `--tidy-real-canvas-probe`):
+
+| zone | tiles | width | fill before → after | tile area range | big ÷ next | 2nd tidy |
+|---|---|---|---|---|---|---|
+| z01 | 22 | 16289 → 7462 (too wide to fill) | 0.148 → 0.973 | 0.97–2.00× | 2.79 | no-op |
+| z02 | 10 | 5855 kept | 0.390 → 0.976 | 0.61–1.54× | 2.02 | no-op |
+| z03 | 24 | 9330 → 6317 (too wide to fill) | 0.290 → 0.972 | 0.77–2.00× | 1.34 | no-op |
+| z04 | 2 | 2511 kept | 0.558 → 0.992 | 0.75–2.00× | — | no-op |
+| z05 | 6 | 3686 kept | 0.369 → 0.973 | 0.83–1.43× | — | no-op |
+
+Pictures are `~/Movies/Array/auto-layout-night/real-canvas/z0N-masonry2.png`.
+The size-group and width work is in `tidy-masonry.md`. The rounds below are
+the history.
+
+
 Date: 2026-11-09. Branch `array/aln-tidy-engine`, on top of `0bb5fb19`.
 
 ## What changed, in one paragraph

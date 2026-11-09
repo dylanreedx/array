@@ -257,21 +257,8 @@ func runTidyPackerChecks() {
                 check(max(sepX, sepY) >= gap - eps, "\(c.name): tiles closer than the gap: \(a.frame) \(b.frame)")
             }
         }
-        // Reading order survives (tiles outside the cluster).
-        func readingOrder(_ scene: CanvasAutoLayoutEngine.Scene) -> [UUID] {
-            let outside = Set([c.lead].compactMap { $0 } + c.helpers)
-            return scene.tiles.filter { !outside.contains($0.id) }.sorted { a, b in
-                let ay = a.frame.y + a.frame.height / 2, by = b.frame.y + b.frame.height / 2
-                let sameLine = abs(a.frame.y - b.frame.y) < min(a.frame.height, b.frame.height) / 2
-                return sameLine ? a.frame.x < b.frame.x : ay < by
-            }.map(\.id)
-        }
-        // Not for real zones: their tops are staggered, and this comparison's
-        // "same line" is not transitive there, so its order is undefined.
-        // Size-grouped rows order tiles by size, tallest rows first, on purpose.
-        if !CanvasTidyPacker.sizeGroupedRows && c.name != "cramped" && !c.name.hasPrefix("real-") {
-            check(readingOrder(before) == readingOrder(after), "\(c.name): tidy shuffled the reading order")
-        }
+        // Reading order is not kept: size groups order tiles by size, tallest
+        // rows first (the lead's decision, `.plans/auto-layout-night`).
         // The lead and its helpers are one block: the lead on the left, the
         // helpers in columns beside it, each column's heights (with gaps)
         // summing to the lead's height, and no other tile inside the block.
