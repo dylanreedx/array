@@ -162,13 +162,19 @@ public enum CanvasTidyPacker {
             var bestCost = chosen.cost
             let kMin = max(minimumWidth / originalWidth, 0.25)
             if kMin < 1 {
-                for step in 1...10 {
-                    let k = pow(kMin, Double(step) / 10)
+                var bestStep: Double?
+                func attempt(_ step: Double) {
+                    let k = pow(kMin, step / 10)
                     let w = max(minimumWidth, (originalWidth * k).rounded(.down))
                     let h = max(1, (originalHeight * k).rounded(.down))
-                    guard let layout = solve(items: items, width: w, height: h, gap: gap) else { continue }
+                    guard let layout = solve(items: items, width: w, height: h, gap: gap) else { return }
                     let cost = layout.cost + shrinkWeight * (pow(log(w / originalWidth), 2) + pow(log(h / originalHeight), 2))
-                    if cost < bestCost - 1e-12 { bestCost = cost; chosen = layout; width = w; height = h }
+                    if cost < bestCost - 1e-12 { bestCost = cost; chosen = layout; width = w; height = h; bestStep = step }
+                }
+                // Ten coarse steps, then eight between the best one's neighbours.
+                for step in 1...10 { attempt(Double(step)) }
+                if let coarse = bestStep {
+                    for i in 1...8 where i != 4 { attempt(coarse - 1 + Double(i) / 4) }
                 }
             }
         }
@@ -392,7 +398,8 @@ public enum CanvasTidyPacker {
             if let known = evaluated[rows.map(\.start)] {
                 layout = known
             } else {
-                let fitted = fitHeights(rows: rows, target: height - Double(rows.count - 1) * gap)
+                let fitted = fitHeightsUnderCap(items: items, rows: rows, target: height - Double(rows.count - 1) * gap,
+                                                width: width, gap: gap)
                 let total = fitted.reduce(0) { $0 + $1.height } + Double(rows.count - 1) * gap
                 let exact = abs(total - height) < 0.5
                 let measured = measure(items: items, rows: fitted, width: width, gap: gap)
@@ -568,6 +575,39 @@ public enum CanvasTidyPacker {
                                 hi: rows.map { max($0.heightMin, $0.heightMax) }, target: target)
         var fitted = rows
         for i in fitted.indices { fitted[i].height = heights[i] }
+        return fitted
+    }
+
+    /// `fitHeights`, then: a row whose fitted height pushes any tile past
+    /// `tileAreaCap` (band clamps move width between tiles as a row grows, so the
+    /// row's own estimate can miss) gets its exact limit, found by bisection
+    /// between its natural height and the fitted one, and the fit runs again.
+    private static func fitHeightsUnderCap(items: [Item], rows: [Row], target: Double, width: Double, gap: Double) -> [Row] {
+        var bounded = rows
+        var fitted = fitHeights(rows: bounded, target: target)
+        func exceeds(_ row: Row, _ h: Double) -> Bool {
+            let widths = rowWidths(items: items, row: row, height: h, width: width, gap: gap).values
+            for (offset, index) in (row.start..<row.end).enumerated() where items[index].fixed == nil {
+                let item = items[index]
+                if (widths[offset] - item.extraWidth) * h > tileAreaCap * item.area * (1 + 1e-9) { return true }
+            }
+            return false
+        }
+        for _ in 0..<3 {
+            var changed = false
+            for i in fitted.indices where fitted[i].height > bounded[i].height && exceeds(bounded[i], fitted[i].height) {
+                var low = bounded[i].height, high = fitted[i].height
+                if exceeds(bounded[i], low) { bounded[i].heightMax = low; changed = true; continue }
+                for _ in 0..<40 {
+                    let middle = (low + high) / 2
+                    if exceeds(bounded[i], middle) { high = middle } else { low = middle }
+                }
+                bounded[i].heightMax = max(bounded[i].heightMin, low)
+                changed = true
+            }
+            if !changed { break }
+            fitted = fitHeights(rows: bounded, target: target)
+        }
         return fitted
     }
 
