@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Pin the selected Xcode SDK before the Python lock shim can inject a CLT SDK.
+# Preserve an explicit caller override across the lock re-exec.
+if [[ -z "${SDKROOT+x}" ]]; then
+  export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+fi
+
 # Share the release-build guard's regular-file flock for the entire process
 # lifetime. macOS has no system flock command; Python's flock uses the same
 # kernel lock. Exec preserves both the PID and the inheritable descriptor.
