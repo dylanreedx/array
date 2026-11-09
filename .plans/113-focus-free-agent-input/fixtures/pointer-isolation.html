@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>Array pointer isolation fixture</title>
+<style>
+:root{color-scheme:light dark;font:16px system-ui}body{margin:32px;max-width:850px}h1{font-size:24px}.row{display:flex;gap:60px;align-items:flex-start;min-height:210px}.menu,.tip{position:relative;width:180px}button{font:inherit;padding:12px;cursor:pointer}.items{display:none;position:absolute;top:100%;left:0;width:180px;background:Canvas;border:1px solid GrayText;padding:8px;z-index:2}.items button{display:block;width:100%}#css:hover .items,#drop.open .items{display:block}.bubble{display:none;position:absolute;top:100%;width:200px;padding:12px;background:Canvas;border:1px solid GrayText}.tip:hover .bubble{display:block}pre{white-space:pre-wrap;border:1px solid GrayText;padding:16px}#park{margin-top:20px;padding:30px;background:color-mix(in srgb,CanvasText 8%,Canvas)}
+</style>
+<h1>Pointer isolation: move, don't click, during the agent's pause</h1>
+<p>Pure CSS hover, click-open/mouseleave-close dropdown, and CSS tooltip. No native select, timer-driven opening, or DOM click simulation.</p>
+<div class="row">
+ <div class="menu" id="css"><button id="cssOpen">CSS menu</button><div class="items"><button id="cssItem">CSS item</button></div></div>
+ <div class="menu" id="drop"><button id="dropOpen">Dropdown menu</button><div class="items"><button id="dropItem">Dropdown item</button></div></div>
+ <div class="tip"><button id="tip">Tooltip target</button><span role="tooltip" class="bubble">A real hover keeps this tooltip visible.</span></div>
+</div>
+<pre id="status"></pre><div id="park">Park the real pointer here, then cross a menu and leave it. Click or scroll inside this tile only when testing deliberate takeover.</div>
+<script>
+const counts={cssAttempts:0,cssPicks:0,dropAttempts:0,dropPicks:0,menuLeaves:0,moves:0};
+const status=document.getElementById('status'),drop=document.getElementById('drop');
+function draw(){status.textContent=JSON.stringify(counts,null,2)+'\nCSS visible: '+(getComputedStyle(document.querySelector('#css .items')).display!=='none')+'; dropdown open: '+drop.classList.contains('open')}
+cssOpen.onclick=e=>{if(e.isTrusted){counts.cssAttempts++;draw()}};
+cssItem.onclick=e=>{if(e.isTrusted){counts.cssPicks++;draw()}};
+dropOpen.onclick=e=>{if(e.isTrusted){counts.dropAttempts++;drop.classList.add('open');draw()}};
+dropItem.onclick=e=>{if(e.isTrusted){counts.dropPicks++;drop.classList.remove('open');draw()}};
+for(const menu of document.querySelectorAll('.menu'))menu.addEventListener('mouseleave',()=>{counts.menuLeaves++;if(menu===drop)drop.classList.remove('open');draw()});
+document.addEventListener('mousemove',()=>{counts.moves++});draw();
+</script>

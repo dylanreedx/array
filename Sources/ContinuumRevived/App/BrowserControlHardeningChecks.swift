@@ -555,6 +555,16 @@ private func runQueuedDomainApprovalScenario() throws {
 
 @MainActor
 func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
+    var toggleReads = 0
+    let prodToggle = BrowserAutomation.resolvePointerDebugToggle(bundleIdentifier: AppChannel.prodBundleIdentifier) { toggleReads += 1; return true }
+    let bareToggle = BrowserAutomation.resolvePointerDebugToggle(bundleIdentifier: nil) { toggleReads += 1; return true }
+    try expect(!prodToggle && !bareToggle && toggleReads == 0, "prod and bare checks must never read the dev pointer toggle")
+    #if DEBUG
+    let devEnabled = BrowserAutomation.resolvePointerDebugToggle(bundleIdentifier: AppChannel.devBundleIdentifier) { toggleReads += 1; return true }
+    let devDisabled = BrowserAutomation.resolvePointerDebugToggle(bundleIdentifier: AppChannel.devBundleIdentifier) { toggleReads += 1; return false }
+    try expect(devEnabled && !devDisabled && toggleReads == 2, "explicit debug dev toggle must follow its own suite")
+    #endif
+    print("PASS: pointer toggle isolates prod/bare from dev preference reads")
     let priorSwitch = BrowserAutomation.focusFreeInputEnabled
     BrowserAutomation.focusFreeInputEnabled = experimental
     defer { BrowserAutomation.focusFreeInputEnabled = priorSwitch }
