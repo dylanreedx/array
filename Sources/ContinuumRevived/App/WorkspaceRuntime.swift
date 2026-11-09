@@ -2630,11 +2630,7 @@ final class WorkspaceRuntime {
         // 6. Park the departing scene warm; release whatever falls off the end.
         clock.begin("park")
         warmScenes.insert(departing, at: 0)
-        while warmScenes.count > max(0, warmSceneCapacity) {
-            let evicted = warmScenes.removeLast()
-            report.evictedWorkspaces.append(evicted.workspaceId)
-            evict(evicted)
-        }
+        report.evictedWorkspaces += trimWarmScenesToCapacity()
 
         // 7. Attach and hydrate.
         clock.begin("attach")
@@ -2648,6 +2644,24 @@ final class WorkspaceRuntime {
 
         clock.begin("focus")
         restoreFocus(from: canvas)
+    }
+
+    /// A live browser lease is a residency pin independent of input backend.
+    /// Recheck all pins each time: one lease ending cannot evict a sibling's
+    /// scene. Called on switches and after lease expiry/release/turn completion.
+    @discardableResult
+    func trimWarmScenesToCapacity() -> [UUID] {
+        var evictedWorkspaces: [UUID] = []
+        while warmScenes.count > max(0, warmSceneCapacity) {
+            let protected = browserLeaseProtectionProvider?() ?? []
+            guard let index = warmScenes.indices.reversed().first(where: { index in
+                !warmScenes[index].layers.contains { layer in layer.tiles.contains { protected.contains($0.id) } }
+            }) else { break }
+            let evicted = warmScenes.remove(at: index)
+            evictedWorkspaces.append(evicted.workspaceId)
+            evict(evicted)
+        }
+        return evictedWorkspaces
     }
 
     /// The target's warm scene, if it is still the scene the target would mount:
@@ -2806,6 +2820,16 @@ final class WorkspaceRuntime {
         warmScenes.flatMap(\.layers).first(where: {
             $0.placement.projectId == projectId && $0.tiles.contains { $0.id == tileId }
         })?.tiles.first { $0.id == tileId }
+    }
+
+    /// Update only metadata: parked layer frames are zone-local, whereas the
+    /// project's persisted tile frames are world coordinates.
+    func mutateParkedBrowserMetadata(tileId: UUID, projectId: UUID, _ change: (inout TileMetadata) -> Void) {
+        for layer in warmScenes.flatMap(\.layers) where layer.placement.projectId == projectId {
+            guard let index = layer.tiles.firstIndex(where: { $0.id == tileId && $0.kind == .browser }) else { continue }
+            change(&layer.tiles[index].metadata)
+            if let view = layer.tileViews[tileId] { change(&view.tile.metadata) }
+        }
     }
 
     /// A Terminal face may finish after its view was evicted from a warm

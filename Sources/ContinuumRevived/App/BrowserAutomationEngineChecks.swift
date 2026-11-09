@@ -143,7 +143,7 @@ private final class BrowserAutomationEngineCheck {
 
     private func ref(_ name: String, in text: String) throws -> String {
         guard let line = text.split(separator: "\n").first(where: { $0.contains("\"\(name)\"") }),
-              let range = line.range(of: #"\[ref=(e\d+)\]"#, options: .regularExpression) else {
+              let range = line.range(of: #"\[ref=(e[A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
             throw BrowserAutomationEngineCheckError("no tag for \"\(name)\" in the outline:\n\(text)")
         }
         return String(line[range].dropFirst(5).dropLast())
@@ -211,7 +211,9 @@ private final class BrowserAutomationEngineCheck {
         let replaced = try await engine.type("x", ref: email, clear: true, deadline: soon)
         try expect(replaced.value == "x", "clear did not replace the field: \(String(describing: replaced.value))")
         _ = try await engine.pressKey("Backspace", deadline: soon)
-        try expect(try await page("() => window.model") as? String == "", "Backspace did not reach the field")
+        let keyedModel = try await page("() => window.model") as? String
+        try expect(userField.string.isEmpty && keyedModel == "",
+                   "host responder key must edit only the page")
 
         // 5. Passwords never come back.
         let secret = try await engine.type("hunter2", ref: password, deadline: soon)

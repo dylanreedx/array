@@ -100,11 +100,15 @@ NOTIFICATIONS_LINUX_ONLY=0
 MANAGED_MODE_ONLY=0
 PERMISSION_UX_ONLY=0
 MATRIX_MODE=full
+FOCUS_SAFE_INPUT_ONLY=0
+BROWSER_SCHEDULING_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --awake-only) MATRIX_MODE=awake-only; shift ;;
     --skip-awake) MATRIX_MODE=skip-awake; shift ;;
+    --browser-scheduling) BROWSER_SCHEDULING_ONLY=1; shift ;;
+    --focus-safe-input) FOCUS_SAFE_INPUT_ONLY=1; shift ;;
     --permission-ux)
       PERMISSION_UX_ONLY=1
       shift
@@ -211,8 +215,10 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
 
+
+--focus-safe-input runs only the browser input witnesses and their contract/catalog neighbors.
 --permission-ux rebuilds the app and MCP helper, then reports permission scope, browser, simulator, grants and session witnesses. This is a targeted development gate.
 
 --agent-schedules rebuilds the app and reports native cron lifetime and durable schedule queue/restart witnesses.
@@ -728,6 +734,48 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+if [[ "$BROWSER_SCHEDULING_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run_app_check .build/debug/Array --browser-background-scheduling-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-focus-restoration-check
+  run_app_check .build/debug/Array --browser-focus-restoration-check
+  run_app_check .build/debug/Array --browser-automation-engine-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
+  run_app_check .build/debug/Array --browser-native-select-preflight-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --workspace-api-browser-check
+  matrix_report 'Focus-free backend Tier A matrix (targeted; faked key state)'
+  exit $?
+
+fi
+if [[ "$FOCUS_SAFE_INPUT_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+  run_app_check .build/debug/Array --browser-background-scheduling-check
+  run_app_check .build/debug/Array --browser-focus-restoration-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-focus-restoration-check
+  run_app_check .build/debug/Array --browser-select-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
+  run_app_check .build/debug/Array --browser-native-select-preflight-check
+  run_app_check .build/debug/Array --browser-automation-engine-check
+  run_app_check .build/debug/Array --workspace-api-browser-check
+  run_app_check .build/debug/Array --browser-unrelated-input-check
+  run_app_check .build/debug/Array --browser-ref-identity-check
+  run_app_check .build/debug/Array --browser-action-results-check
+  run_app_check .build/debug/Array --browser-writer-transfer-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --browser-action-queue-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
+  run git diff --check
+  matrix_report 'Stage 1 browser input matrix (targeted)'
+  exit $?
+fi
 if [[ "$PERMISSION_UX_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp
   run swift build --disable-sandbox --skip-update --product Array
@@ -735,6 +783,10 @@ if [[ "$PERMISSION_UX_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --workspace-api-session-permissions-check
   run_app_check .build/debug/Array --workspace-api-grants-check
   run_app_check .build/debug/Array --workspace-api-browser-check
+  run_app_check .build/debug/Array --browser-focus-restoration-check
+  run_app_check .build/debug/Array --browser-select-check
+  ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
+  run_app_check .build/debug/Array --browser-native-select-preflight-check
   run_app_check .build/debug/Array --browser-automation-engine-check
   run_app_check .build/debug/Array --workspace-api-device-check
   run git diff --check
@@ -1273,7 +1325,19 @@ run_app_check .build/debug/Array --sidebar-agent-status-line-check
 # dialogs answered for the agent, and screenshots hidden and off-window.
 run_app_check .build/debug/Array --browser-automation-engine-check
 run_app_check .build/debug/Array --workspace-api-browser-check
+run_app_check .build/debug/Array --browser-background-scheduling-check
+ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-focus-restoration-check
+run_app_check .build/debug/Array --browser-focus-restoration-check
+run_app_check .build/debug/Array --browser-select-check
+ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-native-select-preflight-check
+run_app_check .build/debug/Array --browser-native-select-preflight-check
 run_app_check .build/debug/Array --agent-browser-spawn-check
+run_app_check .build/debug/Array --browser-unrelated-input-check
+run_app_check .build/debug/Array --browser-ref-identity-check
+run_app_check .build/debug/Array --browser-action-results-check
+run_app_check .build/debug/Array --browser-writer-transfer-check
+ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-durable-takeover-check
+run_app_check .build/debug/Array --browser-durable-takeover-check
 run_app_check .build/debug/Array --browser-action-queue-check
 run_app_check .build/debug/Array --browser-lease-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check

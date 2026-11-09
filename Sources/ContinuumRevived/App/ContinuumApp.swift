@@ -6182,10 +6182,107 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--browser-unrelated-input-check") {
+            do { _ = NSApplication.shared; try runBrowserUnrelatedInputCheck(); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
+        if CommandLine.arguments.contains("--browser-ref-identity-check") {
+            do { _ = NSApplication.shared; try runBrowserRefIdentityCheck(); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
+        if CommandLine.arguments.contains("--browser-action-results-check") {
+            do { _ = NSApplication.shared; try runBrowserActionResultsCheck(); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
+        if CommandLine.arguments.contains("--browser-writer-transfer-check") {
+            do { _ = NSApplication.shared; try runBrowserWriterTransferCheck(); Foundation.exit(0) }
+            catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+        }
+
+        if CommandLine.arguments.contains("--browser-durable-takeover-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserDurableTakeoverCheck(experimental: ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_TIER_A"] == "1")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--browser-action-queue-check") {
             do {
                 _ = NSApplication.shared
                 try runBrowserActionQueueCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-native-select-preflight-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserNativeSelectPreflightCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-select-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserSelectCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-pointer-real-active-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserPointerRealActiveCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-focus-free-real-key-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserFocusFreeRealKeyCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-background-scheduling-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserBackgroundSchedulingCheck()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--browser-focus-restoration-check") {
+            do {
+                _ = NSApplication.shared
+                try runBrowserFocusRestorationCheck(experimental: ProcessInfo.processInfo.environment["ARRAY_FOCUS_FREE_TIER_A"] == "1")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -7373,9 +7470,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func presentBrowserControl(tileId: UUID, agentId: AgentID, engaged: Bool, userDriving: Bool) {
         guard let view = canvasView?.tileView(for: tileId) as? BrowserTileNSView else { return }
         let record = agentSupervisor.records[agentId]
+        let ownsTile = canvasView?.tileRecord(for: tileId)?.metadata.browserControllingAgentId == agentId
+        let writerChoices: [ChoiceItem] = ownsTile ? agentSupervisor.records.values
+            .filter { $0.id != agentId && $0.workspaceToolsEnabled && $0.projectId == record?.projectId }
+            .sorted { $0.displayName < $1.displayName }
+            .map { ChoiceItem(id: "writer-" + $0.id.rawValue.uuidString, title: "Give control to " + $0.displayName) } : []
         view.setAgentControl(name: record?.displayName ?? "Agent",
             colour: record?.identityColor.map { ZoneChromeNSView.color(named: $0) }, engaged: engaged, userDriving: userDriving,
             takeControl: { [weak self] in self?.workspaceAPI.takeBackBrowser(tileId: tileId) },
+            returnToAgent: canvasView?.tileRecord(for: tileId)?.metadata.browserControllingAgentId == agentId ? { [weak self] in _ = self?.workspaceAPI.returnBrowserToAgent(tileId: tileId, agentId: agentId) } : nil,
+            writerChoices: writerChoices,
+            transferWriter: { [weak self] selection in
+                guard let id = UUID(uuidString: String(selection.dropFirst(7))) else { return }
+                _ = self?.workspaceAPI.transferBrowserWriter(tileId: tileId, from: agentId, to: AgentID(rawValue: id))
+            },
             revealAgent: { [weak self] in _ = self?.revealAgentFromInbox(agentId.rawValue) },
             close: { [weak self] in self?.deleteTile(id: tileId) })
     }

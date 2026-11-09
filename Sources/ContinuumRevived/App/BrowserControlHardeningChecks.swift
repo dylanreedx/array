@@ -1,6 +1,10 @@
 import AppKit
 import ContinuumRevivedCore
 import Foundation
+import WebKit
+
+// The owned listener replaces any previous case's listener before counting.
+let browserTakeoverKeyProbeScript = "window.takeKeys=0; if(window.takeKeyHandler) document.removeEventListener('keydown',window.takeKeyHandler); window.takeKeyHandler=e=>{if(e.isTrusted)window.takeKeys++}; document.addEventListener('keydown',window.takeKeyHandler)"
 
 /// Review findings on the agent browser API, each driven through the
 /// provider entry (`handleMCPRequest`) on the production-mounted fixture.
@@ -41,10 +45,10 @@ private final class BrowserHardeningHarness {
     let window: NSWindow
     var permission: WorkspaceToolsPermission = .free
 
-    init() throws {
+    init(fakedKey: Bool = false) throws {
         f = try WorkspaceAPIChecks.makeFixture()
         _ = f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
-        window = NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        window = fakedKey ? BrowserFakedKeyCheckWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false) : NSWindow(contentRect: f.canvas.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = f.canvas
         window.orderFrontOffscreenForChecks()
         f.delegate.qaAgentSupervisor.workspaceToolsPermission = { [unowned self] in self.permission }
@@ -242,7 +246,7 @@ private func runProductionSheetScenario() throws {
     h.pump(3) { user.title == "Billing dashboard" }
     var response: [String: Any]?
     h.f.api.handleMCPRequest(["agentId": h.f.agentId.rawValue.uuidString, "requestId": UUID().uuidString,
-                              "op": "browser.press_key", "payload": ["tileId": user.tileId.uuidString, "keyName": "Enter"]]) { response = $0 }
+                              "op": "browser.scroll", "payload": ["tileId": user.tileId.uuidString, "dy": 0]]) { response = $0 }
     h.pump(3) { h.window.attachedSheet != nil }
     let text = h.sheetText() ?? ""
     try expect(text.contains("Billing dashboard") && text.contains("Default"),
@@ -282,7 +286,7 @@ private func runRevocationReleaseScenario() throws {
     defer { h.tearDown() }
     let user = try h.userBrowser()
     h.f.api.browserHandOverApprovalHandler = { _, _, _, reply in reply(true); return {} }
-    _ = try h.ok("browser.press_key", ["tileId": user.tileId.uuidString, "keyName": "Enter"])
+    _ = try h.ok("browser.scroll", ["tileId": user.tileId.uuidString, "dy": 0])
     try expect(user.agentNavigationDecision != nil, "a handed-over tile carries the agent gate while it acts")
     h.f.api.revoke(agentId: h.f.agentId)
     try expect(user.agentNavigationDecision == nil && !user.automation.isEngaged,
@@ -550,4 +554,448 @@ private func runQueuedDomainApprovalScenario() throws {
     let next = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => 43"])
     try expect(prompts == 1 && (next["value"] as? Int) == 43,
                "after approval the queue must continue and Once must cover the same visit")
+}
+
+@MainActor
+func runBrowserDurableTakeoverCheck(experimental: Bool = false) throws {
+    let priorSwitch = BrowserAutomation.focusFreeInputEnabled
+    BrowserAutomation.focusFreeInputEnabled = experimental
+    defer { BrowserAutomation.focusFreeInputEnabled = priorSwitch }
+    let h = try BrowserHardeningHarness(fakedKey: experimental)
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing runtime") }
+    h.window.setContentSize(NSSize(width: 6000, height: 4000))
+    h.f.canvas.frame = NSRect(x: 0, y: 0, width: 6000, height: 4000)
+    h.pump(0.1)
+    if experimental {
+        _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { document.body.innerHTML='<input style=\"width:200px;height:40px\">'; window.actualKeys=[]; document.addEventListener('keydown',e=>{if(e.isTrusted)actualKeys.push(e.timeStamp)}); \(browserTakeoverKeyProbeScript); return true }"])
+        // The click-only active case leaves its once-listener waiting. The
+        // following key case used to add another listener to that document.
+        _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { \(browserTakeoverKeyProbeScript); return true }"])
+        browser.automation._duringAgentClickForChecks = {
+            h.window.makeFirstResponder(browser.webView)
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: h.window.windowNumber,
+                context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12)!
+            h.window.sendEvent(event)
+        }
+        _ = try h.raw("browser.click", ["tileId":tile.uuidString,"x":20,"y":20])
+        browser.automation._duringAgentClickForChecks = nil
+        var probe: [String: Any]?
+        browser.webView.evaluateJavaScript("({count:takeKeys,actual:actualKeys.length,value:document.querySelector('input').value})") { value, _ in probe = value as? [String: Any] }
+        h.pump(2) { probe != nil }
+        print("Key takeover counter probe: \(probe ?? [:])")
+        try expect(probe?["actual"] as? Int == 1 && probe?["value"] as? String == "q", "one native window key must reach the intended field exactly once: \(probe ?? [:])")
+        try expect(probe?["count"] as? Int == 1, "takeover check must count one real key once: \(probe ?? [:])")
+        h.pump(0.2)
+        probe = nil
+        browser.webView.evaluateJavaScript("({count:takeKeys,actual:actualKeys.length,value:document.querySelector('input').value})") { value, _ in probe = value as? [String: Any] }
+        h.pump(2) { probe != nil }
+        try expect(probe?["actual"] as? Int == 1 && probe?["value"] as? String == "q" && probe?["count"] as? Int == 1,
+            "key must remain single after settling: \(probe ?? [:])")
+        print("PASS: one native window key, one page keydown, one q retained after settling; probe listeners replaced")
+        if let surface = h.f.canvas.tileView(for:tile) as? BrowserTileNSView { surface.qaChooseAgentControl("return") }
+        _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    }
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": """
+        () => {
+          document.body.innerHTML = '<style>#choice{display:none}#menu:hover #choice,#menu.open #choice{display:block}</style><div id="menu"><button id="opener">Pointer opener</button><button id="choice">Pointer choice</button></div><p title="Pointer tooltip">Tooltip</p><p draggable="true">Draggable text and selection</p>';
+          window.pointerEvents = []; window.pointerChoice = 0;
+          const menu = document.getElementById('menu');
+          document.getElementById('opener').onclick = () => menu.classList.add('open');
+          document.getElementById('choice').onclick = () => pointerChoice++;
+          menu.addEventListener('mouseleave', () => menu.classList.remove('open'));
+          for (const type of ['mousemove','mouseenter','mouseleave','dragstart'])
+            document.addEventListener(type, e => { if(e.isTrusted) pointerEvents.push(type) }, true);
+          return true;
+        }
+        """])
+    func pointerRef(_ label: String) throws -> String {
+        let text = try h.ok("browser.snapshot", ["tileId": tile.uuidString])["text"] as? String ?? ""
+        guard let line = text.split(separator: "\n").first(where: { $0.contains(label) }),
+              let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression) else {
+            throw WorkspaceAPIChecks.Failure(message: "missing pointer fixture ref: \(label)")
+        }
+        return String(line[range].dropFirst(5).dropLast())
+    }
+    _ = try h.ok("browser.click", ["tileId": tile.uuidString, "ref": try pointerRef("Pointer opener")])
+    let parentBefore = browser.webView.superview
+    let responderBefore = h.window.firstResponder
+    let countBefore = browser.automation.userInputCount
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { pointerEvents = []; return true }"])
+    for local in [NSPoint(x: 30, y: 30), NSPoint(x: 500, y: 300)] {
+        let point = browser.webView.convert(local, to: nil)
+        for type: NSEvent.EventType in [.mouseMoved, .leftMouseDragged] {
+            let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: h.window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+            NSApp.sendEvent(event)
+            // Exercise window routing as well when inactive NSApp routing drops input.
+            h.window.sendEvent(event)
+            if type == .mouseMoved { browser.webView.mouseMoved(with: event) }
+        }
+        for type: NSEvent.EventType in [.mouseEntered, .mouseExited] {
+            let event = NSEvent.enterExitEvent(with: type, location: point, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: h.window.windowNumber,
+                context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!
+            NSApp.sendEvent(event)
+            if type == .mouseEntered { browser.webView.mouseEntered(with: event) }
+            else { browser.webView.mouseExited(with: event) }
+        }
+    }
+    h.pump(0.1)
+    let pointerState = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => JSON.stringify({events:pointerEvents,hover:document.getElementById('menu').matches(':hover'),open:document.getElementById('menu').classList.contains('open')})"])
+    print("Pointer fixture observation (NSApp/window plus direct public WebKit move/enter/exit, off-screen): \(pointerState["value"] ?? "missing")")
+    _ = try h.ok("browser.click", ["tileId": tile.uuidString, "ref": try pointerRef("Pointer choice")])
+    let picked = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => pointerChoice"])
+    try expect(picked["value"] as? Int == 1, "agent next click must still reach the dropdown choice")
+    try expect(h.live(tile) === browser && browser.webView.superview === parentBefore &&
+        h.window.firstResponder === responderBefore && browser.automation.userInputCount == countBefore,
+        "passive pointer fixture changed browser runtime, parent, responder or control generation")
+    if experimental {
+        _ = try h.ok("browser.evaluate", ["tileId":tile.uuidString,"script":"() => { document.body.innerHTML='<button>Target</button>'; return true }"])
+        let text = try h.ok("browser.snapshot", ["tileId":tile.uuidString])["text"] as? String ?? ""
+        guard let line = text.split(separator:"\n").first(where:{$0.contains("Target")}), let range = line.range(of:#"\[ref=([^\]]+)\]"#,options:.regularExpression) else { throw WorkspaceAPIChecks.Failure(message:"missing nested takeover target") }
+        let ref = String(line[range].dropFirst(5).dropLast())
+        let before = browser.automation.userInputCount
+        var immediateCount = before
+        browser.automation._duringAgentClickForChecks = { h.userKey(into:browser); immediateCount = browser.automation.userInputCount }
+        let answer = try h.raw("browser.click", ["tileId":tile.uuidString,"ref":ref])
+        browser.automation._duringAgentClickForChecks = nil
+        try expect(immediateCount == before+1 && browser.automation.userInputCount == before+1, "real tile key during native delivery must count as takeover")
+        try expect(answer["status"] as? String == "error", "nested takeover must fence click result")
+        let mutation = try h.raw("browser.evaluate", ["tileId":tile.uuidString,"script":"() => 1"])
+        try expect(h.errorCode(mutation) == "target_conflict", "nested takeover must stay paused")
+        guard let surface = h.f.canvas.tileView(for:tile) as? BrowserTileNSView else { throw WorkspaceAPIChecks.Failure(message:"missing nested handback") }
+        surface.qaChooseAgentControl("return")
+        _ = try h.ok("browser.snapshot", ["tileId":tile.uuidString])
+        print("PASS: Tier A faked key nested tile-local key takes over during native click and requires explicit handback")
+    }
+    h.window.setContentSize(NSSize(width: 6000, height: 4000))
+    h.f.canvas.frame = NSRect(x: 0, y: 0, width: 6000, height: 4000)
+    func scroll(at point: NSPoint, flags: CGEventFlags = [], delta: Int32 = -12, phase: Int64 = 0, momentum: Int64 = 0) throws {
+        let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: delta, wheel2: 0, wheel3: 0)!
+        let screen = h.window.convertPoint(toScreen: point)
+        cg.location = CGPoint(x: screen.x, y: (NSScreen.screens.first?.frame.height ?? 0) - screen.y)
+        cg.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(h.window.windowNumber))
+        cg.flags = flags
+        cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+        cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum)
+        let event = NSEvent(cgEvent: cg)!
+        print("Scroll witness delta=\(event.scrollingDeltaY) phase=\(event.phase.rawValue) momentum=\(event.momentumPhase.rawValue)")
+        NSApp.sendEvent(event)
+    }
+    let count = browser.automation.userInputCount
+    for flags: CGEventFlags in [[], .maskCommand] {
+        try scroll(at: NSPoint(x: 4, y: 4), flags: flags)
+    }
+    try expect(browser.automation.userInputCount == count, "outside canvas scroll/zoom must not take browser control")
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+    h.f.canvas.cameraDriver.noteScrollZoom(deltaY: 1, location: .zero)
+    try expect(h.f.canvas.cameraDriver.isCameraSessionActive, "camera fixture must start a zoom session")
+    try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil))
+    try expect(browser.automation.userInputCount == count, "camera follow-through scroll over a driven browser must not take control")
+    for phase: Int64 in [1, 2, 4, 8] {
+        h.f.canvas.cameraDriver.noteScrollZoom(deltaY: 1, location: .zero)
+        try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil), phase: phase)
+        try expect(browser.automation.userInputCount == count, "camera scroll phase must not take browser control")
+    }
+    for momentum: Int64 in [1, 2, 3] {
+        h.f.canvas.cameraDriver.noteScrollZoom(deltaY: 1, location: .zero)
+        try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil), momentum: momentum)
+        try expect(browser.automation.userInputCount == count, "camera momentum must not take browser control")
+    }
+    h.pump(2)
+    for phase: Int64 in [1, 2, 4, 8] {
+        try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil), delta: 0, phase: phase)
+        try expect(browser.automation.userInputCount == count, "zero-delta scroll phase must not take browser control after camera settles")
+    }
+    for momentum: Int64 in [1, 2, 3] {
+        try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil), delta: 0, momentum: momentum)
+        try expect(browser.automation.userInputCount == count, "zero-delta momentum must not take browser control after camera settles")
+    }
+
+    try scroll(at: browser.webView.convert(NSPoint(x: 30, y: 30), to: nil))
+    try expect(browser.automation.userInputCount > count, "tile scroll must take browser control")
+    h.pump(0.1)
+    for _ in 0..<2 {
+        let answer = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { window.reclaimed = true; return true; }"])
+        try expect(h.errorCode(answer) == "target_conflict", "takeover must stay paused: \(answer)")
+    }
+    guard let view = h.f.canvas.tileView(for: tile) as? BrowserTileNSView else {
+        throw WorkspaceAPIChecks.Failure(message: "missing browser surface")
+    }
+    try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControlPaused == true, "pause must be stored in tile metadata")
+    for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+        view.appearance = NSAppearance(named: appearance)
+        view.layoutSubtreeIfNeeded()
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw WorkspaceAPIChecks.Failure(message: "no handback bitmap") }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        if let png = bitmap.representation(using: .png, properties: [:]) { try png.write(to: URL(fileURLWithPath: "/tmp/array-handback-\(name).png")) }
+        try expect(view.qaAgentControlItems.contains("return"), "handback missing in \(name)")
+    }
+    view.setAgentControl(name: "Reader", colour: nil, engaged: false, userDriving: true, takeControl: {}, revealAgent: {}, close: {})
+    try expect(!view.qaAgentControlItems.contains("return"), "unsupported handback must be hidden")
+    h.f.api.browserControlPresentation?(tile, h.f.agentId, false, true)
+    view.qaChooseAgentControl("return")
+    // Discard the old service cache as a restart does; only persisted tile state remains.
+    h.f.api.browserNeedsHandbackSnapshot.removeAll()
+    let persisted = try h.f.storePb.loadCanvas()
+    guard let saved = persisted.tiles.first(where: { $0.id == tile }) else { throw WorkspaceAPIChecks.Failure(message: "handback did not persist its tile") }
+    try expect(saved.metadata.browserControlPaused == false, "handback must synchronously persist its snapshot requirement")
+    let encoded = try JSONEncoder().encode(saved)
+    let decoded = try JSONDecoder().decode(Tile.self, from: encoded)
+    guard var mounted = h.f.canvas.tileRecord(for: tile) else { throw WorkspaceAPIChecks.Failure(message: "missing mounted handback tile") }
+    mounted.metadata = decoded.metadata
+    h.f.canvas.updateTile(mounted, recalculateZoneBounds: false)
+    let premature = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+    try expect(h.errorCode(premature) == "target_conflict", "handback must require a snapshot")
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+}
+
+@MainActor
+func runBrowserUnrelatedInputCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing browser") }
+    let count = browser.automation.userInputCount
+    let composer = NSTextView(frame: NSRect(x: 10, y: 10, width: 200, height: 80))
+    h.f.canvas.addSubview(composer)
+    h.window.makeFirstResponder(composer)
+    let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: h.window.windowNumber, context: nil, characters: "q", charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12)!
+    NSApp.sendEvent(key)
+    try expect(browser.automation.userInputCount == count, "sibling typing must not take browser control")
+    func mouse(_ type: NSEvent.EventType, _ point: NSPoint, flags: NSEvent.ModifierFlags = []) {
+        let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: h.window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
+        NSApp.sendEvent(event)
+    }
+    let sibling = composer.convert(NSPoint(x: 20, y: 20), to: nil)
+    mouse(.leftMouseDown, sibling); mouse(.leftMouseUp, sibling)
+    try expect(browser.automation.userInputCount == count, "clicking a sibling surface must not take browser control")
+    composer.removeFromSuperview()
+    let start = NSPoint(x: 4, y: 4)
+    let cameraBefore = h.f.canvas.canvasState.viewport
+    mouse(.leftMouseDown, start, flags: .command)
+    mouse(.leftMouseDragged, NSPoint(x: 24, y: 24), flags: .command)
+    mouse(.leftMouseUp, NSPoint(x: 24, y: 24), flags: .command)
+    try expect(h.f.canvas.canvasState.viewport != cameraBefore, "camera input did not reach the camera driver")
+    try expect(browser.automation.userInputCount == count, "camera pan must not take browser control")
+    try h.f.runtime.switchWorkspace(to: h.f.workspaceWB)
+    try h.f.runtime.switchWorkspace(to: h.f.workspaceWA)
+    try expect(!h.f.api.browserUserTakenOver.contains(tile), "workspace navigation must not take browser control")
+    try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControlPaused != true, "unrelated user work must leave ownership intact")
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+}
+
+@MainActor
+func runBrowserRefIdentityCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, page) = try h.ownedBrowser()
+    try Data("<html><body><button onclick='window.hit=(window.hit||0)+1'>Target</button></body></html>".utf8).write(to: page)
+    _ = try h.ok("browser.navigate", ["tileId": tile.uuidString, "action": "reload"])
+    func snapshotRef() throws -> String {
+        let result = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+        guard let text = result["text"] as? String,
+              let line = text.split(separator: "\n").first(where: { $0.contains("- button \"Target\"") }),
+              let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression) else {
+            throw WorkspaceAPIChecks.Failure(message: "no actual Target node ref: \(result)")
+        }
+        return String(line[range].dropFirst(5).dropLast())
+    }
+    var old = try snapshotRef()
+    let second = page.deletingLastPathComponent().appendingPathComponent("same-nodes.html")
+    try Data(contentsOf: page).write(to: second)
+    for navigation: [String: Any] in [["url": second.absoluteString], ["action": "reload"], ["action": "back"], ["action": "forward"]] {
+        var payload = navigation; payload["tileId"] = tile.uuidString
+        _ = try h.ok("browser.navigate", payload)
+        let fresh = try snapshotRef()
+        try expect(fresh != old, "document change reused a node ref: \(old)")
+        let answer = try h.raw("browser.click", ["tileId": tile.uuidString, "ref": old])
+        try expect(h.errorCode(answer) == "target_conflict", "stale ref must reject: \(answer)")
+        old = fresh
+    }
+    guard let view = h.f.canvas.tileView(for: tile) as? BrowserTileNSView, let browser = h.live(tile) else {
+        throw WorkspaceAPIChecks.Failure(message: "no tab surface")
+    }
+    let originalTab = view.activeTabIdForQA
+    view.createTabForQA(url: second.absoluteString, title: "Replacement")
+    h.pump(3) { !browser.webView.isLoading }
+    let replacementRef = try snapshotRef()
+    try expect(replacementRef != old, "tab replacement reused the old ref")
+    view.selectTabForQA(tabId: originalTab)
+    h.pump(3) { !browser.webView.isLoading }
+    let restoredRef = try snapshotRef()
+    try expect(restoredRef != old && restoredRef != replacementRef, "tab restoration reused an old ref")
+    let rejected = try h.raw("browser.click", ["tileId": tile.uuidString, "ref": replacementRef])
+    try expect(h.errorCode(rejected) == "target_conflict", "ref from replaced tab must reject")
+    try Data(#"""
+    <html><body><input id="field" aria-label="Submit field" oninput="if(this.value.length===3) document.getElementById('other').focus()">
+    <input id="other" onkeydown="if(event.key==='Enter')window.wrongSubmit=true"></body></html>
+    """#.utf8).write(to: page)
+    _ = try h.ok("browser.navigate", ["tileId": tile.uuidString, "url": page.absoluteString])
+    let target = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let outline = target["text"] as? String,
+          let field = outline.split(separator: "\n").first(where: { $0.contains("- textbox \"Submit field\"") }),
+          let tag = field.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression) else {
+        throw WorkspaceAPIChecks.Failure(message: "no submit field")
+    }
+    let typed = try h.raw("browser.type", ["tileId": tile.uuidString, "ref": String(field[tag].dropFirst(5).dropLast()), "text": "abc", "submit": true])
+    try expect(h.errorCode(typed) == "target_conflict", "submit must refuse after final-character focus change: \(typed)")
+    let wrongSubmit = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => Boolean(window.wrongSubmit)"])
+    try expect(wrongSubmit["value"] as? Bool == false, "Enter reached a different field")
+}
+
+@MainActor
+func runBrowserActionResultsCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    let script = "async () => { window.actionCount=(window.actionCount||0)+1; await new Promise(r=>setTimeout(r,17000)); return true; }"
+    let payload: [String: Any] = ["tileId": tile.uuidString, "script": script, "idempotencyKey": "uncertain-evaluation"]
+    var expired: WorkspaceAPIService.Reply?
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+        h.f.api.dispatchBrowserAction(agentId: h.f.agentId, requestId: "queued-expiry", operation: .browserEvaluate,
+            payload: ["tileId": tile.uuidString, "script": "() => { window.expiredEffect=true; return true; }"], isCancelled: { false },
+            arrived: Date().addingTimeInterval(-14.99), completion: { expired = $0 })
+    }
+    let first = try h.raw("browser.evaluate", payload, timeout: 22)
+    guard case .error(let expiredError)? = expired else { throw WorkspaceAPIChecks.Failure(message: "queued expiry did not report an error") }
+    try expect(expiredError.action?.state == .queueExpired && expiredError.action?.effects == BrowserActionResult.Effects.none, "queue expiry must report no effects: \(expiredError), \(String(describing: expiredError.action))")
+    let retry = try h.raw("browser.evaluate", payload, timeout: 4)
+    func action(_ response: [String: Any]) -> [String: Any]? {
+        ((response["error"] as? [String: Any])?["details"] as? [String: Any])?["action"] as? [String: Any]
+    }
+    try expect(h.errorCode(first) == "outcome_unknown", "dispatched evaluation must time out with uncertain effects")
+    guard let report = action(first), let repeated = action(retry) else { throw WorkspaceAPIChecks.Failure(message: "browser errors need structured action results") }
+    try expect(report["effects"] as? String == "unknown", "timeout after dispatch must not claim no effects")
+    try expect(report["freshSnapshotRequired"] as? Bool == true, "timeout must require observation")
+    try expect(report["actionId"] as? String == repeated["actionId"] as? String, "same-key retry must retain action identity")
+    h.pump(0.1)
+    h.f.api.browserActionQueue = BrowserActionQueue()
+    let restarted = try h.raw("browser.evaluate", payload, timeout: 4)
+    try expect(action(restarted)?["effects"] as? String == "unknown", "restart must retain uncertain retry history")
+    let observed = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => window.actionCount"])
+    try expect(observed["value"] as? Int == 1, "same-key timeout retry dispatched input twice")
+    let settledScript = "() => { window.settledDispatches=(window.settledDispatches||0)+1; return true; }"
+    for n in 0..<70 {
+        _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": settledScript, "idempotencyKey": "settled-\(n)"])
+    }
+    _ = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": settledScript, "idempotencyKey": "settled-0"])
+    let settled = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => window.settledDispatches"])
+    try expect(settled["value"] as? Int == 70, "evicting a settled result must not permit a same-key input replay")
+    let (typingTile, page) = try h.ownedBrowser()
+    try Data("<html><body><input aria-label='Field'></body></html>".utf8).write(to: page)
+    _ = try h.ok("browser.navigate", ["tileId": typingTile.uuidString, "action": "reload"])
+    let snap = try h.ok("browser.snapshot", ["tileId": typingTile.uuidString])
+    guard let text = snap["text"] as? String,
+          let line = text.split(separator: "\n").first(where: { $0.contains("- textbox \"Field\"") }),
+          let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression),
+          let browser = h.live(typingTile) else { throw WorkspaceAPIChecks.Failure(message: "no typing field") }
+    let ref = String(line[range].dropFirst(5).dropLast())
+    let stop = Date().addingTimeInterval(4)
+    func interrupt() {
+        if browser.automation.actionDeliveredCharacters >= 3 { h.userKey(into: browser) }
+        else if Date() < stop { DispatchQueue.main.asyncAfter(deadline: .now() + 0.005) { interrupt() } }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { interrupt() }
+    let partial = try h.raw("browser.type", ["tileId": typingTile.uuidString, "ref": ref, "text": String(repeating: "x", count: 200), "idempotencyKey": "partial-type"])
+    guard let prefix = action(partial), let count = prefix["deliveredCharacters"] as? Int else { throw WorkspaceAPIChecks.Failure(message: "missing partial typing report: \(partial)") }
+    try expect(prefix["effects"] as? String == "partial" && count >= 3 && count < 200, "takeover must report a bounded dispatched prefix: \(partial)")
+    let delivered = browser.automation.actionDeliveredCharacters
+    let partialRetry = try h.raw("browser.type", ["tileId": typingTile.uuidString, "ref": ref, "text": String(repeating: "x", count: 200), "idempotencyKey": "partial-type"])
+    try expect(action(partialRetry)?["effects"] as? String == "partial", "partial retry must retain the original effect report")
+    try expect(browser.automation.actionDeliveredCharacters == delivered, "same-key partial retry must not dispatch")
+}
+
+@MainActor
+func runBrowserWriterTransferCheck() throws {
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let supervisor = h.f.delegate.qaAgentSupervisor
+    let reader = supervisor.spawn(role: nil, prompt: nil, cwd: h.f.pbRoot, harness: .pi,
+        model: "openai-codex/gpt-5.6-sol", thinking: "high", projectId: h.f.projectPb, projectRoot: h.f.pbRoot)
+    _ = supervisor.setWorkspaceToolsEnabled(agentID: reader, true)
+    let (tile, page) = try h.ownedBrowser()
+    try Data("<html><body><button>Target</button></body></html>".utf8).write(to: page)
+    _ = try h.ok("browser.navigate", ["tileId": tile.uuidString, "action": "reload"])
+    let before = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let text = before["text"] as? String,
+          let line = text.split(separator: "\n").first(where: { $0.contains("- button \"Target\"") }),
+          let range = line.range(of: #"\[ref=([^\]]+)\]"#, options: .regularExpression),
+          let view = h.f.canvas.tileView(for: tile) as? BrowserTileNSView else { throw WorkspaceAPIChecks.Failure(message: "no writer fixture") }
+    let ref = String(line[range].dropFirst(5).dropLast())
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { document.body.insertAdjacentHTML('beforeend','<button>Added</button>'); return true; }"])
+    let read = try h.raw("browser.snapshot", ["tileId": tile.uuidString], agent: reader)
+    try expect(read["status"] as? String == "ok", "a reader must be able to observe the tile")
+    try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControllingAgentId == h.f.agentId, "reader changed the writer")
+    let clicked = try h.ok("browser.click", ["tileId": tile.uuidString, "ref": ref])
+    try expect((clicked["changes"] as? [String])?.contains(where: { $0.contains("Added") }) == true, "reader snapshot replaced the writer's comparison baseline")
+    let transfer = "writer-" + reader.rawValue.uuidString
+    var stayedWithWriter = false
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+        view.qaChooseAgentControl(transfer)
+        stayedWithWriter = h.f.canvas.tileRecord(for: tile)?.metadata.browserControllingAgentId == h.f.agentId
+    }
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "async () => { await new Promise(r=>setTimeout(r,150)); return true; }"])
+    try expect(stayedWithWriter, "transfer must refuse while an action is running")
+    h.pump(0.1)
+    view.qaChooseAgentControl(transfer)
+    try expect(h.f.canvas.tileRecord(for: tile)?.metadata.browserControllingAgentId == reader, "explicit quiescent transfer did not change writer")
+    let denied = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+    try expect(h.errorCode(denied) == "permission_denied" || h.errorCode(denied) == "target_conflict", "old writer must lose mutation access")
+    let premature = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"], agent: reader)
+    try expect(h.errorCode(premature) == "target_conflict", "new writer needs a fresh snapshot")
+    let snapshot = try h.raw("browser.snapshot", ["tileId": tile.uuidString], agent: reader)
+    try expect(snapshot["status"] as? String == "ok", "new writer snapshot failed")
+    let written = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"], agent: reader)
+    try expect(written["status"] as? String == "ok", "new writer cannot mutate after snapshot")
+    let oldWriter = try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => true"])
+    try expect(h.errorCode(oldWriter) == "permission_denied", "old writer regained access after the new writer's snapshot")
+}
+
+@MainActor
+func runBrowserBackgroundSchedulingCheck() throws {
+    let priorSwitch = BrowserAutomation.focusFreeInputEnabled
+    BrowserAutomation.focusFreeInputEnabled = true
+    defer { BrowserAutomation.focusFreeInputEnabled = priorSwitch }
+    let h = try BrowserHardeningHarness()
+    defer { h.tearDown() }
+    let (tile, _) = try h.ownedBrowser()
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard let browser = h.live(tile) else { throw WorkspaceAPIChecks.Failure(message: "missing browser") }
+    _ = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => { window.timerTicks=0; window.animationTicks=0; window.timerID=setInterval(()=>timerTicks++,10); function frame(){ animationTicks++; requestAnimationFrame(frame) }; requestAnimationFrame(frame); return true }"])
+    func counters() throws -> [String: Any] {
+        let answer = try h.ok("browser.evaluate", ["tileId": tile.uuidString, "script": "() => ({timer:timerTicks, animation:animationTicks, visibility:document.visibilityState})"])
+        return answer["value"] as? [String: Any] ?? [:]
+    }
+    let before = try counters()
+    h.pump(1)
+    let after = try counters()
+    let ticks = (after["timer"] as? Int ?? 0) - (before["timer"] as? Int ?? 0)
+    try expect(ticks >= 20, "engaged hidden page timer remained throttled: \(ticks) ticks in one second; \(before) -> \(after)")
+    print("Engaged timers: \(ticks)/s; rAF delta=\((after["animation"] as? Int ?? 0) - (before["animation"] as? Int ?? 0)); visibility=\(after["visibility"] ?? "unknown")")
+    h.userKey(into: browser)
+    h.pump(0.1)
+    let prefs = browser.webView.configuration.preferences
+    let defaults = WKPreferences()
+    for name in ["_hiddenPageDOMTimerThrottlingEnabled", "_pageVisibilityBasedProcessSuppressionEnabled"] {
+        let selector = NSSelectorFromString(name)
+        try expect(prefs.responds(to: selector) && defaults.responds(to: selector), "missing scheduling getter \(name)")
+        typealias Getter = @convention(c) (AnyObject, Selector) -> Bool
+        let actual = unsafeBitCast(prefs.method(for: selector), to: Getter.self)(prefs, selector)
+        let original = unsafeBitCast(defaults.method(for: selector), to: Getter.self)(defaults, selector)
+        try expect(actual == original, "takeover did not restore \(name)")
+    }
+    try expect(prefs.inactiveSchedulingPolicy == defaults.inactiveSchedulingPolicy, "takeover did not restore inactive scheduling policy")
+    let snapshot = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    try expect((snapshot["backgroundScheduling"] as? String)?.contains("requestAnimationFrame") == true, "snapshot must name the hidden rAF limitation")
+    print("PASS: production lease accelerates timers and takeover restores scheduling; hidden rAF remains limited")
 }

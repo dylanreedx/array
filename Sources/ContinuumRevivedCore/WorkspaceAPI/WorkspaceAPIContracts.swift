@@ -72,6 +72,7 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     // rename or delete a whole board. Appended last.
     case boardManage = "board.manage"
     case agentSchedule = "agent.schedule"
+    case browserSelect = "browser.select"
 }
 
 // MARK: - Identity
@@ -595,12 +596,14 @@ public struct WorkspaceAPIError: Error, Codable, Equatable, Sendable, CustomStri
     /// For `presentation_required`: the dimensions the only available route
     /// would have to change.
     public var requiredEffects: WorkspacePresentationEffects?
+    public var action: BrowserActionResult?
 
-    public init(code: Code, message: String, approvalRequestId: String? = nil, requiredEffects: WorkspacePresentationEffects? = nil) {
+    public init(code: Code, message: String, approvalRequestId: String? = nil, requiredEffects: WorkspacePresentationEffects? = nil, action: BrowserActionResult? = nil) {
         self.code = code
         self.message = message
         self.approvalRequestId = approvalRequestId
         self.requiredEffects = requiredEffects
+        self.action = action
     }
 
     public var description: String { "\(code.rawValue): \(message)" }

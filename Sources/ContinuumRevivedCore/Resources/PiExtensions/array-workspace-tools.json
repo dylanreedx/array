@@ -1407,7 +1407,7 @@
       "name": "array_browser_navigate",
       "label": "Array Browser Navigate",
       "op": "browser.navigate",
-      "description": "Navigate a browser by URL, back, forward or reload.",
+      "description": "Navigate a browser by URL, back, forward or reload. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Navigate a browser by URL, back, forward or reload.",
       "promptGuidelines": [
         "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
@@ -1460,7 +1460,7 @@
       "name": "array_browser_snapshot",
       "label": "Array Browser Snapshot",
       "op": "browser.snapshot",
-      "description": "Read the page outline and element refs.",
+      "description": "Read the page outline and element refs. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Read the page outline and element refs.",
       "promptGuidelines": [
         "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
@@ -1489,10 +1489,11 @@
       "name": "array_browser_click",
       "label": "Array Browser Click",
       "op": "browser.click",
-      "description": "Click an element ref or CSS coordinates.",
+      "description": "Click an element ref or CSS coordinates. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Click an element ref or CSS coordinates.",
       "promptGuidelines": [
-        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell.",
+        "HTML SELECT activation is refused; use array_browser_select. This preflight does not universally prevent native pickers opened by arbitrary page scripts or delayed showPicker calls."
       ],
       "parameters": {
         "type": "object",
@@ -1543,10 +1544,11 @@
       "name": "array_browser_type",
       "label": "Array Browser Type",
       "op": "browser.type",
-      "description": "Type text into an element or the focused field.",
+      "description": "Type text into an element or the focused field. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Type text into an element or the focused field.",
       "promptGuidelines": [
-        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell.",
+        "Typing stops if external input invalidates its target. A prefix may already be on the page; inspect before retrying."
       ],
       "parameters": {
         "type": "object",
@@ -1589,10 +1591,12 @@
       "name": "array_browser_press_key",
       "label": "Array Browser Press Key",
       "op": "browser.press_key",
-      "description": "Send a named key or shortcut.",
+      "description": "Send a named key or shortcut. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Send a named key or shortcut.",
       "promptGuidelines": [
-        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
+        "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell.",
+        "HTML SELECT activation is refused; use array_browser_select. This preflight does not universally prevent native pickers opened by arbitrary page scripts or delayed showPicker calls.",
+        "If keyboard focus belongs to another tile, keys are refused to protect its text. Inspect before retrying."
       ],
       "parameters": {
         "type": "object",
@@ -1623,7 +1627,7 @@
       "name": "array_browser_scroll",
       "label": "Array Browser Scroll",
       "op": "browser.scroll",
-      "description": "Scroll by CSS pixels or bring an element into view.",
+      "description": "Scroll by CSS pixels or bring an element into view. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Scroll by CSS pixels or bring an element into view.",
       "promptGuidelines": [
         "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
@@ -1664,7 +1668,7 @@
       "name": "array_browser_wait_for",
       "label": "Array Browser Wait For",
       "op": "browser.wait_for",
-      "description": "Wait for text, an element ref, or page idle.",
+      "description": "Wait for text, an element ref, or page idle. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Wait for text, an element ref, or page idle.",
       "promptGuidelines": [
         "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
@@ -1713,7 +1717,7 @@
       "name": "array_browser_take_screenshot",
       "label": "Array Browser Take Screenshot",
       "op": "browser.take_screenshot",
-      "description": "Take a PNG screenshot of the browser or an element.",
+      "description": "Take a PNG screenshot of the browser or an element. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Take a PNG screenshot of the browser or an element.",
       "promptGuidelines": [
         "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
@@ -1748,7 +1752,7 @@
       "name": "array_browser_evaluate",
       "label": "Array Browser Evaluate",
       "op": "browser.evaluate",
-      "description": "Evaluate JavaScript in the page and return its JSON value.",
+      "description": "Evaluate JavaScript in the page and return its JSON value. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Evaluate JavaScript in the page and return its JSON value.",
       "promptGuidelines": [
         "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
@@ -1782,7 +1786,7 @@
       "name": "array_browser_console",
       "label": "Array Browser Console",
       "op": "browser.console",
-      "description": "Read page-supplied console messages and errors.",
+      "description": "Read page-supplied console messages and errors. Results include action identity, effects and retry guidance in result.action or error.details.action. Unknown or partial effects require a fresh snapshot; a new key is not permission to repeat input. Retry deduplication is scoped to retrySessionId.",
       "promptSnippet": "Read page-supplied console messages and errors.",
       "promptGuidelines": [
         "Take a snapshot first, act by ref, and use screenshots only to check visuals. Read errors for the next step; do not fall back to curl or Playwright in the shell."
@@ -1813,6 +1817,63 @@
         },
         "required": [
           "tileId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "array_browser_select",
+      "label": "Array Browser Select",
+      "op": "browser.select",
+      "description": "List or select options on a native HTML SELECT without opening its popup. Omit options to list; pass options to replace selection. The result value is JSON with multiple, disabled, and option index/value/label/group/selected/disabled fields. Duplicate values require an explicit index. Emits untrusted input/change events and reads back after reconciliation; inspect application state before proceeding. Custom ARIA widgets use their normal widget actions.",
+      "promptSnippet": "List or select native HTML options without opening a popup.",
+      "promptGuidelines": [
+        "Use a snapshot ref. List first, then select by exact value; provide index when values repeat. Do not use click or keys to open native select menus."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tileId": {
+            "type": "string",
+            "description": "Explicit browser tile ID returned by Array."
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Element ref from the latest snapshot."
+          },
+          "options": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "object",
+              "properties": {
+                "value": {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "value"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "description": "Reuse for a retry of the same action."
+          }
+        },
+        "required": [
+          "tileId",
+          "ref"
         ],
         "additionalProperties": false
       }

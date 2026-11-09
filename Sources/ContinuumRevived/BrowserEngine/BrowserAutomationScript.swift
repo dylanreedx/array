@@ -14,7 +14,7 @@
 // written into the DOM.
 enum BrowserAutomationScript {
     static let bootstrap = #"""
-    if (!globalThis.__arrayAutomation) {
+    if (!globalThis.__arrayAutomation || globalThis.__arrayAutomation.identity !== identity) {
       const state = { next: 1, byRef: new Map(), refOf: new WeakMap(), lastMutation: Date.now(), observer: null };
       const LEAF_ROLES = new Set(['button', 'link', 'heading', 'option', 'checkbox', 'radio', 'tab', 'menuitem',
         'img', 'textbox', 'searchbox', 'combobox', 'slider', 'spinbutton', 'switch', 'clickable']);
@@ -104,7 +104,7 @@ enum BrowserAutomationScript {
       function refFor(el) {
         let ref = state.refOf.get(el);
         if (!ref) {
-          ref = 'e' + state.next++;
+          ref = 'e' + identity + '_' + state.next++;
           state.refOf.set(el, ref);
           state.byRef.set(ref, new WeakRef(el));
         }
@@ -134,6 +134,18 @@ enum BrowserAutomationScript {
         const ref = state.refOf.get(el);
         return role + (name ? ' "' + name + '"' : '') + (ref ? ' [ref=' + ref + ']' : '');
       }
+      function selectState(el) {
+        return { multiple: el.multiple, disabled: el.matches(':disabled'),
+          selectedIndices: Array.from(el.options).flatMap((o, index) => o.selected ? [index] : []),
+          selectedValues: Array.from(el.selectedOptions).map(o => o.value),
+          optionsTruncated: el.options.length > 500,
+          options: Array.from(el.options).slice(0, 500).map((o, index) => ({
+            index, value: o.value, label: o.label, selected: o.selected,
+            disabled: el.matches(':disabled') || o.matches(':disabled'),
+            group: o.parentElement.tagName === 'OPTGROUP' ? o.parentElement.label : null,
+            groupDisabled: o.parentElement.tagName === 'OPTGROUP' && o.parentElement.disabled
+          })) };
+      }
       function line(el, role, depth, lines, active) {
         const name = nameOf(el, role);
         let s = role + (name ? ' "' + name.replace(/"/g, '\\"') + '"' : '') + ' [ref=' + refFor(el) + ']';
@@ -147,6 +159,7 @@ enum BrowserAutomationScript {
         if (el.tagName === 'A' && el.getAttribute('href')) s += ' [url=' + collapse(el.getAttribute('href'), 120) + ']';
         const value = valueOf(el);
         if (value !== null && value !== '' && role !== 'button') s += ' value="' + collapse(value, 200).replace(/"/g, '\\"') + '"';
+        if (el.tagName === 'SELECT') s += ' htmlSelect=' + JSON.stringify(selectState(el));
         lines.push({ d: depth, k: 'e', s: s });
       }
       function walk(node, depth, lines, counter, active) {
@@ -196,18 +209,66 @@ enum BrowserAutomationScript {
         if (el.shadowRoot) walk(el.shadowRoot, depth, lines, counter, active);
         walk(el, depth, lines, counter, active);
       }
+      function frameInputSafe(frame) {
+        for (let node = frame; node; node = node.assignedSlot || node.parentElement || node.getRootNode().host) {
+          const style = node.ownerDocument.defaultView.getComputedStyle(node);
+          for (const property of ['transform', 'perspective', 'translate', 'rotate', 'scale']) {
+            if (style[property] && style[property] !== 'none') return false;
+          }
+          if (style.zoom && style.zoom !== '1' && style.zoom !== 'normal') return false;
+        }
+        return true;
+      }
       function frameOffset(el) {
         let x = 0, y = 0;
         let win = el.ownerDocument.defaultView;
         while (win && win !== window) {
           const frame = win.frameElement;
           if (!frame) break;
+          if (!frameInputSafe(frame)) return { x, y, uninspectableFrame: true };
           const r = frame.getBoundingClientRect();
           x += r.left + frame.clientLeft;
           y += r.top + frame.clientTop;
           win = win.parent;
         }
         return { x, y };
+      }
+      function isNativeSelect(el) {
+        if (!el) return false;
+        const select = el.tagName === 'SELECT' ? el : el.closest('select');
+        if (select && select.namespaceURI === 'http://www.w3.org/1999/xhtml') return true;
+        const label = el.tagName === 'LABEL' ? el : el.closest('label');
+        return !!label && !!label.control && label.control.tagName === 'SELECT' && label.control.namespaceURI === 'http://www.w3.org/1999/xhtml';
+      }
+      function inspectPoint(doc, x, y) {
+        let hit = doc.elementFromPoint(x, y);
+        while (hit) {
+          if (hit.shadowRoot) {
+            const inner = hit.shadowRoot.elementFromPoint(x, y);
+            if (inner && inner !== hit) { hit = inner; continue; }
+          }
+          if (hit.tagName === 'IFRAME' || hit.tagName === 'FRAME') {
+            try {
+              const child = hit.contentDocument;
+              if (!child || child.readyState !== 'complete' || !frameInputSafe(hit)) return { uninspectableFrame: true };
+              const r = hit.getBoundingClientRect();
+              x -= r.left + hit.clientLeft; y -= r.top + hit.clientTop;
+              doc = child; hit = doc.elementFromPoint(x, y); continue;
+            } catch (_) { return { uninspectableFrame: true }; }
+          }
+          break;
+        }
+        return { hit, nativeSelect: isNativeSelect(hit) };
+      }
+      function keyboardTarget() {
+        let active = deepActive(document);
+        while (active && (active.tagName === 'IFRAME' || active.tagName === 'FRAME')) {
+          try {
+            if (!active.contentDocument) return { uninspectableFrame: true };
+            active = deepActive(active.contentDocument);
+          } catch (_) { return { uninspectableFrame: true }; }
+        }
+        return { nativeSelect: isNativeSelect(active), editor: active?.closest('.monaco-editor') ? 'monaco' : active?.closest('.cm-editor') ? 'cm' : active?.closest('.ProseMirror') ? 'pm' : 'native' };
       }
       function element(ref) {
         const weak = state.byRef.get(ref);
@@ -216,6 +277,8 @@ enum BrowserAutomationScript {
       }
 
       globalThis.__arrayAutomation = {
+        identity,
+        activeRef() { const active = deepActive(document); return { ref: active ? refFor(active) : null }; },
         outline() {
           observe();
           for (const [ref, weak] of state.byRef) { const el = weak.deref(); if (!el || !el.isConnected) state.byRef.delete(ref); }
@@ -237,20 +300,97 @@ enum BrowserAutomationScript {
           const cx = Math.min(Math.max(rect.left + rect.width / 2, 0), view.innerWidth - 1);
           const cy = Math.min(Math.max(rect.top + rect.height / 2, 0), view.innerHeight - 1);
           const hit = el.ownerDocument.elementFromPoint(cx, cy);
+          const inspected = inspectPoint(el.ownerDocument, cx, cy);
           let lands = !!hit && (hit === el || el.contains(hit) || (hit.tagName === 'LABEL' && hit.control === el));
           if (!lands && hit && el.getRootNode() instanceof ShadowRoot) lands = hit.contains(el);
           const offset = frameOffset(el);
+          const topInspection = offset.uninspectableFrame ? { uninspectableFrame: true } : inspectPoint(document, cx + offset.x, cy + offset.y);
           return {
             x: cx + offset.x, y: cy + offset.y,
             rect: { x: rect.left + offset.x, y: rect.top + offset.y, w: rect.width, h: rect.height },
             lands, cover: lands ? null : describe(hit), what: describe(el),
+            editor: el.closest('.monaco-editor') ? 'monaco' : 'native',
+            nativeSelect: isNativeSelect(el) || inspected.nativeSelect || topInspection.nativeSelect,
+            uninspectableFrame: inspected.uninspectableFrame || offset.uninspectableFrame || topInspection.uninspectableFrame,
             editable: el.tagName === 'TEXTAREA' || el.isContentEditable ||
               (el.tagName === 'INPUT' && !['button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'range', 'file', 'color', 'hidden'].includes((el.type || '').toLowerCase())),
           };
         },
         at(a) {
-          const hit = document.elementFromPoint(a.x, a.y);
-          return { what: describe(hit) };
+          const inspected = inspectPoint(document, a.x, a.y);
+          return { what: describe(inspected.hit), editor: inspected.hit?.closest('.monaco-editor') ? 'monaco' : 'native', nativeSelect: inspected.nativeSelect, uninspectableFrame: inspected.uninspectableFrame };
+        },
+        keyboardTarget() { return keyboardTarget(); },
+        beginInputVerification(a) {
+          const el=element(a.ref), native=el && ['INPUT','TEXTAREA'].includes(el.tagName);
+          // Use the same unbounded text reader for the editor and selection
+          // fragments. Block/BR boundaries and NBSP are ordinary editor
+          // whitespace, not reasons to accept a missing non-whitespace suffix.
+          const read=node => {
+            if(node.nodeType===3) return node.data;
+            if(node.nodeName==='BR') return '\n';
+            let text='', previousBlock=false;
+            for(const child of node.childNodes) {
+              const value=read(child), block=/^(DIV|P|LI|PRE|BLOCKQUOTE|H[1-6])$/.test(child.nodeName);
+              if(text && value && (previousBlock || block)) text+='\n';
+              text+=value; previousBlock=block;
+            }
+            return text;
+          };
+          const normalize=value => native ? value : value.replace(/\s+/g,' ').trim();
+          const before=el ? (native ? el.value : read(el)) : '';
+          let left=null,right=null;
+          if(el && a.clear) { left=''; right=''; }
+          else if(native && Number.isInteger(el.selectionStart)) {
+            left=before.slice(0,el.selectionStart); right=before.slice(el.selectionEnd);
+          } else if(el && !native) {
+            const selection=el.ownerDocument.getSelection();
+            if(selection?.rangeCount) {
+              const range=selection.getRangeAt(0);
+              if(el.contains(range.startContainer) && el.contains(range.endContainer)) {
+                // Mark the selection in a detached clone of the WHOLE editor.
+                // Rendering separate Range fragments invents paragraph breaks at
+                // a caret inside a paragraph (e.g. ProseMirror bold insertion).
+                const clone=el.cloneNode(true);
+                const counterpart=node => {
+                  const path=[];
+                  while(node!==el) { path.unshift(Array.prototype.indexOf.call(node.parentNode.childNodes,node)); node=node.parentNode; }
+                  return path.reduce((parent,index)=>parent.childNodes[index],clone);
+                };
+                const copy=el.ownerDocument.createRange();
+                copy.setStart(counterpart(range.startContainer),range.startOffset);
+                copy.setEnd(counterpart(range.endContainer),range.endOffset);
+                const marker='ARRAY_INSERT_'+Math.random().toString(36).slice(2);
+                copy.deleteContents(); copy.insertNode(el.ownerDocument.createTextNode(marker));
+                [left,right]=read(clone).split(marker);
+              }
+            }
+          }
+          state.inputVerification={el,before,left,right,text:a.text,native,read,normalize};
+          return {};
+        },
+        verifyInput() {
+          const v=state.inputVerification; delete state.inputVerification;
+          if(!v || !v.el?.isConnected || v.left===null) return {retained:false};
+          const actual=v.normalize(v.native ? v.el.value : v.read(v.el));
+          const expected=v.normalize(v.left+v.text+v.right);
+          const characters=Array.from(new Intl.Segmenter(undefined,{granularity:'grapheme'}).segment(v.text),s=>s.segment);
+          if(actual===expected) return {retained:true,retainedCharacters:characters.length};
+          const left=v.normalize(v.left), right=v.normalize(v.right);
+          if(!actual.startsWith(left) || !actual.endsWith(right) || actual.length<left.length+right.length)
+            return {retained:false};
+          const observed=actual.slice(left.length,right.length ? -right.length : undefined);
+          const inserted=v.native ? observed : observed.trim();
+          const intended=v.normalize(v.text);
+          let common=0;
+          while(common<intended.length && common<inserted.length && intended[common]===inserted[common]) common++;
+          let count=0, prefix='';
+          for(const character of characters) {
+            prefix+=character;
+            if(v.normalize(prefix).length>common) break;
+            count++;
+          }
+          return {retained:false,retainedCharacters:count};
         },
         focusedIs(a) {
           const el = element(a.ref);
@@ -263,6 +403,42 @@ enum BrowserAutomationScript {
           if (typeof el.select === 'function') el.select();
           else { const sel = el.ownerDocument.getSelection(); sel.selectAllChildren(el); }
           return { ok: true };
+        },
+        selectOptions(a) {
+          const el = element(a.ref);
+          if (!el) return { stale: true };
+          if (el.tagName !== 'SELECT' || el.namespaceURI !== 'http://www.w3.org/1999/xhtml') return { error: 'Use select only on HTML SELECT elements. Custom ARIA widgets use their normal widget actions.' };
+          if (el.options.length > 500) return { error: 'This select has more than 500 options; selection is unsupported.' };
+          const before = selectState(el);
+          if (new TextEncoder().encode(JSON.stringify(before)).byteLength > 55000) return { error: 'Select listing exceeds the size limit.' };
+          if (a.options === undefined) return before;
+          if (before.disabled) return { error: 'This select is disabled.' };
+          if (!el.multiple && a.options.length !== 1) return { error: 'A single select requires exactly one option.' };
+          const indices = [];
+          for (const requested of a.options) {
+            const matches = before.options.filter(o => o.value === requested.value && (requested.index === undefined || o.index === requested.index));
+            if (matches.length !== 1) return { error: 'Option value is missing or ambiguous. List options and specify an index for duplicate values.' };
+            if (matches[0].disabled) return { error: 'The requested option or its group is disabled.' };
+            if (indices.includes(matches[0].index)) return { error: 'The same option was requested twice.' };
+            indices.push(matches[0].index);
+          }
+          indices.sort((a, b) => a - b);
+          const requestedValues = indices.map(index => before.options[index].value);
+          const projected = { ...before, selectedIndices: indices, selectedValues: requestedValues,
+            options: before.options.map(o => ({ ...o, selected: indices.includes(o.index) })) };
+          if (new TextEncoder().encode(JSON.stringify(projected)).byteLength > 55000) return { error: 'The requested selection exceeds the result size limit.' };
+          // Every validation above precedes the first DOM write.
+          const setter = Object.getOwnPropertyDescriptor(el.ownerDocument.defaultView.HTMLOptionElement.prototype, 'selected').set;
+          // Clear first: setting a later option on a single select deselects
+          // earlier ones as part of the platform's selectedness algorithm.
+          for (const option of el.options) setter.call(option, false);
+          for (const index of indices) setter.call(el.options[index], true);
+          if (JSON.stringify(before.selectedIndices) !== JSON.stringify(indices)) {
+            const EventType = el.ownerDocument.defaultView.Event;
+            el.dispatchEvent(new EventType('input', { bubbles: true }));
+            el.dispatchEvent(new EventType('change', { bubbles: true }));
+          }
+          return { ...selectState(el), requestedIndices: indices, requestedValues };
         },
         scroll(a) {
           if (a.ref) {

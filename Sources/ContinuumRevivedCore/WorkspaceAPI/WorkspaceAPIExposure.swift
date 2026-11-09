@@ -17,11 +17,19 @@ public enum WorkspaceAPIExposure {
             + ZonePlacement.CodingKeys.allCases.map { "zone.\($0.rawValue)" }
             + Board.CodingKeys.allCases.map { "board.\($0.rawValue)" }
             + BoardCard.CodingKeys.allCases.filter { $0 == .comments || $0 == .assignees }.map { "boardCard.\($0.rawValue)" }
-            + BoardComment.CodingKeys.allCases.map { "boardComment.\($0.rawValue)" })
+            + BoardComment.CodingKeys.allCases.map { "boardComment.\($0.rawValue)" }
+            + BrowserActionResult.CodingKeys.allCases.map { "browserActionResult.\($0.rawValue)" })
     }
 
     // No fallback classification: a new field must be considered deliberately.
     public static let decisions: [String: Decision] = [
+        "browserActionResult.actionId": .internal,
+        "browserActionResult.retrySessionId": .internal,
+        "browserActionResult.state": .internal,
+        "browserActionResult.effects": .internal,
+        "browserActionResult.retry": .internal,
+        "browserActionResult.freshSnapshotRequired": .internal,
+        "browserActionResult.deliveredCharacters": .internal,
         "agent.schemaVersion": .internal,
         "agent.id": .internal,
         "agent.displayName": .exposed(.agentUpdate),
@@ -97,6 +105,7 @@ public enum WorkspaceAPIExposure {
         "tile.metadata.filePath": .internal,
         "tile.metadata.documentLocation": .internal,
         "tile.metadata.browserOwnerAgentId": .internal,
+        "tile.metadata.browserControlPaused": .internal,
         "tile.metadata.browserProfileId": .notExposed("Browser-profile selection is native UI only."),
         "tile.metadata.iosPreviewAutomationOwnership": .internal,
         "tile.metadata.iosPreviewDeviceID": .notExposed("Selection changes remain native UI; device.open fixes the device when creating an owned tile."),

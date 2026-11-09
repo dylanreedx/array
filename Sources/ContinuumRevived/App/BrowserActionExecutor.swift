@@ -13,6 +13,7 @@ enum BrowserActionExecutor {
         }
         let approvalAtStart = runtime.approvalTime
         let engine = runtime.automation
+        engine.beginActionTracking()
         func reply(_ fields: [String: Any]) -> WorkspaceAPIService.Reply {
             .result(fields.mapValues { AnyHashableJSON(any: $0) })
         }
@@ -29,7 +30,7 @@ enum BrowserActionExecutor {
             case let .snapshot(tile, _) where tile == runtime.tileId:
                 let value = try await engine.snapshot(deadline: deadline)
                 return reply(["text": value.text, "generation": value.generation, "url": value.url,
-                              "title": value.title, "cut": value.cut])
+                              "title": value.title, "cut": value.cut, "backgroundScheduling": engine.backgroundSchedulingCapability, "inputBackend": BrowserAutomation.focusFreeInputEnabled ? (engine.supportsFocusFreeInput ? "experimental focus suppression; Tier B unproven" : "suppression unavailable; Stage 1 delivery") : "Stage 1 delivery"])
             case let .click(tile, target, _) where tile == runtime.tileId:
                 switch target {
                 case .ref(let ref): return outcome(try await engine.click(ref: ref, deadline: deadline))
@@ -37,6 +38,8 @@ enum BrowserActionExecutor {
                 }
             case let .type(tile, text, ref, clear, submit, _) where tile == runtime.tileId:
                 return outcome(try await engine.type(text, ref: ref, clear: clear, submit: submit, deadline: deadline))
+            case let .select(tile, ref, options, _) where tile == runtime.tileId:
+                return outcome(try await engine.selectOptions(ref: ref, options: options, deadline: deadline))
             case let .pressKey(tile, name, _) where tile == runtime.tileId:
                 return outcome(try await engine.pressKey(name, deadline: deadline))
             case let .scroll(tile, ref, dx, dy, _) where tile == runtime.tileId:
@@ -96,12 +99,25 @@ enum BrowserActionExecutor {
             let code: WorkspaceAPIError.Code
             switch error {
             case .notLive: code = .browserNotLive
-            case .timedOut: code = .outcomeUnknown
+            case .editorUnsupported, .nativeSelectUnsupported, .uninspectableFrame: code = .unsupported
+            case .focusChanged, .inputNotRetained, .selectionNotRetained, .timedOut: code = .outcomeUnknown
             case .userTyping: code = .busy
             case .staleRef, .notVisible, .covered, .notEditable, .focusRefused: code = .targetConflict
-            case .unknownKey, .script: code = .invalidRequest
+            case .invalidSelection, .unknownKey, .script: code = .invalidRequest
             }
-            return .error(WorkspaceAPIError(code: code, message: String(error.description.prefix(2048))))
+            let effects: BrowserActionResult.Effects
+            if case let .inputNotRetained(retained, _) = error { effects = retained == nil ? .unknown : .partial }
+            else if case .selectionNotRetained = error { effects = .unknown }
+            else if case .timedOut = error { effects = .unknown }
+            else if case .script = error { effects = .unknown }
+            else { effects = engine.actionInputEvents > 0 ? .partial : .none }
+            let state: BrowserActionResult.State
+            if case .userTyping = error { state = .takeover }
+            else { state = effects == .unknown ? .outcomeUnknown : (effects == .partial ? .partial : .rejected) }
+            return .error(WorkspaceAPIError(code: code, message: String(error.description.prefix(2048)),
+                action: BrowserActionResult(state: state, effects: effects,
+                    retry: state == .takeover ? .waitForHandback : (effects == .unknown ? .sameKeyOnly : .observeBeforeNewAction),
+                    freshSnapshotRequired: true, deliveredCharacters: engine.actionDeliveredCharacters)))
         } catch {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "The browser action could not produce a JSON result."))
         }

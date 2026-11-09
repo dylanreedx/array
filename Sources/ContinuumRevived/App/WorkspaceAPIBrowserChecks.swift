@@ -44,10 +44,10 @@ func runWorkspaceAPIBrowserCheck() throws {
         guard let response else { throw WorkspaceAPIChecks.Failure(message: "MCP \(op) timed out") }
         return response
     }
-    func call(_ op: String, _ payload: [String: Any]) throws -> [String: Any] {
+    func call(_ op: String, _ payload: [String: Any], line: Int = #line) throws -> [String: Any] {
         let response = try rawCall(op, payload)
         guard response["status"] as? String == "ok", let result = response["result"] as? [String: Any] else {
-            throw WorkspaceAPIChecks.Failure(message: "MCP \(op) failed: \(response)")
+            throw WorkspaceAPIChecks.Failure(message: "MCP \(op) failed at fixture line \(line): \(response)")
         }
         return result
     }
@@ -164,7 +164,7 @@ func runWorkspaceAPIBrowserCheck() throws {
     }
     func ref(_ name: String) throws -> String {
         guard let line = outline.split(separator: "\n").first(where: { $0.contains("\"\(name)\"") }),
-              let range = line.range(of: #"\[ref=(e\d+)\]"#, options: .regularExpression) else {
+              let range = line.range(of: #"\[ref=(e[A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
             throw WorkspaceAPIChecks.Failure(message: "no ref for \(name): \(outline)")
         }
         return String(line[range].dropFirst(5).dropLast())
@@ -272,6 +272,16 @@ func runWorkspaceAPIBrowserCheck() throws {
           (afterRevocation["error"] as? [String: Any])?["code"] as? String == "permission_denied" else {
         throw WorkspaceAPIChecks.Failure(message: "revocation must prevent replay of cached page data: \(afterRevocation)")
     }
+    // Renderer recovery is a separate scenario: release the earlier deliberate
+    // user takeover through the real tile action before testing agent reload.
+    guard let heldView = f.canvas.tileView(for: tileId) as? BrowserTileNSView else {
+        throw WorkspaceAPIChecks.Failure(message: "missing held browser before recovery")
+    }
+    heldView.qaChooseAgentControl("return")
+    guard f.canvas.tileRecord(for: tileId)?.metadata.browserControlPaused == false else {
+        throw WorkspaceAPIChecks.Failure(message: "renderer recovery requires explicit handback")
+    }
+    _ = try call("browser.snapshot", ["tileId": target])
     browser.webViewWebContentProcessDidTerminate(browser.webView)
     let terminationDeadline = Date().addingTimeInterval(3)
     while !browser.isTerminated && Date() < terminationDeadline {
@@ -292,6 +302,16 @@ func runWorkspaceAPIBrowserCheck() throws {
         throw WorkspaceAPIChecks.Failure(message: "could not create the user browser fixture")
     }
     f.api.browserRuntimeWiring?(userBrowser, f.projectPb)
+    // This direct user spawn starts its initial about:blank navigation without
+    // the browser.open tool's load wait. Observe only after that document commits;
+    // a snapshot crossing the commit must correctly reject its obsolete refs.
+    let userLoadDeadline = Date().addingTimeInterval(5)
+    while userBrowser.webView.isLoading && Date() < userLoadDeadline {
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+    }
+    guard !userBrowser.webView.isLoading else {
+        throw WorkspaceAPIChecks.Failure(message: "user browser initial document did not finish loading")
+    }
     let userTile = userBrowser.tileId.uuidString
     _ = try call("browser.snapshot", ["tileId": userTile])
     var handOverAllowed = false
@@ -307,13 +327,23 @@ func runWorkspaceAPIBrowserCheck() throws {
         throw WorkspaceAPIChecks.Failure(message: "user browser control must ask even under Free")
     }
     handOverAllowed = true
+    window.makeFirstResponder(userBrowser.webView)
     let reapprovalInputs = userBrowser.automation.userInputCount
     let reapproval = try rawCall("browser.press_key", ["tileId": userTile, "keyName": "Enter"])
     guard reapproval["status"] as? String == "ok" else {
         throw WorkspaceAPIChecks.Failure(message: "initial hand-over failed: inputs=\(reapprovalInputs)->\(userBrowser.automation.userInputCount), engaged=\(userBrowser.automation.isEngaged), gate=\(userBrowser.agentNavigationDecision != nil), prompts=\(handOverPrompts), reply=\(reapproval)")
     }
+    _ = try call("browser.evaluate", ["tileId": userTile, "script": "() => { window.foreignKeys=0; document.addEventListener('keydown',()=>foreignKeys++); return true }"])
+    _ = try call("browser.evaluate", ["tileId": target, "script": "() => { window.targetKeys=0; document.addEventListener('keydown',()=>targetKeys++); return true }"])
     window.makeFirstResponder(userBrowser.webView)
     let otherBrowserInputCount = userBrowser.automation.userInputCount
+    let foreignKey = try rawCall("browser.press_key", ["tileId": target, "keyName": "Enter"])
+    let targetKeys = try call("browser.evaluate", ["tileId": target, "script": "() => targetKeys"])
+    let foreignKeys = try call("browser.evaluate", ["tileId": userTile, "script": "() => foreignKeys"])
+    guard foreignKey["status"] as? String == "ok", targetKeys["value"] as? Int == 1, foreignKeys["value"] as? Int == 0 else {
+        throw WorkspaceAPIChecks.Failure(message: "native key must reach only the requested page: reply=\(foreignKey), target=\(targetKeys), foreign=\(foreignKeys)")
+    }
+    window.makeFirstResponder(restarted.webView)
     _ = try call("browser.press_key", ["tileId": target, "keyName": "Enter"])
     guard userBrowser.automation.userInputCount == otherBrowserInputCount && userBrowser.automation.isEngaged else {
         throw WorkspaceAPIChecks.Failure(message: "agent input in another tile must not masquerade as user takeover here")
@@ -467,7 +497,7 @@ private func runAgentBrowserPopupCheck() throws {
     let snapshot = try call("browser.snapshot", ["tileId": source])
     guard let outline = snapshot["text"] as? String,
           let line = outline.split(separator: "\n").first(where: { $0.contains("Open popup") }),
-          let match = line.range(of: #"\[ref=(e\d+)\]"#, options: .regularExpression) else {
+          let match = line.range(of: #"\[ref=(e[A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
         throw WorkspaceAPIChecks.Failure(message: "popup link missing from snapshot")
     }
     let ref = String(line[match].dropFirst(5).dropLast())
@@ -490,7 +520,7 @@ private func runAgentBrowserPopupCheck() throws {
     let remoteSnapshot = try call("browser.snapshot", ["tileId": source])
     guard let remoteOutline = remoteSnapshot["text"] as? String,
           let remoteLine = remoteOutline.split(separator: "\n").first(where: { $0.contains("Remote popup") }),
-          let remoteMatch = remoteLine.range(of: #"\[ref=(e\d+)\]"#, options: .regularExpression) else {
+          let remoteMatch = remoteLine.range(of: #"\[ref=(e[A-Za-z0-9_-]+)\]"#, options: .regularExpression) else {
         throw WorkspaceAPIChecks.Failure(message: "remote popup link missing")
     }
     _ = try call("browser.click", ["tileId": source, "ref": String(remoteLine[remoteMatch].dropFirst(5).dropLast())])

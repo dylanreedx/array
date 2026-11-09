@@ -46,6 +46,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case browserScreenshot = "array_browser_take_screenshot"
     case browserEvaluate = "array_browser_evaluate"
     case browserConsole = "array_browser_console"
+    case browserSelect = "array_browser_select"
     case notify = "array_notify"
     case report = "array_report"
     case status = "array_status"
@@ -72,7 +73,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .delegate: return .delegate
         case .revealAgent, .messageAgent, .browserOpen, .browserNavigate, .browserSnapshot,
              .browserClick, .browserType, .browserPressKey, .browserScroll, .browserWaitFor,
-             .browserScreenshot, .browserEvaluate, .browserConsole: return .unknown
+             .browserScreenshot, .browserEvaluate, .browserConsole, .browserSelect: return .unknown
         case .revealAgent, .messageAgent, .notify: return .unknown
         }
     }
@@ -91,7 +92,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .messageAgent: return "bubble.left"
         case .getOperation: return "clock"
         case .browserOpen, .browserNavigate, .browserSnapshot, .browserClick, .browserType,
-             .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole: return "globe"
+             .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole, .browserSelect: return "globe"
         case .notify: return "bell"
         case .report: return "doc.text"
         case .status: return "text.bubble"
@@ -140,6 +141,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .browserScreenshot: return "Captured a browser screenshot"
         case .browserEvaluate: return "Ran JavaScript in a browser"
         case .browserConsole: return "Read a browser console"
+        case .browserSelect: return "Selected browser options"
         case .notify: return "Notified you"
         case .report: return "Filed a report"
         case .schedule: return "Updated its schedule"

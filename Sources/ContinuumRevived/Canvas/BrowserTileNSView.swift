@@ -385,6 +385,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     }
 
     private func loadOrRestoreActiveTab(focus: Bool = true) {
+        (runtime as? WKWebViewBrowserRuntime)?.automation.invalidateDocumentIdentity()
         let active = activeTabPreparedForNavigation()
         if let state = active.interactionState {
             lastTabActivationUsedInteractionStateForQA = true
@@ -560,20 +561,22 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     /// The shared choice control exposes the current driver and explicit user
     /// actions without adding a second, platform-styled menu to the tile.
     func setAgentControl(name: String, colour: NSColor?, engaged: Bool, userDriving: Bool,
-                         takeControl: @escaping () -> Void, revealAgent: @escaping () -> Void,
+                         takeControl: @escaping () -> Void, returnToAgent: (() -> Void)? = nil, writerChoices: [ChoiceItem] = [], transferWriter: ((String) -> Void)? = nil, revealAgent: @escaping () -> Void,
                          close: @escaping () -> Void) {
         let visible = engaged || userDriving || !browserActivityLines.isEmpty
         agentControlButton.isHidden = !visible
         guard visible else { agentControlTitleForQA = nil; return }
         let title = AgentControlChip.title(agentName: name, engaged: engaged, userDriving: userDriving) ?? "Browser activity"
         agentControlTitleForQA = title
-        agentControlActions = (userDriving || !engaged ? [] : [AgentControlChip.takeControl]) + [
+        agentControlActions = (userDriving ? (returnToAgent == nil ? [] : [ChoiceItem(id: "return", title: "Return to agent")]) : (!engaged ? [] : [AgentControlChip.takeControl])) + writerChoices + [
             ChoiceItem(id: "reveal", title: "Reveal agent"), ChoiceItem(id: "close", title: "Close browser", destructive: true)
         ]
         agentControlButton.leadingSwatches = colour.map { [$0] } ?? []
         agentControlButton.onSelection = { item in
+            if item.id.hasPrefix("writer-") { transferWriter?(item.id); return }
             switch item.id {
             case "take": takeControl()
+            case "return": returnToAgent?()
             case "reveal": revealAgent()
             case "close": close()
             default: break
@@ -595,6 +598,8 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         agentControlButton.items = agentControlActions + activity
         if let title = agentControlTitleForQA { agentControlButton.setPresentationTitle(title) }
     }
+
+    var qaAgentControlItems: [String] { agentControlButton.items.map(\.id) }
 
     func qaChooseAgentControl(_ id: String) {
         guard let item = agentControlButton.items.first(where: { $0.id == id }) else { return }

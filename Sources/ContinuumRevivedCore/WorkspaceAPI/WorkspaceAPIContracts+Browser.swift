@@ -9,6 +9,7 @@ public enum BrowserToolRequest: Equatable, Sendable {
     case snapshot(tile: UUID, key: String?)
     case click(tile: UUID, target: BrowserClickTarget, key: String?)
     case type(tile: UUID, text: String, ref: String?, clear: Bool, submit: Bool, key: String?)
+    case select(tile: UUID, ref: String, options: [BrowserSelectOption]?, key: String?)
     case pressKey(tile: UUID, keyName: String, key: String?)
     case scroll(tile: UUID, ref: String?, dx: Double, dy: Double, key: String?)
     case waitFor(tile: UUID, condition: BrowserWaitCondition, timeout: Double, key: String?)
@@ -66,6 +67,17 @@ public enum BrowserToolRequest: Equatable, Sendable {
             try fields(["tileId", "text", "ref", "clear", "submit"])
             guard let text = input.text, text.utf8.count <= 16_384 else { throw fail("Invalid or missing text.") }
             return .type(tile: try tile(), text: text, ref: try ref(), clear: input.clear ?? false, submit: input.submit ?? false, key: key)
+        case "browser.select":
+            try fields(["tileId", "ref", "options"])
+            guard let target = try ref() else { throw fail("ref is required.") }
+            if let options = input.options {
+                guard options.count <= 256, options.allSatisfy({ $0.value.utf8.count <= 16_384 && ($0.index == nil || $0.index! >= 0) }),
+                      let rows = object["options"] as? [[String: Any]],
+                      rows.allSatisfy({ Set($0.keys).isSubset(of: ["value", "index"]) }) else {
+                    throw fail("Invalid select options. Use value and optional non-negative index.")
+                }
+            }
+            return .select(tile: try tile(), ref: target, options: input.options, key: key)
         case "browser.press_key":
             try fields(["tileId", "keyName"])
             return .pressKey(tile: try tile(), keyName: try nonempty(input.keyName, "keyName", max: 128), key: key)
@@ -101,6 +113,12 @@ public enum BrowserToolRequest: Equatable, Sendable {
     }
 }
 
+public struct BrowserSelectOption: Codable, Equatable, Sendable {
+    public let value: String
+    public let index: Int?
+    public init(value: String, index: Int? = nil) { self.value = value; self.index = index }
+}
+
 public enum BrowserNavigation: Equatable, Sendable { case url(String), back, forward, reload }
 public enum BrowserClickTarget: Equatable, Sendable { case ref(String), point(Double, Double) }
 public enum BrowserWaitCondition: Equatable, Sendable { case textAppears(String), textGone(String), refAppears(String), refGone(String), idle }
@@ -117,6 +135,7 @@ private struct Input: Decodable {
     var text: String?
     var clear: Bool?
     var submit: Bool?
+    var options: [BrowserSelectOption]?
     var keyName: String?
     var dx: Double?
     var dy: Double?

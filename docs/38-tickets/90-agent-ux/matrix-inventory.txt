@@ -55,11 +55,15 @@ check --board-tile-lifecycle-check
 check --border-census-check
 check --bring-to-front-focus-check
 check --browser-action-queue-check
+check --browser-action-results-check
 check --browser-auth-challenge-check
 check --browser-automation-engine-check
+check --browser-background-scheduling-check
 check --browser-click-recency-check
 check --browser-download-check
+check --browser-durable-takeover-check
 check --browser-element-context-check
+check --browser-focus-restoration-check
 check --browser-inspector-actions-check
 check --browser-inspector-console-check
 check --browser-inspector-dom-tree-check
@@ -69,13 +73,18 @@ check --browser-inspector-styles-check
 check --browser-inspector-tile-shell-check
 check --browser-lease-check
 check --browser-lru-budget-check
+check --browser-native-select-preflight-check
 check --browser-note-action-check
 check --browser-passkey-notice-check
 check --browser-profile-persistence-check
+check --browser-ref-identity-check
 check --browser-restore-state-check
+check --browser-select-check
 check --browser-target-blank-check
 check --browser-ui-delegate-check
+check --browser-unrelated-input-check
 check --browser-url-focus-check
+check --browser-writer-transfer-check
 check --camera-chrome-redraw-check
 check --canvas-background-render-check
 check --canvas-background-settings-check
@@ -350,6 +359,7 @@ check --workspace-api-agent-character-check
 check --workspace-api-agent-colour-check
 check --workspace-api-agent-rename-check
 check --workspace-api-agents-check
+check --workspace-api-agents-contract-check
 check --workspace-api-board-check
 check --workspace-api-board-contract-check
 check --workspace-api-browser-check
@@ -490,11 +500,15 @@ leg run_app_check .build/debug/Array --board-tile-lifecycle-check
 leg run_app_check .build/debug/Array --border-census-check
 leg run_app_check .build/debug/Array --bring-to-front-focus-check
 leg run_app_check .build/debug/Array --browser-action-queue-check
+leg run_app_check .build/debug/Array --browser-action-results-check
 leg run_app_check .build/debug/Array --browser-auth-challenge-check
 leg run_app_check .build/debug/Array --browser-automation-engine-check
+leg run_app_check .build/debug/Array --browser-background-scheduling-check
 leg run_app_check .build/debug/Array --browser-click-recency-check
 leg run_app_check .build/debug/Array --browser-download-check
+leg run_app_check .build/debug/Array --browser-durable-takeover-check
 leg run_app_check .build/debug/Array --browser-element-context-check
+leg run_app_check .build/debug/Array --browser-focus-restoration-check
 leg run_app_check .build/debug/Array --browser-inspector-actions-check
 leg run_app_check .build/debug/Array --browser-inspector-console-check
 leg run_app_check .build/debug/Array --browser-inspector-dom-tree-check
@@ -504,13 +518,18 @@ leg run_app_check .build/debug/Array --browser-inspector-styles-check
 leg run_app_check .build/debug/Array --browser-inspector-tile-shell-check
 leg run_app_check .build/debug/Array --browser-lease-check
 leg run_app_check .build/debug/Array --browser-lru-budget-check
+leg run_app_check .build/debug/Array --browser-native-select-preflight-check
 leg run_app_check .build/debug/Array --browser-note-action-check
 leg run_app_check .build/debug/Array --browser-passkey-notice-check
 leg run_app_check .build/debug/Array --browser-profile-persistence-check
+leg run_app_check .build/debug/Array --browser-ref-identity-check
 leg run_app_check .build/debug/Array --browser-restore-state-check
+leg run_app_check .build/debug/Array --browser-select-check
 leg run_app_check .build/debug/Array --browser-target-blank-check
 leg run_app_check .build/debug/Array --browser-ui-delegate-check
+leg run_app_check .build/debug/Array --browser-unrelated-input-check
 leg run_app_check .build/debug/Array --browser-url-focus-check
+leg run_app_check .build/debug/Array --browser-writer-transfer-check
 leg run_app_check .build/debug/Array --camera-chrome-redraw-check
 leg run_app_check .build/debug/Array --canvas-background-render-check
 leg run_app_check .build/debug/Array --canvas-background-settings-check
@@ -865,6 +884,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-c
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-board-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
