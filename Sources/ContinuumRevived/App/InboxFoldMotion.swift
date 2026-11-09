@@ -157,7 +157,7 @@ final class InboxFoldMotion: NSObject {
 
     private func livePose(_ track: LiveTrack, at time: TimeInterval) -> Pose {
         let fraction = CGFloat(time / duration)
-        let movement = Self.progress(at: fraction)
+        let movement = min(1, max(0, Self.progress(at: fraction)))
         let fade = 1 - pow(1 - min(1, fraction / Self.settleFraction), 3)
         func mix(_ a: CGFloat, _ b: CGFloat) -> CGFloat { a + (b - a) * movement }
         let a = track.from.frame, b = track.to.frame
@@ -196,6 +196,11 @@ final class InboxFoldMotion: NSObject {
                 layer.zPosition = 10_001
             }
         }
+        // Newly inserted children retain their final pitch throughout the move.
+        // One common translation, rather than independent tucked poses, keeps
+        // the stack tight even on its very first expansion.
+        let inserted = after.values.filter { before[$0.key] == nil && $0.order > parent.order }
+        let stackTravel = inserted.map { abs($0.frame.minY - parentFrame.minY) }.min() ?? 0
         for key in Set(beforeViews.keys).union(afterViews.keys).sorted() where key != parentKey {
             guard let snapshot = after[key] ?? before[key],
                   let view = afterViews[key] ?? beforeViews[key] else { continue }
@@ -205,7 +210,8 @@ final class InboxFoldMotion: NSObject {
                        y: container.isFlipped ? parent.maxY - snapshot.frame.height + depth * 3 : parent.minY - depth * 3,
                        width: max(1, parent.width - depth * 8), height: snapshot.frame.height)
             }
-            let from = Pose(frame: before[key]?.frame ?? tucked(before[parentKey]?.frame ?? parentFrame),
+            let insertedOrigin = snapshot.frame.offsetBy(dx: 0, dy: container.isFlipped ? -stackTravel : stackTravel)
+            let from = Pose(frame: before[key]?.frame ?? insertedOrigin,
                             opacity: before[key]?.opacity ?? 0)
             let to = Pose(frame: after[key]?.frame ?? tucked(parentFrame), opacity: after[key] == nil ? 0 : 1)
             guard from.frame != to.frame || from.opacity != to.opacity else { continue }
@@ -223,6 +229,14 @@ final class InboxFoldMotion: NSObject {
                 host = ghost
             }
             host.wantsLayer = true
+            if after[key] != nil {
+                // AppKit's insertion transaction may animate a recycled row host
+                // from its previous slot. The unfold exclusively owns movement.
+                host.superview?.layer?.removeAnimation(forKey: "position")
+                host.superview?.layer?.removeAnimation(forKey: "bounds")
+                host.layer?.removeAnimation(forKey: "position")
+                host.layer?.removeAnimation(forKey: "bounds")
+            }
             guard let layer = host.layer else { continue }
             liveTracks.append(LiveTrack(key: key, view: host, layer: layer, coordinates: container,
                                         from: from, to: to, isGhost: after[key] == nil))
@@ -237,6 +251,7 @@ final class InboxFoldMotion: NSObject {
 
     private func installLiveAnimations() {
         let count = 30
+        let start = CACurrentMediaTime() - elapsed
         for track in liveTracks {
             let transform = CAKeyframeAnimation(keyPath: "transform")
             let opacity = CAKeyframeAnimation(keyPath: "opacity")
@@ -244,15 +259,8 @@ final class InboxFoldMotion: NSObject {
             for index in 0...count {
                 let pose = livePose(track, at: duration * Double(index) / Double(count))
                 let space = track.view.superview ?? track.view
-                let reference = NSRect(origin: .zero, size: track.to.frame.size)
-                var local = NSRect(x: pose.frame.minX - track.to.frame.minX,
-                    y: pose.frame.minY - track.to.frame.minY,
-                    width: pose.frame.width, height: pose.frame.height)
-                if space.isFlipped != track.coordinates.isFlipped {
-                    local.origin.y = reference.height - local.maxY
-                }
-                let base = space.convertToLayer(reference)
-                let presented = space.convertToLayer(local)
+                let base = space.convertToLayer(space.convert(track.to.frame, from: track.coordinates))
+                let presented = space.convertToLayer(space.convert(pose.frame, from: track.coordinates))
                 let sx = presented.width / max(1, base.width)
                 let sy = presented.height / max(1, base.height)
                 let anchor = track.layer.anchorPoint
@@ -268,7 +276,7 @@ final class InboxFoldMotion: NSObject {
             let group = CAAnimationGroup()
             group.animations = [transform, opacity]
             group.duration = duration
-            group.beginTime = track.layer.convertTime(CACurrentMediaTime(), from: nil) - elapsed
+            group.beginTime = track.layer.convertTime(start, from: nil)
             group.fillMode = .both
             group.isRemovedOnCompletion = false
             track.layer.add(group, forKey: Self.liveAnimationKey)
