@@ -59,10 +59,11 @@ enum InboxParentFoldChecks {
 
     static func makeInbox(_ rows: [AgentInboxRow], appearance: NSAppearance.Name, height: CGFloat = 1_100,
                           windows: inout [NSWindow]) -> AgentInboxView {
-        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: height))
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: height),
+                                  indicatorDefaults: ClassicSidebarDefaultsForChecks.make())
         view.clock = { epoch }
-        // What the app's sidebar sets (`configureWorkspaceSidebar`); the
-        // production-wiring section below asserts it does.
+        // Exercise the legacy opt-in policy here. Production's default-open
+        // policy and saved choices are asserted in the wiring section below.
         view.foldsUntouchedGroups = true
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: height),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -118,6 +119,8 @@ enum InboxParentFoldChecks {
         try expect(inbox.clickDisclosureForQA(id: threeChildParent), "motion: parent disclosure was unavailable")
         let motion = inbox.foldMotionForQA
         try expect(motion.isAnimating, "motion: opening a parent must unfold its children instead of only fading their final positions")
+        try expect(motion.usesRenderServerAnimationForQA,
+                   "motion: production unfold must install native layer animations without a frame callback")
         try expect(motion.duration == 0.18, "motion: expanding must take exactly 180 ms")
         let parentKey = "agent:\(threeChildParent.uuidString)"
         let childKey = "agent:\(threeChildren[0].uuidString)"
@@ -690,7 +693,7 @@ enum InboxParentFoldChecks {
         let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 300, height: 1_000))
         app.qaInstallWorkspaceSidebar(sidebar)
         let inbox = sidebar.inboxForQA
-        try expect(inbox.foldsUntouchedGroups, "the app's sidebar must start untouched groups folded")
+        try expect(!inbox.foldsUntouchedGroups, "the app's sidebar must start untouched groups expanded")
         try expect(inbox.parentFoldChoicesForQA == [oneChildParent: true],
                    "the app's sidebar did not restore the stored fold choices — \(inbox.parentFoldChoicesForQA)")
         // The fixture's children finished just before `epoch`; read them from
@@ -698,10 +701,10 @@ enum InboxParentFoldChecks {
         inbox.clock = { epoch }
         inbox.reload(rows: rows())
         inbox.layoutForQA()
-        try expect(!inbox.rowIdsForQA.contains(threeChildren[0]) && inbox.rowIdsForQA.contains(onlyChild),
-                   "the app's sidebar must fold the untouched parent and open the stored one — \(inbox.rowIdsForQA)")
+        try expect(inbox.rowIdsForQA.contains(threeChildren[0]) && inbox.rowIdsForQA.contains(onlyChild),
+                   "the app's sidebar must open the untouched parent and the stored one — \(inbox.rowIdsForQA)")
         try expect(inbox.clickDisclosureForQA(id: threeChildParent), "the triangle could not be clicked")
-        try expect(WorkspaceSidebarConfig.parentFolds(defaults: suite) == [oneChildParent: true, threeChildParent: true],
+        try expect(WorkspaceSidebarConfig.parentFolds(defaults: suite) == [oneChildParent: true, threeChildParent: false],
                    "the app's sidebar did not persist the fold — \(WorkspaceSidebarConfig.parentFolds(defaults: suite))")
         return "production: configureWorkspaceSidebar restored and persisted folds in its settings defaults"
     }

@@ -1,0 +1,16 @@
+  motion: 180/150 ms soft unfold retiring at 54% (under 0.5% travel left), first frame 21% in, softened toolbar spring peak 1.0041196152805876, anchored parent, continuous reversal, uninterrupted stream updates, no per-frame cell builds, reduced motion and cleanup
+  latency: fold with 20 cards in 3.1 ms fastest, 4.0 ms median, 12.8 ms worst, [4, 1, 4, 1, 4, 1, 4, 1, 4, 1] cells built, none on the next layout
+  NSAppearanceNameDarkAqua: folded leads tuck nothing, rows 54.0pt = lone 54.0pt; opened draws its subagents
+  NSAppearanceNameAqua: folded leads tuck nothing, rows 54.0pt = lone 54.0pt; opened draws its subagents
+  wash: one-child strip = card 1.0–51.0; three-child strip = card 1.0–51.0; open lead strip top = card top; hovered plate = strip
+  hover: 4-row sweep updated the cards on screen with 0 builds, fill and action crossfade on each, a fold kept running through a hover
+  deck: a hovered lead stays flat on its card
+  persistence: opened parent restored open, untouched parent folded, stored [5C000000-0000-4000-8000-000000000002: true]
+  auto-expand: approval and unopened failed children open an untouched group; an opened failure does not; a folded one stays folded
+  production: configureWorkspaceSidebar restored and persisted folds in its settings defaults
+InboxParentFoldChecks passed: untouched parents draw folded with 1 tucked card for one child and 2 for more, none when open, the row's height, card and hit area are those of a childless root, each parent's choice survives a reload through the app's own sidebar wiring, and a child that needs you opens only a group you never folded
+SidebarSwarmGlyphChecks passed:
+  cards/NSAppearanceNameAqua: 32/40pt wide for 1/2 digits, 42pt tall; mouse-down folded with the pressed step; hover step + glyph spread; hand on the control only; ←/→ fold with selection kept; two knocked-out cards; circle highlight; morph at the press on the live row, one clock per parent; open = head card on the lane; filled = working; breathing while a child works
+  cards/NSAppearanceNameDarkAqua: 32/40pt wide for 1/2 digits, 42pt tall; mouse-down folded with the pressed step; hover step + glyph spread; hand on the control only; ←/→ fold with selection kept; two knocked-out cards; circle highlight; morph at the press on the live row, one clock per parent; open = head card on the lane; filled = working; breathing while a child works
+  metadata layout: 36 working/ready singleton, 3/12-child and nested-parent cards at 260/340/480pt in Aqua/Dark Aqua; metadata clears fold hit targets; count folds, row/title reveal preserved
+  contact sheet: /Users/dylan/Documents/personal/Array/.worktrees/sidebar-feel/qa-runs/sidebar-swarm-glyph/contact-sheet.png

@@ -280,11 +280,13 @@ check --sidebar-character-check
 check --sidebar-fold-expand-check
 check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
+check --sidebar-indicator-settings-check
 check --sidebar-liveness-check
 check --sidebar-ownership-check
 check --sidebar-pills-check
 check --sidebar-production-corpus-check
 check --sidebar-push-coalescing-check
+check --sidebar-row-presentation-check
 check --sidebar-scope-popover-check
 check --sidebar-screenshot-check
 check --sidebar-sort-check
@@ -713,11 +715,13 @@ leg run_app_check .build/debug/Array --sidebar-character-check
 leg run_app_check .build/debug/Array --sidebar-fold-expand-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
+leg run_app_check .build/debug/Array --sidebar-indicator-settings-check
 leg run_app_check .build/debug/Array --sidebar-liveness-check
 leg run_app_check .build/debug/Array --sidebar-ownership-check
 leg run_app_check .build/debug/Array --sidebar-pills-check
 leg run_app_check .build/debug/Array --sidebar-production-corpus-check
 leg run_app_check .build/debug/Array --sidebar-push-coalescing-check
+leg run_app_check .build/debug/Array --sidebar-row-presentation-check
 leg run_app_check .build/debug/Array --sidebar-scope-popover-check
 leg run_app_check .build/debug/Array --sidebar-screenshot-check
 leg run_app_check .build/debug/Array --sidebar-sort-check
