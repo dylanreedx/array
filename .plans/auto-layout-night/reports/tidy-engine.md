@@ -320,6 +320,20 @@ Checks (all exit 0): `--undo-toast-placement-check`, `--floating-toolbar-check`,
 `--layout-pressure-check`, `--jelly-trajectory-probe`, `--auto-layout-fanout-check`
 and `--fanout-layout-probe` (CoreChecks).
 
+### Merged with the latency stream (`96f9b6c2`)
+
+I merged array/auto-layout-night at `5e1accbd`, which carries the latency
+fixes, cleanly. On the merged tree, all four CoreChecks legs and 8 of the 9
+app legs exit 0. The exception is `--auto-layout-tidy-latency-check`, which
+the lead already recorded as red after merging the latency work. Its 22
+failures:
+- 21 come from its "a move draws nothing new" assertion. Tidy now resizes
+  tiles, so they have to redraw; the latency helper is narrowing that
+  assertion.
+- 1 is "app-side work before the movement 91.9 ms at 89 tiles (budget 50)".
+  In that same run the solve column reads 14.9 ms (it was about 232 ms
+  before this round). The rest is the app's apply and commit path.
+
 ## Open, for the lead
 
 1. **Tidy animation feel.** `applyLayoutTransaction` animates only origins,
