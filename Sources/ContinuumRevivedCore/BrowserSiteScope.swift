@@ -3,9 +3,17 @@ import Foundation
 /// Permission sites use the bundled Mozilla Public Suffix List, including its
 /// private section: two github.io tenants must never share a browser grant.
 public enum BrowserSiteScope {
+    /// Never `Bundle.module`: it traps in a packaged app (see
+    /// `PiExtensionInstaller.bundledExtensionURL`). Same lookup as
+    /// `AgentContextWindowResolver.bundledWindows`: Contents/Resources in the
+    /// app, beside a bare binary.
     private static let rules: Set<String> = {
-        guard let url = Bundle.module.url(forResource: "PublicSuffixList", withExtension: "dat"),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        let name = "continuum-revived_ContinuumRevivedCore.bundle"
+        let roots = [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()].compactMap { $0 }
+        guard let text = roots.lazy.compactMap({ root in
+            try? String(contentsOf: root.appendingPathComponent(name).appendingPathComponent("PublicSuffixList.dat"),
+                        encoding: .utf8)
+        }).first else { return [] }
         return Set(text.split(separator: "\n").compactMap { line in
             let rule = line.trimmingCharacters(in: .whitespaces)
             guard !rule.isEmpty, !rule.hasPrefix("//") else { return nil }

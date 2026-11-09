@@ -1183,6 +1183,24 @@ enum ContinuumApp {
             }
         }
 
+        // Runs inside the assembled .app (scripts/check-app-bundle.sh): every
+        // resource lookup a packaged app reaches must resolve from the bundle.
+        // SwiftPM's Bundle.module traps there when the build dir is gone, which
+        // crashed 0.7.45 on the first browser site check.
+        if CommandLine.arguments.contains("--packaged-resources-check") {
+            let site = BrowserSiteScope.site(for: "docs.alice.github.io")
+            guard site == "alice.github.io" else {
+                fputs("FAIL: public suffix list not loaded: docs.alice.github.io -> \(site)\n", stderr)
+                Foundation.exit(1)
+            }
+            guard let bridge = IOSPreviewTools.bridgeURL, FileManager.default.fileExists(atPath: bridge.path) else {
+                fputs("FAIL: iOS preview bridge.cjs not found\n", stderr)
+                Foundation.exit(1)
+            }
+            print("ContinuumRevivedPackagedResourcesChecks passed: \(site), \(bridge.path)")
+            Foundation.exit(0)
+        }
+
         if CommandLine.arguments.contains("--tool-path-bootstrap-check") {
             do {
                 ToolEnvironment.shared.bootstrap()
