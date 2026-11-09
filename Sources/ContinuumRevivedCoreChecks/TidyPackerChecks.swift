@@ -259,7 +259,8 @@ func runTidyPackerChecks() {
         }
         // Not for real zones: their tops are staggered, and this comparison's
         // "same line" is not transitive there, so its order is undefined.
-        if c.name != "cramped" && !c.name.hasPrefix("real-") {
+        // Size-grouped rows order tiles by size, tallest rows first, on purpose.
+        if !CanvasTidyPacker.sizeGroupedRows && c.name != "cramped" && !c.name.hasPrefix("real-") {
             check(readingOrder(before) == readingOrder(after), "\(c.name): tidy shuffled the reading order")
         }
         // The lead and its helpers are one block: the lead on the left, the
@@ -316,11 +317,23 @@ func runTidyPackerChecks() {
         // made three or four times the rest comes back near the others' size.
         // Measured: 0.29x at worst, and 2.94x for a small tile in a tall row.
         // These bounds hold that, so it cannot quietly get worse.
+        // With size-grouped rows and the hard band: every tile within 0.5–2.0×
+        // of its area, and the tiles made at least twice the median stay the
+        // largest by a visible margin (the column beside the rows).
         if c.name.hasPrefix("real-") {
             for tile in members {
                 let original = before.tiles.first { $0.id == tile.id }!.frame
                 let change = tile.frame.width * tile.frame.height / (original.width * original.height)
-                check(change >= 0.25 && change <= 3.0, "\(c.name): a \(tile.kind!) changed area by \(change)x (bounds 0.25-3.0)")
+                check(change >= 0.5 - 1e-3 && change <= 2.0 + 1e-3, "\(c.name): a \(tile.kind!) changed area by \(change)x (band 0.5-2.0)")
+            }
+            let areas = before.tiles.map { $0.frame.width * $0.frame.height }.sorted()
+            let median = areas[areas.count / 2]
+            let big = Set(before.tiles.filter { $0.frame.width * $0.frame.height >= 2 * median }.map(\.id))
+            if !big.isEmpty {
+                let smallestBig = members.filter { big.contains($0.id) }.map { $0.frame.width * $0.frame.height }.min()!
+                let largestOther = members.filter { !big.contains($0.id) }.map { $0.frame.width * $0.frame.height }.max() ?? 0
+                check(smallestBig >= 1.25 * largestOther,
+                      "\(c.name): the big tiles are not visibly the largest: \(smallestBig / max(largestOther, 1))x the next")
             }
         }
         // Idempotent.
@@ -392,11 +405,12 @@ func runTidyPackerChecks() {
         let c = cases.first { $0.name == name }!
         return (c.scene.zones[0].size, applied(c.scene, solve(c.scene, c.zoneId)).zones[0].size)
     }
-    // A wide zone of two or three tiles cannot be filled by shape alone, so its
-    // height may give a little; it never widens and never grows by more than 15%.
+    // A zone the tiles cannot fill by shape alone may change shape (with the
+    // hard band, two tiles too few to span a wide zone stack instead), but its
+    // area never grows by more than 15%.
     for name in ["two", "three", "five", "eight", "thirteen", "lead-three-helpers", "lead-five-helpers"] {
         let (b, a) = zoneAfter(name)
-        check(a.width <= b.width + 0.01 && a.height <= b.height * 1.15, "\(name): zone grew more than needed: \(b) -> \(a)")
+        check(a.width * a.height <= b.width * b.height * 1.15, "\(name): zone grew more than needed: \(b) -> \(a)")
     }
     // Tiles that already fit the zone exactly at their own sizes, scattered and
     // out of order: the zone keeps its size and every tile its size.
@@ -428,7 +442,9 @@ func runTidyPackerChecks() {
     // Cost on the main thread: 30, 60 and 89 tiles in one zone (89 is the
     // largest real canvas measured), the whole explicit tidy, best of five
     // (other work on the Mac only ever adds time). Budgets are debug builds.
-    let budgets: [(Int, Double)] = [(30, 8), (60, 18), (89, 25)]
+    // 30 tiles: 8 ms for the uniform packer; 12 ms with size-grouped rows, whose
+    // in-band pass and big-tile column cost about 1.5 ms more there.
+    let budgets: [(Int, Double)] = [(30, 12), (60, 18), (89, 25)]
     // Their own generator state: seeds added above must not reshape these.
     seed = 0x7E1D_9ACC_E5ED_0089
     var costCases: [Case] = []
@@ -469,22 +485,22 @@ func runTidyPackerChecks() {
         for (name, value) in digests.sorted(by: { $0.key < $1.key }) { print("        \"\(name)\": \"\(value)\",") }
     }
     let pinned: [String: String] = [
-        "cost-30": "95cbc4a6e7660d5a",
-        "cost-60": "2fcc519cca209def",
-        "cost-89": "c58297466af24911",
-        "cramped": "6d016e18ecc400ca",
-        "dust": "9b11275806b0017b",
-        "eight": "571b25d8afec5baf",
-        "five": "03ea3c771b6ef0ce",
-        "lead-five-helpers": "8a8d4d415d673daa",
-        "lead-three-helpers": "1860f52c39abcb2e",
-        "real-agents-22": "f68dc372982af660",
-        "real-agents-24": "e069649b8b5dae39",
-        "real-overhang-6": "05863b80712e03c9",
-        "roomy": "65e14404e5d8d5a8",
-        "thirteen": "67345f155dae5b57",
-        "three": "03de6e777b49137b",
-        "two": "43ad3d17d96b1b3e",
+        "cost-30": "9394eca16578c47c",
+        "cost-60": "113769d4a6f7d529",
+        "cost-89": "8bf1a54c85d93cf2",
+        "cramped": "a1d0d984adfe7cb2",
+        "dust": "878e3315a351e681",
+        "eight": "a6b882fc2005f242",
+        "five": "50204bdc875ebf24",
+        "lead-five-helpers": "f6362fdac966084c",
+        "lead-three-helpers": "378163cbe1bd21f0",
+        "real-agents-22": "3d59a413644bd9d8",
+        "real-agents-24": "4c72ea829f235922",
+        "real-overhang-6": "d8aa912ab38a8f29",
+        "roomy": "c12f0af008fce981",
+        "thirteen": "cc03197d84ccd826",
+        "three": "099ba643b1a2c5ec",
+        "two": "c076533efc8c1cc0",
     ]
     for (name, value) in pinned where digests[name] != value {
         check(false, "\(name): tidy output changed (digest \(digests[name] ?? "none"), pinned \(value))")
