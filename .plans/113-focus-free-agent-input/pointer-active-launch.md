@@ -1,4 +1,4 @@
-> RETIRED after the approved run: do not rerun this launch. Cooperative restoration returned false and was not confirmed. Current checks make no automatic-restoration claim; the old preparation text below is historical. Atomic buffering has been removed. Use the hands-on preview steps in pointer-manual-test.md instead.
+> RETIRED after the approved run: do not rerun this launch. Cooperative restoration returned false and was not confirmed. Current checks make no automatic-restoration claim; the old preparation text below is historical. Atomic buffering has been removed. The hands-on test was also cancelled; no further activated or manual run is planned.
 
 # Guarded active-pointer proof — prepared, never activated
 

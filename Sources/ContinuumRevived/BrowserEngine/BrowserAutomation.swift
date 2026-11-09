@@ -184,40 +184,6 @@ final class BrowserAutomation {
     private var inputSurfaceIds: Set<ObjectIdentifier> = []
     // Guarded pointer experiment only. Normal launches keep this off.
     static var _pointerFilterForChecks = false
-    static let pointerDebugToggleKey = "array.debug.browserPassivePointerIsolation"
-
-    /// Evaluate the channel before opening any defaults suite. Release builds
-    /// and prod-identified debug builds cannot read the dev toggle.
-    static func resolvePointerDebugToggle(bundleIdentifier: String?, read: () -> Bool) -> Bool {
-        #if DEBUG
-        guard bundleIdentifier == AppChannel.devBundleIdentifier else { return false }
-        return read()
-        #else
-        return false
-        #endif
-    }
-    #if DEBUG
-    private static var pointerPreferenceNextRead: TimeInterval = 0
-    private static var pointerPreferenceCached = false
-    private static let pointerPreferenceDefaults = UserDefaults(suiteName: AppChannel.devBundleIdentifier)
-    #endif
-    private static var debugPointerFilterEnabled: Bool {
-        resolvePointerDebugToggle(bundleIdentifier: Bundle.main.bundleIdentifier) {
-            #if DEBUG
-            let now = ProcessInfo.processInfo.systemUptime
-            if now >= pointerPreferenceNextRead {
-                // One refresh per second lets Dylan flip the explicit dev
-                // suite externally without doing preference I/O per move.
-                pointerPreferenceNextRead = now + 1
-                pointerPreferenceDefaults?.synchronize()
-                pointerPreferenceCached = pointerPreferenceDefaults?.bool(forKey: pointerDebugToggleKey) ?? false
-            }
-            return pointerPreferenceCached
-            #else
-            return false
-            #endif
-        }
-    }
     private var agentDeliveryDepth = 0
     private struct AgentInputFingerprint: Hashable {
         let type: NSEvent.EventType
@@ -991,7 +957,7 @@ final class BrowserAutomation {
             let suppress = MainActor.assumeIsolated {
                 // A re-routed agent event is not user input.
                 if consumeAgentInput(event) { return false }
-                if (_pointerFilterForChecks || debugPointerFilterEnabled), passivePointerTypes.contains(event.type),
+                if _pointerFilterForChecks, passivePointerTypes.contains(event.type),
                    eventEngine(event)?.isEngaged == true { return true }
                 if !passivePointerTypes.contains(event.type),
                    ![NSEvent.EventType.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type) {
