@@ -144,9 +144,10 @@ final class InboxFoldMotion: NSObject {
         let key: String
         let view: NSView
         let layer: CALayer
+        let coordinates: NSView
         let from: Pose
         let to: Pose
-        let originalFrame: NSRect?
+        let isGhost: Bool
     }
     private var liveTracks: [LiveTrack] = []
     private var manuallyAdvanced = false
@@ -165,9 +166,10 @@ final class InboxFoldMotion: NSObject {
                     opacity: mix(track.from.opacity, track.to.opacity))
     }
 
-    /// Animate the native row layers. No raster snapshots, frame timer, text
-    /// measurement or native layout runs during the unfold. Removed children
-    /// temporarily live in the click-through overlay until their exit finishes.
+    /// Animate native card layers. No frame timer, text
+    /// measurement or native layout runs during the unfold. Only departing
+    /// visible children use snapshots; their AppKit-owned views stay in the table
+    /// reuse pool. The click-through overlay owns only disposable image views.
     func startLive(from before: [String: Snapshot], to after: [String: Snapshot],
                    beforeViews: [String: NSView], afterViews: [String: NSView],
                    parentKey: String, expanded: Bool, container: NSView) {
@@ -207,21 +209,23 @@ final class InboxFoldMotion: NSObject {
                             opacity: before[key]?.opacity ?? 0)
             let to = Pose(frame: after[key]?.frame ?? tucked(parentFrame), opacity: after[key] == nil ? 0 : 1)
             guard from.frame != to.frame || from.opacity != to.opacity else { continue }
-            let originalFrame: NSRect?
             let host: NSView
-            if afterViews[key] != nil, let row = view.superview {
-                host = row
-                originalFrame = nil
-            } else {
-                originalFrame = view.frame
-                overlay.addSubview(view)
-                view.frame = to.frame
+            if after[key] != nil {
+                // Animate the card's own layer, never an AppKit row host that
+                // can be recycled during a status reload.
                 host = view
+            } else {
+                // AppKit still owns removed cards through its row reuse pool.
+                // Never steal those views into an overlay or detach them later.
+                guard let image = before[key]?.image else { continue }
+                let ghost = ImageView(image: image, previous: nil, frame: to.frame)
+                overlay.addSubview(ghost)
+                host = ghost
             }
             host.wantsLayer = true
             guard let layer = host.layer else { continue }
-            liveTracks.append(LiveTrack(key: key, view: view, layer: layer,
-                                        from: from, to: to, originalFrame: originalFrame))
+            liveTracks.append(LiveTrack(key: key, view: host, layer: layer, coordinates: container,
+                                        from: from, to: to, isGhost: after[key] == nil))
         }
         guard !liveTracks.isEmpty else { cancel(); return }
         installLiveAnimations()
@@ -239,13 +243,22 @@ final class InboxFoldMotion: NSObject {
             var transforms: [NSValue] = [], alphas: [NSNumber] = []
             for index in 0...count {
                 let pose = livePose(track, at: duration * Double(index) / Double(count))
-                let base = track.to.frame
-                let sx = pose.frame.width / max(1, base.width)
-                let sy = pose.frame.height / max(1, base.height)
+                let space = track.view.superview ?? track.view
+                let reference = NSRect(origin: .zero, size: track.to.frame.size)
+                var local = NSRect(x: pose.frame.minX - track.to.frame.minX,
+                    y: pose.frame.minY - track.to.frame.minY,
+                    width: pose.frame.width, height: pose.frame.height)
+                if space.isFlipped != track.coordinates.isFlipped {
+                    local.origin.y = reference.height - local.maxY
+                }
+                let base = space.convertToLayer(reference)
+                let presented = space.convertToLayer(local)
+                let sx = presented.width / max(1, base.width)
+                let sy = presented.height / max(1, base.height)
                 let anchor = track.layer.anchorPoint
                 var value = CATransform3DMakeTranslation(
-                    pose.frame.minX - base.minX + base.width * anchor.x * (sx - 1),
-                    pose.frame.minY - base.minY + base.height * anchor.y * (sy - 1), 0)
+                    presented.minX - base.minX + base.width * anchor.x * (sx - 1),
+                    presented.minY - base.minY + base.height * anchor.y * (sy - 1), 0)
                 value = CATransform3DScale(value, sx, sy, 1)
                 transforms.append(NSValue(caTransform3D: value))
                 alphas.append(NSNumber(value: Double(pose.opacity)))
@@ -422,9 +435,8 @@ final class InboxFoldMotion: NSObject {
         retirement = nil
         for track in liveTracks {
             track.layer.removeAnimation(forKey: Self.liveAnimationKey)
-            if let frame = track.originalFrame {
+            if track.isGhost, track.view.superview === overlay {
                 track.view.removeFromSuperview()
-                track.view.frame = frame
             }
         }
         liveTracks.removeAll()

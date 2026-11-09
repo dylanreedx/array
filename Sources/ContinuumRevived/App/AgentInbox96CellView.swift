@@ -2949,6 +2949,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         layer.add(fade, forKey: "emphasis")
     }
 
+    func contentPresentationForQA(in destination: CALayer) -> CGRect? {
+        guard let presentation = titleLabel.layer?.presentation() else { return nil }
+        return presentation.convert(presentation.bounds, to: destination)
+    }
+
     func clearSelectionForFold() {
         shown?.isSelected = false
         card.isSelected = false

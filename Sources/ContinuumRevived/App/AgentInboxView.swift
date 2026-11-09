@@ -2945,8 +2945,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // reused at the far end and only the rebuilt cells are taken again.
         // The fold photographs the resting deck, never a pose mid-spring.
         for card in deckCells.allObjects { card.restDeck() }
-        let before = animates ? captureFoldRows(capturePixels: !liveMotion) : FoldCapture()
         let expanded = collapsedParents.contains(parentId)
+        var outgoing: Set<String> = []
+        if liveMotion, !expanded, let parentIndex = tableRow(forAgentId: parentId) {
+            let depth = nesting(atTableRow: parentIndex).depth
+            for index in (parentIndex + 1)..<items.count {
+                guard nesting(atTableRow: index).depth > depth else { break }
+                outgoing.insert(items[index].identity)
+            }
+        }
+        let before = animates
+            ? captureFoldRows(capturePixels: !liveMotion, pixelKeys: outgoing) : FoldCapture()
         let anchor = tableRow(forAgentId: parentId).map {
             (id: parentId, viewportMinY: tableView.rect(ofRow: $0).minY - tableView.visibleRect.minY)
         }
@@ -2976,7 +2985,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard animates else { return }
         let after = captureFoldRows(reusing: before, excluding: relit, capturePixels: !liveMotion)
         if liveMotion {
-            foldMotion.startLive(from: before.snapshots.merging(presentation) { _, drawn in drawn },
+            foldMotion.startLive(from: before.snapshots.merging(presentation) { original, drawn in
+                InboxFoldMotion.Snapshot(key: drawn.key, frame: drawn.frame,
+                    image: drawn.image ?? original.image, opacity: drawn.opacity, order: original.order)
+            },
                 to: after.snapshots, beforeViews: before.sources, afterViews: after.sources,
                 parentKey: "agent:\(parentId.uuidString)", expanded: expanded,
                 container: scrollView.contentView)
@@ -3138,30 +3150,35 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// image from `earlier` is reused when it was taken of this same cell at
     /// this same size, unless the row is in `excluding`.
     private func captureFoldRows(reusing earlier: FoldCapture = FoldCapture(),
-                                 excluding: Set<String> = [], capturePixels: Bool = true) -> FoldCapture {
+                                 excluding: Set<String> = [], capturePixels: Bool = true,
+                                 pixelKeys: Set<String> = []) -> FoldCapture {
         let clip = scrollView.contentView
         var capture = FoldCapture()
+        let visibleRows = tableView.rows(in: tableView.visibleRect)
         for index in items.indices {
             if case .shelfSpacer = items[index] { continue }
             let key = items[index].identity
-            let cell: NSView? = capturePixels
-                ? tableView.view(atColumn: 0, row: index, makeIfNecessary: false)
-                : cellsByRow[index]
+            // The bookkeeping cache may retain a detached reusable card with
+            // a zero local frame. Only the table knows which view owns this slot.
+            let cell: NSView? = capturePixels || NSLocationInRange(index, visibleRows)
+                ? tableView.view(atColumn: 0, row: index, makeIfNecessary: false) : nil
             var rect = tableView.rect(ofRow: index)
             var local = cell?.bounds ?? NSRect(origin: .zero, size: rect.size)
-            if items[index].agentRow?.variant == .card, cardStyleOverride != nil {
+            if capturePixels, items[index].agentRow?.variant == .card, cardStyleOverride != nil {
                 // Keep the painted card height constant. A group's final row has
                 // extra space below it; stretching that gap would squash its text.
                 local.size.height -= CGFloat(AgentInbox96CellView.trailingGap(for: nesting(atTableRow: index)))
                 local.size.height += CGFloat(Self.rowSpacing)
                 rect.size.height = local.height
             }
-            var frame = cell.map { clip.convert(local, from: $0) } ?? clip.convert(rect, from: tableView)
+            var frame = capturePixels
+                ? (cell.map { clip.convert(local, from: $0) } ?? clip.convert(rect, from: tableView))
+                : clip.convert(rect, from: tableView)
             frame.origin.x -= clip.bounds.minX
             frame.origin.y -= clip.bounds.minY
             let visible = frame.intersects(NSRect(origin: .zero, size: clip.bounds.size))
             var image: NSImage?
-            if capturePixels, visible, let cell, capture.sources.count < InboxFoldMotion.snapshotLimit {
+            if (capturePixels || pixelKeys.contains(key)), visible, let cell, capture.sources.count < InboxFoldMotion.snapshotLimit {
                 if !excluding.contains(key), earlier.sources[key] === cell,
                    let reused = earlier.snapshots[key]?.image, reused.size == local.size {
                     image = reused
@@ -6551,6 +6568,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func agentIdForTableRow(_ tableRow: Int) -> UUID? {
         guard tableRow >= 0 else { return nil }
         return item(at: tableRow)?.agentRow?.id
+    }
+
+    func prepareRowPresentationCaptureForQA() {
+        wantsLayer = true
+        tableView.wantsLayer = true
+    }
+    func rowPresentationFramesForQA() -> [(UUID, NSRect, NSRect, [String])] {
+        guard let destination = layer?.presentation() else { return [] }
+        return cellsByRow.compactMap { index, cell in
+            guard items.indices.contains(index), let id = items[index].agentRow?.id,
+                  let presentation = cell.layer?.presentation() else { return nil }
+            let slot = tableView.convert(tableView.rect(ofRow: index), to: self)
+            let frame = (cell as? AgentInbox96CellView)?.contentPresentationForQA(in: destination)
+                ?? presentation.convert(presentation.bounds, to: destination)
+            let keys = (cell.layer?.animationKeys() ?? []) + (cell.superview?.layer?.animationKeys() ?? [])
+            return (id, slot, frame, keys)
+        }
     }
 
     // MARK: - QA
