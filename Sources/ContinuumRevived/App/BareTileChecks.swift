@@ -92,6 +92,21 @@ enum BareTileChecks {
         host.redo()
         host.expectBare(tile, at: expected, "\(mode) after redo of the drag out")
 
+        // 1c. A bare tile of the project that sorts SECOND (A2): a save that fell
+        // back to scanning every project would read A1 first, so this is the
+        // drag that tells a scoped save from a lucky scan.
+        if let a2 = host.world(Fixture.noteA2a) {
+            host.mounted.delegate.qaLastLayoutCommitProjects = nil
+            try host.dragHeader(of: Fixture.noteA2a, byWorld: CGSize(width: 1300, height: 1300))
+            let a2Commit = host.mounted.delegate.qaLastLayoutCommitProjects
+            check(host.canvas.bareTileIds.contains(Fixture.noteA2a),
+                  "\(mode) precondition: note A2a must break out of zone A2 (from \(a2))")
+            check(a2Commit?.loaded == [Fixture.projectA2] && a2Commit?.written == [Fixture.projectA2],
+                  "\(mode) A2 drag out: the save loaded \(String(describing: a2Commit?.loaded)), expected only project A2")
+        } else {
+            check(false, "\(mode) precondition: note A2a is not on the canvas")
+        }
+
         // 2. Auto layout off, then on: the toggle Dylan reported.
         host.setAutoLayout(false)
         host.setAutoLayout(true)
