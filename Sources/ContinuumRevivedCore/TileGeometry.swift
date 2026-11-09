@@ -115,3 +115,34 @@ public enum TileGeometry {
         )
     }
 }
+
+/// The shape tidy gives a tile, and the shape creation starts it in
+/// (`.plans/auto-layout-night`). Ratios are width / height of the whole tile frame.
+public enum TileShapeRule: Equatable, Sendable {
+    /// Always this ratio: a browser is 16:9 after tidy and at creation.
+    case aspect(Double)
+    /// Keep the tile's current ratio, clamped into this band: a terminal or an
+    /// agent stays taller than wide however it was left.
+    case band(min: Double, max: Double)
+    /// Never reshaped by tidy (a device-shaped iOS preview); only moved.
+    case keep
+}
+
+extension TileGeometry {
+    public static func shapeRule(for kind: TileKind) -> TileShapeRule {
+        switch kind {
+        case .browser:
+            return .aspect(16.0 / 9.0)
+        case .terminal:
+            return .band(min: 0.6, max: 0.9)
+        case .managedAgent, .sharedAgent:
+            return .band(min: 0.6, max: 1.0)
+        case .iosPreview, .sharedPortal, .sharedTile:
+            return .keep
+        case .note, .file, .fileTree, .diffReview, .runArtifacts:
+            return .band(min: 0.6, max: 1.8)
+        case .browserInspector, .ticketQueue, .conductorQueue, .kanban:
+            return .band(min: 0.8, max: 2.0)
+        }
+    }
+}
