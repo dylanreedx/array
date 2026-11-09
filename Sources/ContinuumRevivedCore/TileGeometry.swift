@@ -36,7 +36,9 @@ public enum TileGeometry {
         case .terminal:
             return terminalPreset(cell: terminalCell)
         case .browser:
-            return TilePreset(defaultSize: CGSize(width: 1024, height: 640), aspect: .free, sizeQuantum: nil)
+            // 16:9, the shape tidy gives a browser (`shapeRule`), so creation never
+            // needs reshaping. Same width as the old 1024 x 640.
+            return TilePreset(defaultSize: CGSize(width: 1024, height: 576), aspect: .free, sizeQuantum: nil)
         case .iosPreview:
             return TilePreset(defaultSize: CGSize(width: 440, height: 880), aspect: .free, sizeQuantum: nil)
         case .browserInspector:
@@ -58,7 +60,11 @@ public enum TileGeometry {
             return TilePreset(defaultSize: CGSize(width: 720, height: 520), aspect: .free, sizeQuantum: nil)
         case .runArtifacts:
             return TilePreset(defaultSize: CGSize(width: 640, height: 520), aspect: .free, sizeQuantum: nil)
-        case .managedAgent, .sharedAgent, .sharedTile:
+        case .managedAgent, .sharedAgent:
+            // Taller than wide (0.9), inside the agent band of `shapeRule`, at about
+            // the old 640 x 520's area: a transcript reads down, not across.
+            return TilePreset(defaultSize: CGSize(width: 576, height: 640), aspect: .free, sizeQuantum: nil)
+        case .sharedTile:
             return TilePreset(defaultSize: CGSize(width: 640, height: 520), aspect: .free, sizeQuantum: nil)
         case .kanban:
             return TilePreset(defaultSize: CGSize(width: 800, height: 520), aspect: .free, sizeQuantum: nil)
@@ -101,13 +107,13 @@ public enum TileGeometry {
     }
 
     private static func terminalPreset(cell: TerminalCellSize) -> TilePreset {
-        // Keep new shell tiles usable at the default canvas zoom in a common
-        // 1000×700 viewport. The previous 120×32 estimate (1080×664pt) forced
-        // users to zoom out or pan immediately, which made embedded Ghostty/tmux
-        // text feel too small. A 100×28 tile still provides a useful terminal
-        // grid while fitting comfortably at zoom 1.
-        let cols: Double = 100
-        let rows: Double = 28
+        // Taller than wide, inside the terminal band of `shapeRule` (0.6-0.9), so
+        // tidy does not reshape a new terminal. 80 columns is the usable floor;
+        // 39 rows is the fewest that keeps 80 columns at or under 0.9
+        // (720 x 804 with the default cell). The previous 100 x 28 (900 x 584)
+        // was wide, and the 120 x 32 before it forced a zoom-out at zoom 1.
+        let cols: Double = 80
+        let rows: Double = 39
         return TilePreset(
             defaultSize: CGSize(width: cols * cell.width, height: rows * cell.height + terminalChromeHeight),
             aspect: .free,
@@ -143,6 +149,22 @@ extension TileGeometry {
             return .band(min: 0.6, max: 1.8)
         case .browserInspector, .ticketQueue, .conductorQueue, .kanban:
             return .band(min: 0.8, max: 2.0)
+        }
+    }
+
+    /// The sizes a new tile may take to fit an auto-layout zone's free space,
+    /// largest first: its default, then 7/8 and 3/4 of it. Every step keeps the
+    /// default's ratio, so it stays inside `shapeRule` (eighths keep a 1024 x 576
+    /// browser exactly 16:9: 896 x 504, 768 x 432), and none is below the
+    /// kind's minimum. A terminal and a `.keep` kind offer only the default: a
+    /// smaller terminal costs columns, and a device-shaped preview has one size.
+    public static func spawnFitSizes(for kind: TileKind) -> [CGSize] {
+        let base = preset(for: kind).defaultSize
+        if kind == .terminal || shapeRule(for: kind) == .keep { return [base] }
+        let minimum = minimumSize(for: kind)
+        return [1.0, 0.875, 0.75].compactMap { scale -> CGSize? in
+            let size = CGSize(width: (base.width * scale).rounded(), height: (base.height * scale).rounded())
+            return size.width >= minimum.width && size.height >= minimum.height ? size : nil
         }
     }
 }

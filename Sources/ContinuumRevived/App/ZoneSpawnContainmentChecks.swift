@@ -125,11 +125,13 @@ enum ZoneSpawnContainmentChecks {
             viewport: CanvasViewport(x: 0, y: 0, zoom: 1),
             tiles: [], groups: [], lastActiveTileId: nil))
 
-        // The observed zone: 2600x1400 at world (1300, 200). A non-zero origin, so
-        // a frame persisted in the wrong space is arithmetically visible.
+        // The observed zone: 2360x1400 at world (1540, 200), its right edge where the
+        // observed 2600-wide zone's was. A non-zero origin, so a frame persisted in
+        // the wrong space is arithmetically visible. Narrowed from 2600 when agents
+        // became 576x640 (`.plans/auto-layout-night`), so three still fill a row.
         let placement = ZonePlacement(
             zoneId: zoneId, projectId: projectId,
-            origin: ZonePoint(x: 1_300, y: 200), size: ZoneSize(width: 2_600, height: 1_400),
+            origin: ZonePoint(x: 1_540, y: 200), size: ZoneSize(width: 2_360, height: 1_400),
             color: "purple", collapsed: false, hydrationPolicy: .automatic)
         // The camera's centre sits 300pt inside the zone's right edge: on screen,
         // inside the zone, and closer to the edge than half an agent tile.
@@ -219,9 +221,9 @@ enum ZoneSpawnContainmentChecks {
             x: zoneRect.minX + padding, y: zoneRect.minY + header + padding,
             width: zoneRect.width - 2 * padding, height: zoneRect.height - header - 2 * padding)
 
-        // Five agents. The camera's centre sits on the first, so the next two dock
-        // left of it in one row; that row leaves 374pt above and 408pt below, and
-        // 608pt to its left, so after three there is no free 640x520 slot in the
+        // Five agents, 576x640 each. The camera's centre sits on the first, so the
+        // next two dock left of it in one row; that row leaves 322pt above and 356pt
+        // below, and 560pt to its left, so after three there is no free 576x640 slot in the
         // zone at all (asserted, not assumed). Spawns four and five are the
         // full-zone decision: inside the zone, overlapping as little as the
         // bounded search can, never buried exactly under an existing tile.
@@ -265,7 +267,7 @@ enum ZoneSpawnContainmentChecks {
             placed.append(frame)
             if index == 3 {
                 try expect(!hasFreeSlot(size: tileRect.size, in: content, avoiding: placed.map(rect)),
-                           "precondition: after three agents the zone must have no free 640x520 slot; "
+                           "precondition: after three agents the zone must have no free \(tileRect.width)x\(tileRect.height) slot; "
                            + "placed \(placed.map(describe))")
             }
         }

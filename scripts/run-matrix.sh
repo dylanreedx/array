@@ -1447,6 +1447,7 @@ run_app_check .build/debug/Array --leader-modal-recovery-check
 run_app_check .build/debug/Array --palette-agent-harness-check
 run_app_check .build/debug/Array --reveal-in-finder-check
 run_app_check .build/debug/Array --spawn-arrange-commit-check
+run_app_check .build/debug/Array --spawn-sizing-check
 run_app_check .build/debug/Array --tile-insert-slide-check
 run_app_check .build/debug/Array --tile-multiselect-check
 run_app_check .build/debug/Array --settle-closes-tile-check
