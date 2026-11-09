@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ORIGINAL_ARGS=("$@")
 CONFIGURATION=release
 OUTPUT=""
 CHANNEL=dev
@@ -114,7 +115,7 @@ fi
 
 cd "$ROOT_DIR"
 if [[ "$SKIP_BUILD" == 0 && "$CONFIGURATION" == release && "${ARRAY_RELEASE_LOCK_OWNER:-}" != "$$" ]]; then
-  exec python3 - "$0" "$@" <<'RELEASE_LOCK_PY'
+  exec python3 - "$0" "${ORIGINAL_ARGS[@]}" <<'RELEASE_LOCK_PY'
 import fcntl, os, stat, sys
 path = os.environ.get("ARRAY_MATRIX_LOCK", "/tmp/array-matrix.lock")
 try:
