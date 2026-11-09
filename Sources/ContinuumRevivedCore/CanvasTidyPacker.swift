@@ -4,16 +4,19 @@ import Foundation
 /// The explicit Tidy: a pure, deterministic justified-row packer
 /// (`.plans/auto-layout-night`). It fills a zone's content rect edge to edge at
 /// the configured gap, shapes every tile by its kind (`TileGeometry.shapeRule`),
-/// keeps the reading order, and keeps a lead agent's helpers in one block with it.
+/// keeps the reading order, and packs a lead agent with its helpers as one block.
 ///
 /// How it decides, in order:
 /// 1. Reading order: lines of tiles by top edge (a tile joins a line when its top
 ///    sits within half the line's shortest tile of the line's top), then x. A
-///    cluster (lead + helpers) is gathered where its first member reads, lead first.
+///    lead and its helpers become ONE item where the first of them reads: the
+///    lead on the left, its helpers stacked in columns beside it, each column's
+///    heights (with gaps) summing to the lead's height. Only the lead takes the
+///    agent band; helpers are shaped by the block (`.plans/auto-layout-night`).
 /// 2. For a uniform area scale `s` on a grid over [`areaFloor`, `areaCeiling`],
 ///    a dynamic program picks the row breaks whose rows, each justified to the
 ///    content width, keep every tile closest to `s` × its current area at its
-///    preferred ratio. A cluster is either inside one row or a run of whole rows.
+///    preferred ratio.
 /// 3. Rows then trade height inside each tile's ratio band (and below the
 ///    per-tile cap, `tileAreaCap`) so the rows sum to the content height.
 /// 4. The cheapest candidate wins: the change to the tiles (mean squared log
@@ -90,7 +93,21 @@ public enum CanvasTidyPacker {
         var minH: Double
         /// `.keep`: never reshaped or resized, only moved.
         var fixed: CGSize?
+        /// Width that does not scale with height: a block's inner gaps.
+        var extraWidth: Double = 0
+        var block: Block?
     }
+
+    /// A lead with its helpers. The item's flexible width is the lead's width ×
+    /// (1 + q × columns): each helper column is q × the lead's width.
+    private struct Block {
+        var lead: UUID
+        var columns: [[UUID]]
+        var q: Double
+    }
+
+    /// Helpers stacked per column beside their lead.
+    public static let helpersPerColumn = 3
 
     /// A candidate row. Its geometry does not depend on the area scale; only
     /// its cost does: Σ (Lᵢ − ln s)² + shape, with Lᵢ = ln(areaᵢ / current areaᵢ).
@@ -121,19 +138,17 @@ public enum CanvasTidyPacker {
     public static func pack(members: [Member], content: CGRect, gap rawGap: Double) -> Result {
         let gap = max(0, rawGap.isFinite ? rawGap : 0)
         guard !members.isEmpty else { return Result(frames: [:], content: content, scale: 1) }
-        let ordered = readingOrder(members)
-        let items = ordered.map(item(for:))
-        let clusters = clusterIndices(ordered)
+        let items = orderedItems(members, gap: gap)
         var height = max(Double(content.height), 1)
 
         // Width grows only for a tile that cannot fit across at its minimum.
         var minimumWidth = 1.0
         for item in items {
             if let fixed = item.fixed { minimumWidth = max(minimumWidth, Double(fixed.width)) }
-            else { minimumWidth = max(minimumWidth, item.minW, item.minH * item.ratioMin) }
+            else { minimumWidth = max(minimumWidth, max(item.minW, item.minH * item.ratioMin) + item.extraWidth) }
         }
         var width = max(Double(content.width), minimumWidth)
-        guard var chosen = solve(items: items, clusters: clusters, width: width, height: height, gap: gap) else {
+        guard var chosen = solve(items: items, width: width, height: height, gap: gap) else {
             return Result(frames: [:], content: content, scale: 1)
         }
         // A zone too big for its tiles shrinks, keeping its proportions: try
@@ -151,7 +166,7 @@ public enum CanvasTidyPacker {
                     let k = pow(kMin, Double(step) / 10)
                     let w = max(minimumWidth, (originalWidth * k).rounded(.down))
                     let h = max(1, (originalHeight * k).rounded(.down))
-                    guard let layout = solve(items: items, clusters: clusters, width: w, height: h, gap: gap) else { continue }
+                    guard let layout = solve(items: items, width: w, height: h, gap: gap) else { continue }
                     let cost = layout.cost + shrinkWeight * (pow(log(w / originalWidth), 2) + pow(log(h / originalHeight), 2))
                     if cost < bestCost - 1e-12 { bestCost = cost; chosen = layout; width = w; height = h }
                 }
@@ -181,7 +196,11 @@ public enum CanvasTidyPacker {
                     let edge = index == row.end - 1 && widths.justified ? right : snap(x + widths.values[offset])
                     frame = TileFrame(x: x, y: y, width: edge - x, height: rowBottom - y)
                 }
-                frames[item.id] = frame
+                if let block = item.block {
+                    placeBlock(block, in: frame, gap: gridGap, snap: snap, into: &frames)
+                } else {
+                    frames[item.id] = frame
+                }
                 x = snap(frame.x + frame.width) + gridGap
             }
             y = rowBottom + gridGap
@@ -194,7 +213,35 @@ public enum CanvasTidyPacker {
 
     // MARK: - Order and clusters
 
-    private static func readingOrder(_ members: [Member]) -> [Member] {
+    /// The lead on the left at the block's full height; each helper column of
+    /// q × the lead's width, its helpers splitting the height. The last column
+    /// and the last helper of a column end exactly on the block's edges.
+    private static func placeBlock(_ block: Block, in frame: TileFrame, gap: Double,
+                                   snap: (Double) -> Double, into frames: inout [UUID: TileFrame]) {
+        let columns = Double(block.columns.count)
+        let flexible = frame.width - columns * gap
+        let leadWidth = flexible / (1 + block.q * columns)
+        let right = frame.x + frame.width, bottom = frame.y + frame.height
+        var x = snap(frame.x + leadWidth)
+        frames[block.lead] = TileFrame(x: frame.x, y: frame.y, width: x - frame.x, height: frame.height)
+        for (c, column) in block.columns.enumerated() {
+            let left = x + gap
+            let edge = c == block.columns.count - 1 ? right : snap(left + block.q * leadWidth)
+            let share = (frame.height - Double(column.count - 1) * gap) / Double(column.count)
+            var y = frame.y
+            for (r, id) in column.enumerated() {
+                let end = r == column.count - 1 ? bottom : snap(y + share)
+                frames[id] = TileFrame(x: left, y: y, width: edge - left, height: end - y)
+                y = end + gap
+            }
+            x = edge
+        }
+    }
+
+    /// Members as packing items in reading order: lines of tiles by top edge,
+    /// then x; a lead with helpers present becomes one block item where the first
+    /// of them reads.
+    private static func orderedItems(_ members: [Member], gap: Double) -> [Item] {
         let sorted = members.sorted {
             if $0.frame.y != $1.frame.y { return $0.frame.y < $1.frame.y }
             if $0.frame.x != $1.frame.x { return $0.frame.x < $1.frame.x }
@@ -218,38 +265,66 @@ public enum CanvasTidyPacker {
                 return UUID.isOrderedBeforeByString($0.id, $1.id)
             }
         }
-        // Gather each cluster where its first member reads, lead first.
-        let leads = clusterLeads(flat)
-        var emitted = Set<UUID>()
-        var result: [Member] = []
-        for member in flat where !emitted.contains(member.id) {
-            if let lead = clusterKey(member, leads) {
-                let block = flat.filter { $0.id == lead } + flat.filter { $0.id != lead && $0.clusterLead == lead }
-                for m in block where emitted.insert(m.id).inserted { result.append(m) }
-            } else {
-                emitted.insert(member.id)
-                result.append(member)
-            }
+        // Leads present with at least one helper present.
+        let present = Set(flat.map(\.id))
+        let leads = Set(flat.compactMap { m in m.clusterLead.flatMap { $0 != m.id && present.contains($0) ? $0 : nil } })
+        func leadOf(_ m: Member) -> UUID? {
+            if leads.contains(m.id) { return m.id }
+            if let lead = m.clusterLead, leads.contains(lead) { return lead }
+            return nil
         }
-        return result
+        var emitted = Set<UUID>()
+        var items: [Item] = []
+        for member in flat where !emitted.contains(member.id) {
+            guard let leadId = leadOf(member), let lead = flat.first(where: { $0.id == leadId }) else {
+                emitted.insert(member.id)
+                items.append(item(for: member))
+                continue
+            }
+            // Helpers column by column: by x, then y, so a tidied block reads
+            // back into the same columns.
+            let helpers = flat.filter { $0.id != leadId && $0.clusterLead == leadId }.sorted {
+                if $0.frame.x != $1.frame.x { return $0.frame.x < $1.frame.x }
+                if $0.frame.y != $1.frame.y { return $0.frame.y < $1.frame.y }
+                return UUID.isOrderedBeforeByString($0.id, $1.id)
+            }
+            emitted.insert(leadId)
+            helpers.forEach { emitted.insert($0.id) }
+            items.append(blockItem(lead: lead, helpers: helpers, gap: gap))
+        }
+        return items
     }
 
-    /// Leads present in the zone with at least one helper present.
-    private static func clusterLeads(_ members: [Member]) -> Set<UUID> {
-        let present = Set(members.map(\.id))
-        return Set(members.compactMap { m in m.clusterLead.flatMap { $0 != m.id && present.contains($0) ? $0 : nil } })
-    }
-
-    private static func clusterKey(_ member: Member, _ leads: Set<UUID>) -> UUID? {
-        if leads.contains(member.id) { return member.id }
-        if let lead = member.clusterLead, leads.contains(lead) { return lead }
-        return nil
-    }
-
-    /// Per position, the cluster it belongs to (its lead's id), or nil.
-    private static func clusterIndices(_ ordered: [Member]) -> [UUID?] {
-        let leads = clusterLeads(ordered)
-        return ordered.map { clusterKey($0, leads) }
+    private static func blockItem(lead: Member, helpers: [Member], gap: Double) -> Item {
+        let leadItem = item(for: lead)
+        let leadW = max(1, lead.frame.width), leadH = max(1, lead.frame.height)
+        let perColumn = helpersPerColumn
+        let columns = stride(from: 0, to: helpers.count, by: perColumn).map {
+            Array(helpers[$0..<min($0 + perColumn, helpers.count)])
+        }
+        let cols = Double(columns.count)
+        // Column width relative to the lead's: the helpers' mean width as they
+        // are now (a fresh helper is its lead's width), within reason.
+        let meanHelperWidth = helpers.reduce(0.0) { $0 + $1.frame.width } / Double(helpers.count)
+        let q = min(max(meanHelperWidth / leadW, 0.5), 1.25)
+        let factor = 1 + q * cols
+        let helperMinimum = helpers.map { $0.kind.map { TileGeometry.minimumSize(for: $0) } ?? $0.minimumSize }
+        let helperMinW = helperMinimum.map { Double($0.width) }.max() ?? 1
+        let helperMinH = helperMinimum.map { Double($0.height) }.max() ?? 1
+        let leadMinW = max(leadItem.minW, helperMinW / q)
+        var minH = leadItem.minH
+        for column in columns { minH = max(minH, Double(column.count) * helperMinH + Double(column.count - 1) * gap) }
+        // Current area of the block's flexible part: every member, plus the
+        // inner column gaps a tidied block holds (so a tidied block costs zero).
+        var area = leadW * leadH + helpers.reduce(0.0) { $0 + $1.frame.width * $1.frame.height }
+        for column in columns { area += q * leadW * Double(column.count - 1) * gap }
+        let leadRatio = min(max(leadW / leadH, leadItem.ratioMin), leadItem.ratioMax)
+        return Item(
+            id: lead.id, area: area,
+            ratio: leadRatio * factor, ratioMin: leadItem.ratioMin * factor, ratioMax: leadItem.ratioMax * factor,
+            minW: leadMinW * factor, minH: minH, fixed: nil,
+            extraWidth: cols * gap,
+            block: Block(lead: lead.id, columns: columns.map { $0.map(\.id) }, q: q))
     }
 
     private static func item(for member: Member) -> Item {
@@ -286,13 +361,12 @@ public enum CanvasTidyPacker {
     /// heights fitted to the content height, and the cheapest result kept: the
     /// change to the tiles plus the change to the zone height; ties go to the
     /// scale nearest 1.
-    private static func solve(items: [Item], clusters: [UUID?], width: Double, height: Double, gap: Double) -> Layout? {
+    private static func solve(items: [Item], width: Double, height: Double, gap: Double) -> Layout? {
         let n = items.count
         var table = [[Row?]](repeating: [], count: n)
         for start in 0..<n {
             table[start] = (1...min(maxRowLength, n - start)).map { length in
-                rowRespectsClusters(start, start + length, clusters)
-                    ? evaluateRow(items: items, start: start, end: start + length, width: width, gap: gap) : nil
+                evaluateRow(items: items, start: start, end: start + length, width: width, gap: gap)
             }
         }
         var evaluated: [[Int]: Layout] = [:]
@@ -337,18 +411,13 @@ public enum CanvasTidyPacker {
         return best
     }
 
-    /// A row may not cut a cluster unless the row lies wholly inside it.
-    private static func rowRespectsClusters(_ start: Int, _ end: Int, _ clusters: [UUID?]) -> Bool {
-        if let c = clusters[start], c == clusters[end - 1] { return true }
-        if start > 0, let c = clusters[start], clusters[start - 1] == c { return false }
-        if end < clusters.count, let c = clusters[end - 1], clusters[end] == c { return false }
-        return true
-    }
-
     private static func evaluateRow(items: [Item], start: Int, end: Int, width: Double, gap: Double) -> Row? {
         let slice = items[start..<end]
         var fixedWidth = 0.0, fixedHeight = 0.0
-        for item in slice { if let f = item.fixed { fixedWidth += Double(f.width); fixedHeight = max(fixedHeight, Double(f.height)) } }
+        for item in slice {
+            fixedWidth += item.extraWidth
+            if let f = item.fixed { fixedWidth += Double(f.width); fixedHeight = max(fixedHeight, Double(f.height)) }
+        }
         let available = width - Double(end - start - 1) * gap - fixedWidth
         var flex: [Item] = []
         flex.reserveCapacity(end - start)
@@ -475,14 +544,14 @@ public enum CanvasTidyPacker {
         -> (values: [Double], justified: Bool)
     {
         let slice = Array(items[row.start..<row.end])
-        let fixedWidth = slice.reduce(0.0) { $0 + Double($1.fixed?.width ?? 0) }
+        let fixedWidth = slice.reduce(0.0) { $0 + Double($1.fixed?.width ?? 0) + $1.extraWidth }
         let available = width - Double(slice.count - 1) * gap - fixedWidth
         let flex = slice.filter { $0.fixed == nil }
         guard !flex.isEmpty, let ratios = rowRatios(flex: flex, height: height, available: available) else {
-            return (slice.map { Double($0.fixed?.width ?? 0) }, false)
+            return (slice.map { Double($0.fixed?.width ?? 0) + $0.extraWidth }, false)
         }
         var next = ratios.makeIterator()
-        let values = slice.map { item in item.fixed.map { Double($0.width) } ?? next.next()! * height }
+        let values = slice.map { item in item.fixed.map { Double($0.width) } ?? next.next()! * height + item.extraWidth }
         // A row ending in a fixed tile is left-aligned exactly; the flexible
         // tiles already sum to the width.
         return (values, slice.last?.fixed == nil)
@@ -511,7 +580,7 @@ public enum CanvasTidyPacker {
             let widths = rowWidths(items: items, row: row, height: row.height, width: width, gap: gap).values
             for (offset, index) in (row.start..<row.end).enumerated() where items[index].fixed == nil {
                 let item = items[index]
-                let w = widths[offset], h = row.height
+                let w = widths[offset] - item.extraWidth, h = row.height
                 let areaDev = log(max(w * h, 1e-9) / item.area)
                 let shapeDev = log(max(w / h, 1e-9) / item.ratio)
                 let change = areaDev * areaDev + 2 * shapeDev * shapeDev + capPenalty(areaDev)

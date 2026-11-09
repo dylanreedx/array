@@ -76,6 +76,12 @@ func runTidyPackerChecks() {
                 lead = tiles[agents[0]].id
                 helpers = agents[1...3].map { tiles[$0].id }
                 for i in agents.prefix(4) { tiles[i].clusterLead = lead }
+                // Helpers as spawn makes them: the lead's width, half its height.
+                let leadFrame = tiles[agents[0]].frame
+                for i in agents[1...3] {
+                    tiles[i].frame.width = leadFrame.width
+                    tiles[i].frame.height = ((leadFrame.height - gap) / 2).rounded()
+                }
             }
         }
         let minX = tiles.map(\.frame.x).min()!, minY = tiles.map(\.frame.y).min()!
@@ -198,23 +204,34 @@ func runTidyPackerChecks() {
         if c.name != "cramped" {
             check(readingOrder(before) == readingOrder(after), "\(c.name): tidy shuffled the reading order")
         }
-        // The lead and its helpers form one block: in one row with nobody
-        // between them, or a run of rows nobody else shares.
+        // The lead and its helpers are one block: the lead on the left, the
+        // helpers in columns beside it, each column's heights (with gaps)
+        // summing to the lead's height, and no other tile inside the block.
         if let lead = c.lead {
-            let cluster = Set([lead] + c.helpers)
-            let clusterFrames = members.filter { cluster.contains($0.id) }.map(\.frame)
-            let rows = Set(clusterFrames.map(\.y))
             let leadFrame = members.first { $0.id == lead }!.frame
-            if rows.count == 1 {
-                let xs = clusterFrames.map(\.x)
-                let intruder = members.contains { !cluster.contains($0.id) && $0.frame.y == leadFrame.y
-                    && $0.frame.x > xs.min()! && $0.frame.x < xs.max()! }
-                check(!intruder, "\(c.name): a tile sits between the lead and its helpers")
-                check(leadFrame.x == xs.min()!, "\(c.name): the lead is not first in its block")
-            } else {
-                check(!members.contains { !cluster.contains($0.id) && rows.contains($0.frame.y) },
-                      "\(c.name): the cluster's rows are shared with other tiles")
+            let helperFrames = members.filter { c.helpers.contains($0.id) }.map(\.frame)
+            let columns = Dictionary(grouping: helperFrames, by: \.x).sorted { $0.key < $1.key }
+            check(abs(columns.first!.key - (leadFrame.x + leadFrame.width + gap)) <= eps,
+                  "\(c.name): helpers do not start one gap right of the lead: \(leadFrame) \(helperFrames)")
+            for (_, column) in columns {
+                let stacked = column.sorted { $0.y < $1.y }
+                let total = stacked.reduce(0.0) { $0 + $1.height } + Double(stacked.count - 1) * gap
+                check(abs(stacked.first!.y - leadFrame.y) <= eps && abs(total - leadFrame.height) <= eps,
+                      "\(c.name): a helper column does not span the lead's height: \(stacked) vs \(leadFrame)")
             }
+            let blockRight = helperFrames.map { $0.x + $0.width }.max()!
+            check(!members.contains { m in
+                m.id != lead && !c.helpers.contains(m.id)
+                    && m.frame.x < blockRight && m.frame.x + m.frame.width > leadFrame.x
+                    && m.frame.y < leadFrame.y + leadFrame.height && m.frame.y + m.frame.height > leadFrame.y
+            }, "\(c.name): another tile sits inside the lead's block")
+            let leadRatio = leadFrame.width / leadFrame.height
+            check(leadRatio >= 0.6 - 1e-3 && leadRatio <= 1.0 + 1e-3, "\(c.name): the lead is outside the agent band: \(leadFrame)")
+        }
+        // A lone agent (no lead with it) takes the agent band.
+        for tile in members where tile.kind == .managedAgent && tile.id != c.lead && !c.helpers.contains(tile.id) {
+            let ratio = tile.frame.width / tile.frame.height
+            check(ratio >= 0.6 - 1e-3 && ratio <= 1.0 + 1e-3, "\(c.name): a lone agent is outside the agent band: \(tile.frame)")
         }
         // Every frame converts to zone-local and back exactly: the canvas
         // rejects a layered commit that cannot.

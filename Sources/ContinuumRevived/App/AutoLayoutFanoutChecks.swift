@@ -426,17 +426,22 @@ enum AutoLayoutFanoutChecks {
         if let web = after["Web"], abs(web.width - web.height * 16 / 9) > 1.0 / 32 {
             failures.append("tidy: the browser is not 16:9: \(web)")
         }
-        let block = ["Lead", "H1", "H2"].compactMap { after[$0] }
-        let rows = Set(block.map(\.y))
-        if rows.count == 1 {
-            let xs = block.map(\.x)
-            if after["Lead"]!.x != xs.min()! { failures.append("tidy: the lead is not first in its block") }
-            if after.contains(where: { !["Lead", "H1", "H2"].contains($0.key) && $0.value.y == after["Lead"]!.y
-                && $0.value.x > xs.min()! && $0.value.x < xs.max()! }) {
-                failures.append("tidy: a tile sits between the lead and its helpers")
+        // The lead and its helpers are one block: helpers stacked one gap right
+        // of the lead, their heights (with the gap) summing to the lead's.
+        let gap = TileGapResolver.resolvedGap(defaults: canvas.autoLayoutDefaults)
+        if let lead = after["Lead"], let h1 = after["H1"], let h2 = after["H2"] {
+            let column = [h1, h2].sorted { $0.y < $1.y }
+            if abs(h1.x - h2.x) > 0.01 || abs(h1.x - (lead.x + lead.width + gap)) > 0.01 {
+                failures.append("tidy: the helpers are not one column beside the lead: \(lead) \(column)")
             }
-        } else if after.contains(where: { !["Lead", "H1", "H2"].contains($0.key) && rows.contains($0.value.y) }) {
-            failures.append("tidy: the lead's rows are shared with other tiles")
+            if abs(column[0].y - lead.y) > 0.01 || abs(column[0].height + gap + column[1].height - lead.height) > 0.01 {
+                failures.append("tidy: the helpers do not span the lead's height: \(lead) \(column)")
+            }
+            let right = column.map { $0.x + $0.width }.max()!
+            if after.contains(where: { !["Lead", "H1", "H2"].contains($0.key) && $0.value.x < right && $0.value.x + $0.value.width > lead.x
+                && $0.value.y < lead.y + lead.height && $0.value.y + $0.value.height > lead.y }) {
+                failures.append("tidy: another tile sits inside the lead's block")
+            }
         }
         // Persisted through the production store, in world frames.
         if let saved = try ProjectStore(projectRoot: root).tryLoadCanvas() {
