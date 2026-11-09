@@ -376,6 +376,18 @@ final class CanvasNSView: NSView, TokenThemed {
     private var autoLayoutBlockedZoneIds: Set<UUID> = []
     var autoLayoutReduceMotionProvider: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     var qaAutoLayoutUndoText: String { autoLayoutUndoToast.qaText }
+    /// QA: wall time of each stage of the auto-layout passes since the last
+    /// reset, in ms (`--auto-layout-tidy-latency-check`). Production pays two
+    /// clock reads per stage per pass — never per frame or per tile.
+    struct AutoLayoutStageTimes: Equatable {
+        var begin = 0.0, solve = 0.0, apply = 0.0, animate = 0.0, finish = 0.0
+        var capture = 0.0, persist = 0.0, notify = 0.0, undo = 0.0
+        var tidy = 0.0
+        var presentLayout = 0.0, presentDisplay = 0.0, presentFlush = 0.0
+        var solves = 0
+    }
+    var qaAutoLayoutStageTimes = AutoLayoutStageTimes()
+    private static func stageClock() -> Double { CACurrentMediaTime() * 1000 }
     @discardableResult func qaClickAutoLayoutUndo() -> Bool { autoLayoutUndoToast.clickUndoForQA() }
 
     /// Production membership write: the single sink every canvas membership
@@ -609,6 +621,8 @@ final class CanvasNSView: NSView, TokenThemed {
             guard CanvasAutoLayoutConfig.enabled(defaults: autoLayoutDefaults) else { return }
         }
         let scene = baseline ?? autoLayoutScene()
+        let solveStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.solves += 1 }
         let transaction = CanvasAutoLayoutEngine.solve(
             scene: scene,
             mutation: mutation,
@@ -637,6 +651,9 @@ final class CanvasNSView: NSView, TokenThemed {
                 return scope
             }()
         )
+        qaAutoLayoutStageTimes.solve += Self.stageClock() - solveStart
+        let applyStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.apply += Self.stageClock() - applyStart }
         autoLayoutBlockedZoneIds = transaction.blockedZoneIds
         if case .tile = mutation {
             autoLayoutMoveLatch = transaction.moveLatch
@@ -892,6 +909,8 @@ final class CanvasNSView: NSView, TokenThemed {
         layoutAllTiles(onlyChangedTiles: true)
 
         guard !autoLayoutReduceMotionProvider() else { return }
+        let animateStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.animate += Self.stageClock() - animateStart }
         let activeZoneMembers: Set<UUID> = activeZoneId.map { zoneId in
             Set(autoLayoutScene().tiles.lazy.filter { $0.zoneId == zoneId }.map(\.id))
         } ?? []
@@ -917,6 +936,8 @@ final class CanvasNSView: NSView, TokenThemed {
     @discardableResult
     func finishAutoLayoutGesture() -> CanvasLayoutTransaction? {
         guard let baseline = autoLayoutGestureBaseline else { return nil }
+        let finishStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.finish += Self.stageClock() - finishStart }
         autoLayoutGestureBaseline = nil
         resetAutoLayoutMoveLatch()
         let current = autoLayoutScene()
@@ -936,6 +957,8 @@ final class CanvasNSView: NSView, TokenThemed {
     }
 
     func tidyAutoLayout(zoneId: UUID? = nil, commit: Bool = true, offerUndo: Bool = true, compact: Bool = true) {
+        let tidyStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.tidy += Self.stageClock() - tidyStart }
         let baseline = autoLayoutScene()
         // The explicit tidy keeps each lead agent's helpers in one block with it
         // (`CanvasTidyPacker`). Only it reads lineage, so only it asks: once per
@@ -1346,6 +1369,8 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func showAutoLayoutUndo(changedCount: Int) {
         guard changedCount > 0 else { return }
+        let undoStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.undo += Self.stageClock() - undoStart }
         autoLayoutUndoTimer?.invalidate()
         let noun = changedCount == 1 ? "item" : "items"
         autoLayoutUndoToast.show("Auto layout arranged \(changedCount) \(noun)")
@@ -2930,6 +2955,8 @@ final class CanvasNSView: NSView, TokenThemed {
         includeAllZones: Bool = false
     ) -> Bool {
         guard pendingGeometryEdit == nil else { return false }
+        let beginStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.begin += Self.stageClock() - beginStart }
         let capturesLayoutChain = isAutoLayoutEnabled && action != .resizeTileToPreset && action != .dockTile
         let capturedTileIds = includeAllTiles || capturesLayoutChain
             ? Set(allWorkspaceTiles().map(\.id))
@@ -2948,18 +2975,48 @@ final class CanvasNSView: NSView, TokenThemed {
     func commitGeometryEdit() -> CanvasGeometryTransaction? {
         guard let pending = pendingGeometryEdit else { return nil }
         pendingGeometryEdit = nil
+        let captureStart = Self.stageClock()
         let after = captureGeometry(tileIds: pending.tileIds, zoneIds: pending.zoneIds)
         let transaction = CanvasGeometryTransaction(action: pending.action, before: pending.before, after: after)
+        qaAutoLayoutStageTimes.capture += Self.stageClock() - captureStart
         guard !transaction.isNoOp else { return nil }
-        guard persistGeometrySnapshot(transaction.after, changedFrom: transaction.before) else {
+        presentGeometryBeforePersisting()
+        let persistStart = Self.stageClock()
+        let persisted = persistGeometrySnapshot(transaction.after, changedFrom: transaction.before)
+        qaAutoLayoutStageTimes.persist += Self.stageClock() - persistStart
+        guard persisted else {
             _ = applyGeometrySnapshot(transaction.before, notifyCommit: false)
             return nil
         }
+        let notifyStart = Self.stageClock()
+        defer { qaAutoLayoutStageTimes.notify += Self.stageClock() - notifyStart }
         if let workspaceId = activeUndoWorkspaceId {
             canvasHistories[workspaceId]?.record(transaction)
         }
         notifyGeometryCommit(transaction)
         return transaction
+    }
+
+    /// Put the edited geometry, and the animations toward it, on screen BEFORE
+    /// the durable write. A movement starts at the CA commit that carries it, and
+    /// that commit used to wait for the end of the run-loop turn — behind the
+    /// write below (each project's `canvas.json` read and verified plus the
+    /// workspace document, 4–19 ms measured; more with more projects), the commit
+    /// notifications and the Undo toast. Animations run on the render server, so
+    /// the write no longer delays or stalls them. A refused write still rolls the
+    /// geometry back below, exactly as before; it is visible as a snap back.
+    /// Witness: `--auto-layout-tidy-latency-check` (movement start).
+    private func presentGeometryBeforePersisting() {
+        guard onLayoutCommitted != nil, let window else { return }
+        var t = Self.stageClock()
+        window.layoutIfNeeded()
+        qaAutoLayoutStageTimes.presentLayout += Self.stageClock() - t
+        t = Self.stageClock()
+        window.displayIfNeeded()
+        qaAutoLayoutStageTimes.presentDisplay += Self.stageClock() - t
+        t = Self.stageClock()
+        CATransaction.flush()
+        qaAutoLayoutStageTimes.presentFlush += Self.stageClock() - t
     }
 
     /// Stand down a move preview while a reference card owns the pointer.
@@ -6722,18 +6779,37 @@ final class CanvasNSView: NSView, TokenThemed {
                 || !Self.geometryNearlyEqual(view.frame.width, rect.width)
                 || !Self.geometryNearlyEqual(view.frame.height, rect.height)
         }
+        // A changed tile that only TRANSLATED draws nothing new: its pixels do
+        // not depend on where it sits. Redrawing it anyway (plus its affordance
+        // overlay) put every tidied or pushed tile's whole draw into the CA
+        // commit that starts the movement — 27 ms of an 89-tile tidy's commit
+        // (`--auto-layout-tidy-latency-check`). Size, visibility and every
+        // non-geometry field still invalidate.
+        func onlyTranslated(_ tile: Tile, view: TileNSView?, worldFrame: TileFrame, hidden: Bool) -> Bool {
+            guard onlyChangedTiles, let view else { return false }
+            var translated = view.tile
+            translated.frame.x = tile.frame.x
+            translated.frame.y = tile.frame.y
+            return translated == tile && view.isHidden == hidden
+                && Self.geometryNearlyEqual(view.frame.width, CGFloat(worldFrame.width))
+                && Self.geometryNearlyEqual(view.frame.height, CGFloat(worldFrame.height))
+        }
         for tile in canvasState.tiles {
-            guard needsLayout(tile, view: tileViews[tile.id], worldFrame: tile.frame,
-                              hidden: membershipPlacement(of: tile.id)?.collapsed == true) else { continue }
-            layoutTile(tile, invalidateTileDisplay: invalidateTileDisplay)
+            let view = tileViews[tile.id]
+            let hidden = membershipPlacement(of: tile.id)?.collapsed == true
+            guard needsLayout(tile, view: view, worldFrame: tile.frame, hidden: hidden) else { continue }
+            layoutTile(tile, invalidateTileDisplay: invalidateTileDisplay
+                && !onlyTranslated(tile, view: view, worldFrame: tile.frame, hidden: hidden))
         }
         // Lay out tiles for every installed ZoneLayer (T05).
         for layer in zoneLayers {
             for tile in layer.tiles {
-                guard needsLayout(tile, view: layer.tileViews[tile.id],
-                                  worldFrame: CanvasEngine.worldFrame(tile: tile, in: layer.placement),
+                let view = layer.tileViews[tile.id]
+                let worldFrame = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
+                guard needsLayout(tile, view: view, worldFrame: worldFrame,
                                   hidden: layer.placement.collapsed) else { continue }
-                _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay)
+                _layoutLayerTile(tile, in: layer, invalidateTileDisplay: invalidateTileDisplay
+                    && !onlyTranslated(tile, view: view, worldFrame: worldFrame, hidden: layer.placement.collapsed))
             }
         }
         if navModeOverlayView != nil { qaCameraLayoutStats.chromeRepaints += 1 }
