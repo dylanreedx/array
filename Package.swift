@@ -202,6 +202,7 @@ let package = Package(
                 .copy("Resources/TaskEditor"),
                 .copy("Resources/FocusInputFixtures")
             ],
+            swiftSettings: [.define("ARRAY_CHECKS", .when(configuration: .debug))],
             linkerSettings: [
                 .linkedFramework("Carbon"),
                 .linkedLibrary("stdc++")

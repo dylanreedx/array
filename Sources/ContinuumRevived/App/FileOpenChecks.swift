@@ -1,3 +1,4 @@
+#if ARRAY_CHECKS
 import AppKit
 import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
@@ -1990,3 +1991,5 @@ enum FileOpenChecks {
                    "saving a recovered draft must remove its recovery record")
     }
 }
+
+#endif
