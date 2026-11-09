@@ -313,6 +313,7 @@ check --terminal-tmux-persistence-check
 check --terminal-tmux-unresponsive-check
 check --throbber-timeline-check
 check --ticket-queue-tile-check
+check --tidy-zone-neighbours-check
 check --tile-action-check
 check --tile-character-check
 check --tile-chrome-canvas-check
@@ -741,6 +742,7 @@ leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
 leg run_app_check .build/debug/Array --terminal-tmux-unresponsive-check
 leg run_app_check .build/debug/Array --throbber-timeline-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
+leg run_app_check .build/debug/Array --tidy-zone-neighbours-check
 leg run_app_check .build/debug/Array --tile-action-check
 leg run_app_check .build/debug/Array --tile-character-check
 leg run_app_check .build/debug/Array --tile-chrome-canvas-check
