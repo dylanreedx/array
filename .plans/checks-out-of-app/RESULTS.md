@@ -62,3 +62,9 @@ attempt; its wall time is not a clean-build comparison. Earlier scope and
 incremental measurements above describe the four-file candidate. Debug bodies
 are unchanged between these candidates. The full 100k-line extraction is not
 complete, and no release-speed improvement is established by these measurements.
+
+The release retry ran 894.18 seconds but FAILED: ContinuumApp.swift was modified
+during compilation while removing the residency dispatch gates. This was an
+execution error, not a release compiler incompatibility. No after binary/size or
+bundle result from that attempt is valid. The queued verifier continued into the
+full matrix; release verification must be repeated after its lock is released.
