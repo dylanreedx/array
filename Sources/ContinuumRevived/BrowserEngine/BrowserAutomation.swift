@@ -111,7 +111,7 @@ struct BrowserAutomationScreenshot {
 
 @MainActor
 final class BrowserAutomation {
-    // Internal experiment only. Remain off until the approved Tier B proof passes.
+    // Enabled by default; unavailable private selectors retain Stage 1 delivery.
     static var focusFreeInputEnabled = true
     static let world = WKContentWorld.world(name: "array.automation")
     static let snapshotByteCap = 20_000

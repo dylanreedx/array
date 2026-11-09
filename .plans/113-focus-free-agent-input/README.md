@@ -77,7 +77,7 @@ All items are **GUESS (design)**; none requires the Stage 2 private APIs.
 
 ## Open gaps
 
-- Real-pointer hover can disturb a page while the physical pointer is over a driven tile; see research/pointer-isolation.md.
+- Real-pointer hover can disturb a page while the physical pointer is over a driven tile; see [pointer-isolation.md](pointer-isolation.md).
 - Script-opened or delayed native pickers remain unsupported.
 - requestAnimationFrame may remain frozen on hidden pages.
 - Monaco caret and undo remain unsupported.
