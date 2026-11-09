@@ -99,7 +99,6 @@ final class ChoiceMenuController {
             var item = ChoiceItem(
                 id: id, title: source.title, detail: (source as? ChoiceDetailMenuItem)?.detail,
                 enabled: source.isEnabled, toolTip: source.toolTip)
-            item.swatch = (source as? AgentIdentityColourMenuItem)?.choice?.swatch
             item.separatorBefore = separatorBefore
             item.hasSubmenu = hasSubmenu
             // The cascade owner dismisses all levels before dispatching a leaf.

@@ -1,1 +1,0 @@
-SidebarRowPresentationChecks passed: all four styles, status completion and arrival, expanded and unfolding; presentation frames stayed in their slots or intentional unfold/reflow envelope; /tmp/sidebar-presentation-green-final

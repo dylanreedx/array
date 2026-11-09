@@ -39,38 +39,6 @@ enum AgentIdentityColorChecks {
         components(color).map { $0.map { String(format: "%.2f", $0) }.joined(separator: ",") } ?? "nil"
     }
 
-    static func clickSwatch(list: ChoiceListView, id: String, name: String) -> Bool {
-        guard let row = list.rowView(id: id), let window = row.window else { return false }
-        window.contentView?.layoutSubtreeIfNeeded()
-        // Hit the visible swatch, rather than invoking the row callback.
-        let dot = row.subviews.first { $0 is ChoiceDotView && !$0.isHidden }
-        let point = dot.map { $0.convert(NSPoint(x: $0.bounds.midX, y: $0.bounds.midY), to: nil) }
-            ?? row.convert(NSPoint(x: 20, y: row.bounds.midY), to: nil)
-        if let directory = ProcessInfo.processInfo.environment["ARRAY_COLOUR_STILLS"] {
-            for (label, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-                window.appearance = NSAppearance(named: appearance)
-                let surface = window.contentView!
-                surface.display()
-                if let bitmap = surface.bitmapImageRepForCachingDisplay(in: surface.bounds) {
-                    surface.cacheDisplay(in: surface.bounds, to: bitmap)
-                    try? bitmap.representation(using: .png, properties: [:])?.write(to:
-                        URL(fileURLWithPath: directory).appendingPathComponent("\(name)-\(label).png"))
-                }
-            }
-        }
-        func event(_ type: NSEvent.EventType) -> NSEvent {
-            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
-                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!
-        }
-        NSApp.postEvent(event(.leftMouseUp), atStart: true)
-        NSApp.sendEvent(event(.leftMouseDown))
-        if let up = NSApp.nextEvent(matching: .leftMouseUp, until: Date(), inMode: .default, dequeue: true) {
-            NSApp.sendEvent(up)
-        }
-        return true
-    }
-
     static func run() throws -> String {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("agent-identity-color-\(UUID().uuidString)", isDirectory: true)
@@ -248,8 +216,6 @@ enum AgentIdentityColorChecks {
                    "the row palette matches the tile's, got \(inbox.identityColorChoiceTitlesForQA)")
         try expect(inbox.chooseIdentityColorForQA("Blue"), "Blue is pickable")
         try expect(supervisor.records[agentId]?.identityColor == "blue", "the row pick lands on the record")
-        let sidebarReload = try AgentStore(applicationSupportDirectory: storeRoot).load(id: agentId)
-        try expect(sidebarReload?.identityColor == "blue", "sidebar swatch persists blue")
         try expect(same(tile.identityColor?.cgColor, ZoneChromeNSView.color(named: "blue").cgColor)
                     && tile.qaIdentityBar != nil,
                    "a pick in the sidebar repaints the agent's open tile")

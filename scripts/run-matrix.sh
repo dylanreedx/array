@@ -1726,7 +1726,6 @@ run_app_check .build/debug/Array --sidebar-workspace-treatment-check
 # needs a WindowServer and Screen Recording permission; run scripts/capture-sidebar-96.sh.
 run_app_check .build/debug/Array --sidebar-production-corpus-check
 run_app_check .build/debug/Array --sidebar-screenshot-check
-run_app_check .build/debug/Array --sidebar-indicator-settings-check
 run_app_check .build/debug/Array --workspace-sidebar-shell-check
 # .plans/86: the multi-workspace checklist driven through the real popover.
 run_app_check .build/debug/Array --workspace-filter-sheet-check
@@ -1985,8 +1984,6 @@ run_app_check .build/debug/Array --sidebar-ownership-check
 # of the Snoozed and History headings and History's "Show 25 more" footer, and
 # asserts each opens or pages its rows.
 run_app_check .build/debug/Array --sidebar-fold-expand-check
-# Presentation-layer sampling across helper completion, arrival, reload and unfold.
-run_app_check .build/debug/Array --sidebar-row-presentation-check
 # .plans/113: the header's sort list (Most active, By project, Newest first)
 # picked through its real popover: the drawn order and project headings in
 # each mode, the project filter in two of them, the stored choice restored by

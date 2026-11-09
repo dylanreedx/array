@@ -62,14 +62,6 @@ public enum SettingsSchema {
                             help: "Ten neutral palettes. Changes apply immediately across the app.",
                             keywords: ["neutral", "palette", "grey", "gray", "black", "white"]),
             ]),
-            SettingsGroup(id: "appearance.sidebar", title: "Sidebar", rows: [
-                SettingsRow(.choice(key: SidebarActiveIndicatorStyle.defaultsKey, label: "Active agent",
-                                    options: SidebarActiveIndicatorStyle.allCases.map(\.rawValue),
-                                    default: SidebarActiveIndicatorStyle.fallback.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorStyle.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "How the open agent is highlighted. Changes apply immediately; Reduce Motion keeps it still.",
-                            keywords: ["sidebar", "duplex", "gradient", "sheen", "classic", "selection", "motion"]),
-            ]),
             SettingsGroup(id: "appearance.canvasBackground", title: "Canvas background", rows: [
                 SettingsRow(.custom(id: "canvasBackground", label: "Canvas background")),
             ]),

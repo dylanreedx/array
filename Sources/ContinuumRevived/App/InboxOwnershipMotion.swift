@@ -428,12 +428,6 @@ struct InboxOwnershipSlice: Equatable {
     var sweepColour: String?
     /// The lead only: what someone in its card is asking the user.
     var raisedAsk: String?
-    var activeGroup = false
-    var leadHeight: CGFloat = 0
-    var runningY: CGFloat?
-    var rowIndex = 0
-    var focusFrom: CGFloat?
-    var focusChangedAt: CFTimeInterval?
 }
 
 /// The three things every row of a lead's card paints behind its content: its
@@ -443,7 +437,6 @@ struct InboxOwnershipChrome {
     let sheet: InboxGroupBackgroundView
     let sweep = InboxSweepBorderView()
     let stem = InboxOwnershipStemView()
-    let groupLight = InboxExpandedGroupLight()
 
     /// The card's inner padding, and where the fold control sits in it, so that
     /// its glyph — the head of the stem — is centred `pad + 7` in.
@@ -464,7 +457,6 @@ struct InboxOwnershipChrome {
     static let helperIndent: CGFloat = 12
 
     func install(in view: NSView) {
-        view.addSubview(groupLight, positioned: .above, relativeTo: sheet)
         for child in [sweep, stem] as [NSView] {
             child.translatesAutoresizingMaskIntoConstraints = true
             view.addSubview(child)
@@ -474,7 +466,7 @@ struct InboxOwnershipChrome {
     /// Lay the three out in a cell of `bounds`. `laneTop` is where the lead's
     /// stem begins (its row only); `rowMid` is the subagent line's centre.
     func layout(_ slice: InboxOwnershipSlice, bounds: NSRect, gutter: CGFloat, gap: CGFloat,
-                spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat, indicatorStyle: String) {
+                spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat) {
         let bleed = spacing / 2
         let top = slice.continuesAbove ? -bleed : 0
         let bottom = bounds.height + (slice.continuesBelow ? bleed : 0)
@@ -482,8 +474,6 @@ struct InboxOwnershipChrome {
         let card = NSRect(x: gutter, y: -slice.offset + gap / 2,
                           width: max(0, bounds.width - gutter * 2), height: max(0, slice.groupHeight - gap))
 
-        groupLight.frame = clip
-        groupLight.show(slice, card: card.offsetBy(dx: 0, dy: -top), style: indicatorStyle)
         sheet.clipsToBounds = false
         sheet.frame = clip
         let strip = card.intersection(clip)
@@ -492,7 +482,7 @@ struct InboxOwnershipChrome {
             card.minY >= clip.minY - 0.5, card.maxY <= clip.maxY + 0.5)
 
         sweep.frame = clip
-        sweep.show(card: slice.sweepPhase == nil || indicatorStyle != "current" ? nil : card.offsetBy(dx: 0, dy: -top),
+        sweep.show(card: slice.sweepPhase == nil ? nil : card.offsetBy(dx: 0, dy: -top),
                    colour: slice.sweepColour.map(AgentInboxView.identityDotColour(named:)),
                    phase: slice.sweepPhase ?? 0,
                    moving: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)

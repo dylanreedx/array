@@ -1,1 +1,0 @@
-inbox-parent-fold check failed: motion: opening a parent must unfold its children instead of only fading their final positions

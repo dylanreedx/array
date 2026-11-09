@@ -62,8 +62,7 @@ enum SidebarSortChecks {
     static func build(dark: Bool, rows: [AgentInboxRow] = fixture(), width: CGFloat = 340, height: CGFloat = 460,
                       leadOpen: Bool = true) -> (AgentInboxView, NSWindow)
     {
-        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height),
-                                   indicatorDefaults: ClassicSidebarDefaultsForChecks.make())
+        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         inbox.clock = { now }
         inbox.prefersReducedMotion = { false }
         inbox.hoverCardEnabled = false

@@ -575,37 +575,3 @@ private struct SettingsPreviewCardTitle: NSViewRepresentable {
         nsView.intrinsicContentSize
     }
 }
-
-/// The sidebar's four looks use Array's shared choice surface.
-struct SidebarActiveIndicatorSettingsRow: View {
-    let model: SettingsModel
-    let row: SettingsRow
-
-    var body: some View {
-        let _ = model.revision
-        HStack {
-            SettingsRowLabel(title: row.field.label, help: row.help)
-            Spacer()
-            SidebarActiveIndicatorChoice(model: model, field: row.field)
-                .frame(width: 180, height: ChoiceButton.controlHeight)
-        }
-    }
-}
-
-private struct SidebarActiveIndicatorChoice: NSViewRepresentable {
-    let model: SettingsModel
-    let field: SettingsField
-
-    func makeNSView(context: Context) -> ChoiceButton {
-        let button = ChoiceButton(title: SidebarActiveIndicatorStyle.fallback.title)
-        button.setAccessibilityLabel("Active agent")
-        button.setAccessibilityIdentifier("settings.activeAgentStyle")
-        return button
-    }
-
-    func updateNSView(_ button: ChoiceButton, context: Context) {
-        button.items = SidebarActiveIndicatorStyle.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
-        button.selectedID = model.binding(for: field).string
-        button.onSelection = { item in model.write(.string(item.id), to: field) }
-    }
-}

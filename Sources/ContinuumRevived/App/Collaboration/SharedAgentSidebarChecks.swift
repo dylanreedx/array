@@ -186,10 +186,8 @@ enum SharedAgentSidebarChecks {
             "the row carries the owner's 'Shared by Dylan' marker (got \(inbox.whereMarkerForQA(id: sharedTile)?.text ?? "none"))")
         guard let leadCell = inbox.ownershipCellForQA(id: sharedTile) else { throw Failure(description: "no cell for the shared lead") }
         leadCell.layoutSubtreeIfNeeded()
-        let expectsSweep = leadCell.activeIndicatorStyle == SidebarActiveIndicatorStyle.classic.rawValue
-            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        try expect(leadRow.state == .ready && leadCell.showsWorkingGlyphForQA && leadCell.isSweepingForQA == expectsSweep,
-            "an idle shared lead with a working helper draws its working glyph and follows the selected style's border policy "
+        try expect(leadRow.state == .ready && leadCell.showsWorkingGlyphForQA && leadCell.isSweepingForQA,
+            "an idle shared lead with a working helper draws the working glyph and the outline "
             + "(state \(leadRow.state), glyph \(leadCell.showsWorkingGlyphForQA), outline \(leadCell.isSweepingForQA))")
 
         // MARK: Sort: Most active, the guest's first-launch order.

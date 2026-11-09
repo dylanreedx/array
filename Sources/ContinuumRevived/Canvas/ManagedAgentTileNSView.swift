@@ -1939,13 +1939,19 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         root.identifier = NSUserInterfaceItemIdentifier("agentTile.identityColor")
         let menu = NSMenu(title: "Color")
         let current = record.identityColor?.lowercased()
-        for choice in AgentIdentityColourPicker.items {
-            let item = AgentIdentityColourMenuItem(title: choice.title, action: #selector(selectIdentityColor(_:)), keyEquivalent: "")
-            item.choice = choice
+        let none = NSMenuItem(title: "None", action: #selector(selectIdentityColor(_:)), keyEquivalent: "")
+        none.target = self
+        none.representedObject = ""
+        none.identifier = NSUserInterfaceItemIdentifier("agentTile.identityColor.none")
+        none.state = current == nil ? .on : .off
+        menu.addItem(none)
+        menu.addItem(.separator())
+        for color in ZoneColorConfig.palette {
+            let item = NSMenuItem(title: color.capitalized, action: #selector(selectIdentityColor(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = choice.id == "none" ? "" : choice.id
-            item.identifier = NSUserInterfaceItemIdentifier("agentTile.identityColor.\(choice.id)")
-            item.state = (current ?? "none") == choice.id ? .on : .off
+            item.representedObject = color
+            item.identifier = NSUserInterfaceItemIdentifier("agentTile.identityColor.\(color)")
+            item.state = current == color ? .on : .off
             menu.addItem(item)
         }
         root.submenu = menu
@@ -4931,19 +4937,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// Invoke one identity-colour item exactly as AppKit would, target and all.
     @discardableResult
     func qaInvokeIdentityColorMenuItem(_ identifier: String) -> Bool {
-        let tree = makeAdditionalTitleBarMenuItems()
-        guard let menu = tree.first(where: { $0.identifier?.rawValue == "agentTile.identityColor" })?.submenu,
-            let item = menu.items.first(where: { $0.identifier?.rawValue == identifier }),
+        guard let item = makeAdditionalTitleBarMenuItems()
+            .first(where: { $0.identifier?.rawValue == "agentTile.identityColor" })?.submenu?
+            .items.first(where: { $0.identifier?.rawValue == identifier }),
             let action = item.action, let target = item.target else { return false }
-        let controller = ChoiceMenuController()
-
-        controller.present(menu: menu, relativeTo: self)
-        defer { controller.dismiss() }
-        guard let list = controller.qaPopovers.first?.listView,
-              let index = menu.items.firstIndex(of: item) else { return false }
-        _ = action
-        _ = target
-        return AgentIdentityColorChecks.clickSwatch(list: list, id: "menu.\(index)", name: "tile")
+        _ = target.perform(action, with: item)
+        return true
     }
 
     /// The title bar's identity wash as drawn: the bar's frame and the colour, or nil.
