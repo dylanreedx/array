@@ -782,6 +782,7 @@ if [[ "$PERMISSION_UX_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --workspace-api-free-permissions-check
   run_app_check .build/debug/Array --workspace-api-session-permissions-check
   run_app_check .build/debug/Array --workspace-api-grants-check
+  run_app_check .build/debug/Array --workspace-api-agent-camera-check
   run_app_check .build/debug/Array --workspace-api-browser-check
   run_app_check .build/debug/Array --browser-focus-restoration-check
   run_app_check .build/debug/Array --browser-select-check
@@ -1885,6 +1886,7 @@ run_app_check .build/debug/Array --workspace-lifecycle-check
 # forgery, revocation and all five presentation dimensions under user input.
 run_app_check .build/debug/Array --workspace-api-open-check
 run_app_check .build/debug/Array --workspace-api-grants-check
+run_app_check .build/debug/Array --workspace-api-agent-camera-check
 # CX-01 Phase 2a: agent.find / agent.inspect — ranking, ambiguity, self-inspect
 # preset, other-agent approval, byte caps, zero lifecycle side effects.
 # Agent colour: durable record update through the real workspace API.

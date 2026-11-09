@@ -201,9 +201,8 @@ public struct WorkspacePresentationPolicy: Codable, Equatable, Sendable {
 
     /// Background operations: nothing moves.
     public static let preserveAll = WorkspacePresentationPolicy()
-    /// §16 default for an ordinary explicit open: preserve four, reveal within
-    /// the current workspace.
-    public static let defaultExplicitOpen = WorkspacePresentationPolicy(camera: .revealResult)
+    /// Agent opens preserve presentation unless the caller explicitly requests a reveal.
+    public static let defaultExplicitOpen = WorkspacePresentationPolicy()
 
     /// Dimension-wise intersection: a dimension the ceiling does not permit
     /// collapses to `.preserve`.

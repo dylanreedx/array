@@ -501,6 +501,41 @@ enum WorkspaceAPIChecks {
 
     // MARK: - Leg 2: grants and presentation
 
+    static func runAgentCameraCheck() throws {
+        let f = try makeFixture()
+        defer { f.tearDown() }
+        let window = NSWindow(contentRect: f.canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = f.canvas
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+        try expect(f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true), "enable workspace tools")
+        try "Agent result".write(to: f.pbRoot.appendingPathComponent("agent-result.md"), atomically: true, encoding: .utf8)
+        f.canvas.setViewport(CanvasViewport(x: -20000, y: -20000, zoom: 1))
+        let viewport = f.canvas.viewport
+        let opened = try result(open(f, ["relativePath": "agent-result.md"]), "agent result")
+        try expect(f.canvas.viewport == viewport, "new agent tile preserves viewport")
+        guard let id = uuid(opened["tileId"]), let button = f.canvas.qaAgentResultIndicatorButtons.first(where: { $0.identifier?.rawValue == id.uuidString }) else {
+            throw Failure(message: "offscreen API-created tile must have an edge indicator")
+        }
+        let output = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("qa-runs/agent-camera-policy")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            button.appearance = NSAppearance(named: appearance)
+            button.applyTokens()
+            button.layoutSubtreeIfNeeded()
+            guard let bitmap = button.bitmapImageRepForCachingDisplay(in: button.bounds) else { throw Failure(message: "indicator bitmap") }
+            button.cacheDisplay(in: button.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent("indicator-\(name).png"))
+        }
+        let point = button.convert(CGPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+        let up = NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [], timestamp: 1, windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: 0)!
+        NSApp.postEvent(up, atStart: true)
+        NSApp.sendEvent(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+        try expect(!f.canvas.qaAgentResultIndicatorButtons.contains(where: { $0.identifier?.rawValue == id.uuidString }), "visited indicator clears")
+        try expect(f.canvas.viewport != viewport, "indicator click reveals through production navigation")
+    }
+
     static func runGrantsAndPresentationCheck() throws {
         let fixture = try makeFixture()
         defer { fixture.tearDown() }
@@ -620,6 +655,9 @@ enum WorkspaceAPIChecks {
 
         // W24/W29 — presentation dimensions. Baselines first.
         let before = baselines(f)
+        let defaultOpen = try result(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue]), "default preserves camera")
+        try expect(defaultOpen["presentationEffects"]?.object?["camera"]?.string == "preserved", "agent open must preserve camera by default")
+        try expect(f.canvas.qaViewportApplyCount == before.viewportApplies, "default open does not apply a viewport")
         // (a) camera reveal into the UNARMED zoneB would re-arm it → unavailable.
         let revealB = try result(open(f, ["relativePath": "notes.md", "presentation": ["camera": "revealResult"]]), "reveal into unarmed zone")
         try expect(revealB["presentationEffects"]?.object?["camera"]?.string == "unavailable" && revealB["presentation"]?.string == "unavailable",
@@ -636,6 +674,14 @@ enum WorkspaceAPIChecks {
                    && f.canvas.armedZoneId == before.armed && f.runtime.workspaceId == before.workspace,
                    "focus, selection, armed zone and workspace are untouched by a camera reveal")
         try expect(f.runtime.interactionGeneration == before.generation, "a programmatic reveal is not a user interaction")
+        let key = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: f.canvas.window?.windowNumber ?? 0, context: nil, characters: "x", charactersIgnoringModifiers: "x", isARepeat: false, keyCode: 7)!
+        NSApp.sendEvent(key)
+        let typing = try result(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue, "presentation": ["camera": "revealResult"]]), "typing defers")
+        try expect(typing["presentationEffects"]?.object?["camera"]?.string == "deferred", "keystroke defers explicit reveal")
+        let idleUptime = ProcessInfo.processInfo.systemUptime + 4
+        f.runtime.engagementClock = { idleUptime }
+        let idle = try result(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue, "presentation": ["camera": "revealResult"]]), "idle reveal")
+        try expect(idle["presentationEffects"]?.object?["camera"]?.string == "changed", "explicit reveal honoured after engagement expires")
         // (c) selection/focus/workspace/armedZone are outside the preset ceiling → preserved.
         let ceiling = try result(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue,
                                           "presentation": ["camera": "preserve", "keyboardFocus": "enterResult", "selection": "selectResult",
