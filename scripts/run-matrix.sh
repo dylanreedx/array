@@ -1655,6 +1655,7 @@ run_app_check .build/debug/Array --sidebar-workspace-treatment-check
 # needs a WindowServer and Screen Recording permission; run scripts/capture-sidebar-96.sh.
 run_app_check .build/debug/Array --sidebar-production-corpus-check
 run_app_check .build/debug/Array --sidebar-screenshot-check
+run_app_check .build/debug/Array --sidebar-indicator-settings-check
 run_app_check .build/debug/Array --workspace-sidebar-shell-check
 # .plans/86: the multi-workspace checklist driven through the real popover.
 run_app_check .build/debug/Array --workspace-filter-sheet-check

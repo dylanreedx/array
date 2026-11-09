@@ -59,7 +59,8 @@ enum InboxParentFoldChecks {
 
     static func makeInbox(_ rows: [AgentInboxRow], appearance: NSAppearance.Name, height: CGFloat = 1_100,
                           windows: inout [NSWindow]) -> AgentInboxView {
-        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: height))
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: height),
+                                  indicatorDefaults: ClassicSidebarDefaultsForChecks.make())
         view.clock = { epoch }
         // Exercise the legacy opt-in policy here. Production's default-open
         // policy and saved choices are asserted in the wiring section below.

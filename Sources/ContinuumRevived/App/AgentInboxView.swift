@@ -1368,7 +1368,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
     }
 
-    override init(frame frameRect: NSRect) {
+    private let indicatorDefaults: UserDefaults
+    private var activeIndicatorStyle: SidebarActiveIndicatorStyle
+
+    override convenience init(frame frameRect: NSRect) {
+        self.init(frame: frameRect, indicatorDefaults: .standard)
+    }
+
+    init(frame frameRect: NSRect, indicatorDefaults: UserDefaults) {
+        self.indicatorDefaults = indicatorDefaults
+        self.activeIndicatorStyle = SidebarActiveIndicatorStyle.resolve(in: indicatorDefaults)
         // The scope is a fixed-width ChoiceButton: project names can never resize the band.
         scopeButton = ChoiceButton(title: InboxScope.allTitle)
         scopeButton.translatesAutoresizingMaskIntoConstraints = false
@@ -1712,6 +1721,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // the field keeps the legacy one-row constraints and a zero text inset.
         // The result is the exact overlap this style exists to prevent.
         applyHeaderStyle()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(activeIndicatorSettingDidChange),
+            name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorStyle.defaultsKey)), object: nil)
         // Plan 110: characters turned on or off, a new set, new motion settings, or a
         // window's visibility. Rare events; each touches the visible cells only.
         NotificationCenter.default.addObserver(
@@ -1720,6 +1732,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         NotificationCenter.default.addObserver(
             self, selector: #selector(agentCharacterVisibilityDidChange),
             name: AgentCharacterController.visibilityDidChangeNotification, object: nil)
+    }
+
+    @objc private func activeIndicatorSettingDidChange() {
+        let next = SidebarActiveIndicatorStyle.resolve(in: indicatorDefaults)
+        guard next != activeIndicatorStyle else { return }
+        activeIndicatorStyle = next
+        // Update existing views in place; no row rebuild, selection or scroll change.
+        for row in 0..<tableView.numberOfRows {
+            if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
+                applyActiveIndicatorStyle(to: cell)
+            }
+        }
+    }
+
+    private func applyActiveIndicatorStyle(to cell: AgentInboxRowCell) {
+        (cell as? AgentInbox96CellView)?.activeIndicatorStyle = activeIndicatorStyle.rawValue
+        (cell as? AgentInboxCellView)?.activeIndicatorStyle = activeIndicatorStyle.rawValue
     }
 
     /// The 96 cells on screen, for the character refreshes.
@@ -4005,6 +4034,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if let slim = cell as? AgentInboxSlimCellView {
             slim.setNesting(nesting(atTableRow: row))
         }
+        applyActiveIndicatorStyle(to: cell)
         let rowDisclosure = disclosure(for: model)
         let rowRollup = rollupsByParent[model.id]
         let renderNow = clock()
@@ -9686,12 +9716,13 @@ final class InboxRowFocusRingView: NSView, TokenThemed {
 /// A plain `NSView` is answerable for its own layer, has no sublayers but its
 /// own, and IS the background the labels inside it are measured against.
 final class AgentInboxCardView: NSView, TokenThemed {
-    // Internal review switch; production always retains the existing treatment.
-    static let indicatorStyle: String = {
-        guard Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else { return "current" }
-        let value = UserDefaults.standard.string(forKey: "SidebarActiveIndicatorStyle") ?? "current"
-        return ["gradient", "sheen", "duplex"].contains(value) ? value : "current"
-    }()
+    var indicatorStyle = SidebarActiveIndicatorStyle.fallback.rawValue {
+        didSet { guard indicatorStyle != oldValue else { return }; applyTokens() }
+    }
+    /// Actual production layers, inspected by the settings event-path witness.
+    var qaIndicatorLayers: (wash: CAGradientLayer, edge: CALayer, sheen: CAGradientLayer) {
+        (indicatorWash, indicatorEdge, indicatorSheen)
+    }
     var indicatorColour: NSColor? { didSet { applyTokens() } }
     private let indicatorWash = CAGradientLayer()
     private let indicatorEdge = CALayer()
@@ -9711,7 +9742,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
     }
 
     private func applyIndicator() {
-        let style = Self.indicatorStyle
+        let style = indicatorStyle
         let enabled = style != "current" && (isRouteActive || isSelected)
         indicatorWash.isHidden = !enabled
         indicatorEdge.isHidden = !enabled
@@ -9730,6 +9761,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         }
         let dark = effectiveTokenTheme == .dark
         let colour = indicatorColour ?? TextToken.textPrimary.color.nsColor(in: self)
+        indicatorWash.locations = nil
         indicatorWash.type = .axial
         indicatorSheen.type = .axial
         indicatorWash.cornerRadius = Radius.card
@@ -9844,7 +9876,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         didSet {
             guard isHovered != oldValue else { return }
             applyFill(fading: true)
-            guard Self.indicatorStyle != "current", !isRouteActive, window != nil,
+            guard indicatorStyle != "current", !isRouteActive, window != nil,
                   !indicatorReducesMotion, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
                 layer?.removeAnimation(forKey: "indicator.hover-settle")
                 return
@@ -9984,7 +10016,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
         layer.backgroundColor = fill
         guard fading, window != nil, presented != fill else { return }
-        if Self.indicatorStyle != "current",
+        if indicatorStyle != "current",
            indicatorReducesMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             layer.removeAnimation(forKey: Self.fillFadeKey)
             return
@@ -10020,6 +10052,10 @@ final class AgentInboxCardView: NSView, TokenThemed {
 
 /// One row's words, on the card that carries them.
 final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
+    var activeIndicatorStyle = SidebarActiveIndicatorStyle.fallback.rawValue {
+        didSet { card.indicatorStyle = activeIndicatorStyle }
+    }
+
     private let groupBackground = InboxGroupBackgroundView()
     private let spine = InboxSpineView()
     private let card = AgentInboxCardView()
