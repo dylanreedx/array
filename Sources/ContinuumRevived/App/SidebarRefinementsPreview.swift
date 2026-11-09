@@ -21,15 +21,31 @@ final class SidebarRefinementsPreview: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let now = WorkspaceFilterSheet.now
-        rows.append(AgentInboxRow(
-            id: UUID(), title: "Plan richer file tile previews", projectName: "Array",
-            workspaceName: "Array", workspaceId: WorkspaceFilterSheet.array.id,
-            state: .ready, lifecycle: .settled(at: now.addingTimeInterval(-120)),
-            createdAt: now.addingTimeInterval(-600), identityColor: "teal"))
+        rows = SidebarPolishFixtures.rows(now: now)
+        let activeLead = rows.first { $0.depth == 0 && $0.identityColor == "teal" }?.id
+        let mainMenu = NSMenu()
+        let applicationItem = NSMenuItem()
+        let applicationMenu = NSMenu(title: "Array Sidebar")
+        applicationMenu.addItem(withTitle: "Quit Array Sidebar", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        applicationItem.submenu = applicationMenu
+        mainMenu.addItem(applicationItem)
+        NSApp.mainMenu = mainMenu
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 900)
         for (index, theme) in [NSAppearance.Name.aqua, .darkAqua].enumerated() {
             let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 380, height: 740))
             inbox.clock = { now }
+            inbox.foldsUntouchedGroups = true
+            if let activeLead {
+                inbox.openAgentId = activeLead
+                inbox.restoreParentFolds([activeLead: true])
+            }
+            inbox.onRevealRow = { [weak self] id in
+                guard let self else { return }
+                for sidebar in self.inboxes {
+                    sidebar.openAgentId = id
+                    sidebar.reload(rows: self.rows)
+                }
+            }
             inbox.workspaceColourNames = Dictionary(uniqueKeysWithValues:
                 WorkspaceFilterSheet.workspaces.map { ($0.id, $0.colour) })
             inbox.scopeCatalog = WorkspaceFilterSheet.workspaces.map { .workspaceID($0.id, $0.name) }
