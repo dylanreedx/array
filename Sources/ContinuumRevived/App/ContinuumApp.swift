@@ -15256,8 +15256,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self else { return }
             WorkspaceSidebarConfig.setShelfExpanded(shelf, expanded, defaults: self.settingsDefaults)
         }
-        // Groups start folded, and each parent's fold is kept as it was left
-        // (launch polish, item Q).
+        // Untouched groups start open, and each parent's fold is kept as it
+        // was left (launch polish, item Q; default-open since ec5405ee).
         sidebar.agentInbox.foldsUntouchedGroups = false
         sidebar.agentInbox.restoreParentFolds(WorkspaceSidebarConfig.parentFolds(defaults: settingsDefaults))
         sidebar.agentInbox.onParentFoldChange = { [weak self] folds in
@@ -40773,11 +40773,11 @@ extension AppDelegate {
     app.configureWorkspaceSidebar(sidebar)
     app.refreshAgentSurfaces(notify: false)
     sidebar.inboxForQA.layoutForQA()
-    // This section is about scope membership, so open the headless agent's
-    // group the way a person does; the child is a row of 'Default' either way.
-    try expect(sidebar.inboxForQA.collapsedParentsForQA.contains(headlessId.rawValue)
-               && sidebar.inboxForQA.clickDisclosureForQA(id: headlessId.rawValue),
-               "item Q: the shipped sidebar must start the headless agent's group folded, and open it on a click")
+    // The shipped sidebar opens an untouched group (ec5405ee; saved folds win,
+    // asserted in --inbox-parent-fold-check), so the child is drawn already.
+    try expect(!sidebar.inboxForQA.collapsedParentsForQA.contains(headlessId.rawValue)
+               && sidebar.inboxForQA.rowIdsForQA.contains(childId.rawValue),
+               "the shipped sidebar must start the headless agent's untouched group open, its child drawn")
     sidebar.inboxForQA.layoutForQA()
     try expect(sidebar.inboxForQA.selectedScopeTitleForQA == "Default",
                "the persisted scope must be restored onto the real sidebar — got '\(sidebar.inboxForQA.selectedScopeTitleForQA)'")

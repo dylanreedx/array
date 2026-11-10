@@ -566,11 +566,10 @@ enum SidebarTruthChecks {
 
         // W4 · a parent with two observed children. Closing the parent's tile
         // takes the group: no child may be left behind as a top-level row.
-        // Launch polish, item Q: the shipped sidebar starts the group folded; open
-        // it the way a person does, so its children are rows this leg can follow.
-        try expect(inbox.collapsedParentsForQA.contains(parentAgent.rawValue)
-                   && inbox.clickDisclosureForQA(id: parentAgent.rawValue),
-                   "setup: the shipped sidebar must start the parent's group folded, and open it on a click")
+        // Launch polish, item Q: the shipped sidebar starts an untouched group open
+        // (ec5405ee), so its children are already rows this leg can follow.
+        try expect(!inbox.collapsedParentsForQA.contains(parentAgent.rawValue),
+                   "setup: the shipped sidebar must start the parent's untouched group open")
         for child in [childOne, childTwo] {
             try expect(block(world, child) == "live",
                        "setup: a live parent's child is drawn under it — got \(String(describing: block(world, child)))")
