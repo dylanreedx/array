@@ -10,6 +10,8 @@ public protocol ProjectStoring: Sendable {
 
     // Canvas
     func saveCanvas(_ canvas: CanvasState) throws
+    /// Only straight after this thread's own `tryLoadCanvas` of the same file.
+    func saveCanvasAfterVerifiedRead(_ canvas: CanvasState) throws
     func loadCanvas() throws -> CanvasState
     func loadCanvasWithSanitizationResult() throws -> CanvasEngine.CanvasSanitizationResult
     func tryLoadCanvas() throws -> CanvasState?
@@ -64,4 +66,11 @@ public protocol WorkspaceStoring: Sendable {
     func load() throws -> WorkspaceDocument
     func tryLoad() throws -> WorkspaceDocument?
     func deleteDocument() throws
+}
+
+extension ProjectStoring {
+    /// Stores without their own gate keep the full `saveCanvas`.
+    public func saveCanvasAfterVerifiedRead(_ canvas: CanvasState) throws {
+        try saveCanvas(canvas)
+    }
 }

@@ -603,6 +603,12 @@ func runAgentContentBuiltModuleChecks() {
     print("AgentContent built-module checks passed: the compiler's record for \(sourceNames.count) source file(s) across \(dependencyFiles.count) dependency file(s) names none of the \(forbiddenModules.count) forbidden modules")
 }
 
+// Focused parser-identity work witness: exits 1 on the old quadratic matcher.
+if CommandLine.arguments.contains("--parser-identity-prefix-check") {
+    runParserIdentityPrefixChecks()
+    Foundation.exit(0)
+}
+
 runAgentContentModuleChecks()
 runAgentContentPlatformNeutralityChecks()
 runAgentContentManifestChecks()

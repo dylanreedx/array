@@ -314,16 +314,30 @@ if command -v tmux >/dev/null 2>&1; then
   esac
 fi
 : > "$SELF_CHECK_LOG"
-self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check --tool-path-bootstrap-check --app-support-channel-check --agent-awareness-check --terminal-theme-fidelity-check)
+self_checks=(--palette-duplicate-root-check --file-tree-boot-persistence-check --menu-contract-check --delete-confirm-policy-defaults-check --tool-path-bootstrap-check --app-support-channel-check --agent-awareness-check --terminal-theme-fidelity-check --packaged-resources-check)
 if [[ -n "${CONTINUUM_BUNDLE_CHECK_FORCE_FAIL:-}" ]]; then
   self_checks+=("$CONTINUUM_BUNDLE_CHECK_FORCE_FAIL")
 fi
 self_check_names=()
 self_check_codes=()
+# SwiftPM bakes the build dir into Bundle.module as a fallback, so on this Mac a
+# packaged app can quietly read resources from .build that a user's install
+# does not have (0.7.45 trapped on exactly that). The resources check runs with
+# the build dirs unreadable, as they are on every other Mac.
+build_dir_sandbox="(version 1)(allow default)"
+for build_dir in "$ROOT_DIR/.build" "$ROOT_DIR/.build-film"; do
+  if [[ -d "$build_dir" ]]; then
+    build_dir_sandbox+=" (deny file-read* (subpath \"$(cd "$build_dir" && pwd -P)\"))"
+  fi
+done
 for check in "${self_checks[@]}"; do
   printf '==> %s\n' "$check" | tee -a "$SELF_CHECK_LOG"
+  sandbox=()
+  if [[ "$check" == --packaged-resources-check ]]; then
+    sandbox=(sandbox-exec -p "$build_dir_sandbox")
+  fi
   set +e
-  env -u TMUX -u TMUX_PANE \
+  ${sandbox[@]+"${sandbox[@]}"} env -u TMUX -u TMUX_PANE \
     HOME="$isolated_home" \
     CFFIXED_USER_HOME="$isolated_home" \
     TMUX_TMPDIR="$isolated_tmux" \

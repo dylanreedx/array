@@ -82,6 +82,19 @@ public enum CommandRegistry {
             ),
             definition("view.fitCanvasToAll", .fitCanvasToAll, aliases: ["zoom all"]),
             definition("view.tidyCanvas", .tidyCanvas, aliases: ["auto layout", "arrange"]),
+            // Tidy the zone you are in, from the keyboard. The zone menu's item
+            // waits for macOS's selection blink and fade before its action is
+            // even sent (about 120 ms on film); a chord does not. ⌥⌘T: T for
+            // tidy, and ⌘T is New Terminal. The palette adds its ⌘K row in the
+            // zone context, so the command itself has no static row.
+            CommandDefinition(
+                id: "zone.tidy",
+                title: LaunchPaletteAction.tidyCurrentZone.displayName,
+                aliases: ["tidy", "arrange", "auto layout"],
+                paletteAction: .tidyCurrentZone,
+                paletteVisible: false,
+                shortcuts: [globalShortcut("global.tidyZone", command: "zone.tidy", keyCode: 17, modifiers: [.command, .option])]
+            ),
             // The searchable path to hold-⌥ Return: reveal the already-current
             // tile for work. Same AppDelegate helper, never a second behavior.
             definition("view.focusCurrentTile", .focusCurrentTile, aliases: ["reveal"]),

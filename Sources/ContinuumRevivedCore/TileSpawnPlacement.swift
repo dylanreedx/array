@@ -42,6 +42,7 @@ public enum TileSpawnPlacement {
         /// tile under the camera, choosing by the zone's shape. `nil` keeps the
         /// .plans/18 policy everywhere else.
         public var fanOut: FanOut?
+        public var preferredAnchor: CGPoint? = nil
 
         public init(
             newSize: CGSize,
@@ -50,7 +51,8 @@ public enum TileSpawnPlacement {
             siblings: [Tile],
             gap: Double,
             bounds: CGRect? = nil,
-            fanOut: FanOut? = nil
+            fanOut: FanOut? = nil,
+            preferredAnchor: CGPoint? = nil
         ) {
             self.newSize = newSize
             self.viewport = viewport
@@ -59,6 +61,7 @@ public enum TileSpawnPlacement {
             self.gap = gap
             self.bounds = bounds
             self.fanOut = fanOut
+            self.preferredAnchor = preferredAnchor
         }
     }
 
@@ -135,6 +138,17 @@ public enum TileSpawnPlacement {
         let obstacles = context.siblings.map { rect(for: $0.frame) }.filter { $0.width > 0 && $0.height > 0 }
         let bounds = context.bounds.flatMap(sanitizedBounds)
 
+        // Auto-layout owns the cluster shape. A nearest-slot shortcut here
+        // bypassed growth/shape ranking whenever a host was visible, so a camera
+        // following each new tile grew one column. Focus is only the fan-out's
+        // final distance tie-break; framing reveals the selected docked slot.
+        if var fanOut = context.fanOut {
+            fanOut.focus = fanOut.focus ?? context.preferredAnchor
+            if let placed = fanOutPlacement(fanOut, size: size, viewport: viewportRect, obstacles: obstacles, gap: gap) {
+                return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
+            }
+        }
+
         // A tile bigger than the viewport keeps its working size: centre the axis that
         // fits, and use a stable padded origin on an axis that cannot.
         if size.width > viewportRect.width || size.height > viewportRect.height {
@@ -144,8 +158,9 @@ public enum TileSpawnPlacement {
             return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
         }
 
-        if let fanOut = context.fanOut,
-           let placed = fanOutPlacement(fanOut, size: size, viewport: viewportRect, obstacles: obstacles, gap: gap) {
+        if let anchor = context.preferredAnchor,
+           let placed = nearestVisibleSlot(size: size, anchor: anchor, visible: viewportRect,
+                                           bounds: bounds, obstacles: obstacles, gap: gap) {
             return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
         }
 
@@ -178,10 +193,76 @@ public enum TileSpawnPlacement {
         return TileFrame(x: chosen.rect.minX, y: chosen.rect.minY, width: size.width, height: size.height)
     }
 
+    public static func nearestVisibleSlot(size: CGSize, anchor: CGPoint, visible: CGRect,
+                                          bounds: CGRect?, obstacles: [CGRect], gap: Double) -> CGRect? {
+        let area = bounds.map { visible.intersection($0) } ?? visible
+        guard !area.isNull, area.width >= size.width, area.height >= size.height else { return nil }
+        let slotGap = CGFloat(gap)
+        let xs: [CGFloat] = [anchor.x-size.width/2, area.minX, area.maxX-size.width]
+            + obstacles.flatMap { [$0.maxX+slotGap, $0.minX-slotGap-size.width] }
+        let ys: [CGFloat] = [anchor.y-size.height/2, area.minY, area.maxY-size.height]
+            + obstacles.flatMap { [$0.maxY+slotGap, $0.minY-slotGap-size.height] }
+        var best: CGRect?
+        for x in xs { for y in ys {
+            let rect = CGRect(x: min(max(x, area.minX), area.maxX-size.width),
+                              y: min(max(y, area.minY), area.maxY-size.height), width: size.width, height: size.height)
+            guard !obstacles.contains(where: { $0.intersects(rect.insetBy(dx: -gap/2, dy: -gap/2)) }) else { continue }
+            if best == nil || hypot(rect.midX-anchor.x, rect.midY-anchor.y) < hypot(best!.midX-anchor.x, best!.midY-anchor.y) { best = rect }
+        } }
+        return best
+    }
+
+    /// Auto-layout zones only (`.plans/auto-layout-night`): the first of `sizes`
+    /// (largest first) that has a free slot wholly inside `room`, the zone's
+    /// content rect in the placement space. Slots are the fan-out's, ranked by
+    /// the fan-out's own key but among in-room slots only; an empty zone centres
+    /// the tile on the focus, clamped into the room. `nil` when nothing fits, and
+    /// the caller places the default size as before, growing the zone.
+    ///
+    /// Without it, a zone with room still grew: the fan-out ranks visibility and
+    /// screen shape, not containment, so it could choose a slot past the zone's
+    /// edge, and the settle then grew the zone and pushed its neighbours.
+    public static func roomFit(_ context: Context, room: CGRect, sizes: [CGSize]) -> TileFrame? {
+        guard let fanOut = context.fanOut,
+              let room = sanitizedBounds(room) else { return nil }
+        let zoom = context.viewport.zoom.isFinite && context.viewport.zoom > 0 ? context.viewport.zoom : 1
+        let viewportRect = CGRect(
+            x: context.viewport.x.isFinite ? context.viewport.x : 0,
+            y: context.viewport.y.isFinite ? context.viewport.y : 0,
+            width: max(Double(context.visibleSize.width).isFinite ? Double(context.visibleSize.width) : 0, 0) / zoom,
+            height: max(Double(context.visibleSize.height).isFinite ? Double(context.visibleSize.height) : 0, 0) / zoom)
+        let gap = context.gap.isFinite && context.gap > 0 ? context.gap : 0
+        let obstacles = context.siblings.map { rect(for: $0.frame) }.filter { $0.width > 0 && $0.height > 0 }
+        var ranked = fanOut
+        ranked.focus = fanOut.focus ?? context.preferredAnchor
+        for candidate in sizes {
+            let size = sanitizedSize(candidate)
+            guard size.width <= room.width, size.height <= room.height else { continue }
+            let placed: CGRect?
+            if ranked.hosts.contains(where: { $0.width > 0 && $0.height > 0 }) {
+                placed = fanOutPlacement(ranked, size: size, viewport: viewportRect,
+                                         obstacles: obstacles, gap: gap, room: room)
+            } else {
+                let focus = ranked.focus ?? CGPoint(x: viewportRect.midX, y: viewportRect.midY)
+                // Centred where the user is looking (.plans/18), as before; only
+                // the size and the clamp into the room are new.
+                let centred = contained(CGRect(x: focus.x - size.width / 2, y: focus.y - size.height / 2,
+                                               width: size.width, height: size.height), in: room)
+                let guarded = centred.insetBy(dx: -(gap - 0.5), dy: -(gap - 0.5))
+                placed = obstacles.contains(where: { $0.intersects(guarded) }) ? nil : centred
+            }
+            if let placed {
+                return TileFrame(x: placed.minX, y: placed.minY, width: size.width, height: size.height)
+            }
+        }
+        return nil
+    }
+
     // MARK: - Fan out
 
     private static func fanOutPlacement(
-        _ fanOut: FanOut, size: CGSize, viewport: CGRect, obstacles: [CGRect], gap: Double
+        _ fanOut: FanOut, size: CGSize, viewport: CGRect, obstacles: [CGRect], gap: Double,
+        room: CGRect? = nil
     ) -> CGRect? {
         let hosts = fanOut.hosts.map { rect(for: $0) }.filter { $0.width > 0 && $0.height > 0 }
         guard !hosts.isEmpty else { return nil }
@@ -200,6 +281,7 @@ public enum TileSpawnPlacement {
                 CGRect(x: host.minX, y: host.minY - gap - h, width: w, height: h),
             ]
             for slot in slots {
+                if let room, !room.insetBy(dx: -0.5, dy: -0.5).contains(slot) { continue }
                 // Free with the standard gap to every other tile, not just the host.
                 let guarded = slot.insetBy(dx: -(gap - 0.5), dy: -(gap - 0.5))
                 guard !obstacles.contains(where: { $0.intersects(guarded) }) else { continue }
@@ -376,6 +458,31 @@ public enum TileSpawnPlacement {
         //    off screen.
         if lhs.side != rhs.side { return lhs.side.rawValue < rhs.side.rawValue }
         return false
+    }
+
+    // MARK: - Explicit helper columns
+
+    /// Explicit helper intent: fill columns to the lead's right, starting at
+    /// its top. Camera visibility and automatic growth direction cannot change
+    /// the side. Candidates come from actual frames, independent of presets.
+    public static func besideLead(newSize: CGSize, lead: TileFrame, helpers: [TileFrame],
+                                  siblings: [TileFrame], gap: Double) -> TileFrame {
+        let size = sanitizedSize(newSize)
+        let gap = gap.isFinite ? max(0, gap) : 0
+        let firstX = lead.x + lead.width + gap
+        let lastY = max(lead.y, lead.y + lead.height - Double(size.height))
+        let xs = ([firstX] + siblings.map { $0.x + $0.width + gap })
+            .filter { $0 >= firstX }.sorted()
+        let ys = ([lead.y] + helpers.map { $0.y + $0.height + gap })
+            .filter { $0 >= lead.y && $0 <= lastY + 0.001 }.sorted()
+        let obstacles = siblings.map { rect(for: $0) }
+        for x in xs { for y in ys {
+            let frame = TileFrame(x: x, y: y, width: Double(size.width), height: Double(size.height))
+            let guarded = rect(for: frame).insetBy(dx: -max(0, gap - 0.5), dy: -max(0, gap - 0.5))
+            if !obstacles.contains(where: { $0.intersects(guarded) }) { return frame }
+        } }
+        // The furthest sibling edge always offers an unoccupied top slot.
+        return TileFrame(x: xs.last ?? firstX, y: lead.y, width: Double(size.width), height: Double(size.height))
     }
 
     // MARK: - Geometry helpers

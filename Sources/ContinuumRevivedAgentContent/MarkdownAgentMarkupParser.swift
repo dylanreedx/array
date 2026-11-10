@@ -7,7 +7,11 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
     private static let maximumInlineDepth = 64
     private static let maximumBlockDepth = 32
 
-    public init() {}
+    // Optional scalar work diagnostic. Nil in ordinary callers; no history retained.
+    private let reconciliationWork: (@Sendable (Int) -> Void)?
+    public init(reconciliationWork: (@Sendable (Int) -> Void)? = nil) {
+        self.reconciliationWork = reconciliationWork
+    }
 
     public func parse(
         _ source: String,
@@ -71,12 +75,27 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
     }
 
     private func reconcileIdentities(_ current: [AgentBlock], with previous: [AgentBlock]) -> [AgentBlock] {
+        var candidateVisits = 0
+        defer { reconciliationWork?(candidateVisits) }
         var exactMatches: [Int: Int] = [:]
         var reservedPrevious: Set<Int> = []
 
-        for currentIndex in current.indices {
-            if let previousIndex = previous.indices.first(where: {
-                !reservedPrevious.contains($0) && semanticallyEqual(current[currentIndex], previous[$0])
+        // The greedy matcher must choose each equal leading sibling in order:
+        // all earlier previous indices are already reserved. Skip revisiting
+        // that prefix for every later sibling; retain the original search for
+        // the unmatched suffix, including edits, moves and ambiguous duplicates.
+        var matchedPrefixCount = 0
+        while matchedPrefixCount < current.count && matchedPrefixCount < previous.count {
+            candidateVisits += 1
+            guard semanticallyEqual(current[matchedPrefixCount], previous[matchedPrefixCount]) else { break }
+            exactMatches[matchedPrefixCount] = matchedPrefixCount
+            reservedPrevious.insert(matchedPrefixCount)
+            matchedPrefixCount += 1
+        }
+        for currentIndex in current.indices.dropFirst(matchedPrefixCount) {
+            if let previousIndex = (matchedPrefixCount..<previous.count).first(where: {
+                candidateVisits += 1
+                return !reservedPrevious.contains($0) && semanticallyEqual(current[currentIndex], previous[$0])
             }) {
                 exactMatches[currentIndex] = previousIndex
                 reservedPrevious.insert(previousIndex)

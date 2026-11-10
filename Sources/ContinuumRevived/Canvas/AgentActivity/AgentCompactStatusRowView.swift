@@ -107,7 +107,17 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     /// 0.7.30 — what the agent left running. Clickable: it opens the menu that
     /// lists each job with its ports and a Stop.
     private let processesPill = AgentStatusPillView()
-    private var backgroundJobs: (value: String, detail: String, spoken: String)?
+    private struct BackgroundJobs: Equatable {
+        let value: String
+        let detail: String
+        let spoken: String
+    }
+    private var backgroundJobs: BackgroundJobs?
+    /// What the last full `apply` painted beside the presentation. An identical
+    /// request at the exact same width repaints nothing, so it is skipped.
+    private var appliedBackgroundJobs: BackgroundJobs?
+    private var appliedLastPrompt: String?
+    private var appliedWidth: CGFloat?
     /// A shared agent's "Sam sent the last prompt · 10:52". The first thing
     /// the row gives up when it is narrow.
     private let lastPromptPill = AgentStatusPillView()
@@ -394,6 +404,12 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
     }
 
     func apply(_ next: AgentCompactStatusPresentation) {
+        guard presentation != next || appliedBackgroundJobs != backgroundJobs
+            || appliedLastPrompt != lastPrompt || appliedWidth != bounds.width else { return }
+        appliedBackgroundJobs = backgroundJobs
+        appliedLastPrompt = lastPrompt
+        appliedWidth = bounds.width
+        qaFullApplyCount += 1
         presentation = next
         applySymbol(next.location.symbolName, to: locationIcon)
         locationLabel.stringValue = next.location.text
@@ -580,11 +596,13 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
         guard let presentation else { return }
         apply(presentation)
     }
+    /// Applies that got past the identical-request skip and repainted the row.
+    private(set) var qaFullApplyCount = 0
     var qaLastPromptText: String? { lastPromptPill.isHidden ? nil : lastPromptPill.qaValueText }
     var qaLastPromptFill: CGColor? { lastPromptPill.layer?.backgroundColor }
 
     func applyBackgroundJobs(value: String?, detail: String, spoken: String) {
-        backgroundJobs = value.map { ($0, detail, spoken) }
+        backgroundJobs = value.map { BackgroundJobs(value: $0, detail: detail, spoken: spoken) }
         guard let presentation else { return }
         apply(presentation)
     }

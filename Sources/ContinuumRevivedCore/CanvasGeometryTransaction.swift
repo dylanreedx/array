@@ -67,8 +67,8 @@ public struct CanvasGeometrySnapshot: Codable, Equatable, Sendable {
     public var zones: [CanvasZoneGeometry]
 
     public init(tiles: [CanvasTileGeometry], zones: [CanvasZoneGeometry]) {
-        self.tiles = tiles.sorted { $0.tileId.uuidString < $1.tileId.uuidString }
-        self.zones = zones.sorted { $0.zoneId.uuidString < $1.zoneId.uuidString }
+        self.tiles = tiles.sorted { UUID.isOrderedBeforeByString($0.tileId, $1.tileId) }
+        self.zones = zones.sorted { UUID.isOrderedBeforeByString($0.zoneId, $1.zoneId) }
     }
 }
 

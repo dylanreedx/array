@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Pin the selected Xcode SDK before the Python lock shim can inject a CLT SDK.
+# Preserve an explicit caller override across the lock re-exec.
+if [[ -z "${SDKROOT+x}" ]]; then
+  export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+fi
+
 # Share the release-build guard's regular-file flock for the entire process
 # lifetime. macOS has no system flock command; Python's flock uses the same
 # kernel lock. Exec preserves both the PID and the inheritable descriptor.
@@ -1228,6 +1234,7 @@ run_leg scripts/check-film-absent.sh
 run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks
+run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 fi
@@ -1239,6 +1246,7 @@ run_leg .build/debug/ContinuumRevivedAgentUIChecks
 # blocks so a forbidden import or declared dependency is red before it is ever
 # used. Fast and pure: no app bundle, no display, no provider process.
 run_leg .build/debug/ContinuumRevivedAgentContentChecks
+run_leg .build/debug/ContinuumRevivedAgentContentChecks --parser-identity-prefix-check
 run_leg .build/debug/ContinuumRevivedSyncChecks
 # Ticket 86 (D4-R1): relay hub core — auth/scope, lossless catch-up, I5 gate.
 run_leg .build/debug/ContinuumRevivedRelayChecks
@@ -1432,6 +1440,9 @@ run_app_check .build/debug/Array --agent-tile-reference-check
 # that direct `mouseDown` calls skipped while all four regressed in 0.7.31.
 run_app_check .build/debug/Array --canvas-pointer-path-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
+# The compact status row skips an identical apply and repaints any change it
+# shows: presentation, last prompt, background jobs or a quarter-point width.
+run_app_check .build/debug/Array --compact-status-row-skip-check
 # Offline seed replay shares the live acceptance tile fixture, without CLI usage.
 run_app_check .build/debug/Array --live-compaction-replay-check
 run_app_check .build/debug/Array --agent-account-usage-check
@@ -1510,6 +1521,7 @@ run_app_check .build/debug/Array --leader-modal-recovery-check
 run_app_check .build/debug/Array --palette-agent-harness-check
 run_app_check .build/debug/Array --reveal-in-finder-check
 run_app_check .build/debug/Array --spawn-arrange-commit-check
+run_app_check .build/debug/Array --spawn-sizing-check
 run_app_check .build/debug/Array --tile-insert-slide-check
 run_app_check .build/debug/Array --tile-multiselect-check
 run_app_check .build/debug/Array --settle-closes-tile-check
@@ -1550,6 +1562,12 @@ run_app_check .build/debug/Array --stranded-tile-recovery-check
 # Confidence pass S2: the layout commit skipped tiles it could place in no file
 # and still reported success. It now fails, the move rolls back, and it says so.
 run_app_check .build/debug/Array --layout-commit-truth-check
+# A drag or tidy commit reads and writes only the projects it touched, flat in
+# the workspace's project count (.plans/auto-layout-night).
+run_app_check .build/debug/Array --layout-commit-scope-check
+# A tidy that grows a zone pushes its neighbours clear as rigid bodies; a shrink
+# pulls nothing in; Tidy Canvas over a 2x3 grid fills and is a fixed point.
+run_app_check .build/debug/Array --tidy-zone-neighbours-check
 # Confidence pass S2: a refused or failed spawn left its web view running and
 # its tile drawn with nothing on disk. It now takes back what it made.
 run_app_check .build/debug/Array --refused-spawn-teardown-check
@@ -1593,6 +1611,11 @@ run_app_check .build/debug/Array --zone-close-keep-delete-check
 run_app_check .build/debug/Array --zone-chrome-zorder-check
 run_app_check .build/debug/Array --zone-resize-check
 run_app_check .build/debug/Array --jelly-auto-layout-check
+# Everyday drags in a tidied mixed zone stay legal (unequal swaps trade row
+# positions), and the jelly trajectory probe, now with a tidied mixed zone, finds
+# no ORTHO/FLIP/TELEPORT/STUCK frame and no overlapping drop (.plans/auto-layout-night).
+run_app_check .build/debug/Array --drag-in-tidy-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
 run_app_check .build/debug/Array --auto-layout-fanout-app-check
 run_app_check .build/debug/Array --zone-adaptive-bounds-check
 run_app_check .build/debug/Array --agent-status-check
@@ -2138,6 +2161,9 @@ run_app_check .build/debug/Array --agent-local-file-link-check
 # of Markdown built 12,000 TextKit stacks, 1.39 GB resident, and the process died.
 # Preview is budgeted and says where it stopped, and a relayout re-measures nothing.
 run_app_check .build/debug/Array --file-markdown-perf-check
+# A paired mouse flips macOS to legacy scrollers mid-run. The scroller must not
+# take width from the text, or every Markdown tile re-measures on the main thread.
+run_app_check .build/debug/Array --file-markdown-scroller-check
 # Standing performance budgets (docs/internals/performance-budgets.md). The pan
 # leg gates: a camera pan must cost no bounds write, no tile-model write and no
 # text re-measurement, over a canvas of large Markdown tiles. The zoom leg is
@@ -2178,6 +2204,11 @@ run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 # which is our own per-tile-per-step call, not the camera mechanism. KNOWN-RED
 # against that product target until the chrome floor stops moving every step.
 run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
+# A zoom step moves the device-pixel grid, and AppKit retiled every scroll view
+# to re-snap its clip view to it: 128 code-block retiles per step in the motion
+# workload's four visible Markdown tiles, each reflowing its document. They wait
+# for the settle now. Off-screen window, production camera driver entry.
+run_app_check .build/debug/Array --canvas-zoom-step-cost-check
 # The Slice 2 contract (.plans/22): N input events inside one display interval
 # cause a bounded number of camera commits and preserve the final desired
 # viewport. The control condition drives 6 direct setViewport calls and must
@@ -2186,6 +2217,7 @@ run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 # clock frozen and must land at most 2 (leading-edge apply + one coalesced
 # flush). Before CanvasCameraDriver, the driven condition measured 6.
 run_app_check .build/debug/Array --canvas-camera-coalesce-check
+run_app_check .build/debug/Array --canvas-native-pacing-check
 # The pinch glide's mechanics, on deterministic time: a flick above the engage
 # threshold glides and terminates on its own; a deliberate stop stays dead; a
 # new pinch or an EXTERNAL viewport write (navigation snap, pointer drag)
@@ -2309,6 +2341,8 @@ run_app_check .build/debug/Array --browser-click-recency-check
 run_app_check .build/debug/Array --language-server-release-check
 run_app_check .build/debug/Array --zone-tier-transition-check
 run_app_check .build/debug/Array --spawn-placement-check
+run_app_check .build/debug/Array --spawn-framing-check
+run_app_check .build/debug/Array --spawn-live-framing-check
 run_app_check .build/debug/Array --focus-mode-check
 run_app_check .build/debug/Array --spawn-rate-limit-check
 run_app_check .build/debug/Array --file-tree-boot-persistence-check

@@ -90,6 +90,7 @@ check --canvas-background-render-check
 check --canvas-background-settings-check
 check --canvas-camera-coalesce-check
 check --canvas-camera-hit-oracle-check
+check --canvas-native-pacing-check
 check --canvas-persistence-model-check
 check --canvas-pointer-path-check
 check --canvas-save-receipt-check
@@ -97,6 +98,7 @@ check --canvas-unreadable-check
 check --canvas-visibility-index-check
 check --canvas-zoom-invalidation-probe-check
 check --canvas-zoom-momentum-check
+check --canvas-zoom-step-cost-check
 check --character-perf-check
 check --character-settings-check
 check --character-size-check
@@ -116,6 +118,7 @@ check --collaboration-full-access-check
 check --collaboration-native-check
 check --collaboration-usage-telemetry-check
 check --command-center-check
+check --compact-status-row-skip-check
 check --companion-agent-destination-check
 check --companion-command-check
 check --companion-sync-health-check
@@ -133,6 +136,7 @@ check --corner-style-check
 check --cross-project-agents-check
 check --diff-review-off-main-check
 check --diff-tile-check
+check --drag-in-tidy-check
 check --drag-magnetize-check
 check --duckherd-theme-check
 check --editor-navigation-check
@@ -148,6 +152,7 @@ check --file-image-check
 check --file-initial-load-check
 check --file-markdown-perf-check
 check --file-markdown-preview-check
+check --file-markdown-scroller-check
 check --file-open-active-context-check
 check --file-tree-boot-persistence-check
 check --file-tree-hardening-check
@@ -183,6 +188,7 @@ check --ios-preview-tile-check
 check --jelly-auto-layout-check
 check --keybind-edit-check
 check --language-server-release-check
+check --layout-commit-scope-check
 check --layout-commit-truth-check
 check --lead-character-check
 check --leader-activation-check
@@ -219,6 +225,7 @@ check --palette-duplicate-root-check
 check --palette-first-responder-restore-check
 check --palette-jump-check
 check --palette-zone-check
+check --parser-identity-prefix-check
 check --perf-budget-camera-slope-check
 check --perf-budget-check
 check --perf-budget-geometry-hold-probe-check
@@ -296,8 +303,11 @@ check --sidebar-workspace-treatment-check
 check --single-zone-compat-check
 check --spawn-arrange-commit-check
 check --spawn-focus-policy-check
+check --spawn-framing-check
+check --spawn-live-framing-check
 check --spawn-placement-check
 check --spawn-rate-limit-check
+check --spawn-sizing-check
 check --stranded-tile-recovery-check
 check --stray-window-audit-check
 check --streaming-ingest-check
@@ -320,6 +330,7 @@ check --terminal-tmux-persistence-check
 check --terminal-tmux-unresponsive-check
 check --throbber-timeline-check
 check --ticket-queue-tile-check
+check --tidy-zone-neighbours-check
 check --tile-action-check
 check --tile-character-check
 check --tile-chrome-canvas-check
@@ -353,6 +364,7 @@ check --ui-test-support-check
 check --ui-tour-check
 check --unified-model-boot-check
 check --update-channel-check
+check --uuid-string-order-check
 check --viewport-sanitize-check
 check --web-link-open-check
 check --window-chrome-check
@@ -538,6 +550,7 @@ leg run_app_check .build/debug/Array --canvas-background-render-check
 leg run_app_check .build/debug/Array --canvas-background-settings-check
 leg run_app_check .build/debug/Array --canvas-camera-coalesce-check
 leg run_app_check .build/debug/Array --canvas-camera-hit-oracle-check
+leg run_app_check .build/debug/Array --canvas-native-pacing-check
 leg run_app_check .build/debug/Array --canvas-persistence-model-check
 leg run_app_check .build/debug/Array --canvas-pointer-path-check
 leg run_app_check .build/debug/Array --canvas-save-receipt-check
@@ -545,6 +558,7 @@ leg run_app_check .build/debug/Array --canvas-unreadable-check
 leg run_app_check .build/debug/Array --canvas-visibility-index-check
 leg run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 leg run_app_check .build/debug/Array --canvas-zoom-momentum-check
+leg run_app_check .build/debug/Array --canvas-zoom-step-cost-check
 leg run_app_check .build/debug/Array --character-perf-check
 leg run_app_check .build/debug/Array --character-settings-check
 leg run_app_check .build/debug/Array --character-size-check
@@ -559,6 +573,7 @@ leg run_app_check .build/debug/Array --cli-update-settings-check
 leg run_app_check .build/debug/Array --collaboration-cursor-motion-check
 leg run_app_check .build/debug/Array --collaboration-full-access-check
 leg run_app_check .build/debug/Array --collaboration-native-check
+leg run_app_check .build/debug/Array --compact-status-row-skip-check
 leg run_app_check .build/debug/Array --companion-command-check
 leg run_app_check .build/debug/Array --companion-sync-health-check
 leg run_app_check .build/debug/Array --companion-task-host-check
@@ -573,6 +588,7 @@ leg run_app_check .build/debug/Array --corner-style-check
 leg run_app_check .build/debug/Array --cross-project-agents-check
 leg run_app_check .build/debug/Array --diff-review-off-main-check
 leg run_app_check .build/debug/Array --diff-tile-check
+leg run_app_check .build/debug/Array --drag-in-tidy-check
 leg run_app_check .build/debug/Array --drag-magnetize-check
 leg run_app_check .build/debug/Array --duckherd-theme-check
 leg run_app_check .build/debug/Array --editor-navigation-check
@@ -588,6 +604,7 @@ leg run_app_check .build/debug/Array --file-image-check
 leg run_app_check .build/debug/Array --file-initial-load-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check
 leg run_app_check .build/debug/Array --file-markdown-preview-check
+leg run_app_check .build/debug/Array --file-markdown-scroller-check
 leg run_app_check .build/debug/Array --file-open-active-context-check
 leg run_app_check .build/debug/Array --file-tree-boot-persistence-check
 leg run_app_check .build/debug/Array --file-tree-hardening-check
@@ -622,6 +639,7 @@ leg run_app_check .build/debug/Array --ios-preview-tile-check
 leg run_app_check .build/debug/Array --jelly-auto-layout-check
 leg run_app_check .build/debug/Array --keybind-edit-check
 leg run_app_check .build/debug/Array --language-server-release-check
+leg run_app_check .build/debug/Array --layout-commit-scope-check
 leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --lead-character-check
 leg run_app_check .build/debug/Array --leader-activation-check
@@ -731,8 +749,11 @@ leg run_app_check .build/debug/Array --sidebar-workspace-treatment-check
 leg run_app_check .build/debug/Array --single-zone-compat-check
 leg run_app_check .build/debug/Array --spawn-arrange-commit-check
 leg run_app_check .build/debug/Array --spawn-focus-policy-check
+leg run_app_check .build/debug/Array --spawn-framing-check
+leg run_app_check .build/debug/Array --spawn-live-framing-check
 leg run_app_check .build/debug/Array --spawn-placement-check
 leg run_app_check .build/debug/Array --spawn-rate-limit-check
+leg run_app_check .build/debug/Array --spawn-sizing-check
 leg run_app_check .build/debug/Array --stranded-tile-recovery-check
 leg run_app_check .build/debug/Array --stray-window-audit-check
 leg run_app_check .build/debug/Array --streaming-ingest-check
@@ -755,6 +776,7 @@ leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
 leg run_app_check .build/debug/Array --terminal-tmux-unresponsive-check
 leg run_app_check .build/debug/Array --throbber-timeline-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
+leg run_app_check .build/debug/Array --tidy-zone-neighbours-check
 leg run_app_check .build/debug/Array --tile-action-check
 leg run_app_check .build/debug/Array --tile-character-check
 leg run_app_check .build/debug/Array --tile-chrome-canvas-check
@@ -864,6 +886,7 @@ leg run_app_check .build/debug/Array --zone-tile-hydration-check
 leg run_app_check .build/debug/Array --zone-unacquired-project-check
 leg run_ios_build
 leg run_leg .build/debug/ContinuumRevivedAgentContentChecks
+leg run_leg .build/debug/ContinuumRevivedAgentContentChecks --parser-identity-prefix-check
 leg run_leg .build/debug/ContinuumRevivedAgentUIChecks
 leg run_leg .build/debug/ContinuumRevivedCollaborationChecks
 leg run_leg .build/debug/ContinuumRevivedCollaborationChecks --live-tile-only
@@ -884,12 +907,14 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-teleme
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --command-center-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-agent-destination-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-board-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
@@ -941,14 +966,15 @@ bundle-check --app-support-channel-check
 bundle-check --delete-confirm-policy-defaults-check
 bundle-check --file-tree-boot-persistence-check
 bundle-check --menu-contract-check
+bundle-check --packaged-resources-check
 bundle-check --palette-duplicate-root-check
 bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
-count ContinuumRevivedAgentContentChecks 23
+count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 203
+count ContinuumRevivedCoreChecks 205
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

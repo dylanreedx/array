@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Pin the selected Xcode SDK before the Python lock shim can inject a CLT SDK.
+# Preserve an explicit caller override across the lock re-exec.
+if [[ -z "${SDKROOT+x}" ]]; then
+  export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+fi
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 ORIGINAL_ARGS=("$@")
 CONFIGURATION=release
