@@ -786,7 +786,7 @@ enum SidebarScreenshotChecks {
             // The PRODUCTION proposal (T3 since the confidence pass) is the one the
             // shipped list must measure as.
             let expectedCard = SidebarDensityProposal.production.cardHeight
-            let expectedPitch = AgentInbox96CellView.rowHeight(for: .production) + Space.s
+            let expectedPitch = AgentInbox96CellView.rowHeight(for: .production) + AgentInboxView.rowSpacing
                 + (SidebarDensityProposal.production.isTwoLine
                     ? AgentInbox96CellView.ownershipTrailingGap(for: .none)
                     : AgentInbox96CellView.trailingGap(for: .none))
@@ -1273,7 +1273,7 @@ struct SidebarDensityProposal: Sendable {
     static let locked = SidebarDensityProposal(
         id: "locked", title: "50 pt card / 54 pt pitch — ownership, two lines",
         insetV: 8, bandTop: 0, gapTop: 0, bandTitle: 18, gapBottom: 0, bandDetail: 16,
-        gapBetweenRows: 4,
+        gapBetweenRows: 2,
         rationale: "Plan 106: the project moves under the title; subagents live in the card.")
 
     /// The ownership layout: no band above the title.

@@ -259,8 +259,8 @@ final class ChoiceListView: NSView, TokenThemed, AgentPageZoomScalable {
     }
 
     private var reservesLeadingSlot: Bool {
-        if presentation == .menu { return items.contains { $0.icon != nil } }
-        return ![.commands, .slashCommands].contains(presentation) || items.contains { $0.icon != nil }
+        if presentation == .menu { return items.contains { $0.icon != nil || $0.swatch != nil } }
+        return ![.commands, .slashCommands].contains(presentation) || items.contains { $0.icon != nil || $0.swatch != nil }
     }
 
     override func layout() {
@@ -723,6 +723,10 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
             [swatchDot, attentionDot, trailingLabel].forEach(addSubview)
             accessoryButtons.forEach(addSubview)
         }
+        if presentation != .checklist {
+            swatchDot.isHidden = item.swatch == nil
+            addSubview(swatchDot)
+        }
         setAccessibilityRole(presentation == .menu ? .menuItem : .row)
         setAccessibilityElement(true)
         setAccessibilityLabel([item.title, item.detail, item.trailing].compactMap { $0 }.joined(separator: ", "))
@@ -789,6 +793,12 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
 
     override func layout() {
         super.layout()
+        defer {
+            if presentation != .checklist {
+                swatchDot.frame = leadingImageView.frame.insetBy(dx: 3, dy: 3)
+                if item.swatch != nil { leadingImageView.isHidden = true }
+            }
+        }
         let glyphSide = CGFloat(pageZoom.scaled(14))
         let leadingX = CGFloat(pageZoom.scaled(presentation == .menu ? 26 : 8))
         leadingImageView.frame = NSRect(
@@ -872,6 +882,12 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
         if item.enabled { onHover?(item.id) }
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        // Decorative labels and images belong to the row's click target.
+        return hit is ChoiceAccessoryButton ? hit : self
+    }
+
     override func mouseDown(with event: NSEvent) {
         guard item.enabled else { return }
         if event.modifierFlags.contains(.option), let only = item.optionAccessoryID {
@@ -931,6 +947,7 @@ private final class ChoiceRowView: NSControl, TokenThemed, AgentPageZoomScalable
             layer?.backgroundColor = nil
         }
         layer?.borderWidth = 0
+        swatchDot.colour = item.swatch
         leadingImageView.isHidden = presentation.showsSelectionCheckmark ? (item.icon == nil && !selected) : item.icon == nil
         if presentation == .checklist { applyChecklistTokens(theme: theme) }
         if presentation == .menu {

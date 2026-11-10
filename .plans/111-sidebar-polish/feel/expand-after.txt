@@ -1,0 +1,15 @@
+FINAL toggleCollapse ms=8.776068687438965
+FINAL toggleCollapse ms=3.3910274505615234
+FINAL toggleFanout ms=3.6829710006713867
+FINAL toggleFanout ms=6.225943565368652
+FINAL toggleFanout ms=14.734983444213867
+FINAL toggleCollapse ms=6.823062896728516
+FINAL toggleCollapse ms=2.945065498352051
+FINAL toggleFanout ms=3.370046615600586
+FINAL toggleFanout ms=4.049062728881836
+FINAL toggleFanout ms=13.169050216674805
+SidebarFoldExpandChecks passed:
+dark fold expansion: "40 more, all done" lights and presses like a subagent row; clicking its words opens 43 rows in the visible rows' style and order (3 rows built, 16 on screen); "Show less" holds through a refresh; a folded subagent failing rebuilds nothing (1 built); a new live subagent keeps the read row still (31 built, 30 on screen of 61); its finish rebuilds 0; a folded subagent reveals on click; Show less folds back under the pointer
+dark shelves: clicking the words "Snoozed (1)" opens its shelf, "History (40)" shows 10 closed agents, and "Show 25 more (30 hidden)" pages 10 → 35
+light fold expansion: "40 more, all done" lights and presses like a subagent row; clicking its words opens 43 rows in the visible rows' style and order (3 rows built, 16 on screen); "Show less" holds through a refresh; a folded subagent failing rebuilds nothing (1 built); a new live subagent keeps the read row still (31 built, 30 on screen of 61); its finish rebuilds 0; a folded subagent reveals on click; Show less folds back under the pointer
+light shelves: clicking the words "Snoozed (1)" opens its shelf, "History (40)" shows 10 closed agents, and "Show 25 more (30 hidden)" pages 10 → 35

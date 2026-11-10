@@ -352,6 +352,8 @@ struct SettingsFieldRow: View {
             SettingsModelPickerRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == AppTheme.defaultsKey:
             NeutralThemePickerRow(model: model, row: row)
+        case let .choice(key, _, _, _, _) where key == SidebarActiveIndicatorStyle.defaultsKey:
+            SidebarActiveIndicatorSettingsRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == CornerStyle.defaultsKey:
             PickerRow(row: row, model: model, segmented: true)
         case let .choice(key, _, _, _, _) where key == "array.updateChannel":

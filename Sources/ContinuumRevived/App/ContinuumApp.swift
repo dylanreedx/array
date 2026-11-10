@@ -828,7 +828,8 @@ enum ContinuumApp {
             return
         }
         if (ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_PREVIEW"] == "1"
-            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"),
+            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"
+            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar"),
            Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier,
            !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) {
             SidebarRefinementsPreview.run()
@@ -1481,6 +1482,19 @@ enum ContinuumApp {
                     Foundation.exit(0)
                 } catch {
                     fputs("sidebar-workspace-treatment check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
+        if CommandLine.arguments.contains("--sidebar-row-presentation-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await SidebarRowPresentationChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("sidebar-row-presentation check failed: \(error)\n", stderr)
                     Foundation.exit(1)
                 }
             }
@@ -4454,6 +4468,17 @@ enum ContinuumApp {
 
         // Program 96/P0.2: the offscreen screenshot set + density proposals. Async
         // because it drives the corpus, whose events hop `DispatchQueue.main.async`.
+        if CommandLine.arguments.contains("--sidebar-indicator-settings-check") {
+            _ = NSApplication.shared
+            do {
+                try SidebarIndicatorSettingsChecks.run()
+                print("SidebarIndicatorSettingsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: sidebar-indicator-settings: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-screenshot-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -15233,7 +15258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         // Groups start folded, and each parent's fold is kept as it was left
         // (launch polish, item Q).
-        sidebar.agentInbox.foldsUntouchedGroups = true
+        sidebar.agentInbox.foldsUntouchedGroups = false
         sidebar.agentInbox.restoreParentFolds(WorkspaceSidebarConfig.parentFolds(defaults: settingsDefaults))
         sidebar.agentInbox.onParentFoldChange = { [weak self] folds in
             guard let self else { return }
