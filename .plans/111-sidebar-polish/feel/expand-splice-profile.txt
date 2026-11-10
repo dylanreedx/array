@@ -1,0 +1,75 @@
+STAGE applyFoldIncrementally model 0.37598609924316406
+STAGE applyFoldIncrementally splice 0.05602836608886719
+STAGE applyFoldIncrementally collect 44.01397705078125
+STAGE applyFoldIncrementally diff 0.1119375228881836
+STAGE applyFoldIncrementally reload 1.9860267639160156
+STAGE applyFoldIncrementally finish 0.0940561294555664
+LEAD total=48.25699329376221
+STAGE applyFoldIncrementally model 0.3960132598876953
+STAGE applyFoldIncrementally splice 0.016927719116210938
+STAGE applyFoldIncrementally collect 0.15592575073242188
+STAGE applyFoldIncrementally diff 0.13899803161621094
+STAGE applyFoldIncrementally reload 1.1310577392578125
+STAGE applyFoldIncrementally finish 0.102996826171875
+LEAD total=3.2410621643066406
+STAGE applyScopeIncrementally model 0.3490447998046875
+STAGE applyScopeIncrementally splice 0.01800060272216797
+STAGE applyScopeIncrementally collect 0.07700920104980469
+STAGE applyScopeIncrementally diff 0.05805492401123047
+STAGE applyScopeIncrementally reload 0.4850625991821289
+STAGE applyScopeIncrementally finish 0.0699758529663086
+FANOUT closing=true prep=0.030040740966796875 display=1.1349916458129883 render=1.0739564895629883 tail=0.9950399398803711
+STAGE applyScopeIncrementally model 0.4730224609375
+STAGE applyScopeIncrementally splice 0.029087066650390625
+STAGE applyScopeIncrementally collect 3.303050994873047
+STAGE applyScopeIncrementally diff 0.21409988403320312
+STAGE applyScopeIncrementally reload 0.030994415283203125
+STAGE applyScopeIncrementally finish 0.11909008026123047
+FANOUT closing=false prep=0.007033348083496094 display=1.4458894729614258 render=4.209041595458984 tail=0.0010728836059570312
+STAGE applyScopeIncrementally model 0.3209114074707031
+STAGE applyScopeIncrementally splice 0.1710653305053711
+STAGE applyScopeIncrementally collect 37.557005882263184
+STAGE applyScopeIncrementally diff 0.08499622344970703
+STAGE applyScopeIncrementally reload 0.030040740966796875
+STAGE applyScopeIncrementally finish 0.11301040649414062
+FANOUT closing=true prep=0.04100799560546875 display=1.3070106506347656 render=38.35701942443848 tail=3.350973129272461
+STAGE applyFoldIncrementally model 0.3039836883544922
+STAGE applyFoldIncrementally splice 0.029087066650390625
+STAGE applyFoldIncrementally collect 16.172051429748535
+STAGE applyFoldIncrementally diff 0.07593631744384766
+STAGE applyFoldIncrementally reload 1.3829469680786133
+STAGE applyFoldIncrementally finish 0.10204315185546875
+LEAD total=19.389986991882324
+STAGE applyFoldIncrementally model 0.4099607467651367
+STAGE applyFoldIncrementally splice 0.01704692840576172
+STAGE applyFoldIncrementally collect 0.18095970153808594
+STAGE applyFoldIncrementally diff 0.1360177993774414
+STAGE applyFoldIncrementally reload 1.2100934982299805
+STAGE applyFoldIncrementally finish 0.1010894775390625
+LEAD total=3.4160614013671875
+STAGE applyScopeIncrementally model 0.4000663757324219
+STAGE applyScopeIncrementally splice 0.028967857360839844
+STAGE applyScopeIncrementally collect 0.14901161193847656
+STAGE applyScopeIncrementally diff 0.0820159912109375
+STAGE applyScopeIncrementally reload 0.7429122924804688
+STAGE applyScopeIncrementally finish 0.09202957153320312
+FANOUT closing=true prep=0.030040740966796875 display=1.345992088317871 render=1.5200376510620117 tail=1.0639429092407227
+STAGE applyScopeIncrementally model 0.6289482116699219
+STAGE applyScopeIncrementally splice 0.048995018005371094
+STAGE applyScopeIncrementally collect 3.1239986419677734
+STAGE applyScopeIncrementally diff 0.26404857635498047
+STAGE applyScopeIncrementally reload 0.03600120544433594
+STAGE applyScopeIncrementally finish 0.23102760314941406
+FANOUT closing=false prep=0.007033348083496094 display=1.461029052734375 render=4.391908645629883 tail=0.0010728836059570312
+STAGE applyScopeIncrementally model 0.2930164337158203
+STAGE applyScopeIncrementally splice 0.18799304962158203
+STAGE applyScopeIncrementally collect 35.37797927856445
+STAGE applyScopeIncrementally diff 0.08296966552734375
+STAGE applyScopeIncrementally reload 0.028014183044433594
+STAGE applyScopeIncrementally finish 0.10895729064941406
+FANOUT closing=true prep=0.03790855407714844 display=1.255035400390625 render=36.149024963378906 tail=2.719998359680176
+SidebarFoldExpandChecks passed:
+dark fold expansion: "40 more, all done" lights and presses like a subagent row; clicking its words opens 43 rows in the visible rows' style and order (2 rows built, 16 on screen); "Show less" holds through a refresh; a folded subagent failing rebuilds nothing (1 built); a new live subagent keeps the read row still (31 built, 30 on screen of 61); its finish rebuilds 0; a folded subagent reveals on click; Show less folds back under the pointer
+dark shelves: clicking the words "Snoozed (1)" opens its shelf, "History (40)" shows 10 closed agents, and "Show 25 more (30 hidden)" pages 10 → 35
+light fold expansion: "40 more, all done" lights and presses like a subagent row; clicking its words opens 43 rows in the visible rows' style and order (2 rows built, 16 on screen); "Show less" holds through a refresh; a folded subagent failing rebuilds nothing (1 built); a new live subagent keeps the read row still (31 built, 30 on screen of 61); its finish rebuilds 0; a folded subagent reveals on click; Show less folds back under the pointer
+light shelves: clicking the words "Snoozed (1)" opens its shelf, "History (40)" shows 10 closed agents, and "Show 25 more (30 hidden)" pages 10 → 35

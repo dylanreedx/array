@@ -828,7 +828,8 @@ enum ContinuumApp {
             return
         }
         if (ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_PREVIEW"] == "1"
-            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"),
+            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar-preview"
+            || Bundle.main.bundleIdentifier == "dev.arrayapp.macos.sidebar"),
            Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier,
            !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) {
             SidebarRefinementsPreview.run()
@@ -1481,6 +1482,19 @@ enum ContinuumApp {
                     Foundation.exit(0)
                 } catch {
                     fputs("sidebar-workspace-treatment check failed: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
+        if CommandLine.arguments.contains("--sidebar-row-presentation-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await SidebarRowPresentationChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("sidebar-row-presentation check failed: \(error)\n", stderr)
                     Foundation.exit(1)
                 }
             }
@@ -4454,6 +4468,17 @@ enum ContinuumApp {
 
         // Program 96/P0.2: the offscreen screenshot set + density proposals. Async
         // because it drives the corpus, whose events hop `DispatchQueue.main.async`.
+        if CommandLine.arguments.contains("--sidebar-indicator-settings-check") {
+            _ = NSApplication.shared
+            do {
+                try SidebarIndicatorSettingsChecks.run()
+                print("SidebarIndicatorSettingsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: sidebar-indicator-settings: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-screenshot-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -15231,9 +15256,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self else { return }
             WorkspaceSidebarConfig.setShelfExpanded(shelf, expanded, defaults: self.settingsDefaults)
         }
-        // Groups start folded, and each parent's fold is kept as it was left
-        // (launch polish, item Q).
-        sidebar.agentInbox.foldsUntouchedGroups = true
+        // Untouched groups start open, and each parent's fold is kept as it
+        // was left (launch polish, item Q; default-open since ec5405ee).
+        sidebar.agentInbox.foldsUntouchedGroups = false
         sidebar.agentInbox.restoreParentFolds(WorkspaceSidebarConfig.parentFolds(defaults: settingsDefaults))
         sidebar.agentInbox.onParentFoldChange = { [weak self] folds in
             guard let self else { return }
@@ -40748,11 +40773,11 @@ extension AppDelegate {
     app.configureWorkspaceSidebar(sidebar)
     app.refreshAgentSurfaces(notify: false)
     sidebar.inboxForQA.layoutForQA()
-    // This section is about scope membership, so open the headless agent's
-    // group the way a person does; the child is a row of 'Default' either way.
-    try expect(sidebar.inboxForQA.collapsedParentsForQA.contains(headlessId.rawValue)
-               && sidebar.inboxForQA.clickDisclosureForQA(id: headlessId.rawValue),
-               "item Q: the shipped sidebar must start the headless agent's group folded, and open it on a click")
+    // The shipped sidebar opens an untouched group (ec5405ee; saved folds win,
+    // asserted in --inbox-parent-fold-check), so the child is drawn already.
+    try expect(!sidebar.inboxForQA.collapsedParentsForQA.contains(headlessId.rawValue)
+               && sidebar.inboxForQA.rowIdsForQA.contains(childId.rawValue),
+               "the shipped sidebar must start the headless agent's untouched group open, its child drawn")
     sidebar.inboxForQA.layoutForQA()
     try expect(sidebar.inboxForQA.selectedScopeTitleForQA == "Default",
                "the persisted scope must be restored onto the real sidebar — got '\(sidebar.inboxForQA.selectedScopeTitleForQA)'")
@@ -43199,14 +43224,13 @@ extension AppDelegate {
     try expect(advancePartial.selectedRowIdsForQA == [advance3.id, advance4.id],
                "one target left unfiled leaves the cursor on the pair — got \(advancePartial.selectedRowIdsForQA)")
 
-    // J10 · THE ROUTE IS NAVIGATION TOO — and it is the SELECTION rule that catches it.
-    // The packet validates the current selection/route at completion; cross-review asked
-    // whether a route change with an unmoved cursor could slip past. MEASURED HERE: the
-    // route only moves through `openAgentId`, whose `didSet` re-renders the list, and a
-    // render empties the table's selection — so leaving for another agent's tile
-    // mid-action drops the cursor, the selection no longer matches at completion, and
-    // the advance is refused. Both halves are asserted so this stays true if either
-    // moves.
+    // J10 · THE ROUTE IS NAVIGATION TOO. The packet validates the current
+    // selection/route at completion; cross-review asked whether a route change with an
+    // unmoved cursor could slip past. It now can reach completion with the cursor
+    // unmoved: a focus change repaints in place and keeps the selection (sidebar
+    // polish), so the route is compared on its own. Both halves are asserted: the
+    // cursor really is kept (else this would only re-test the selection rule), and
+    // the advance is still refused.
     let advanceRoute = makeAdvanceView(rows: advanceFixture)
     try expect(advanceRoute.selectRowForQA(id: advance4.id), "the last row must be selectable")
     var cursorAfterRouteChange: [UUID] = []
@@ -43217,10 +43241,10 @@ extension AppDelegate {
     }
     try settleFromMenu(advanceRoute, advance4)
     advanceRoute.layoutForQA()
-    try expect(cursorAfterRouteChange.isEmpty,
-               "going to another agent's tile re-renders the list and drops the cursor — got \(cursorAfterRouteChange)")
-    try expect(advanceRoute.selectedRowIdsForQA.isEmpty,
-               "…so the completion finds a selection that is not the one it armed on and lands nowhere — got \(advanceRoute.selectedRowIdsForQA)")
+    try expect(cursorAfterRouteChange == [advance4.id],
+               "going to another agent's tile keeps the cursor where it was — got \(cursorAfterRouteChange)")
+    try expect(!advanceRoute.isAdvanceArmedForQA,
+               "…and the completion, finding the route moved, drops the advance rather than holding it")
     try expect(advanceRoute.selectedRowIdsForQA != [advance3.id],
                "…and specifically not on J2's landing, which is where the person did not ask to be")
 
@@ -44665,6 +44689,9 @@ extension AppDelegate {
         app.refreshAgentSurfaces(notify: false)
         sidebar.layoutSubtreeIfNeeded()
         let inbox = sidebar.inboxForQA
+        // This scenario exercises hidden helpers; untouched groups now start open.
+        inbox.restoreParentFolds([parent.rawValue: false])
+        sidebar.layoutSubtreeIfNeeded()
         try expect(inbox.pushedRowForQA(id: children[0].rawValue) != nil,
                    "fixture: the headless child must be a pushed row")
         try expect(inbox.onScreenCardForQA(id: parent.rawValue) != nil,

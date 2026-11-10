@@ -53,6 +53,21 @@ enum UIProbeAppearance {
     /// probes).
     private static let sentinel = NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1).cgColor
 
+    /// Optional chrome must be reached through its real chord and settle gates.
+    private static func makeInboxOptionalChrome() -> NSView {
+        let now = LabFixtures.inboxNow
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+        view.clock = { now }
+        view.onRowAction = { _, _ in }
+        view.wiredRowActions = [.settle]
+        view.setJumpHintsVisible(true)
+        let rows = AgentInbox96Fixtures.rows(now: now).filter {
+            AgentInbox96CellView.isSettleCandidate($0, now: now)
+        }
+        view.reload(rows: Array(rows.prefix(1)))
+        return view
+    }
+
     private static func makeIOSPreviewTile() -> NSView {
         let tile = Tile(id: UUID(), kind: .iosPreview, title: "iOS Preview",
                         frame: TileFrame(x: 0, y: 0, width: 440, height: 700),
@@ -390,6 +405,9 @@ enum UIProbeAppearance {
             // relying on the sidebar surface above, because an EMPTY list owns no
             // row views — `AgentInboxRowView` would be a declared conformer this
             // sweep never renders, which `declaredConformers()` is right to reject.
+            ("appearance.inboxOptionalChrome", NSSize(width: 320, height: 180), {
+                makeInboxOptionalChrome()
+            }),
             ("appearance.agentInbox", NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight), {
                 LabCatalog.makeAgentInboxPreview(selecting: LabFixtures.inboxAgentIds[1])
             }),
@@ -1872,6 +1890,8 @@ enum UIProbeAppearance {
             tile.layoutSubtreeIfNeeded()
         }
         return collaboration + [
+            AdoptedSurface(id: "inboxOptionalChrome", size: NSSize(width: 320, height: 180),
+                           make: { makeInboxOptionalChrome() }),
             AdoptedSurface(id: "editorNavigator", size: NSSize(width: 260, height: 400), make: {
                 FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
             }),

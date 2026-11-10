@@ -118,9 +118,10 @@ enum SidebarOwnershipChecks {
                       rows fixture: [AgentInboxRow]? = nil, folds: [UUID: Bool]? = nil,
                       clock: @escaping () -> Date = { now },
                       record: @escaping (InboxRowAction, [UUID]) -> Void) -> (AgentInboxView, NSWindow) {
-        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height),
+                                   indicatorDefaults: ClassicSidebarDefaultsForChecks.make())
         inbox.clock = clock
-        inbox.foldsUntouchedGroups = true
+        inbox.foldsUntouchedGroups = false
         inbox.prefersReducedMotion = { false }
         inbox.onRevealRow = { _ in }
         inbox.hoverCardEnabled = false
@@ -135,7 +136,7 @@ enum SidebarOwnershipChecks {
         inbox.currentWorkspaceId = workspaceId
         inbox.currentWorkspaceName = "personal"
         inbox.setScope(.all)
-        inbox.restoreParentFolds(folds ?? [uuid(quality): true, uuid(verify): true, uuid(quality + 1): true])
+        inbox.restoreParentFolds(folds ?? [uuid(quality): true, uuid(verify): true, uuid(quality + 1): true, uuid(collab): false])
         inbox.reload(rows: fixture ?? rows())
         inbox.layoutForQA()
         inbox.scrollToTopForQA()

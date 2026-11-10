@@ -1,0 +1,48 @@
+{
+  "baseline": "4ef367ba production fold sources; final witness unchanged",
+  "records": 17280,
+  "frames": 3072,
+  "requestedHz": 120,
+  "medianSampleHz": 93.4,
+  "originDeparturesByStyle": {
+    "current": 29,
+    "gradient": 29,
+    "sheen": 30,
+    "duplex": 31
+  },
+  "firstOriginExamples": [
+    {
+      "style": "current",
+      "phase": "unfolding-stable",
+      "frame": "7",
+      "time": "2052325.3876653754",
+      "id": "EC354040-E995-412C-9FF4-0AA2ED197BFA",
+      "slotY": "536.0",
+      "presentationY": "2.5",
+      "height": "18.0",
+      "animations": ""
+    },
+    {
+      "style": "current",
+      "phase": "unfolding-stable",
+      "frame": "8",
+      "time": "2052325.398364667",
+      "id": "EC354040-E995-412C-9FF4-0AA2ED197BFA",
+      "slotY": "536.0",
+      "presentationY": "2.5",
+      "height": "18.0",
+      "animations": ""
+    },
+    {
+      "style": "current",
+      "phase": "unfolding-stable",
+      "frame": "9",
+      "time": "2052325.4077287505",
+      "id": "EC354040-E995-412C-9FF4-0AA2ED197BFA",
+      "slotY": "536.0",
+      "presentationY": "2.5",
+      "height": "18.0",
+      "animations": ""
+    }
+  ]
+}

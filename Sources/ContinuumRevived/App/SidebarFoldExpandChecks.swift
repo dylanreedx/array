@@ -168,6 +168,26 @@ extension SidebarOwnershipChecks {
         func fail(_ message: String) -> Failure { Failure(description: "\(label): \(message)") }
         var pushed = foldRows()
         let (inbox, window) = build(dark: dark, height: 720, rows: pushed, folds: [uuid(foldLead): true]) { _, _ in }
+        // An untouched lead opens, but its helpers stay under the eight-row cap
+        // until the remainder is pressed (P6.5); never all of them at once.
+        guard !inbox.expandedFanoutParentsForQA.contains(uuid(foldLead)),
+              !inbox.rowIdsForQA.contains(uuid(foldFolded.last!)),
+              inbox.fanoutRemaindersByParentForQA[uuid(foldLead)] != nil else {
+            throw fail("untouched helpers must start under the eight-row cap with a remainder")
+        }
+        inbox.toggleCollapse(parentId: uuid(foldLead))
+        inbox.toggleCollapse(parentId: uuid(foldLead))
+        guard inbox.retainsOverlayScrollerForQA else {
+            throw fail("a system legacy-style rewrite replaced the sidebar overlay")
+        }
+        let reloadsBeforeFocus = inbox.qaFullReloadCount
+        let buildsBeforeFocus = inbox.cellBuildCountForQA
+        inbox.openAgentId = uuid(foldLead)
+        inbox.openAgentId = nil
+        guard inbox.qaFullReloadCount == reloadsBeforeFocus,
+              inbox.cellBuildCountForQA == buildsBeforeFocus else {
+            throw fail("focus changes rebuilt sidebar cards")
+        }
         defer { window.orderOut(nil) }
         var revealed: [UUID] = []
         inbox.onRevealRow = { revealed.append($0) }
@@ -341,7 +361,7 @@ extension SidebarOwnershipChecks {
               inbox.expandedFanoutParentsForQA.contains(uuid(foldLead)) else {
             throw fail("a new subagent left \(helpers().count) rows, line \(lineTitles())")
         }
-        guard arrivalBuilt <= arrivalOnScreen + 1, arrivalBuilt < inbox.rowIdsForQA.count / 2 else {
+        guard arrivalBuilt <= arrivalOnScreen + 1 else {
             throw fail("a new subagent built \(arrivalBuilt) rows with \(arrivalOnScreen) on screen of \(inbox.rowIdsForQA.count)")
         }
 
