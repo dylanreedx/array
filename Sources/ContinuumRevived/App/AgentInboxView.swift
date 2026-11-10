@@ -819,7 +819,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// presentation state: it changes how many children are inline, never the
     /// underlying rows or any resource bookkeeping.
     private var expandedFanoutParents: Set<UUID> = []
-    private var knownFanoutParents: Set<UUID> = []
     /// The current deferred groups, derived from the full sorted row list. The
     /// remainder cell is a non-agent affordance, so it never enters `rows`,
     /// selection, jump indexes or lifecycle actions.
@@ -2465,8 +2464,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         parentsWithChildren = InboxSort.parentIds(in: sorted)
         ownershipAskByLead = Self.asksByLead(in: sorted)
         var fullRollups = InboxSort.rollups(in: sorted)
-        expandedFanoutParents.formUnion(parentsWithChildren.subtracting(knownFanoutParents))
-        knownFanoutParents.formUnion(parentsWithChildren)
         let bounded = InboxSort.boundedForInbox(
             rows: sorted, expandedParents: expandedFanoutParents, now: clock())
         fanoutRemaindersByParent = bounded.remainderByParent

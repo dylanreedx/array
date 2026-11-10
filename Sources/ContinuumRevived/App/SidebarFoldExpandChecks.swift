@@ -168,13 +168,15 @@ extension SidebarOwnershipChecks {
         func fail(_ message: String) -> Failure { Failure(description: "\(label): \(message)") }
         var pushed = foldRows()
         let (inbox, window) = build(dark: dark, height: 720, rows: pushed, folds: [uuid(foldLead): true]) { _, _ in }
-        guard inbox.expandedFanoutParentsForQA.contains(uuid(foldLead)),
-              inbox.rowIdsForQA.contains(uuid(foldFolded.last!)) else {
-            throw fail("untouched helpers must start expanded")
+        // An untouched lead opens, but its helpers stay under the eight-row cap
+        // until the remainder is pressed (P6.5); never all of them at once.
+        guard !inbox.expandedFanoutParentsForQA.contains(uuid(foldLead)),
+              !inbox.rowIdsForQA.contains(uuid(foldFolded.last!)),
+              inbox.fanoutRemaindersByParentForQA[uuid(foldLead)] != nil else {
+            throw fail("untouched helpers must start under the eight-row cap with a remainder")
         }
         inbox.toggleCollapse(parentId: uuid(foldLead))
         inbox.toggleCollapse(parentId: uuid(foldLead))
-        inbox.toggleFanout(parentId: uuid(foldLead))
         guard inbox.retainsOverlayScrollerForQA else {
             throw fail("a system legacy-style rewrite replaced the sidebar overlay")
         }
