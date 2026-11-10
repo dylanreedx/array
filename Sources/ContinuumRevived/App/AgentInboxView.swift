@@ -4034,16 +4034,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let index = rowIndex(forTableRow: row) else { return nil }
         cellBuildCountForQA += 1
         let interacting = isInteracting(row: row)
-        let reuseID = NSUserInterfaceItemIdentifier("inbox-\(model.id)-\(model.variant)")
+        let reuseID = NSUserInterfaceItemIdentifier(Self.accessibilityIdentifier(for: model))
         // A newly visible helper can use a cached helper that just left the
         // displayed model. Never lend a card still named by a displayed row.
         if updatingFold, model.depth > 0, recentCells[reuseID.rawValue as NSString] == nil {
             let displayed = Set(rows.map(\.id))
             if let spare = recentCellModels.first(where: { id, previous in
                 previous.depth > 0 && previous.variant == model.variant && !displayed.contains(id)
-                    && recentCells["inbox-\(id)-\(previous.variant)" as NSString] != nil
+                    && recentCells[Self.accessibilityIdentifier(for: previous) as NSString].map { spare in
+                        !crossfadingCells.values.contains { $0 === spare }
+                    } == true
             }) {
-                let spareKey = "inbox-\(spare.key)-\(spare.value.variant)" as NSString
+                let spareKey = Self.accessibilityIdentifier(for: spare.value) as NSString
                 recentCells[reuseID.rawValue as NSString] = recentCells.removeValue(forKey: spareKey)
                 recentCellOrder.removeAll { $0 == spareKey }
                 recentCellOrder.append(reuseID.rawValue as NSString)
@@ -4052,7 +4054,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         var reusesRecentCell = false
         let cell: AgentInboxRowCell
-        if let cached = recentCells[reuseID.rawValue as NSString] as? AgentInboxRowCell {
+        // A cached view that is fading out as a crossfade ghost is not free: lending
+        // it back would put it in this row, and retiring the ghost would then take
+        // the live row with it (card → slim → card leaves an empty slot).
+        if let cached = recentCells[reuseID.rawValue as NSString] as? AgentInboxRowCell,
+           !crossfadingCells.values.contains(where: { $0 === cached }) {
             cell = cached
             reusesRecentCell = true
         } else {
@@ -4062,6 +4068,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             }
             let key = reuseID.rawValue as NSString
             recentCells[key] = cell
+            recentCellOrder.removeAll { $0 == key }
             recentCellOrder.append(key)
             if recentCellOrder.count > 128 {
                 recentCells.removeValue(forKey: recentCellOrder.removeFirst())
