@@ -645,6 +645,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private let scopeButton: ChoiceButton
+    private let headerPattern = SidebarHeaderPatternView()
     private let searchField: NSTextField
     /// The leading magnifier, drawn only when a header override asks for field
     /// chrome. An `NSImageView` rather than another `TokenThemed` view: its tint
@@ -1507,6 +1508,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scopeButton.setAccessibilityHelp("Opens the agent scope choices")
 
         addSubview(scopeButton)
+        addSubview(headerPattern, positioned: .below, relativeTo: nil)
         addSubview(searchField)
         newAgentButton.translatesAutoresizingMaskIntoConstraints = false
         newAgentButton.target = self
@@ -1624,11 +1626,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
-        // T3 nightly's one row: [search ………][scope][+]. The scope control sizes
-        // to its title and search takes the rest, down to the room its glyph and a
-        // one-word placeholder need; only below that does the scope label yield.
-        // Capping the scope instead (104pt, or 30% of the sidebar) ellipsized
-        // "This workspace" beside a search field that was mostly empty.
+        // Search and compose lead, with the scope and sort controls below.
         let searchFloor = searchField.widthAnchor.constraint(
             greaterThanOrEqualToConstant: Self.searchFieldFloorWidth)
         // Both stay under `defaultLow`: nothing in this row may outrank the
@@ -1637,31 +1635,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         searchFloor.priority = Self.searchFloorPriority
         oneRowHeaderConstraints = [
             searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
-            searchField.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+            searchField.topAnchor.constraint(equalTo: topAnchor, constant: Space.xs),
             searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            scopeButton.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: Space.s),
-            scopeButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            searchFloor,
-            // .plans/113: the sort button sits in the field's reserved trailing
-            // slot, inset from the edge as far as from the top and bottom, so the
-            // row keeps its three controls and their widths. Typing swaps it for
-            // the clear button.
-            // The field's trailing anchor is its ALIGNMENT edge, inset from the
-            // painted frame, so that inset is given back.
-            sortButton.trailingAnchor.constraint(
-                equalTo: searchField.trailingAnchor,
-                constant: -((ChoiceButton.controlHeight - Self.sortButtonSide) / 2
-                    - searchField.alignmentRectInsets.right)),
-            sortButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            sortButton.widthAnchor.constraint(equalToConstant: Self.sortButtonSide),
-            sortButton.heightAnchor.constraint(equalToConstant: Self.sortButtonSide),
-            newAgentButton.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.xs),
+            searchField.trailingAnchor.constraint(equalTo: newAgentButton.leadingAnchor, constant: -Space.xs),
             newAgentButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             newAgentButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
             newAgentButton.heightAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
-            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
+            scopeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            scopeButton.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.xs),
+            scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            sortButton.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: Space.m),
+            sortButton.trailingAnchor.constraint(equalTo: scopeButton.leadingAnchor, constant: -Space.xs),
+            sortButton.centerYAnchor.constraint(equalTo: scopeButton.centerYAnchor),
+            sortButton.widthAnchor.constraint(equalToConstant: Self.sortButtonSide),
+            sortButton.heightAnchor.constraint(equalToConstant: Self.sortButtonSide),
+            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.xs),
+            searchFloor,
         ]
         NSLayoutConstraint.activate(defaultHeaderConstraints)
         NSLayoutConstraint.activate([
@@ -1733,6 +1723,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         NotificationCenter.default.addObserver(
             self, selector: #selector(activeIndicatorSettingDidChange),
             name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorStyle.defaultsKey)), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(headerBackgroundDidChange),
+            name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarHeaderBackground.defaultsKey)), object: nil)
         // Plan 110: characters turned on or off, a new set, new motion settings, or a
         // window's visibility. Rare events; each touches the visible cells only.
         NotificationCenter.default.addObserver(
@@ -1741,6 +1733,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         NotificationCenter.default.addObserver(
             self, selector: #selector(agentCharacterVisibilityDidChange),
             name: AgentCharacterController.visibilityDidChangeNotification, object: nil)
+    }
+
+    @objc private func headerBackgroundDidChange() {
+        headerPattern.style = SidebarHeaderBackground.resolve(in: indicatorDefaults)
     }
 
     @objc private func activeIndicatorSettingDidChange() {
@@ -1809,6 +1805,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `AgentInboxCellView.viewDidChangeEffectiveAppearance` for the words, each
     /// on the view that owns the colour.
     func applyTokens() {
+        headerPattern.needsDisplay = true
         for cell in recentCells.values { cell.appearance = effectiveAppearance }
         foldMotion.cancel()
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
@@ -1857,10 +1854,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         updateSortButtonVisibility()
     }
 
-    /// .plans/113: one-row header only, and only while the field is empty — the
-    /// clear button takes the same slot while there is text to clear.
+    /// The compact header keeps sorting available while searching.
     private func updateSortButtonVisibility() {
-        let shown = headerStyleOverride?.oneRow == true && searchField.stringValue.isEmpty
+        let shown = headerStyleOverride?.oneRow == true
         guard sortButton.isHidden == shown else { return }
         sortButton.isHidden = !shown
         if !shown, sortPopover.isPresented { sortPopover.dismiss(); sortButton.isActive = false }
@@ -2059,6 +2055,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         defer { syncElapsedTickTimer() }
         let columnWidthAtLayoutEntry = column.width
         super.layout()
+        headerPattern.frame = NSRect(x: 0, y: scrollView.frame.maxY, width: bounds.width, height: max(0, bounds.height - scrollView.frame.maxY))
+        headerPattern.style = SidebarHeaderBackground.resolve(in: indicatorDefaults)
         fitSearchPlaceholder()
         let viewportHeight = scrollView.contentView.bounds.height
         if lastSpacerViewportHeight != viewportHeight {

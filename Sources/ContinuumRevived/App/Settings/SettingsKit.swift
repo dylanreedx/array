@@ -609,3 +609,35 @@ private struct SidebarActiveIndicatorChoice: NSViewRepresentable {
         button.onSelection = { item in model.write(.string(item.id), to: field) }
     }
 }
+struct SidebarHeaderBackgroundSettingsRow: View {
+    let model: SettingsModel
+    let row: SettingsRow
+
+    var body: some View {
+        let _ = model.revision
+        HStack {
+            SettingsRowLabel(title: row.field.label, help: row.help)
+            Spacer()
+            SidebarHeaderBackgroundChoice(model: model, field: row.field)
+                .frame(width: 180, height: ChoiceButton.controlHeight)
+        }
+    }
+}
+
+private struct SidebarHeaderBackgroundChoice: NSViewRepresentable {
+    let model: SettingsModel
+    let field: SettingsField
+
+    func makeNSView(context: Context) -> ChoiceButton {
+        let button = ChoiceButton(title: SidebarHeaderBackground.fallback.title)
+        button.setAccessibilityLabel("Header background")
+        button.setAccessibilityIdentifier("settings.headerBackground")
+        return button
+    }
+
+    func updateNSView(_ button: ChoiceButton, context: Context) {
+        button.items = SidebarHeaderBackground.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
+        button.selectedID = model.binding(for: field).string
+        button.onSelection = { item in model.write(.string(item.id), to: field) }
+    }
+}

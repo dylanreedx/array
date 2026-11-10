@@ -94,7 +94,7 @@ enum SidebarTruthChecks {
               + "event push opened no file; the default scope was the workspace on screen, "
               + "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
               + "reloaded the sidebar once; settled and closed agents shared ONE folded History "
-              + "heading, most recent first, at the bottom of the list; the header is one row whose New "
+              + "heading, most recent first, at the bottom of the list; the header has two compact rows whose New "
               + "agent button made an agent; hovering it offered Snooze and Settle, and "
               + "Settle settled it")
     }
@@ -786,11 +786,11 @@ enum SidebarTruthChecks {
         guard let newAgent = header.newAgent else {
             throw Failure(message: "the header must carry a New agent button")
         }
-        try expect(abs(header.search.midY - header.scope.midY) <= 2
+        try expect(header.scope.maxY < header.search.minY
                    && abs(header.search.midY - newAgent.midY) <= 2,
-                   "search, scope and New agent share ONE row — mid-Ys \(header.search.midY), \(header.scope.midY), \(newAgent.midY)")
-        try expect(header.search.minX < header.scope.minX && header.scope.maxX <= newAgent.minX,
-                   "in T3's order: search, then scope, then New agent")
+                   "Search and New agent share the first row above scope — mid-Ys \(header.search.midY), \(header.scope.midY), \(newAgent.midY)")
+        try expect(header.search.maxX <= newAgent.minX && abs(header.scope.maxX - newAgent.maxX) <= 3,
+                   "Search leads compose and scope aligns to the trailing edge")
         try expect(newAgent.width == AgentInboxView.headerIconButtonSide
                    && newAgent.height == AgentInboxView.headerIconButtonSide,
                    "New agent is a \(AgentInboxView.headerIconButtonSide)pt square — got \(newAgent.size)")

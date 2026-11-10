@@ -132,9 +132,7 @@ enum SidebarSortChecks {
             throw Failure(description: "VoiceOver cannot reach the sort button")
         }
 
-        // 1b. The header keeps its three controls and their widths: the sort
-        //     button sits inside the search field's trailing slot, and typing
-        //     swaps it for the clear button. At the sidebar's default and minimum.
+        // Search and compose occupy the first row, with persistent filters below.
         for width in [CGFloat(WorkspaceSidebarConfig.defaultWidth), CGFloat(WorkspaceSidebarConfig.minWidth)] {
             let (header, headerWindow) = build(dark: false, width: width, height: 200)
             defer { headerWindow.orderOut(nil) }
@@ -142,16 +140,15 @@ enum SidebarSortChecks {
             let field = header.searchFieldViewForQA.frame
             let scope = header.scopeControlFrameForQA
             let sort = header.sortButtonForQA.frame
-            guard field.width > scope.width, field.maxX <= scope.minX,
-                  !header.sortButtonForQA.isHidden, field.contains(sort),
-                  abs((field.maxX - sort.maxX) - (sort.minY - field.minY)) <= 1,
-                  abs(sort.midY - field.midY) <= 1 else {
+            guard field.width > scope.width, scope.maxY < field.minY,
+                  !header.sortButtonForQA.isHidden, sort.maxX <= scope.minX,
+                  abs(sort.midY - scope.midY) <= 1 else {
                 throw Failure(description: "at \(width)pt the header squeezes: field \(field), scope \(scope), sort \(sort)")
             }
             header.setSearchForQA("alp")
             header.layoutForQA()
-            guard header.sortButtonForQA.isHidden, header.searchClearShownForQA else {
-                throw Failure(description: "at \(width)pt typing left the sort button up or the clear button down")
+            guard !header.sortButtonForQA.isHidden, header.searchClearShownForQA else {
+                throw Failure(description: "at \(width)pt typing hid sort or failed to show clear")
             }
             header.setSearchForQA("")
             header.layoutForQA()
@@ -413,7 +410,7 @@ enum SidebarSortChecks {
               !AgentInbox96CellView.showsWorkingGlyph(idleLead, rollup: ChildRollup(children: 1, working: 0, needsYou: 0, failed: 0)) else {
             throw Failure(description: "the lead's working fact does not follow its helpers")
         }
-        report.append("header: search wider than scope with the sort button inside it at 280 and 220 pt; typing swaps it for clear")
+        report.append("header: search and compose above trailing-aligned sort and scope at 280 and 220 pt; sort remains available while typing")
         report.append("lead glyph: on with a working helper (open and folded) beside the outline, off when it finishes")
 
         // 9. Stills.

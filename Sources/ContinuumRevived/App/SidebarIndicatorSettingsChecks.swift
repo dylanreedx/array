@@ -57,6 +57,24 @@ enum SidebarIndicatorSettingsChecks {
                 button.presentsOffscreenForQA = true
                 return button
             }
+            guard let background = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Header background" }) else {
+                throw Failure(description: "Appearance is missing Header background")
+            }
+            background.presentsOffscreenForQA = true
+            try expect(background.selectedID == "none", "Header background must default to None")
+            for style in SidebarHeaderBackground.allCases {
+                background.scrollToVisible(background.bounds.insetBy(dx: 0, dy: -80))
+                fixture.settle()
+                try click(background)
+                fixture.settle()
+                guard let row = background.qaPresentedList?.rowView(id: style.rawValue) else {
+                    throw Failure(description: "Header background choice missing \(style.title)")
+                }
+                background.qaPresentedPanel?.makeKey()
+                try click(row)
+                fixture.settle()
+                try expect(SidebarHeaderBackground.resolve(in: defaults) == style, "Header background did not persist")
+            }
             let initialButton = try control()
             try expect(initialButton.selectedID == "duplex", "Settings must show Duplex by default")
             let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 360, height: 1000), indicatorDefaults: defaults)

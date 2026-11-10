@@ -63,6 +63,11 @@ public enum SettingsSchema {
                             keywords: ["neutral", "palette", "grey", "gray", "black", "white"]),
             ]),
             SettingsGroup(id: "appearance.sidebar", title: "Sidebar", rows: [
+                SettingsRow(.choice(key: SidebarHeaderBackground.defaultsKey, label: "Header background",
+                                    options: SidebarHeaderBackground.allCases.map(\.rawValue),
+                                    default: SidebarHeaderBackground.fallback.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: SidebarHeaderBackground.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "A subtle static pattern behind the sidebar controls."),
                 SettingsRow(.choice(key: SidebarActiveIndicatorStyle.defaultsKey, label: "Active agent",
                                     options: SidebarActiveIndicatorStyle.allCases.map(\.rawValue),
                                     default: SidebarActiveIndicatorStyle.fallback.rawValue,
