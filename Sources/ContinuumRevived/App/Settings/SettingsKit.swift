@@ -604,7 +604,13 @@ private struct SidebarActiveIndicatorChoice: NSViewRepresentable {
     }
 
     func updateNSView(_ button: ChoiceButton, context: Context) {
-        button.items = SidebarActiveIndicatorStyle.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
+        if field.key == SidebarActiveIndicatorScope.defaultsKey {
+            button.setAccessibilityLabel("Apply active style to")
+            button.setAccessibilityIdentifier("settings.activeAgentScope")
+            button.items = SidebarActiveIndicatorScope.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
+        } else {
+            button.items = SidebarActiveIndicatorStyle.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
+        }
         button.selectedID = model.binding(for: field).string
         button.onSelection = { item in model.write(.string(item.id), to: field) }
     }

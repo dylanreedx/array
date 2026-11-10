@@ -63,6 +63,11 @@ public enum SettingsSchema {
                             keywords: ["neutral", "palette", "grey", "gray", "black", "white"]),
             ]),
             SettingsGroup(id: "appearance.sidebar", title: "Sidebar", rows: [
+                SettingsRow(.choice(key: SidebarActiveIndicatorScope.defaultsKey, label: "Apply active style to",
+                                    options: SidebarActiveIndicatorScope.allCases.map(\.rawValue),
+                                    default: SidebarActiveIndicatorScope.fallback.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorScope.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Highlight the selected agent or every working agent and its lead."),
                 SettingsRow(.choice(key: SidebarActiveIndicatorStyle.defaultsKey, label: "Active agent",
                                     options: SidebarActiveIndicatorStyle.allCases.map(\.rawValue),
                                     default: SidebarActiveIndicatorStyle.fallback.rawValue,

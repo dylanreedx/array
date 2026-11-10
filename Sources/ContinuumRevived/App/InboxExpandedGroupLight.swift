@@ -101,7 +101,7 @@ final class InboxExpandedGroupLight: NSView {
                     b.add(settle, forKey: "group.settle." + key)
                 }
             }
-            let breath = CAKeyframeAnimation(keyPath: "opacity"); breath.values = [0.2,0.85,0.2]; breath.keyTimes = [0,0.5,1]; breath.duration = 6
+            let breath = CAKeyframeAnimation(keyPath: "opacity"); breath.values = [0.2,0.85,0.2]; breath.keyTimes = [0,0.5,1]; breath.duration = 4
             breath.timingFunctions = [.init(name: .easeInEaseOut),.init(name: .easeInEaseOut)]
             animate(breath,on:b,key:"group.focus")
         case "gradient":

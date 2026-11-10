@@ -21,3 +21,14 @@ public enum SidebarActiveIndicatorStyle: String, CaseIterable, Sendable {
         (defaults.object(forKey: defaultsKey) as? String).flatMap(Self.init(rawValue:)) ?? fallback
     }
 }
+
+/// Selected preserves the shipped sidebar's open-agent highlighting.
+public enum SidebarActiveIndicatorScope: String, CaseIterable, Sendable {
+    case selected, working
+    public static let defaultsKey = "continuum.sidebar.activeAgentScope"
+    public static let fallback: Self = .selected
+    public var title: String { self == .selected ? "Selected agent" : "All working agents" }
+    public static func resolve(in defaults: UserDefaults) -> Self {
+        (defaults.string(forKey: defaultsKey)).flatMap(Self.init(rawValue:)) ?? fallback
+    }
+}

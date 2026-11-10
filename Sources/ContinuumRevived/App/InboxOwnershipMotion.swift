@@ -451,7 +451,7 @@ struct InboxOwnershipChrome {
     static let foldX: CGFloat = pad + 7 - InboxSwarmFoldControl.glyphCentreX
     static var laneX: CGFloat { foldX + InboxSwarmFoldControl.glyphCentreX }
     /// A subagent row's height; the table's row spacing makes its pitch 24 pt.
-    static let subagentHeight: CGFloat = 20
+    static let subagentHeight: CGFloat = 18
     /// The room under a card's last subagent, inside the card.
     static let footPad: CGFloat = 6
     /// How far an open lead's row overlaps its first subagent, so the first row

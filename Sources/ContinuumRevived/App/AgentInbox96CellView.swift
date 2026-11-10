@@ -2973,6 +2973,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     func applyInteraction(_ interaction: RowInteraction) {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
+        card.isIndicatorWorking = interaction.isIndicatorWorking
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
         hoverActionsHovered = interaction.isHovered
         setHoverActionsShown(interaction.isHovered)
