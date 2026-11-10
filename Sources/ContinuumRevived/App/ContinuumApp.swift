@@ -43224,14 +43224,13 @@ extension AppDelegate {
     try expect(advancePartial.selectedRowIdsForQA == [advance3.id, advance4.id],
                "one target left unfiled leaves the cursor on the pair — got \(advancePartial.selectedRowIdsForQA)")
 
-    // J10 · THE ROUTE IS NAVIGATION TOO — and it is the SELECTION rule that catches it.
-    // The packet validates the current selection/route at completion; cross-review asked
-    // whether a route change with an unmoved cursor could slip past. MEASURED HERE: the
-    // route only moves through `openAgentId`, whose `didSet` re-renders the list, and a
-    // render empties the table's selection — so leaving for another agent's tile
-    // mid-action drops the cursor, the selection no longer matches at completion, and
-    // the advance is refused. Both halves are asserted so this stays true if either
-    // moves.
+    // J10 · THE ROUTE IS NAVIGATION TOO. The packet validates the current
+    // selection/route at completion; cross-review asked whether a route change with an
+    // unmoved cursor could slip past. It now can reach completion with the cursor
+    // unmoved: a focus change repaints in place and keeps the selection (sidebar
+    // polish), so the route is compared on its own. Both halves are asserted: the
+    // cursor really is kept (else this would only re-test the selection rule), and
+    // the advance is still refused.
     let advanceRoute = makeAdvanceView(rows: advanceFixture)
     try expect(advanceRoute.selectRowForQA(id: advance4.id), "the last row must be selectable")
     var cursorAfterRouteChange: [UUID] = []
@@ -43242,10 +43241,10 @@ extension AppDelegate {
     }
     try settleFromMenu(advanceRoute, advance4)
     advanceRoute.layoutForQA()
-    try expect(cursorAfterRouteChange.isEmpty,
-               "going to another agent's tile re-renders the list and drops the cursor — got \(cursorAfterRouteChange)")
-    try expect(advanceRoute.selectedRowIdsForQA.isEmpty,
-               "…so the completion finds a selection that is not the one it armed on and lands nowhere — got \(advanceRoute.selectedRowIdsForQA)")
+    try expect(cursorAfterRouteChange == [advance4.id],
+               "going to another agent's tile keeps the cursor where it was — got \(cursorAfterRouteChange)")
+    try expect(!advanceRoute.isAdvanceArmedForQA,
+               "…and the completion, finding the route moved, drops the advance rather than holding it")
     try expect(advanceRoute.selectedRowIdsForQA != [advance3.id],
                "…and specifically not on J2's landing, which is where the person did not ask to be")
 

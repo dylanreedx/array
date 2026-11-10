@@ -1316,8 +1316,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     refreshVisibleOwnership()
                 }
                 applyHoverInPlace(tableRows: [oldValue, openAgentId].compactMap { $0 }.compactMap(tableRow(forAgentId:)))
+                // The nudge never asks on the open agent, so its target can move too.
+                refreshSettleNudge()
             } else {
-                render(next, animateRows: false)
+                // Membership changed (a closed tile's row leaving as focus clears):
+                // the full push path, so departing rows fade out from their place.
+                reload(rows: allRows)
             }
         }
     }
@@ -5335,6 +5339,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         /// Candidate landings in preference order: the rows AFTER the whole affected
         /// set, nearest first, then the rows before it, nearest first.
         let candidateIds: [UUID]
+        /// The open agent at dispatch. A focus change no longer re-renders the
+        /// list (it repaints in place and keeps the selection), so the route is
+        /// compared on its own at completion.
+        let routeOnArm: UUID?
     }
 
     private var pendingAdvance: PendingAdvance?
@@ -5360,7 +5368,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let first = positions.first, let last = positions.last else { return }
         pendingAdvance = PendingAdvance(
             targets: positions.map { rows[$0] },
-            candidateIds: rows[(last + 1)...].map(\.id) + rows[..<first].map(\.id).reversed())
+            candidateIds: rows[(last + 1)...].map(\.id) + rows[..<first].map(\.id).reversed(),
+            routeOnArm: openAgentId)
     }
 
     /// Land the advance armed at dispatch, on the push that carries the filing.
@@ -5379,14 +5388,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // chose to be and this may not take them anywhere else. That is a decision, not
         // a wait: the advance is dropped rather than left armed for the next push.
         //
-        // THE ROUTE IS COVERED BY THIS SAME LINE, and measured rather than assumed
-        // (cross-review asked for a second check on `openAgentId`): the route only ever
-        // changes through that property, whose `didSet` re-renders the list — and a
-        // render empties the table's selection. So a person who leaves for another
-        // agent's tile mid-action arrives here with a selection that no longer matches,
-        // and is dropped by the guard below. A separate route comparison would be a
-        // second rule nothing could witness.
-        guard selectionOnEntry == pending.targets.map(\.id) else {
+        // THE ROUTE IS ITS OWN COMPARISON (J10 witnesses it). It used to ride on the
+        // selection, because `openAgentId`'s didSet re-rendered the list and a render
+        // empties the selection. A focus change now repaints in place and KEEPS the
+        // selection, so a person who leaves for another agent's tile mid-action would
+        // otherwise be carried to a landing they did not ask for.
+        guard selectionOnEntry == pending.targets.map(\.id),
+              openAgentId == pending.routeOnArm else {
             pendingAdvance = nil
             return
         }
