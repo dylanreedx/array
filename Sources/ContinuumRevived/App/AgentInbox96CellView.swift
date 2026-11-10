@@ -2971,6 +2971,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 
     func applyInteraction(_ interaction: RowInteraction) {
+        card.isPressed = interaction.isPressed
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.isIndicatorWorking = interaction.isIndicatorWorking

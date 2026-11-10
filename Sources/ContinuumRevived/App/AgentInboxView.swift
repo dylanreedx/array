@@ -293,6 +293,8 @@ private final class AgentInboxTableView: NSTableView {
         if event.modifierFlags.contains(.control) {
             contextHandler?.presentContextMenu(for: event)
         } else {
+            contextHandler?.beginRowPress(event)
+            defer { contextHandler?.endRowPress() }
             super.mouseDown(with: event)
         }
     }
@@ -306,13 +308,18 @@ private final class AgentInboxTableView: NSTableView {
         super.addCursorRect(rect, cursor: object)
     }
 
-    // No row cursor. A pointing hand over every whole row is a web idiom;
-    // native sidebars (Finder, Mail, Xcode) keep the arrow, and with the hand
-    // everywhere the row's real buttons gave no distinct feedback.
     override func resetCursorRects() {
         registeredCursorsForQA = []
         super.resetCursorRects()
+        let visible = rows(in: visibleRect)
+        guard visible.length > 0 else { return }
+        for row in visible.location..<min(numberOfRows, visible.location + visible.length) {
+            if contextHandler?.isClickableRow(row) == true {
+                addCursorRect(rect(ofRow: row).intersection(visibleRect), cursor: .pointingHand)
+            }
+        }
     }
+
 }
 
 @MainActor
@@ -4392,6 +4399,33 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }?.id
     }
 
+    private var pressedTableRow: Int?
+    fileprivate func isClickableRow(_ row: Int) -> Bool {
+        guard items.indices.contains(row) else { return false }
+        switch items[row] {
+        case .agent, .fanoutRemainder: return true
+        default: return false
+        }
+    }
+
+    fileprivate func beginRowPress(_ event: NSEvent) {
+        let row = tableView.row(at: tableView.convert(event.locationInWindow, from: nil))
+        guard isClickableRow(row), agentIdForTableRow(row) != nil else { return }
+        pressedTableRow = row
+        if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
+            cell.applyInteraction(interaction(forTableRow: row))
+            CATransaction.flush()
+        }
+    }
+
+    fileprivate func endRowPress() {
+        guard let row = pressedTableRow else { return }
+        pressedTableRow = nil
+        if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
+            cell.applyInteraction(interaction(forTableRow: row))
+        }
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
         // Selection clears recession on the row you moved onto and restores it on
         // the one you left, so exactly those two are redrawn — the emphasis is
@@ -5696,6 +5730,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let id = agentIdForTableRow(row) else { return .none }
         return RowInteraction(
             isHovered: id == hoveredAgentId,
+            isPressed: row == pressedTableRow,
             isRouteActive: id == openAgentId,
             isIndicatorWorking: SidebarActiveIndicatorScope.resolve(in: indicatorDefaults) == .working && items[row].agentRow?.state == .working,
             hasKeyboardFocus: id == keyboardFocusAgentId
@@ -8493,6 +8528,7 @@ final class AgentInboxRemainderView: NSTableCellView {
     /// `ChromeIconButton`'s ladder: held, the row-selected step; under the
     /// pointer, the hover step.
     private func applyInteraction() {
+        fill.isPressed = isPressed
         fill.isSelected = isPressed
         fill.isHovered = isHovered && !isPressed
     }
@@ -8598,6 +8634,7 @@ private final class InboxPressReportingButton: NSButton {
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
         onPressChange?(true)
+        CATransaction.flush()
         defer { onPressChange?(false) }
         super.mouseDown(with: event)
     }
@@ -8719,6 +8756,7 @@ extension AgentInboxRowCell {
 /// row Return will act on.
 struct RowInteraction: Equatable {
     var isHovered = false
+    var isPressed = false
     var isRouteActive = false
     var isIndicatorWorking = false
     var hasKeyboardFocus = false
@@ -9976,6 +10014,13 @@ final class AgentInboxCardView: NSView, TokenThemed {
     /// them because they no longer do: each resolves to a different step of the
     /// ladder, and "selected" and "hovered" and "route-active" have to be
     /// distinguishable from each other, not merely from resting.
+    var isPressed = false {
+        didSet {
+            guard isPressed != oldValue else { return }
+            layer?.removeAnimation(forKey: Self.fillFadeKey)
+            applyFill(fading: false)
+        }
+    }
     var isSelected = false {
         didSet { guard isSelected != oldValue else { return }; applyFill(fading: true) }
     }
@@ -10038,6 +10083,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
     /// RENDERED row and not merely of the token table: pointing at a selected
     /// row lifts it to hover rather than leaving it at the quieter step.
     var surfaceRole: SidebarSurfaceRole {
+        if isPressed { return .selected }
         if isRouteActive || isIndicatorWorking { return .active }
         if isHovered { return .hover }
         if isSelected { return .selected }
@@ -10124,9 +10170,9 @@ final class AgentInboxCardView: NSView, TokenThemed {
             underlay: underlayAlpha)
         applyIndicator()
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
-        layer.backgroundColor = sharesGroupLight ? nil : fill
+        layer.backgroundColor = sharesGroupLight && !isPressed ? nil : fill
         if sharesGroupLight { layer.removeAnimation(forKey: Self.fillFadeKey) }
-        guard !sharesGroupLight, fading, window != nil, presented != fill else { return }
+        guard !isPressed, !sharesGroupLight, fading, window != nil, presented != fill else { return }
         if indicatorStyle != "current",
            indicatorReducesMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             layer.removeAnimation(forKey: Self.fillFadeKey)
@@ -10798,6 +10844,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
     func applyInteraction(_ interaction: RowInteraction) {
+        card.isPressed = interaction.isPressed
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.isIndicatorWorking = interaction.isIndicatorWorking
@@ -11723,6 +11770,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
     func applyInteraction(_ interaction: RowInteraction) {
+        card.isPressed = interaction.isPressed
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.isIndicatorWorking = interaction.isIndicatorWorking

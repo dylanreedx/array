@@ -32,6 +32,7 @@ enum SidebarIndicatorSettingsChecks {
     }
 
     static func run() throws {
+        try SidebarPressFeedbackChecks.run()
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             let suite = "array.sidebar-indicator-check.\(UUID().uuidString)"
             let defaults = QAIsolatedDefaults(isolatedSuiteName: suite)!

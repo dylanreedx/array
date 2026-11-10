@@ -223,7 +223,7 @@ enum SidebarSwarmGlyphChecks {
         fold.resetCursorRects()
         try expect(fold.registeredCursorsForQA.contains { $0.cursor == .pointingHand && $0.rect == fold.bounds },
                    "\(label): the fold control registers no pointing hand over its bounds")
-        try expect(!inbox.rowCursorsForQA().contains(.pointingHand), "\(label): the list registered a pointing hand")
+        try expect(inbox.rowCursorsForQA().contains(.pointingHand), "\(label): the list did not register a pointing hand")
         let title = cell.qaTitleFrameForQA
         let body = cell.hitTest(cell.convert(NSPoint(x: title.midX, y: title.midY), to: cell.superview))
         try expect(body.map { $0 !== fold && !$0.isDescendant(of: fold) } ?? true,
