@@ -83,6 +83,27 @@ GET replay itself never sends a push. Payloads up to 8 MiB can publish, includin
 existing Macs that previously received `payloadTooLarge` above 512 KiB. This is a
 bounded compatibility fix; arbitrary event clients still need cursor-gap recovery.
 
+The no-progress watchdog's lead message is an internal agent message too, so it
+has no path ID: it adds no Mac banner, sound, badge, phone push, widget or Live
+Activity sender. It is recorded here because its flag also heads a helper's
+**SRC-01** wake (`finished: needs you: …`). Its switch, Settings ▸ Agents ▸
+Managed mode ▸ "Tell the lead only when a helper is stuck"
+(`agents.managedMode.stallAlerts`), is off by default.
+- Off (unchanged): one message after 10 minutes without progress, whatever the
+  helper is doing, including during a long build.
+- On, helper waiting on a live child process or an open tool call: quiet. No
+  message, no sidebar needs-you, no wake heading, however long it waits.
+- On, helper stalled (in a turn, 2 minutes without progress, nothing it started
+  running, no tool call open) for 3 minutes: one message naming the state and
+  when it stalled; the flag reads `stalled, no progress for N min`.
+- On, helper blocked on a request: the 10-minute rule, as when off.
+- Every case: one message per episode, re-armed only by the helper's progress;
+  sent on the existing agent-message path (queued behind a running lead turn, a
+  new turn for an idle lead, nothing to a gone lead, withdrawn if the helper is
+  stopped first). The helper is never messaged, stopped or restarted.
+Witnesses: `--helper-liveness-check` (both settings, byte-identical lead stream
+with the switch off) and `--helper-watchdog-check` (off).
+
 Helper completion wakes (0.7.41) are internal agent messages, using the existing
 supervisor send/composer queue. They add no direct Mac banner, sound, badge,
 phone push, widget or Live Activity sender. The per-lead setting that once disabled

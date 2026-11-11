@@ -269,6 +269,9 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: AgentManagedModeConfig.showIndicatorKey, label: "Show Managed indicator", default: true),
                             help: "Shows Managed beside the branch in agent tiles.",
                             keywords: ["managed", "badge", "indicator", "header"]),
+                SettingsRow(.toggle(key: AgentManagedModeConfig.stallAlertsKey, label: "Tell the lead only when a helper is stuck", default: false),
+                            help: "Off: the lead hears after 10 minutes without progress, even during a long build. On: no alert while a helper waits on a build or a tool call; the lead hears once a helper has been stalled for 3 minutes.",
+                            keywords: ["stalled", "stuck", "watchdog", "helper", "alert", "no progress"]),
             ]),
             SettingsGroup(id: "agents.lifecycle", title: "Finished agents", rows: [
                 SettingsRow(.choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Settle finished agents", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption,

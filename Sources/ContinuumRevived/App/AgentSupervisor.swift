@@ -6045,12 +6045,25 @@ final class AgentSupervisor {
     private(set) var helperLiveness: [AgentID: HelperLivenessFact] = [:]
     /// Quiet this long, with no live child, reads as stalled. Classifies only.
     var helperLivenessQuietAfter = HelperLiveness.defaultQuietAfter
+    /// With `AgentManagedModeConfig.stallAlertsKey` on, a lead hears once its
+    /// helper has been stalled this long. Informs only; nothing is stopped.
+    static let defaultHelperStallAlertAfter: TimeInterval = 3 * 60
+    var helperStallAlertAfter = AgentSupervisor.defaultHelperStallAlertAfter
+    private static let stallClock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+    static func stallClockText(_ date: Date) -> String { stallClock.string(from: date) }
 
     /// The one place a helper's liveness is written. A run ledger would append
     /// a transition here, when `state` differs from the stored one.
-    private func recordHelperLiveness(_ id: AgentID, _ state: HelperLiveness, lastProgressAt: Date, liveChildren: Int, now: Date) {
+    private func recordHelperLiveness(_ id: AgentID, _ state: HelperLiveness, lastProgressAt: Date,
+                                      liveChildren: Int, openToolCalls: Int, now: Date) {
         let since = helperLiveness[id].flatMap { $0.state == state ? $0.since : nil } ?? now
-        helperLiveness[id] = HelperLivenessFact(state: state, since: since, lastProgressAt: lastProgressAt, liveChildren: liveChildren)
+        helperLiveness[id] = HelperLivenessFact(state: state, since: since, lastProgressAt: lastProgressAt,
+                                                liveChildren: liveChildren, openToolCalls: openToolCalls)
     }
 
     private func withdrawQueuedHelperAlert(_ id: AgentID) {
@@ -6072,8 +6085,9 @@ final class AgentSupervisor {
         let now = helperWatchdogNow()
         helperProgress[id] = HelperProgress(at: now, last: last, status: presenceRowStatus(for: id))
         pendingHelperAlerts[id] = nil
-        if let fact = helperLiveness[id], fact.state == .stalled || fact.state == .waitingOnChild {
-            recordHelperLiveness(id, .working, lastProgressAt: now, liveChildren: fact.liveChildren, now: now)
+        if let fact = helperLiveness[id], fact.state == .stalled || fact.state.isWaiting {
+            recordHelperLiveness(id, .working, lastProgressAt: now, liveChildren: fact.liveChildren,
+                                 openToolCalls: fact.openToolCalls, now: now)
         }
         if records[id]?.helperWatchdogNeedsYou != nil {
             records[id]?.helperWatchdogNeedsYou = nil
@@ -6086,13 +6100,14 @@ final class AgentSupervisor {
     /// injected by the witness; the production timer samples every 30 seconds.
     func sweepHelperWatchdog() async {
         let now = helperWatchdogNow()
+        let stallAlerts = AgentManagedModeConfig.stallAlerts(defaults: managedModeDefaults)
         for id in Array(records.keys) {
             // Delegated or messaged: a stuck helper alerts whoever waits on it.
             guard let record = records[id], let parent = record.parentAgentID ?? helperMessageSubscriptions[id]?.first?.parent else { continue }
             let status = presenceRowStatus(for: id)
             guard status == .working || status == .needsAttention else {
                 recordHelperLiveness(id, .finished, lastProgressAt: helperProgress[id]?.at ?? helperLiveness[id]?.lastProgressAt ?? now,
-                                     liveChildren: processTracker?.jobs(for: id).count ?? 0, now: now)
+                                     liveChildren: processTracker?.jobs(for: id).count ?? 0, openToolCalls: 0, now: now)
                 helperProgress[id] = nil
                 pendingHelperAlerts[id] = nil
                 if records[id]?.helperWatchdogNeedsYou != nil {
@@ -6106,24 +6121,44 @@ final class AgentSupervisor {
                 noteHelperProgress(id, last: status == .needsAttention ? "needs you" : "working")
             }
             if let at = helperProgress[id]?.at {
-                // The tracker's last published list: no process inspection here.
+                // The tracker's last published list and the runner's open tool
+                // items: no process inspection here.
                 let children = processTracker?.jobs(for: id).count ?? 0
+                let tools = openToolItems[id]?.count ?? 0
                 recordHelperLiveness(id, HelperLiveness.classify(
                     inTurn: true, blocked: status == .needsAttention, lastProgressAt: at, liveChildren: children,
-                    now: now, quietAfter: helperLivenessQuietAfter), lastProgressAt: at, liveChildren: children, now: now)
+                    openToolCalls: tools, now: now, quietAfter: helperLivenessQuietAfter),
+                    lastProgressAt: at, liveChildren: children, openToolCalls: tools, now: now)
             }
-            guard var progress = helperProgress[id], !progress.escalated,
-                  now.timeIntervalSince(progress.at) >= helperWatchdogThreshold else { continue }
+            guard var progress = helperProgress[id], !progress.escalated else { continue }
+            // Switch off: ten minutes without progress, whatever the helper is
+            // doing. On: never while it waits on a live build or tool call;
+            // once it has been stalled for `helperStallAlertAfter`; otherwise
+            // (blocked on a request) the same ten minutes.
+            let stall = stallAlerts ? helperLiveness[id] : nil
+            let due: Bool
+            switch stall?.state {
+            case .waitingOnChild?, .waitingOnToolCall?: due = false
+            case .stalled?: due = now.timeIntervalSince(stall!.since) >= helperStallAlertAfter
+            default: due = now.timeIntervalSince(progress.at) >= helperWatchdogThreshold
+            }
+            guard due else { continue }
             progress.escalated = true
             helperProgress[id] = progress
             let minutes = max(1, Int(helperWatchdogThreshold / 60))
-            records[id]?.helperWatchdogNeedsYou = "no progress for \(minutes) min"
+            let quietMinutes = max(1, Int(now.timeIntervalSince(progress.at) / 60))
+            let stalled = stall?.state == .stalled ? stall : nil
+            records[id]?.helperWatchdogNeedsYou = stalled == nil ? "no progress for \(minutes) min" : "stalled, no progress for \(quietMinutes) min"
             notifyLeadPlanChanged(id)
             onSelfReportChanged?(id)
             // A gone parent gets no message. The child's sidebar still speaks.
             if records[parent] != nil {
                 let name = String(record.humanDisplayName.split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40))
-                pendingHelperAlerts[id] = (parent, "Helper \(name) has shown no progress for \(minutes) min (last: \(progress.last)). Check it, message it, or stop it.")
+                if let stalled {
+                    pendingHelperAlerts[id] = (parent, "Helper \(name) is stalled since \(Self.stallClockText(stalled.since)): no progress for \(quietMinutes) min, nothing it started is running and no tool call is open (last: \(progress.last)). Check it, message it, or stop it.")
+                } else {
+                    pendingHelperAlerts[id] = (parent, "Helper \(name) has shown no progress for \(minutes) min (last: \(progress.last)). Check it, message it, or stop it.")
+                }
             }
         }
         for (child, alert) in pendingHelperAlerts {
@@ -9719,6 +9754,15 @@ final class AgentSupervisor {
     /// this app having just sent a prompt.
     func qaDeliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
         deliver(event, to: id, now: now)
+    }
+
+    /// One event as the bound runner's own stream delivers it, through the same
+    /// generation-checked path (tool boundaries included). False with no runner.
+    @discardableResult
+    func qaDeliverFromBoundRunner(_ event: AgentRuntimeEvent, to id: AgentID) -> Bool {
+        guard let runner = runners[id], let generation = runnerGenerationTokens[id] else { return false }
+        deliver(event, from: runner, generation: generation, to: id)
+        return true
     }
 
     #if ARRAY_FILM

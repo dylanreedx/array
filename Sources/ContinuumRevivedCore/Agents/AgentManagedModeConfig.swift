@@ -5,6 +5,13 @@ import Foundation
 public enum AgentManagedModeConfig {
     public static let enabledKey = "agents.managedMode.enabled"
     public static let showIndicatorKey = "agents.managedMode.showIndicator"
+    /// Off: a lead hears after ten minutes without progress, as before. On: not
+    /// while its helper waits on a live build or tool call, and once a helper
+    /// has been stalled for a few minutes.
+    public static let stallAlertsKey = "agents.managedMode.stallAlerts"
+    public static func stallAlerts(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: stallAlertsKey) as? Bool ?? false
+    }
     public static func enabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: enabledKey) as? Bool ?? true
     }
