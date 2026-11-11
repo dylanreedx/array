@@ -2419,12 +2419,15 @@ final class CanvasNSView: NSView, TokenThemed {
     /// zones too); dragging a member so its center sits more than the break-out
     /// distance beyond its zone detaches it to bare canvas. Returns true if changed.
     @discardableResult
-    func reevaluateZoneMembership(forMovedTile tileId: UUID, notifyChange: Bool = true) -> Bool {
+    /// `releasedFrame` is where the user let go, in the tile's own frame space,
+    /// when a magnet then snapped the tile elsewhere: only the user's release can
+    /// break a tile out of its zone, never the canvas's own snap.
+    func reevaluateZoneMembership(forMovedTile tileId: UUID, notifyChange: Bool = true, releasedFrame: TileFrame? = nil) -> Bool {
         // Once the flat scene is retired a tile lives in a layer, and the flat
         // snapshot this used to read held only the boot project's launch-time
         // tiles: a layer tile returned false here, so it could never change zone.
         if let layer = tileLayers.first(where: { $0.tiles.contains(where: { $0.id == tileId }) }) {
-            return reevaluateLayerMembership(forMovedTile: tileId, in: layer, notifyChange: notifyChange)
+            return reevaluateLayerMembership(forMovedTile: tileId, in: layer, notifyChange: notifyChange, releasedFrame: releasedFrame)
         }
         guard flatCompatibilitySceneActive,
               let tile = canvasState.tiles.first(where: { $0.id == tileId }) else { return false }
@@ -2492,7 +2495,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// the record to its project's bare layer, stamp cleared. A bare tile
     /// dropped with its centre in a zone of its project is adopted by it. One
     /// dropped in another project's zone stays bare.
-    private func reevaluateLayerMembership(forMovedTile tileId: UUID, in layer: ZoneLayer, notifyChange: Bool) -> Bool {
+    private func reevaluateLayerMembership(forMovedTile tileId: UUID, in layer: ZoneLayer, notifyChange: Bool, releasedFrame: TileFrame? = nil) -> Bool {
         guard let tile = layer.tiles.first(where: { $0.id == tileId }) else { return false }
         let world = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
         let cx = world.x + world.width / 2
@@ -2502,10 +2505,20 @@ final class CanvasNSView: NSView, TokenThemed {
             let f = CanvasEngine.zoneWorldFrame(z)
             return cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height
         }
+        // A latched move (a swap or a slide-in) is a choice of a slot INSIDE the
+        // zone, applied by the settle that follows. Its pointer can still sit past
+        // the edge, e.g. an unequal swap or a slide to a row's end in a tidied
+        // zone, so the drop must never break out to bare.
         if containing == nil, !layer.isBare, layer.placement.projectId != nil,
+           autoLayoutMoveLatch == nil,
            let zone = liveZones.first(where: { $0.zoneId == current }) {
             let f = CanvasEngine.zoneWorldFrame(zone)
-            let outsideBy = max(f.x - cx, cx - (f.x + f.width), f.y - cy, cy - (f.y + f.height))
+            var released = tile
+            if let releasedFrame { released.frame = releasedFrame }
+            let releasedWorld = CanvasEngine.worldFrame(tile: released, in: layer.placement)
+            let rx = releasedWorld.x + releasedWorld.width / 2
+            let ry = releasedWorld.y + releasedWorld.height / 2
+            let outsideBy = max(f.x - rx, rx - (f.x + f.width), f.y - ry, ry - (f.y + f.height))
             guard outsideBy >= ZoneBreakoutConfig.distance(defaults: breakoutDefaults),
                   transferLayerTileToBare(tileId) else { return false }
             if isAutoLayoutEnabled {
