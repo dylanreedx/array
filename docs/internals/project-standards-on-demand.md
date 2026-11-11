@@ -62,6 +62,20 @@ No matching, no excerpt ranking, no model call. Matching is wave 4.
 The catalog entry carries `"advertisedWhen": "projectStandards"`; the tool's
 description is the only always-loaded text added, and only for such checkouts.
 
+Always-loaded words, measured from the catalog:
+
+| | Without standards | With standards |
+|---|---|---|
+| Tools | 36 (unchanged) | 37 |
+| MCP descriptions with guidelines (Claude, Codex) | 5,010 | 5,061 (+51) |
+| Parameter descriptions | 941 | 957 (+16) |
+| Pi snippets and guidelines | 2,855 | 2,868 (+13) |
+| MCP server instructions, injected agent guidance | unchanged | unchanged |
+
+Claude defers MCP tools behind tool search, so up front it sees only the name.
+The one guideline ("Rule text is quoted from this checkout's files.") exists
+because the catalog requires every tool to carry one; it instructs nothing.
+
 ## Observation seam
 
 Each answered call hands a `StandardsRetrieval` (agent, time, standard ids,
@@ -81,6 +95,9 @@ run ledger (part 12) or telemetry (part 14) attaches there when it exists.
   observer record.
 
 ## Not done here
+
+`standards.read` goes through the same dispatch as every operation, so it
+needs a mounted workspace and workspace tools enabled.
 
 Bundled Array agent RFCs (drafts, not on integration), trigger matching and
 diff matching (wave 4), ordering of retrieval against edits, and the paired
