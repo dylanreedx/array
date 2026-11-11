@@ -2338,6 +2338,19 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // `.plans/116` part 16: standards.read and its advertising, through the
+        // production launch configuration of all three harnesses.
+        if CommandLine.arguments.contains("--standards-resolution-check") {
+            do {
+                _ = NSApplication.shared
+                try StandardsResolutionChecks.run()
+                print("ContinuumRevivedStandardsResolutionChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-api-agent-colour-check") {
             do {
                 _ = NSApplication.shared
