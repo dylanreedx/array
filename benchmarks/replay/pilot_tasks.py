@@ -8,7 +8,12 @@ because the real fix commits carry no check the grader can run in isolation
 must show each hidden check failing by assertion on the parent and passing on
 the real fix before a task is written.
 
-usage: pilot_tasks.py REPO OUT_DIR   (writes OUT_DIR/<task>/task.json)"""
+The third task joins the two fixes into one with two independent parts, and
+its request asks the lead to give each part to its own helper: it tests the
+delegation path, not whether a lead chooses to delegate, so it is never paired
+with a solo run.
+
+usage: pilot_tasks.py REPO OUT_DIR [TASK ...]   (writes OUT_DIR/<task>/task.json)"""
 import json
 from pathlib import Path
 import subprocess
@@ -104,24 +109,31 @@ other = {"checks": [], "exceptions": [], "targetedOnly": [{"flag": "--other-chec
 assert unregistered(other), "declaring another flag does not excuse this one"
 '''
 
+DELETED_REQUEST = ("In scripts/gate-prepass.py, the coverage section of the report lists a deleted file twice: "
+                   "once with status D and again as 'old path of D'. A deleted file should be listed once, "
+                   "with its own status. Renamed files should still list both the new path and the old path.")
+TARGETED_REQUEST = ("scripts/gate-prepass.py fails every newly dispatched --*-check flag that no matrix leg and no "
+                    "bundle-harness list runs. Some checks can only be run by hand, for example because they need "
+                    "a real display. Let the coverage manifest (scripts/check-coverage-manifest.json) declare such "
+                    "checks in an optional top-level list `targetedOnly` of objects "
+                    "{\"flag\": \"--some-check\", \"reason\": \"...\"}. A declared flag must not be reported as "
+                    "unregistered (or as uncertain). Validate the list in load_manifest like the rest of the "
+                    "manifest: it must be a list, each entry an object, each flag an exact --*-check flag that is "
+                    "not duplicated, and each reason a non-empty single line. An invalid entry is a manifest "
+                    "problem, reported the same way as the others.")
+
 TASKS = [
     dict(name='prepass-deleted-once', parent='ac055cd22~1', fix='ac055cd22',
          hidden={'checks/hidden_deleted_once.py': DELETED_ONCE},
-         request=("In scripts/gate-prepass.py, the coverage section of the report lists a deleted file twice: "
-                  "once with status D and again as 'old path of D'. A deleted file should be listed once, "
-                  "with its own status. Renamed files should still list both the new path and the old path. "
-                  "Fix it.")),
+         request=DELETED_REQUEST + " Fix it."),
     dict(name='prepass-targeted-only', parent='2f96d775c~1', fix='2f96d775c',
          hidden={'checks/hidden_targeted_only.py': TARGETED},
-         request=("scripts/gate-prepass.py fails every newly dispatched --*-check flag that no matrix leg and no "
-                  "bundle-harness list runs. Some checks can only be run by hand, for example because they need "
-                  "a real display. Let the coverage manifest (scripts/check-coverage-manifest.json) declare such "
-                  "checks in an optional top-level list `targetedOnly` of objects "
-                  "{\"flag\": \"--some-check\", \"reason\": \"...\"}. A declared flag must not be reported as "
-                  "unregistered (or as uncertain). Validate the list in load_manifest like the rest of the "
-                  "manifest: it must be a list, each entry an object, each flag an exact --*-check flag that is "
-                  "not duplicated, and each reason a non-empty single line. An invalid entry is a manifest "
-                  "problem, reported the same way as the others.")),
+         request=TARGETED_REQUEST),
+    dict(name='prepass-two-parts', parent='ac055cd22~1', fix='2f96d775c',
+         hidden={'checks/hidden_deleted_once.py': DELETED_ONCE, 'checks/hidden_targeted_only.py': TARGETED},
+         request=("This task has two independent parts, both in scripts/gate-prepass.py. Give each part to its "
+                  "own helper, one helper per part, and bring both results into this checkout.\n\n"
+                  "Part 1. " + DELETED_REQUEST + "\n\nPart 2. " + TARGETED_REQUEST)),
 ]
 
 
@@ -164,6 +176,8 @@ def build(source_repo, out, spec):
 
 def main(argv):
     for spec in TASKS:
+        if argv[2:] and spec['name'] not in argv[2:]:
+            continue
         print(build(Path(argv[0]), Path(argv[1]), spec))
 
 
