@@ -249,6 +249,23 @@ enum RequestTelemetryChecks {
         let twice = Array(usage(lead).dropFirst(rows.count))
         try expect(twice.count == 1, "a result delivered twice must give one row, got \(twice)")
         try expectRow(twice.first, "same result twice", model: "claude-opus-5-5", source: "cli", counts(2, 10_695, 11_239, 124))
+        // The runner stops at the first result, so the stream above cannot show
+        // the ledger's own guard. Deliver one result's usage twice inside one
+        // turn through the supervisor's event fold.
+        rows = usage(lead)
+        let thread = AgentSupervisor.threadId(for: lead), turn = "twice-\(UUID().uuidString)"
+        var repeated = TokenUsageSnapshot(inputTokens: 21_936, outputTokens: 124, totalCostUsd: nil,
+                                          accountingObservationID: "claude-result|twice|\(UUID().uuidString)")
+        repeated.typedCountsByModel = ["claude-opus-5-5": .init(uncachedInput: 2, cacheRead: 10_695, cacheWrite: 11_239, output: 124)]
+        repeated.accountingTurn = turn
+        b.supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: turn), to: lead)
+        b.supervisor.qaDeliver(.tokenUsageUpdated(threadId: thread, snapshot: repeated), to: lead)
+        b.supervisor.qaDeliver(.tokenUsageUpdated(threadId: thread, snapshot: repeated), to: lead)
+        b.supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: turn, outcome: .completed, errorMessage: nil), to: lead)
+        b.supervisor.runLedger.drain()
+        let delivered = Array(usage(lead).dropFirst(rows.count))
+        try expect(delivered.count == 1, "one result's usage delivered twice must give one row, got \(delivered)")
+        try expectRow(delivered.first, "same usage delivered twice", model: "claude-opus-5-5", source: "cli", counts(2, 10_695, 11_239, 124))
         try privacy(root: root)
         try await timing(b, lead)
     }
