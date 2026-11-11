@@ -95,6 +95,9 @@ public struct CodexAppServerEventTranslator {
     /// `thread.forkedFromId` per thread, so its cumulative totals say what
     /// they inherited (collaboration accounting).
     private var forkedFromByThread: [String: String] = [:]
+    /// Threads this process saw start, so their first cumulative total counts
+    /// from zero; a resumed thread's first total carries its history.
+    private var startedThreads = Set<String>()
     private var recountedCompactionTokensByThread: [String: Int] = [:]
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
@@ -218,6 +221,7 @@ public struct CodexAppServerEventTranslator {
               let id = thread["id"] as? String, !id.isEmpty
         else { return [] }
         if let parent = thread["forkedFromId"] as? String, !parent.isEmpty, parent != id { forkedFromByThread[id] = parent }
+        startedThreads.insert(id)
         // Fire session-ready/running once, on the first thread/started this
         // translator ever sees (the primary thread). A measured caveat: no
         // captured session ever delivered a SECOND thread/started for a child,
@@ -300,6 +304,7 @@ public struct CodexAppServerEventTranslator {
             let label = (item["agentPath"] as? String)
                 .map { URL(fileURLWithPath: $0).lastPathComponent }
                 .flatMap { $0.isEmpty ? nil : $0.replacingOccurrences(of: "_", with: " ") }
+            startedThreads.insert(childThreadID)
             onSubagentAnnouncement?(threadId, childThreadID, itemId, label)
             return []
 
@@ -663,11 +668,19 @@ public struct CodexAppServerEventTranslator {
             let input = Self.intValue(total["inputTokens"])
             let output = Self.intValue(total["outputTokens"])
             if (input ?? 0) + (output ?? 0) > 0 {
-                events.append(.tokenUsageUpdated(
-                    threadId: threadId,
-                    snapshot: TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil,
-                        observedAt: (emittedAtMs as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) },
-                        accountingForkedFrom: forkedFromByThread[threadId])))
+                var snapshot = TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil,
+                    observedAt: (emittedAtMs as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) },
+                    accountingForkedFrom: forkedFromByThread[threadId])
+                // `cachedInputTokens` is a subset of `inputTokens`. Every capture
+                // reports `cacheWriteInputTokens` as 0 while its cached reads
+                // grow, so it is not a measurement: unknown.
+                let cached = Self.intValue(total["cachedInputTokens"])
+                snapshot.typedCounts = .init(
+                    uncachedInput: input.flatMap { input in cached.flatMap { input >= $0 ? input - $0 : nil } },
+                    cacheRead: cached, cacheWrite: nil, output: output)
+                snapshot.accountingSession = threadId
+                snapshot.accountingSessionStarted = startedThreads.contains(threadId)
+                events.append(.tokenUsageUpdated(threadId: threadId, snapshot: snapshot))
             }
         }
         if let last = usage["last"] as? [String: Any],
