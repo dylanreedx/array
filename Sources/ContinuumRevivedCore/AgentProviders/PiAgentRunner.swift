@@ -44,6 +44,12 @@ public final class PiAgentRunner: @unchecked Sendable {
         /// The agent id written into the child environment, so its background
         /// jobs can be traced back to it. nil for runs that belong to no agent.
         public var processOwner: String?
+        /// Host arguments resolved at EACH process launch (never at runner
+        /// construction), on the thread that spawns the process. Given this
+        /// config, returns the full extra-argument list. nil uses `extraArgs`.
+        public var launchArguments: (@Sendable (Config) -> [String])?
+        /// What every spawn passes as its extra arguments.
+        public func resolvedExtraArgs() -> [String] { launchArguments?(self) ?? extraArgs }
 
         /// `model`/`thinking` default from `AgentModelConfig` (Settings ▸ Agents),
         /// so changing the picker changes what the next prompt spawns.
@@ -289,7 +295,7 @@ public final class PiAgentRunner: @unchecked Sendable {
             model: config.model,
             thinking: config.thinking,
             sessionId: config.sessionId,
-            extraArgs: config.extraArgs,
+            extraArgs: config.resolvedExtraArgs(),
             prompt: prompt,
             extensionPaths: config.extensionPaths
         )

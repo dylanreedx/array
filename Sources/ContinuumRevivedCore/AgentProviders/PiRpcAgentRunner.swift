@@ -525,7 +525,7 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
             model: config.model,
             thinking: config.thinking,
             sessionId: config.sessionId,
-            extraArgs: config.extraArgs,
+            extraArgs: config.resolvedExtraArgs(),
             extensionPaths: config.extensionPaths
         )
         do {

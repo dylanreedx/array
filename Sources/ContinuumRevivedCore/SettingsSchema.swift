@@ -227,6 +227,15 @@ public enum SettingsSchema {
                             help: "Looks for newer versions at most once an hour. Updates only run when you click Update.",
                             keywords: ["update", "upgrade", "version", "cli", "npm", "homebrew"]),
             ]),
+            SettingsGroup(id: "agents.personalRules", title: "Personal rules",
+                          footer: "Claude Code agents already read your own Claude instructions, so they are left as they are. Array only reads the file; it never changes it.", rows: [
+                SettingsRow(.toggle(key: PersonalRulesConfig.enabledKey, label: "Give Codex and Pi agents my rules", default: false),
+                            help: "Each time Array starts a Codex or Pi agent, it adds the text of the file below to that agent's instructions.",
+                            keywords: ["rules", "instructions", "preferences", "commit", "codex", "pi", "agents.md", "claude.md"]),
+                SettingsRow(.text(key: PersonalRulesConfig.pathKey, label: "Rules file", default: ""),
+                            help: "The full path to a short text file you keep.",
+                            keywords: ["rules", "instructions", "file", "path"]),
+            ]),
             SettingsGroup(id: "agents.identity", title: "Agent colour", rows: [
                 SettingsRow(.choice(key: AgentIdentityColorConfig.styleKey, label: "Agent colour shows as",
                                     options: AgentIdentityColorStyle.allCases.map(\.rawValue),
