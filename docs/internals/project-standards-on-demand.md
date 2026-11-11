@@ -15,7 +15,7 @@ A file is a standard when its header, the lines between its `# Title` and its
 first `## ` heading, has an `Applies when:` line. Its id is its path under
 `docs/standards/` without `.md` (`project/benches-and-storage`). A file with no
 `Applies when:`, `Status:` or `Layer:` line (a README, an index) is not a
-standard and is skipped. One with `Status:` or `Layer:` but no usable
+standard and is skipped; so is any `README.md`, the conventional index. One with `Status:` or `Layer:` but no usable
 `Applies when:` is reported as an issue.
 
 Rules sit under `## Rules`. A rule starts at a line `N.` or `N.M.` and runs to
