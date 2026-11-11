@@ -36,13 +36,37 @@ at launch, in this fixed order:
 
 1. the user's own Codex `developer_instructions` (Codex only, see below),
 2. instruction text Array already passes in the runner's extra arguments,
-3. each source's block in registration order; duplicate names are dropped.
+3. each source's block in registration order (Array's `reply-rules`, then the
+   user's `personal-rules`); duplicate names are dropped.
 
 Codex gets one `-c developer_instructions=<TOML basic string>` (a repeated key
 replaces the earlier one); every control byte, including DEL, is escaped. Pi gets
 one `--append-system-prompt`. A file with a NUL byte is rejected (it cannot
-travel in argv). Today the only registered source is `personal-rules`; a later
-Array block registers its own source after it.
+travel in argv). `HostLaunchInstructions.production(reply:personal:)` is the one
+place that order is set.
+
+## Array's reply rules
+
+A second block, owned by Array: `ReplyStandard` in Core, the one place its text
+lives (RFC 6's reply rules, compressed). Settings ▸ Agents ▸ Reply rules
+(`agents.replyRules.enabled`, default off), the group just above Personal
+rules; the two switches are independent. The block never enters the user's
+files and the personal text never enters it.
+
+It reaches every Array-run agent: Codex and Pi through the seam above, and
+Claude through `ClaudeAgentRunner.Config.hostInstructions`, resolved at each
+Claude spawn. On Claude it is joined after `WorkspaceMCPConfiguration.agentGuidance`
+in the ONE `--append-system-prompt` value (a second flag replaces the first);
+with workspace tools off it is that flag's only value. Personal rules never
+reach Claude (`HostLaunchInstructionSource.reachesClaude`). With both switches
+off every argv equals the base launch element by element. If the user's own
+Codex setting cannot be read with confidence, that Codex launch gets neither
+block, as before.
+
+`--reply-rules-launch-check` drives the same production path and fake CLIs as
+the personal-rules witness: Claude with and without workspace tools, Codex and
+Pi; solo (first, idle reuse, resumed, compaction), lead, helper and `retryOf`;
+both blocks on; the switch read per launch; both off against the base argv.
 
 ## The user's own Codex setting
 

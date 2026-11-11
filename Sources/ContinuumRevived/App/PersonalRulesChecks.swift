@@ -377,34 +377,43 @@ enum PersonalRulesChecks {
         let bin: URL
         let instructions: HostLaunchInstructions
         let idle: TimeInterval
+        let workspaceMCP: WorkspaceMCPConfiguration?
         var supervisor: AgentSupervisor
 
         static func model(_ harness: AgentHarness) -> String {
             harness == .claudeCode ? "anthropic/claude-haiku-4-5-20251001" : "openai-codex/gpt-5.6-sol"
         }
 
-        init(root base: URL, name: String, instructions: HostLaunchInstructions, idle: TimeInterval = AgentSupervisor.defaultIdleRunnerTimeout) throws {
+        /// `workspaceMCP` turns workspace tools on for Claude agents only.
+        init(root base: URL, name: String, instructions: HostLaunchInstructions, idle: TimeInterval = AgentSupervisor.defaultIdleRunnerTimeout,
+             workspaceMCP: WorkspaceMCPConfiguration? = nil) throws {
             bin = base.appendingPathComponent("bin", isDirectory: true)
             root = base.appendingPathComponent("run-\(name)", isDirectory: true)
             work = root.appendingPathComponent("work", isDirectory: true)
             try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
             self.instructions = instructions
             self.idle = idle
-            supervisor = Self.supervisor(root: root, instructions: instructions, idle: idle)
+            self.workspaceMCP = workspaceMCP
+            supervisor = Self.supervisor(root: root, instructions: instructions, idle: idle, workspaceMCP: workspaceMCP)
         }
 
-        static func supervisor(root: URL, instructions: HostLaunchInstructions, idle: TimeInterval) -> AgentSupervisor {
-            AgentSupervisor(
+        static func supervisor(root: URL, instructions: HostLaunchInstructions, idle: TimeInterval,
+                               workspaceMCP: WorkspaceMCPConfiguration? = nil) -> AgentSupervisor {
+            let supervisor = AgentSupervisor(
                 store: AgentStore(applicationSupportDirectory: root),
                 makeRunner: { AgentSupervisor.productionRunner(for: $0, hostInstructions: instructions) },
                 submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0),
                 idleRunnerTimeout: idle)
+            if let workspaceMCP {
+                supervisor.workspaceMCPConfigurationProvider = { _, harness in harness == .claudeCode ? workspaceMCP : nil }
+            }
+            return supervisor
         }
 
         /// Stops everything and restores the agents into a new supervisor.
         func restart() throws -> AgentSupervisor {
             supervisor.stopAll()
-            supervisor = Self.supervisor(root: root, instructions: instructions, idle: idle)
+            supervisor = Self.supervisor(root: root, instructions: instructions, idle: idle, workspaceMCP: workspaceMCP)
             supervisor.restore()
             return supervisor
         }
