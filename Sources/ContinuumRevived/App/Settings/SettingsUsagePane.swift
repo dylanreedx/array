@@ -20,6 +20,8 @@ final class SettingsUsageModel {
     @ObservationIgnored var ledgerURL: URL?
     var period: UsageReport.Period = .week
     private(set) var phase: Phase = .idle
+    /// Tasks whose breakdown is open.
+    var openTasks: Set<UUID> = []
     /// Rows shown in the task list; "Show more" adds a page.
     var limit = SettingsUsageModel.page
     static let page = 30
@@ -41,6 +43,10 @@ final class SettingsUsageModel {
         active = false
         cancel?.cancel()
         cancel = nil
+    }
+
+    func toggle(_ task: UUID) {
+        if openTasks.remove(task) == nil { openTasks.insert(task) }
     }
 
     func select(_ period: UsageReport.Period) {
@@ -188,7 +194,7 @@ private struct UsageReportSections: View {
             figure("usage.closed", "Tasks closed", UsageWords.count(report.closed))
             if report.closed > 0 {
                 figure("usage.fullyCounted", "Fully counted", "\(UsageWords.count(report.fullyCounted)) of \(UsageWords.count(report.closed))",
-                       help: "Every turn's tokens were recorded, all four kinds known.")
+                       help: "Every turn's tokens were recorded, in every kind its harness reports.")
                 figure("usage.split", "How the work was split",
                        "\(UsageWords.count(report.solo)) solo · \(UsageWords.count(report.oneHelper)) with one helper · \(UsageWords.count(report.twoOrMoreHelpers)) with two or more")
             }
@@ -207,32 +213,42 @@ private struct UsageReportSections: View {
         }
         if report.closed > 0 {
             Section {
-                UsageTokenGrid(report: report, settings: settings)
+                UsageTokenGrid(table: report.tokens, exact: false, id: "usage.tokens", settings: settings)
             } header: {
                 Text("Tokens")
             } footer: {
-                Text("Totals over the \(report.closed) \(report.closed == 1 ? "task" : "tasks") closed in the \(period == "all time" ? "ledger" : period). A task whose count is missing or partial is marked unknown, never counted as zero.")
+                let text = UsageWords.coverage(report)
+                Text(text)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .settingsRenderedText("usage.coverage", text, model: settings)
             }
         }
         Section {
             if report.tasks.isEmpty {
                 let text = "No tasks in the \(period)."
                 InfoRow(text: text).settingsRenderedText("usage.noTasks", text, model: settings)
+            } else {
+                UsageTaskColumns.header
             }
             ForEach(Array(report.tasks.prefix(usage.limit).enumerated()), id: \.element.task) { index, line in
-                UsageTaskRow(line: line, index: index, settings: settings)
+                UsageTaskRow(line: line, index: index, usage: usage, settings: settings)
             }
             if report.tasks.count > usage.limit {
                 HStack {
-                    Text("Newest \(usage.limit) of \(report.tasks.count)").font(.callout).foregroundStyle(.secondary)
+                    Text("Newest \(usage.limit) of \(UsageWords.count(report.tasks.count))").font(.callout).foregroundStyle(.secondary)
                     Spacer()
                     Button("Show more") { usage.limit += SettingsUsageModel.page }
                 }
             }
         } header: {
             Text("Recent tasks")
+        } footer: {
+            if !report.tasks.isEmpty {
+                Text("Click a task to see its tokens by kind, for the lead and the helpers.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -246,55 +262,114 @@ private struct UsageReportSections: View {
     }
 }
 
+/// Lead / Helpers / All by kind, plus Total. Compact on the page, exact in an
+/// opened task. A cell missing part of its count reads "at least"; the reason is
+/// said once, under the table.
 private struct UsageTokenGrid: View {
-    let report: UsageReport
+    let table: UsageReport.Table
+    let exact: Bool
+    let id: String
     let settings: SettingsModel
 
     var body: some View {
-        Grid(alignment: .trailing, horizontalSpacing: 16, verticalSpacing: 8) {
+        Grid(alignment: .trailing, horizontalSpacing: 16, verticalSpacing: exact ? 4 : 8) {
             GridRow {
                 Text("").gridColumnAlignment(.leading)
                 ForEach(["Lead", "Helpers", "All"], id: \.self) { Text($0).font(.callout.weight(.semibold)).foregroundStyle(.secondary) }
             }
             ForEach(UsageReport.TokenType.allCases, id: \.self) { type in
+                if type == .total { Divider().gridCellUnsizedAxes(.horizontal) }
                 GridRow {
-                    Text(type.title).frame(maxWidth: .infinity, alignment: .leading).gridColumnAlignment(.leading)
-                    cell("usage.tokens.\(type.rawValue).lead", report.tokens[.lead]?[type] ?? .init())
-                    cell("usage.tokens.\(type.rawValue).helpers", report.tokens[.helpers]?[type] ?? .init())
-                    cell("usage.tokens.\(type.rawValue).all", report.all[type] ?? .init())
+                    Text(type.title)
+                        .fontWeight(type == .total ? .semibold : .regular)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .gridColumnAlignment(.leading)
+                    ForEach(UsageReport.Column.allCases, id: \.self) { column in
+                        let words = UsageWords.figure(table[column]?[type] ?? .init(), exact: exact)
+                        Text(words)
+                            .monospacedDigit()
+                            .fontWeight(type == .total ? .semibold : .regular)
+                            .frame(minWidth: 96, alignment: .trailing)
+                            .settingsRenderedText("\(id).\(type.rawValue).\(column.rawValue)", words, model: settings)
+                    }
                 }
             }
         }
+        .font(exact ? .callout : .body)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    private func cell(_ id: String, _ figure: UsageReport.Figure) -> some View {
-        let words = UsageWords.figure(figure, of: report.closed)
-        return VStack(alignment: .trailing, spacing: 1) {
-            Text(words.value).monospacedDigit()
-            if let note = words.note {
-                Text(note).font(.caption).foregroundStyle(.secondary)
-            }
+/// Fixed columns so a reader can scan down: when, time to answer, how, tokens, model.
+private enum UsageTaskColumns {
+    static let time: CGFloat = 100
+    static let how: CGFloat = 76
+    static let tokens: CGFloat = 96
+    static let model: CGFloat = 112
+    static let chevron: CGFloat = 14
+
+    static func row<A: View, B: View, C: View, D: View, E: View>(_ when: A, _ time: B, _ how: C, _ tokens: D, _ model: E) -> some View {
+        HStack(spacing: 10) {
+            when.frame(maxWidth: .infinity, alignment: .leading)
+            time.frame(width: Self.time, alignment: .trailing)
+            how.frame(width: Self.how, alignment: .leading)
+            tokens.frame(width: Self.tokens, alignment: .trailing)
+            model.frame(width: Self.model, alignment: .leading)
         }
-        .settingsRenderedText(id, [words.value, words.note].compactMap { $0 }.joined(separator: " · "), model: settings)
+        .lineLimit(1)
+    }
+
+    static var header: some View {
+        row(Text("Closed").padding(.leading, chevron + 6), Text("Time to answer"), Text("Done"), Text("Tokens"), Text("Model"))
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(.secondary)
     }
 }
 
 private struct UsageTaskRow: View {
     let line: UsageReport.TaskLine
     let index: Int
+    let usage: SettingsUsageModel
     let settings: SettingsModel
 
     var body: some View {
-        let lines = UsageWords.task(line)
-        VStack(alignment: .leading, spacing: 3) {
-            Text(lines[0])
-            ForEach(lines.dropFirst(), id: \.self) { text in
-                Text(text).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        let cells = UsageWords.cells(line)
+        let opened = usage.openTasks.contains(line.task)
+        VStack(alignment: .leading, spacing: 8) {
+            Button { usage.toggle(line.task) } label: {
+                UsageTaskColumns.row(
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(opened ? 90 : 0))
+                            .frame(width: UsageTaskColumns.chevron)
+                        Text(cells.when).foregroundStyle(line.state == .closed ? .primary : .secondary)
+                    },
+                    Text(cells.time).monospacedDigit(),
+                    Text(cells.how),
+                    Text(cells.tokens).monospacedDigit(),
+                    Text(cells.model).truncationMode(.middle).foregroundStyle(.secondary))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("ArraySettingsUsageTask.\(index)")
+            .accessibilityAddTraits(opened ? .isSelected : [])
+            .settingsRenderedText("usage.task.\(index)", cells.joined, model: settings)
+            if opened {
+                VStack(alignment: .leading, spacing: 8) {
+                    let detail = UsageWords.detail(line)
+                    Text(detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .settingsRenderedText("usage.task.\(index).detail", detail, model: settings)
+                    UsageTokenGrid(table: line.tokens, exact: true, id: "usage.task.\(index).tokens", settings: settings)
+                }
+                .padding(.leading, UsageTaskColumns.chevron + 6)
+                .padding(.bottom, 4)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .settingsRenderedText("usage.task.\(index)", lines.joined(separator: "\n"), model: settings)
     }
 }
 
@@ -309,11 +384,39 @@ enum UsageWords {
 
     static func count(_ value: Int) -> String { number.string(from: NSNumber(value: value)) ?? "\(value)" }
 
-    /// A total and, when part of it is missing, how many tasks are unknown.
-    static func figure(_ figure: UsageReport.Figure, of tasks: Int) -> (value: String, note: String?) {
-        guard figure.isUnknown else { return (count(figure.known), nil) }
-        if figure.known == 0, figure.unknown >= tasks { return ("unknown", nil) }
-        return (count(figure.known), "+ unknown in \(figure.unknown) of \(tasks)")
+    /// 139, 5.1K, 320K, 5.4M: three figures at most, one decimal below 100.
+    static func compact(_ value: Int) -> String {
+        guard value >= 1_000 else { return "\(value)" }
+        var scaled = Double(value)
+        var units = ["K", "M", "B"][...]
+        var unit = ""
+        while scaled >= 999.95, let next = units.popFirst() { scaled /= 1_000; unit = next }
+        let text = scaled < 99.95 ? String(format: "%.1f", scaled) : String(format: "%.0f", scaled)
+        return (text.hasSuffix(".0") ? String(text.dropLast(2)) : text) + unit
+    }
+
+    /// One cell: a number, "at least" a number, "unknown", or a dash for a kind
+    /// the harness never reports.
+    static func figure(_ figure: UsageReport.Figure, exact: Bool) -> String {
+        if figure.isNotReported { return "—" }
+        let value = exact ? count(figure.known) : compact(figure.known)
+        guard figure.isUnknown else { return value }
+        return figure.known == 0 ? "unknown" : "at least \(value)"
+    }
+
+    /// The one line under the Tokens table.
+    static func coverage(_ report: UsageReport) -> String {
+        var lines: [String] = []
+        if report.missing > 0 {
+            lines.append("\(count(report.missing)) of \(count(report.closed)) tasks are missing part of their count, so totals marked “at least” are lower bounds.")
+        } else {
+            lines.append("Every task closed in this period is fully counted.")
+        }
+        for (harness, kinds) in report.notReportedKinds.sorted(by: { $0.key < $1.key }) where !kinds.isEmpty {
+            let names = kinds.map { "tokens \($0.title.lowercased())" }.joined(separator: " or ")
+            lines.append("— \(harness) does not report \(names); its tasks count fully without them.")
+        }
+        return lines.joined(separator: " ")
     }
 
     static func duration(_ seconds: TimeInterval?) -> String {
@@ -324,44 +427,57 @@ enum UsageWords {
         return "\(minutes / 60) h \(String(format: "%02d", minutes % 60)) min"
     }
 
-    static let when: DateFormatter = {
+    static let time: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        formatter.doesRelativeDateFormatting = true
+        formatter.setLocalizedDateFormatFromTemplate("jmm")
         return formatter
     }()
 
-    static func task(_ line: UsageReport.TaskLine) -> [String] {
-        let state: String
+    static let day: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        return formatter
+    }()
+
+    /// "Today 14:02", "Yesterday 09:10", "Nov 7, 05:14": short enough for its column.
+    static func when(_ date: Date, now: Date = Date()) -> String {
+        let calendar = Calendar.current
+        let day = calendar.isDateInToday(date) ? "Today" : calendar.isDateInYesterday(date) ? "Yesterday" : "\(Self.day.string(from: date)),"
+        return "\(day) \(time.string(from: date))"
+    }
+
+    struct Cells {
+        /// The close time, or "Still open" / "Interrupted": neither has one.
+        var when: String
+        var time: String
+        var how: String
+        var tokens: String
+        var model: String
+        var joined: String { [when, time, how, tokens, model].joined(separator: " | ") }
+    }
+
+    static func cells(_ line: UsageReport.TaskLine) -> Cells {
+        let closed: String
         switch line.state {
-        case .closed: state = "Closed"
-        case .open: state = "Still open, not counted"
-        case .interrupted: state = "Interrupted, not counted"
+        case .closed: closed = line.ended.map { when($0) } ?? "unknown"
+        case .open: closed = "Still open"
+        case .interrupted: closed = "Interrupted"
         }
-        let date = (line.ended ?? line.opened).map { when.string(from: $0) } ?? "unknown time"
-        let helpers = line.helpers == 0 ? "solo" : line.helpers == 1 ? "1 helper" : "\(line.helpers) helpers"
-        var lines = ["\(date) · \(state)",
-                     "Time to answer \(duration(line.timeToAnswer)) · active \(duration(line.activeTime)) · \(helpers)"]
-        for role in UsageReport.Role.allCases where role == .lead || line.helpers > 0 {
-            let figures = UsageReport.TokenType.allCases.map { ($0, line.tokens[role]?[$0] ?? .init()) }
-            let label = role == .lead ? "Lead" : "Helpers"
-            if figures.allSatisfy({ $0.1.isUnknown && $0.1.known == 0 }) {
-                lines.append("\(label): unknown")
-                continue
-            }
-            // Partial in every kind: say it once, after the known part.
-            let everyPartial = figures.allSatisfy { $0.1.isUnknown }
-            let parts = figures.map { type, figure -> String in
-                let value = figure.isUnknown && !everyPartial
-                    ? (figure.known == 0 ? "unknown" : "\(count(figure.known)) + unknown") : count(figure.known)
-                return "\(type.title.lowercased()) \(value)"
-            }
-            lines.append("\(label): " + parts.joined(separator: " · ") + (everyPartial ? ", each plus an unknown part" : ""))
-        }
+        let models = line.models.compactMap(\.model).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        let lead = line.models.first { $0.role == .lead }?.model ?? models.first
+        let model = lead.map { lead in models.count > 1 ? "\(lead) +\(models.count - 1)" : lead } ?? "unknown"
+        return Cells(when: closed,
+                     time: duration(line.timeToAnswer),
+                     how: line.helpers == 0 ? "solo" : line.helpers == 1 ? "1 helper" : "\(line.helpers) helpers",
+                     tokens: figure(line.total, exact: false),
+                     model: model)
+    }
+
+    /// The opened row's first line: active time and every harness and model.
+    static func detail(_ line: UsageReport.TaskLine) -> String {
         let models = line.models.map { "\($0.role == .lead ? "Lead" : "Helper") \($0.harness ?? "unknown harness") (\($0.model ?? "unknown model"))" }
-        lines.append(models.isEmpty ? "Harness and model unknown" : models.joined(separator: " · "))
-        return lines
+        let opened = line.state == .closed ? [] : ["Opened \(line.opened.map { when($0) } ?? "unknown")"]
+        return (opened + ["Active \(duration(line.activeTime))"] + (models.isEmpty ? ["harness and model unknown"] : models)).joined(separator: " · ")
     }
 }
 
