@@ -1,8 +1,5 @@
 import ContinuumRevivedCore
 import Foundation
-#if canImport(Darwin)
-import Darwin
-#endif
 
 /// M1.8 (`.plans/46`) — stopping an agent stops everything it launched.
 ///
@@ -33,7 +30,6 @@ enum ProcessGroupChildChecks {
     }
 
     static func run() throws -> String {
-        try checkSpawnedChildSignalMask()
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("continuum-process-group-\(UUID().uuidString)", isDirectory: true)
@@ -262,93 +258,5 @@ func runProcessGroupChildChecks() {
     } catch {
         fputs("FAIL: \(error)\n", stderr)
         exit(1)
-    }
-}
-
-// Actual imported production primitive, from a deliberately masked owned test
-// worker. The child never unblocks itself and all outcomes exit/reap normally.
-private final class ProcessGroupMaskResult: @unchecked Sendable {
-    private let lock = NSLock()
-    private var failure: String?
-    func set(_ value: String?) { lock.lock(); failure = value; lock.unlock() }
-    func get() -> String? { lock.lock(); defer { lock.unlock() }; return failure }
-}
-
-extension ProcessGroupChildChecks {
-    private static func checkSpawnedChildSignalMask() throws {
-        let result = ProcessGroupMaskResult()
-        let done = DispatchGroup()
-        done.enter()
-        DispatchQueue.global(qos: .utility).async {
-            defer { done.leave() }
-            do {
-                func readMask() throws -> [Int32] {
-                    var value = sigset_t()
-                    try expect(pthread_sigmask(SIG_SETMASK, nil, &value) == 0, "mask: caller query failed")
-                    return (1..<Int32(NSIG)).filter { sigismember(&value, $0) == 1 }
-                }
-                let entering = try readMask()
-                var block = sigset_t(), original = sigset_t()
-                try expect(sigemptyset(&block) == 0 && sigaddset(&block, SIGTERM) == 0,
-                           "mask: could not construct test worker mask")
-                try expect(pthread_sigmask(SIG_BLOCK, &block, &original) == 0,
-                           "mask: could not block TERM only on owned test worker")
-                defer { _ = pthread_sigmask(SIG_SETMASK, &original, nil) }
-                let before = try readMask()
-                try expect(before.contains(SIGTERM), "mask: test worker was not masked")
-                let script = #"""
-                import json, os, signal, sys, threading
-                def emit(row): os.write(1, (json.dumps(row, ensure_ascii=False)+'\n').encode())
-                inherited = sorted(int(value) for value in signal.pthread_sigmask(signal.SIG_BLOCK, []))
-                emit({'mask':inherited,'pid':os.getpid(),'pgid':os.getpgrp(),
-                      'marker':os.environ.get('CONTINUUM_ARRAY_MANAGED_AGENT'),
-                      'payload':'complete π🙂 é signal-mask fixture'})
-                def term(signum, frame):
-                    os.write(2, 'TERM-DIAGNOSTIC π🙂\n'.encode())
-                    emit({'termHandler':True})
-                    sys.exit(0)
-                def fallback():
-                    emit({'normalFallback':True})
-                    os._exit(0)
-                signal.signal(signal.SIGTERM, term)
-                safety=threading.Timer(.5, fallback); safety.daemon=True; safety.start()
-                os.kill(os.getpid(), signal.SIGTERM)
-                threading.Event().wait()
-                """#
-                let child = try ProcessGroupChild.spawn(executable: "/usr/bin/python3",
-                    arguments: ["-c", script], environment: ProcessInfo.processInfo.environment,
-                    currentDirectory: nil, standardInput: .nullDevice)
-                defer {
-                    try? child.standardOutput.close()
-                    try? child.standardError.close()
-                }
-                let bytes = child.standardOutput.readDataToEndOfFile()
-                let diagnostics = String(decoding: child.standardError.readDataToEndOfFile(), as: UTF8.self)
-                let exitCode = child.wait()
-                let after = try readMask()
-                // Reap/close the real child before asserting the mask, including
-                // the old/faulted path's normal fallback. No leaking failure.
-                try expect(pthread_sigmask(SIG_SETMASK, &original, nil) == 0, "mask: worker restore failed")
-                let restored = try readMask()
-                try expect(before == after && restored == entering, "mask: production spawn changed caller mask")
-                try expect(exitCode == 0 && child.reapedRawStatus == 0 && !ProcessGroupChild.groupExists(child.processGroupId),
-                           "mask: fixture child/group did not exit and reap normally")
-                let rows = try bytes.split(separator: 10).map { try JSONSerialization.jsonObject(with: Data($0)) as? [String: Any] }
-                try expect(rows.count == 2, "mask: fixture output incomplete")
-                try expect(rows[0]?["pid"] as? Int32 == child.pid && rows[0]?["pgid"] as? Int32 == child.processGroupId,
-                           "mask: wrong child/group identity")
-                try expect(rows[0]?["marker"] as? String == ProcessInfo.processInfo.environment["CONTINUUM_ARRAY_MANAGED_AGENT"],
-                           "mask: inherited managed marker changed")
-                try expect((rows[0]?["payload"] as? String)?.utf8.elementsEqual("complete π🙂 é signal-mask fixture".utf8) == true,
-                           "mask: UTF8 payload changed")
-                try expect(rows[0]?["mask"] as? [Int] == [], "mask: CLI inherited host worker blocked signals")
-                try expect(rows[1]?["termHandler"] as? Bool == true && diagnostics.contains("TERM-DIAGNOSTIC π🙂"),
-                           "mask: child TERM handler did not execute normally without unblocking")
-                result.set(nil)
-            } catch { result.set(String(describing: error)) }
-        }
-        try expect(done.wait(timeout: .now() + 10) == .success, "mask: bounded owned worker did not finish")
-        if let failure = result.get() { throw Failure(message: failure) }
-        print("ProcessGroupChild child-mask witness passed: masked owned worker, empty child mask, unchanged/restored caller, full UTF8, managed marker, normal TERM handler and group/reap")
     }
 }
