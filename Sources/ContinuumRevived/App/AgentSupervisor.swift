@@ -1044,7 +1044,7 @@ final class AgentSupervisor {
     static let replayCap = 500
 
     private let store: AgentStore
-    let runLedger: ManagedRunLedger
+    private(set) var runLedger: ManagedRunLedger
     var qaRunLedgerRecording = true
     private var wakeupScheduler: AgentWakeupScheduler?
     private var scheduledQueueAdmissions: Set<UUID> = []
@@ -9044,10 +9044,12 @@ final class AgentSupervisor {
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
         let result = await accept(intent.neutralizingTypedEnvelopes, for: agentID, sharedAdmission: nil)
-        if qaRunLedgerRecording, result == .accepted, effectiveMode(for: agentID) == .managed, records[agentID]?.parentAgentID == nil {
+        // `.plans/116` part 14: a human submission to any top-level agent opens
+        // or joins its task, with its mode, so solo and fanned-out work separate.
+        if qaRunLedgerRecording, result == .accepted, let record = records[agentID], record.parentAgentID == nil {
             switch intent {
             case .send, .sendPrompt, .queue:
-                runLedger.submission(agent: agentID.rawValue, project: records[agentID]?.projectId)
+                runLedger.submission(agent: agentID.rawValue, project: record.projectId, mode: effectiveMode(for: agentID).rawValue)
             default: break
             }
         }
@@ -9944,6 +9946,13 @@ final class AgentSupervisor {
     /// is precisely what this ticket adds. The production caller it defends is Phase 5's
     /// persistent session: an rpc session comes alive, or an approval opens, without
     /// this app having just sent a prompt.
+    /// Checks only: what a relaunch does to the run ledger, a new instance over
+    /// the same file with no live baselines or attribution.
+    func qaReopenRunLedger() {
+        runLedger.drain()
+        runLedger = ManagedRunLedger(support: store.layout.applicationSupportDirectory)
+    }
+
     func qaDeliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
         deliver(event, to: id, now: now)
     }
@@ -12026,6 +12035,12 @@ final class AgentSupervisor {
         )
     }
 
+    static func usageIdentity(_ record: AgentRecord) -> ManagedRunLedger.UsageIdentity {
+        .init(harness: record.harness?.rawValue, model: record.model,
+              effort: record.thinking.isEmpty ? nil : record.thinking, parent: record.parentAgentID?.rawValue,
+              reportedByParent: record.capabilities == .observedReadOnly && record.harness == .claudeCode)
+    }
+
     private func updateTurnFacts(with event: AgentRuntimeEvent, for id: AgentID, now: Date = Date()) {
         var facts = turnFacts[id] ?? TurnFacts()
         // The presence owner reduces EVERY event first; the record stamps below
@@ -12033,9 +12048,23 @@ final class AgentSupervisor {
         facts.presence.reduce(event, at: now)
         switch event {
         case let .turnStarted(_, turnID):
-            if qaRunLedgerRecording { runLedger.working(agent: id.rawValue, turn: turnID) }
+            if qaRunLedgerRecording {
+                runLedger.usageTurnStarted(agent: id.rawValue, turn: turnID)
+                runLedger.working(agent: id.rawValue, turn: turnID)
+            }
         case let .turnCompleted(_, turnID, outcome, _):
+            if qaRunLedgerRecording, let record = records[id] {
+                runLedger.usageTurnEnded(agent: id.rawValue, turn: turnID, Self.usageIdentity(record),
+                                         record: AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults))
+            }
             if qaRunLedgerRecording { runLedger.ended(agent: id.rawValue, turn: turnID, outcome: outcome) }
+        case let .tokenUsageUpdated(_, snapshot):
+            // `.plans/116` part 14: every agent's usage is its own row, its
+            // parent named on it; a provider-run child is never folded in.
+            if qaRunLedgerRecording, let record = records[id] {
+                runLedger.usage(agent: id.rawValue, Self.usageIdentity(record), snapshot,
+                                record: AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults))
+            }
         default: break
         }
         switch event {

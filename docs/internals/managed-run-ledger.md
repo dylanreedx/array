@@ -20,7 +20,9 @@ handed off unchanged for background aggregation; only their enum counts persist.
 Kinds: `taskOpened`, `submission`, `delegated`, `working`, `reported`,
 `turnEnded`, `taskClosed`, `taskInterrupted`. The opening row identifies the lead
 and project; delegation rows associate helpers and parts. A human send or queued
-submission accepted for a managed top-level lead opens or joins its active task.
+submission accepted for any top-level agent, Managed or not, opens or joins its
+active task; `taskOpened` records the agent's `mode` (`managed` or `free`), so
+solo and fanned-out work can be told apart.
 A lead turn ending with no open helper parts closes it. Once the lead has
 ended, the last helper report or terminal event also closes it without a wake. Helper wakes do not
 open tasks. The next submission links a new task to the prior one. Restart marks
@@ -35,9 +37,9 @@ append was torn, the sole append path adds a newline before the recovery fact. B
 may be lost on process death before their write; this is not a transactional audit
 log. Unknown schema versions are not interpreted.
 
-Later parts must extend this schema and append path for typed usage counters,
-observed evidence and integration object IDs. No token totals, verified stage,
-release stage or acceptance is inferred here. Export, retention, deletion,
+Later parts must extend this schema and append path for observed evidence and
+integration object IDs. Typed usage counters are recorded (below). No verified
+stage, release stage or acceptance is inferred here. Export, retention, deletion,
 compaction snapshots, takeover and usage UI remain later work.
 
 ## Review witnesses and timing
@@ -194,3 +196,80 @@ the same message content in the same order, and `array_report` replies the
 same, with recording on and off; that no agent receives evidence words; and
 that the ledger holds no prompt, content, diff, output, command or absolute
 path. It prints the report path's cost with recording on and off.
+
+## Tokens by type per task (plan 14 step 1)
+
+Usage rows (`kind: usage`) carry `harness`, `model`, `modelSource` (`cli` when
+the stream named the model, `record` when it came from the agent's record),
+`effort`, `parent` (the agent's parent, when it has one), `turn`, `tokens`,
+`incomplete` and, for a late row, `late: true`. `tokens` holds `uncachedInput`,
+`cacheRead`, `cacheWrite` and `output`; their input sum is the whole prompt. A
+key that is absent is unknown, never zero. An empty or blank model id is
+recorded as no model.
+
+**Whose row.** Every agent gets its own rows, never folded into another's: a
+helper at any depth, and a provider-run child (a Codex child thread), name
+their parent and are charged to the task their parent chain leads to. Claude's
+in-process subagents have no usage stream of their own; the parent's result
+reports them under their own model ids, so their turns write
+`incomplete: ["reportedByParent"]`. Usage of an agent with no task in its chain
+(a top-level agent no human prompted in this process) is recorded under the
+all-zero task id with `noTask`, never dropped.
+
+**Which turn.** A report names its turn (Claude: the translator's turn id;
+Codex: the frame's `turnId`). Usage for the agent's open turn waits in memory
+and becomes rows when that turn ends, before its `turnEnded`, so a task never
+closes ahead of its lead's usage. A turn that reported nothing writes one row
+with `incomplete: ["noUsage"]`. A report naming a turn whose rows are already
+written becomes a late row at once, for that turn and the task that turn ran
+in; it never lands on the running turn. A closing task writes what its agents'
+open turns gathered so far (`usage-close` source); a turn that starts before
+the previous one's end was seen writes the previous one's with
+`turnEndNotSeen`. One turn can therefore have several rows: sum them.
+
+**Claude.** The result's `modelUsage`, split by model (subagents and side
+models included); a later numbered result in one process yields only its own
+share. Without `modelUsage`, the result's own `usage` under the `system/init`
+model. A result id counts once for the life of the process. The run's
+main-conversation messages, counted once per message id (Claude re-sends one
+message per content block), must equal the result's own `usage`; when they do
+not, the row says `unreconciled`.
+
+**Codex.** `thread/tokenUsage/updated` totals are cumulative per thread, so
+the ledger differences them per thread in provider time (`emittedAtMs`).
+`cachedInputTokens` is a subset of input; uncached is the rest. Codex reports
+`cacheWriteInputTokens` as 0 while cached reads grow, so cache write is unknown.
+A thread has a trusted baseline only if this process saw it start: a
+`thread/start` here, or a child announced here. `CodexAgentRunner` marks the
+`thread/started` it synthesizes after `thread/resume`, so a resumed thread is
+never mistaken for a new one. Without a baseline (after a relaunch, or a fork)
+the first total becomes the baseline, charges nothing and marks the turn
+(`noBaseline`, `fork`). A report older than the newest is already inside it and
+is ignored. A total that goes down is a `reset`: what ran before is unknown.
+No figure is ever negative. The model id is the one `thread/started` named,
+where it did.
+
+Counters live in memory on the ledger queue (open turns, a bounded record of
+each agent's last 16 turns' tasks, per-thread baselines and seen result ids);
+the event path pays one enqueue. Buffered usage is lost if the process dies
+before its turn ends or its task closes. The switch is Settings, Agents, Token
+usage (`agents.tokenTelemetry.enabled`, on by default). Off records nothing
+from that moment and deletes nothing; Codex baselines stay current, so turning
+it back on never charges the off period to a task. Rows hold ids, model ids,
+turn ids, fixed words and numbers; never prompt text, paths or diffs. They stay
+on this Mac.
+
+`--request-telemetry-check` (cases through `CONTINUUM_TELEMETRY_CASE`: `lead`,
+`free`, `helpers`, `codex`, `codex-off`, `codex-relaunch`, `codex-late`,
+`codex-child`, `empty-model`) drives the production composer `accept`,
+`array_delegate` (including a helper's own helper) and `array_report` through
+the MCP binary, with CLI doubles replaying committed captures through the
+production runners and translators. `codex-relaunch` reopens the ledger
+(`qaReopenRunLedger`) and resumes the thread; `empty-model` drives the ledger
+seam directly; one duplicate case delivers events through `qaDeliver`. It
+asserts exact totals worked by hand from the captures. Each behaviour was
+observed RED by breaking it: per-message dedupe, result dedupe, provider-time
+ordering, per-thread differencing, fork detection, the resume marker, baselines
+while off, the off switch, free-agent tasks, nested attribution, a child folded
+into its parent, late rows (lost, and charged to the running task), blank model
+ids, and usage written after closure.

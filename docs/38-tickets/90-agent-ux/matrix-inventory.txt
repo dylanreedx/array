@@ -261,6 +261,7 @@ check --replay-grader-check
 check --replay-isolation-check
 check --replay-scoring-check
 check --reply-rules-launch-check
+check --request-telemetry-check
 check --reserved-dispatch-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
@@ -720,6 +721,7 @@ leg run_app_check .build/debug/Array --refused-spawn-teardown-check
 leg run_app_check .build/debug/Array --relationship-geometry-check
 leg run_app_check .build/debug/Array --replay-driver-check
 leg run_app_check .build/debug/Array --reply-rules-launch-check
+leg run_app_check .build/debug/Array --request-telemetry-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
