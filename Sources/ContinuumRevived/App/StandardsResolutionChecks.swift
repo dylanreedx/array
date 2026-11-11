@@ -23,6 +23,7 @@ enum StandardsResolutionChecks {
     static let ruleOne = "1. Agents MUST run `make lint` before committing.\nWhy: the CI lint gate rejects the push otherwise.\nEnforced by: CI."
     static let ruleTwo = "2. Agents MUST NOT edit `vendor/`.\nWhy: it is regenerated."
     static let secret = "OUTSIDE-CHECKOUT-SECRET"
+    static let planSecret = "IN-CHECKOUT-PLAN-SECRET"
 
     static func run() throws {
         guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil,
@@ -45,6 +46,11 @@ enum StandardsResolutionChecks {
         let builds = "# Builds\n\nStatus: Accepted\nLayer: Project\nApplies when: Before you commit or touch `vendor/`.\n\n## Rules\n\n\(ruleOne)\n\n\(ruleTwo)\n"
         try write("docs/standards/project/builds.md", builds, under: repo)
         try write("docs/standards/broken.md", "# Broken\n\nStatus: Draft\n\n## Rules\n\n1. Lost.\n", under: repo)
+        try write("docs/standards/README.md", "# Standards\n\nStatus: index.\n", under: repo)
+        // Inside the checkout but outside docs/standards: never read either.
+        try write(".plans/foo.md", "# Plan\n\nApplies when: always.\n\n## Rules\n\n1. \(planSecret)\n", under: repo)
+        try fm.createSymbolicLink(atPath: repo.appendingPathComponent("docs/standards/project/plan.md").path,
+                                  withDestinationPath: "../../../.plans/foo.md")
         try write("leak.md", "# Leak\n\nApplies when: always.\n\n## Rules\n\n1. \(secret)\n", under: f.tempRoot.appendingPathComponent("outside"))
         try fm.createSymbolicLink(at: repo.appendingPathComponent("docs/standards/project/escape.md"),
                                   withDestinationURL: f.tempRoot.appendingPathComponent("outside/leak.md"))
@@ -69,6 +75,14 @@ enum StandardsResolutionChecks {
         func record(_ id: AgentID) throws -> AgentRecord {
             guard let value = supervisor.records[id] else { throw Failure(description: "no record for \(id)") }
             return value
+        }
+        /// The production asynchronous entry both transports use, awaited.
+        func read(_ id: AgentID, _ payload: [String: Any], op: String = "standards.read") -> WorkspaceAPIService.Reply? {
+            var reply: WorkspaceAPIService.Reply?
+            f.api.dispatchAsync(agentId: id, requestId: "standards-\(UUID().uuidString)", op: op, payload: payload) { reply = $0 }
+            let deadline = Date().addingTimeInterval(20)
+            while reply == nil, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+            return reply
         }
 
         let key = ProjectStandards.environmentKey
@@ -125,16 +139,21 @@ enum StandardsResolutionChecks {
         let indexStandards = index["standards"] as? [[String: Any]] ?? []
         try expect(index["root"] as? String == "docs/standards" && indexStandards.map { $0["id"] as? String } == ["project/builds"],
                    "the index holds this checkout's one valid standard and nothing of any other repository: \(index)")
-        try expect(indexStandards.first?["ruleIds"] as? [String] == ["project/builds#1", "project/builds#2"]
+        try expect(indexStandards.first?["ruleCount"] as? Int == 2
                    && indexStandards.first?["rules"] == nil
                    && indexStandards.first?["appliesWhen"] as? String == "Before you commit or touch `vendor/`."
                    && indexStandards.first?["path"] as? String == "docs/standards/project/builds.md",
-                   "the index carries trigger, path and rule ids, no rule text: \(indexStandards)")
+                   "the index carries trigger, path and rule count, no rule text: \(indexStandards)")
+        try expect(index["source"] as? String == StandardsReadResult.sourceNote && index["total"] as? Int == 5,
+                   "the answer labels its text as repository content and states its total: \(String(describing: index["source"])) \(String(describing: index["total"]))")
+        try expect((index["skipped"] as? [[String: Any]])?.map { $0["path"] as? String } == ["docs/standards/README.md"],
+                   "the README is listed as skipped, with its reason")
         let version = ProjectStandards.version(of: Data(builds.utf8))
         try expect(indexStandards.first?["version"] as? String == version, "version is the file's content hash")
         let issues = (index["issues"] as? [[String: Any]] ?? []).map { "\($0["path"] as? String ?? "") \($0["code"] as? String ?? "")" }
-        try expect(issues.sorted() == ["docs/standards/broken.md missing_trigger", "docs/standards/project/escape.md outside_checkout"],
-                   "a broken standard and a link out are explicit issues: \(issues)")
+        try expect(issues.sorted() == ["docs/standards/broken.md missing_trigger", "docs/standards/project/escape.md outside_standards",
+                                       "docs/standards/project/plan.md outside_standards"],
+                   "a broken standard, a link out of the checkout and a link to elsewhere in it are explicit issues: \(issues)")
         // One rule, verbatim.
         let one = try structured(claudeReplies.calls[1], "rule")
         let oneRules = (one["standards"] as? [[String: Any]])?.first?["rules"] as? [[String: Any]] ?? []
@@ -145,7 +164,8 @@ enum StandardsResolutionChecks {
         try expect((traversal["standards"] as? [Any])?.isEmpty == true
                    && traversal["unresolved"] as? [String] == ["../../outside/leak", "/etc/passwd", "project/escape", "broken"],
                    "traversal, absolute and broken ids are unresolved, never read: \(traversal)")
-        try expect(!claudeReplies.raw.contains(secret) && !codexReplies.raw.contains(secret), "nothing outside the checkout reaches an agent")
+        try expect(![secret, planSecret].contains { claudeReplies.raw.contains($0) || codexReplies.raw.contains($0) },
+                   "nothing outside docs/standards reaches an agent, in the checkout or out")
         // Codex: a whole standard.
         let whole = try structured(codexReplies.calls[0], "whole")
         let wholeRules = (whole["standards"] as? [[String: Any]])?.first?["rules"] as? [[String: Any]] ?? []
@@ -174,17 +194,19 @@ enum StandardsResolutionChecks {
 
         // MARK: Production dispatch (the Pi bridge's entry) and capabilities
 
-        let piIndex = f.api.dispatch(agentId: piA, requestId: "standards-pi", op: "standards.read", payload: [:])
-        guard case .result(let piObject) = piIndex,
+        guard case .result(let piObject)? = read(piA, [:]),
               piObject["standards"]?.array?.compactMap({ $0.object?["id"]?.string }) == ["project/builds"] else {
-            throw Failure(description: "Pi's dispatch reads the same index: \(piIndex)")
+            throw Failure(description: "Pi's entry reads the same index")
         }
-        guard case .error(let missing) = f.api.dispatch(agentId: f.agentId, requestId: "standards-missing", op: "standards.read", payload: [:]),
+        guard case .error(let sync) = f.api.dispatch(agentId: piA, requestId: "standards-sync", op: "standards.read", payload: [:]),
+              sync.code == .unsupported else {
+            throw Failure(description: "the synchronous entry refuses standards.read: its reads run off the main actor")
+        }
+        guard case .error(let missing)? = read(f.agentId, [:]),
               missing.code == .notFound, missing.message.contains("docs/standards"), !missing.message.contains(f.pbRoot.path) else {
             throw Failure(description: "a checkout without standards is not_found, naming no absolute path")
         }
-        guard case .error(let bad) = f.api.dispatch(agentId: piA, requestId: "standards-bad", op: "standards.read", payload: ["path": "../x"]),
-              bad.code == .invalidRequest else {
+        guard case .error(let bad)? = read(piA, ["path": "../x"]), bad.code == .invalidRequest else {
             throw Failure(description: "a path field is refused, not followed")
         }
         func capabilities(_ id: AgentID) throws -> [String] {
@@ -194,10 +216,22 @@ enum StandardsResolutionChecks {
             return ctx["capabilities"]?.array?.compactMap(\.string) ?? []
         }
         try expect(try capabilities(claudeA).contains("standards.read") && !(try capabilities(claudeB)).contains("standards.read"),
-                   "workspace.context advertises standards.read only where the checkout has standards")
+                   "workspace.context advertises standards.read only where the launch offered it")
+        // Standards added after claudeB launched: its tool list is unchanged,
+        // and the context says so plainly.
+        try write("docs/standards/late.md", builds, under: f.pbRoot)
+        guard case .result(let late) = f.api.dispatch(agentId: claudeB, requestId: "ctx-late", op: "workspace.context", payload: [:]) else {
+            throw Failure(description: "workspace.context failed")
+        }
+        try expect(late["toolListNote"]?.string == ProjectStandards.toolListNote
+                   && !(late["capabilities"]?.array?.compactMap(\.string) ?? []).contains("standards.read"),
+                   "after a change the context keeps the launch's tool list and says it is fixed at launch: \(late)")
+        guard case .result(let steady) = f.api.dispatch(agentId: claudeA, requestId: "ctx-steady", op: "workspace.context", payload: [:]) else {
+            throw Failure(description: "workspace.context failed")
+        }
+        try expect(steady["toolListNote"] == nil, "no note when nothing changed")
         supervisor.setWorkspaceToolsEnabled(agentID: claudeA, false)
-        guard case .error(let off) = f.api.dispatch(agentId: claudeA, requestId: "standards-off", op: "standards.read", payload: [:]),
-              off.code == .permissionDenied else {
+        guard case .error(let off)? = read(claudeA, [:]), off.code == .permissionDenied else {
             throw Failure(description: "with workspace tools off, standards.read is denied like every operation")
         }
     }

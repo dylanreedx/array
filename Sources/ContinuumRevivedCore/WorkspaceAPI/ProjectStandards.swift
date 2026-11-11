@@ -47,7 +47,15 @@ public struct ProjectStandardsIssue: Codable, Equatable, Sendable {
         case noRules = "no_rules"
         case unnumberedRule = "unnumbered_rule"
         case duplicateRuleId = "duplicate_rule_id"
-        case outsideCheckout = "outside_checkout"
+        /// `docs/standards`, `docs` or a subfolder is a symlink: not read.
+        case symlinkedFolder = "symlinked_folder"
+        /// A symlink whose target is outside `docs/standards`: not read.
+        case outsideStandards = "outside_standards"
+        /// More than one hard link: the same bytes live elsewhere too.
+        case hardLink = "hard_link"
+        case brokenLink = "broken_link"
+        /// A `*.md` that is a socket, pipe, device or folder.
+        case notRegularFile = "not_regular_file"
         case unreadable
     }
 
@@ -66,13 +74,40 @@ public struct ProjectStandardsIssue: Codable, Equatable, Sendable {
     }
 }
 
+/// A `*.md` entry that is deliberately not a standard, and why. Listed, so
+/// nothing in the folder disappears without a note.
+public struct ProjectStandardsSkipped: Codable, Equatable, Sendable {
+    public enum Reason: String, Codable, Sendable {
+        /// `README.md`: the folder's index.
+        case indexFile = "index_file"
+        /// No `Applies when:`, `Status:` or `Layer:` header.
+        case notAStandard = "not_a_standard"
+        /// More than one folder below `docs/standards`.
+        case nestedFolder = "nested_folder"
+    }
+    public var path: String
+    public var reason: Reason
+
+    public init(path: String, reason: Reason) {
+        self.path = path
+        self.reason = reason
+    }
+}
+
 public struct ProjectStandardsIndex: Equatable, Sendable {
     public var standards: [ProjectStandard]
     public var issues: [ProjectStandardsIssue]
+    public var skipped: [ProjectStandardsSkipped]
+    /// Fingerprint of the folder's listing (names, types, sizes, times,
+    /// inodes, link targets). Changes whenever its contents do.
+    public var version: String
 
-    public init(standards: [ProjectStandard], issues: [ProjectStandardsIssue]) {
+    public init(standards: [ProjectStandard], issues: [ProjectStandardsIssue],
+                skipped: [ProjectStandardsSkipped] = [], version: String = "") {
         self.standards = standards
         self.issues = issues
+        self.skipped = skipped
+        self.version = version
     }
 }
 
@@ -132,6 +167,7 @@ public enum ProjectStandards {
         }
         let rulesEnd = lines[(rulesHeading + 1)...].firstIndex { $0.hasPrefix("## ") } ?? lines.count
         var rules: [ProjectStandardRule] = []
+        var seen: Set<String> = []
         var current: (number: String, lines: [String])?
         func flush() {
             guard let open = current else { return }
@@ -143,7 +179,7 @@ public enum ProjectStandards {
             let line = lines[index]
             if let number = ruleNumber(line) {
                 flush()
-                if rules.contains(where: { $0.id == id + "#" + number }) {
+                guard seen.insert(number).inserted else {
                     return issue(.duplicateRuleId, "Rule \(number) is numbered twice.", line: index + 1)
                 }
                 current = (number, [line])
@@ -174,63 +210,151 @@ public enum ProjectStandards {
         return number
     }
 
-    /// Every standard in `checkoutRoot/docs/standards`, one level deep. nil
-    /// when the directory does not exist. Each file is resolved with the
-    /// workspace API's path rule (`AgentLocalFileLinkResolver`); anything that
-    /// resolves outside the checkout is an issue and is never read.
-    public static func scan(checkoutRoot: URL, fileManager: FileManager = .default) -> ProjectStandardsIndex? {
+    /// One entry of the folder, from `lstat` alone: no file is read.
+    struct Entry {
+        let relative: String // under docs/standards
+        let type: FileAttributeType
+        let size: UInt64
+        let modified: TimeInterval
+        let inode: UInt64
+        let links: Int
+        let destination: String?
+    }
+
+    /// The folder's listing and its fingerprint. Reads names and attributes
+    /// only, so a cache can tell whether anything changed without reading.
+    struct Listing {
+        let root: URL
+        let folder: URL
+        /// Set when the folder itself cannot be used (a symlink in its path).
+        let folderIssue: ProjectStandardsIssue?
+        let entries: [Entry]
+        let version: String
+    }
+
+    static func listing(checkoutRoot: URL, fileManager: FileManager) -> Listing? {
         let root = URL(fileURLWithPath: checkoutRoot.path, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
-        var isDirectory: ObjCBool = false
-        let directoryURL = root.appendingPathComponent(directory, isDirectory: true)
-        guard fileManager.fileExists(atPath: directoryURL.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+        let folder = root.appendingPathComponent(directory, isDirectory: true)
+        func entry(_ relative: String) -> Entry? {
+            let path = folder.appendingPathComponent(relative).path
+            guard let attributes = try? fileManager.attributesOfItem(atPath: path),
+                  let type = attributes[.type] as? FileAttributeType else { return nil }
+            return Entry(relative: relative, type: type,
+                         size: (attributes[.size] as? NSNumber)?.uint64Value ?? 0,
+                         modified: (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0,
+                         inode: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0,
+                         links: (attributes[.referenceCount] as? NSNumber)?.intValue ?? 1,
+                         destination: type == .typeSymbolicLink ? try? fileManager.destinationOfSymbolicLink(atPath: path) : nil)
+        }
+        guard let folderAttributes = try? fileManager.attributesOfItem(atPath: folder.path),
+              let folderType = folderAttributes[.type] as? FileAttributeType else { return nil }
+        // The folder must BE root/docs/standards: no symlink at docs or below.
+        let resolvedFolder = folder.standardizedFileURL.resolvingSymlinksInPath().path
+        if folderType == .typeSymbolicLink || resolvedFolder != folder.path {
+            let issue = ProjectStandardsIssue(path: directory, code: .symlinkedFolder,
+                                              message: "docs/standards (or docs) is a symlink; standards are read only from the real folder.")
+            return Listing(root: root, folder: folder, folderIssue: issue, entries: [],
+                           version: version(of: Data("symlinked:\(resolvedFolder)".utf8)))
+        }
+        guard folderType == .typeDirectory else { return nil }
+        func names(_ path: String) -> [String] { ((try? fileManager.contentsOfDirectory(atPath: path)) ?? []).sorted() }
+        var entries: [Entry] = []
+        for name in names(folder.path) {
+            guard let top = entry(name) else { continue }
+            entries.append(top)
+            if top.type == .typeDirectory {
+                entries += names(folder.appendingPathComponent(name).path).compactMap { entry(name + "/" + $0) }
+            }
+        }
+        let fingerprint = entries.map {
+            "\($0.relative)|\($0.type.rawValue)|\($0.size)|\($0.modified)|\($0.inode)|\($0.links)|\($0.destination ?? "")"
+        }.joined(separator: "\n")
+        return Listing(root: root, folder: folder, folderIssue: nil, entries: entries, version: version(of: Data(fingerprint.utf8)))
+    }
+
+    /// Every standard in `checkoutRoot/docs/standards`, one folder deep. nil
+    /// when the folder does not exist. Reads only regular files whose resolved
+    /// path is inside the resolved folder; everything else is an issue or a
+    /// skipped entry, named.
+    public static func scan(checkoutRoot: URL, fileManager: FileManager = .default) -> ProjectStandardsIndex? {
+        guard let listing = listing(checkoutRoot: checkoutRoot, fileManager: fileManager) else { return nil }
+        return index(from: listing, fileManager: fileManager)
+    }
+
+    static func index(from listing: Listing, fileManager: FileManager) -> ProjectStandardsIndex {
+        if let issue = listing.folderIssue {
+            return ProjectStandardsIndex(standards: [], issues: [issue], version: listing.version)
+        }
         var standards: [ProjectStandard] = []
         var issues: [ProjectStandardsIssue] = []
-        func contained(_ relative: String) -> Bool {
-            AgentLocalFileLinkResolver.isContained(
-                root.appendingPathComponent(relative).standardizedFileURL.resolvingSymlinksInPath(), in: root)
-        }
-        guard contained(directory) else {
-            return ProjectStandardsIndex(standards: [], issues: [
-                ProjectStandardsIssue(path: directory, code: .outsideCheckout, message: "Resolves outside this checkout; not read.")])
-        }
-        func names(_ relative: String) -> [String] {
-            ((try? fileManager.contentsOfDirectory(atPath: root.appendingPathComponent(relative).path)) ?? [])
-                .filter { !$0.hasPrefix(".") }.sorted()
-        }
-        var candidates: [String] = [] // relative to docs/standards
-        for name in names(directory) {
-            let relative = directory + "/" + name
-            if name.hasSuffix(".md") { if name != readmeName { candidates.append(name) }; continue }
-            var sub: ObjCBool = false
-            guard fileManager.fileExists(atPath: root.appendingPathComponent(relative).path, isDirectory: &sub), sub.boolValue else { continue }
-            guard contained(relative) else {
-                issues.append(ProjectStandardsIssue(path: relative, code: .outsideCheckout, message: "Resolves outside this checkout; not read."))
+        var skipped: [ProjectStandardsSkipped] = []
+        let folderPath = listing.folder.path
+        for entry in listing.entries {
+            let path = directory + "/" + entry.relative
+            let depth = entry.relative.split(separator: "/").count
+            func issue(_ code: ProjectStandardsIssue.Code, _ message: String) {
+                issues.append(ProjectStandardsIssue(path: path, code: code, message: message))
+            }
+            if entry.type == .typeDirectory {
+                if depth > 1 { skipped.append(ProjectStandardsSkipped(path: path, reason: .nestedFolder)) }
                 continue
             }
-            candidates += names(relative).filter { $0.hasSuffix(".md") && $0 != readmeName }.map { name + "/" + $0 }
-        }
-        for candidate in candidates {
-            let relative = directory + "/" + candidate
-            let id = String(candidate.dropLast(3))
-            switch AgentLocalFileLinkResolver.resolve(destination: relative, checkoutRoot: root, fileManager: fileManager) {
-            case .failure(.outsideCheckout):
-                issues.append(ProjectStandardsIssue(path: relative, code: .outsideCheckout, message: "Resolves outside this checkout; not read."))
-            case .failure:
+            let isMarkdown = entry.relative.hasSuffix(".md")
+            if entry.type == .typeSymbolicLink, depth == 1, !isMarkdown {
+                // A symlinked subfolder is refused; any other non-.md link is not a candidate.
+                var isFolder: ObjCBool = false
+                if fileManager.fileExists(atPath: listing.folder.appendingPathComponent(entry.relative).path, isDirectory: &isFolder),
+                   isFolder.boolValue {
+                    issue(.symlinkedFolder, "A symlinked folder; standards are read only from real folders.")
+                }
                 continue
-            case .success(let link):
-                guard let data = fileManager.contents(atPath: link.path) else {
-                    issues.append(ProjectStandardsIssue(path: relative, code: .unreadable, message: "Could not be read."))
+            }
+            guard isMarkdown else { continue }
+            if (entry.relative as NSString).lastPathComponent == readmeName {
+                skipped.append(ProjectStandardsSkipped(path: path, reason: .indexFile))
+                continue
+            }
+            var readPath = listing.folder.appendingPathComponent(entry.relative).path
+            var type = entry.type
+            var links = entry.links
+            if type == .typeSymbolicLink {
+                let resolved = URL(fileURLWithPath: readPath).standardizedFileURL.resolvingSymlinksInPath()
+                guard fileManager.fileExists(atPath: readPath),
+                      let target = try? fileManager.attributesOfItem(atPath: resolved.path),
+                      let targetType = target[.type] as? FileAttributeType, targetType != .typeSymbolicLink else {
+                    issue(.brokenLink, "A symlink to nothing.")
                     continue
                 }
-                switch parse(id: id, path: relative, data: data) {
-                case .notAStandard: continue
-                case .standard(let standard): standards.append(standard)
-                case .failed(let found): issues += found
+                guard AgentLocalFileLinkResolver.isContained(resolved, in: URL(fileURLWithPath: folderPath, isDirectory: true)) else {
+                    issue(.outsideStandards, "A symlink to a file outside docs/standards; not read.")
+                    continue
                 }
+                readPath = resolved.path
+                type = targetType
+                links = (target[.referenceCount] as? NSNumber)?.intValue ?? 1
+            }
+            guard type == .typeRegular else {
+                issue(.notRegularFile, "Not a regular file; not read.")
+                continue
+            }
+            guard links <= 1 else {
+                issue(.hardLink, "Hard-linked to another path (\(links) links); not read.")
+                continue
+            }
+            guard let data = fileManager.contents(atPath: readPath) else {
+                issue(.unreadable, "Could not be read.")
+                continue
+            }
+            switch parse(id: String(entry.relative.dropLast(3)), path: path, data: data) {
+            case .notAStandard: skipped.append(ProjectStandardsSkipped(path: path, reason: .notAStandard))
+            case .standard(let standard): standards.append(standard)
+            case .failed(let found): issues += found
             }
         }
         return ProjectStandardsIndex(standards: standards.sorted { $0.id < $1.id },
-                                     issues: issues.sorted { ($0.path, $0.line ?? 0) < ($1.path, $1.line ?? 0) })
+                                     issues: issues.sorted { ($0.path, $0.line ?? 0) < ($1.path, $1.line ?? 0) },
+                                     skipped: skipped.sorted { $0.path < $1.path },
+                                     version: listing.version)
     }
 
     /// Whether an agent launched in this checkout is offered `array_standards`.
@@ -258,5 +382,28 @@ public enum ProjectStandards {
 
     public static func version(of data: Data) -> String {
         "sha256:" + SHA256.hash(data: data).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Parsed indexes by checkout, kept until the folder's listing fingerprint
+/// changes. Thread-safe: `standards.read` scans off the main actor.
+public final class ProjectStandardsCache: @unchecked Sendable {
+    public static let shared = ProjectStandardsCache()
+    private let lock = NSLock()
+    private var indexes: [String: ProjectStandardsIndex] = [:]
+
+    public init() {}
+
+    /// The checkout's index: re-read only when the listing changed. nil when
+    /// there is no `docs/standards`.
+    public func index(checkoutRoot: URL, fileManager: FileManager = .default) -> ProjectStandardsIndex? {
+        guard let listing = ProjectStandards.listing(checkoutRoot: checkoutRoot, fileManager: fileManager) else {
+            lock.withLock { indexes[checkoutRoot.path] = nil }
+            return nil
+        }
+        if let cached = lock.withLock({ indexes[listing.root.path] }), cached.version == listing.version { return cached }
+        let index = ProjectStandards.index(from: listing, fileManager: fileManager)
+        lock.withLock { indexes[listing.root.path] = index }
+        return index
     }
 }

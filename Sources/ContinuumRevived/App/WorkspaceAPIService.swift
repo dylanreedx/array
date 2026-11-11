@@ -429,6 +429,10 @@ final class WorkspaceAPIService {
             }
             return
         }
+        if WorkspaceAPIOp(rawValue: op) == .standardsRead {
+            dispatchStandardsRead(agentId: agentId, payload: payload, completion: completion)
+            return
+        }
         if let operation = WorkspaceAPIOp(rawValue: op), operation == .browserOpen {
             dispatchBrowserOpen(agentId: agentId, requestId: requestId, payload: payload,
                                 isCancelled: isCancelled, completion: completion)
@@ -521,7 +525,7 @@ final class WorkspaceAPIService {
         case .agentReport:
             return fileReport(agentId: agentId, ownHandle: ownHandle, payload: payload)
         case .standardsRead:
-            return readStandards(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload)
+            return .error(WorkspaceAPIError(code: .unsupported, message: "standards.read requires the asynchronous workspace entry."))
         case .agentSchedule:
             guard payload["agentId"] == nil else {
                 return .error(.init(code: .permissionDenied, message: "Schedules are self-only; omit agentId."))
