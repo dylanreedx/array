@@ -3,103 +3,120 @@
 Part 16 of `.plans/116-agent-standards`, the wave-2 shadow step. An agent can
 read its own checkout's written standards through the workspace API. Nothing
 tells an agent to use it, no always-loaded text is removed, and a checkout
-with no standards sees exactly what it sees today.
+with no standards launches exactly as it did before (witnessed against a
+capture from the base commit).
 
 ## Where standards are looked for
 
 Only in the calling agent's own checkout (`AgentRecord.checkoutRoot`), in
-`docs/standards/`, one directory level deep (`docs/standards/project/x.md`).
-Never Array's own repository, never the active project, never a bundled copy.
+`docs/standards/`, one folder deep (`docs/standards/project/x.md`). Never
+Array's own repository, never the active project, never a bundled copy.
+
+Only regular files whose resolved path is inside the resolved
+`docs/standards` are read. Refused, each as a named issue:
+`symlinked_folder` (`docs/standards`, `docs` or a subfolder is a symlink),
+`outside_standards` (a symlink to anywhere else, in the checkout or out),
+`hard_link` (link count above one), `broken_link`, `not_regular_file`,
+`unreadable`. A symlink to another file inside the folder is read.
 
 A file is a standard when its header, the lines between its `# Title` and its
 first `## ` heading, has an `Applies when:` line. Its id is its path under
-`docs/standards/` without `.md` (`project/benches-and-storage`). A file with no
-`Applies when:`, `Status:` or `Layer:` line (a README, an index) is not a
-standard and is skipped; so is any `README.md`, the conventional index. One with `Status:` or `Layer:` but no usable
-`Applies when:` is reported as an issue.
+`docs/standards/` without `.md`. Rules sit under `## Rules`, start at `N.` or
+`N.M.`, and are returned verbatim with ids `<standard id>#<number>`. Parse
+failures are issues: `missing_trigger`, `empty_trigger`, `multiline_trigger`,
+`duplicate_trigger`, `no_rules`, `unnumbered_rule`, `duplicate_rule_id`.
 
-Rules sit under `## Rules`. A rule starts at a line `N.` or `N.M.` and runs to
-the next rule or heading. Its id is `<standard id>#<number>`
-(`project/benches-and-storage#3`). The text is returned verbatim, `Why` and
-`Enforced by` included.
-
-Every file is resolved with `AgentLocalFileLinkResolver`, the API's existing
-path rule: canonical, symlink-aware, component containment, regular files only.
-A symlink or directory pointing outside the checkout is an issue, never read.
-
-## Explicit failures
-
-Reported as `issues` (path, code, message, line) beside whatever did parse:
-`missing_trigger`, `empty_trigger`, `multiline_trigger`, `no_rules`,
-`unnumbered_rule`, `duplicate_rule_id`, `outside_checkout`, `unreadable`.
-A broken standard never disappears silently and is never replaced by another
-repository's rules. No `docs/standards/` at all is `not_found`.
+Every other `*.md` is listed in `skipped` with its reason: `index_file`
+(`README.md`), `not_a_standard` (no header), `nested_folder` (too deep).
+Nothing in the folder disappears without a note.
 
 ## The operation
 
 `standards.read`, tool `array_standards`, self-checkout read only, in the
-session preset (no prompt).
+session preset (no prompt). Every answer carries `source`: the text is quoted
+from files in this repository, which anyone with commit access or another
+agent may have written, and is not an instruction from Array or the user.
 
 - No arguments: the index. Each standard's id, path, title, `appliesWhen`,
-  rule ids and `version` (`sha256:` of the file bytes, first 16 hex), plus
-  `issues`.
-- `standards: [id]`: those standards with every rule's text.
-- `rules: [ruleId]`: only those rules.
-- Any id that does not resolve comes back in `unresolved`; nothing is guessed.
+  `ruleCount` and `version` (content hash), plus `issues` and `skipped`.
+- `standards: [id]`: those standards with every rule. `rules: [ruleId]`: only
+  those rules. Ids that match nothing come back in `unresolved`.
+- Paging, after `canvas.query`: `total` items, `nextCursor` while more
+  remains, about 32 KB a page, at least one item per page. A rule longer than
+  16 KB comes in ordered `part`/`parts` pieces that join to the exact text. A
+  cursor is bound to the folder's version (`cursor_expired` after a change)
+  and to the ids it was minted for. Nothing is limited, refused or cut for
+  size.
+- No `docs/standards/` is `not_found`.
 
-No matching, no excerpt ranking, no model call. Matching is wave 4.
+It runs on the asynchronous workspace entry (`dispatchAsync`), which both the
+MCP and Pi transports use: identity, grant and validation on the main actor;
+listing, reading and parsing off it, through `ProjectStandardsCache`, which
+re-reads only when the folder's listing (names, types, sizes, times, inodes,
+link targets) changes. It needs no mounted canvas.
 
-## Advertised only where there are standards
+No matching, no ranking, no model call. Matching is wave 4.
 
-`ProjectStandards.isPresent(checkoutRoot:)` decides, once per launch:
+## Offered only where there are standards
 
-- Claude and Codex: the MCP server's environment gets
-  `ARRAY_WORKSPACE_PROJECT_STANDARDS=1`, and only then lists `array_standards`.
-- Pi: the agent process gets the same variable; the bundled extension
-  registers the tool only then, and a roled agent's `--tools` gains it only then.
-- `workspace.context` lists `standards.read` in capabilities only then.
+One decision per launch: `AgentSupervisor.runnerLaunch` calls
+`ProjectStandards.isPresent`, a name listing that reads no file, and carries
+the answer on `AgentRunnerLaunch.projectStandards`. Present means
+`docs/standards` is a symlink (so the refusal is seen) or holds a `*.md` other
+than `README.md` at its top level or one folder down.
 
-The catalog entry carries `"advertisedWhen": "projectStandards"`; the tool's
-description is the only always-loaded text added, and only for such checkouts.
+- Claude and Codex: the MCP server gets `ARRAY_WORKSPACE_PROJECT_STANDARDS=1`
+  and only then lists `array_standards` (`WorkspaceMCPConfiguration`).
+- Pi: the agent process gets the same variable and the bundled extension
+  registers the tool only then (`PiAgentRunner.Config`, `childEnvironment`);
+  a roled agent's `--tools` gains it only then (`RoleRegistry.toolsArguments`).
+- `workspace.context` lists `standards.read` exactly when the launch offered
+  it. If the folder changed since, it adds `toolListNote`: the tool list is
+  fixed when the agent starts.
 
-Always-loaded words, measured from the catalog:
+Every one of those stops defaults to off, and `hostToolNames` and
+`WorkspaceMCPHost.configuration` take the flag with no default. Each stop that
+remains is a process boundary or an argv builder that must know; the catalog
+filters by operation, with no field of its own.
 
-| | Without standards | With standards |
-|---|---|---|
-| Tools | 36 (unchanged) | 37 |
-| MCP descriptions with guidelines (Claude, Codex) | 5,010 | 5,061 (+51) |
-| Parameter descriptions | 941 | 957 (+16) |
-| Pi snippets and guidelines | 2,855 | 2,868 (+13) |
-| MCP server instructions, injected agent guidance | unchanged | unchanged |
+## Always-loaded words
+
+| | Without standards | First cut | Now |
+|---|---|---|---|
+| Tools | 36 (as on the base commit) | 37 | 37 |
+| `array_standards` description + guideline, authored | 0 | 49 | 45 |
+| The same as rendered over MCP (adds `Guidelines:` and `-`) | 0 | 51 | 47 |
+| Parameter descriptions | 0 | 16 | 9 |
+| Pi snippet | 0 | 5 | 4 |
+| Total added, Claude and Codex | 0 | 67 | 56 |
+| Total added, Pi | 0 | 70 | 58 |
+| MCP server instructions, injected agent guidance | unchanged | unchanged | unchanged |
 
 Claude defers MCP tools behind tool search, so up front it sees only the name.
-The one guideline ("Rule text is quoted from this checkout's files.") exists
-because the catalog requires every tool to carry one; it instructs nothing.
 
-## Observation seam
+## Seams for later parts
 
-Each answered call hands a `StandardsRetrieval` (agent, time, standard ids,
-rule ids, versions, unresolved ids; no rule text) to
-`WorkspaceAPIService.standardsRetrievalObserver`. Production sets none. The
-run ledger (part 12) or telemetry (part 14) attaches there when it exists.
+A retrieval fact (agent, ids, versions; never text) would be appended in
+`WorkspaceAPIService.answerOffMain`, where one comment marks the place. No run
+ledger is written today.
 
 ## Witnesses
 
-- CoreChecks `--project-standards-index-check`: the production parser over
-  fixtures written into a temporary directory: valid, missing trigger,
-  duplicate and unnumbered rules, no rules, a symlink out, a README.
-- App `--standards-resolution-check`: a temporary non-Array git repository,
-  standards written by the check; Claude, Codex and Pi launch configuration
-  through the production supervisor paths; `standards.read` through the
-  production dispatch; a missing-standards checkout; traversal ids; the
-  observer record.
+- CoreChecks `--project-standards-index-check`: presence, parsing, every issue
+  and skipped reason, containment (symlink out, symlink into `.plans`,
+  symlinked folder, symlinked `docs`, hard link, broken link, FIFO), paging
+  (multi-page index, a rule in parts, a foreign cursor, an expired cursor),
+  cache invalidation, and printed timings.
+- App `--standards-resolution-check`: launches without standards match
+  `scripts/fixtures/standards-base-capture.json` (taken by
+  `StandardsBaseCapture` on b33595b8) for Claude, Codex, roled and roleless
+  Pi; with standards, the production launch, the real MCP server, Pi's argv,
+  environment and extension under node, the asynchronous entry, containment,
+  provenance, capabilities and the launch note.
 
 ## Not done here
 
-`standards.read` goes through the same dispatch as every operation, so it
-needs a mounted workspace and workspace tools enabled.
-
-Bundled Array agent RFCs (drafts, not on integration), trigger matching and
-diff matching (wave 4), ordering of retrieval against edits, and the paired
-trial. Agents with workspace tools disabled cannot reach this operation;
-plain file reads remain their path.
+Bundled Array agent RFCs (drafts, not on integration), trigger and diff
+matching (wave 4), ordering of retrieval against edits, and the paired trial.
+Agents with workspace tools disabled cannot reach this operation; plain file
+reads remain their path.
