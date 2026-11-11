@@ -91,6 +91,8 @@ public struct UsageReport: Equatable, Encodable, Sendable {
         public var role: Role
         public var harness: String?
         public var model: String?
+        /// `cli` when the stream named it, `record` when the agent's settings did.
+        public var source: String?
     }
 
     public struct TaskLine: Equatable, Codable, Sendable {
@@ -102,6 +104,9 @@ public struct UsageReport: Equatable, Encodable, Sendable {
         public var timeToAnswer: TimeInterval?
         /// The union of every agent's turns. Nil unless closed with every turn ended.
         public var activeTime: TimeInterval?
+        /// `managed` or `free`; nil when not recorded.
+        public var mode: String?
+        /// Every agent under the lead, at any depth.
         public var helpers: Int
         /// Exact figures; inside one task each count is 0 or 1.
         public var tokens: Table
@@ -117,6 +122,10 @@ public struct UsageReport: Equatable, Encodable, Sendable {
     public var fullyCounted: Int = 0
     /// Closed tasks with any figure missing: every total is a lower bound.
     public var missing: Int = 0
+    public var managed: Int = 0
+    public var free: Int = 0
+    /// Closed tasks from before modes were recorded.
+    public var modeUnknown: Int = 0
     public var solo: Int = 0
     public var oneHelper: Int = 0
     public var twoOrMoreHelpers: Int = 0
@@ -125,6 +134,9 @@ public struct UsageReport: Equatable, Encodable, Sendable {
     public var interrupted: Int = 0
     /// Over closed tasks.
     public var tokens: Table = [:]
+    /// Usage in the period that no human-prompted task owns: its total, and rows.
+    public var untasked = Figure()
+    public var untaskedRows = 0
     /// Harness and kind pairs not reported by a harness in the period's tasks.
     public var notReportedKinds: [String: [TokenType]] = [:]
     /// Newest first: closed, open and interrupted tasks of the period.
@@ -139,10 +151,13 @@ public struct UsageReport: Equatable, Encodable, Sendable {
     }
 
     /// The one report function: the page and any scorecard command call this.
-    public static func make(_ ledger: [RunLedgerUsageReader.Task], period: Period, now: Date = Date()) -> UsageReport {
+    public static func make(_ ledger: RunLedgerUsageReader.Ledger, period: Period, now: Date = Date()) -> UsageReport {
         var report = UsageReport(period: period)
         let start = period.start(now: now)
-        for task in ledger {
+        let untasked = ledger.untasked.filter { start == nil || $0.at >= start! }
+        report.untaskedRows = untasked.count
+        report.untasked = tokens(untasked, silent: false)[.total] ?? Figure()
+        for task in ledger.tasks {
             let when = task.state == .open ? task.opened : task.ended
             if let start, (when ?? .distantPast) < start { continue }
             let line = summarize(task)
@@ -154,6 +169,11 @@ public struct UsageReport: Equatable, Encodable, Sendable {
             }
             report.closed += 1
             if line.fullyCounted { report.fullyCounted += 1 }
+            switch task.mode {
+            case "managed": report.managed += 1
+            case "free": report.free += 1
+            default: report.modeUnknown += 1
+            }
             if line.total.isUnknown { report.missing += 1 }
             switch line.helpers {
             case 0: report.solo += 1
@@ -175,29 +195,22 @@ public struct UsageReport: Equatable, Encodable, Sendable {
     static func summarize(_ task: RunLedgerUsageReader.Task) -> TaskLine {
         var tokens: Table = [:]
         var models: [Model] = []
+        // A Claude in-process subagent's tokens are in its parent's result:
+        // its own rows say so and count neither as missing nor as a helper.
+        let byParent = { (row: RunLedgerUsageReader.Usage) in row.incomplete.contains("reportedByParent") }
+        var helpers = Set(task.helpers)
+        for row in task.usage where row.agent != task.lead && !byParent(row) { helpers.insert(row.agent) }
         for role in Role.allCases {
             let column: Column = role == .lead ? .lead : .helpers
-            let rows = task.usage.filter { ($0.agent == task.lead) == (role == .lead) }
+            let mine = task.usage.filter { ($0.agent == task.lead) == (role == .lead) }
+            let rows = mine.filter { !byParent($0) }
             // An agent of this role that ran a turn but left no usage row, or a
             // lead with no row at all: everything of this role is missing.
             let ran = task.turns.keys.filter { ($0 == task.lead) == (role == .lead) }
-            let silent = ran.contains { agent in !rows.contains { $0.agent == agent } } || (role == .lead && rows.isEmpty)
-            var total = Figure()
-            for type in TokenType.kinds {
-                let reporting = rows.filter { !(notReported[$0.harness ?? ""]?.contains(type) ?? false) }
-                var figure = Figure()
-                for row in reporting { figure.known += row.tokens.flatMap(type.value) ?? 0 }
-                let partial = silent || rows.contains { !$0.incomplete.isEmpty || $0.tokens == nil }
-                    || reporting.contains { $0.tokens.flatMap(type.value) == nil }
-                figure.unknown = partial ? 1 : 0
-                figure.reported = reporting.isEmpty ? 0 : 1
-                figure.notReported = !partial && reporting.isEmpty && !rows.isEmpty ? 1 : 0
-                tokens[column, default: [:]][type] = figure
-                total.merge(Figure(known: figure.known, unknown: figure.unknown, reported: figure.reported))
-            }
-            tokens[column, default: [:]][.total] = total
+            let silent = ran.contains { agent in !mine.contains { $0.agent == agent } } || (role == .lead && rows.isEmpty)
+            tokens[column] = Self.tokens(rows, silent: silent)
             for row in rows {
-                let model = Model(role: role, harness: row.harness, model: row.model)
+                let model = Model(role: role, harness: row.harness, model: row.model, source: row.modelSource)
                 if !models.contains(model) { models.append(model) }
             }
         }
@@ -218,8 +231,29 @@ public struct UsageReport: Equatable, Encodable, Sendable {
             }
         }
         return TaskLine(task: task.id, state: task.state, opened: task.opened, ended: task.ended,
-                        timeToAnswer: timeToAnswer, activeTime: active, helpers: task.helpers.count,
+                        timeToAnswer: timeToAnswer, activeTime: active, mode: task.mode, helpers: helpers.count,
                         tokens: tokens, fullyCounted: fully, models: models)
+    }
+
+    /// One role's rows of one task (or the untasked rows), by kind and in total.
+    static func tokens(_ rows: [RunLedgerUsageReader.Usage], silent: Bool) -> [TokenType: Figure] {
+        var result: [TokenType: Figure] = [:]
+        var total = Figure()
+        for type in TokenType.kinds {
+            let reporting = rows.filter { !(notReported[$0.harness ?? ""]?.contains(type) ?? false) }
+            var figure = Figure()
+            for row in reporting { figure.known += row.tokens.flatMap(type.value) ?? 0 }
+            // `noBaseline`, `reset`, `noUsage`…: a figure that should be there and is not.
+            let partial = silent || rows.contains { !$0.incomplete.isEmpty || $0.tokens == nil }
+                || reporting.contains { $0.tokens.flatMap(type.value) == nil }
+            figure.unknown = partial ? 1 : 0
+            figure.reported = reporting.isEmpty ? 0 : 1
+            figure.notReported = !partial && reporting.isEmpty && !rows.isEmpty ? 1 : 0
+            result[type] = figure
+            total.merge(Figure(known: figure.known, unknown: figure.unknown, reported: figure.reported))
+        }
+        result[.total] = total
+        return result
     }
 
     /// Overlapping turns count once.

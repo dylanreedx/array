@@ -13,7 +13,7 @@ final class SettingsUsageModel {
     enum Phase: Equatable {
         case idle
         case counting
-        /// `ledgerTasks` is how many tasks the whole ledger holds.
+        /// `ledgerTasks` is how many tasks (and untasked rows) the whole ledger holds.
         case ready(UsageReport, ledgerTasks: Int)
     }
 
@@ -65,7 +65,7 @@ final class SettingsUsageModel {
         let (url, period, worker) = (ledgerURL, period, worker)
         worker.queue.async {
             let readStart = Date()
-            let tasks = url.map { worker.tasks(at: $0, isCancelled: token.isCancelled) } ?? []
+            let tasks = url.map { worker.tasks(at: $0, isCancelled: token.isCancelled) } ?? RunLedgerUsageReader.Ledger()
             let reportStart = Date()
             let report = UsageReport.make(tasks, period: period)
             let run = (onMain: Thread.isMainThread, readSeconds: reportStart.timeIntervalSince(readStart),
@@ -74,7 +74,7 @@ final class SettingsUsageModel {
                 MainActor.assumeIsolated {
                     guard !token.isCancelled() else { return }
                     self.qaRuns.append(run)
-                    self.phase = .ready(report, ledgerTasks: tasks.count)
+                    self.phase = .ready(report, ledgerTasks: tasks.tasks.count + tasks.untasked.count)
                 }
             }
         }
@@ -107,14 +107,14 @@ final class SettingsUsageModel {
     /// Queue-confined: the last read, kept while the file is unchanged.
     final class Worker: @unchecked Sendable {
         let queue = DispatchQueue(label: "dev.array.settings-usage", qos: .utility)
-        private var cached: (url: URL, size: Int, modified: Date, tasks: [RunLedgerUsageReader.Task])?
+        private var cached: (url: URL, size: Int, modified: Date, tasks: RunLedgerUsageReader.Ledger)?
 
-        func tasks(at url: URL, isCancelled: () -> Bool) -> [RunLedgerUsageReader.Task] {
+        func tasks(at url: URL, isCancelled: () -> Bool) -> RunLedgerUsageReader.Ledger {
             let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
             let size = (attributes?[.size] as? NSNumber)?.intValue ?? -1
             let modified = attributes?[.modificationDate] as? Date ?? .distantPast
             if let cached, cached.url == url, cached.size == size, cached.modified == modified { return cached.tasks }
-            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return [] }
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return RunLedgerUsageReader.Ledger() }
             let tasks = RunLedgerUsageReader.read(data, isCancelled: isCancelled)
             if !isCancelled() { cached = (url, size, modified, tasks) }
             return tasks
@@ -156,7 +156,7 @@ struct SettingsUsageSections: View {
         case let .ready(report, ledgerTasks):
             if ledgerTasks == 0 {
                 Section {
-                    let text = "No Managed tasks are recorded on this Mac yet. A task appears here once a Managed lead finishes it."
+                    let text = "No tasks are recorded on this Mac yet. A task appears here once an agent you prompted finishes it."
                     InfoRow(text: text).settingsRenderedText("usage.empty", text, model: settings)
                 }
             } else {
@@ -196,7 +196,14 @@ private struct UsageReportSections: View {
                 figure("usage.fullyCounted", "Fully counted", "\(UsageWords.count(report.fullyCounted)) of \(UsageWords.count(report.closed))",
                        help: "Every turn's tokens were recorded, in every kind its harness reports.")
                 figure("usage.split", "How the work was split",
-                       "\(UsageWords.count(report.solo)) solo · \(UsageWords.count(report.oneHelper)) with one helper · \(UsageWords.count(report.twoOrMoreHelpers)) with two or more")
+                       "\(UsageWords.count(report.solo)) solo · \(UsageWords.count(report.oneHelper)) with one helper · \(UsageWords.count(report.twoOrMoreHelpers)) with two or more",
+                       help: "A helper is any agent working under the lead, at any depth.")
+                figure("usage.mode", "Mode", UsageWords.modes(report),
+                       help: "How the agent was set when the task began.")
+            }
+            if report.untaskedRows > 0 {
+                let text = UsageWords.untasked(report)
+                InfoRow(text: text).settingsRenderedText("usage.noTask", text, model: settings)
             }
             if report.open + report.interrupted > 0 {
                 let text = "Listed below but not counted: \(report.open) still open, \(report.interrupted) interrupted."
@@ -464,8 +471,10 @@ enum UsageWords {
         case .interrupted: closed = "Interrupted"
         }
         let models = line.models.compactMap(\.model).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-        let lead = line.models.first { $0.role == .lead }?.model ?? models.first
-        let model = lead.map { lead in models.count > 1 ? "\(lead) +\(models.count - 1)" : lead } ?? "unknown"
+        // The lead's model; a blank one stays unknown rather than borrowing a helper's.
+        let others = models.count - (line.models.first { $0.role == .lead }?.model == nil ? 0 : 1)
+        let lead = line.models.first { $0.role == .lead }?.model ?? "unknown"
+        let model = others > 0 ? "\(lead) +\(others)" : lead
         return Cells(when: closed,
                      time: duration(line.timeToAnswer),
                      how: line.helpers == 0 ? "solo" : line.helpers == 1 ? "1 helper" : "\(line.helpers) helpers",
@@ -475,9 +484,25 @@ enum UsageWords {
 
     /// The opened row's first line: active time and every harness and model.
     static func detail(_ line: UsageReport.TaskLine) -> String {
-        let models = line.models.map { "\($0.role == .lead ? "Lead" : "Helper") \($0.harness ?? "unknown harness") (\($0.model ?? "unknown model"))" }
+        let models = line.models.map { model -> String in
+            let source = model.source == "record" ? ", from its settings" : ""
+            return "\(model.role == .lead ? "Lead" : "Helper") \(model.harness ?? "unknown harness") (\(model.model ?? "model unknown")\(source))"
+        }
+        let mode = line.mode == "free" ? ["Free"] : line.mode == "managed" ? ["Managed"] : []
         let opened = line.state == .closed ? [] : ["Opened \(line.opened.map { when($0) } ?? "unknown")"]
-        return (opened + ["Active \(duration(line.activeTime))"] + (models.isEmpty ? ["harness and model unknown"] : models)).joined(separator: " · ")
+        return (mode + opened + ["Active \(duration(line.activeTime))"] + (models.isEmpty ? ["harness and model unknown"] : models)).joined(separator: " · ")
+    }
+
+    static func modes(_ report: UsageReport) -> String {
+        var parts = ["\(count(report.managed)) Managed", "\(count(report.free)) Free"]
+        if report.modeUnknown > 0 { parts.append("\(count(report.modeUnknown)) not recorded") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The one line for usage no human-prompted task owns.
+    static func untasked(_ report: UsageReport) -> String {
+        let turns = report.untaskedRows == 1 ? "1 record" : "\(count(report.untaskedRows)) records"
+        return "Not in any task: \(figure(report.untasked, exact: false)) tokens in \(turns), from agents no one prompted here. Not counted above."
     }
 }
 
