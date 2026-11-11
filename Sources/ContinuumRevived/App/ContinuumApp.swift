@@ -2403,6 +2403,21 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // Targeted only, never a matrix leg: prints what the run ledger adds to
+        // the request path and asserts nothing about time.
+        if CommandLine.arguments.contains("--managed-run-ledger-timing-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedRunLedgerTimingChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--helper-message-result-check") {
             _ = NSApplication.shared
             Task { @MainActor in
