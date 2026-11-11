@@ -17,8 +17,8 @@ Exit status (each is witnessed by scripts/check-gate-prepass.py):
 Hard rules:
   commit-subject           `type(area): description`, under 72 characters
   commit-attribution       Co-Authored-By or an AI-attribution line
-  unregistered-check-flag  a newly dispatched `--*-check` flag that no matrix
-                           leg runs and no bundle-harness self-check list holds
+  unregistered-check-flag  a newly dispatched `--*-check` flag neither run by
+                           matrix/bundle nor declared targeted-only with a reason
   bundle-module            `Bundle.module` added outside a checks target
   manifest-stale           a coverage-manifest entry this range made stale
 Advisory rules:
@@ -288,6 +288,25 @@ def load_manifest(repo, rev, required):
             if not isinstance(value, list) or not all(isinstance(g, str) and g for g in value) \
                     or (key == "covers" and not value):
                 problems.append("%s.%s must be a %slist of globs" % (where, key, "non-empty " if key == "covers" else ""))
+    targeted = data.get("targetedOnly", [])
+    if not isinstance(targeted, list):
+        problems.append("targetedOnly must be a list")
+        targeted = []
+    targeted_seen = set()
+    for index, entry in enumerate(targeted):
+        where = "targetedOnly[%d]" % index
+        if not isinstance(entry, dict):
+            problems.append(where + " must be an object"); continue
+        flag = entry.get("flag")
+        if not isinstance(flag, str) or not re.fullmatch(FLAG, flag):
+            problems.append(where + ".flag must be an exact --*-check flag")
+        elif flag in targeted_seen:
+            problems.append(where + ".flag is duplicated")
+        else:
+            targeted_seen.add(flag)
+        reason = entry.get("reason")
+        if not isinstance(reason, str) or not reason.strip() or len(reason.splitlines()) != 1:
+            problems.append(where + ".reason must be a non-empty one-line reason")
     exceptions = data.get("exceptions", [])
     if not isinstance(exceptions, list):
         problems.append("exceptions must be a list")
@@ -454,6 +473,7 @@ def swift_views(repo, head, path, cache):
 
 def check_swift(repo, head, renamed_diff, unrenamed_diff, reg, manifest, notify_patterns, sender_paths):
     found, notify_hits, cache = [], [], {}
+    targeted = {entry["flag"] for entry in (manifest or {}).get("targetedOnly", [])}
     removed_flags = set()
     for change in renamed_diff.values():
         for text in change["removed"]:
@@ -468,7 +488,7 @@ def check_swift(repo, head, renamed_diff, unrenamed_diff, reg, manifest, notify_
             kept, bare, raw = keep[number - 1], code[number - 1], change["added"][number]
             flags = [] if is_checks_path(path) else [m for rx in DISPATCH_RES for m in rx.findall(kept)]
             for flag in sorted(set(flags)):
-                if flag in removed_flags or flag in reg["matrix"]:
+                if flag in removed_flags or flag in targeted or flag in reg["matrix"]:
                     continue
                 if flag in reg["bundle"]:
                     continue
@@ -478,12 +498,12 @@ def check_swift(repo, head, renamed_diff, unrenamed_diff, reg, manifest, notify_
                                      path, number, raw, flag=flag)
                     continue
                 add_line_finding(found, manifest, "unregistered-check-flag", "fail",
-                                 "%s is dispatched but no matrix leg or bundle-harness self-check list runs it" % flag,
+                                 "%s is undeclared: register it in the matrix or bundle harness, or declare it targeted-only with a reason" % flag,
                                  path, number, raw, flag=flag)
             if not flags and not is_checks_path(path):
                 for rx in UNCERTAIN_RES:
                     for flag in rx.findall(kept):
-                        if flag in reg["matrix"] or flag in reg["bundle"] or flag in removed_flags:
+                        if flag in targeted or flag in reg["matrix"] or flag in reg["bundle"] or flag in removed_flags:
                             continue
                         add_line_finding(found, manifest, "uncertain-check-flag", "advisory",
                                          "%s is held in a form the pre-pass cannot classify; confirm it is dispatched and registered" % flag,

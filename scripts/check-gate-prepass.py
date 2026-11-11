@@ -254,6 +254,22 @@ def cases(w):
     w.expect("new --*-check registered nowhere fails", ["base", "new-flag"], 1,
              [(F, "unregistered-check-flag", "--brand-new-check")])
 
+    fx.start("targeted-only", "new-flag")
+    manifest = json.loads(fx.read(MANIFEST))
+    manifest["targetedOnly"] = [{"flag": "--brand-new-check", "reason": "requires a real display"}]
+    fx.write(MANIFEST, json.dumps(manifest) + "\n")
+    fx.commit("test(canvas): declare the targeted display check")
+    w.expect("targeted-only flag with a reason passes", ["base", "targeted-only"], 0, [])
+    manifest["targetedOnly"] = []
+    fx.write(MANIFEST, json.dumps(manifest) + "\n")
+    fx.commit("test(canvas): remove the targeted declaration")
+    w.expect("removing targeted-only declaration fails", ["base", "targeted-only"], 1,
+             [(F, "unregistered-check-flag", "--brand-new-check")])
+    manifest["targetedOnly"] = [{"flag": "--brand-new-check"}]
+    fx.write(MANIFEST, json.dumps(manifest) + "\n")
+    fx.commit("test(canvas): omit the targeted reason")
+    w.expect("targeted-only entry without a reason fails", ["base", "targeted-only"], 2, [])
+
     # 5. A flag registered only in the bundle harness's self_checks.
     fx.start("bundle-only")
     fx.edit(APP, "        // anchor", '        if CommandLine.arguments.contains("--bundle-only-check") { exit(0) }\n        // anchor')

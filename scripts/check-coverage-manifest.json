@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "about": "Exact matrix invocation -> the source paths it covers and the files that implement the check. Read by scripts/gate-prepass.py (owner of this file). A change to a covered path recommends the check; listing never proves the check ran. Globs: ** spans directories, * and ? stay inside one. Every invocation must be a literal run-matrix.sh leg (args after run/run_leg/run_app_check), and every glob must match a file, or the pre-pass reports the entry stale. Exceptions are line-specific (rule + path + exact trimmed line) and need a reason and an owner.",
+  "about": "Exact matrix invocation -> the source paths it covers and the files that implement the check. Read by scripts/gate-prepass.py (owner of this file). A change to a covered path recommends the check; listing never proves the check ran. Globs: ** spans directories, * and ? stay inside one. Every invocation must be a literal run-matrix.sh leg (args after run/run_leg/run_app_check), and every glob must match a file, or the pre-pass reports the entry stale. Targeted-only declarations live in targetedOnly as {flag, reason}; reason must be one non-empty line. They declare intentional targeted checks without adding nightly coverage. Exceptions are line-specific (rule + path + exact trimmed line) and need a reason and an owner.",
   "checks": [
     {
       "invocation": "scripts/check-app-bundle.sh --configuration debug --bundle \"$MATRIX_RESULTS/Array.app\"",
@@ -72,5 +72,6 @@
       "reason": "fixture histories prove every pre-pass rule red and green"
     }
   ],
+  "targetedOnly": [],
   "exceptions": []
 }
