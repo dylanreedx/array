@@ -348,9 +348,8 @@ enum RequestTelemetryChecks {
         for secret in ["SECRET-", "FRAMES-", root.path, root.resolvingSymlinksInPath().path] {
             try expect(!text.contains(secret), "ledger stores \(secret)")
         }
-        let allowed = ManagedRunLedgerChecks.allowedKeys.union(["effort", "tokens", "incomplete"])
         for row in ManagedRunLedgerChecks.rows(ledgerURL()) {
-            try expect(Set(row.keys).isSubset(of: allowed), "unexpected row keys: \(row.keys.sorted())")
+            try expect(Set(row.keys).isSubset(of: ManagedRunLedgerChecks.allowedKeys), "unexpected row keys: \(row.keys.sorted())")
         }
     }
 
