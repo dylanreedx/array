@@ -270,6 +270,13 @@ public enum SettingsSchema {
                             help: "Shows Managed beside the branch in agent tiles.",
                             keywords: ["managed", "badge", "indicator", "header"]),
             ]),
+            SettingsGroup(id: "agents.tokenTelemetry", title: "Token usage",
+                          footer: "Kept on this Mac only. Never uploaded or synced.", rows: [
+                SettingsRow(.toggle(key: AgentTokenTelemetryConfig.enabledKey, label: "Record token usage",
+                                    default: AgentTokenTelemetryConfig.defaultEnabled),
+                            help: "Counts the tokens each Managed task used, by agent, model and type. Turning it off stops new records and deletes nothing.",
+                            keywords: ["usage", "tokens", "telemetry", "cost", "cache", "privacy"]),
+            ]),
             SettingsGroup(id: "agents.lifecycle", title: "Finished agents", rows: [
                 SettingsRow(.choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Settle finished agents", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption,
                                     titles: Dictionary(uniqueKeysWithValues: AgentAutoSettleConfig.options.map { option in
