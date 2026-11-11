@@ -70,3 +70,51 @@ still pays for an asynchronous hand-off.
 All twelve previously reported regression arms passed on the final build.
 Cross-harness delegation initially failed its selected-mode assertion, then
 passed on rerun; no adjacent policy code was changed. Full matrix was not run.
+
+## Request-path cost, measured
+
+`--managed-run-ledger-timing-check` is targeted only, never a matrix leg. It
+prints numbers and asserts nothing about time. It refuses to run unless
+`CONTINUUM_APP_SUPPORT` is already a temporary directory, then creates and owns
+its own temporary support directory. Run it the way the matrix runs an app check:
+temporary `CONTINUUM_APP_SUPPORT`, an isolated `TMUX_TMPDIR`, and `TMUX` unset.
+
+What the calling (main) thread does per path:
+
+- Submission (`AgentSupervisor.accept(_:for:)`): a bool read, an enum compare,
+  `effectiveMode(for:)` (dictionary reads of `records`, `runners`,
+  `helperProviderRetryErrors`, `runningModes`), two more `records` reads, then
+  `ManagedRunLedger.submission`: one `queue.async` whose closure captures two
+  UUIDs. That is one heap block and one enqueue, which wakes the idle utility
+  queue.
+- Delegation (`WorkspaceAPIService+Delegation.swift`): one `queue.async`
+  capturing two UUIDs and the existing request-id string (retained, not copied).
+  This call is not behind `qaRunLedgerRecording`.
+- Helper report (`fileReport`): a bool read, then one `queue.async` capturing a
+  UUID, a `Date` and the report's two arrays (retained, not copied).
+- Turn start/end (`working`/`ended`, on the event path): one `queue.async` each.
+
+No path formats strings or dates, encodes, takes a lock or waits on disk on the
+calling thread. Source strings, counts, encoding and file I/O all run on the queue.
+
+Part 1 times only those statements on the production supervisor and ledger,
+with recording on. It takes 5,000 samples after 200 warm-up samples, each
+preceded by a 2 ms pause so the queue is idle, as it is when a person submits.
+Part 2 times the whole `accept` call, on and off alternating within each of
+1,000 pairs (20 warm-up pairs). Debug build, on a machine running a live Array.
+
+| Run | Submission med / p95 / max (µs) | Delegation med / p95 | Report med / p95 | Paired whole-call on−off median (95% CI) |
+| --- | --- | --- | --- | --- |
+| A | 8.62 / 19.96 / 116.83 | 3.29 / 9.25 | 3.33 / 9.21 | −19.75 µs (−69.33, 31.54) |
+| B | 13.50 / 25.58 / 200.75 | 5.12 / 12.12 | 5.25 / 13.29 | 4.21 µs (−60.58, 64.25) |
+
+Each whole call takes about 21 ms. The paired differences have an interquartile
+range near ±0.6–0.9 ms. Both confidence intervals contain zero.
+
+Machine load moves these numbers about 2–3×. Under heavier load, earlier runs
+reached a submission median of 27–30 µs, while the enqueue alone, which did not
+change, also tripled. A sample is also inflated by whatever ran just before it.
+The first statement after an idle pause pays a cold-cache cost. In an in-process
+A/B with alternating order, binding a whole `AgentRecord` copy and reading single
+fields differed by about 0.5 µs, so nothing on the calling thread is worth
+moving. The remaining cost is the main-actor reads and the enqueue itself.
