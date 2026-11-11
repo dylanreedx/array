@@ -39,6 +39,12 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     public let resultDelivery: WorkspaceResultDelivery
     /// The agent's checkout has standards, so the server lists `array_standards`.
     public let projectStandards: Bool
+    /// Tools the server lists with `_meta["anthropic/alwaysLoad"]`, so Claude
+    /// Code sends their schemas up front instead of deferring them behind
+    /// tool search. Empty for everyone but a Claude Managed lead
+    /// (`docs/internals/managed-lead-tool-loading.md`).
+    public private(set) var alwaysLoadedTools: [String] = []
+    public static let alwaysLoadedToolsEnvironmentKey = "ARRAY_WORKSPACE_ALWAYS_LOADED_TOOLS"
 
     /// How long a client waits for one workspace tool call. An approval alert
     /// has no deadline of its own, and `wait_agents` blocks for up to an hour:
@@ -78,6 +84,15 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
         try? materialize()
     }
 
+    /// This configuration with `tools` always loaded, its Claude config file
+    /// rewritten to match (best effort; a launch materializes again).
+    public func alwaysLoading(_ tools: [String]) -> WorkspaceMCPConfiguration {
+        var copy = self
+        copy.alwaysLoadedTools = tools
+        try? copy.materialize()
+        return copy
+    }
+
     public struct MaterializeError: Error, CustomStringConvertible, Sendable {
         public let path: String
         public let reason: String
@@ -112,6 +127,11 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
         // Absent, not "0", without standards: the server's environment is
         // then byte-for-byte what it was before `array_standards` existed.
         if projectStandards { environment[ProjectStandards.environmentKey] = "1" }
+        // Absent when empty, as above: every other agent's server environment,
+        // config file and argv stay exactly what they were.
+        if !alwaysLoadedTools.isEmpty {
+            environment[Self.alwaysLoadedToolsEnvironmentKey] = alwaysLoadedTools.joined(separator: ",")
+        }
         return environment
     }
 

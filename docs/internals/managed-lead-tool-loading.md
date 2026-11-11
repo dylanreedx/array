@@ -68,3 +68,35 @@ made before the search carries no schema.
 - Pi's own MCP servers default to `codemode` exposure and can be set per tool
   with `toolExposure`; Array does not use that path.
 - Nothing to fix for Pi: every Array tool already loads with its schema.
+
+## The fix: pin three tools for a Claude Managed lead
+
+`AgentSupervisor.runnerLaunch` gives a Claude Managed lead (mode Managed, no
+parent) a workspace MCP configuration that names three tools in
+`ARRAY_WORKSPACE_ALWAYS_LOADED_TOOLS`. `array-workspace-mcp` lists exactly
+those with `_meta: {"anthropic/alwaysLoad": true}`; every other tool stays
+deferred. The set lives in `ManagedLeadHookState.alwaysLoadedTools`:
+
+- `array_status`: the brief's first instruction is "post [the plan] with
+  array_status".
+- `array_delegate`: the brief's core instruction, and the call that went out
+  empty in the pilot.
+- `array_message_agent`: how a lead follows up with or redirects a helper it
+  started; the alternative is the shell.
+
+Not pinned: `array_report` (helpers report, leads do not) and the browser,
+device, board and canvas tools (task-specific).
+
+Everyone else is unchanged: a helper (Free, parented), a solo Free agent, a
+Codex lead (never given the key: Codex has no pin) and Pi (not MCP). Their
+server environment, and so their `--mcp-config` file and argv, are byte for
+byte what they were.
+
+The server-wide `"alwaysLoad": true` was not used: it loads all 36 tools
+(about 22,800 more tokens per request, below) and makes Claude's start wait
+for the server to connect.
+
+Witness: `--managed-lead-tool-loading-check` launches a Managed lead, its
+helper and a solo agent through the production supervisor and Claude runner,
+reads the `--mcp-config` from each real argv, starts the server it names and
+reads `tools/list`.

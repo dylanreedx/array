@@ -1181,8 +1181,13 @@ final class AgentSupervisor {
     func runnerLaunch(for id: AgentID, record: AgentRecord) -> AgentRunnerLaunch {
         let standards = ProjectStandards.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
         standardsOfferedAtLaunch[id] = standards
+        var workspaceMCP = workspaceMCPConfigurationProvider?(id, record.harness ?? .pi, standards)
+        // Only Claude reads the always-load pin; a helper is Free and parented.
+        if record.mode == .managed, record.parentAgentID == nil, record.harness == .claudeCode {
+            workspaceMCP = workspaceMCP?.alwaysLoading(ManagedLeadHookState.alwaysLoadedTools)
+        }
         return AgentRunnerLaunch(record: record, spawnDepth: depth(of: id),
-                                 workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi, standards),
+                                 workspaceMCP: workspaceMCP,
                                  projectStandards: standards)
     }
 

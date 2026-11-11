@@ -100,6 +100,9 @@ enum StandardsResolutionChecks {
                                       model: harness == .pi ? "openai-codex/gpt-5.6-sol" : "anthropic/claude-sonnet-5-5",
                                       thinking: "high", projectId: project, projectRoot: root)
             supervisor.setWorkspaceToolsEnabled(agentID: id, true)
+            // Free: a Claude Managed lead's always-loaded tools are not
+            // about standards (`--managed-lead-tool-loading-check`).
+            _ = supervisor.setMode(.free, for: id)
             return id
         }
         let claudeA = spawn(.claudeCode, repo, project: f.projectPa)

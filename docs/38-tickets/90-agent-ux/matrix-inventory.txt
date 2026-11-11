@@ -210,6 +210,7 @@ check --managed-duckherd-check
 check --managed-duckherd-live-check
 check --managed-lead-context-transition-check
 check --managed-lead-plan-check
+check --managed-lead-tool-loading-check
 check --managed-mode-hooks-check
 check --managed-mode-launch-check
 check --managed-mode-persistence-check
@@ -678,6 +679,7 @@ leg run_app_check .build/debug/Array --managed-codex-launch-check
 leg run_app_check .build/debug/Array --managed-compaction-tools-check
 leg run_app_check .build/debug/Array --managed-lead-context-transition-check
 leg run_app_check .build/debug/Array --managed-lead-plan-check
+leg run_app_check .build/debug/Array --managed-lead-tool-loading-check
 leg run_app_check .build/debug/Array --managed-mode-hooks-check
 leg run_app_check .build/debug/Array --managed-mode-launch-check
 leg run_app_check .build/debug/Array --managed-mode-persistence-check

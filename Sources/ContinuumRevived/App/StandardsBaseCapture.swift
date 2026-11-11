@@ -38,6 +38,10 @@ enum StandardsBaseCapture {
                                       model: harness == .pi ? "openai-codex/gpt-5.6-sol" : "anthropic/claude-sonnet-5-5",
                                       thinking: "high", projectId: f.projectPb, projectRoot: root)
             supervisor.setWorkspaceToolsEnabled(agentID: id, true)
+            // Free, so a Claude Managed lead's always-loaded tools
+            // (`ManagedLeadHookState.alwaysLoadedTools`) stay out of a
+            // capture about standards; mode changed none of it on the base.
+            _ = supervisor.setMode(.free, for: id)
             return id
         }
         let claude = spawn(.claudeCode, role: nil), codex = spawn(.codex, role: nil)

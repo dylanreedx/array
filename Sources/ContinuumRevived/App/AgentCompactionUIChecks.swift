@@ -595,7 +595,9 @@ func runManagedCompactionToolsChecks() async throws {
             if !supervisor.isRunning(id) { break }
             try await Task.sleep(for: .milliseconds(20))
         }
-        try ManagedModeChecks.expect(launches.last?.workspaceMCP == config, "compaction lost workspace tools for \(harness)")
+        // A Claude lead also keeps its always-loaded tools across compaction.
+        let expected = harness == .claudeCode ? config.alwaysLoading(ManagedLeadHookState.alwaysLoadedTools) : config
+        try ManagedModeChecks.expect(launches.last?.workspaceMCP == expected, "compaction lost workspace tools for \(harness)")
         let args = ClaudeAgentRunner.processArguments(model: record.model, effort: nil, sessionMode: .resume,
             sessionId: "fixture-session", extraArgs: [], workspaceMCP: launches.last?.workspaceMCP, mode: .managed)
         try ManagedModeChecks.expect(args.contains("--mcp-config") && args.contains("--append-system-prompt") && args.contains("--settings") && args.contains("Edit,Write,MultiEdit,NotebookEdit,ListAgents"), "compaction launch lost guidance or hooks")
