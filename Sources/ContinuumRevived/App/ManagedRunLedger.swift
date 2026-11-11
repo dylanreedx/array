@@ -197,6 +197,9 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// Per agent, the turn whose end has not been seen and its counters so far.
     /// Memory only; the turn end, a task close or the next turn writes them.
     private var openTurns: [UUID: OpenTurn] = [:]
+    /// The task each agent's recent turns ran in, newest last, so a report that
+    /// names an ended turn is charged to that turn's task. Bounded per agent.
+    private var turnTasks: [UUID: [(turn: String, task: UUID)]] = [:]
     /// Each agent's parent, as its record names it: a helper or provider-run
     /// child at any depth is charged to the task its chain leads to.
     private var usageParents: [UUID: UUID] = [:]
@@ -228,7 +231,15 @@ final class ManagedRunLedger: @unchecked Sendable {
                 self.writeBuffers(agent, open, sourcePrefix: "usage-unended", extra: ["turnEndNotSeen"])
             }
             self.openTurns[agent] = OpenTurn(turn: turn)
+            if let task = self.usageTask(agent) {
+                var recent = self.turnTasks[agent, default: []]
+                recent.append((turn, task))
+                self.turnTasks[agent] = Array(recent.suffix(16))
+            }
         }
+    }
+    private func task(of agent: UUID, turn: String?) -> UUID {
+        turn.flatMap { turn in turnTasks[agent]?.last(where: { $0.turn == turn })?.task } ?? usageTask(agent) ?? Self.noTask
     }
 
     /// One usage snapshot, on the event path: one enqueue. `record` false keeps
@@ -240,7 +251,7 @@ final class ManagedRunLedger: @unchecked Sendable {
                                         codexTotals: &self.codexTotals, claudeResults: &self.claudeResults)
             if let parent = identity.parent { self.usageParents[agent] = parent }
             let turn = snapshot.accountingTurn ?? self.openTurns[agent]?.turn
-            let task = self.usageTask(agent) ?? Self.noTask
+            let task = self.task(of: agent, turn: turn)
             if let turn, var open = self.openTurns[agent], open.turn == turn {
                 open.observed = true
                 if record {
@@ -276,7 +287,7 @@ final class ManagedRunLedger: @unchecked Sendable {
             if !open.observed {
                 let model = identity.model.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
                 let buffer = UsageBuffer(tokens: nil, incomplete: [identity.reportedByParent ? "reportedByParent" : "noUsage"])
-                self.append(self.usageRow(agent, identity, turn: turn, task: self.usageTask(agent) ?? Self.noTask,
+                self.append(self.usageRow(agent, identity, turn: turn, task: self.task(of: agent, turn: turn),
                                           model: UsageModel(id: model, source: model == nil ? nil : "record"), buffer,
                                           source: "usage/\(agent)/\(turn)/none", late: false))
             }
