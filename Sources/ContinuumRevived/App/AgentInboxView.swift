@@ -9917,6 +9917,11 @@ final class AgentInboxCardView: NSView, TokenThemed {
     private let indicatorEdge = CALayer()
     private let indicatorSheen = CAGradientLayer()
     var suppressesSelectionOutlineForFold = false { didSet { applyIndicator() } }
+    /// The one even selection outline: primary text, softened. The appearance
+    /// census admits exactly this value for the card's border slot.
+    static func selectionOutline(theme: TokenTheme) -> CGColor {
+        TextToken.textPrimary.color.cgColor(for: theme).copy(alpha: theme == .dark ? 0.55 : 0.35)!
+    }
     var indicatorReducesMotion = false { didSet { applyIndicator() } }
     private var motionSignature: String?
 
@@ -9937,8 +9942,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         indicatorEdge.frame = bounds.insetBy(dx: 0.5, dy: 0.5)
         indicatorEdge.cornerRadius = max(0, Radius.card - 0.5)
         indicatorEdge.borderWidth = isSelected || isCanvasSelection ? 1 : 0
-        indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
-            .withAlphaComponent(effectiveTokenTheme == .dark ? 0.55 : 0.35).cgColor
+        indicatorEdge.borderColor = Self.selectionOutline(theme: effectiveTokenTheme)
         indicatorEdge.isHidden = suppressesSelectionOutlineForFold || (!isSelected && !isCanvasSelection)
         let enabled = !sharesGroupLight && style != "current" && isIndicatorWorking
         indicatorWash.isHidden = !enabled
@@ -10002,8 +10006,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
             indicatorEdge.isHidden = true
         }
         indicatorEdge.borderWidth = isSelected || isCanvasSelection ? 1 : 0
-        indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
-            .withAlphaComponent(dark ? 0.55 : 0.35).cgColor
+        indicatorEdge.borderColor = Self.selectionOutline(theme: dark ? .dark : .light)
         // Only the open agent animates. Multi-selection remains a static indication.
         let moving = isIndicatorWorking && !indicatorReducesMotion
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && window != nil
