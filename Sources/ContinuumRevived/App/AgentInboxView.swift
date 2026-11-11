@@ -2803,6 +2803,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let ask = ownershipAskByLead[lead.id]
             let working = lead.state == .working || (rollup?.working ?? 0) > 0
             let sweepPhase = working ? InboxOwnershipClock.phase(for: lead.id) : nil
+            // A group that asks raises Needs you on its lead and stops its sweep, as
+            // in 0.7.47; the scope rule below decides only whether it may light.
             // The lanes, read backwards: a lane runs through a row while a later
             // row at its level is still to come, and ends in a foot at the last.
             var laterAt = [Bool](repeating: false, count: AgentInboxRow.maxDepth + 2)
@@ -2852,7 +2854,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     offset: offset, groupHeight: groupHeight,
                     continuesAbove: index > start, continuesBelow: index < end,
                     leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
-                    sweepPhase: activeGroup ? sweepPhase : nil, sweepColour: lead.identityColor,
+                    sweepPhase: activeGroup && ask == nil ? sweepPhase : nil, sweepColour: lead.identityColor,
                     raisedAsk: index == start ? ask : nil,
                     activeGroup: activeGroup, groupSelected: hasSelectedMember,
                     leadHeight: heights[0], runningY: runningOffset,

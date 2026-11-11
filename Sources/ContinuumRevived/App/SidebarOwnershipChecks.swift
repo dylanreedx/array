@@ -117,9 +117,10 @@ enum SidebarOwnershipChecks {
     static func build(dark: Bool, width: CGFloat = 380, height: CGFloat = 1400,
                       rows fixture: [AgentInboxRow]? = nil, folds: [UUID: Bool]? = nil,
                       clock: @escaping () -> Date = { now },
+                      defaults: ClassicSidebarDefaultsForChecks = .make(),
                       record: @escaping (InboxRowAction, [UUID]) -> Void) -> (AgentInboxView, NSWindow) {
         let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height),
-                                   indicatorDefaults: ClassicSidebarDefaultsForChecks.make())
+                                   indicatorDefaults: defaults)
         inbox.clock = clock
         inbox.foldsUntouchedGroups = false
         inbox.prefersReducedMotion = { false }
@@ -159,7 +160,10 @@ enum SidebarOwnershipChecks {
         var report: [String] = []
         for dark in [true, false] {
             var actions: [(InboxRowAction, [UUID])] = []
-            let (inbox, window) = build(dark: dark) { actions.append(($0, $1)) }
+            // "Show style on: All working agents", so every working group may light;
+            // step 5 also walks the default, Selected agent.
+            let indicatorDefaults = ClassicSidebarDefaultsForChecks.make(scope: .working)
+            let (inbox, window) = build(dark: dark, defaults: indicatorDefaults) { actions.append(($0, $1)) }
             defer { window.orderOut(nil) }
             let label = dark ? "dark" : "light"
             func cell(_ n: Int) throws -> AgentInbox96CellView {
@@ -220,10 +224,38 @@ enum SidebarOwnershipChecks {
                 throw Failure(description: "\(label): a status that fits is not drawn after the title: \(probe.visibleTextForQA)")
             }
 
-            // 5. Motion: the running card's light runs through every slice; working
-            // text shimmers; a working subagent pulses.
+            // 5. Motion: under All working agents, a running card's light runs through
+            // every slice; working text shimmers; a working subagent pulses.
             guard open.isSweepingForQA, probe.isSweepingForQA, folded.isSweepingForQA else {
                 throw Failure(description: "\(label): a running card's light is not running in every slice")
+            }
+            // Under Selected agent (the default) nothing lights until a group is
+            // selected; then that group's every slice lights and no other group does.
+            func setScope(_ scope: SidebarActiveIndicatorScope?) {
+                indicatorDefaults.scope = scope
+                SettingChangeEvent.post(SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey))
+                inbox.layoutForQA()
+            }
+            func sweeping() throws -> [Bool] {
+                try [verify, verify + 1, collab].map { try cell($0).isSweepingForQA }
+            }
+            setScope(nil)
+            guard try sweeping() == [false, false, false] else {
+                throw Failure(description: "\(label): with Selected agent and nothing selected, a light runs: "
+                    + "open/probe/folded \(try sweeping())")
+            }
+            guard inbox.selectRowForQA(id: uuid(verify)) else {
+                throw Failure(description: "\(label): could not select the open running lead")
+            }
+            inbox.layoutForQA()
+            guard try sweeping() == [true, true, false] else {
+                throw Failure(description: "\(label): with Selected agent and the open lead selected, "
+                    + "open/probe/folded light \(try sweeping()); expected the selected group's slices only")
+            }
+            inbox.clearSelectionForQA()
+            setScope(.working)
+            guard try sweeping() == [true, true, true] else {
+                throw Failure(description: "\(label): returning to All working agents left lights \(try sweeping())")
             }
             guard open.isTitleShimmeringForQA, probe.isTitleShimmeringForQA, probe.isPulsingForQA else {
                 throw Failure(description: "\(label): working text does not shimmer or a working subagent does not pulse")
