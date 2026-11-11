@@ -19,6 +19,41 @@ final class ManagedRunLedger: @unchecked Sendable {
         var checks: [String: Int]?
         var findings: [String: Int]?
         var openParts: [UUID]?
+        var evidence: [String: String]?
+    }
+    // Constant space per helper; independent of the supervisor's receipt ring.
+    // These counts establish capture only, never command success or coverage.
+    private struct Capture {
+        var pre = 0
+        var post = 0
+        var shell = 0
+    }
+    private var captures: [UUID: Capture] = [:]
+    func observeHook(agent: UUID, event: String, shell: Bool) {
+        queue.async {
+            var capture = self.captures[agent] ?? Capture()
+            if event == "PreToolUse" { capture.pre += 1 }
+            if event == "PostToolUse" {
+                capture.post += 1
+                if shell { capture.shell += 1 }
+            }
+            self.captures[agent] = capture
+        }
+    }
+    /// Enqueues only. No receipt text, shell output or filesystem access on the
+    /// report path. Missing call correlation and coverage remain explicit gaps.
+    func helperEvidence(agent: UUID, source: String) {
+        queue.async {
+            guard let delegation = self.rows.last(where: { $0.agent == agent && $0.kind == "delegated" }) else { return }
+            let capture = self.captures[agent] ?? Capture()
+            self.append(Row(kind: "helperEvidence", task: delegation.task, agent: agent,
+                part: delegation.part, source: "evidence/" + source, evidence: [
+                    "preToolUses": String(capture.pre), "postToolUses": String(capture.post),
+                    "shellCompletions": String(capture.shell),
+                    "afterCoveredEdit": "unknown", "checkFilesModified": "unknown",
+                    "exitZero": "unknown", "captureGap": "true"
+                ]))
+        }
     }
     private let queue = DispatchQueue(label: "dev.array.run-ledger", qos: .utility)
     private let url: URL

@@ -2390,7 +2390,7 @@ enum ContinuumApp {
         }
         // `.plans/116` part 12 step 1: the host-kept run ledger, through the
         // composer's accept, the real MCP binary and a restart.
-        if CommandLine.arguments.contains("--managed-run-ledger-check") {
+        if CommandLine.arguments.contains("--managed-run-ledger-check") || CommandLine.arguments.contains("--helper-evidence-provider-check") {
             _ = NSApplication.shared
             Task { @MainActor in
                 do {

@@ -26,7 +26,7 @@ enum ManagedRunLedgerChecks {
 
     /// Every key a row may carry. None of them holds free text.
     static let allowedKeys: Set<String> = ["v", "at", "kind", "task", "agent", "part", "source", "previousTask",
-        "project", "intent", "origin", "outcome", "harness", "model", "retryOf", "checks", "findings", "openParts"]
+        "project", "intent", "origin", "outcome", "harness", "model", "retryOf", "checks", "findings", "openParts", "evidence"]
     static let secrets = ["SECRET-PROMPT", "SECRET-BRIEF", "SECRET-REPORT", "SECRET-CHECK", "SECRET-FINDING", "HOLD-"]
 
     static func rows(_ url: URL) -> [[String: Any]] {
@@ -128,6 +128,24 @@ enum ManagedRunLedgerChecks {
         try expect(rows(ledger, "taskClosed").isEmpty, "task closed while a helper was still working")
 
         if noWake { supervisor.helperCompletionEnabled = { _ in false } }
+        // Capture survives eviction from the old receipt ring, through the real
+        // authenticated hook endpoint. Payload success is deliberately not exit 0.
+        let config = try b.configuration(for: h1)
+        for _ in 0..<130 {
+            var request = URLRequest(url: URL(string: config.endpoint)!)
+            request.httpMethod = "POST"
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "schema": WorkspaceAPISchema.v1, "kind": "request", "requestId": UUID().uuidString,
+                "agentId": h1.rawValue.uuidString, "token": config.token,
+                "op": WorkspaceAgentHook.op,
+                "payload": ["hook_event_name": "PostToolUse", "tool_name": "Bash",
+                    "tool_input": ["command": "SECRET-CHECK"], "tool_response": ["is_error": false]]
+            ])
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let reply = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            try expect(reply?["status"] as? String == "ok", "shadow hook refused")
+
+        }
         // 5. The helper's report, filed through the production MCP binary, appends under its part.
         let report = try await WorkspaceAgentReportChecks.call(b.configuration(for: h1), "array_report", [
             "summary": "SECRET-REPORT-GAMMA",
@@ -135,6 +153,11 @@ enum ManagedRunLedgerChecks {
             "findings": [["level": "issue", "text": "SECRET-FINDING-ONE"]]])
         try expect(!report.isError, "report refused: \(report.reply)")
         try await wait("report not recorded under the part") { !rows(ledger, "reported", task: t1, agent: h1).isEmpty }
+        try await wait("shadow evidence missing") { !rows(ledger, "helperEvidence", task: t1, agent: h1).isEmpty }
+        let evidence = rows(ledger, "helperEvidence", task: t1, agent: h1)[0]["evidence"] as? [String: String]
+        try expect(evidence?["exitZero"] == "unknown" && evidence?["afterCoveredEdit"] == "unknown"
+                   && evidence?["shellCompletions"] == "130" && evidence?["captureGap"] == "true",
+                   "unobserved checks acquired a result")
         let reported = rows(ledger, "reported", task: t1, agent: h1)[0]
         try expect(reported["part"] as? String == p1 && (reported["checks"] as? [String: Int]) == ["pass": 1, "fail": 1]
                    && (reported["findings"] as? [String: Int]) == ["issue": 1], "report row wrong: \(reported)")

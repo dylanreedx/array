@@ -118,3 +118,25 @@ The first statement after an idle pause pays a cold-cache cost. In an in-process
 A/B with alternating order, binding a whole `AgentRecord` copy and reading single
 fields differed by about 0.5 µs, so nothing on the calling thread is worth
 moving. The remaining cost is the main-actor reads and the enqueue itself.
+
+## Helper evidence shadow capture
+
+`helperEvidence` rows extend v1 with an `evidence` dictionary. The host queues
+hook counters independently of the 128-receipt ring and snapshots them when a
+helper files a report. Task and part ids come from the ledger's delegation row.
+Only counts and fixed enum words are stored; no command, path or report text.
+The report, courier, UI and agent output never read these rows.
+
+This initial subset records pre/post tool counts and shell completion counts.
+`afterCoveredEdit`, `checkFilesModified` and `exitZero` are always `unknown`;
+`captureGap` is always `true`. A hook completion is not a verified check run.
+Counters are process-local; report snapshots survive restart, but recovery does
+not pretend it recovered unreported hook activity. Queue backlog or process death
+can lose observations. This is not complete provider correlation.
+
+The gate-owned manifest is deliberately not copied here. Exact check identity,
+covered-path freshness, snapshots, call-id/stream correlation for both harnesses,
+and known numeric terminal exits remain unimplemented. The provider check flag
+currently exercises only this conservative subset through the production helper
+report and authenticated Claude hook paths. It does not prove the full part 8
+step 1 contract or the before/after-edit cases.

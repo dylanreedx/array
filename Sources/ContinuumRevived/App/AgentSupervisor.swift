@@ -6148,6 +6148,10 @@ final class AgentSupervisor {
 
     func recordHookReceipt(_ receipt: AgentHookReceipt, for id: AgentID) {
         guard records[id] != nil else { return }
+        if records[id]?.parentAgentID != nil {
+            runLedger.observeHook(agent: id.rawValue, event: receipt.event,
+                shell: HelperCommandGuard.normalizedTool(receipt.toolName) == "bash")
+        }
         var ring = hookReceipts[id, default: []]
         ring.append(receipt)
         if ring.count > AgentHookReceipt.ringCapacity { ring.removeFirst(ring.count - AgentHookReceipt.ringCapacity) }
@@ -6190,6 +6194,9 @@ final class AgentSupervisor {
         guard persist(record) else { return false }
         if qaRunLedgerRecording {
             runLedger.reported(agent: id.rawValue, at: date, checks: report.checks, findings: report.findings)
+            if record.parentAgentID != nil {
+                runLedger.helperEvidence(agent: id.rawValue, source: UUID().uuidString)
+            }
         }
         onSelfReportChanged?(id)
         // A report filed between turns is a result: it releases a turn held
