@@ -72,15 +72,21 @@ def fixture(root):
 
 
 def checks_hash(task):
-    return digest(json.dumps([task['base'], sorted(task['hidden'].items()), sorted(task['neighbours']),
-                              sorted(task['protected'])], sort_keys=True).encode())
+    frozen = [task['base'], sorted(task['hidden'].items()), sorted(task['neighbours']), sorted(task['protected'])]
+    if task.get('tools'):
+        frozen.append(sorted(task['tools']))
+    return digest(json.dumps(frozen, sort_keys=True).encode())
 
 
-def make_task(repo, base, fix, request, fixture_id, hidden_paths, neighbours, protected):
-    """Hidden checks are the fix commit's added checks, held host-side only."""
+def make_task(repo, base, fix, request, fixture_id, hidden_paths, neighbours, protected, tools=()):
+    """Hidden checks are the fix commit's added checks, held host-side only.
+    `tools` are extra binaries the checks run (absolute paths); grading may
+    read and run exactly those, and puts their folders on PATH."""
     hidden = {p: subprocess.check_output(['git', '-C', str(repo), 'show', fix + ':' + p]).decode() for p in hidden_paths}
     task = dict(fixture=fixture_id, source=str(repo), base=base, fix=fix, request=request,
                 hidden=hidden, neighbours=list(neighbours), protected=sorted(set(protected) | set(hidden)))
+    if tools:
+        task['tools'] = sorted(os.path.realpath(t) for t in tools)
     task['requestHash'] = digest(request.encode())
     task['checksHash'] = checks_hash(task)
     task['task'] = task_id(base, task['requestHash'], task['checksHash'])
@@ -138,7 +144,8 @@ class Workspace:
     tmux, temporary and home directories, and nothing else."""
     FOLDERS = ('support', 'build', 'tmux', 'tmp', 'home')
 
-    def __init__(self, repo, commit):
+    def __init__(self, repo, commit, tools=()):
+        self.tools = [os.path.realpath(t) for t in tools]
         self.root = own_root('replay-')
         self.project = self.root / 'project'
         try:
@@ -164,7 +171,8 @@ class Workspace:
             for folder in self.FOLDERS:
                 (self.root / folder).mkdir()
             # A fresh environment: nothing inherited, so no TMUX or real paths.
-            self.env = dict(PATH='/usr/bin:/bin', LANG='en_US.UTF-8', PYTHONDONTWRITEBYTECODE='1',
+            path = ':'.join(sorted({os.path.dirname(t) for t in self.tools}) + ['/usr/bin', '/bin'])
+            self.env = dict(PATH=path, LANG='en_US.UTF-8', PYTHONDONTWRITEBYTECODE='1',
                             HOME=str(self.root / 'home'), TMPDIR=str(self.root / 'tmp'),
                             TMUX_TMPDIR=str(self.root / 'tmux'), CONTINUUM_APP_SUPPORT=str(self.root / 'support'),
                             REPLAY_BUILD_PATH=str(self.root / 'build'), CONTINUUM_PROJECT_ROOT=str(self.project))
@@ -187,20 +195,25 @@ def toolchain():
                    os.path.realpath(sys.base_prefix), os.path.dirname(PYTHON)})
 
 
-def sandbox_profile(root):
+def sandbox_profile(root, tools=()):
     """Deny by default. Read: the run root and the toolchain. Write: the run root.
-    No network of any kind (unix sockets included), no signals outside the
-    sandbox, no mach services."""
+    Run programs: the toolchain, and files inside the run root (a task's own
+    check scripts write and run helpers there). No network of any kind (unix
+    sockets included), no signals outside the sandbox, no mach services.
+    `tools` are single extra binaries a task's checks declare (absolute,
+    resolved), readable and runnable one by one."""
     q = json.dumps
+    extra = [str(t) for t in tools]
     tools = toolchain()
     readable = tools + [str(root)]
     ancestors = sorted({str(a) for p in readable for a in Path(p).parents} - set(readable))
     return ''.join([
         '(version 1)(deny default)',
         '(allow process-fork)(allow sysctl-read)(allow signal (target same-sandbox))',
-        '(allow process-exec ', ' '.join('(subpath %s)' % q(p) for p in tools), ')',
+        '(allow process-exec ', ' '.join('(subpath %s)' % q(p) for p in tools + [str(root)]),
+        ' '.join(' (literal %s)' % q(p) for p in extra), ')',
         '(allow file-read* (literal "/") (literal "/private/var/select/sh") ',
-        ' '.join('(subpath %s)' % q(p) for p in readable), ')',
+        ' '.join('(subpath %s)' % q(p) for p in readable), ' '.join(' (literal %s)' % q(p) for p in extra), ')',
         '(allow file-read-metadata ', ' '.join('(literal %s)' % q(p) for p in ancestors), ')',
         '(allow file-write* (literal "/dev/null") (subpath %s))' % q(str(root))])
 
@@ -211,7 +224,7 @@ class ContainedRun(Workspace):
         if self.project.resolve() != self.root / 'project':
             raise ValueError('run storage changed')
         started = time.monotonic()
-        process = subprocess.Popen(['/usr/bin/sandbox-exec', '-p', sandbox_profile(self.root), PYTHON, '-I', '-c', code],
+        process = subprocess.Popen(['/usr/bin/sandbox-exec', '-p', sandbox_profile(self.root, self.tools), PYTHON, '-I', '-c', code],
                                    cwd=self.project, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    start_new_session=True)
         outcome = 'completed'
@@ -263,7 +276,7 @@ def run_check(run, name, source, deadline=10):
     require_owned(run.root)
     read_end, write_end = os.pipe()
     nonce = uuid.uuid4().hex
-    process = subprocess.Popen(['/usr/bin/sandbox-exec', '-p', sandbox_profile(run.root), PYTHON, '-I', '-c', HARNESS],
+    process = subprocess.Popen(['/usr/bin/sandbox-exec', '-p', sandbox_profile(run.root, run.tools), PYTHON, '-I', '-c', HARNESS],
                                cwd=run.project, env=run.env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, pass_fds=(write_end,), start_new_session=True)
     os.close(write_end)
@@ -354,7 +367,8 @@ def grade(task, agent_tree):
     memory and the pristine export, never from the agent's tree."""
     if checks_hash(task) != task['checksHash']:
         raise ValueError('checks changed since the task was frozen')
-    with Workspace(task['source'], task['base']) as reference, ContainedRun(task['source'], task['base']) as run:
+    with Workspace(task['source'], task['base']) as reference, \
+            ContainedRun(task['source'], task['base'], task.get('tools', ())) as run:
         changes, unsafe, nested = collect_changes(reference.project, agent_tree)
         tampered = list(unsafe)
         for path, value in sorted(changes.items()):
@@ -464,7 +478,7 @@ def run_contained(task, harness, mode, code, destination, deadline=2, interrupt=
     """One fake process run, graded after termination. Usage stays unknown:
     a subprocess has no typed usage, so this adapter never claims any."""
     record = new_record(task, harness, mode)
-    run = ContainedRun(task['source'], task['base'])
+    run = ContainedRun(task['source'], task['base'], task.get('tools', ()))
     try:
         result = run.execute(code, deadline=deadline, interrupt=interrupt)
         record.update(outcome=result['outcome'], wallSeconds=result['wallSeconds'],

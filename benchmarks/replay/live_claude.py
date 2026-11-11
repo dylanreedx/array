@@ -23,6 +23,7 @@ one launch line per process)."""
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 import sys
@@ -45,6 +46,10 @@ HOOK_PROBE_PARENT = os.path.realpath(subprocess.check_output(['/usr/bin/getconf'
 CORE_RESOURCES = 'continuum-revived_ContinuumRevivedCore.bundle'
 # Host-owned stand-ins first on the agent's PATH (read-only to the agent).
 LIVE_BIN = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'live-bin')
+# Single extra binaries a task's own checks may run (node runs the perf
+# runner's report check); each readable and runnable by its exact path.
+EXTRA_TOOLS = [os.path.realpath(t) for t in
+               (shutil.which(name, path='/usr/local/bin:/opt/homebrew/bin') for name in ('node',)) if t]
 XCODE_TOOLS = '/Applications/Xcode.app/Contents/Developer/usr/bin'
 # The subagent tool's name, and its older one.
 BUILT_IN_SUBAGENTS = 'Agent,Task'
@@ -89,7 +94,7 @@ def profile(root, claude, proxy_port, programs=(), extra_files=(), extra_folders
     Write: the run root and a few device files. Metadata (stat) is readable
     everywhere; directory listings and contents are not."""
     readable = TOOLCHAIN + KEYCHAIN + [root, LIVE_BIN] + list(extra_folders)
-    programs = [claude] + list(programs)
+    programs = [claude] + list(programs) + EXTRA_TOOLS
     literals = programs + list(extra_files)
     executable = TOOLCHAIN + [root, LIVE_BIN]
     writable = [root] + ([probe_folder] if probe_folder else [])
@@ -123,7 +128,8 @@ def main(argv):
     proxy = 'http://127.0.0.1:%d' % port
     # Xcode's own git and python3 first: the /usr/bin shims need a cache in the
     # user's temp folder, which is outside the run.
-    child['PATH'] = LIVE_BIN + ':' + XCODE_TOOLS + ':' + child.get('PATH', '/usr/bin:/bin')
+    child['PATH'] = ':'.join([LIVE_BIN, XCODE_TOOLS, child.get('PATH', '/usr/bin:/bin')]
+                             + sorted({os.path.dirname(t) for t in EXTRA_TOOLS}))
     child.update(CLAUDE_CONFIG_DIR=str(config), CLAUDE_SECURESTORAGE_CONFIG_DIR='',
                  HTTPS_PROXY=proxy, HTTP_PROXY=proxy, https_proxy=proxy, http_proxy=proxy,
                  NO_PROXY='localhost,127.0.0.1', no_proxy='localhost,127.0.0.1',
