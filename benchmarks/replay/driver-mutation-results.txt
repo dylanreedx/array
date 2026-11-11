@@ -1,0 +1,4 @@
+solo run that delegates: RED exit=1 FAIL: solo run delegated: the production record has 1 helper(s)
+codex stream with a reset: RED exit=1 FAIL: a Codex reset was not marked: ["cacheRead unknown: no typed cache counter", "cacheWrite unknown: no typed cache counter"]
+failed run's record vanishes: RED exit=1 FAIL: a failed run's record vanished
+restored: GREEN exit=0 ReplayDriverChecks passed

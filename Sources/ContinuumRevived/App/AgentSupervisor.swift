@@ -8497,6 +8497,9 @@ final class AgentSupervisor {
     }
 
     func qaForgetHelperCompletionBatches() { helperCompletionBatches = [:] }
+    /// Replay driver: a lead's run is over only once no helper result is still
+    /// on its way to it (batched, queued, in custody or from a running helper).
+    func qaHasPendingHelperResults(for id: AgentID) -> Bool { hasPendingArrayHelpers(id) }
 
     /// The durable half of `trackHelperMessage`, read back at restore.
     private func restoreHelperMessageSubscriptions() {

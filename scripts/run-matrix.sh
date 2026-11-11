@@ -736,6 +736,27 @@ run_ios_build() {
   return 0
 }
 
+# Offline replay checks never start the app or a provider. This subset permits
+# managed agents to verify them without entering the bare CoreChecks suite.
+run_leg python3 benchmarks/replay/check.py --replay-grader-check
+run_leg python3 benchmarks/replay/check.py --replay-isolation-check
+run_leg python3 benchmarks/replay/check.py --replay-scoring-check
+run_leg python3 benchmarks/replay/check.py --replay-containment-check
+if [[ "${REPLAY_CHECKS_ONLY:-0}" == "1" ]]; then
+  matrix_finish_jobs
+  matrix_report "Offline replay matrix"
+  exit $?
+fi
+
+if [[ "${REPLAY_DRIVER_ONLY:-0}" == "1" ]]; then
+  run swift build --configuration debug --product array-workspace-mcp -j 2
+  run swift build --configuration debug --product Array -j 2
+  run_app_check .build/debug/Array --replay-driver-check
+  matrix_finish_jobs
+  matrix_report "Replay driver matrix"
+  exit $?
+fi
+
 # Ticket P0.11: first leg, so a matrix that lost a check goes red before it
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
@@ -1951,6 +1972,7 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # Busy messages: position/replay, sender/hops, two callers with turn-specific
 # results, caller-scoped restart replay, paused recovery and storage refusal.
 run_app_check .build/debug/Array --workspace-api-delegation-check
+run_app_check .build/debug/Array --replay-driver-check
 run_app_check .build/debug/Array --helper-wait-input-check
 run_leg python3 scripts/check-interruptible-helper-waits.py
 run_leg node --experimental-strip-types --no-warnings scripts/check-pi-helper-waits.mjs
