@@ -100,3 +100,85 @@ Witness: `--managed-lead-tool-loading-check` launches a Managed lead, its
 helper and a solo agent through the production supervisor and Claude runner,
 reads the `--mcp-config` from each real argv, starts the server it names and
 reads `tools/list`.
+
+## Start-up tokens, measured
+
+One `claude -p` request per row, answering "Reply with the single word ok."
+Claude Code 2.1.321, `claude-haiku-5-5`, the Array work account's own login,
+`CLAUDE_CONFIG_DIR` in a temp dir (no user CLAUDE.md, skills or plugins), an
+empty temp cwd, `--no-session-persistence`. The argv is a lead's: guidance in
+`--append-system-prompt`, the edit tools disallowed, `--strict-mcp-config`,
+the real `array-workspace-mcp` with 36 tools. Not included: Array's hooks and
+the lead brief (about 150 words, the same before and after). Total input =
+uncached + cache write + cache read.
+
+| Run | Total input | vs. deferred | Deferred tools (CLI debug log) |
+|---|---:|---:|---|
+| CLI alone, no Array server | 17,227 | | 14 |
+| Lead before: every Array tool deferred | 18,799 | 0 | 50 |
+| Same, built from this branch (pin absent) | 18,807 | +8 | 50 |
+| Lead after: three tools pinned | 21,686 | +2,879 | 47 |
+| Whole server `alwaysLoad: true` | 41,611 | +22,812 | 14 |
+
+- Array's deferred surface (names, server instructions, guidance line) costs
+  about 1,570 tokens per request on top of the CLI's own floor.
+- Pinning the three lead tools costs about 2,900 tokens per request, paid
+  only by Claude Managed leads. `array_message_agent` alone is about half.
+- Loading Array's whole tool surface would cost about 22,800 tokens per
+  request, for every agent.
+- The 8-token difference between the two "before" rows is the temp paths.
+
+Codex and Pi: no change, so before equals after (the frozen-argv leg
+`--managed-codex-launch-check` passes). Not measured live: a Codex run
+writes state under `~/.codex` even with `--ephemeral`, which this task may
+not do. The earlier probe measured Codex's own floor at 16,515
+(`.plans/116-agent-standards/evidence/probe-helper-context.md`).
+
+## Proposal (not implemented): shorter tool descriptions
+
+Rewording descriptions changes every agent's behaviour, so each cut needs its
+own paired replay before it ships. What the numbers say:
+
+The surface is 36 tools, 5,010 description words (32,238 characters) and
+983 words of parameter descriptions (23,385 characters of schema JSON).
+Longest, by description plus schema characters:
+
+| Tool | Description words | Description + schema chars |
+|---|---:|---:|
+| array_message_agent | 443 | 3,673 |
+| array_device_act | 212 | 3,561 |
+| array_delegate | 248 | 3,440 |
+| array_canvas_apply | 172 | 2,714 |
+| array_device_build_run | 241 | 2,585 |
+| array_board_apply | 194 | 2,424 |
+| array_device_open | 178 | 2,408 |
+| array_open_document | 146 | 2,311 |
+| array_update_agent | 288 | 2,309 |
+| array_board_manage | 214 | 2,064 |
+
+What could move out:
+
+1. Repeated family text: five sentences repeated in 10 to 11 browser tools
+   ("Take a snapshot first, act by ref...", "do not fall back to curl or
+   Playwright", the retry and effects lines) and three in five device tools.
+   883 words are repeats of a first copy. The browser lines are already in
+   the server instructions; keep them there once.
+2. Return shapes and error catalogues in prose ("Returns delivery
+   ('delivered', 'queued' or 'refused'), childAgentId...", "Errors are
+   structured: permission_denied (...), invalid_request (...)..."). The
+   reply already names its code and next step; the model needs the prose only
+   when it gets that error.
+3. Rules said twice inside one description: `array_message_agent` says the
+   reply is not in the result twice and explains the idempotency key twice.
+4. Rules the guidance line already gives every Claude and Codex agent:
+   `array_update_agent`'s renaming rules (288 words) and the delegate/message
+   basics.
+
+Expected saving, an estimate: a third of the description words, about 1,700
+words. On the whole surface that is roughly 5,000 to 6,000 tokens. Per
+request at start-up it is small, because deferred tools cost only their
+names; it is paid back on every ToolSearch load and, for a Claude Managed
+lead, at start: a 200-word `array_message_agent` would cut the pin's cost
+from about 2,900 to about 2,000 tokens. Trimming the server instructions
+(282 words), which overlap the guidance line, saves every Claude and Codex
+agent about 250 tokens on every request.
