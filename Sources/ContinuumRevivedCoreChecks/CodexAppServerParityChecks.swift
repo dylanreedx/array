@@ -293,7 +293,11 @@ private func runCodexAppServerTranslatorMappingChecks() {
     let usage = translator.translate(line: #"""
         {"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"th-SECRET-THREAD","turnId":"turn-1","tokenUsage":{"total":{"inputTokens":100,"outputTokens":20},"last":{"inputTokens":100,"outputTokens":20},"modelContextWindow":200000}}}
         """#)
-    expect(usage == [.tokenUsageUpdated(threadId: "th-SECRET-THREAD", snapshot: TokenUsageSnapshot(inputTokens: 100, outputTokens: 20, totalCostUsd: nil))],
+    // No `cachedInputTokens`: the input's split is unknown, never all uncached.
+    var usageSnapshot = TokenUsageSnapshot(inputTokens: 100, outputTokens: 20, totalCostUsd: nil)
+    usageSnapshot.typedCounts = .init(uncachedInput: nil, cacheRead: nil, cacheWrite: nil, output: 20)
+    (usageSnapshot.accountingSession, usageSnapshot.accountingSessionStarted) = ("th-SECRET-THREAD", true)
+    expect(usage == [.tokenUsageUpdated(threadId: "th-SECRET-THREAD", snapshot: usageSnapshot)],
            "thread/tokenUsage/updated must map to tokenUsageUpdated off the cumulative `total` block")
     // T1 — `last` is the request and `modelContextWindow` its window: the live
     // occupancy reading, never the cumulative `total`. Numbers from the

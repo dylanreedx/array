@@ -79,8 +79,14 @@ private func runClaudeTranslatorMappingChecks() {
             freshness: .live)),
         .itemStarted(threadId: claudeSID, itemId: "toolu_02", kind: .fileChange, title: "Edit"),
         .itemCompleted(threadId: claudeSID, itemId: "toolu_02", kind: .fileChange, status: .failed),
-        .tokenUsageUpdated(threadId: claudeSID, snapshot: TokenUsageSnapshot(
-            inputTokens: 24406, outputTokens: 40, totalCostUsd: 0.014992)),
+        .tokenUsageUpdated(threadId: claudeSID, snapshot: {
+            // No `modelUsage`: the result's own counters by type, under the
+            // model `system/init` named. No message id, so nothing to reconcile.
+            var snapshot = TokenUsageSnapshot(inputTokens: 24406, outputTokens: 40, totalCostUsd: 0.014992)
+            let typed = TokenUsageSnapshot.TypedCounts(uncachedInput: 10, cacheRead: 17900, cacheWrite: 6496, output: 40)
+            (snapshot.typedCounts, snapshot.typedCountsByModel) = (typed, ["claude-haiku-4-5-20251001": typed])
+            return snapshot
+        }()),
         // The result's OWN counters (10 / 17,900 / 6,496) are the run's sum and
         // are cost accounting, published as `totalProcessedTokens`/cost. The
         // occupancy carried here is still the last request's, so closing a turn
