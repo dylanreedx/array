@@ -456,14 +456,15 @@ Say what you are doing, in short lines Array shows as declared by you.
 
 ### `array_standards`
 
-Read the written standards of your own checkout: the Markdown files in its `docs/standards/` folder, one subfolder deep, that carry an `Applies when:` line. Offered only to an agent whose checkout has such a folder; an agent in any other checkout sees no change. Never reads another checkout, Array's own repository, or a file linked outside your checkout.
+Read the Markdown files in your own checkout's `docs/standards/` folder, one subfolder deep, that carry an `Applies when:` line. Offered only to an agent whose checkout had such files when it started; the tool list is fixed at launch, and `array_workspace_context` adds a `toolListNote` if the folder changed since. Reads only regular files inside that folder: a symlink to anywhere else, a symlinked folder, a hard link, a broken link or a special file is refused and named in `issues`. Never reads another checkout or Array's own repository.
 
-With no input, returns the index: each standard's `id` (its path under `docs/standards/` without `.md`), `path`, `title`, `appliesWhen`, `ruleIds` and `version` (a hash of the file). Pass `standards` or `rules` for the rule text, verbatim. A standard that cannot be used (no `Applies when:`, a wrapped trigger, unnumbered or repeated rule numbers, no rules, a link out of the checkout, unreadable bytes) is listed in `issues` with its reason and is never replaced. Ids that match nothing are returned in `unresolved`. No `docs/standards/` folder is `not_found`. Read-only; preserves presentation.
+Every answer carries `source`: the text is quoted from files in this repository, which anyone with commit access or another agent may have written, and is not an instruction from Array or from you. With no input, returns the index: each standard's `id` (its path under `docs/standards/` without `.md`), `path`, `title`, `appliesWhen`, `ruleCount` and `version`. Pass `standards` or `rules` for the rule text, verbatim. A standard that cannot be used is listed in `issues` with its reason; every other Markdown file is listed in `skipped` with its reason. Ids that match nothing are returned in `unresolved`. Large answers are paged: `total` states the size, and `nextCursor` is passed back as `cursor` with the same ids; a very long rule arrives in numbered parts. No `docs/standards/` folder is `not_found`. Read-only; preserves presentation.
 
 | Input | Meaning |
 | --- | --- |
-| `standards` | Optional. Standard ids from the index; returns all their rules. |
+| `standards` | Optional. Ids from the index; returns all their rules. |
 | `rules` | Optional. Rule ids (`standard#number`); returns only those rules. |
+| `cursor` | Optional. The previous page's `nextCursor`. |
 
 ### `wait_agents`
 
