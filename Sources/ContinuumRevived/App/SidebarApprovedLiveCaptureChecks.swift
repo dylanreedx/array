@@ -69,6 +69,7 @@ enum SidebarApprovedLiveCaptureChecks {
                 inbox.toggleCollapse(parentId: lead)
                 if state != "all-working-unselected" { _ = inbox.selectRowForQA(id: lead) }
                 inbox.layoutViewportForQA()
+                inbox.foldMotionForQA.holdForCaptureForQA()
                 let frozen = inbox.foldMotionForQA.coveredViewsForQA.compactMap(\.layer)
                 for layer in frozen {
                     let time = layer.convertTime(CACurrentMediaTime() + 0.04, from: nil)

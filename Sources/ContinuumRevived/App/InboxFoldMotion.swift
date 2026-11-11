@@ -444,6 +444,12 @@ final class InboxFoldMotion: NSObject {
         }
     }
 
+    /// Keep the live render-server pose available for a window capture.
+    func holdForCaptureForQA() {
+        retirement?.cancel()
+        retirement = nil
+    }
+
     func cancel() {
         retirement?.cancel()
         retirement = nil
