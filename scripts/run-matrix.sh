@@ -741,9 +741,18 @@ run_ios_build() {
 run_leg python3 benchmarks/replay/check.py --replay-grader-check
 run_leg python3 benchmarks/replay/check.py --replay-isolation-check
 run_leg python3 benchmarks/replay/check.py --replay-scoring-check
+run_leg python3 benchmarks/replay/check.py --replay-containment-check
 if [[ "${REPLAY_CHECKS_ONLY:-0}" == "1" ]]; then
   matrix_finish_jobs
   matrix_report "Offline replay matrix"
+  exit $?
+fi
+
+if [[ "${REPLAY_DRIVER_ONLY:-0}" == "1" ]]; then
+  run swift build --configuration debug --product Array -j 2
+  run_app_check .build/debug/Array --replay-driver-check
+  matrix_finish_jobs
+  matrix_report "Replay driver matrix"
   exit $?
 fi
 
@@ -1952,6 +1961,7 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # Busy messages: position/replay, sender/hops, two callers with turn-specific
 # results, caller-scoped restart replay, paused recovery and storage refusal.
 run_app_check .build/debug/Array --workspace-api-delegation-check
+run_app_check .build/debug/Array --replay-driver-check
 run_app_check .build/debug/Array --helper-wait-input-check
 run_leg python3 scripts/check-interruptible-helper-waits.py
 run_leg node --experimental-strip-types --no-warnings scripts/check-pi-helper-waits.mjs

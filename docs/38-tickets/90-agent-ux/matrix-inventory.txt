@@ -248,6 +248,8 @@ check --provider-request-response-check
 check --push-payload-dump-check
 check --refused-spawn-teardown-check
 check --relationship-geometry-check
+check --replay-containment-check
+check --replay-driver-check
 check --replay-grader-check
 check --replay-isolation-check
 check --replay-scoring-check
@@ -453,6 +455,7 @@ leg run git diff --check
 leg run python3 scripts/check-multiplayer-journey.py --relay local --name "$journey" --prepare-only
 leg run scripts/make-app-bundle.sh --skip-build --configuration debug --output "$MATRIX_RESULTS/Array.app"
 leg run swift build
+leg run swift build --configuration debug --product Array -j 2
 leg run swift build --disable-sandbox --skip-update
 leg run swift build --disable-sandbox --skip-update --product Array
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
@@ -699,6 +702,7 @@ leg run_app_check .build/debug/Array --provider-request-response-check
 leg run_app_check .build/debug/Array --push-payload-dump-check
 leg run_app_check .build/debug/Array --refused-spawn-teardown-check
 leg run_app_check .build/debug/Array --relationship-geometry-check
+leg run_app_check .build/debug/Array --replay-driver-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
@@ -942,6 +946,7 @@ leg run_leg npm --prefix Tools/TaskEditor test
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
 leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
+leg run_leg python3 benchmarks/replay/check.py --replay-containment-check
 leg run_leg python3 benchmarks/replay/check.py --replay-grader-check
 leg run_leg python3 benchmarks/replay/check.py --replay-isolation-check
 leg run_leg python3 benchmarks/replay/check.py --replay-scoring-check

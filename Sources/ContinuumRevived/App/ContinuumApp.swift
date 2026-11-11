@@ -3270,6 +3270,20 @@ enum ContinuumApp {
         // through the production mount and dispatch — create-once under retry,
         // idempotency conflict, child tile in the parent's zone, presentation
         // failure repaired by agent.reveal, operation.get, cancellation truth.
+        if CommandLine.arguments.contains("--replay-driver-check") {
+            Task { @MainActor in
+                do {
+                    try await runReplayDriverChecks()
+                    print("ReplayDriverChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            dispatchMain()
+        }
+
         if CommandLine.arguments.contains("--workspace-api-delegation-check") {
             _ = NSApplication.shared
             Task { @MainActor in
