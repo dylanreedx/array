@@ -27,45 +27,76 @@ enum SettingsUsageChecks {
             try waitReady(fixture)
             let texts = model.renderedTexts
 
-            // 1. Tasks closed in the last 7 days, coverage and the split.
+            // 1. Tasks closed in the last 7 days, coverage and the split. The Codex
+            // task counts fully: Codex never reports cache writes.
             try expect(texts["usage.closed"] == "5", "tasks closed: \(texts["usage.closed"] ?? "nil")")
-            try expect(texts["usage.fullyCounted"] == "2 of 5", "fully counted: \(texts["usage.fullyCounted"] ?? "nil")")
+            try expect(texts["usage.fullyCounted"] == "3 of 5", "fully counted: \(texts["usage.fullyCounted"] ?? "nil")")
             try expect(texts["usage.split"] == "3 solo · 1 with one helper · 1 with two or more", "split: \(texts["usage.split"] ?? "nil")")
             try expect(texts["usage.notCounted"] == "Listed below but not counted: 1 still open, 1 interrupted.",
                        "open and interrupted: \(texts["usage.notCounted"] ?? "nil")")
 
-            // 2. Exact totals by type, lead against helpers; unknown never reads as 0.
+            // 2. Totals by kind and a Total row, lead against helpers, compact; a
+            // partly missing cell says "at least", and why is said once below.
             let expected: [String: String] = [
-                "usage.tokens.uncachedInput.lead": "511 · + unknown in 1 of 5",
-                "usage.tokens.cacheRead.lead": "5,102 · + unknown in 1 of 5",
-                "usage.tokens.cacheWrite.lead": "223 · + unknown in 2 of 5",
-                "usage.tokens.output.lead": "139 · + unknown in 1 of 5",
-                "usage.tokens.uncachedInput.helpers": "40 · + unknown in 1 of 5",
-                "usage.tokens.cacheRead.helpers": "320 · + unknown in 1 of 5",
-                "usage.tokens.cacheWrite.helpers": "70 · + unknown in 1 of 5",
-                "usage.tokens.output.helpers": "46 · + unknown in 1 of 5",
-                "usage.tokens.uncachedInput.all": "551 · + unknown in 2 of 5",
-                "usage.tokens.cacheWrite.all": "293 · + unknown in 3 of 5",
+                "usage.tokens.uncachedInput.lead": "at least 511",
+                "usage.tokens.cacheRead.lead": "at least 5.4M",
+                "usage.tokens.cacheWrite.lead": "at least 223",
+                "usage.tokens.output.lead": "at least 139",
+                "usage.tokens.total.lead": "at least 5.4M",
+                "usage.tokens.uncachedInput.helpers": "at least 40",
+                "usage.tokens.cacheRead.helpers": "at least 320K",
+                "usage.tokens.cacheWrite.helpers": "at least 70",
+                "usage.tokens.output.helpers": "at least 46",
+                "usage.tokens.total.helpers": "at least 320K",
+                "usage.tokens.uncachedInput.all": "at least 551",
+                "usage.tokens.cacheRead.all": "at least 5.7M",
+                "usage.tokens.cacheWrite.all": "at least 293",
+                "usage.tokens.total.all": "at least 5.7M",
             ]
             for (id, value) in expected.sorted(by: { $0.key < $1.key }) {
                 try expect(texts[id] == value, "\(id) rendered \(texts[id] ?? "nil"), expected \(value)")
             }
+            try expect(texts["usage.coverage"] == "2 of 5 tasks are missing part of their count, so totals marked “at least” are lower bounds. — Codex does not report tokens written to cache; its tasks count fully without them.",
+                       "the coverage line: \(texts["usage.coverage"] ?? "nil")")
+            try expect(!texts.contains { $0.key.hasPrefix("usage.tokens.") && $0.value.contains("unknown in") },
+                       "coverage must be said once, not under every cell")
 
-            // 3. A task whose helper usage is incomplete says unknown, beside the known part.
+            // 3. One aligned row per task, newest first: when | time to answer | how | tokens | model.
             let rows = (0..<7).compactMap { texts["usage.task.\($0)"] }
             try expect(rows.count == 7, "the period lists 7 tasks (5 closed, 1 open, 1 interrupted), got \(rows.count)")
-            guard let fanned = rows.first(where: { $0.contains("2 helpers") }) else { throw Failure("no two-helper task row") }
-            try expect(fanned.contains("Helpers: input, not cached 10 · read from cache 20 · written to cache 30 · output 40, each plus an unknown part")
-                       && fanned.contains("Helper Codex (gpt-x)"),
-                       "the two-helper task must show its helpers' partial count as unknown: \(fanned)")
-            guard let oneHelper = rows.first(where: { $0.contains("1 helper") }) else { throw Failure("no one-helper task row") }
-            try expect(oneHelper.contains("Time to answer 16 min · active 11 min"),
-                       "time to answer and active time (overlap counted once): \(oneHelper)")
-            try expect(rows.contains { $0.contains("Still open, not counted") } && rows.contains { $0.contains("Interrupted, not counted") },
-                       "open and interrupted tasks are listed")
-            guard let silent = rows.first(where: { $0.contains("Harness and model unknown") && $0.contains("Closed") }) else { throw Failure("no unrecorded task row") }
-            try expect(silent.contains("Lead: unknown") && !silent.contains(" 0 "),
-                       "a task with no usage rows reads unknown, never 0: \(silent)")
+            let cells = rows.map { Array($0.components(separatedBy: " | ").dropFirst()) }
+            let expectedCells: [[String]] = [
+                ["unknown", "solo", "unknown", "unknown"],            // still open
+                ["5 min", "solo", "5.4M", "claude-x"],
+                ["1 min", "solo", "4.5K", "gpt-x"],                   // Codex
+                ["unknown", "solo", "40K", "claude-x"],               // interrupted
+                ["16 min", "1 helper", "320K", "claude-x"],
+                ["3 min", "2 helpers", "at least 110", "claude-x +1"],
+                ["2 min", "solo", "unknown", "unknown"],              // recorded nothing
+            ]
+            try expect(cells == expectedCells, "task rows: \(cells)")
+            try expect(rows[0].hasPrefix("Still open |") && rows[3].hasPrefix("Interrupted |"), "open and interrupted tasks say so where a close time would be")
+            try expect(texts["usage.task.4.detail"] == nil, "a row must be closed until clicked")
+
+            // 4. Opening a row shows the same table with exact figures.
+            guard case let .ready(report, _) = model.usage.phase else { throw Failure("no report") }
+            for index in [2, 4, 5] { model.usage.toggle(report.tasks[index].task) }
+            fixture.settle(0.2)
+            let opened = model.renderedTexts
+            let exact: [String: String] = [
+                "usage.task.4.tokens.cacheRead.helpers": "320,000",
+                "usage.task.4.tokens.total.all": "320,211",
+                "usage.task.2.tokens.cacheWrite.lead": "—",
+                "usage.task.2.tokens.total.lead": "4,480",
+                "usage.task.5.tokens.uncachedInput.helpers": "at least 10",
+                "usage.task.5.tokens.total.lead": "10",
+            ]
+            for (id, value) in exact.sorted(by: { $0.key < $1.key }) {
+                try expect(opened[id] == value, "\(id) rendered \(opened[id] ?? "nil"), expected \(value)")
+            }
+            try expect(opened["usage.task.4.detail"] == "Active 11 min · Lead Claude Code (claude-x) · Helper Claude Code (claude-x)",
+                       "opened detail: \(opened["usage.task.4.detail"] ?? "nil")")
+            try expect(opened["usage.task.5.detail"]?.contains("Helper Codex (gpt-x)") == true, "opened detail names every model")
             try expect(model.renderedTexts["usage.recordingOff"] == nil, "recording is on, but the page says it is off")
 
             // Export: the figures on screen, holding no names. Every string is an
@@ -80,7 +111,7 @@ enum SettingsUsageChecks {
                 else if let string = value as? String { strings.append(string) }
             }
             walk(json)
-            let fixed: Set<String> = ["week", "lead", "helpers", "open", "closed", "interrupted", "Claude Code", "Codex", "claude-x", "gpt-x"]
+            let fixed: Set<String> = ["cacheWrite", "week", "lead", "helpers", "open", "closed", "interrupted", "Claude Code", "Codex", "claude-x", "gpt-x"]
             let stray = strings.filter { !fixed.contains($0) && UUID(uuidString: $0) == nil && ISO8601DateFormatter().date(from: $0) == nil }
             try expect(stray.isEmpty, "the export holds words that are not ids: \(stray)")
             let exported = (json as? [String: Any])?["tokens"] as? [String: Any]
@@ -89,12 +120,12 @@ enum SettingsUsageChecks {
                        && (lead?["uncachedInput"] as? [String: Any])?["unknown"] as? Int == 1,
                        "the export must carry the figures on screen: \(String(describing: lead?["uncachedInput"]))")
 
-            // 4. Both appearances render, recording on, last 7 days.
+            // 5. Both appearances render, recording on, last 7 days.
             try render(fixture, name: "light", appearance: .aqua)
             try render(fixture, name: "dark", appearance: .darkAqua)
             fixture.window.appearance = NSAppearance(named: .aqua)
 
-            // 5. The period chooser, through the production choice button.
+            // 6. The period chooser, through the production choice button.
             guard let chooser = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityIdentifier() == "ArraySettingsUsagePeriod" }) else {
                 throw Failure("the period chooser is not a ChoiceButton")
             }
@@ -102,11 +133,11 @@ enum SettingsUsageChecks {
             try expect(chooser.chooseForQA(id: UsageReport.Period.month.rawValue), "could not choose Last 30 days")
             chooser.dismissPresentedPopover()
             try waitReady(fixture, closed: "6")
-            try expect(model.renderedTexts["usage.tokens.uncachedInput.lead"] == "1,511 · + unknown in 1 of 6"
+            try expect(model.renderedTexts["usage.tokens.uncachedInput.lead"] == "at least 1.5K"
                        && model.renderedTexts["usage.split"] == "4 solo · 1 with one helper · 1 with two or more",
                        "30 days must add the older task: \(model.renderedTexts["usage.tokens.uncachedInput.lead"] ?? "nil")")
 
-            // 6. Off the main thread, and only while the pane is shown.
+            // 7. Off the main thread, and only while the pane is shown.
             try expect(!model.usage.qaRuns.isEmpty && model.usage.qaRuns.allSatisfy { !$0.onMain }, "a count ran on the main thread")
             let runs = model.usage.qaRuns.count
             fixture.select("general")
@@ -114,7 +145,7 @@ enum SettingsUsageChecks {
             fixture.settle(0.3)
             try expect(model.usage.qaRuns.count == runs, "a count ran while another pane was shown")
 
-            // 7. Recording off: stated, the old records still shown, and the switch writes the key.
+            // 8. Recording off: stated, the old records still shown, and the switch writes the key.
             fixture.select("usage")
             try waitReady(fixture, closed: "7")
             let switches = fixture.descendants(NSSwitch.self)
@@ -129,7 +160,7 @@ enum SettingsUsageChecks {
 
         }
 
-        // 8. An empty ledger: a plain empty state, no figures.
+        // 9. An empty ledger: a plain empty state, no figures.
         try withPane(ledger: root.appendingPathComponent("missing/ledger.jsonl")) { fixture, _ in
             fixture.select("usage")
             try waitReady(fixture)
@@ -170,7 +201,7 @@ enum SettingsUsageChecks {
         }
         // Solo, Claude, fully counted: 5 minutes.
         task(ago: 7_200, { id, lead, s in
-            turn(id, lead, s, 300) + [usage(id, lead, s.addingTimeInterval(300), "Claude Code", "claude-x", .init(uncachedInput: 100, cacheRead: 1_000, cacheWrite: 200, output: 50))]
+            turn(id, lead, s, 300) + [usage(id, lead, s.addingTimeInterval(300), "Claude Code", "claude-x", .init(uncachedInput: 100, cacheRead: 5_400_000, cacheWrite: 200, output: 50))]
         }, close: 300)
         // Solo, Codex: cache write unknown.
         task(ago: 86_400, { id, lead, s in
@@ -182,7 +213,7 @@ enum SettingsUsageChecks {
             return [row("delegated", id, helper, s.addingTimeInterval(20), part: helper)]
                 + turn(id, lead, s, 60) + turn(id, helper, s.addingTimeInterval(30), 570) + turn(id, lead, s.addingTimeInterval(900), 60)
                 + [usage(id, lead, s.addingTimeInterval(960), "Claude Code", "claude-x", .init(uncachedInput: 10, cacheRead: 100, cacheWrite: 20, output: 5)),
-                   usage(id, helper, s.addingTimeInterval(600), "Claude Code", "claude-x", .init(uncachedInput: 30, cacheRead: 300, cacheWrite: 40, output: 6))]
+                   usage(id, helper, s.addingTimeInterval(600), "Claude Code", "claude-x", .init(uncachedInput: 30, cacheRead: 320_000, cacheWrite: 40, output: 6))]
         }, close: 960)
         // Two helpers; the Codex helper's usage is incomplete.
         task(ago: 4 * 86_400, { id, lead, s in
@@ -257,10 +288,13 @@ enum SettingsUsageChecks {
         if let scroll = fixture.descendants(NSScrollView.self).max(by: { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }),
            let document = scroll.documentView {
             let top = scroll.contentView.bounds.origin
-            scroll.contentView.scroll(to: NSPoint(x: 0, y: document.isFlipped ? max(0, document.frame.height - scroll.contentView.bounds.height) : 0))
-            fixture.settle(0.2)
-            if let lower = fixture.snapshot() {
-                try? lower.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("\(name)-lower.png"))
+            let end = max(0, document.frame.height - scroll.contentView.bounds.height)
+            for (suffix, fraction) in [("middle", 0.5), ("lower", 1.0)] {
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: document.isFlipped ? end * fraction : end * (1 - fraction)))
+                fixture.settle(0.2)
+                if let shot = fixture.snapshot() {
+                    try? shot.representation(using: .png, properties: [:])?.write(to: dir.appendingPathComponent("\(name)-\(suffix).png"))
+                }
             }
             scroll.contentView.scroll(to: top)
             fixture.settle(0.1)
