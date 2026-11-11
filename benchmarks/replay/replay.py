@@ -152,7 +152,7 @@ def run_fake(repo, base, request, grader, harness, mode, outcome,
                 'raise SystemExit(0)' if neighbor_ok else 'raise SystemExit(1)'],
                 cwd=grading.project).returncode == 0
         return dict(v=1, task=str(uuid.uuid5(uuid.NAMESPACE_URL, base + request)), run=str(uuid.uuid4()), base=base,
-            harness=harness, mode=mode, actualChoice='managed' if mode == 'chooser' else mode,
+            fixture='synthetic-value', harness=harness, mode=mode, actualChoice='managed' if mode == 'chooser' else mode,
             requestHash=digest(request.encode()), graderHash=grader.sha256,
             diffHash=digest(patch), outcome=outcome, simulated=True,
             tokens={'input': sum(v[0] for v in unique.values()),
@@ -168,6 +168,11 @@ def compare(records):
     for r in records:
         key = (r['base'], r['requestHash'], r['graderHash'], r['harness'])
         groups.setdefault(key, {}).setdefault(r['mode'], []).append(r)
+    # Missing a whole harness is missing coverage too, not a smaller cohort.
+    tasks = {key[:3] for key in groups}
+    for task in tasks:
+        for harness in HARNESSES:
+            groups.setdefault((*task, harness), {})
     differences = []
     for modes in groups.values():
         if any(len(modes.get(m, [])) != 1 for m in ('solo', 'managed')):
@@ -189,3 +194,80 @@ def append_record(path, record):
         stream.write(json.dumps(record, sort_keys=True, allow_nan=False) + '\n')
         stream.flush()
         os.fsync(stream.fileno())
+
+class ContainedRun:
+    """Kernel-enforced write/network boundary. All owned paths are minted here."""
+    def __init__(self, repo, base):
+        self.workspace = Workspace(repo, base)
+        self.root = self.workspace.root.resolve()
+        self.project = self.workspace.project.resolve()
+        if not self.root.is_relative_to(Path(tempfile.gettempdir()).resolve()):
+            self.workspace.temp.cleanup()
+            raise ValueError('storage is not a created temporary directory')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.workspace.__exit__(*args)
+
+    def execute(self, code, deadline=2, interrupt=False):
+        import signal
+        import time
+        if self.workspace.root.resolve() != self.root or self.workspace.project.resolve() != self.project:
+            raise ValueError('run storage changed')
+        # SBPL uses Scheme strings; JSON escaping is suitable for these absolute paths.
+        allowed = ' '.join('(subpath ' + json.dumps(str(p)) + ')' for p in
+                           (self.project, self.root / 'support', self.root / 'build', self.root / 'tmux'))
+        profile = '(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write* ' + allowed + ')'
+        started = time.monotonic()
+        process = subprocess.Popen(['/usr/bin/sandbox-exec', '-p', profile, sys.executable, '-c', code],
+            cwd=self.project, env=self.workspace.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+        outcome = 'completed'
+        try:
+            if interrupt:
+                # Model a host cancellation after launch, never silently omit its record.
+                os.killpg(process.pid, signal.SIGTERM)
+                outcome = 'interrupted'
+            stdout, stderr = process.communicate(timeout=deadline)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+            outcome = 'timeout'
+        finally:
+            # Remove descendants even if the immediate worker exited first.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        wall = time.monotonic() - started
+        if outcome == 'completed' and process.returncode:
+            outcome = 'containment_failed' if b'Operation not permitted' in stderr else 'failed'
+        return dict(outcome=outcome, wallSeconds=wall, activeSeconds=wall,
+                    passed=outcome == 'completed', stdoutHash=digest(stdout), stderrHash=digest(stderr),
+                    exitCode=process.returncode, terminated=process.poll() is not None)
+
+def run_contained(repo, base, fixture_id, request, grader, harness, mode, code,
+                  destination, deadline=2, interrupt=False):
+    """One durable record for an actual contained fake process, including errors.
+
+    This is the subprocess/grading adapter, not the supervisor adapter. Usage is
+    intentionally unknown: real typed observations must come from the host ledger.
+    """
+    with ContainedRun(repo, base) as run:
+        result = run.execute(code, deadline=deadline, interrupt=interrupt)
+        git(run.project, 'add', '-A')
+        patch = subprocess.check_output(['git', '-C', str(run.project), 'diff', '--cached', '--binary'])
+        with Workspace(repo, base) as grading:
+            subprocess.run(['git', '-C', str(grading.project), 'apply', '--allow-empty'],
+                           input=patch, check=True, capture_output=True)
+            check = grader.grade(grading.project)
+        record = dict(v=1, task=str(uuid.uuid5(uuid.NAMESPACE_URL, fixture_id)), run=str(uuid.uuid4()),
+            fixture=fixture_id, base=base, requestHash=digest(request.encode()), graderHash=grader.sha256,
+            diffHash=digest(patch), harness=harness, mode=mode, simulated=True,
+            tokens=dict(input=None, output=None, cacheRead=None, cacheWrite=None), usageComplete=False,
+            checkResult=check, **result)
+        record['passed'] = result['outcome'] == 'completed' and check == 'passed'
+        append_record(destination, record)
+        return record

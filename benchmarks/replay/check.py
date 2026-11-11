@@ -39,6 +39,42 @@ class Witnesses(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 replay.require_live_isolation()
 
+    def test_containment(self):
+        with tempfile.TemporaryDirectory(prefix='replay-') as d:
+            root = Path(d)
+            repo, base, _ = replay.fixture(root)
+            outside = root / 'outside'
+            outside.write_text('unchanged')
+            with replay.ContainedRun(repo, base) as run:
+                good = run.execute('from pathlib import Path; Path("allowed").write_text("ok")')
+                self.assertTrue(good['passed'])
+                bad = run.execute('from pathlib import Path; Path(' + repr(str(outside)) + ').write_text("escaped")')
+                self.assertEqual(bad['outcome'], 'containment_failed')
+                self.assertFalse(bad['passed'])
+                self.assertEqual(outside.read_text(), 'unchanged')
+                for code, options, expected in [
+                    ('raise RuntimeError("failed")', {}, 'failed'),
+                    ('import time; time.sleep(60)', {'deadline': 0.1}, 'timeout'),
+                    ('import time; time.sleep(60)', {'interrupt': True}, 'interrupted')]:
+                    result = run.execute(code, **options)
+                    self.assertEqual(result['outcome'], expected)
+                    self.assertFalse(result['passed'])
+                    self.assertTrue(result['terminated'])
+                    replay.append_record(root / 'process-results.jsonl', result)
+                run.workspace.project = outside
+                with self.assertRaises(ValueError):
+                    run.execute('pass')
+            grader = replay.Grader(b'from pathlib import Path\nassert Path("value").read_text() == "fixed"\n')
+            record = replay.run_contained(repo, base, 'synthetic-value', 'Repair the value.', grader,
+                'codex', 'solo', 'import time; time.sleep(60)', root / 'run.jsonl', deadline=0.1)
+            self.assertEqual(record['outcome'], 'timeout')
+            self.assertEqual(record['fixture'], 'synthetic-value')
+            self.assertFalse(record['passed'])
+            self.assertFalse(record['usageComplete'])
+            self.assertEqual(len((root / 'run.jsonl').read_text().splitlines()), 1)
+            saved = [json.loads(line) for line in (root / 'process-results.jsonl').read_text().splitlines()]
+            self.assertEqual(len(saved), 3)
+
     def test_scoring(self):
         with tempfile.TemporaryDirectory(prefix='replay-') as d:
             repo, base, fix = replay.fixture(Path(d))
@@ -58,6 +94,7 @@ class Witnesses(unittest.TestCase):
                 self.assertTrue(r['diffHash'])
             self.assertEqual(replay.compare(records)['coverage'], '2/2')
             self.assertIsNone(replay.compare(records[:-2])['difference'])
+            self.assertIsNone(replay.compare(records[:3])['difference'])
             for outcome in ('failed', 'timeout', 'interrupted'):
                 r = replay.run_fake(repo, base, 'Repair the value.', grader,
                     'claude', 'solo', outcome)
@@ -76,7 +113,7 @@ class Witnesses(unittest.TestCase):
 
 if __name__ == '__main__':
     import sys
-    names = {'--replay-grader-check': 'test_grader',
+    names = {'--replay-containment-check': 'test_containment', '--replay-grader-check': 'test_grader',
              '--replay-isolation-check': 'test_isolation',
              '--replay-scoring-check': 'test_scoring'}
     suite = unittest.TestSuite(Witnesses(names[a]) for a in sys.argv[1:])
