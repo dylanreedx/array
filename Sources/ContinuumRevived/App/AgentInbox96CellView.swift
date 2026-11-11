@@ -2967,9 +2967,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return frame
     }
 
-    func clearSelectionForFold() {
-        shown?.isSelected = false
-        card.isSelected = false
+    func setSelectionForFold(_ selected: Bool) {
+        shown?.isSelected = selected
+        card.isSelected = selected
     }
 
     func applyInteraction(_ interaction: RowInteraction) {

@@ -4130,7 +4130,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let keepsContent = updatingFold && reusesRecentCell && cell is AgentInbox96CellView
             && recentCellModels[model.id] == model && !parentsWithChildren.contains(model.id)
         if keepsContent {
-            (cell as? AgentInbox96CellView)?.clearSelectionForFold()
+            (cell as? AgentInbox96CellView)?.setSelectionForFold(tableView.selectedRowIndexes.contains(row))
             (cell as? AgentInbox96CellView)?.updateElapsedClock(now: renderNow)
             _ = cell.updateEmphasisInPlace(AgentInboxRow.emphasis(
                 for: model.state, attention: model.attention, isInteracting: interacting))
