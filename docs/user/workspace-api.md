@@ -181,7 +181,8 @@ Create a child agent in Array, inheriting your checkout and, by default, harness
 | `title` | Optional. Short human label for the child's tile. |
 | `idempotencyKey` | Required. Stable key for this delegation. Reuse for transport retries; new attempts need a new key. |
 | `harness` | Optional. Child CLI; omit to inherit yours. Must be installed and signed in. Values: `Claude Code`, `Codex`, `Pi`. |
-| `retryOf` | Optional. Failed/stopped child of yours to continue; carries its brief, changed files and report. |
+| `effort` | Optional. Optional effort advertised by the selected harness live catalogue for the selected model. Unknown or unavailable efforts are refused. |
+| `retryOf` | Optional. Failed/stopped child of yours to continue; carries its brief, effort, changed files and report. |
 | `model` | Optional. Exact fully qualified id from the selected CLI catalogue. Omit to inherit on the same harness, or use a different harness's own default. |
 | `placement` | Optional.  |
 | `presentation` | Optional.  |

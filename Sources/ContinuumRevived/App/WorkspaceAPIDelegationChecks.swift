@@ -531,14 +531,24 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
                 expectEffort(await settle(child, launch: 4, "\(pair) after compaction"), "high", resumed: true, "\(pair) turn after compaction")
             }
 
-            // retryOf: a failed helper retried with the same listed effort.
-            if let failed = childId(delegateEffort(lead, with(["effort": "high", "task": "EFFORT-FAIL"])), "\(pair) failing helper") {
-                _ = await settle(failed, launch: 1, "\(pair) failing helper")
+            // retryOf continues the same work: the retry inherits the failed
+            // helper's stored effort, and an effort the call names wins.
+            func failedHelper(_ effort: String, _ what: String) async -> AgentID? {
+                guard let failed = childId(delegateEffort(lead, with(["effort": effort, "task": "EFFORT-FAIL"])), what) else { return nil }
+                _ = await settle(failed, launch: 1, what)
                 let retryable = await waitUntil(timeout: 5, pollInterval: 0.02) { supervisor.mayRetry(failed, from: lead) }
-                check(retryable, "\(pair): the failed helper must be retryable")
-                if let retried = childId(delegateEffort(lead, with(["effort": "high", "task": "effort retry", "retryOf": failed.rawValue.uuidString])), "\(pair) retryOf") {
-                    check(supervisor.records[retried]?.delegationContext?.retryOf == failed, "\(pair): the retry must carry retryOf")
-                    expectEffort(await settle(retried, launch: 1, "\(pair) retried helper"), "high", resumed: false, "\(pair) retried helper")
+                check(retryable, "\(what): the failed helper must be retryable")
+                return failed
+            }
+            for (override, expected) in [(String?.none, "high"), ("xhigh", "xhigh")] {
+                let what = "\(pair) retryOf \(override == nil ? "inherited" : "overridden")"
+                guard let failed = await failedHelper("high", what) else { continue }
+                var fields: [String: Any] = ["task": "effort retry", "retryOf": failed.rawValue.uuidString]
+                if let override { fields["effort"] = override }
+                if let retried = childId(delegateEffort(lead, with(fields)), what) {
+                    check(supervisor.records[retried]?.delegationContext?.retryOf == failed, "\(what): the retry must carry retryOf")
+                    check(supervisor.records[retried]?.thinking == expected, "\(what): the retried helper must hold \(expected), got \(String(describing: supervisor.records[retried]?.thinking))")
+                    expectEffort(await settle(retried, launch: 1, what), expected, resumed: false, what)
                 }
             }
 
@@ -578,6 +588,8 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
             let fixture = target == .codex ? AgentCatalogQAFixture.codex : AgentCatalogQAFixture.claude
             guard let child = childId(delegateEffort(lead, ["effort": "xhigh"]), "\(target.rawValue) stale setup") else { continue }
             _ = await settle(child, launch: 1, "\(target.rawValue) stale setup")
+            let staleFailed = childId(delegateEffort(lead, ["effort": "xhigh", "task": "EFFORT-FAIL"]), "\(target.rawValue) stale retry setup")
+            if let staleFailed { _ = await settle(staleFailed, launch: 1, "\(target.rawValue) stale retry setup") }
             var levels = fixture.effortLevels
             levels[model] = levels[model]?.filter { $0 != "xhigh" }
             AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
@@ -590,10 +602,21 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
                 check(supervisor.records[child]?.thinking == "xhigh", "\(target.rawValue): nothing rewrites the stored effort")
                 check(supervisor.records[child]?.latestTerminalEvent?.outcome == .succeeded, "\(target.rawValue): the stale helper's turn must still run")
             }
+            // A retry inherits the now-stale effort: not refused, kept on the
+            // record, left off the launch.
+            let retryable = await waitUntil(timeout: 5, pollInterval: 0.02) { staleFailed.map { supervisor.mayRetry($0, from: lead) } ?? false }
+            check(retryable, "\(target.rawValue): the stale helper must be retryable")
+            if let staleFailed, let retried = childId(delegateEffort(lead, ["task": "stale retry", "retryOf": staleFailed.rawValue.uuidString]), "\(target.rawValue) stale inherited retry") {
+                check(supervisor.records[retried]?.thinking == "xhigh", "\(target.rawValue): the retry must inherit the stale effort, got \(String(describing: supervisor.records[retried]?.thinking))")
+                if let launch = await settle(retried, launch: 1, "\(target.rawValue) stale inherited retry") {
+                    check(launch.effort == nil && launch.effortArguments.isEmpty,
+                          "\(target.rawValue): an inherited stale effort must not reach the CLI; launch effort \(String(describing: launch.effort)), argv effort \(launch.effortArguments)")
+                }
+            }
             AgentModelCatalog.shared.resetForQA(snapshot: fixture)
         }
         try expect(effortFailures.isEmpty, "delegate effort:\n" + effortFailures.joined(separator: "\n"))
-        print("delegate effort: a listed effort reaches Claude and Codex on the first, resumed, compaction, post-compaction and retryOf launches; omitted effort keeps today's argv; unlisted and no-data efforts are refused with nothing created; a stale effort is left off the launch")
+        print("delegate effort: a listed effort reaches Claude and Codex on the first, resumed, compaction, post-compaction and retryOf launches; a retry inherits the failed helper's effort unless it names one, and a stale inherited effort is left off; omitted effort keeps today's argv; unlisted and no-data efforts are refused with nothing created; a stale effort is left off the launch")
 
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .loggedOut, models: []))
         _ = try failure(dispatch("agent.delegate", ["task": "unready", "idempotencyKey": "unready", "harness": "Codex"]), .unsupported, "signed out harness")

@@ -200,10 +200,15 @@ extension WorkspaceAPIService {
 
         // Approval may have let the old helper resume or disappear.
         var prompt = request.task
+        // A retry continues the same work: it keeps the failed helper's stored
+        // effort unless this call names its own. The inherited value is not
+        // refused here; launch leaves it off if the catalogue no longer lists it.
+        var retryEffort: String?
         if let retryOf = request.retryOf {
             guard supervisor.mayRetry(retryOf, from: agentId), let old = supervisor.records[retryOf] else {
                 return fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn.")
             }
+            retryEffort = old.thinking
             let files = try? WorktreeManager().changedFiles(
                 repo: URL(fileURLWithPath: old.checkoutRoot), since: old.delegationContext?.baseHead)
             prompt += "\n\n" + AgentDelegationContext.handoff(from: old, changedFiles: files)
@@ -219,7 +224,7 @@ extension WorkspaceAPIService {
         let spawnRequest = SpawnRequest(
             role: nil, prompt: prompt, isolated: false, sourceItemID: requestId,
             displayLabel: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
-        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? (childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)), mode: .free, retryOf: request.retryOf, originalBrief: request.task) else {
+        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? retryEffort ?? (childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)), mode: .free, retryOf: request.retryOf, originalBrief: request.task) else {
             let reason = supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
             return fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true)
         }
