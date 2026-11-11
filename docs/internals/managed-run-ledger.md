@@ -119,6 +119,23 @@ A/B with alternating order, binding a whole `AgentRecord` copy and reading singl
 fields differed by about 0.5 µs, so nothing on the calling thread is worth
 moving. The remaining cost is the main-actor reads and the enqueue itself.
 
+## Constant cost per fact
+
+Each fact costs the same however long the ledger is. One `reduce` keeps the
+open parts per task, each part's tasks, delegation order and the owner's last
+turn boundary in memory; live appends and the load-time rebuild both run it,
+and `append` stays the only writer. Before this, closure scanned every row on
+each report or turn end: at 50,001 rows a fact took 5,795 µs against 36 µs on
+an empty ledger (161×), and the queue fell minutes behind.
+
+`--managed-run-ledger-check` runs two arms for it (each alone through
+`CONTINUUM_LEDGER_REVIEW_CASE=replay|scale`). `replay` drives one fixed call
+sequence, with a torn row and a restart, and compares a digest of the rows (times
+zeroed, ids renamed by first appearance, keys sorted, since the encoder's key
+order differs per process) against the digest the scanning reducer produced.
+`scale` preloads 50,001 rows and fails only if a fact costs five times more
+than on an empty ledger; it measured 0.99–1.03×.
+
 ## Helper evidence shadow capture
 
 `helperEvidence` rows extend v1 with an `evidence` dictionary. The host queues

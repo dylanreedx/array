@@ -44,10 +44,10 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// report path. Missing call correlation and coverage remain explicit gaps.
     func helperEvidence(agent: UUID, source: String) {
         queue.async {
-            guard let delegation = self.rows.last(where: { $0.agent == agent && $0.kind == "delegated" }) else { return }
+            guard let task = self.delegatedTask[agent] else { return }
             let capture = self.captures[agent] ?? Capture()
-            self.append(Row(kind: "helperEvidence", task: delegation.task, agent: agent,
-                part: delegation.part, source: "evidence/" + source, evidence: [
+            self.append(Row(kind: "helperEvidence", task: task, agent: agent,
+                part: self.parts[agent], source: "evidence/" + source, evidence: [
                     "preToolUses": String(capture.pre), "postToolUses": String(capture.post),
                     "shellCompletions": String(capture.shell),
                     "afterCoveredEdit": "unknown", "checkFilesModified": "unknown",
@@ -57,13 +57,19 @@ final class ManagedRunLedger: @unchecked Sendable {
     }
     private let queue = DispatchQueue(label: "dev.array.run-ledger", qos: .utility)
     private let url: URL
-    private var rows: [Row] = []
     private var seen = Set<String>()
     private var active: [UUID: UUID] = [:]
     private var previous: [UUID: UUID] = [:]
     private var owners: [UUID: UUID] = [:]
     private var parts: [UUID: UUID] = [:]
     private var open = Set<UUID>()
+    // Indexes over the facts so far, so each new fact costs the same however
+    // long the ledger is. Rebuilt once at load by the same `reduce`.
+    private var delegatedTask: [UUID: UUID] = [:]
+    private var partTasks: [UUID: Set<UUID>] = [:]
+    private var openByTask: [UUID: Set<UUID>] = [:]
+    private var delegationOrder: [UUID: [UUID]] = [:]
+    private var leadBoundary: [UUID: Row] = [:]
     private var needsSeparator = false
     // Replayed transcript events during restore are history, not new run facts.
     // Keep live attribution after closure for wakes, but never rebuild it from disk.
@@ -78,14 +84,7 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// stable source identities; duplicates never reach disk or the reducer.
     private func append(_ row: Row) {
         guard seen.insert(row.source).inserted else { return }
-        rows.append(row)
-        switch row.kind {
-        case "taskOpened": active[row.agent] = row.task; previous[row.agent] = row.task; owners[row.task] = row.agent
-        case "delegated": parts[row.agent] = row.part; if let part = row.part { open.insert(part) }
-        case "turnEnded", "reported": if let part = row.part { open.remove(part) }
-        case "taskClosed", "taskInterrupted": active[row.agent] = nil
-        default: break
-        }
+        reduce(row)
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             var data = Data()
@@ -98,6 +97,27 @@ final class ManagedRunLedger: @unchecked Sendable {
             needsSeparator = false
         } catch { NSLog("Run ledger write failed: %@", String(describing: error)) }
     }
+    /// The one reducer, for live appends and for the load-time rebuild.
+    private func reduce(_ row: Row) {
+        switch row.kind {
+        case "taskOpened": active[row.agent] = row.task; previous[row.agent] = row.task; owners[row.task] = row.agent
+        case "delegated":
+            parts[row.agent] = row.part; delegatedTask[row.agent] = row.task
+            if let part = row.part {
+                open.insert(part)
+                if partTasks[part, default: []].insert(row.task).inserted { delegationOrder[row.task, default: []].append(part) }
+                for task in partTasks[part]! { openByTask[task, default: []].insert(part) }
+            }
+        case "turnEnded", "reported":
+            if let part = row.part {
+                open.remove(part)
+                for task in partTasks[part] ?? [] { openByTask[task]?.remove(part) }
+            }
+        case "taskClosed", "taskInterrupted": active[row.agent] = nil
+        default: break
+        }
+        if (row.kind == "working" || row.kind == "turnEnded"), owners[row.task] == row.agent { leadBoundary[row.task] = row }
+    }
     private func recover() {
         if let data = try? Data(contentsOf: url) {
             // Preserve all prior bytes, including a torn final append. The sole
@@ -107,15 +127,11 @@ final class ManagedRunLedger: @unchecked Sendable {
             for line in complete.split(separator: 10) {
                 guard let row = try? JSONDecoder().decode(Row.self, from: Data(line)), row.v == 1 else { continue }
                 guard seen.insert(row.source).inserted else { continue }
-                rows.append(row)
-                if row.kind == "taskOpened" { active[row.agent] = row.task; previous[row.agent] = row.task; owners[row.task] = row.agent }
-                if row.kind == "delegated", let part = row.part { parts[row.agent] = part; open.insert(part) }
-                if (row.kind == "turnEnded" || row.kind == "reported"), let part = row.part { open.remove(part) }
-                if row.kind == "taskClosed" || row.kind == "taskInterrupted" { active[row.agent] = nil }
+                reduce(row)
             }
         }
         for (agent, task) in active {
-            let pending = rows.filter { $0.task == task && $0.kind == "delegated" }.compactMap(\.part).filter { open.contains($0) }
+            let pending = (delegationOrder[task] ?? []).filter { open.contains($0) }
             append(Row(kind: "taskInterrupted", task: task, agent: agent, source: "interrupted/\(task)", openParts: pending))
         }
     }
@@ -157,8 +173,8 @@ final class ManagedRunLedger: @unchecked Sendable {
               let owner = owners[task] else { return }
         append(Row(kind: kind, task: task, agent: agent, part: part, source: source, outcome: outcome, checks: checks, findings: findings))
         guard active[owner] == task, kind == "turnEnded" || kind == "reported",
-              !rows.contains(where: { $0.task == task && $0.kind == "delegated" && $0.part.map(open.contains) == true }),
-              let leadBoundary = rows.last(where: { $0.task == task && $0.agent == owner && ($0.kind == "working" || $0.kind == "turnEnded") }),
+              openByTask[task]?.isEmpty ?? true,
+              let leadBoundary = leadBoundary[task],
               leadBoundary.kind == "turnEnded" else { return }
         let closing = leadBoundary.outcome == "completed" ? "taskClosed" : "taskInterrupted"
         append(Row(kind: closing, task: task, agent: owner, source: "close/\(task)", openParts: closing == "taskInterrupted" ? [] : nil))

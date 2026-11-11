@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import ContinuumRevivedCore
 import Foundation
 
@@ -43,8 +44,10 @@ enum ManagedRunLedgerChecks {
     static func run() async throws {
         let mode = ProcessInfo.processInfo.environment["CONTINUUM_LEDGER_REVIEW_CASE"]
         if mode == "isolation" { try isolation(); return }
+        if mode == "replay" { try replay(); return }
+        if mode == "scale" { try scale(); return }
         try await scenario(noWake: mode == "closure")
-        if mode == nil { try await scenario(noWake: true); try isolation() }
+        if mode == nil { try await scenario(noWake: true); try isolation(); try replay(); try scale() }
     }
 
     static func isolation() throws {
@@ -63,6 +66,141 @@ enum ManagedRunLedgerChecks {
         try expect(refused, "check accepted a non-temporary support directory")
         try expect(try FileManager.default.contentsOfDirectory(atPath: unsafe.path).isEmpty, "unsafe support was touched")
         print("Ledger isolation refusal passed")
+    }
+
+    /// A check-owned temporary directory, refused unless the run is isolated.
+    static func ownedSupport(_ label: String) throws -> URL {
+        guard let support = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"],
+              WorkspaceAgentReportChecks.isTemporary(URL(fileURLWithPath: support)) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "run-ledger: \(label) requires isolated CONTINUUM_APP_SUPPORT")
+        }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("continuum-ledger-\(label)-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// The ledger file with times zeroed, every UUID renamed by first appearance
+    /// and each row's keys sorted (the encoder's key order is random per process),
+    /// so two runs of one call sequence compare byte for byte.
+    static func canonical(_ url: URL) throws -> String {
+        var text = ""
+        for line in try Data(contentsOf: url).split(separator: 10) {
+            guard var row = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else {
+                text += String(decoding: line, as: UTF8.self) + "\n"; continue
+            }
+            row["at"] = 0
+            text += String(decoding: try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self) + "\n"
+        }
+        let uuid = try NSRegularExpression(pattern: "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}")
+        var names: [String: String] = [:], out = "", last = text.startIndex
+        for match in uuid.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            let range = Range(match.range, in: text)!
+            let id = String(text[range])
+            if names[id] == nil { names[id] = "id\(names.count)" }
+            out += text[last..<range.lowerBound] + names[id]!
+            last = range.upperBound
+        }
+        return out + text[last...]
+    }
+
+    /// The canonical bytes of `replay()` as the scanning reducer wrote them.
+    static let replayDigest = "2b8f33497cd3253a9b0a6830020c3de4a6e8de5788d8e89c07049613e513c02d"
+
+    /// One fixed call sequence through the production ledger: joins, a report that
+    /// leaves a part open, closure, a linked task, an interrupted task, a torn
+    /// final row and a restart. The recorded bytes must not change with the reducer.
+    static func replay() throws {
+        let dir = try ownedSupport("replay")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let lead = UUID(), other = UUID(), h1 = UUID(), h2 = UUID(), h3 = UUID(), h4 = UUID(), project = UUID()
+        let pass: [AgentReport.Check] = [.init(what: "x", result: .pass)]
+        let issue: [AgentReport.Finding] = [.init(level: .issue, text: "x")]
+        var ledger = ManagedRunLedger(support: dir)
+        ledger.submission(agent: lead, project: project)
+        ledger.working(agent: lead, turn: "l1")
+        ledger.delegated(parent: lead, child: h1, source: "r1")
+        ledger.delegated(parent: lead, child: h2, source: "r2")
+        ledger.delegated(parent: lead, child: h2, source: "r2")
+        ledger.working(agent: h1, turn: "a"); ledger.working(agent: h2, turn: "b")
+        ledger.ended(agent: lead, turn: "l1", outcome: .completed)
+        ledger.reported(agent: h1, at: Date(timeIntervalSinceReferenceDate: 1), checks: pass, findings: [])
+        ledger.ended(agent: h1, turn: "a", outcome: .completed)
+        ledger.submission(agent: lead, project: project)
+        ledger.working(agent: lead, turn: "l2"); ledger.ended(agent: lead, turn: "l2", outcome: .completed)
+        ledger.reported(agent: h2, at: Date(timeIntervalSinceReferenceDate: 2), checks: [], findings: issue)
+        ledger.ended(agent: h2, turn: "b", outcome: .failed)
+        ledger.submission(agent: lead, project: project)
+        ledger.working(agent: lead, turn: "l3")
+        ledger.delegated(parent: lead, child: h3, source: "r3")
+        ledger.working(agent: h3, turn: "c")
+        ledger.ended(agent: lead, turn: "l3", outcome: .completed)
+        ledger.submission(agent: other, project: nil)
+        ledger.working(agent: other, turn: "o1")
+        ledger.delegated(parent: other, child: h4, source: "r4")
+        ledger.ended(agent: other, turn: "o1", outcome: .interrupted)
+        ledger.ended(agent: h4, turn: "d", outcome: .completed)
+        ledger.ended(agent: h3, turn: "c", outcome: .cancelled)
+        ledger.submission(agent: lead, project: project)
+        ledger.working(agent: lead, turn: "l4")
+        ledger.delegated(parent: lead, child: h1, source: "r5")
+        ledger.drain()
+        let file = dir.appendingPathComponent("run-ledger/ledger.jsonl")
+        let tail = try FileHandle(forWritingTo: file)
+        try tail.seekToEnd(); try tail.write(contentsOf: Data("{torn".utf8)); try tail.close()
+        ledger = ManagedRunLedger(support: dir)
+        ledger.submission(agent: lead, project: project)
+        ledger.drain()
+        let text = try canonical(file)
+        let digest = SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+        print("ledger replay rows=\(text.split(separator: "\n").count) digest=\(digest)")
+        if ProcessInfo.processInfo.environment["CONTINUUM_LEDGER_REPLAY_PRINT"] == "1" { print(text) }
+        try expect(digest == replayDigest, "replayed ledger bytes changed")
+        print("Ledger replay passed: recorded bytes identical to the scanning reducer")
+    }
+
+    /// Facts appended to a ledger already holding `history` closed tasks cost the
+    /// same as on an empty one. Prints both; fails only on a fivefold slowdown.
+    static func scale() throws {
+        let history = 7_143, facts = 300
+        func perFact(preloadedTasks: Int) throws -> Double {
+            let dir = try ownedSupport("scale")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let file = dir.appendingPathComponent("run-ledger/ledger.jsonl")
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            var data = Data()
+            let encoder = JSONEncoder()
+            for _ in 0..<preloadedTasks {
+                let lead = UUID(), helper = UUID(), task = UUID()
+                for (kind, agent, part) in [("taskOpened", lead, nil), ("submission", lead, nil), ("working", lead, nil),
+                                            ("delegated", helper, helper), ("reported", helper, helper),
+                                            ("turnEnded", lead, nil), ("taskClosed", lead, nil)] as [(String, UUID, UUID?)] {
+                    var row = ManagedRunLedger.Row(kind: kind, task: task, agent: agent, part: part, source: UUID().uuidString)
+                    if kind == "turnEnded" { row.outcome = "completed" }
+                    data.append(try encoder.encode(row)); data.append(10)
+                }
+            }
+            try data.write(to: file)
+            let ledger = ManagedRunLedger(support: dir)
+            let lead = UUID(), helper = UUID(), other = UUID()
+            ledger.submission(agent: lead, project: nil)
+            ledger.working(agent: lead, turn: "l")
+            ledger.delegated(parent: lead, child: helper, source: "r")
+            ledger.delegated(parent: lead, child: other, source: "s")
+            ledger.drain()
+            let start = DispatchTime.now().uptimeNanoseconds
+            for i in 0..<facts {
+                ledger.reported(agent: helper, at: Date(timeIntervalSinceReferenceDate: Double(i)), checks: [], findings: [])
+            }
+            ledger.drain()
+            let micros = Double(DispatchTime.now().uptimeNanoseconds - start) / 1000 / Double(facts)
+            try expect(rows(file, "reported").count == preloadedTasks + facts, "scale facts not recorded")
+            print(String(format: "ledger scale preloaded-rows=%d facts=%d per-fact=%.1f us", preloadedTasks * 7, facts, micros))
+            return micros
+        }
+        let small = try perFact(preloadedTasks: 0), large = try perFact(preloadedTasks: history)
+        print(String(format: "ledger scale ratio=%.2f", large / small))
+        try expect(large < 5 * small, "a fact costs \(Int(large / small))x more at \(history * 7) rows")
+        print("Ledger scale passed: per-fact cost does not grow with the ledger")
     }
 
     static func scenario(noWake: Bool) async throws {
