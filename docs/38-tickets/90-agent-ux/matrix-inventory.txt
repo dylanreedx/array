@@ -226,6 +226,7 @@ check --palette-first-responder-restore-check
 check --palette-jump-check
 check --palette-zone-check
 check --parser-identity-prefix-check
+check --part-contract-check
 check --perf-budget-camera-slope-check
 check --perf-budget-check
 check --perf-budget-geometry-hold-probe-check
@@ -674,6 +675,7 @@ leg run_app_check .build/debug/Array --palette-duplicate-root-check
 leg run_app_check .build/debug/Array --palette-first-responder-restore-check
 leg run_app_check .build/debug/Array --palette-jump-check
 leg run_app_check .build/debug/Array --palette-zone-check
+leg run_app_check .build/debug/Array --part-contract-check
 leg run_app_check .build/debug/Array --perf-budget-camera-slope-check
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
