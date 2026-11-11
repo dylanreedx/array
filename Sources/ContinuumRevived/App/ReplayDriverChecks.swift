@@ -109,6 +109,53 @@ struct ReplayLiveSettings {
     /// Host directory the run's ledger, transcripts and diff are copied to
     /// before its root is cleaned.
     let keep: URL
+    /// The managed-strict arm: Managed mode with the strict-lead switch on.
+    var strict = false
+    /// Environment switches the caller set on this process for the run.
+    var switches: [String: String] = [:]
+    /// Where this run sat in its task's sequence of arms (cache columns
+    /// depend on it): position, of, sequence.
+    var runOrder: [String: Any]?
+}
+
+/// What a live lead did, read from its own CLI session file after the run.
+/// Edit-tool calls and `array_delegate` calls are exact. Shell writes are a
+/// pattern match over the Bash commands, so they are labelled heuristic.
+enum ReplayLeadTranscript {
+    static let editTools: Set<String> = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+    static let shellWrite = try! NSRegularExpression(pattern: #"""
+        (^|[\s;&|(])(sed\s+-i|perl\s+-[a-z]*i|tee\s|patch\s|git\s+(apply|am|merge|cherry-pick|checkout|restore|reset|commit|mv|rm)\b|mv\s|cp\s|rm\s|touch\s|mkdir\s)|[^0-9&>]>>?\s*(?!/dev/)[^&\s]|\.write_text\(|\.write\(|open\([^)]*['"][wa]
+        """#, options: [])
+
+    static func read(projects: URL, sessionId: String) -> [String: Any] {
+        let fm = FileManager.default
+        let dirs = (try? fm.contentsOfDirectory(at: projects, includingPropertiesForKeys: nil)) ?? []
+        guard let file = dirs.map({ $0.appendingPathComponent(sessionId + ".jsonl") })
+                .first(where: { fm.fileExists(atPath: $0.path) }),
+              let text = try? String(contentsOf: file, encoding: .utf8) else {
+            return ["changed": "unknown", "method": "lead session file not found", "editToolCalls": NSNull(),
+                    "shellWrites": [Any](), "bashCalls": NSNull(), "delegateCalls": NSNull()]
+        }
+        var seen = Set<String>(), edits = 0, bash = 0, delegates = 0, writes: [String] = []
+        for line in text.split(separator: "\n") {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  object["type"] as? String == "assistant",
+                  let content = (object["message"] as? [String: Any])?["content"] as? [[String: Any]] else { continue }
+            for item in content where item["type"] as? String == "tool_use" {
+                guard let id = item["id"] as? String, seen.insert(id).inserted, let name = item["name"] as? String else { continue }
+                if editTools.contains(name) { edits += 1 }
+                if name.hasSuffix("__array_delegate") { delegates += 1 }
+                if name == "Bash", let command = (item["input"] as? [String: Any])?["command"] as? String {
+                    bash += 1
+                    let range = NSRange(command.startIndex..., in: command)
+                    if shellWrite.firstMatch(in: command, range: range) != nil { writes.append(String(command.prefix(160))) }
+                }
+            }
+        }
+        let changed = edits > 0 ? "yes: edit tool" : !writes.isEmpty ? "likely: shell write (heuristic)" : "none seen"
+        return ["changed": changed, "method": "lead session file", "editToolCalls": edits, "shellWrites": writes,
+                "bashCalls": bash, "delegateCalls": delegates]
+    }
 }
 
 /// Recorded provider streams, translated by the PRODUCTION translators so the
@@ -474,7 +521,10 @@ final class ReplaySupervisorDriver {
         return ["v": version, "run": UUID().uuidString.lowercased(), "task": task.task, "ledgerTask": NSNull(),
                 "fixture": task.fixture, "base": task.base, "requestHash": task.requestHash,
                 "checksHash": task.checksHash, "harness": condition.harness == .codex ? "codex" : "claude",
-                "mode": condition.managed ? "managed" : "solo", "actualChoice": NSNull(), "simulated": condition.live == nil,
+                "mode": condition.live?.strict == true ? "managed-strict" : condition.managed ? "managed" : "solo",
+                "actualChoice": NSNull(), "simulated": condition.live == nil,
+                "runOrder": condition.live?.runOrder ?? NSNull(), "switches": condition.live?.switches ?? [String: String](),
+                "leadChanges": NSNull(),
                 "outcome": "driverFailed", "failure": NSNull(),
                 "fannedOut": condition.managed ? false as Any : NSNull(), "helperCount": 0, "helpers": [Any](),
                 "delegationAttempts": 0,
@@ -522,15 +572,9 @@ final class ReplaySupervisorDriver {
         let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("support")),
                                          makeRunner: { launch in
             let isLead = launch.record.parentAgentID == nil
-            var launch = launch
-            // Production hands every Claude agent the workspace MCP server and
-            // refuses a Free agent's delegation per call. A live solo lead gets
-            // no server at all, as this driver's solo condition states.
-            if condition.live != nil, isLead, !condition.managed {
-                launch = AgentRunnerLaunch(record: launch.record, spawnDepth: launch.spawnDepth, workspaceMCP: nil,
-                                           accountConfigDirectory: launch.accountConfigDirectory,
-                                           projectStandards: launch.projectStandards)
-            }
+            // A live solo lead keeps the workspace MCP server production gives
+            // every Claude agent; the workspace API refuses its delegation per
+            // call, and the driver counts those calls from its session file.
             if isLead { facts.leadLaunch(hasTools: launch.workspaceMCP != nil) }
             let agent: AgentRunning = condition.live != nil
                 ? AgentSupervisor.productionRunner(for: launch)
@@ -620,8 +664,18 @@ final class ReplaySupervisorDriver {
         let ledger = RunLedgerUsageReader.ledgerURL(applicationSupport: root.appendingPathComponent("support"))
         let disagreements = ReplayLedgerRecord.fill(&record, ledger: ledger, lead: lead, managed: condition.managed,
                                                     productionHelpers: helpers.count)
-        if !condition.managed, !helpers.isEmpty || facts.leadLaunchesWithTools.contains(true) {
+        if !condition.managed, !helpers.isEmpty || (condition.live == nil && facts.leadLaunchesWithTools.contains(true)) {
             record["failure"] = "solo lead had a delegation route"
+        }
+        if condition.live != nil, let leadRecord = supervisor.records[lead] {
+            let lead = ReplayLeadTranscript.read(projects: root.appendingPathComponent("claude-config/projects"),
+                                                 sessionId: AgentSupervisor.claudeSessionLocation(for: leadRecord).sessionId)
+            record["leadChanges"] = lead
+            // A solo lead's array_delegate calls are refused by the workspace
+            // API; each is an attempt, beside any on the runner's spawn channel.
+            if !condition.managed, let calls = lead["delegateCalls"] as? Int {
+                record["delegationAttempts"] = facts.intercepted + calls
+            }
         }
         if !facts.leaks.isEmpty {
             record["outcome"] = "containmentFailed"
@@ -934,6 +988,43 @@ func runReplayDriverChecks() async throws {
     guard AppDelegate.workspaceMCPExecutablePath() != nil else {
         throw ReplayFailure(description: "array-workspace-mcp is not built; build that product first")
     }
+
+    // What a live lead did, read from its own session file: exact counts for
+    // edit tools and delegation, a labelled heuristic for shell writes, and
+    // each tool call once although the CLI may write it on several lines.
+    let sessions = FileManager.default.temporaryDirectory.appendingPathComponent("replay-lead-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: sessions) }
+    func call(_ id: String, _ name: String, _ input: [String: Any]) -> String {
+        let line: [String: Any] = ["type": "assistant", "message": ["content": [["type": "tool_use", "id": id, "name": name, "input": input]]]]
+        return String(decoding: try! JSONSerialization.data(withJSONObject: line), as: UTF8.self)
+    }
+    func lead(_ lines: [String]) throws -> [String: Any] {
+        let folder = sessions.appendingPathComponent("p-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try lines.joined(separator: "\n").write(to: folder.appendingPathComponent("lead.jsonl"), atomically: true, encoding: .utf8)
+        return ReplayLeadTranscript.read(projects: sessions, sessionId: "lead")
+    }
+    let reads = try lead([call("a", "Bash", ["command": "grep -n old scripts/x.py 2>/dev/null"]),
+                          call("b", "Read", ["file_path": "x"]), call("c", "Bash", ["command": "ls > /dev/null"])])
+    try expect(reads["changed"] as? String == "none seen" && reads["bashCalls"] as? Int == 2,
+               "a lead that only read was recorded as changing files: \(reads)")
+    let shell = try lead([call("a", "Bash", ["command": "python3 - <<'E'\np='x.py'\nopen(p,'w').write(s)\nE"]),
+                          call("a", "Bash", ["command": "python3 - <<'E'\np='x.py'\nopen(p,'w').write(s)\nE"]),
+                          call("b", "Bash", ["command": "git -C .worktrees/h diff > p2.diff && git apply p2.diff"]),
+                          call("d", "mcp__array_workspace__array_delegate", ["task": "part 1"])])
+    try expect(shell["changed"] as? String == "likely: shell write (heuristic)" && shell["editToolCalls"] as? Int == 0
+               && (shell["shellWrites"] as? [String])?.count == 2 && shell["delegateCalls"] as? Int == 1,
+               "a lead's shell writes or delegations were miscounted: \(shell)")
+    let edits = try lead([call("a", "Edit", ["file_path": "x"]), call("b", "Write", ["file_path": "y"])])
+    try expect(edits["changed"] as? String == "yes: edit tool" && edits["editToolCalls"] as? Int == 2,
+               "a lead's edit-tool calls were not counted: \(edits)")
+    try expect(ReplayLeadTranscript.read(projects: sessions, sessionId: "absent")["changed"] as? String == "unknown",
+               "a missing lead session was not recorded as unknown")
+    let order = parseRunOrder("2/3:managed,managed-strict,solo")
+    try expect(order?["position"] as? Int == 2 && order?["of"] as? Int == 3
+               && order?["sequence"] as? [String] == ["managed", "managed-strict", "solo"], "run order misparsed: \(String(describing: order))")
+    try expect(parseRunOrder("3/2:a,b") == nil && parseRunOrder("1/2:solo") == nil && parseRunOrder("solo") == nil,
+               "an impossible run order was accepted")
     let fm = FileManager.default
     let host = URL(fileURLWithPath: try ReplaySupervisorDriver.realPath(fm.temporaryDirectory.path))
         .appendingPathComponent("replay-driver-\(UUID().uuidString)")
@@ -1109,15 +1200,19 @@ func runReplayDriverChecks() async throws {
 
 // MARK: - One live run
 
-/// `--replay-live-run TASK_JSON SINK solo|managed MODEL EFFORT DEADLINE_SECONDS KEEP_DIR`.
+/// `--replay-live-run TASK_JSON SINK solo|managed|managed-strict MODEL EFFORT DEADLINE_SECONDS KEEP_DIR ORDER`.
 /// One condition, one record appended to SINK; the raw run is copied to KEEP_DIR.
+/// ORDER is `position/of:arm,arm,...`, this run's place in its task's sequence.
 /// The caller supplies containment: `live_claude.py` first on PATH as `claude`,
-/// and the egress proxy's port (`benchmarks/replay/run_pilot.py`).
+/// and the egress proxy's port; and for managed-strict, the strict-lead switch
+/// in this process's environment, named in REPLAY_LIVE_SWITCHES
+/// (`NAME=VALUE,...`). All of that is `benchmarks/replay/run_pilot.py`.
 @MainActor
 func runReplayLive(_ arguments: [String]) async throws {
-    guard let at = arguments.firstIndex(of: "--replay-live-run"), arguments.count >= at + 8,
-          ["solo", "managed"].contains(arguments[at + 3]), let deadline = Double(arguments[at + 6]) else {
-        throw ReplayFailure(description: "usage: --replay-live-run TASK SINK solo|managed MODEL EFFORT DEADLINE KEEP")
+    guard let at = arguments.firstIndex(of: "--replay-live-run"), arguments.count >= at + 9,
+          ["solo", "managed", "managed-strict"].contains(arguments[at + 3]), let deadline = Double(arguments[at + 6]),
+          let order = parseRunOrder(arguments[at + 8]) else {
+        throw ReplayFailure(description: "usage: --replay-live-run TASK SINK solo|managed|managed-strict MODEL EFFORT DEADLINE KEEP ORDER")
     }
     let value = { (offset: Int) in arguments[at + offset] }
     for key in ["REPLAY_LIVE_CLAUDE", "REPLAY_LIVE_PROXY_PORT"] where ProcessInfo.processInfo.environment[key] == nil {
@@ -1126,10 +1221,33 @@ func runReplayLive(_ arguments: [String]) async throws {
     AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
     let task = try ReplayTask.load(URL(fileURLWithPath: value(1)))
     let driver = ReplaySupervisorDriver(task: task, sink: URL(fileURLWithPath: value(2)))
-    let live = ReplayLiveSettings(model: value(4), effort: value(5), deadlineSeconds: deadline,
+    var live = ReplayLiveSettings(model: value(4), effort: value(5), deadlineSeconds: deadline,
                                   keep: URL(fileURLWithPath: value(7), isDirectory: true))
-    let record = await driver.run(ReplayCondition(harness: .claudeCode, managed: value(3) == "managed",
+    live.strict = value(3) == "managed-strict"
+    live.runOrder = order
+    let environment = ProcessInfo.processInfo.environment
+    for pair in (environment["REPLAY_LIVE_SWITCHES"] ?? "").split(separator: ",") {
+        let name = String(pair.split(separator: "=", maxSplits: 1).first ?? "")
+        guard !name.isEmpty, let set = environment[name] else {
+            throw ReplayFailure(description: "switch \(name) is named but not set in this process")
+        }
+        live.switches[name] = set
+    }
+    if live.strict, live.switches.isEmpty {
+        throw ReplayFailure(description: "managed-strict needs the strict-lead switch (strictLeadSwitch in live-config.json)")
+    }
+    let record = await driver.run(ReplayCondition(harness: .claudeCode, managed: value(3) != "solo",
                                                   lead: .repairs, live: live))
     let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
     print(String(decoding: data, as: UTF8.self))
+}
+
+/// `position/of:arm,arm,...` to the record's runOrder object.
+func parseRunOrder(_ text: String) -> [String: Any]? {
+    let halves = text.split(separator: ":", maxSplits: 1)
+    guard halves.count == 2 else { return nil }
+    let numbers = halves[0].split(separator: "/").compactMap { Int($0) }
+    let sequence = halves[1].split(separator: ",").map(String.init)
+    guard numbers.count == 2, numbers[0] >= 1, numbers[0] <= numbers[1], sequence.count == numbers[1] else { return nil }
+    return ["position": numbers[0], "of": numbers[1], "sequence": sequence]
 }
