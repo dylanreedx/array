@@ -80,13 +80,17 @@ enum SidebarSelectionGeometryChecks {
                     inbox.layoutViewportForQA()
                     try checkBottom(inbox, lead: lead, helpers: helpers)
                     if count == 0 {
+                        _ = inbox.selectRowForQA(id: lead)
+                        inbox.layoutViewportForQA()
                         guard let cell = inbox.cellForQA(id: lead), let card = cards(cell).first,
                               card.layer?.cornerRadius ?? 0 > 0 else {
                             throw Failure(message: "singleton lost its rounded selection surface")
                         }
                         if style != .classic {
-                            guard !card.qaIndicatorLayers.wash.isHidden,
-                                  abs(card.qaIndicatorLayers.wash.bounds.height - cell.qaCardFrameForQA.height) < 0.5 else {
+                            let light = lights(cell).first
+                            let groupHeight = light?.layer?.sublayers?.first?.frame.height ?? 0
+                            guard light?.isHidden == false,
+                                  abs(groupHeight - cell.qaCardFrameForQA.height) < 0.5 else {
                                 throw Failure(message: "removing helpers left a stale selection height")
                             }
                         }
@@ -102,8 +106,8 @@ enum SidebarSelectionGeometryChecks {
                     }
                     for helper in [parent] + Array(helpers.prefix(count)) {
                         if let selectedCell = inbox.cellForQA(id: helper.id),
-                           lights(selectedCell).contains(where: { !$0.isHidden }) {
-                            throw Failure(message: "selected group retains a second tinted or outlined surface")
+                           style != .classic && lights(selectedCell).allSatisfy({ $0.isHidden }) {
+                            throw Failure(message: "selected working group lost its active style")
                         }
                     }
                     inbox.clearSelectionForQA()

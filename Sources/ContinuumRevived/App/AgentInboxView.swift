@@ -2161,6 +2161,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         externalSessionHiding?.noteDiscovered(Set(newRows.compactMap(\.externalSession?.sessionKey)))
         updateScopeMenu()
         render(display(from: newRows))
+        if !selectionOnEntry.isEmpty { restoreSelection(ids: selectionOnEntry) }
         completePendingAdvance(selectionOnEntry: selectionOnEntry)
     }
 
@@ -2378,7 +2379,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // frozen order never reorders on a push, so a multi-selection used to
             // survive every push; `render` empties the table's selection, so the
             // rows still on screen are selected again by id.
-            let keptSelection = sortMode != .newest ? selectedRows.map(\.id) : []
+            let keptSelection = selectedRows.map(\.id)
             render(next)
             if !keptSelection.isEmpty { restoreSelection(ids: keptSelection) }
             if slides {
@@ -2794,7 +2795,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let rollup = rollupsByParent[lead.id]
             let ask = ownershipAskByLead[lead.id]
             let working = lead.state == .working || (rollup?.working ?? 0) > 0
-            let sweepPhase = working && ask == nil ? InboxOwnershipClock.phase(for: lead.id) : nil
+            let sweepPhase = working ? InboxOwnershipClock.phase(for: lead.id) : nil
             // The lanes, read backwards: a lane runs through a row while a later
             // row at its level is still to come, and ends in a foot at the last.
             var laterAt = [Bool](repeating: false, count: AgentInboxRow.maxDepth + 2)
@@ -2823,11 +2824,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     scan += heights[i - start] + spacing
                 }
             }
-            let activeGroup = end > start && (start...end).contains {
-                if case .agent(let row) = items[$0] { return row.id == openAgentId || (SidebarActiveIndicatorScope.resolve(in: indicatorDefaults) == .working && row.state == .working) }
-                return false
-            }
             let hasSelectedMember = (start...end).contains { tableView.selectedRowIndexes.contains($0) }
+            let activeGroup = working && (SidebarActiveIndicatorScope.resolve(in: indicatorDefaults) == .working || hasSelectedMember)
             let focusHeight = max(1, groupHeight - SidebarDensityProposal.production.gapBetweenRows)
             let focusTarget = runningOffset.map { $0 / focusHeight } ?? min(0.9, heights[0] / focusHeight * 0.8)
             if let old = groupFocusMemory[lead.id] {
@@ -2844,9 +2842,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     offset: offset, groupHeight: groupHeight,
                     continuesAbove: index > start, continuesBelow: index < end,
                     leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
-                    sweepPhase: sweepPhase, sweepColour: lead.identityColor,
+                    sweepPhase: activeGroup ? sweepPhase : nil, sweepColour: lead.identityColor,
                     raisedAsk: index == start ? ask : nil,
-                    activeGroup: activeGroup && !hasSelectedMember,
+                    activeGroup: activeGroup, groupSelected: hasSelectedMember,
                     leadHeight: heights[0], runningY: runningOffset,
                     rowIndex: index - start, focusFrom: focusMemory?.from,
                     focusChangedAt: focusMemory?.changedAt)
@@ -2937,10 +2935,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The identity sequence changes, but only by one contiguous block, so the
     /// table inserts or removes exactly those rows (`applyFoldIncrementally`)
     /// rather than reloading whole; anything else falls back to a full render.
-    /// Selection and hover are dropped for the same reason `setScope` drops them —
-    /// their indexes belong to the list that just went away, and a bulk action
-    /// (P3.11) must never reach a row you cannot see.
+    /// Selection follows agent identity through the fold. A hidden selected helper
+    /// is represented by its lead until the group opens again.
     func toggleCollapse(parentId: UUID) {
+        let currentSelection = selectedRows.map(\.id)
+        let deferredSelection = foldedSelectionByParent.removeValue(forKey: parentId)
+        let keptSelection = collapsedParents.contains(parentId) && currentSelection == [parentId]
+            ? (deferredSelection ?? currentSelection) : currentSelection
         updatingFold = true
         defer { updatingFold = false }
         let animates = window != nil && !prefersReducedMotion()
@@ -2994,6 +2995,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.layoutSubtreeIfNeeded()
         layoutSubtreeIfNeeded()
         restoreScrollAnchor(anchor)
+        if !keptSelection.isEmpty {
+            let visible = keptSelection.filter { tableRow(forAgentId: $0) != nil }
+            if visible.isEmpty { foldedSelectionByParent[parentId] = keptSelection }
+            restoreSelection(ids: visible.isEmpty ? [parentId] : visible)
+            layoutSubtreeIfNeeded()
+        }
         guard animates else { return }
         let after = captureFoldRows(reusing: before, excluding: relit, capturePixels: !liveMotion)
         if liveMotion {
@@ -4399,6 +4406,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private var pressedTableRow: Int?
+    private var foldedSelectionByParent: [UUID: [UUID]] = [:]
     fileprivate func isClickableRow(_ row: Int) -> Bool {
         guard items.indices.contains(row) else { return false }
         switch items[row] {
@@ -4447,6 +4455,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
     @objc private func rowClicked(_ sender: Any?) {
+        if let id = agentIdForTableRow(tableView.clickedRow) { foldedSelectionByParent.removeValue(forKey: id) }
         _ = activateRow(
             atTableRow: tableView.clickedRow,
             event: NSApp.currentEvent)
@@ -5733,7 +5742,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             isHovered: id == hoveredAgentId,
             isPressed: row == pressedTableRow,
             isRouteActive: id == openAgentId,
-            isIndicatorWorking: SidebarActiveIndicatorScope.resolve(in: indicatorDefaults) == .working && items[row].agentRow?.state == .working,
+            isIndicatorWorking: items[row].agentRow?.state == .working && ownership(atTableRow: row).activeGroup,
             hasKeyboardFocus: id == keyboardFocusAgentId
         )
     }
@@ -9889,9 +9898,15 @@ final class AgentInboxCardView: NSView, TokenThemed {
 
     private func applyIndicator() {
         let style = indicatorStyle
-        let enabled = !sharesGroupLight && style != "current" && (isRouteActive || isSelected || isIndicatorWorking)
+        if let layer, indicatorEdge.superlayer == nil { layer.addSublayer(indicatorEdge) }
+        indicatorEdge.frame = bounds.insetBy(dx: 0.5, dy: 0.5)
+        indicatorEdge.cornerRadius = max(0, Radius.card - 0.5)
+        indicatorEdge.borderWidth = isSelected ? 1 : 0
+        indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
+            .withAlphaComponent(effectiveTokenTheme == .dark ? 0.55 : 0.35).cgColor
+        indicatorEdge.isHidden = !isSelected
+        let enabled = !sharesGroupLight && style != "current" && isIndicatorWorking
         indicatorWash.isHidden = !enabled
-        indicatorEdge.isHidden = !enabled
         guard enabled, let layer else {
             stopIndicatorMotion()
             return
@@ -9955,7 +9970,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
             .withAlphaComponent(dark ? 0.55 : 0.35).cgColor
         // Only the open agent animates. Multi-selection remains a static indication.
-        let moving = (isRouteActive || isIndicatorWorking) && !indicatorReducesMotion
+        let moving = isIndicatorWorking && !indicatorReducesMotion
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && window != nil
         let signature = moving ? "\(style):\(bounds.size)" : nil
         guard signature != motionSignature else { return }

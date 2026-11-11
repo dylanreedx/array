@@ -32,6 +32,7 @@ enum SidebarIndicatorSettingsChecks {
     }
 
     static func run() throws {
+        try SidebarIndicatorTruthTableChecks.run()
         try SidebarPressFeedbackChecks.run()
         try SidebarSelectionGeometryChecks.run()
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
@@ -97,6 +98,7 @@ enum SidebarIndicatorSettingsChecks {
             inbox.reload(rows: [lead] + helpers)
             inbox.layoutForQA()
             inbox.rebuildRowsForQA()
+            _ = inbox.selectRowForQA(id: id)
             fixture.settle()
             guard let card = descendants(inbox, AgentInboxCardView.self).first(where: { $0.isRouteActive }) else {
                 throw Failure(description: "sidebar did not render its real active card")
@@ -105,11 +107,11 @@ enum SidebarIndicatorSettingsChecks {
                 throw Failure(description: "sidebar did not render the real N-more-helpers tail")
             }
             try expect(!tail.isSweepingForQA, "default Duplex left a Classic border slice on the helper tail")
-            let builds = inbox.cellBuildCountForQA
             var renders: [Data] = []
             // Deliberately visit Gradient before Sheen: stale colour-stop counts
             // from a three-stop wash must not survive in a two-colour surface.
             inbox.openAgentId = nil
+            inbox.clearSelectionForQA()
             defaults.set("working", forKey: SidebarActiveIndicatorScope.defaultsKey)
             NotificationCenter.default.post(name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey)), object: nil)
             fixture.settle()
@@ -117,8 +119,10 @@ enum SidebarIndicatorSettingsChecks {
             defaults.set("selected", forKey: SidebarActiveIndicatorScope.defaultsKey)
             NotificationCenter.default.post(name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey)), object: nil)
             inbox.openAgentId = id
+            _ = inbox.selectRowForQA(id: id)
             fixture.settle()
-            try expect(descendants(inbox, AgentInboxCardView.self).allSatisfy { !$0.isIndicatorWorking }, "selected scope retained working indicators")
+            try expect(descendants(inbox, AgentInboxCardView.self).contains { $0.isIndicatorWorking }, "selected scope lost working indicators")
+            let builds = inbox.cellBuildCountForQA
             for style in [SidebarActiveIndicatorStyle.classic, .gradient, .sheen, .duplex] {
                 let button = try control()
                 // Bring the label/help and control into the Form's viewport.
@@ -163,7 +167,7 @@ enum SidebarIndicatorSettingsChecks {
                     try expect(gradients.contains { $0.colors?.count == 3 && $0.mask is CAGradientLayer }, "Gradient lost its shared cascading wash")
                     try expect(gradients.contains { $0.animation(forKey: "group.orbit.startPoint")?.duration == 60 } == !reduced, "shared Gradient loop policy wrong")
                 case .sheen:
-                    try expect(painted.contains { $0 is CAShapeLayer }, "Sheen lost the even satin rim")
+                    try expect(!painted.contains { ($0 as? CAShapeLayer)?.strokeColor != nil }, "Sheen added a second group outline")
                     try expect(painted.contains { $0.animation(forKey: "group.sheen") != nil } == !reduced, "shared Sheen sweep policy wrong")
                 }
                 guard let rep = SettingsFixtureWindow.capture(card.superview ?? card), let png = rep.representation(using: .png, properties: [:]) else {
@@ -180,11 +184,13 @@ enum SidebarIndicatorSettingsChecks {
             }
             try expect(Set(renders).count == 4, "the four choices did not produce four rendered surfaces")
             inbox.openAgentId = nil
+            inbox.clearSelectionForQA()
             inbox.layoutForQA()
             fixture.settle()
             try expect(descendants(inbox, InboxExpandedGroupLight.self).allSatisfy { $0.isHidden },
                        "closing the active agent retained its shared group light")
             inbox.openAgentId = id
+            _ = inbox.selectRowForQA(id: id)
             inbox.layoutForQA()
             fixture.settle()
             try expect(descendants(inbox, InboxExpandedGroupLight.self).contains { !$0.isHidden },

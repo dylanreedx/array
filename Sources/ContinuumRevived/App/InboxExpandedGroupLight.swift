@@ -133,8 +133,7 @@ final class InboxExpandedGroupLight: NSView {
             sweep.values = [-card.width,-card.width,card.width * 2,card.width * 2];sweep.keyTimes = [0,0.12,0.38,1];sweep.duration = 6
             sweep.timingFunctions = [.init(name:.linear),.init(name:.easeInEaseOut),.init(name:.linear)]
             animate(sweep,on:shine,key:"group.sheen",delay:Double(slice.rowIndex) * 0.22)
-            let rim = CAShapeLayer();rim.frame = whole.bounds;rim.path = CGPath(roundedRect:whole.bounds.insetBy(dx:0.5,dy:0.5),cornerWidth:Radius.card,cornerHeight:Radius.card,transform:nil)
-            rim.fillColor = nil;rim.strokeColor = colour.withAlphaComponent(dark ? 0.10 : 0.075).cgColor;rim.lineWidth = 1;whole.addSublayer(rim)
+
         }
     }
 }

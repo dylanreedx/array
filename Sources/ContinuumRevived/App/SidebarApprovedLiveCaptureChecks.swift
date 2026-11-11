@@ -46,10 +46,14 @@ enum SidebarApprovedLiveCaptureChecks {
             }
             paths.append(path)
         }
+        let truthCapture = ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_TRUTH_CAPTURE"] == "1"
+        let states = truthCapture
+            ? ["selected-working-expanded", "selected-working-collapsed", "selected-working-helper"]
+            : ["selected-done-capped", "selected-working-expanded", "all-working-unselected"]
         for dark in [true, false] {
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             let appearance = dark ? "dark" : "light"
-            for state in ["selected-done-capped", "selected-working-expanded", "all-working-unselected"] {
+            for state in states {
                 let lead = UUID()
                 let now = Date()
                 let parent = AgentInboxRow(id: lead, title: "Further Sidebar Improvements", projectName: "Array",
@@ -67,16 +71,18 @@ enum SidebarApprovedLiveCaptureChecks {
                 for key in [SidebarActiveIndicatorStyle.defaultsKey, SidebarActiveIndicatorScope.defaultsKey] {
                     NotificationCenter.default.post(name: SettingChangeEvent.name(for: SettingID(rawValue: key)), object: nil)
                 }
-                inbox.openAgentId = state == "all-working-unselected" ? nil : lead
+                inbox.openAgentId = state == "all-working-unselected" ? nil
+                    : (state == "selected-working-helper" ? helpers[0].id : lead)
                 inbox.reload(rows: [parent])
                 inbox.apply(rows: [parent] + helpers,
                     changed: AgentsBoardChangeSet(added: Set(helpers.map(\.id)), updated: [lead], removed: []))
-                inbox.restoreParentFolds([lead: true])
+                inbox.restoreParentFolds([lead: state != "selected-working-collapsed"])
                 if state == "all-working-unselected" { inbox.clearSelectionForQA() }
-                else { _ = inbox.selectRowForQA(id: lead) }
+                else { _ = inbox.selectRowForQA(id: state == "selected-working-helper" ? helpers[0].id : lead) }
                 inbox.layoutViewportForQA()
                 try await Task.sleep(for: .milliseconds(300))
                 try await capture(appearance + "-" + state)
+                if truthCapture { continue }
                 inbox.toggleCollapse(parentId: lead)
                 if state != "all-working-unselected" { _ = inbox.selectRowForQA(id: lead) }
                 inbox.layoutViewportForQA()

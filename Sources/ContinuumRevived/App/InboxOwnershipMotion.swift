@@ -42,6 +42,8 @@ enum InboxOwnershipClock {
 /// on the same timeline the light passes from one row into the next unbroken.
 @MainActor
 final class InboxSweepBorderView: NSView {
+    var drawsStaticOutline = true { didSet { ring.isHidden = !drawsStaticOutline } }
+    var staticOutlineVisibleForQA: Bool { !isHidden && !ring.isHidden && ring.strokeColor != nil }
     static let period: CFTimeInterval = 3
     static let lineWidth: CGFloat = 0.75
     static let haloRadius: CGFloat = 64
@@ -429,6 +431,7 @@ struct InboxOwnershipSlice: Equatable {
     /// The lead only: what someone in its card is asking the user.
     var raisedAsk: String?
     var activeGroup = false
+    var groupSelected = false
     var leadHeight: CGFloat = 0
     var runningY: CGFloat?
     var rowIndex = 0
@@ -491,6 +494,7 @@ struct InboxOwnershipChrome {
             card.minY >= clip.minY - 0.5, card.maxY <= clip.maxY + 0.5)
 
         sweep.frame = clip
+        sweep.drawsStaticOutline = !slice.groupSelected
         sweep.show(card: slice.sweepPhase == nil || indicatorStyle != "current" ? nil : card.offsetBy(dx: 0, dy: -top),
                    colour: slice.sweepColour.map(AgentInboxView.identityDotColour(named:)),
                    phase: slice.sweepPhase ?? 0,
