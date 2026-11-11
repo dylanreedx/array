@@ -736,6 +736,17 @@ run_ios_build() {
   return 0
 }
 
+# Offline replay checks never start the app or a provider. This subset permits
+# managed agents to verify them without entering the bare CoreChecks suite.
+run_leg python3 benchmarks/replay/check.py --replay-grader-check
+run_leg python3 benchmarks/replay/check.py --replay-isolation-check
+run_leg python3 benchmarks/replay/check.py --replay-scoring-check
+if [[ "${REPLAY_CHECKS_ONLY:-0}" == "1" ]]; then
+  matrix_finish_jobs
+  matrix_report "Offline replay matrix"
+  exit $?
+fi
+
 # Ticket P0.11: first leg, so a matrix that lost a check goes red before it
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.

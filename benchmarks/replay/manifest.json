@@ -1,0 +1,10 @@
+{
+  "v": 1,
+  "tasks": [],
+  "conditions": {
+    "harnesses": ["claude", "codex"],
+    "modes": ["solo", "managed", "chooser"]
+  },
+  "fixturePolicy": "Repository public history only; neutral requests; no session or memory text",
+  "liveEnabled": false
+}
