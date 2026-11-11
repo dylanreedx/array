@@ -94,7 +94,7 @@ enum SettingsUsageChecks {
             for (id, value) in exact.sorted(by: { $0.key < $1.key }) {
                 try expect(opened[id] == value, "\(id) rendered \(opened[id] ?? "nil"), expected \(value)")
             }
-            try expect(opened["usage.task.4.detail"] == "Active 11 min · Lead Claude Code (claude-x) · Helper Claude Code (claude-x)",
+            try expect(opened["usage.task.4.detail"] == "Managed · Active 11 min · Lead Claude Code (claude-x) · Helper Claude Code (claude-x)",
                        "opened detail: \(opened["usage.task.4.detail"] ?? "nil")")
             try expect(opened["usage.task.5.detail"]?.contains("Helper Codex (gpt-x)") == true, "opened detail names every model")
             try expect(model.renderedTexts["usage.recordingOff"] == nil, "recording is on, but the page says it is off")
@@ -111,7 +111,7 @@ enum SettingsUsageChecks {
                 else if let string = value as? String { strings.append(string) }
             }
             walk(json)
-            let fixed: Set<String> = ["cacheWrite", "week", "lead", "helpers", "open", "closed", "interrupted", "Claude Code", "Codex", "claude-x", "gpt-x"]
+            let fixed: Set<String> = ["cacheWrite", "managed", "free", "cli", "record", "week", "lead", "helpers", "open", "closed", "interrupted", "Claude Code", "Codex", "claude-x", "gpt-x"]
             let stray = strings.filter { !fixed.contains($0) && UUID(uuidString: $0) == nil && ISO8601DateFormatter().date(from: $0) == nil }
             try expect(stray.isEmpty, "the export holds words that are not ids: \(stray)")
             let exported = (json as? [String: Any])?["tokens"] as? [String: Any]
@@ -160,12 +160,55 @@ enum SettingsUsageChecks {
 
         }
 
-        // 9. An empty ledger: a plain empty state, no figures.
+        // 9. The run ledger's later rows: free tasks, helpers at any depth, late
+        // rows, Codex without a baseline, blank model ids, usage with no task.
+        let later = root.appendingPathComponent("later/run-ledger/ledger.jsonl")
+        try write(laterFixture(now: now), to: later)
+        try withPane(ledger: later) { fixture, _ in
+            let model = fixture.model
+            fixture.select("usage")
+            try waitReady(fixture)
+            let texts = model.renderedTexts
+            let summary: [String: String] = [
+                "usage.closed": "5",
+                "usage.mode": "3 Managed · 2 Free",
+                "usage.split": "4 solo · 0 with one helper · 1 with two or more",
+                "usage.fullyCounted": "4 of 5",
+                "usage.noTask": "Not in any task: 300 tokens in 2 records, from agents no one prompted here. Not counted above.",
+                "usage.coverage": "1 of 5 tasks are missing part of their count, so totals marked “at least” are lower bounds. — Codex does not report tokens written to cache; its tasks count fully without them.",
+            ]
+            for (id, value) in summary.sorted(by: { $0.key < $1.key }) {
+                try expect(texts[id] == value, "later rows: \(id) rendered \(texts[id] ?? "nil"), expected \(value)")
+            }
+            let cells = (0..<5).compactMap { texts["usage.task.\($0)"] }.map { Array($0.components(separatedBy: " | ").dropFirst()) }
+            let expectedCells: [[String]] = [
+                ["1 min", "solo", "40", "claude-x"],              // Free, model from its settings
+                ["1 min", "2 helpers", "24", "claude-x"],         // a helper's helper counts
+                ["1 min", "solo", "20", "claude-x"],              // late row, once
+                ["1 min", "solo", "at least 84", "gpt-x"],        // Codex without a baseline
+                ["1 min", "solo", "1", "unknown"],                // blank model id
+            ]
+            try expect(cells == expectedCells, "later rows: task rows \(cells)")
+            guard case let .ready(report, _) = model.usage.phase else { throw Failure("no report") }
+            try expect(report.tasks.count == 5, "usage with no task must not be listed as a task")
+            for index in [0, 1, 3] { model.usage.toggle(report.tasks[index].task) }
+            fixture.settle(0.2)
+            let opened = model.renderedTexts
+            try expect(opened["usage.task.0.detail"] == "Free · Active 1 min · Lead Claude Code (claude-x, from its settings)",
+                       "later rows: free detail \(opened["usage.task.0.detail"] ?? "nil")")
+            try expect(opened["usage.task.1.tokens.total.helpers"] == "20" && opened["usage.task.1.tokens.total.lead"] == "4",
+                       "a helper's helper is a helper, and a subagent the lead's result reports adds nothing: \(opened["usage.task.1.tokens.total.helpers"] ?? "nil")")
+            try expect(opened["usage.task.3.tokens.cacheWrite.lead"] == "unknown" && opened["usage.task.3.tokens.total.lead"] == "at least 84",
+                       "no baseline is a missing figure, not a kind Codex leaves out: \(opened["usage.task.3.tokens.cacheWrite.lead"] ?? "nil")")
+            try render(fixture, name: "later", appearance: .aqua)
+        }
+
+        // 10. An empty ledger: a plain empty state, no figures.
         try withPane(ledger: root.appendingPathComponent("missing/ledger.jsonl")) { fixture, _ in
             fixture.select("usage")
             try waitReady(fixture)
             let texts = fixture.model.renderedTexts
-            try expect(texts["usage.empty"]?.hasPrefix("No Managed tasks are recorded") == true, "the empty ledger has no empty state")
+            try expect(texts["usage.empty"]?.hasPrefix("No tasks are recorded") == true, "the empty ledger has no empty state")
             try expect(!texts.keys.contains { $0.hasPrefix("usage.tokens.") || $0 == "usage.closed" }, "the empty ledger shows figures")
         }
 
@@ -193,9 +236,11 @@ enum SettingsUsageChecks {
         func turn(_ task: UUID, _ agent: UUID, _ start: Date, _ seconds: TimeInterval) -> [Row] {
             [row("working", task, agent, start), row("turnEnded", task, agent, start.addingTimeInterval(seconds), outcome: "completed")]
         }
-        func task(ago: TimeInterval, lead harness: String = "Claude Code", model: String = "claude-x", _ build: (UUID, UUID, Date) -> [Row], close: TimeInterval?, kind: String = "taskClosed") {
+        func task(ago: TimeInterval, mode: String = "managed", _ build: (UUID, UUID, Date) -> [Row], close: TimeInterval?, kind: String = "taskClosed") {
             let (id, lead, start) = (UUID(), UUID(), now.addingTimeInterval(-ago))
-            rows.append(row("taskOpened", id, lead, start))
+            var opened = row("taskOpened", id, lead, start)
+            opened.mode = mode
+            rows.append(opened)
             rows += build(id, lead, start)
             if let close { rows.append(row(kind, id, lead, start.addingTimeInterval(close))) }
         }
@@ -203,8 +248,8 @@ enum SettingsUsageChecks {
         task(ago: 7_200, { id, lead, s in
             turn(id, lead, s, 300) + [usage(id, lead, s.addingTimeInterval(300), "Claude Code", "claude-x", .init(uncachedInput: 100, cacheRead: 5_400_000, cacheWrite: 200, output: 50))]
         }, close: 300)
-        // Solo, Codex: cache write unknown.
-        task(ago: 86_400, { id, lead, s in
+        // Solo, Codex, in Free mode: cache write not reported.
+        task(ago: 86_400, mode: "free", { id, lead, s in
             turn(id, lead, s, 60) + [usage(id, lead, s.addingTimeInterval(60), "Codex", "gpt-x", .init(uncachedInput: 400, cacheRead: 4_000, cacheWrite: nil, output: 80))]
         }, close: 60)
         // One helper, fully counted. Lead 0-60 and 900-960, helper 30-600: active 660 s, answer 960 s.
@@ -235,8 +280,85 @@ enum SettingsUsageChecks {
         task(ago: 2 * 86_400, { id, lead, s in
             turn(id, lead, s, 40) + [usage(id, lead, s.addingTimeInterval(40), "Claude Code", "claude-x", .init(uncachedInput: 9_999, cacheRead: 9_999, cacheWrite: 9_999, output: 9_999))]
         }, close: 40, kind: "taskInterrupted")
+        // Usage no human-prompted task owns.
+        var stray = usage(RunLedgerUsageReader.noTask, UUID(), now.addingTimeInterval(-900), "Claude Code", "claude-x",
+                          .init(uncachedInput: 1_200, cacheRead: 41_000, cacheWrite: 300, output: 900))
+        stray.turn = "t1"
+        rows.append(stray)
         // A task closed before this all-time window only matters for "All time".
         task(ago: 400 * 86_400, { id, lead, s in turn(id, lead, s, 10) }, close: 10)
+        return rows
+    }
+
+    /// Five closed tasks an hour apart, and usage no task owns.
+    static func laterFixture(now: Date) -> [Row] {
+        var rows: [Row] = []
+        var serial = 0
+        func row(_ kind: String, _ task: UUID, _ agent: UUID, _ at: Date) -> Row {
+            serial += 1
+            var row = Row(kind: kind, task: task, agent: agent, source: "later/\(serial)")
+            row.at = at
+            return row
+        }
+        func usage(_ task: UUID, _ agent: UUID, _ at: Date, _ counts: Counts?, harness: String = "Claude Code", model: String? = "claude-x",
+                   turn: String = "t1", incomplete: [String]? = nil, parent: UUID? = nil) -> Row {
+            var r = row("usage", task, agent, at)
+            (r.harness, r.model, r.modelSource, r.tokens, r.incomplete, r.turn, r.parent) =
+                (harness, model, model == nil ? nil : "cli", counts, incomplete, turn, parent)
+            return r
+        }
+        func task(hours: Double, mode: String, _ build: (UUID, UUID, Date) -> [Row], after: (UUID, UUID, Date) -> [Row] = { _, _, _ in [] }) {
+            let (id, lead, start) = (UUID(), UUID(), now.addingTimeInterval(-hours * 3_600))
+            var opened = row("taskOpened", id, lead, start)
+            opened.mode = mode
+            rows.append(opened)
+            rows += [row("working", id, lead, start)] + build(id, lead, start) + [row("turnEnded", id, lead, start.addingTimeInterval(60))]
+            rows.append(row("taskClosed", id, lead, start.addingTimeInterval(60)))
+            rows += after(id, lead, start)
+        }
+        let all = { (n: Int) in Counts(uncachedInput: n, cacheRead: n, cacheWrite: n, output: n) }
+        // Free, solo; the stream named no model, so the record did.
+        task(hours: 1, mode: "free", { id, lead, s in
+            var r = usage(id, lead, s.addingTimeInterval(60), all(10))
+            r.modelSource = "record"
+            return [r]
+        })
+        // Managed: a helper, the helper's own helper (no delegated row, charged to
+        // this task through its parent), and a Claude in-process subagent whose
+        // tokens are inside the lead's result.
+        task(hours: 2, mode: "managed", { id, lead, s in
+            let (helper, grandchild, subagent) = (UUID(), UUID(), UUID())
+            var delegated = row("delegated", id, helper, s)
+            delegated.part = helper
+            return [delegated, row("working", id, helper, s), row("turnEnded", id, helper, s.addingTimeInterval(50)),
+                    usage(id, lead, s.addingTimeInterval(60), all(1)),
+                    usage(id, helper, s.addingTimeInterval(50), all(2), parent: lead),
+                    usage(id, grandchild, s.addingTimeInterval(40), all(3), parent: helper),
+                    usage(id, subagent, s.addingTimeInterval(30), nil, incomplete: ["reportedByParent"], parent: lead)]
+        })
+        // Managed, solo: the turn ended with no usage; its usage arrived late,
+        // after the task closed. A replayed copy of the late row counts once.
+        task(hours: 3, mode: "managed", { id, lead, s in
+            [usage(id, lead, s.addingTimeInterval(60), nil, incomplete: ["noUsage"])]
+        }, after: { id, lead, s in
+            var late = usage(id, lead, s.addingTimeInterval(90), all(5))
+            late.late = true
+            return [late, late]
+        })
+        // Free, Codex resumed with no trusted baseline: that turn charged nothing.
+        task(hours: 4, mode: "free", { id, lead, s in
+            [usage(id, lead, s.addingTimeInterval(30), nil, harness: "Codex", model: "gpt-x", incomplete: ["noBaseline"]),
+             usage(id, lead, s.addingTimeInterval(60), .init(uncachedInput: 7, cacheRead: 70, cacheWrite: nil, output: 7), harness: "Codex", model: "gpt-x", turn: "t2")]
+        })
+        // Managed, solo, a blank model id.
+        task(hours: 5, mode: "managed", { id, lead, s in
+            [usage(id, lead, s.addingTimeInterval(60), .init(uncachedInput: 1, cacheRead: 0, cacheWrite: 0, output: 0), model: nil)]
+        })
+        // Usage no human-prompted task owns: two rows this week, one long ago.
+        let stray = UUID()
+        rows += [usage(RunLedgerUsageReader.noTask, stray, now.addingTimeInterval(-600), .init(uncachedInput: 100, cacheRead: 0, cacheWrite: 0, output: 0)),
+                 usage(RunLedgerUsageReader.noTask, stray, now.addingTimeInterval(-500), .init(uncachedInput: 200, cacheRead: 0, cacheWrite: 0, output: 0), turn: "t2"),
+                 usage(RunLedgerUsageReader.noTask, stray, now.addingTimeInterval(-40 * 86_400), .init(uncachedInput: 999, cacheRead: 0, cacheWrite: 0, output: 0), turn: "t3")]
         return rows
     }
 
