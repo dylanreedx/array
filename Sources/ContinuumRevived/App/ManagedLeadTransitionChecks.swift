@@ -38,6 +38,12 @@ enum ManagedLeadTransitionChecks {
         try expect(try await briefs(fresh, "startup") == 0, "fresh startup briefed twice")
         try expect(try await briefs(fresh, "resume") == 0, "resume of a briefed context briefed it again")
 
+        let forked = try await ManagedModeChecks.delegate(b, mode: "managed", label: "forked")
+        try await ManagedModeChecks.settled(b, forked)
+        try expect(try await briefs(forked, "fork") == 1, "forked lead got no brief")
+        try expect(try await briefs(forked, "fork") == 0, "forked lead briefed twice")
+        try expect(try await briefs(forked, "resume") == 0, "fork resume briefed twice")
+
         // (c) A Managed lead whose context never got the brief is briefed on resume, once.
         let resumed = try await ManagedModeChecks.delegate(b, mode: "managed", label: "resumed")
         try await ManagedModeChecks.settled(b, resumed)
@@ -106,6 +112,11 @@ enum ManagedLeadTransitionChecks {
         try expect(ManagedCodexChecks.rows(b, kind: "hook", session: mid).contains {
             ManagedCodexChecks.output($0)["permissionDecisionReason"] as? String == ManagedLeadHookState.editDenial
         }, "Codex real hook did not deny the edit")
+
+        let fork: [String: Any] = ["hook_event_name": "SessionStart", "source": "fork", "session_id": mid + "-fork"]
+        try expect(try await ManagedModeChecks.hook(b, managed, fork)["additionalContext"] as? String == ManagedLeadHookState.brief, "Codex fork got no brief")
+        try expect(try await ManagedModeChecks.hook(b, managed, fork).isEmpty, "Codex fork briefed twice")
+        try expect(try await ManagedModeChecks.hook(b, managed, ["hook_event_name": "SessionStart", "source": "resume", "session_id": mid + "-fork"]).isEmpty, "Codex fork resume briefed twice")
 
         // (c) Compaction through the endpoint: once.
         let compact: [String: Any] = ["hook_event_name": "SessionStart", "source": "compact", "session_id": mid]

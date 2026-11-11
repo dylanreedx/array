@@ -26,7 +26,7 @@ public struct ManagedLeadHookState {
         switch event {
         case "SessionStart":
             guard let source = payload["source"] as? String,
-                  ["startup", "resume", "compact", "clear"].contains(source),
+                  ["startup", "resume", "compact", "clear", "fork"].contains(source),
                   let session = payload["session_id"] as? String, !session.isEmpty,
                   (source == "compact" || source == "clear" || !briefedSessions.contains(session)) else { return nil }
             briefedSessions.insert(session)
