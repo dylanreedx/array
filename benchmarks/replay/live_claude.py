@@ -42,6 +42,7 @@ MACH = ['com.apple.SecurityServer', 'com.apple.securityd.xpc', 'com.apple.system
 # Device files a shell, git and python need; never a terminal's tty.
 DEVICES = ['/dev/null', '/dev/zero', '/dev/random', '/dev/urandom', '/dev/dtracehelper']
 HOOK_PROBE_PARENT = os.path.realpath(subprocess.check_output(['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']).decode().strip()).rstrip('/')
+CORE_RESOURCES = 'continuum-revived_ContinuumRevivedCore.bundle'
 XCODE_TOOLS = '/Applications/Xcode.app/Contents/Developer/usr/bin'
 # The subagent tool's name, and its older one.
 BUILT_IN_SUBAGENTS = 'Agent,Task'
@@ -54,7 +55,7 @@ def q(text):
 def workspace_mcp(args):
     """Paths and port of the workspace MCP server named in --mcp-config."""
     if '--mcp-config' not in args:
-        return [], [], []
+        return [], [], [], []
     config_path = args[args.index('--mcp-config') + 1]
     server = json.loads(Path(config_path).read_text())['mcpServers']['array_workspace']
     env = server.get('env', {})
@@ -62,7 +63,12 @@ def workspace_mcp(args):
     # The sandbox matches resolved paths: /var/folders is /private/var/folders.
     # The server binary links only system libraries and the Swift runtime.
     files = [os.path.realpath(config_path), os.path.realpath(env['ARRAY_WORKSPACE_MCP_TOKEN_FILE'])]
-    return [os.path.realpath(server['command'])], files, [port]
+    server_binary = os.path.realpath(server['command'])
+    # Its tool catalogue is a resource in Core's bundle beside the binary;
+    # without it the server lists no tools at all. Bundle.main also lists the
+    # binary's own folder (names only: a literal rule, not its contents).
+    folder = os.path.dirname(server_binary)
+    return [server_binary], files + [folder], [os.path.join(folder, CORE_RESOURCES)], [port]
 
 
 def hook_probe_folder(cwd):
@@ -75,12 +81,12 @@ def hook_probe_folder(cwd):
     return None
 
 
-def profile(root, claude, proxy_port, programs=(), extra_files=(), extra_ports=(), probe_folder=None):
+def profile(root, claude, proxy_port, programs=(), extra_files=(), extra_folders=(), extra_ports=(), probe_folder=None):
     """Exec: the toolchain, the run root, the CLI and the MCP server binary.
     Read: those, plus the Keychain files and the MCP config and token files.
     Write: the run root and a few device files. Metadata (stat) is readable
     everywhere; directory listings and contents are not."""
-    readable = TOOLCHAIN + KEYCHAIN + [root]
+    readable = TOOLCHAIN + KEYCHAIN + [root] + list(extra_folders)
     programs = [claude] + list(programs)
     literals = programs + list(extra_files)
     executable = TOOLCHAIN + [root]
@@ -108,7 +114,7 @@ def main(argv):
     root = os.path.realpath(env['REPLAY_LIVE_ROOT'])
     claude = os.path.realpath(env['REPLAY_LIVE_CLAUDE'])
     port = int(env['REPLAY_LIVE_PROXY_PORT'])
-    programs, files, ports = workspace_mcp(argv)
+    programs, files, folders, ports = workspace_mcp(argv)
     config = Path(root) / 'claude-config'
     config.mkdir(exist_ok=True)
     child = {k: v for k, v in env.items() if not k.startswith('REPLAY_LIVE_')}
@@ -131,7 +137,7 @@ def main(argv):
     if env.get('REPLAY_LIVE_LOG'):
         with open(os.path.join(env['REPLAY_LIVE_LOG'], 'launches.jsonl'), 'a') as log:
             log.write(json.dumps(dict(pid=os.getpid(), cwd=os.getcwd(), root=root, args=args, ports=[port] + ports)) + '\n')
-    sandbox = profile(root, claude, port, programs, files, ports, hook_probe_folder(os.getcwd()))
+    sandbox = profile(root, claude, port, programs, files, folders, ports, hook_probe_folder(os.getcwd()))
     os.execve('/usr/bin/sandbox-exec', ['/usr/bin/sandbox-exec', '-p', sandbox, claude] + args, child)
 
 
