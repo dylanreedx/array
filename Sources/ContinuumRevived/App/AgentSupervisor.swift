@@ -8817,10 +8817,12 @@ final class AgentSupervisor {
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
         let result = await accept(intent.neutralizingTypedEnvelopes, for: agentID, sharedAdmission: nil)
-        if qaRunLedgerRecording, result == .accepted, effectiveMode(for: agentID) == .managed, records[agentID]?.parentAgentID == nil {
+        // `.plans/116` part 14: a human submission to any top-level agent opens
+        // or joins its task, with its mode, so solo and fanned-out work separate.
+        if qaRunLedgerRecording, result == .accepted, let record = records[agentID], record.parentAgentID == nil {
             switch intent {
             case .send, .sendPrompt, .queue:
-                runLedger.submission(agent: agentID.rawValue, project: records[agentID]?.projectId)
+                runLedger.submission(agent: agentID.rawValue, project: record.projectId, mode: effectiveMode(for: agentID).rawValue)
             default: break
             }
         }
