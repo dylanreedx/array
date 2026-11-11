@@ -109,6 +109,7 @@ final class InboxFoldMotion: NSObject {
         !liveTracks.isEmpty && link == nil
             && liveTracks.allSatisfy { $0.layer.animation(forKey: Self.liveAnimationKey) != nil }
     }
+    var ghostKeysForQA: Set<String> { Set(liveTracks.filter(\.isGhost).map(\.key)) }
     var overlayPassesHitTestingForQA: Bool { overlay?.hitTest(.zero) == nil }
     var poses: [String: Pose] {
         if !liveTracks.isEmpty {

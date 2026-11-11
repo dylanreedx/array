@@ -2967,6 +2967,18 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return frame
     }
 
+    func captureFoldImage(in rect: NSRect, beforeRaster: () -> Void) -> NSImage? {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        card.suppressesSelectionOutlineForFold = true
+        defer {
+            card.suppressesSelectionOutlineForFold = false
+            CATransaction.commit()
+        }
+        beforeRaster()
+        return InboxFoldMotion.image(of: self, in: rect)
+    }
+
     func setSelectionForFold(_ selected: Bool) {
         shown?.isSelected = selected
         card.isSelected = selected

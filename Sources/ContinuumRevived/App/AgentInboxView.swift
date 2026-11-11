@@ -804,6 +804,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var foldChoices: [UUID: Bool] = [:]
     private let foldMotion = InboxFoldMotion()
     var foldMotionForQA: InboxFoldMotion { foldMotion }
+    var onFoldRasterForQA: ((String, NSView) -> Void)?
     /// Reports a fold or unfold by the person, with every choice made so far, so
     /// the host can remember them across launches. Not called by `restoreParentFolds`.
     var onParentFoldChange: (([UUID: Bool]) -> Void)?
@@ -3211,7 +3212,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                    let reused = earlier.snapshots[key]?.image, reused.size == local.size {
                     image = reused
                 } else {
-                    image = InboxFoldMotion.image(of: cell, in: local)
+                    if let row = cell as? AgentInbox96CellView {
+                        image = row.captureFoldImage(in: local) { self.onFoldRasterForQA?(key, cell) }
+                    } else {
+                        onFoldRasterForQA?(key, cell)
+                        image = InboxFoldMotion.image(of: cell, in: local)
+                    }
                     if (cell as? AgentInbox96CellView)?.qaDeckIsPosedForQA == true { qaPosedDecksPhotographed += 1 }
                 }
             }
@@ -9902,6 +9908,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
     private let indicatorWash = CAGradientLayer()
     private let indicatorEdge = CALayer()
     private let indicatorSheen = CAGradientLayer()
+    var suppressesSelectionOutlineForFold = false { didSet { applyIndicator() } }
     var indicatorReducesMotion = false { didSet { applyIndicator() } }
     private var motionSignature: String?
 
@@ -9924,7 +9931,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         indicatorEdge.borderWidth = isSelected || isCanvasSelection ? 1 : 0
         indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
             .withAlphaComponent(effectiveTokenTheme == .dark ? 0.55 : 0.35).cgColor
-        indicatorEdge.isHidden = !isSelected && !isCanvasSelection
+        indicatorEdge.isHidden = suppressesSelectionOutlineForFold || (!isSelected && !isCanvasSelection)
         let enabled = !sharesGroupLight && style != "current" && isIndicatorWorking
         indicatorWash.isHidden = !enabled
         guard enabled, let layer else {

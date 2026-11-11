@@ -14,34 +14,44 @@ enum SidebarIndicatorTruthTableChecks {
         for dark in [false, true] {
             for style in SidebarActiveIndicatorStyle.allCases {
                 for scope in ["selected", "working"] {
+                    let suite = "array.indicator-truth.\(UUID())"
+                    let defaults = QAIsolatedDefaults(isolatedSuiteName: suite)!
+                    defaults.set(style.rawValue, forKey: SidebarActiveIndicatorStyle.defaultsKey)
+                    defaults.set(scope, forKey: SidebarActiveIndicatorScope.defaultsKey)
+                    let lead = UUID(), helper = UUID(), arrival = UUID()
+                    let now = Date()
+                    let inbox = AgentInboxView(frame: NSRect(x: 0,y: 0,width: 380,height: 600), indicatorDefaults: defaults)
+                    inbox.foldsUntouchedGroups = false
+                    inbox.prefersReducedMotion = { false }
+                    let window = NSWindow(contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.isReleasedWhenClosed = false
+                    window.contentView = inbox
+                    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                    window.orderFrontOffscreenForChecks()
                     for selection in ["lead", "helper", "none"] {
                         for working in [false, true] {
                             for fold in ["collapsed", "expanded", "mid-fold", "live-add"] {
                                 autoreleasepool {
                                     let label = "\(style.rawValue)/\(scope)/\(selection)/\(working)/\(fold)/\(dark)"
-                                    let suite = "array.indicator-truth.\(UUID())"
-                                    let defaults = QAIsolatedDefaults(isolatedSuiteName: suite)!
-                                    defaults.set(style.rawValue, forKey: SidebarActiveIndicatorStyle.defaultsKey)
-                                    defaults.set(scope, forKey: SidebarActiveIndicatorScope.defaultsKey)
-                                    let lead = UUID(), helper = UUID(), arrival = UUID()
-                                    let now = Date()
                                     func row(_ id: UUID, parent: UUID? = nil) -> AgentInboxRow {
                                         AgentInboxRow(id: id, title: id == lead ? "Selected lead" : "Helper", state: working ? .working : .ready,
                                             depth: parent == nil ? 0 : 1, createdAt: now, parentId: parent)
                                     }
-                                    let inbox = AgentInboxView(frame: NSRect(x: 0,y: 0,width: 380,height: 600), indicatorDefaults: defaults)
-                                    inbox.foldsUntouchedGroups = false
-                                    inbox.prefersReducedMotion = { false }
-                                    let window = NSWindow(contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-                                    window.isReleasedWhenClosed = false
-                                    window.contentView = inbox
-                                    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-                                    window.orderFrontOffscreenForChecks()
+                                    inbox.foldMotionForQA.cancel()
+                                    inbox.openAgentId = nil
+                                    inbox.clearSelectionForQA()
+                                    inbox.restoreParentFolds([lead: true])
                                     let rows = [row(lead), row(helper, parent: lead)]
                                     inbox.reload(rows: rows)
                                     inbox.openAgentId = selection == "none" ? nil : (selection == "lead" ? lead : helper)
                                     inbox.layoutViewportForQA()
                                     if selection != "none" { _ = inbox.selectRowForQA(id: selection == "lead" ? lead : helper) }
+                                    var rasterOutlines: [String: Int] = [:]
+                                    inbox.onFoldRasterForQA = { key, view in
+                                        rasterOutlines[key] = descendants(view, AgentInboxCardView.self).filter {
+                                            !$0.qaIndicatorLayers.edge.isHidden && $0.qaIndicatorLayers.edge.borderWidth > 0
+                                        }.count
+                                    }
                                     if fold == "expanded" && selection == "helper" {
                                         inbox.toggleCollapse(parentId: lead)
                                         inbox.toggleCollapse(parentId: lead)
@@ -63,7 +73,8 @@ enum SidebarIndicatorTruthTableChecks {
                                     let moving = style == .classic ? sweeps.contains { $0.isMovingForQA } : lights.contains {
                                         !$0.isHidden && $0.renderedLayersForChecks.contains { !($0.animationKeys() ?? []).isEmpty }
                                     }
-                                    let outlines = cards.filter {
+                                    let outlines = inbox.foldMotionForQA.ghostKeysForQA.reduce(0) { $0 + (rasterOutlines[$1] ?? 0) }
+                                        + cards.filter {
                                         !$0.qaIndicatorLayers.edge.isHidden && $0.qaIndicatorLayers.edge.borderWidth > 0
                                     }.count
                                     var correct = present == expected && moving == expected && outlines == (selection == "none" ? 0 : 1)
@@ -127,15 +138,15 @@ enum SidebarIndicatorTruthTableChecks {
                                     if correct { passed += 1 } else {
                                         failures.append("\(label): style=\(present) motion=\(moving) expected=\(expected) outlines=\(outlines)")
                                     }
-                                    inbox.foldMotionForQA.cancel()
-                                    window.orderOut(nil)
-                                    window.contentView = nil
-                                    window.close()
-                                    defaults.removePersistentDomain(forName: suite)
                                 }
                             }
                         }
                     }
+                    inbox.foldMotionForQA.cancel()
+                    window.orderOut(nil)
+                    window.contentView = nil
+                    window.close()
+                    defaults.removePersistentDomain(forName: suite)
                 }
             }
         }
