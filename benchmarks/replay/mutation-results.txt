@@ -1,102 +1,16 @@
---replay-grader-check RED exit=1
-test_grader (__main__.Witnesses.test_grader) ... FAIL
-
-======================================================================
-FAIL: test_grader (__main__.Witnesses.test_grader)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-mutation-u8sl0_qo/check.py", line 15, in test_grader
-    self.assertFalse(replay.validate(repo, fix, fix, grader))
-    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError: True is not false
-
-----------------------------------------------------------------------
-Ran 1 test in 1.428s
-
-FAILED (failures=1)
-
---replay-grader-check GREEN exit=0
-test_grader (__main__.Witnesses.test_grader) ... ok
-
-----------------------------------------------------------------------
-Ran 1 test in 7.392s
-
-OK
-
---replay-isolation-check RED exit=1
-test_isolation (__main__.Witnesses.test_isolation) ... FAIL
-
-======================================================================
-FAIL: test_isolation (__main__.Witnesses.test_isolation)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-mutation-fv1hu98c/check.py", line 31, in test_isolation
-    self.assertFalse(replay.has_object(w.project, fix))
-    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError: True is not false
-
-----------------------------------------------------------------------
-Ran 1 test in 1.935s
-
-FAILED (failures=1)
-
---replay-isolation-check GREEN exit=0
-test_isolation (__main__.Witnesses.test_isolation) ... ok
-
-----------------------------------------------------------------------
-Ran 1 test in 3.846s
-
-OK
-
---replay-containment-check RED exit=1
-test_containment (__main__.Witnesses.test_containment) ... FAIL
-
-======================================================================
-FAIL: test_containment (__main__.Witnesses.test_containment)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-mutation-1yul6v_9/check.py", line 52, in test_containment
-    self.assertEqual(bad['outcome'], 'containment_failed')
-    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError: 'completed' != 'containment_failed'
-- completed
-+ containment_failed
-
-
-----------------------------------------------------------------------
-Ran 1 test in 1.621s
-
-FAILED (failures=1)
-
---replay-containment-check GREEN exit=0
-test_containment (__main__.Witnesses.test_containment) ... ok
-
-----------------------------------------------------------------------
-Ran 1 test in 7.657s
-
-OK
-
---replay-scoring-check RED exit=1
-test_scoring (__main__.Witnesses.test_scoring) ... FAIL
-
-======================================================================
-FAIL: test_scoring (__main__.Witnesses.test_scoring)
-----------------------------------------------------------------------
-Traceback (most recent call last):
-  File "/var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-mutation-wov03pg_/check.py", line 96, in test_scoring
-    self.assertIsNone(replay.compare(records[:-2])['difference'])
-    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError: 0.0 is not None
-
-----------------------------------------------------------------------
-Ran 1 test in 20.548s
-
-FAILED (failures=1)
-
---replay-scoring-check GREEN exit=0
-test_scoring (__main__.Witnesses.test_scoring) ... ok
-
-----------------------------------------------------------------------
-Ran 1 test in 35.920s
-
-OK
+grader an exit(0) fools: --replay-grader-check RED exit=1 an agent's exit(0) passed the grader
+grader an exit(0) fools: --replay-grader-check GREEN exit=0 all witnesses passed
+tampered check file: --replay-grader-check RED exit=1 a tampered check file was not recorded as tampering
+tampered check file: --replay-grader-check GREEN exit=0 all witnesses passed
+run reads the host repository: --replay-containment-check RED exit=1 a run read the host repository
+run reads the host repository: --replay-containment-check GREEN exit=0 all witnesses passed
+run writes outside its directories: --replay-containment-check RED exit=1 a run wrote outside its directories
+run writes outside its directories: --replay-containment-check GREEN exit=0 all witnesses passed
+managed run that did not delegate counted as fan-out: --replay-scoring-check RED exit=1 a comparison was printed from an excluded pair: managed did not fan out
+managed run that did not delegate counted as fan-out: --replay-scoring-check GREEN exit=0 all witnesses passed
+comparison from a failed pair: --replay-scoring-check RED exit=1 a comparison was printed from an excluded pair: a run did not complete
+comparison from a failed pair: --replay-scoring-check GREEN exit=0 all witnesses passed
+comparison from an unmatched pair: --replay-scoring-check RED exit=1 a comparison was printed from an unmatched pair
+comparison from an unmatched pair: --replay-scoring-check GREEN exit=0 all witnesses passed
+failed run's record vanishes: --replay-scoring-check RED exit=1 a failed run's record vanished
+failed run's record vanishes: --replay-scoring-check GREEN exit=0 all witnesses passed
