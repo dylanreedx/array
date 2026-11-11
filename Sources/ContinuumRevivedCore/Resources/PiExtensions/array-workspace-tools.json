@@ -625,7 +625,49 @@
           },
           "retryOf": {
             "type": "string",
-            "description": "Failed/stopped child of yours to continue; carries its brief, effort, changed files and report."
+            "description": "Failed/stopped child of yours to continue; carries its brief, effort, contract, changed files and report."
+          },
+          "contract": {
+            "type": "object",
+            "description": "What the child owns and owes, stored with its brief and told to it once. Paths are repository-relative. The result's ownershipOverlaps names live siblings whose contracts own the same paths; it is advice and never stops the delegation.",
+            "properties": {
+              "owns": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Files or directories the child owns."
+              },
+              "mustNotTouch": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Paths the child must not touch."
+              },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Checks the child owes, by flag or invocation."
+              },
+              "decisions": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Owner decisions that bind the child."
+              },
+              "costLimit": {
+                "type": "string",
+                "description": "A hot-path cost limit, when one applies."
+              },
+              "report": {
+                "type": "string",
+                "description": "What the child reports back."
+              }
+            }
           },
           "model": {
             "type": "string",

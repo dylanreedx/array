@@ -52,7 +52,7 @@ public enum WorkspaceAPIExposure {
         "agent.capabilities": .internal,
         "agent.sourceItemId": .internal,
         "agent.spawnResultHandle": .internal,
-        "agent.delegationContext": .internal, // Original brief, retry lineage and checkout baseline; host-owned.
+        "agent.delegationContext": .internal, // Original brief, the lead's contract (both set once by agent.delegate, never edited), retry lineage and checkout baseline; host-owned.
         "agent.workspaceToolsEnabled": .notExposed("Only the user may grant workspace-tool access."),
         "agent.identityColor": .exposed(.agentUpdate),
         "agent.characterName": .exposed(.agentUpdate),

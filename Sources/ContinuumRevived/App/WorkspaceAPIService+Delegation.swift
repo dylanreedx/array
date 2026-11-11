@@ -38,6 +38,10 @@ extension WorkspaceAPIService {
         guard let idempotencyKey = request.idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines), !idempotencyKey.isEmpty else {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "idempotencyKey is required for agent.delegate: a spawn without one cannot be retried safely."))
         }
+        let requestedContract: AgentDelegationContract?
+        do { requestedContract = try request.contract?.normalized() } catch {
+            return .error(WorkspaceAPIError(code: .invalidRequest, message: error.localizedDescription))
+        }
         let generationAtDispatch = runtime.interactionGeneration
 
         // 2. Reserve the operation BEFORE any effect (§10.2). Same key + same
@@ -204,15 +208,21 @@ extension WorkspaceAPIService {
         // effort unless this call names its own. The inherited value is not
         // refused here; launch leaves it off if the catalogue no longer lists it.
         var retryEffort: String?
+        var retryContract: AgentDelegationContract?
         if let retryOf = request.retryOf {
             guard supervisor.mayRetry(retryOf, from: agentId), let old = supervisor.records[retryOf] else {
                 return fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn.")
             }
             retryEffort = old.thinking
+            retryContract = old.delegationContext?.contract
             let files = try? WorktreeManager().changedFiles(
                 repo: URL(fileURLWithPath: old.checkoutRoot), since: old.delegationContext?.baseHead)
             prompt += "\n\n" + AgentDelegationContext.handoff(from: old, changedFiles: files)
         }
+        // Told once, after the task; a retry keeps the failed helper's contract
+        // unless this call states its own.
+        let contract = requestedContract ?? retryContract
+        if let contract { prompt += "\n\n" + contract.promptText }
         // A Managed lead's helper reports through array_report (.plans/102).
         if supervisor.effectiveMode(for: agentId) == .managed {
             prompt += "\n\n" + ManagedLeadHookState.helperReportLine
@@ -224,7 +234,7 @@ extension WorkspaceAPIService {
         let spawnRequest = SpawnRequest(
             role: nil, prompt: prompt, isolated: false, sourceItemID: requestId,
             displayLabel: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
-        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? retryEffort ?? (childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)), mode: .free, retryOf: request.retryOf, originalBrief: request.task) else {
+        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? retryEffort ?? (childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)), mode: .free, retryOf: request.retryOf, originalBrief: request.task, contract: contract) else {
             let reason = supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
             return fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true)
         }
@@ -257,6 +267,17 @@ extension WorkspaceAPIService {
         result.checkoutRoot = child?.checkoutRoot
         result.worktreeBranch = child?.worktreeBranch
         result.checkoutNotice = child?.delegationContext?.checkoutNotice
+        // Advice, never a refusal: owned paths a live sibling's contract also
+        // claims. Records are already in memory; nothing waits on disk.
+        if let contract, !contract.owns.isEmpty {
+            let overlaps = supervisor.children(of: agentId).compactMap { sibling -> AgentDelegateResult.OwnershipOverlap? in
+                guard sibling != childId, supervisor.isRunning(sibling) || supervisor.turnPresence(for: sibling)?.phase.isLive == true,
+                      let record = supervisor.records[sibling], let theirs = record.delegationContext?.contract else { return nil }
+                let paths = contract.ownershipOverlap(with: theirs)
+                return paths.isEmpty ? nil : .init(agentId: sibling, title: record.humanDisplayName, paths: paths)
+            }
+            if !overlaps.isEmpty { result.ownershipOverlaps = overlaps }
+        }
 
         // 7. Attachment: a tile in the PARENT's zone, framed against that zone
         //    (hazard 9), through the existing managed-agent tile route.

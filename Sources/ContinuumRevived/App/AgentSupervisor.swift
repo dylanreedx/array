@@ -5829,7 +5829,7 @@ final class AgentSupervisor {
     ///
     /// Returns nil on a refusal, having said so in the parent's transcript.
     @discardableResult
-    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil) -> AgentID? {
+    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil, contract: AgentDelegationContract? = nil) -> AgentID? {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
         }
@@ -5940,7 +5940,7 @@ final class AgentSupervisor {
             guard var spawned = records[childID] else { return nil }
             spawned.delegationContext = AgentDelegationContext(
                 brief: originalBrief ?? request.prompt, baseHead: baseHead, retryOf: retryOf,
-                createdWorktree: overlapping && isolate, checkoutNotice: notice)
+                createdWorktree: overlapping && isolate, checkoutNotice: notice, contract: contract)
             records[childID] = spawned
             persist(spawned)
             // The child record remembers the tool call that asked for it, so its
