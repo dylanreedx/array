@@ -70,17 +70,47 @@ struct HostLaunchInstructionBlock: Sendable, Equatable {
 protocol HostLaunchInstructionSource: Sendable {
     /// Called once per process launch, off the main thread.
     func resolveBlock() -> HostLaunchInstructionBlock?
+    /// Whether Claude launches carry this block too. Personal rules do not:
+    /// Claude Code already reads the user's own Claude instructions.
+    var reachesClaude: Bool { get }
+}
+
+extension HostLaunchInstructionSource {
+    var reachesClaude: Bool { false }
+}
+
+/// Array's reply rules (`ReplyStandard`), for every Array-run agent on every
+/// harness. Static text; the switch is read at each launch, so a change
+/// reaches the next launched process.
+struct ReplyStandardSource: HostLaunchInstructionSource {
+    /// Checks never read the user's settings through this.
+    static let shared = ReplyStandardSource { productionEnabled(defaults: .standard) }
+    static func productionEnabled(defaults: UserDefaults) -> Bool {
+        !CheckFocusGuard.isQARun() && ReplyStandard.isEnabled(defaults: defaults)
+    }
+    let isEnabled: @Sendable () -> Bool
+    var reachesClaude: Bool { true }
+
+    func resolveBlock() -> HostLaunchInstructionBlock? {
+        isEnabled() ? HostLaunchInstructionBlock(name: "reply-rules", label: ReplyStandard.label, text: ReplyStandard.text) : nil
+    }
 }
 
 /// The single host-owned launch seam for Codex and Pi. Sources stay separate;
 /// one option per harness is rendered at launch, in this fixed order:
 /// 1. the user's own Codex `developer_instructions` (Codex only),
 /// 2. instruction text Array already passes in the runner's extra arguments,
-/// 3. each source's block in registration order (today: personal-rules only).
+/// 3. each source's block in registration order: Array's reply rules, then
+///    the user's personal rules (the more specific layer comes last).
 /// Codex gets one `-c developer_instructions=…` (a repeated key replaces the
-/// earlier one); Pi gets one `--append-system-prompt`. Claude is never touched.
+/// earlier one); Pi gets one `--append-system-prompt`. Claude gets only the
+/// blocks that reach it, joined into its one `--append-system-prompt`.
 struct HostLaunchInstructions: Sendable {
-    static let shared = HostLaunchInstructions(sources: [PersonalRulesSource.shared])
+    static let shared = production(reply: .shared, personal: .shared)
+    /// The production order, shared with the checks that witness it.
+    static func production(reply: ReplyStandardSource, personal: PersonalRulesSource) -> HostLaunchInstructions {
+        HostLaunchInstructions(sources: [reply, personal])
+    }
     let sources: [any HostLaunchInstructionSource]
     /// Reads the user's own Codex setting, read-only. Injected in checks.
     var codexUserInstructions: @Sendable (_ codexHome: String?, _ cwd: URL) -> CodexUserInstructions = {
@@ -121,10 +151,23 @@ struct HostLaunchInstructions: Sendable {
         Self.render(blocks(), codex: false, existingArguments: config.extraArgs)
     }
 
+    /// Claude's host text for this launch, or nil. The runner joins it with
+    /// Array's workspace guidance into one `--append-system-prompt`.
+    func claudeText() -> String? {
+        var names = Set<String>()
+        let blocks = sources.filter(\.reachesClaude).compactMap { $0.resolveBlock() }.filter { names.insert($0.name).inserted }
+        let text = Self.joined(blocks)
+        return text.isEmpty ? nil : text
+    }
+
+    static func joined(_ blocks: [HostLaunchInstructionBlock]) -> String {
+        blocks.map { $0.label + ":\n" + $0.text }.joined(separator: "\n\n")
+    }
+
     /// Pure: joins existing instruction text and the blocks into one option.
     static func render(_ blocks: [HostLaunchInstructionBlock], codex: Bool,
                        existingArguments: [String] = [], userText: String? = nil) -> [String] {
-        let rendered = blocks.map { $0.label + ":\n" + $0.text }.joined(separator: "\n\n")
+        let rendered = joined(blocks)
         guard !rendered.isEmpty else { return existingArguments }
         var remaining: [String] = []
         var existingText: [String] = userText.map { [$0] } ?? []

@@ -227,6 +227,11 @@ public enum SettingsSchema {
                             help: "Looks for newer versions at most once an hour. Updates only run when you click Update.",
                             keywords: ["update", "upgrade", "version", "cli", "npm", "homebrew"]),
             ]),
+            SettingsGroup(id: "agents.replyRules", title: "Reply rules", rows: [
+                SettingsRow(.toggle(key: ReplyStandard.enabledKey, label: "Give every agent Array's reply rules", default: false),
+                            help: "Each time Array starts a Claude Code, Codex or Pi agent, it adds Array's \(ReplyStandard.wordCount)-word rules for replies: answer first, only what was asked, plain terms, a fixed report order, and \"done\" only for what was checked. Your personal rules come after them.",
+                            keywords: ["reply", "replies", "rules", "report", "answer", "instructions", "codex", "pi", "claude"]),
+            ]),
             SettingsGroup(id: "agents.personalRules", title: "Personal rules",
                           footer: "Claude Code agents already read your own Claude instructions, so they are left as they are. Array only reads the file; it never changes it.", rows: [
                 SettingsRow(.toggle(key: PersonalRulesConfig.enabledKey, label: "Give Codex and Pi agents my rules", default: false),

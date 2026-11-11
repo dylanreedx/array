@@ -227,6 +227,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         /// .plans/101 — the account's config folder, passed as
         /// `CLAUDE_CONFIG_DIR`. nil is the CLI's default login.
         public var configDirectory: String?
+        /// Host instruction text resolved at EACH process launch (never at runner
+        /// construction), on the thread that spawns the process; nil adds none.
+        public var hostInstructions: (@Sendable () -> String?)?
 
         public init(
             model: String,
@@ -281,7 +284,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         workspaceMCP: WorkspaceMCPConfiguration? = nil,
         mode: AgentMode = .free,
         hookSurfaceAvailable: Bool = true,
-        duckherdPluginKeys: [String] = []
+        duckherdPluginKeys: [String] = [],
+        hostInstructions: String? = nil
     ) -> [String] {
         let sessionArgs: [String]
         switch sessionMode {
@@ -330,7 +334,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             // user's and the project's hooks; `--setting-sources` would drop
             // theirs, so it is never passed here. It sits before the MCP pair
             // so the config path stays last.
-            args += ["--append-system-prompt", WorkspaceMCPConfiguration.agentGuidance,
+            // Host text joins the guidance in this ONE value: a second
+            // `--append-system-prompt` replaces the first (claude 2.1.321).
+            args += ["--append-system-prompt", ([WorkspaceMCPConfiguration.agentGuidance] + (hostInstructions.map { [$0] } ?? [])).joined(separator: "\n\n"),
                      "--allowedTools", "mcp__array_workspace"]
                 + (mode == .free ? ["--disallowedTools", "ListAgents"] : [])
             if hookSurfaceAvailable {
@@ -338,6 +344,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                     command: workspaceMCP.claudeHookCommand, pluginConfigs: pluginConfigs)]
             }
             args += ["--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
+        } else if let hostInstructions {
+            args += ["--append-system-prompt", hostInstructions]
         }
         return args
     }
@@ -913,7 +921,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             mode: config.mode,
             hookSurfaceAvailable: config.workspaceMCP != nil && AgentHookSurfaceCatalog.shared.claudeAvailable(command: command),
             duckherdPluginKeys: config.mode == .managed
-                ? ClaudeDuckherd.installedPluginKeys(configDirectory: ClaudeDuckherd.configDirectory(config.configDirectory)) : []
+                ? ClaudeDuckherd.installedPluginKeys(configDirectory: ClaudeDuckherd.configDirectory(config.configDirectory)) : [],
+            hostInstructions: config.hostInstructions?()
         )
         let spawned: ProcessGroupChild
         do {

@@ -1922,7 +1922,7 @@ final class AgentSupervisor {
         switch record.harness {
         case .claudeCode:
             return claudeRunner(for: record, workspaceMCP: launch.workspaceMCP,
-                                configDirectory: launch.accountConfigDirectory)
+                                configDirectory: launch.accountConfigDirectory, hostInstructions: hostInstructions)
         case .codex:
             return codexRunner(for: record, workspaceMCP: launch.workspaceMCP,
                                codexHome: launch.accountConfigDirectory, hostInstructions: hostInstructions)
@@ -1965,10 +1965,13 @@ final class AgentSupervisor {
     /// The only `ClaudeAgentRunner(` construction in the app, mirroring
     /// `piRunner(for:)` so the same ownership scan can hold for both.
     nonisolated static func claudeRunner(
-        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, configDirectory: String? = nil
+        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, configDirectory: String? = nil,
+        hostInstructions: HostLaunchInstructions = .shared
     ) -> AgentRunning {
         var config = claudeRunnerConfig(for: record, workspaceMCP: workspaceMCP)
         config.configDirectory = configDirectory
+        // Resolved per process launch, off the main thread (see codexRunnerConfig).
+        config.hostInstructions = { hostInstructions.claudeText() }
         return ClaudeAgentRunner(config: config)
     }
 
