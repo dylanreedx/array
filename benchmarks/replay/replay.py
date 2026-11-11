@@ -23,7 +23,8 @@ MODES = tuple(MANIFEST['conditions']['modes'])
 RECORD_FIELDS = tuple(field['name'] for field in MANIFEST['recordFields'])
 HOST_OWNED = tuple(MANIFEST['hostOwnedPaths'])
 OUTCOMES = ('completed', 'failed', 'timeout', 'interrupted', 'containmentFailed', 'driverFailed')
-TOKEN_TYPES = ('input', 'output', 'cacheRead', 'cacheWrite')
+# The run ledger's token types; their input sum is the whole prompt.
+TOKEN_TYPES = ('uncachedInput', 'cacheRead', 'cacheWrite', 'output')
 PYTHON = os.path.realpath(sys.executable)
 
 
@@ -418,8 +419,8 @@ def new_record(task, harness, mode, simulated=True):
                 checksHash=task['checksHash'], harness=harness, mode=mode, actualChoice=None,
                 simulated=simulated, outcome='driverFailed', failure=None,
                 fannedOut=None if mode == 'solo' else False, helperCount=0, helpers=[], delegationAttempts=0,
-                tokens={t: None for t in TOKEN_TYPES}, usageComplete=False,
-                usageProblems=['no usage observed'], wallSeconds=None, activeSeconds=None, humanSteps=None,
+                tokens={t: None for t in TOKEN_TYPES}, tokensNotReported=[], usageComplete=False,
+                usageProblems=['no usage observed'], usageRows=[], wallSeconds=None, activeSeconds=None, humanSteps=None,
                 diffHash=None, changedPaths=[], tampered=[], checks={}, gradeResult='notGraded',
                 hiddenPassed=None, neighbourPassed=None, passed=False)
 
@@ -431,7 +432,11 @@ def check_record(record):
         raise ValueError('record values outside the schema')
     if set(record['tokens']) != set(TOKEN_TYPES):
         raise ValueError('record token types differ from the schema')
-    if record['usageComplete'] and (any(record['tokens'][t] is None for t in TOKEN_TYPES) or record['usageProblems']):
+    not_reported = record['tokensNotReported']
+    if not set(not_reported) <= set(TOKEN_TYPES) or any(record['tokens'][t] is not None for t in not_reported):
+        raise ValueError('a token type the harness does not report has a figure')
+    unknown = [t for t in TOKEN_TYPES if record['tokens'][t] is None and t not in not_reported]
+    if record['usageComplete'] and (unknown or record['usageProblems']):
         raise ValueError('usage marked complete with unknown token types')
     if record['passed'] and (record['outcome'] != 'completed' or record['gradeResult'] != 'passed'):
         raise ValueError('passed without a completed, passing grade')
@@ -485,6 +490,8 @@ def pair_exclusion(solo, managed):
         return 'a run did not complete'
     if not solo['usageComplete'] or not managed['usageComplete']:
         return 'usage incomplete'
+    if set(solo['tokensNotReported']) != set(managed['tokensNotReported']):
+        return 'token types reported differ'
     if solo['delegationAttempts'] or solo['helperCount']:
         return 'solo delegated'
     if managed['fannedOut'] is not True:
@@ -519,13 +526,14 @@ def compare(records):
             excluded[reason] += 1
             continue
         side = '(solo %s, managed %s)' % (verdict(a), verdict(b))
+        tokens = {t: b['tokens'][t] - a['tokens'][t] for t in TOKEN_TYPES
+                  if a['tokens'][t] is not None and b['tokens'][t] is not None}
         pair = dict(task=key[0], harness=key[1], soloPassed=a['passed'], managedPassed=b['passed'],
-                    input=b['tokens']['input'] - a['tokens']['input'],
-                    output=b['tokens']['output'] - a['tokens']['output'],
-                    wallSeconds=b['wallSeconds'] - a['wallSeconds'])
+                    tokens=tokens, wallSeconds=b['wallSeconds'] - a['wallSeconds'])
         pairs.append(pair)
-        lines.append('%s %s input %+d %s output %+d %s wall %+.2fs %s' % (
-            key[1], key[0][:12], pair['input'], side, pair['output'], side, pair['wallSeconds'], side))
+        figures = ['%s %+d %s' % (t, tokens[t], side) if t in tokens
+                   else '%s not reported' % t if t in a['tokensNotReported'] else '%s unknown' % t for t in TOKEN_TYPES]
+        lines.append('%s %s %s wall %+.2fs %s' % (key[1], key[0][:12], ' '.join(figures), pair['wallSeconds'], side))
     by_mode = collections.Counter((r['mode'], r['passed']) for r in records)
     fan_out = sum(1 for r in records if r['mode'] == 'managed' and r['fannedOut'] is True)
     lines.append('runs %d; pairs compared %d of %d expected; coverage %d/%d' % (

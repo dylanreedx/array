@@ -91,6 +91,9 @@ struct ReplayCondition {
     let managed: Bool
     let lead: ReplayLeadScript
     var codexResets = false
+    /// The lead's Codex thread began in an earlier process: its first turn
+    /// resumes it, carrying history this process never watched.
+    var codexResumed = false
 }
 
 /// Recorded provider streams, translated by the PRODUCTION translators so the
@@ -126,19 +129,33 @@ enum ReplayStreams {
         return events.filter(keep)
     }
 
-    /// One codex app-server turn on a persistent thread: the recorded
-    /// cumulative totals continue from `carried` unless the thread was reset.
-    static func codexTurn(carried: (Int, Int)) throws -> [AgentRuntimeEvent] {
+    /// The recorded capture's own thread and turn ids.
+    static let codexFixtureThread = "00000000-0000-4000-8000-000000000001"
+    static let codexFixtureTurn = "00000000-0000-4000-8000-000000000002"
+
+    /// One codex app-server turn on a persistent thread, as the production
+    /// runner publishes it: the agent's own thread, a fresh turn id, provider
+    /// times after every earlier turn's, and, for a resumed thread, the marker
+    /// `CodexAgentRunner` puts on the `thread/started` it synthesizes. The
+    /// recorded cumulative totals continue from `carried`.
+    static func codexTurn(thread: String, turn: String, carried: [String: Int], resumed: Bool,
+                          providerTime: Int) throws -> [AgentRuntimeEvent] {
         var translator = CodexAppServerEventTranslator()
         var events: [AgentRuntimeEvent] = []
-        for line in try lines(codexFixture) {
-            guard var object = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+        for (index, line) in try lines(codexFixture).enumerated() {
+            let renamed = line.replacingOccurrences(of: codexFixtureThread, with: thread)
+                .replacingOccurrences(of: codexFixtureTurn, with: turn)
+            guard var object = try JSONSerialization.jsonObject(with: Data(renamed.utf8)) as? [String: Any] else { continue }
+            if object["emittedAtMs"] != nil { object["emittedAtMs"] = providerTime + index }
+            if object["method"] as? String == "thread/started", resumed, var params = object["params"] as? [String: Any] {
+                params[CodexAppServerEventTranslator.resumedMarker] = true
+                object["params"] = params
+            }
             if object["method"] as? String == "thread/tokenUsage/updated",
                var params = object["params"] as? [String: Any],
                var usage = params["tokenUsage"] as? [String: Any],
                var total = usage["total"] as? [String: Any] {
-                total["inputTokens"] = ((total["inputTokens"] as? Int) ?? 0) + carried.0
-                total["outputTokens"] = ((total["outputTokens"] as? Int) ?? 0) + carried.1
+                for (key, value) in carried { total[key] = ((total[key] as? Int) ?? 0) + value }
                 usage["total"] = total; params["tokenUsage"] = usage; object["params"] = params
             }
             let text = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
@@ -147,101 +164,102 @@ enum ReplayStreams {
         return events.filter(keep)
     }
 
-    /// Independent arithmetic over the raw recorded files, for the witness.
-    static func recordedClaudeTurnTotals() throws -> (Int, Int) {
-        for line in try lines(claudeFixture) {
-            guard let o = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  o["type"] as? String == "result", let models = o["modelUsage"] as? [String: [String: Any]] else { continue }
-            var input = 0, output = 0
-            for usage in models.values {
-                input += ["inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"].reduce(0) { $0 + ((usage[$1] as? Int) ?? 0) }
-                output += (usage["outputTokens"] as? Int) ?? 0
-            }
-            return (input, output)
-        }
-        throw ReplayFailure(description: "claude fixture has no result")
-    }
-
-    static func recordedCodexTurnTotals() throws -> (Int, Int) {
-        var last: (Int, Int)?
+    /// The recorded thread's last cumulative total, every counter in it.
+    static func recordedCodexFinalTotal() throws -> [String: Int] {
+        var last: [String: Int]?
         for line in try lines(codexFixture) {
             guard let o = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
                   o["method"] as? String == "thread/tokenUsage/updated",
                   let total = ((o["params"] as? [String: Any])?["tokenUsage"] as? [String: Any])?["total"] as? [String: Any]
             else { continue }
-            last = ((total["inputTokens"] as? Int) ?? 0, (total["outputTokens"] as? Int) ?? 0)
+            last = total.compactMapValues { $0 as? Int }
         }
         guard let last else { throw ReplayFailure(description: "codex fixture has no usage") }
         return last
     }
 }
 
-/// Usage over production-delivered events. Claude reports per result with a
-/// stable identity; codex reports a running total per thread.
-struct ReplayUsageAccount {
-    private var claude: [String: (Int, Int)] = [:]
-    private var codex: [String: [(Int, Int)]] = [:]
-    private var turnHadUsage: [AgentID: Bool] = [:]
-    private(set) var problems: [String] = []
-    private(set) var completedTurns: [AgentID: Int] = [:]
+/// Which agents had a failed turn, from production-delivered events. Usage is
+/// never counted here: the run ledger records it (`ReplayLedgerRecord`).
+struct ReplayTurnOutcomes {
     private(set) var failedTurns: [AgentID: Int] = [:]
 
-    mutating func observe(_ agent: AgentID, harness: AgentHarness, _ event: AgentRuntimeEvent) {
+    mutating func observe(_ agent: AgentID, _ event: AgentRuntimeEvent) {
         switch event {
-        case .turnStarted:
-            turnHadUsage[agent] = false
-        case let .turnCompleted(_, _, outcome, _):
-            if outcome == .completed { completedTurns[agent, default: 0] += 1 } else { failedTurns[agent, default: 0] += 1 }
-            if turnHadUsage[agent] != true { problems.append("gap: a turn ended with no usage report") }
-            turnHadUsage[agent] = nil
+        case let .turnCompleted(_, _, outcome, _) where outcome != .completed:
+            failedTurns[agent, default: 0] += 1
         case let .sessionStateChanged(state) where state == .error:
             failedTurns[agent, default: 0] += 1
-        case let .tokenUsageUpdated(thread, snapshot):
-            turnHadUsage[agent] = true
-            switch harness {
-            case .claudeCode:
-                guard let id = snapshot.accountingObservationID else {
-                    problems.append("claude usage without a message identity"); return
-                }
-                let value = (snapshot.accountingInputTokens ?? snapshot.inputTokens,
-                             snapshot.accountingOutputTokens ?? snapshot.outputTokens)
-                let key = agent.rawValue.uuidString + "|" + id
-                if let seen = claude[key], seen != value { problems.append("claude message reported twice with different usage") }
-                claude[key] = value
-            case .codex:
-                if snapshot.accountingForkedFrom != nil { problems.append("codex fork: the total includes another session") }
-                codex[agent.rawValue.uuidString + "|" + thread, default: []].append((snapshot.inputTokens, snapshot.outputTokens))
-            case .pi:
-                problems.append("pi is not a replay harness")
-            }
         default:
             break
         }
     }
+}
 
-    /// Typed cache counters do not exist on `TokenUsageSnapshot` yet, so cache
-    /// stays unknown and usage incomplete until they are published.
-    func totals() -> (tokens: [String: Any], complete: Bool, problems: [String]) {
-        var problems = self.problems
-        var input = 0, output = 0
-        for value in claude.values { input += value.0; output += value.1 }
-        for (session, totals) in codex.sorted(by: { $0.key < $1.key }) {
-            var previous = (0, 0)
-            for current in totals {
-                let delta = (current.0 - previous.0, current.1 - previous.1)
-                if delta.0 < 0 || delta.1 < 0 {
-                    problems.append("codex reset in session \(session.suffix(8)): a running total went down")
-                }
-                input += max(0, delta.0); output += max(0, delta.1)
-                previous = current
+/// The run's task as the production run ledger recorded it, read through the
+/// usage page's own reader and derivation (`RunLedgerUsageReader`,
+/// `UsageReport.make`), never a second one. Missing is never zero; a kind the
+/// harness never reports (Codex cache writes) is "not reported", not missing.
+enum ReplayLedgerRecord {
+    static let kinds: [(name: String, type: UsageReport.TokenType)] =
+        [("uncachedInput", .uncachedInput), ("cacheRead", .cacheRead), ("cacheWrite", .cacheWrite), ("output", .output)]
+
+    /// Fills the ledger fields; returns where the ledger and the production
+    /// records disagree (a measurement failure, never papered over).
+    static func fill(_ record: inout [String: Any], ledger url: URL, lead: AgentID, managed: Bool,
+                     productionHelpers: Int) -> [String] {
+        let data = (try? Data(contentsOf: url)) ?? Data()
+        let tasks = RunLedgerUsageReader.read(data).tasks.filter { $0.lead == lead.rawValue }
+        guard tasks.count == 1, let task = tasks.first,
+              let line = UsageReport.make(RunLedgerUsageReader.Ledger(tasks: [task]), period: .all).tasks.first else {
+            record["usageProblems"] = ["the run ledger holds \(tasks.count) task(s) for the lead"]
+            return ["the run ledger holds \(tasks.count) task(s) for the lead, not one"]
+        }
+        var disagreements: [String] = []
+        record["ledgerTask"] = task.id.uuidString.lowercased()
+        let mode = managed ? "managed" : "free"
+        if task.mode != mode { disagreements.append("the ledger recorded mode \(task.mode ?? "none"), not \(mode)") }
+        record["helperCount"] = task.helpers.count
+        if managed { record["fannedOut"] = !task.helpers.isEmpty }
+        if task.helpers.count != productionHelpers {
+            disagreements.append("the ledger delegated \(task.helpers.count) helper(s); the production records hold \(productionHelpers)")
+        }
+
+        var tokens: [String: Any] = [:], notReported: [String] = [], problems: [String] = []
+        let all = line.tokens[.all] ?? [:]
+        for (name, type) in kinds {
+            let figure = all[type] ?? UsageReport.Figure(unknown: 1)
+            if figure.isNotReported {
+                tokens[name] = NSNull(); notReported.append(name)
+            } else if figure.isUnknown {
+                tokens[name] = NSNull(); problems.append("\(name) unknown")
+            } else {
+                tokens[name] = figure.known
             }
         }
-        if claude.isEmpty && codex.isEmpty { problems.append("no usage observed") }
-        let broken = problems.contains { !$0.hasPrefix("cache") }
-        problems += ["cacheRead unknown: no typed cache counter", "cacheWrite unknown: no typed cache counter"]
-        let tokens: [String: Any] = ["input": broken ? NSNull() : input, "output": broken ? NSNull() : output,
-                                     "cacheRead": NSNull(), "cacheWrite": NSNull()]
-        return (tokens, false, problems)
+        if task.state != .closed { problems.append("task \(task.state.rawValue)") }
+        problems += Set(task.usage.flatMap(\.incomplete)).subtracting(["reportedByParent"]).sorted()
+        let complete = line.fullyCounted && problems.isEmpty
+        if !complete && problems.isEmpty { problems.append("usage not fully counted") }
+        record["tokens"] = tokens
+        record["tokensNotReported"] = notReported
+        record["usageComplete"] = complete
+        record["usageProblems"] = problems
+        record["usageRows"] = task.usage.map { row -> [String: Any] in
+            var counts: [String: Any] = [:]
+            for (name, type) in kinds {
+                counts[name] = row.tokens.flatMap { type == .uncachedInput ? $0.uncachedInput : type == .cacheRead ? $0.cacheRead
+                    : type == .cacheWrite ? $0.cacheWrite : $0.output } ?? NSNull()
+            }
+            return ["agent": row.agent.uuidString.lowercased(), "role": row.agent == lead.rawValue ? "lead" : "helper",
+                    "parent": row.parent.map { $0.uuidString.lowercased() as Any } ?? NSNull(),
+                    "harness": row.harness ?? NSNull(), "model": row.model ?? NSNull(),
+                    "modelSource": row.modelSource ?? NSNull(), "turn": row.turn ?? NSNull(),
+                    "tokens": counts, "incomplete": row.incomplete]
+        }
+        record["wallSeconds"] = line.timeToAnswer.map { $0 as Any } ?? NSNull()
+        record["activeSeconds"] = line.activeTime.map { $0 as Any } ?? NSNull()
+        return disagreements
     }
 }
 
@@ -250,13 +268,16 @@ final class ReplayRunFacts: @unchecked Sendable {
     private let lock = NSLock()
     private var intervalsStorage: [(Double, Double)] = []
     private var turnsStorage: [AgentID: Int] = [:]
-    private var codexCarried: [AgentID: (Int, Int)] = [:]
+    private var codexCarried: [AgentID: [String: Int]] = [:]
+    private var providerClock = Int(Date().timeIntervalSince1970 * 1000)
     private var interceptedStorage = 0
     private var leadToolsStorage: [Bool] = []
     private var leaksStorage: [String] = []
     private var delegateRepliesStorage: [String] = []
 
     var intervals: [(Double, Double)] { lock.withLock { intervalsStorage } }
+    /// Every agent turn the fakes ran, counted by the fakes themselves.
+    var turns: Int { lock.withLock { turnsStorage.values.reduce(0, +) } }
     var intercepted: Int { lock.withLock { interceptedStorage } }
     var leadLaunchesWithTools: [Bool] { lock.withLock { leadToolsStorage } }
     var leaks: [String] { lock.withLock { leaksStorage } }
@@ -268,8 +289,12 @@ final class ReplayRunFacts: @unchecked Sendable {
     func leadLaunch(hasTools: Bool) { lock.withLock { leadToolsStorage.append(hasTools) } }
     func leak(_ text: String) { lock.withLock { leaksStorage.append(text) } }
     func delegateReply(_ text: String) { lock.withLock { delegateRepliesStorage.append(text) } }
-    func carried(_ id: AgentID) -> (Int, Int) { lock.withLock { codexCarried[id] ?? (0, 0) } }
-    func carry(_ id: AgentID, _ value: (Int, Int)) { lock.withLock { codexCarried[id] = value } }
+    func carried(_ id: AgentID) -> [String: Int] { lock.withLock { codexCarried[id] ?? [:] } }
+    func carry(_ id: AgentID, _ value: [String: Int]) { lock.withLock { codexCarried[id] = value } }
+    /// Provider times (ms) for `count` frames, later than every earlier turn's.
+    func providerTimes(_ count: Int) -> Int {
+        lock.withLock { let start = providerClock; providerClock += count + 1; return start }
+    }
 }
 
 @MainActor
@@ -368,6 +393,9 @@ final class ReplaySupervisorDriver {
     let task: ReplayTask
     let sink: URL
     var injectedRoot: URL?
+    /// Agent turns the fakes ran in the last run, counted by the fakes, never
+    /// read from the ledger: what a witness checks the ledger's totals against.
+    private(set) var lastRunTurns = 0
 
     init(task: ReplayTask, sink: URL) {
         self.task = task
@@ -406,7 +434,8 @@ final class ReplaySupervisorDriver {
                 "outcome": "driverFailed", "failure": NSNull(),
                 "fannedOut": condition.managed ? false as Any : NSNull(), "helperCount": 0, "helpers": [Any](),
                 "delegationAttempts": 0,
-                "tokens": ["input": NSNull(), "output": NSNull(), "cacheRead": NSNull(), "cacheWrite": NSNull()],
+                "tokens": ["uncachedInput": NSNull(), "cacheRead": NSNull(), "cacheWrite": NSNull(), "output": NSNull()],
+                "tokensNotReported": [Any](), "usageRows": [Any](),
                 "usageComplete": false, "usageProblems": ["no usage observed"], "wallSeconds": NSNull(),
                 "activeSeconds": NSNull(), "humanSteps": NSNull(), "diffHash": NSNull(), "changedPaths": [Any](),
                 "tampered": [Any](), "checks": [String: Any](), "gradeResult": "notGraded",
@@ -463,9 +492,9 @@ final class ReplaySupervisorDriver {
         world.delegate.qaWorkspaceAPI.approvalHandler = { _ in approvalsAsked += 1; return .allowForSession }
         defer { supervisor.stopAll() }
 
-        var account = ReplayUsageAccount()
+        var outcomes = ReplayTurnOutcomes()
         let observation = supervisor.addDeliveredEventObserver { agent, event in
-            account.observe(agent, harness: condition.harness, event)
+            outcomes.observe(agent, event)
         }
         defer { supervisor.removeDeliveredEventObserver(observation) }
 
@@ -489,7 +518,8 @@ final class ReplaySupervisorDriver {
         }
 
         let started = ProcessInfo.processInfo.systemUptime
-        guard supervisor.send(task.request, to: lead) else {
+        // The composer's human submission: the path that opens the run ledger's task.
+        guard await supervisor.accept(.sendPrompt(AgentPrompt(task.request)), for: lead) == .accepted else {
             throw ReplayFailure(description: "production submission refused")
         }
         record["outcome"] = "timeout"
@@ -506,11 +536,11 @@ final class ReplaySupervisorDriver {
             if settledSince == nil { settledSince = now }
         }
         supervisor.stopAll()
+        lastRunTurns = facts.turns
 
-        // Facts from the PRODUCTION records, never from the fake.
+        // Checkouts from the PRODUCTION records, never from the fake.
         let helpers = supervisor.records.values.filter { $0.parentAgentID == lead }
             .sorted { $0.createdAt < $1.createdAt }
-        record["helperCount"] = helpers.count
         record["helpers"] = helpers.map { helper -> [String: Any] in
             let checkout = helper.checkoutRoot.hasPrefix(root.path + "/")
                 ? String(helper.checkoutRoot.dropFirst(root.path.count + 1)) : helper.checkoutRoot
@@ -518,32 +548,24 @@ final class ReplaySupervisorDriver {
                     "isolated": helper.worktreeBranch != nil]
         }
         record["delegationAttempts"] = facts.intercepted
-        if condition.managed {
-            record["fannedOut"] = !helpers.isEmpty
-        } else if !helpers.isEmpty || facts.leadLaunchesWithTools.contains(true) {
+        // Task, mode, helper count, tokens by type, completeness and times from
+        // the run's own ledger, in this run's Application Support only.
+        supervisor.runLedger.drain()
+        let ledger = RunLedgerUsageReader.ledgerURL(applicationSupport: root.appendingPathComponent("support"))
+        let disagreements = ReplayLedgerRecord.fill(&record, ledger: ledger, lead: lead, managed: condition.managed,
+                                                    productionHelpers: helpers.count)
+        if !condition.managed, !helpers.isEmpty || facts.leadLaunchesWithTools.contains(true) {
             record["failure"] = "solo lead had a delegation route"
         }
         if !facts.leaks.isEmpty {
             record["outcome"] = "containmentFailed"
             record["failure"] = facts.leaks.joined(separator: "; ")
         }
-        let failed = supervisor.records.keys.contains { (account.failedTurns[$0] ?? 0) > 0 }
+        let failed = supervisor.records.keys.contains { (outcomes.failedTurns[$0] ?? 0) > 0 }
         if failed, record["outcome"] as? String == "completed" {
             record["outcome"] = "failed"
             record["failure"] = "an agent's turn failed"
         }
-        let usage = account.totals()
-        record["tokens"] = usage.tokens
-        record["usageComplete"] = usage.complete
-        record["usageProblems"] = usage.problems
-        let intervals = facts.intervals.sorted { $0.0 < $1.0 }
-        var active = 0.0, end = 0.0
-        for interval in intervals {
-            active += max(0, interval.1 - max(end, interval.0))
-            end = max(end, interval.1)
-        }
-        record["activeSeconds"] = intervals.isEmpty ? NSNull() : active
-        record["wallSeconds"] = intervals.isEmpty ? NSNull() : max(0, end - started)
         if approvalsAsked > 0 { record["humanSteps"] = approvalsAsked }
 
         // Grade the lead's working copy on a pristine export, after termination.
@@ -556,6 +578,7 @@ final class ReplaySupervisorDriver {
             record[key] = grade[key] ?? NSNull()
         }
         record["passed"] = record["outcome"] as? String == "completed" && grade["gradeResult"] as? String == "passed"
+        if !disagreements.isEmpty { throw ReplayFailure(description: disagreements.joined(separator: "; ")) }
     }
 }
 
@@ -705,10 +728,17 @@ private final class ReplayFakeAgent: AgentRunning, @unchecked Sendable {
         var events: [AgentRuntimeEvent]
         switch condition.harness {
         case .codex:
-            let carried = condition.codexResets && turn > 1 ? (0, 0) : facts.carried(id)
-            events = try ReplayStreams.codexTurn(carried: carried)
-            let final = try ReplayStreams.recordedCodexTurnTotals()
-            facts.carry(id, (carried.0 + final.0, carried.1 + final.1))
+            let final = try ReplayStreams.recordedCodexFinalTotal()
+            // Each turn is a new app-server process: a later turn resumes the
+            // agent's thread, as the production runner does. A resumed-from-
+            // before lead starts with a whole recorded thread of history.
+            let resumedFromBefore = isLead && turn == 1 && condition.codexResumed
+            var carried = resumedFromBefore ? final : facts.carried(id)
+            if condition.codexResets && turn > 1 { carried = [:] }
+            events = try ReplayStreams.codexTurn(thread: session, turn: UUID().uuidString.lowercased(), carried: carried,
+                                                 resumed: turn > 1 || resumedFromBefore,
+                                                 providerTime: facts.providerTimes(try ReplayStreams.lines(ReplayStreams.codexFixture).count))
+            facts.carry(id, final.merging(carried, uniquingKeysWith: +))
         default:
             events = try ReplayStreams.claudeTurn(session: session)
         }
@@ -852,36 +882,57 @@ func runReplayDriverChecks() async throws {
         .trimmingCharacters(in: .whitespacesAndNewlines)
     let task = try ReplayTask.load(URL(fileURLWithPath: taskJSON))
     let driver = ReplaySupervisorDriver(task: task, sink: sink)
-    var primary: [[String: Any]] = []
-    let claudeTurn = try ReplayStreams.recordedClaudeTurnTotals()
-    let codexTurn = try ReplayStreams.recordedCodexTurnTotals()
+    var primary: [String: [[String: Any]]] = [:]
+    var resumedSolo: [String: Any] = [:]
 
     func string(_ r: [String: Any], _ k: String) -> String? { r[k] as? String }
     func int(_ r: [String: Any], _ k: String) -> Int? { r[k] as? Int }
     func problems(_ r: [String: Any]) -> [String] { r["usageProblems"] as? [String] ?? [] }
-    func tokens(_ r: [String: Any]) -> (Any?, Any?) {
-        let t = r["tokens"] as? [String: Any]
-        return (t?["input"], t?["output"])
+    func tokens(_ r: [String: Any]) -> [String: Any] { r["tokens"] as? [String: Any] ?? [:] }
+    // Hand-computed in RequestTelemetryChecks from the same captures: one Claude
+    // opus turn is 2 / 10,695 / 11,239 / 124; the whole recorded Codex thread,
+    // started here, is 7,652 / 57,344 / not reported / 313.
+    func perTurn(_ harness: AgentHarness) -> [String: Int?] {
+        harness == .codex ? ["uncachedInput": 7_652, "cacheRead": 57_344, "cacheWrite": nil, "output": 313]
+            : ["uncachedInput": 2, "cacheRead": 10_695, "cacheWrite": 11_239, "output": 124]
+    }
+    /// The record's typed totals equal `turns` whole recorded turns; a kind the
+    /// harness never reports is null and listed, never zero.
+    func expectTotals(_ r: [String: Any], _ harness: AgentHarness, turns: Int, _ label: String) throws {
+        let figures = tokens(r)
+        for (kind, each) in perTurn(harness) {
+            if let each {
+                try expect(figures[kind] as? Int == each * turns,
+                           "\(label) tokens are not \(turns) recorded turn(s): \(kind) \(figures[kind] ?? "missing"), expected \(each * turns)")
+            } else {
+                try expect(figures[kind] is NSNull && (r["tokensNotReported"] as? [String])?.contains(kind) == true,
+                           "\(label) \(kind) is not recorded as not reported: \(figures[kind] ?? "missing") \(r["tokensNotReported"] ?? "")")
+            }
+        }
+    }
+    func expectLedgerTask(_ r: [String: Any], _ label: String) throws {
+        try expect(string(r, "ledgerTask").flatMap(UUID.init(uuidString:)) != nil, "\(label) has no ledger task: \(r["ledgerTask"] ?? "")")
     }
 
     for harness in [AgentHarness.claudeCode, .codex] {
         let name = harness == .codex ? "codex" : "claude"
-        let perTurn = harness == .codex ? codexTurn : claudeTurn
 
         let solo = await driver.run(ReplayCondition(harness: harness, managed: false, lead: .repairs))
         try expect(string(solo, "outcome") == "completed" && solo["passed"] as? Bool == true,
                    "\(name) solo did not complete and pass: \(solo)")
         try expect(int(solo, "helperCount") == 0 && int(solo, "delegationAttempts") == 0 && solo["fannedOut"] is NSNull,
                    "\(name) solo recorded helpers: \(solo)")
+        try expectLedgerTask(solo, "\(name) solo")
+        try expect(solo["usageComplete"] as? Bool == true && problems(solo).isEmpty,
+                   "\(name) solo usage was not complete: \(problems(solo))")
         // One turn, its usage report delivered twice: counted once.
-        try expect(tokens(solo).0 as? Int == perTurn.0 && tokens(solo).1 as? Int == perTurn.1,
-                   "\(name) usage lost or doubled: \(tokens(solo)) against the recorded \(perTurn)")
-        try expect(solo["usageComplete"] as? Bool == false && problems(solo).contains { $0.hasPrefix("cacheRead unknown") },
-                   "\(name) usage marked complete without cache counters")
+        try expect(driver.lastRunTurns == 1, "\(name) solo ran \(driver.lastRunTurns) turns, not one")
+        try expectTotals(solo, harness, turns: 1, "\(name) solo")
         try expect((solo["wallSeconds"] as? Double ?? -1) >= (solo["activeSeconds"] as? Double ?? .infinity)
                    && (solo["activeSeconds"] as? Double ?? 0) > 0, "\(name) solo timing missing: \(solo)")
 
         let managed = await driver.run(ReplayCondition(harness: harness, managed: true, lead: .delegatesTwoParts))
+        let managedTurns = driver.lastRunTurns
         try expect(string(managed, "outcome") == "completed" && managed["passed"] as? Bool == true,
                    "\(name) managed did not complete and pass: \(managed)")
         try expect(managed["fannedOut"] as? Bool == true && int(managed, "helperCount") == 2,
@@ -892,27 +943,46 @@ func runReplayDriverChecks() async throws {
                    "\(name) concurrent helpers did not get separate checkouts: \(checkouts)")
         try expect(managed["changedPaths"] as? [String] == ["calc.py"],
                    "\(name) grading carried a helper worktree or host state: \(managed["changedPaths"] ?? "")")
-        // Lead: delegating turn + one wake per delivered helper result, at least.
-        let managedInput = tokens(managed).0 as? Int ?? 0
-        try expect(managedInput >= perTurn.0 * 3 && managedInput % perTurn.0 == 0
-                   && !problems(managed).contains { !$0.hasPrefix("cache") },
-                   "\(name) managed usage is not whole recorded turns across lead and helpers: \(managedInput) \(problems(managed))")
+        try expectLedgerTask(managed, "\(name) managed")
+        try expect(managed["usageComplete"] as? Bool == true && problems(managed).isEmpty,
+                   "\(name) managed usage was not complete: \(problems(managed))")
+        // Lead's delegating turn, each helper's turn and the lead's wakes, each
+        // one whole recorded turn: the lead's and its helpers' rows together.
+        try expect(managedTurns >= 3, "\(name) managed ran \(managedTurns) turns")
+        try expectTotals(managed, harness, turns: managedTurns, "\(name) managed")
+        let roles = Set((managed["usageRows"] as? [[String: Any]] ?? []).compactMap { $0["role"] as? String })
+        try expect(roles == ["lead", "helper"], "\(name) managed usage rows do not name the lead and helpers: \(roles)")
 
-        primary += [solo, managed]
+        primary[name] = [solo, managed]
         let lone = await driver.run(ReplayCondition(harness: harness, managed: true, lead: .repairs))
         try expect(lone["fannedOut"] as? Bool == false && int(lone, "helperCount") == 0 && string(lone, "outcome") == "completed",
                    "\(name) a managed lead that delegated nothing was not recorded as not fanning out: \(lone)")
 
         let attempt = await driver.run(ReplayCondition(harness: harness, managed: false, lead: .triesToDelegate))
-        try expect(int(attempt, "helperCount") == 0, "solo run delegated: the production record has \(attempt["helperCount"] ?? "?") helper(s)")
+        // The production records, not the ledger: a helper started through the
+        // runner's own spawn channel has no delegated row.
+        let attemptHelpers = (attempt["helpers"] as? [Any])?.count ?? -1
+        try expect(attemptHelpers == 0 && int(attempt, "helperCount") == 0,
+                   "solo run delegated: the production record has \(attemptHelpers) helper(s)")
         try expect(int(attempt, "delegationAttempts") == 1, "solo delegation attempt not recorded: \(attempt)")
     }
+
+    // A lead whose Codex thread began in an earlier process: the ledger has no
+    // baseline, so the turn's figures are partial and the record incomplete.
+    resumedSolo = await driver.run(ReplayCondition(harness: .codex, managed: false, lead: .repairs, codexResumed: true))
+    try expect(string(resumedSolo, "outcome") == "completed", "a resumed Codex run did not complete: \(resumedSolo)")
+    try expect(resumedSolo["usageComplete"] as? Bool == false,
+               "a Codex resume without a baseline was recorded complete: \(problems(resumedSolo))")
+    try expect(problems(resumedSolo).contains("noBaseline"),
+               "a Codex resume's record does not carry the ledger's noBaseline flag: \(problems(resumedSolo))")
+    try expect(["uncachedInput", "cacheRead", "output"].allSatisfy { tokens(resumedSolo)[$0] is NSNull },
+               "a Codex resume without a baseline produced a total: \(tokens(resumedSolo))")
 
     // A reset needs a second turn on one thread: the managed lead's wake after
     // its helpers report. The recorded totals restart instead of continuing.
     let reset = await driver.run(ReplayCondition(harness: .codex, managed: true, lead: .delegatesTwoParts, codexResets: true))
-    try expect(problems(reset).contains { $0.hasPrefix("codex reset") }, "a Codex reset was not marked: \(problems(reset))")
-    try expect(tokens(reset).0 is NSNull && tokens(reset).1 is NSNull && reset["usageComplete"] as? Bool == false,
+    try expect(problems(reset).contains("reset"), "a Codex reset was not marked: \(problems(reset))")
+    try expect(["uncachedInput", "cacheRead", "output"].allSatisfy { tokens(reset)[$0] is NSNull } && reset["usageComplete"] as? Bool == false,
                "a Codex reset produced a total: \(tokens(reset))")
 
     let crash = await driver.run(ReplayCondition(harness: .claudeCode, managed: false, lead: .crashes))
@@ -942,15 +1012,31 @@ func runReplayDriverChecks() async throws {
     let all = try compare(sink)
     try expect(all.contains("pairs compared 0 of 2 expected") && all.contains("unmatched"),
                "the comparison did not read every Swift record: \(all)")
-    // The matched pairs are excluded because cache counters are unknown.
+    // Matched complete pairs: one difference line per harness, by type, the
+    // Codex cache write named as not reported.
     let pairs = host.appendingPathComponent("pairs.jsonl")
-    for r in primary { try ReplayRecordSchema.write(r, to: pairs) }
+    for r in (primary["claude"] ?? []) + (primary["codex"] ?? []) { try ReplayRecordSchema.write(r, to: pairs) }
     let compared = try compare(pairs)
-    try expect(compared.contains("pairs compared 0 of 2 expected") && compared.contains("excluded 2: usage incomplete"),
-               "the comparison did not exclude incomplete Swift usage: \(compared)")
+    let lines = compared.split(separator: "\n").map(String.init)
+    for name in ["claude", "codex"] {
+        let pair = primary[name] ?? []
+        let difference = pair.count == 2 ? (tokens(pair[1])["uncachedInput"] as? Int ?? 0) - (tokens(pair[0])["uncachedInput"] as? Int ?? 0) : 0
+        let line = lines.first { $0.hasPrefix(name + " ") } ?? ""
+        try expect(compared.contains("pairs compared 2 of 2 expected") && line.contains(String(format: "uncachedInput %+d", difference)),
+                   "the comparison printed no difference for a complete \(name) pair: \(compared)")
+    }
+    try expect(lines.first { $0.hasPrefix("codex ") }?.contains("cacheWrite not reported") == true,
+               "the comparison did not name Codex cache writes as not reported: \(compared)")
     print(compared)
+    // An incomplete record refuses its pair: no difference is printed for it.
+    let mixed = host.appendingPathComponent("mixed.jsonl")
+    for r in (primary["claude"] ?? []) + [resumedSolo] + Array((primary["codex"] ?? []).suffix(1)) { try ReplayRecordSchema.write(r, to: mixed) }
+    let refusedPair = try compare(mixed)
+    try expect(refusedPair.contains("pairs compared 1 of 2 expected") && refusedPair.contains("excluded 1: usage incomplete")
+               && !refusedPair.split(separator: "\n").contains { $0.hasPrefix("codex ") },
+               "the comparison printed a difference for an incomplete pair: \(refusedPair)")
     for r in saved {
-        print("replay driver: \(r["harness"] ?? "") \(r["mode"] ?? "") outcome=\(r["outcome"] ?? "") passed=\(r["passed"] ?? "") helpers=\(r["helperCount"] ?? "") fannedOut=\(r["fannedOut"] ?? "") attempts=\(r["delegationAttempts"] ?? "") tokens=\(r["tokens"] ?? "")")
+        print("replay driver: \(r["harness"] ?? "") \(r["mode"] ?? "") outcome=\(r["outcome"] ?? "") passed=\(r["passed"] ?? "") helpers=\(r["helperCount"] ?? "") fannedOut=\(r["fannedOut"] ?? "") attempts=\(r["delegationAttempts"] ?? "") complete=\(r["usageComplete"] ?? "") tokens=\(r["tokens"] ?? "")")
     }
     green = true
 }

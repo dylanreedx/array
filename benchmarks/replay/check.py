@@ -186,14 +186,24 @@ class Witnesses(unittest.TestCase):
             with self.assertRaises(ValueError):
                 replay.write_record(run.root / 'record.jsonl', record)
         with self.assertRaises(ValueError):
-            replay.check_record(dict(record, usageComplete=True, usageProblems=[], tokens=dict(input=1, output=1, cacheRead=None, cacheWrite=0)))
+            replay.check_record(dict(record, usageComplete=True, usageProblems=[],
+                                     tokens=dict(uncachedInput=1, cacheRead=None, cacheWrite=0, output=1)))
+        # Not reported is not missing: complete with a null figure, but never a zero one.
+        codex = dict(tokens=dict(uncachedInput=1, cacheRead=2, cacheWrite=None, output=3), tokensNotReported=['cacheWrite'])
+        try:
+            replay.check_record(dict(record, usageComplete=True, usageProblems=[], **codex))
+        except ValueError as error:
+            self.fail('a type its harness never reports was read as missing: %s' % error)
+        with self.assertRaises(ValueError):
+            replay.check_record(dict(record, usageComplete=True, usageProblems=[], tokensNotReported=['cacheWrite'],
+                                     tokens=dict(uncachedInput=1, cacheRead=2, cacheWrite=0, output=3)))
 
     def test_scoring(self):
         def rec(harness, mode, passed=True, outcome='completed', fanned=True, tokens=(100, 10), wall=10.0, attempts=0):
             r = replay.new_record(self.task, harness, mode)
             r.update(outcome=outcome, passed=passed and outcome == 'completed',
                      gradeResult='passed' if passed and outcome == 'completed' else 'failed',
-                     tokens=dict(input=tokens[0], output=tokens[1], cacheRead=0, cacheWrite=0),
+                     tokens=dict(uncachedInput=tokens[0], cacheRead=0, cacheWrite=0, output=tokens[1]),
                      usageComplete=True, usageProblems=[], wallSeconds=wall, activeSeconds=wall,
                      delegationAttempts=attempts)
             if mode == 'managed':
@@ -204,14 +214,14 @@ class Witnesses(unittest.TestCase):
         result = replay.compare(records)
         self.assertEqual(result['coverage'], '2/2')
         line = [l for l in result['lines'] if l.startswith('claude ')][0]
-        self.assertEqual(line.count('(solo PASS, managed FAIL)'), 3, 'a figure was printed without both verdicts')
-        self.assertIn('input +50', line)
+        self.assertEqual(line.count('(solo PASS, managed FAIL)'), 5, 'a figure was printed without both verdicts')
+        self.assertIn('uncachedInput +50', line)
         self.assertIn('managed: 1 passed, 1 failed', result['lines'])
         for broken, reason in [
             (rec('codex', 'managed', fanned=False), 'managed did not fan out'),
             (rec('codex', 'managed', outcome='failed'), 'a run did not complete'),
             (dict(rec('codex', 'managed'), usageComplete=False, usageProblems=['cacheRead unknown'],
-                  tokens=dict(input=90, output=12, cacheRead=None, cacheWrite=None)), 'usage incomplete')]:
+                  tokens=dict(uncachedInput=90, cacheRead=None, cacheWrite=None, output=12)), 'usage incomplete')]:
             out = replay.compare(records[:3] + [broken])
             self.assertEqual(out['coverage'], '1/2', 'a comparison was printed from an excluded pair: ' + reason)
             self.assertEqual(out['excluded'], {reason: 1}, 'exclusion not counted: ' + reason)
@@ -220,6 +230,17 @@ class Witnesses(unittest.TestCase):
         self.assertEqual(out['excluded'], {'solo delegated': 1}, 'a delegating solo run was compared')
         self.assertEqual(replay.compare([rec('codex', 'managed', fanned=False)])['fanOutSamples'], 0,
                          'a managed run that did not delegate was counted as fan-out')
+        # A type the harness never reports is named, and the pair still compares.
+        def unreported(r):
+            return dict(r, tokens=dict(r['tokens'], cacheWrite=None), tokensNotReported=['cacheWrite'])
+        try:
+            out = replay.compare(records[:2] + [unreported(records[2]), unreported(records[3])])
+        except ValueError as error:
+            self.fail('a type its harness never reports was read as missing: %s' % error)
+        self.assertEqual(out['coverage'], '2/2', 'a pair with a type its harness never reports was refused')
+        codex_line = [l for l in out['lines'] if l.startswith('codex ')][0]
+        self.assertIn('cacheWrite not reported', codex_line)
+        self.assertIn('uncachedInput -10', codex_line)
         unmatched = replay.compare(records[:3])
         self.assertEqual(unmatched['coverage'], '1/2', 'a comparison was printed from an unmatched pair')
         duplicate = replay.compare(records + [rec('codex', 'managed')])

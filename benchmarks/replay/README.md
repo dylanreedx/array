@@ -29,17 +29,20 @@ writer per language; both refuse a record whose keys differ from the list,
 and refuse a sink inside a run directory. `replay.compare` reads both.
 The task id has one derivation, `replay.task_id(base, requestHash,
 checksHash)`; Swift copies it from `task.json` and never derives one.
-`ledgerTask` and `tokens.cacheRead`/`cacheWrite` are reserved and null
-until the run ledger (branch `array/run-ledger`) and typed cache counters
-are on this base.
+Schema v3 takes its usage fields from the run ledger (below): `ledgerTask`,
+`tokens` by the ledger's four types (`uncachedInput`, `cacheRead`,
+`cacheWrite`, `output`), `tokensNotReported`, `usageComplete`,
+`usageProblems`, `usageRows`, `helperCount`, `fannedOut`, `wallSeconds` and
+`activeSeconds`.
 
 A record is written before its run directory is cleaned, for every outcome,
 including driver failures and refused storage.
 
 ## Conditions and delegation
 
-The Swift driver submits the request to a lead through `AgentSupervisor.send`
-and does nothing else to the run. It mounts one project through the
+The Swift driver submits the request to a lead through the composer's human
+submission, `AgentSupervisor.accept(.sendPrompt)`, the path that opens a run
+ledger task, and does nothing else to the run. It mounts one project through the
 production boot mount so the workspace API has its scene.
 
 - Managed: the lead's record is Managed with workspace tools on. The fake
@@ -62,21 +65,44 @@ helper result still on its way to the lead.
 
 ## Usage
 
-Usage is read from production-delivered events. The fakes emit recorded
-streams through the production translators: Claude
-`claude-2.1.291-opus-turn.jsonl` (a new result uuid per turn, as the CLI
-does), Codex `codex-appserver-single-agent.jsonl` (a persistent thread, so
-later turns continue the running total). Every usage report is delivered
-twice.
+Every usage field comes from the run's own run ledger,
+`<run root>/support/run-ledger/ledger.jsonl`, the supervisor's Application
+Support for that run and never the user's. After the run the driver drains
+the ledger queue and reads the file with `RunLedgerUsageReader`, then derives
+the task's figures with `UsageReport.make`, the usage page's own functions.
+It has no usage arithmetic of its own.
 
-- Claude: de-duplicated by `accountingObservationID` per agent. A report
-  without one makes usage incomplete.
-- Codex: running totals differenced per session and per token type. A total
-  that goes down (reset), a forked session, or a turn with no usage report
-  (gap) makes usage incomplete and the totals null, never zero or negative.
-- `TokenUsageSnapshot` has no typed cache counters, so cache is unknown and
-  every Swift record is usage-incomplete today. The comparison therefore
-  prints no difference for any driver record yet. That is the honest result.
+| Field | Source |
+| --- | --- |
+| `ledgerTask` | the one task the lead's submission opened |
+| mode check | the task's `mode` (`managed` or `free`) must match the condition |
+| `helperCount`, `fannedOut` | the task's `delegated` rows; must equal the production records |
+| `tokens` | the task's figure per type, lead and helpers together |
+| `tokensNotReported` | types the harness never reports (Codex `cacheWrite`): null, and not incomplete |
+| `usageComplete` | the page's "fully counted" (closed, every type known or not reported), and no row flag |
+| `usageProblems` | unknown types, a task not closed, and the rows' flags (`noBaseline`, `reset`, `fork`, `noUsage`, ...) |
+| `usageRows` | each usage row: agent, lead or helper, parent, harness, model, model source, turn, tokens, flags |
+| `wallSeconds` | the page's time to answer: opening submission to close |
+| `activeSeconds` | the page's active time: the union of every agent's turns in the task |
+
+Missing is never zero: an unknown type is null. A ledger that disagrees with
+the production records (task count, mode, helper count) fails the run as
+`driverFailed`.
+
+The fakes emit recorded streams through the production translators: Claude
+`claude-2.1.291-opus-turn.jsonl` (a new result uuid per turn, as the CLI
+does), Codex `codex-appserver-single-agent.jsonl` on the agent's own thread
+with a fresh turn id and later provider times per turn. Each turn after the
+first resumes the thread with the marker `CodexAgentRunner` sets, so the
+ledger keeps its baseline from the first. Every usage report is delivered
+twice. The witness compares the record with the figures
+`--request-telemetry-check` works by hand from the same captures: one Claude
+turn is 2 / 10,695 / 11,239 / 124 (uncached / cache read / cache write /
+output) and the Codex thread is 7,652 / 57,344 / not reported / 313, times
+the turns the fakes ran. A Codex lead resuming a thread from an earlier
+process (`codexResumed`) has no baseline and is incomplete; a reset is
+incomplete; the comparison prints a difference per type for a matched
+complete pair and refuses a pair with an incomplete record.
 
 ## Grading
 
@@ -128,27 +154,41 @@ Each is shown RED for its named reason, then GREEN restored:
 an exit(0) fools the grader; a tampered check file; a run reads the host
 repository; a run writes outside its directories; a Managed run that did not
 delegate is compared as fan-out; a comparison from a failed pair; from an
-unmatched pair; a failed run's record vanishes (Python); a solo run that
-delegates; a Codex stream with a reset; a failed run's record vanishes
-(Swift). An import, syntax or build failure never counts as RED.
+unmatched pair; from an incomplete pair; a type a harness never reports read
+as missing; a failed run's record vanishes (Python); a solo run that
+delegates; a Codex resume without a baseline read as complete; the ledger
+rows' flags dropped; missing counted as zero; Codex cache writes counted as
+incomplete; helpers' usage left out of the task; a failed run's record
+vanishes (Swift). An import, syntax or build failure never counts as RED.
 
 ## Before a live pilot
 
-- Typed cache counters on `TokenUsageSnapshot` (plan part 14). Until then no
-  pair compares.
-- The run ledger's task id joined into `ledgerTask`.
-- A live adapter that runs the real CLI runner inside this sandbox. It needs
-  provider egress, which `sandbox-exec` can only filter by address and port,
-  not host name, so network isolation against answer leakage needs another
-  mechanism or the run is invalid. It needs loopback to the workspace MCP
-  host port, and the CLI's own login state without Array copying or storing
-  credentials. None of this exists.
-- Claude's built-in Agent tool and Codex's own subagents cannot be closed
-  through any Array route. In a live solo run they arrive as observed
-  children: counted as attempts, and the run excluded. Disabling them needs
-  a launch option production does not have.
-- Curated historical tasks with Swift graders and compile receipts; the
-  chooser mode (needs part 1); a coding rubric for `humanSteps`; a
+Usage is now complete for fake runs. These remain for the owner to decide:
+
+- Network and login inside containment. A real CLI needs provider egress and
+  loopback to the workspace MCP port, and `sandbox-exec` filters by address
+  and port, not host name, so it cannot stop answer leakage. The CLI also
+  needs its own login state inside the run without Array copying or storing
+  credentials. No mechanism exists for either.
+- Claude's built-in Agent tool and Codex's own subagents cannot be switched
+  off through any Array route, so a live solo run can still fan out. The
+  driver counts what it sees as attempts and excludes the run; a Claude
+  in-process subagent's usage is inside its parent's (`reportedByParent`).
+  Disabling them needs launch options production does not have.
+- A live adapter that runs the real runner inside this containment. None
+  exists; `liveEnabled` is false.
+- Real usage. A live run spends subscription usage and nothing caps it, by
+  design. Which tasks, how many repeats per condition, and who starts a run.
+- Time figures. Time to answer ends when the task closes; a Managed lead's
+  wake turns after the close still count in active time, so on a fan-out run
+  active time can exceed time to answer. Decide which figure is compared.
+- Codex never reports cache writes, so Codex comparisons cover three types.
+- The ledger writes `delegated` rows only for `array_delegate`. A helper a
+  runner starts through its own spawn channel has none, so the ledger's
+  helper count misses it; the driver then fails the run (the ledger and the
+  production records disagree) and the solo witness reads the records.
+- Curated historical tasks with graders and compile receipts (the manifest has
+  none); the chooser mode; a coding rubric for `humanSteps`; a
   disposable-socket check before any terminal-enabled adapter.
 
 ## Limits
