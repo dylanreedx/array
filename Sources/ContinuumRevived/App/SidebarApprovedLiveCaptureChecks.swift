@@ -47,13 +47,14 @@ enum SidebarApprovedLiveCaptureChecks {
             paths.append(path)
         }
         let truthCapture = ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_TRUTH_CAPTURE"] == "1"
+        let motionCapture = ProcessInfo.processInfo.environment["ARRAY_DUPLEX_MOTION_CAPTURE"] == "1"
         let states = truthCapture
             ? ["selected-working-expanded", "selected-working-collapsed", "selected-working-helper"]
             : ["selected-done-capped", "selected-working-expanded", "all-working-unselected"]
-        for dark in [true, false] {
+        for dark in (motionCapture ? [true] : [true, false]) {
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             let appearance = dark ? "dark" : "light"
-            for state in states {
+            for state in (motionCapture ? ["selected-working-expanded"] : states) {
                 let lead = UUID()
                 let now = Date()
                 let parent = AgentInboxRow(id: lead, title: "Further Sidebar Improvements", projectName: "Array",
@@ -81,6 +82,32 @@ enum SidebarApprovedLiveCaptureChecks {
                 else { _ = inbox.selectRowForQA(id: state == "selected-working-helper" ? helpers[0].id : lead) }
                 inbox.layoutViewportForQA()
                 try await Task.sleep(for: .milliseconds(300))
+                if motionCapture {
+                    func lights(_ view: NSView) -> [InboxExpandedGroupLight] {
+                        ((view as? InboxExpandedGroupLight).map { [$0] } ?? []) + view.subviews.flatMap(lights)
+                    }
+                    let layers = lights(inbox).flatMap(\.renderedLayersForChecks).filter { $0.animation(forKey: "group.focus") != nil }
+                    let saved = layers.map { layer in ["startPoint", "endPoint"].map { layer.animation(forKey: "group.travel." + $0) } }
+                    for old in [true, false] {
+                        for bottom in [false, true] {
+                            CATransaction.begin(); CATransaction.setDisableActions(true)
+                            for (index, layer) in layers.enumerated() {
+                                let phase = bottom ? 2.0 : 0.0
+                                for (part, key) in ["startPoint", "endPoint"].enumerated() {
+                                    layer.removeAnimation(forKey: "group.travel." + key)
+                                    if !old, let animation = saved[index][part] {
+                                        layer.add(animation, forKey: "group.travel." + key)
+                                    }
+                                }
+                                layer.speed = 0
+                                layer.timeOffset = (layer.animation(forKey: "group.focus")?.beginTime ?? 0) + phase
+                            }
+                            CATransaction.commit()
+                            try await capture((old ? "old" : "new") + (bottom ? "-bottom" : "-top"))
+                        }
+                    }
+                    continue
+                }
                 try await capture(appearance + "-" + state)
                 if truthCapture { continue }
                 inbox.toggleCollapse(parentId: lead)

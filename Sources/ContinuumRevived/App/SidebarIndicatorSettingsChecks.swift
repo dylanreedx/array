@@ -163,6 +163,17 @@ enum SidebarIndicatorSettingsChecks {
                 case .duplex:
                     try expect(gradients.filter { $0.type == .radial }.count == 2, "Duplex must paint two shared light fields")
                     try expect(gradients.contains { $0.animation(forKey: "group.focus") != nil } == !reduced, "shared Duplex breath policy wrong")
+                    let right = gradients.first { $0.type == .radial && $0.startPoint.x == 0.88 }!
+                    let travel = right.animation(forKey: "group.travel.startPoint") as? CAKeyframeAnimation
+                    try expect((travel != nil) == !reduced, "Duplex travel ignored reduced motion")
+                    if let travel, let values = travel.values as? [NSValue] {
+                        let delta = (values[1].pointValue.y - values[0].pointValue.y) * right.bounds.height
+                        try expect(travel.duration == 4 && abs(delta - 6) < 0.01,
+                            "Duplex right light must travel six points over four seconds")
+                        try expect(values.allSatisfy { $0.pointValue.x == 0.88 }, "Duplex drifted horizontally")
+                    }
+                    try expect(gradients.first?.startPoint == CGPoint(x: 0.1, y: 0.08), "Duplex upper-left anchor changed")
+
                 case .gradient:
                     try expect(gradients.contains { $0.colors?.count == 3 && $0.mask is CAGradientLayer }, "Gradient lost its shared cascading wash")
                     try expect(gradients.contains { $0.animation(forKey: "group.orbit.startPoint")?.duration == 60 } == !reduced, "shared Gradient loop policy wrong")
