@@ -21,6 +21,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# Assembled from parts so check-notification-map.py does not count these
+# fixture strings as a real sender; the fixture files still contain the call.
+BANNER_CALL = "UNNotification" + "Request("
 ENV = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
            GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
            GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid",
@@ -88,7 +91,7 @@ BASE_FILES = {
     "Sources/ContinuumRevived/App/Legacy.swift":
         "import Foundation\nlet legacyURL = Bundle.module.url(forResource: \"x\", withExtension: nil)\nlet legacyName = \"a\"\n",
     "Sources/ContinuumRevived/App/Notify.swift":
-        "import UserNotifications\nlet request = UNNotificationRequest(identifier: \"a\", content: content, trigger: nil)\nlet extra = 1\n",
+        "import UserNotifications\nlet request = " + BANNER_CALL + "identifier: \"a\", content: content, trigger: nil)\nlet extra = 1\n",
     "Sources/ContinuumRevivedCore/Plain.swift": "struct Plain {}\n",
     "Sources/ContinuumRevivedCore/Resources/data.json": "{}\n",
     "docs/internals/notification-senders.json":
@@ -390,7 +393,7 @@ def cases(w):
     # 14. Notification senders without a map change are advisory.
     fx.start("notify")
     fx.write("Sources/ContinuumRevived/App/Banner.swift",
-             'let banner = UNNotificationRequest(identifier: "b", content: content, trigger: nil)\n')
+             'let banner = ' + BANNER_CALL + 'identifier: "b", content: content, trigger: nil)\n')
     fx.edit("Sources/ContinuumRevived/App/Notify.swift", "extra = 1", "extra = 2")
     fx.commit("feat(notifications): add a banner")
     w.expect("sender added or touched without the map is advisory", ["base", "notify"], 0, [U,
