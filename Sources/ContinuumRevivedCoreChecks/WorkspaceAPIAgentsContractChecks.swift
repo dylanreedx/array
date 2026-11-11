@@ -71,6 +71,7 @@ private func checkAgentOpsAndPreset() {
         .boardManage,
         .agentSchedule,
         .browserSelect,
+        .standardsRead,
     ], "ops are appended to the enum, never reordered: \(WorkspaceAPIOp.allCases.map(\.rawValue))")
     expect(WorkspaceAPIOp(rawValue: "agent.message") == .agentMessage
             && !WorkspaceAPIOp.sessionPresetOperations.contains(.agentMessage),

@@ -2101,7 +2101,9 @@ final class AgentSupervisor {
                 RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
                     .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth)
             } ?? [],
-            processOwner: AgentProcessAttribution.ownerTag(for: record.id)
+            processOwner: AgentProcessAttribution.ownerTag(for: record.id),
+            projectStandards: ProjectStandards.isPresent(
+                checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
         )
     }
 

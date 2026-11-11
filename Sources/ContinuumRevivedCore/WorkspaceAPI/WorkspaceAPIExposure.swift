@@ -18,11 +18,21 @@ public enum WorkspaceAPIExposure {
             + Board.CodingKeys.allCases.map { "board.\($0.rawValue)" }
             + BoardCard.CodingKeys.allCases.filter { $0 == .comments || $0 == .assignees }.map { "boardCard.\($0.rawValue)" }
             + BoardComment.CodingKeys.allCases.map { "boardComment.\($0.rawValue)" }
-            + BrowserActionResult.CodingKeys.allCases.map { "browserActionResult.\($0.rawValue)" })
+            + BrowserActionResult.CodingKeys.allCases.map { "browserActionResult.\($0.rawValue)" }
+            + StandardsRetrieval.CodingKeys.allCases.map { "standardsRetrieval.\($0.rawValue)" })
     }
 
     // No fallback classification: a new field must be considered deliberately.
     public static let decisions: [String: Decision] = [
+        // `standards.read`'s shadow observation record: host-owned, never edited.
+        "standardsRetrieval.agentId": .internal,
+        "standardsRetrieval.at": .internal,
+        "standardsRetrieval.index": .internal,
+        "standardsRetrieval.standardIds": .internal,
+        "standardsRetrieval.ruleIds": .internal,
+        "standardsRetrieval.versions": .internal,
+        "standardsRetrieval.unresolved": .internal,
+        "standardsRetrieval.issueCount": .internal,
         "browserActionResult.actionId": .internal,
         "browserActionResult.retrySessionId": .internal,
         "browserActionResult.state": .internal,

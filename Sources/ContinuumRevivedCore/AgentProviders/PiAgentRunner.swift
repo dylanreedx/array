@@ -44,6 +44,10 @@ public final class PiAgentRunner: @unchecked Sendable {
         /// The agent id written into the child environment, so its background
         /// jobs can be traced back to it. nil for runs that belong to no agent.
         public var processOwner: String?
+        /// The agent's checkout has standards: the bundled workspace-tools
+        /// extension then registers `array_standards`
+        /// (`docs/internals/project-standards-on-demand.md`).
+        public var projectStandards: Bool = false
 
         /// `model`/`thinking` default from `AgentModelConfig` (Settings ▸ Agents),
         /// so changing the picker changes what the next prompt spawns.
@@ -54,8 +58,10 @@ public final class PiAgentRunner: @unchecked Sendable {
             sessionId: String? = nil,
             extraArgs: [String] = [],
             extensionPaths: [String] = PiAgentRunner.installedExtensionPaths(),
-            processOwner: String? = nil
+            processOwner: String? = nil,
+            projectStandards: Bool = false
         ) {
+            self.projectStandards = projectStandards
             self.model = model
             self.thinking = thinking
             self.cwd = cwd
@@ -247,7 +253,8 @@ public final class PiAgentRunner: @unchecked Sendable {
     public static func childEnvironment(
         base: [String: String] = ProcessInfo.processInfo.environment,
         extraDirs: [String]? = nil,
-        processOwner: String? = nil
+        processOwner: String? = nil,
+        projectStandards: Bool = false
     ) -> [String: String] {
         var environment = base
         environment["PATH"] = augmentedPath(
@@ -255,6 +262,9 @@ public final class PiAgentRunner: @unchecked Sendable {
             extraDirs: extraDirs ?? liveExtraDirs())
         environment[arrayHostedEnvironmentKey] = "1"
         environment[AgentProcessAttribution.ownerEnvironmentKey] = processOwner
+        // Set from this agent's checkout alone, never inherited from Array's own
+        // environment (an agent shell that launched Array would carry it).
+        environment[ProjectStandards.environmentKey] = projectStandards ? "1" : nil
         return environment
     }
 
@@ -303,7 +313,7 @@ public final class PiAgentRunner: @unchecked Sendable {
                 arguments: arguments,
                 // Augment PATH so the child finds both `pi` and the `node` its shebang
                 // re-invokes — a GUI launch inherits a thin PATH missing the nvm bin.
-                environment: Self.childEnvironment(processOwner: config.processOwner),
+                environment: Self.childEnvironment(processOwner: config.processOwner, projectStandards: config.projectStandards),
                 currentDirectory: config.cwd,
                 // pi inherits the app's stdin, exactly as it did under `Process`.
                 standardInput: .inherit

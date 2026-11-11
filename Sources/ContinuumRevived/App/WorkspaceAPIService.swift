@@ -124,6 +124,11 @@ final class WorkspaceAPIService {
 
     // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
     var grants: [AgentID: [WorkspaceToolGrant]] = [:]
+    /// The shadow observation seam for `standards.read`
+    /// (`docs/internals/project-standards-on-demand.md`): ids and versions of
+    /// each answered read, never rule text. Production sets none; the run
+    /// ledger or telemetry attaches here when it exists.
+    var standardsRetrievalObserver: ((StandardsRetrieval) -> Void)?
     private var revocationGenerations: [AgentID: UInt64] = [:]
     /// Explicit user approvals belong to the app session and project/action
     /// scope. Per-agent grants still carry revocation and enabled-state checks.
@@ -520,6 +525,8 @@ final class WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: .unsupported, message: "Browser tools are not available yet."))
         case .agentReport:
             return fileReport(agentId: agentId, ownHandle: ownHandle, payload: payload)
+        case .standardsRead:
+            return readStandards(agentId: agentId, record: record, ownHandle: ownHandle, payload: payload)
         case .agentSchedule:
             guard payload["agentId"] == nil else {
                 return .error(.init(code: .permissionDenied, message: "Schedules are self-only; omit agentId."))
@@ -561,7 +568,11 @@ final class WorkspaceAPIService {
         // Only operations a tool reaches: pi and the MCP server both register
         // `WorkspaceMCPToolCatalog`'s tools, so an op outside it is not callable
         // and must not be advertised as if it were.
-        let exposed = WorkspaceAPIOp.allCases.filter(WorkspaceMCPToolCatalog.exposedOperations.contains)
+        // `standards.read` only where the checkout has standards, matching the
+        // tool list its transport was given.
+        let offered = Set(WorkspaceMCPToolCatalog.tools(projectStandards: ProjectStandards.isPresent(
+            checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))).map(\.operation))
+        let exposed = WorkspaceAPIOp.allCases.filter(offered.contains)
         // Under Agent permissions `free` a gated op inside the project needs no
         // prompt, so it is callable now and must not read as approval-required.
         let free = supervisor.workspaceToolsPermission() == .free

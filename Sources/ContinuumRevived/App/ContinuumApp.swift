@@ -23911,8 +23911,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func workspaceMCPConfiguration(for agentID: AgentID, harness: AgentHarness) -> WorkspaceMCPConfiguration? {
         guard harness == .claudeCode || harness == .codex,
               let executable = Self.workspaceMCPExecutablePath() else { return nil }
+        let projectStandards = agentSupervisor.records[agentID].map {
+            ProjectStandards.isPresent(checkoutRoot: URL(fileURLWithPath: $0.checkoutRoot, isDirectory: true))
+        } ?? false
         return workspaceMCPHost.configuration(for: agentID, serverExecutable: executable,
-                                              resultDelivery: agentSupervisor.resultDelivery(for: agentID))
+                                              resultDelivery: agentSupervisor.resultDelivery(for: agentID),
+                                              projectStandards: projectStandards)
     }
 
     func qaInstallWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {

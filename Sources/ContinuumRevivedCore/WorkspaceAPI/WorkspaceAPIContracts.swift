@@ -73,6 +73,9 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case boardManage = "board.manage"
     case agentSchedule = "agent.schedule"
     case browserSelect = "browser.select"
+    // `WorkspaceAPIContracts+Standards.swift`: the caller's own checkout's
+    // written standards. Self-checkout read only. Appended last.
+    case standardsRead = "standards.read"
 }
 
 // MARK: - Identity

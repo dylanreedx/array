@@ -532,7 +532,7 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
             try transport.start(
                 executable: command.executable,
                 arguments: arguments,
-                environment: PiAgentRunner.childEnvironment(processOwner: config.processOwner),
+                environment: PiAgentRunner.childEnvironment(processOwner: config.processOwner, projectStandards: config.projectStandards),
                 currentDirectory: config.cwd
             )
         } catch {
