@@ -43,6 +43,32 @@ enum PersonalRulesChecks {
         try expect(rpcArgs.filter { $0.contains(text) }.count == 1, "Pi RPC rules not delivered once")
         let server = AgentSupervisor.codexRunnerConfig(for: record, hostInstructions: HostLaunchInstructions(sources: [on]))
         try expect(CodexCLIBackend.appServerArguments(extraArgs: server.extraArgs).filter { $0.contains(text) }.count == 1, "Codex app-server rules not delivered once")
+        // Probe: repeated developer_instructions options replace, so use one value.
+        let existingText = "Existing developer fixture guidance"
+        let existing = "developer_instructions=" + String(decoding: try JSONEncoder().encode(existingText), as: UTF8.self)
+        for lifecycle in ["first", "resume", "retry", "after-compaction"] {
+            record.codexThreadId = lifecycle == "first" ? nil : "resumed-fixture"
+            let c = AgentSupervisor.codexRunnerConfig(for: record,
+                hostInstructions: HostLaunchInstructions(sources: [on]), extraArgs: ["-c", existing])
+            let vectors = [CodexCLIBackend.appServerArguments(extraArgs: c.extraArgs),
+                CodexCLIBackend.processArguments(model: c.model, effort: c.effort,
+                    sessionMode: lifecycle == "first" ? .fresh : .resume, threadId: record.codexThreadId,
+                    cwdPath: root.path, extraArgs: c.extraArgs, prompt: AgentPrompt("fixture task"))]
+            for args in vectors {
+                let overrides = args.filter { $0.hasPrefix("developer_instructions=") }
+                try expect(overrides.count == 1, "\(lifecycle): Codex repeated instruction override")
+                let decoded = try JSONDecoder().decode(String.self,
+                    from: Data(overrides[0].dropFirst("developer_instructions=".count).utf8))
+                try expect(decoded == existingText + "\n\nPersonal working rules:\n" + text,
+                           "\(lifecycle): Codex overwrote existing guidance or changed order")
+            }
+            let p = AgentSupervisor.runnerConfig(for: record, spawnDepth: 1,
+                hostInstructions: HostLaunchInstructions(sources: [on]))
+            let pi = PiRpcAgentRunner.processArguments(model: p.model, thinking: p.thinking,
+                sessionId: p.sessionId, extraArgs: p.extraArgs, extensionPaths: [])
+            try expect(pi.filter { $0.contains(text) }.count == 1,
+                       "\(lifecycle): Pi relaunch lost rules (provider compaction remains unknown)")
+        }
         var observed: [AgentHarness: [Int]] = [:]
         try await runWorkspaceAPIDelegationChecks(crossHarness: true, inspectLaunch: { launch in
             guard launch.record.parentAgentID != nil, let harness = launch.record.harness else { return }

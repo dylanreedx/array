@@ -2044,13 +2044,13 @@ final class AgentSupervisor {
     /// `model_reasoning_effort` only on exact match, and — the one difference
     /// from claude — continuity is STORED: `record.codexThreadId` (nil ⇒ fresh)
     /// is read back so a later turn resumes the same codex thread.
-    nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, hostInstructions: HostLaunchInstructions = .shared) -> CodexAgentRunner.Config {
+    nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, hostInstructions: HostLaunchInstructions = .shared, extraArgs: [String] = []) -> CodexAgentRunner.Config {
         CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
             effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             threadId: record.codexThreadId,
-            extraArgs: hostInstructions.arguments(codex: true),
+            extraArgs: hostInstructions.arguments(codex: true, existingArguments: extraArgs),
             workspaceMCP: workspaceMCP,
             processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
@@ -2099,10 +2099,10 @@ final class AgentSupervisor {
             // T5 — the spawn verbs are appended only below Array's own cap, so the
             // model is never OFFERED a verb it cannot use. That is better than
             // refusing after the fact: it never proposes what it cannot have.
-            extraArgs: (record.role.map {
+            extraArgs: hostInstructions.arguments(codex: false, existingArguments: record.role.map {
                 RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
                     .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth)
-            } ?? []) + hostInstructions.arguments(codex: false),
+            } ?? []),
             processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
     }
