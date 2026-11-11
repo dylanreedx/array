@@ -72,6 +72,8 @@ final class ManagedRunLedger: @unchecked Sendable {
         url = support.appendingPathComponent("run-ledger/ledger.jsonl")
         queue.async { self.recover() }
     }
+    /// Waits for every fact handed off so far to reach disk. Checks only.
+    func drain() { queue.sync {} }
     /// The sole append path, including replay and restart facts. Callers supply
     /// stable source identities; duplicates never reach disk or the reducer.
     private func append(_ row: Row) {

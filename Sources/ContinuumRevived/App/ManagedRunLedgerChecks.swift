@@ -189,6 +189,13 @@ enum ManagedRunLedgerChecks {
         let h2 = try await delegate(b, task: "HOLD-helpertwo SECRET-BRIEF-ZETA", key: UUID().uuidString)
         try await wait("second delegation not recorded") { !rows(ledger, "working", task: t2, agent: h2).isEmpty }
         let p2 = rows(ledger, "delegated", task: t2, agent: h2)[0]["part"] as! String
+        // The delegation hand-off obeys the same recording switch as submission and report.
+        supervisor.qaRunLedgerRecording = false
+        let h3 = try await delegate(b, task: "HOLD-helperthree SECRET-BRIEF-THETA", key: UUID().uuidString)
+        try await wait("unrecorded helper did not start") { supervisor.isRunning(h3) }
+        supervisor.runLedger.drain()
+        supervisor.qaRunLedgerRecording = true
+        try expect(rows(ledger, "delegated", agent: h3).isEmpty, "delegation recorded with recording off")
 
         // 8. Crash with the task open: Application Support as it stood, relaunched.
         let crash = b.binDir.appendingPathComponent("crash-image", isDirectory: true)
@@ -228,7 +235,7 @@ enum ManagedRunLedgerChecks {
                 try expect(Set(row.keys).isSubset(of: allowedKeys) && row["v"] as? Int == 1, "unexpected row shape: \(row)")
             }
         }
-        try release("leadtwo"); try release("helpertwo")
+        try release("leadtwo"); try release("helpertwo"); try release("helperthree")
         if noWake { try await timing(b, lead: lead, helper: h2) }
         print("Managed run ledger passed: one task per human submission, delegation/report/turn facts under its id, join while a part is open, wake opens none, linked next task, crash marks incomplete once, no prompt or report text stored")
     }

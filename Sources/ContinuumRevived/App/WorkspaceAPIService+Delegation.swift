@@ -212,7 +212,7 @@ extension WorkspaceAPIService {
             let reason = supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
             return fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true)
         }
-        supervisor.runLedger.delegated(parent: agentId.rawValue, child: childId.rawValue, source: requestId)
+        if supervisor.qaRunLedgerRecording { supervisor.runLedger.delegated(parent: agentId.rawValue, child: childId.rawValue, source: requestId) }
         operations.update(operationId: requestId) { op in
             op.steps.creation = .succeeded
             op.childAgentId = childId

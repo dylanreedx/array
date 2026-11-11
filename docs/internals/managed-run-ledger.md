@@ -88,8 +88,8 @@ What the calling (main) thread does per path:
   UUIDs. That is one heap block and one enqueue, which wakes the idle utility
   queue.
 - Delegation (`WorkspaceAPIService+Delegation.swift`): one `queue.async`
-  capturing two UUIDs and the existing request-id string (retained, not copied).
-  This call is not behind `qaRunLedgerRecording`.
+  capturing two UUIDs and the existing request-id string (retained, not copied),
+  behind the same `qaRunLedgerRecording` switch as submission and report.
 - Helper report (`fileReport`): a bool read, then one `queue.async` capturing a
   UUID, a `Date` and the report's two arrays (retained, not copied).
 - Turn start/end (`working`/`ended`, on the event path): one `queue.async` each.
