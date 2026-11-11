@@ -193,6 +193,7 @@ check --language-server-release-check
 check --layout-commit-scope-check
 check --layout-commit-truth-check
 check --lead-character-check
+check --lead-checkout-ledger-check
 check --leader-activation-check
 check --leader-jump-check
 check --leader-jump-visible-indicators-check
@@ -663,6 +664,7 @@ leg run_app_check .build/debug/Array --language-server-release-check
 leg run_app_check .build/debug/Array --layout-commit-scope-check
 leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --lead-character-check
+leg run_app_check .build/debug/Array --lead-checkout-ledger-check
 leg run_app_check .build/debug/Array --leader-activation-check
 leg run_app_check .build/debug/Array --leader-jump-check
 leg run_app_check .build/debug/Array --leader-jump-visible-indicators-check

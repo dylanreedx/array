@@ -32,6 +32,10 @@ final class ManagedRunLedger: @unchecked Sendable {
         var turn: String?
         var late: Bool?
         var mode: String?
+        /// `leadCheckoutChanged`: counts by `modified`, `added`, `deleted`.
+        var changed: [String: Int]?
+        /// Checkout-relative paths, at most `LeadCheckoutWatch.maxPaths`.
+        var paths: [String]?
     }
     // Live only: a helper delegated before this process started has no entry,
     // and its report records that instead of pretending to have watched it.
@@ -166,11 +170,42 @@ final class ManagedRunLedger: @unchecked Sendable {
                 findings: Dictionary(grouping: findings, by: { $0.level.rawValue }).mapValues { $0.count })
         }
     }
-    func working(agent: UUID, turn: String) {
-        queue.async { self.fact(kind: "working", agent: agent, source: "working/\(agent)/\(turn)") }
+    func working(agent: UUID, turn: String, root: String? = nil) {
+        queue.async {
+            self.leadWatch.turnStarted(agent: agent, root: root)
+            self.fact(kind: "working", agent: agent, source: "working/\(agent)/\(turn)")
+        }
     }
     func ended(agent: UUID, turn: String, outcome: TurnOutcome) {
-        queue.async { self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", outcome: outcome.rawValue) }
+        queue.async {
+            self.leadWatch.turnEnded(agent: agent)
+            self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", outcome: outcome.rawValue)
+        }
+    }
+
+    // MARK: A Managed lead's own checkout changes (`.plans/116` gap 20)
+
+    private var leadWatch = LeadCheckoutWatch()
+    /// A Managed lead's own shell call started. `root` is its checkout; `busy`,
+    /// whether another agent on that checkout is running.
+    func leadShellStarted(agent: UUID, call: String, root: String, busy: Bool) {
+        let at = Date()
+        queue.async { self.leadWatch.shellStarted(lead: agent, call: call, root: root, at: at, busy: busy) }
+    }
+    /// The call ended: git and the comparison run here, never on the caller.
+    func leadShellEnded(agent: UUID, call: String, busy: Bool) {
+        let at = Date()
+        queue.async {
+            guard let (change, ambiguous) = self.leadWatch.shellEnded(lead: agent, call: call, at: at, busy: busy) else { return }
+            var row = Row(kind: "leadCheckoutChanged", task: self.sessionTasks[agent] ?? Self.noTask, agent: agent,
+                          source: "leadShell/\(agent)/\(call)")
+            row.changed = ["modified": change.modified, "added": change.added, "deleted": change.deleted]
+            row.paths = change.paths
+            row.evidence = ["by": ambiguous ? "ambiguous" : "lead"]
+            if ambiguous { row.evidence?["reason"] = "sharedCheckoutBusy" }
+            if change.paths.count < change.count { row.evidence?["pathsTruncated"] = "true" }
+            self.append(row)
+        }
     }
 
     // MARK: Token usage (`.plans/116` part 14 step 1)

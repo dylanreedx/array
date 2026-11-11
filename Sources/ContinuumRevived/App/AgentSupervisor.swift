@@ -2326,6 +2326,18 @@ final class AgentSupervisor {
             runtimeObservationObservers[id]?.values.forEach { $0(observation) }
             return
         }
+        // `.plans/116` gap 20: a Managed lead's OWN shell call, seen on its
+        // own side channel. One enqueue; git runs on the ledger's queue.
+        // An end names the call, not always the tool; the ledger ignores ends
+        // of calls it never saw start.
+        if qaRunLedgerRecording, case let .toolDetail(call, detail) = observation, effectiveMode(for: id) == .managed {
+            if detail.phase == .started, AgentToolKind.resolve(toolName: detail.toolName) == .shell {
+                runLedger.leadShellStarted(agent: id.rawValue, call: call, root: record.checkoutRoot,
+                                           busy: sharedCheckoutBusy(besides: record))
+            } else if detail.phase == .ended {
+                runLedger.leadShellEnded(agent: id.rawValue, call: call, busy: sharedCheckoutBusy(besides: record))
+            }
+        }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -2333,6 +2345,17 @@ final class AgentSupervisor {
         // immutable agent ID; no raw runtime payload or path enters the event log.
         sharedTranscriptDetails[id]?.captureRuntimeObservation(observation)
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
+    }
+
+    /// Whether another agent on this record's checkout is running now. Path
+    /// text only, no filesystem access: a shared checkout is handed out as the
+    /// lead's own path.
+    private func sharedCheckoutBusy(besides record: AgentRecord) -> Bool {
+        let root = URL(fileURLWithPath: record.checkoutRoot).standardizedFileURL.path
+        return records.values.contains { other in
+            other.id != record.id && isRunning(other.id)
+                && URL(fileURLWithPath: other.checkoutRoot).standardizedFileURL.path == root
+        }
     }
 
     /// The account quota for the account this agent is spending, or nil when
@@ -12071,7 +12094,7 @@ final class AgentSupervisor {
         case let .turnStarted(_, turnID):
             if qaRunLedgerRecording {
                 runLedger.usageTurnStarted(agent: id.rawValue, turn: turnID)
-                runLedger.working(agent: id.rawValue, turn: turnID)
+                runLedger.working(agent: id.rawValue, turn: turnID, root: records[id]?.checkoutRoot)
             }
         case let .turnCompleted(_, turnID, outcome, _):
             if qaRunLedgerRecording, let record = records[id] {

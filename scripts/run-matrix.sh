@@ -1058,6 +1058,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --managed-mode-persistence-check
   run_app_check .build/debug/Array --managed-run-ledger-check
   run_app_check .build/debug/Array --helper-evidence-provider-check
+  run_app_check .build/debug/Array --lead-checkout-ledger-check
   run_app_check .build/debug/Array --request-telemetry-check
   run_app_check .build/debug/Array --managed-lead-plan-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
@@ -1353,6 +1354,7 @@ run_app_check .build/debug/Array --managed-compaction-tools-check
 run_app_check .build/debug/Array --managed-mode-persistence-check
 run_app_check .build/debug/Array --managed-run-ledger-check
 run_app_check .build/debug/Array --helper-evidence-provider-check
+run_app_check .build/debug/Array --lead-checkout-ledger-check
 run_app_check .build/debug/Array --request-telemetry-check
 run_app_check .build/debug/Array --managed-lead-plan-check
 run_app_check .build/debug/Array --managed-codex-launch-check

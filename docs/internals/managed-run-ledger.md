@@ -273,3 +273,52 @@ ordering, per-thread differencing, fork detection, the resume marker, baselines
 while off, the off switch, free-agent tasks, nested attribution, a child folded
 into its parent, late rows (lost, and charged to the running task), blank model
 ids, and usage written after closure.
+
+## A Managed lead's own checkout changes (gap 20)
+
+A Managed lead cannot use the edit tools, but its shell can still write. When
+one of the lead's OWN shell calls ends, the ledger appends one
+`leadCheckoutChanged` row if files in the lead's checkout changed during that
+call. Always on while recording is on (`qaRunLedgerRecording`); nothing blocks,
+prompts or changes what any agent sees.
+
+**Source.** The lead's runtime side channel: `.toolDetail` start for a shell
+tool, and the end of the same call id. A delegated helper has its own record
+and channel, and a Claude in-process subagent's calls are not on the side
+channel, so a call seen here is the lead's. The supervisor hands one enqueue to
+the ledger; `git status` and the comparison run on the ledger's queue.
+
+**Which files count.** `git status --porcelain --untracked-files=all
+--no-renames` at the end, so ignored files (a build directory) never count, and
+Array's own `.array/` state is skipped. The queue may look seconds later, so
+only times decide: a modified or new file counts when its modification time is
+inside the call (opened 0.5 s before the host saw the start, closed when it saw
+the end); a deletion counts when its folder's change time is. A (path, time)
+already counted is not counted again. A file changed again before the host
+looked counts for the later change.
+
+**Lead or the first helper.** The first helper shares the lead's checkout.
+The supervisor passes, at the call's start and end, whether any other agent on
+the same checkout path is running; the queue also marks a call when another
+agent on that checkout starts or ends a turn while the call is open (queue
+order, not clock time: a turn start can reach the ledger after the supervisor
+already runs the agent). Any of these makes the row `evidence.by: ambiguous`
+with `reason: sharedCheckoutBusy`. Otherwise `by: lead`.
+
+**Stored.** `changed` (counts by `modified`, `added`, `deleted`), `paths`
+(checkout-relative, at most 64; `evidence.pathsTruncated` when cut), and
+`evidence`. No command text, contents, diffs or absolute paths.
+
+**Not seen.** A background command's writes after its call ended; a
+non-git checkout (no row); edits by another process during the call that is
+not an Array agent (recorded as the lead's); a file whose time is later
+rewritten.
+
+`--lead-checkout-ledger-check` drives a Managed Claude lead through the
+production runner and translator over a CLI double that replays Bash frames
+and really changes files: modify, add and delete are the lead's with the right
+paths; an ignored build and `git status` record nothing; a write while the
+shared first helper runs is `ambiguous`; the helper's own write is never the
+lead's; no command, prompt or absolute path is stored. Observed RED with the
+supervisor hand-off removed (no rows) and with the shared-checkout test removed
+(the write charged to the lead).
