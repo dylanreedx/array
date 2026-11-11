@@ -619,6 +619,10 @@
             ],
             "description": "Child CLI; omit to inherit yours. Must be installed and signed in."
           },
+          "effort": {
+            "type": "string",
+            "description": "Optional effort advertised by the selected harness live catalogue for the selected model. Unknown or unavailable efforts are refused."
+          },
           "retryOf": {
             "type": "string",
             "description": "Failed/stopped child of yours to continue; carries its brief, changed files and report."

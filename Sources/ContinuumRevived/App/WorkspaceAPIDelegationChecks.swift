@@ -318,6 +318,34 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
                 if target != source { payload["harness"] = target.rawValue }
                 let expectedModel = source == .codex ? AgentCatalogQAFixture.claude.models.last! : (target == source ? model : AgentModelCatalog.shared.snapshot(for: target).seedModel!)
                 if source == .codex { payload["model"] = expectedModel }
+                if target != .pi {
+                    var explicit = payload
+                    explicit["idempotencyKey"] = handle + "-effort"
+                    explicit["effort"] = "high"
+                    let started = try result(api.dispatch(agentId: parent, requestId: handle + "-effort", op: "agent.delegate", payload: explicit), "explicit effort")
+                    let effortId = AgentID(rawValue: UUID(uuidString: started["childAgentId"]!.string!)!)
+                    let effortRecord = supervisor.records[effortId]!
+                    try expect(effortRecord.thinking == "high", "explicit effort must reach the child record")
+                    let launchEffort = target == .codex ? AgentSupervisor.codexRunnerConfig(for: effortRecord).effort : AgentSupervisor.claudeRunnerConfig(for: effortRecord).effort
+                    try expect(launchEffort == "high", "explicit effort must reach runner configuration")
+                    if target == .claudeCode {
+                        for session in [ClaudeAgentRunner.SessionMode.start, .resume, .fork] {
+                            let args = ClaudeAgentRunner.processArguments(model: effortRecord.model, effort: launchEffort, sessionMode: session, sessionId: "fixture", extraArgs: [])
+                            try expect(args.contains("--effort") && args.contains("high"), "Claude effort argv across session modes")
+                        }
+                    } else {
+                        for session in [CodexCLIBackend.SessionMode.fresh, .resume] {
+                            let args = CodexCLIBackend.processArguments(model: effortRecord.model, effort: launchEffort, sessionMode: session, threadId: "fixture", cwdPath: pbRoot.path, extraArgs: [], prompt: AgentPrompt(text: "fixture"))
+                            try expect(args.contains("model_reasoning_effort=high"), "Codex effort argv across session modes")
+                        }
+                    }
+                    explicit["idempotencyKey"] = handle + "-bad-effort"
+                    explicit["effort"] = "unlisted"
+                    let before = supervisor.records.count
+                    let refused = try failure(api.dispatch(agentId: parent, requestId: handle + "-bad-effort", op: "agent.delegate", payload: explicit), .unsupported, "unlisted effort")
+                    try expect(refused.message.contains("Accepted values:") && refused.message.contains("high"), "refusal must name advertised values")
+                    try expect(supervisor.records.count == before, "invalid effort creates no helper")
+                }
                 let tilesBefore = agentTileCount()
                 let created = try result(api.dispatch(agentId: parent, requestId: handle, op: "agent.delegate", payload: payload), "cross harness delegation")
                 let replay = try result(api.dispatch(agentId: parent, requestId: handle + "-retry", op: "agent.delegate", payload: payload), "cross retry")

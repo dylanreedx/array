@@ -39,7 +39,7 @@ public enum WorkspaceAPIExposure {
         "agent.harness": .notExposed("Changing an existing harness requires the native settings flow."),
         "agent.mode": .notExposed("App-wide Settings policy owns the next-turn target; helpers and Pi remain free."),
         "agent.model": .notExposed("Existing-agent provider settings are native UI only."),
-        "agent.thinking": .notExposed("Existing-agent provider settings are native UI only."),
+        "agent.thinking": .exposed(.agentDelegate),
         "agent.cwd": .notExposed("Changing an existing agent's home is native UI only."),
         "agent.projectRoot": .internal,
         "agent.checkoutRoot": .internal,

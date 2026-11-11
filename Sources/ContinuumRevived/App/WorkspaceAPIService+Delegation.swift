@@ -112,6 +112,15 @@ extension WorkspaceAPIService {
             return fail(.unsupported, "\(childHarness.rawValue) does not offer the requested child model. Use an exact fully qualified id from its live catalogue: \(offered.isEmpty ? "none offered" : offered). No other CLI was tried.")
         }
 
+        func effortRefusal() -> String? {
+            guard let effort = request.effort else { return nil }
+            guard let accepted = AgentModelCatalog.shared.efforts(for: childModel, harness: childHarness), !accepted.isEmpty else {
+                return "The live catalogue has no effort data for \(childModel); explicit effort is unavailable."
+            }
+            return accepted.contains(effort) ? nil : "Unsupported effort '\(effort)' for \(childModel). Accepted values: \(accepted.joined(separator: ", "))."
+        }
+        if let reason = effortRefusal() { return fail(.unsupported, reason) }
+
         // 4. Grant (§14.1). Delegation is outside the Phase 1 preset: the first
         //    request per agent session goes through the trusted approval UI.
         let effectivePolicy: WorkspacePresentationPolicy
@@ -187,6 +196,8 @@ extension WorkspaceAPIService {
             return fail(.unsupported, "The selected child model is no longer offered by \(childHarness.rawValue). Delegate again with an exact catalogue id.")
         }
 
+        if let reason = effortRefusal() { return fail(.unsupported, reason) }
+
         // Approval may have let the old helper resume or disappear.
         var prompt = request.task
         if let retryOf = request.retryOf {
@@ -208,7 +219,7 @@ extension WorkspaceAPIService {
         let spawnRequest = SpawnRequest(
             role: nil, prompt: prompt, isolated: false, sourceItemID: requestId,
             displayLabel: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
-        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking), mode: .free, retryOf: request.retryOf, originalBrief: request.task) else {
+        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? (childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)), mode: .free, retryOf: request.retryOf, originalBrief: request.task) else {
             let reason = supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
             return fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true)
         }

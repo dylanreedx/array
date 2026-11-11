@@ -2003,7 +2003,7 @@ final class AgentSupervisor {
             return ClaudeAgentRunner.Config(
                 model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
                 mode: record.mode,
-                effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+                effort: AgentModelCatalog.shared.efforts(for: record.model, harness: .claudeCode)?.contains(record.thinking) == true ? record.thinking : ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
                 cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
                 sessionId: forkFrom,
                 forkSession: true,
@@ -2015,7 +2015,7 @@ final class AgentSupervisor {
         return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             mode: record.mode,
-            effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+            effort: AgentModelCatalog.shared.efforts(for: record.model, harness: .claudeCode)?.contains(record.thinking) == true ? record.thinking : ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: location.cwd, isDirectory: true),
             sessionId: location.sessionId,
             // An agent that has never had a turn cannot have a conversation to
@@ -2046,7 +2046,7 @@ final class AgentSupervisor {
     nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> CodexAgentRunner.Config {
         CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
-            effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
+            effort: AgentModelCatalog.shared.efforts(for: record.model, harness: .codex)?.contains(record.thinking) == true ? record.thinking : CodexCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             threadId: record.codexThreadId,
             workspaceMCP: workspaceMCP,

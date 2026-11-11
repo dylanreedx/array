@@ -66,6 +66,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     /// Legacy alias for harness. Conflicting selectors are invalid.
     public var provider: String?
     /// Exact catalogue id. Omitted: inherit for the same harness, otherwise use its seed.
+    public var effort: String?
     public var model: String?
     public var placement: Placement?
     public var presentationPolicy: WorkspacePresentationPolicy
@@ -82,6 +83,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         title: String? = nil,
         provider: String? = nil,
         model: String? = nil,
+        effort: String? = nil,
         placement: Placement? = nil,
         presentationPolicy: WorkspacePresentationPolicy = .defaultExplicitOpen,
         idempotencyKey: String? = nil,
@@ -93,6 +95,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         self.task = task
         self.title = title
         self.provider = provider
+        self.effort = effort
         self.model = model
         self.placement = placement
         self.presentationPolicy = presentationPolicy
@@ -100,13 +103,14 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case task, mode, retryOf, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
+        case effort, task, mode, retryOf, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
     }
 
     /// Tolerant of the model-facing shape (`presentation`, short names, any
     /// subset). Unknown keys are ignored, so a forged `authorized` is inert.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        effort = try c.decodeIfPresent(String.self, forKey: .effort)
         harness = try c.decodeIfPresent(String.self, forKey: .harness)
         retryOf = try c.decodeIfPresent(AgentID.self, forKey: .retryOf)
         mode = try c.decodeIfPresent(AgentMode.self, forKey: .mode)
@@ -122,6 +126,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(effort, forKey: .effort)
         try c.encodeIfPresent(harness, forKey: .harness)
         try c.encodeIfPresent(retryOf, forKey: .retryOf)
         try c.encodeIfPresent(mode, forKey: .mode)
