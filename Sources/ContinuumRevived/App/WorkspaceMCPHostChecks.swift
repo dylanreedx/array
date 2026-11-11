@@ -65,7 +65,7 @@ func runWorkspaceMCPHostCheck() throws {
     guard FileManager.default.isExecutableFile(atPath: helper) else {
         throw WorkspaceMCPHostCheckError("workspace MCP helper is missing at \(helper)")
     }
-    guard let config = host.configuration(for: agentID, serverExecutable: helper) else {
+    guard let config = host.configuration(for: agentID, serverExecutable: helper, projectStandards: false) else {
         throw WorkspaceMCPHostCheckError("workspace MCP host did not issue a registration")
     }
 

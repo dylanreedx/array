@@ -429,6 +429,10 @@ final class WorkspaceAPIService {
             }
             return
         }
+        if WorkspaceAPIOp(rawValue: op) == .standardsRead {
+            dispatchStandardsRead(agentId: agentId, payload: payload, completion: completion)
+            return
+        }
         if let operation = WorkspaceAPIOp(rawValue: op), operation == .browserOpen {
             dispatchBrowserOpen(agentId: agentId, requestId: requestId, payload: payload,
                                 isCancelled: isCancelled, completion: completion)
@@ -520,6 +524,8 @@ final class WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: .unsupported, message: "Browser tools are not available yet."))
         case .agentReport:
             return fileReport(agentId: agentId, ownHandle: ownHandle, payload: payload)
+        case .standardsRead:
+            return .error(WorkspaceAPIError(code: .unsupported, message: "standards.read requires the asynchronous workspace entry."))
         case .agentSchedule:
             guard payload["agentId"] == nil else {
                 return .error(.init(code: .permissionDenied, message: "Schedules are self-only; omit agentId."))
@@ -561,7 +567,11 @@ final class WorkspaceAPIService {
         // Only operations a tool reaches: pi and the MCP server both register
         // `WorkspaceMCPToolCatalog`'s tools, so an op outside it is not callable
         // and must not be advertised as if it were.
-        let exposed = WorkspaceAPIOp.allCases.filter(WorkspaceMCPToolCatalog.exposedOperations.contains)
+        // `standards.read` exactly when this agent's LAUNCH offered the tool:
+        // the tool list is fixed when its process starts.
+        let offeredStandards = supervisor.standardsOfferedAtLaunch[agentId] ?? false
+        let offered = Set(WorkspaceMCPToolCatalog.tools(projectStandards: offeredStandards).map(\.operation))
+        let exposed = WorkspaceAPIOp.allCases.filter(offered.contains)
         // Under Agent permissions `free` a gated op inside the project needs no
         // prompt, so it is callable now and must not read as approval-required.
         let free = supervisor.workspaceToolsPermission() == .free
@@ -591,6 +601,9 @@ final class WorkspaceAPIService {
             observedAt: Date(),
             displayName: record.humanDisplayName,
             nameSource: record.displayNameSource.workspaceAPINameSource)
+        if ProjectStandards.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)) != offeredStandards {
+            response.toolListNote = ProjectStandards.toolListNote
+        }
         // Enforce the byte ceiling by shedding history, newest kept, never by
         // truncating identity.
         while let data = try? Self.encoder.encode(response),

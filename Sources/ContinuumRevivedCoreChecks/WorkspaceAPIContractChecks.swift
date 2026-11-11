@@ -308,7 +308,7 @@ private func checkAgentUpdateCoding() {
         expect(source.workspaceAPINameSource == api, "\(source) reports as \(api)")
     }
     let tool = WorkspaceMCPToolCatalog.tool(named: "array_update_agent")
-    expect(tool?.operation == .agentUpdate && RoleRegistry.hostToolNames(for: .pi).contains("array_update_agent"), "both transports expose agent.update, including roled Pi")
+    expect(tool?.operation == .agentUpdate && RoleRegistry.hostToolNames(for: .pi, projectStandards: false).contains("array_update_agent"), "both transports expose agent.update, including roled Pi")
     if case let .object(properties)? = tool?.inputSchema["properties"],
        case let .object(color)? = properties["identityColor"],
        case let .array(values)? = color["enum"] {

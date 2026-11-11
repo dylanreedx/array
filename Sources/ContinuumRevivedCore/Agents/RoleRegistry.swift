@@ -71,9 +71,12 @@ public struct RoleRegistry: Sendable {
     /// every ROLED pi agent's `--tools` allowlist regardless of depth — reading
     /// your own context and opening a file are not delegation. A roleless agent
     /// sends no `--tools` and already has them.
-    public static func hostToolNames(for harness: AgentHarness) -> [String] {
+    /// `projectStandards` is the launch's decision (`AgentRunnerLaunch`):
+    /// `array_standards` joins only when it is true. No default, so no caller
+    /// can get it by omission.
+    public static func hostToolNames(for harness: AgentHarness, projectStandards: Bool) -> [String] {
         switch harness {
-        case .pi: return WorkspaceMCPToolCatalog.tools.map(\.name)
+        case .pi: return WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards).map(\.name)
         case .claudeCode, .codex: return []
         }
     }
@@ -143,7 +146,7 @@ public struct RoleRegistry: Sendable {
     ///
     /// A role that declares NO tool list is left alone: pi's default is not ours
     /// to invent, and it already includes spawning.
-    public func toolsArguments(roleId: String?, allowingSpawn: Bool) -> [String] {
+    public func toolsArguments(roleId: String?, allowingSpawn: Bool, projectStandards: Bool = false) -> [String] {
         guard let roleId, let tools = byID[roleId]?.tools else { return [] }
         let declared = tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         var missing: [String] = []
@@ -154,7 +157,8 @@ public struct RoleRegistry: Sendable {
             missing += RoleRegistry.spawnToolNames(for: harness).filter { !declared.contains($0) }
         }
         // CX-01: the host bridge tools are not depth-gated.
-        missing += RoleRegistry.hostToolNames(for: harness).filter { !declared.contains($0) && !missing.contains($0) }
+        missing += RoleRegistry.hostToolNames(for: harness, projectStandards: projectStandards)
+            .filter { !declared.contains($0) && !missing.contains($0) }
         guard !missing.isEmpty else { return ["--tools", tools] }
         return ["--tools", (declared + missing).joined(separator: ", ")]
     }

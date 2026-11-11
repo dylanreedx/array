@@ -23,6 +23,7 @@ public extension WorkspaceAPIOp {
         .browserSnapshot, .browserScreenshot, .browserConsole,
         .agentNotify,
         .agentReport, .agentStatus, .agentSchedule,
+        .standardsRead,
     ]
 
     /// Outside the preset, but not refused: the service asks the user through

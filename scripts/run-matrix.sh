@@ -1263,6 +1263,9 @@ run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
+# .plans/116 part 16: the project standards parser over fixtures it writes,
+# with explicit issues for broken standards and nothing read outside the checkout.
+run_leg .build/debug/ContinuumRevivedCoreChecks --project-standards-index-check
 if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 fi
@@ -1952,6 +1955,10 @@ run_app_check .build/debug/Array --workspace-api-agent-camera-check
 # preset, other-agent approval, byte caps, zero lifecycle side effects.
 # Agent colour: durable record update through the real workspace API.
 run_app_check .build/debug/Array --workspace-api-agent-colour-check
+# .plans/116 part 16: standards.read offered only where a checkout has standards,
+# through Claude's and Codex's MCP launch, the real MCP server, Pi's argv,
+# environment and extension, and the production dispatch.
+run_app_check .build/debug/Array --standards-resolution-check
 # Plan 110: a per-agent character through agent.update and the tile's own menu.
 run_app_check .build/debug/Array --workspace-api-agent-character-check
 # Agent rename: agent.update displayName — self without approval, another agent

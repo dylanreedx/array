@@ -574,7 +574,7 @@ func runManagedCompactionToolsChecks() async throws {
         }, submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0))
         defer { supervisor.stopAll() }
         let config = WorkspaceMCPConfiguration(serverExecutable: "/fixture/server", endpoint: "http://localhost/fixture", agentID: "fixture", token: "fixture", directory: root)
-        supervisor.workspaceMCPConfigurationProvider = { _, _ in config }
+        supervisor.workspaceMCPConfigurationProvider = { _, _, _ in config }
         let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: harness,
             model: harness == .codex ? ManagedCodexChecks.model : ManagedModeChecks.model, thinking: AgentModelConfig.defaultThinking)
         _ = supervisor.setMode(.managed, for: id)
@@ -588,7 +588,7 @@ func runManagedCompactionToolsChecks() async throws {
             launches.append(launch)
             return runner
         }, submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0))
-        supervisor.workspaceMCPConfigurationProvider = { _, _ in config }
+        supervisor.workspaceMCPConfigurationProvider = { _, _, _ in config }
         supervisor.restore()
         _ = await supervisor.accept(.compact(AgentCompactionRequest()), for: id)
         for _ in 0..<250 {

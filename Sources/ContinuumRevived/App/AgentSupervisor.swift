@@ -1167,7 +1167,22 @@ final class AgentSupervisor {
 
     /// Native Claude/Codex MCP launch material. The app wires this to its
     /// per-agent host listener; nil keeps checks and unmanaged runners inert.
-    var workspaceMCPConfigurationProvider: ((AgentID, AgentHarness) -> WorkspaceMCPConfiguration?)?
+    var workspaceMCPConfigurationProvider: ((AgentID, AgentHarness, _ projectStandards: Bool) -> WorkspaceMCPConfiguration?)?
+    /// Whether each agent's latest launch was offered `array_standards`.
+    /// `workspace.context` reads this rather than the folder, so it agrees
+    /// with the tool list the process actually has.
+    private(set) var standardsOfferedAtLaunch: [AgentID: Bool] = [:]
+
+    /// What a turn's runner is built from. Decides standards presence ONCE
+    /// (a name listing, no file reads) and hands that one answer to the MCP
+    /// configuration, Pi's argv and environment, and `workspace.context`.
+    func runnerLaunch(for id: AgentID, record: AgentRecord) -> AgentRunnerLaunch {
+        let standards = ProjectStandards.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
+        standardsOfferedAtLaunch[id] = standards
+        return AgentRunnerLaunch(record: record, spawnDepth: depth(of: id),
+                                 workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi, standards),
+                                 projectStandards: standards)
+    }
 
     /// CX-01 (§14.1): fired after `setWorkspaceToolsEnabled` persists a change, so
     /// the host grant table can revoke (or start honouring) the agent's policy.
@@ -1378,7 +1393,7 @@ final class AgentSupervisor {
         guard var record = records[id], runners[id] == nil else { return false }
         let runner = preferredRunner
             ?? idleSessionRunners[id]
-            ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
+            ?? makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
         guard let compacting = runner as? AgentCompactionRunning,
               compacting.compactionCapabilities.supportsManual else { return false }
         if idleSessionRunners[id] === runner { idleSessionRunners[id] = nil }
@@ -1944,7 +1959,8 @@ final class AgentSupervisor {
     nonisolated static func piRunner(
         for launch: AgentRunnerLaunch, hostInstructions: HostLaunchInstructions = .shared
     ) -> AgentRunning {
-        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth, hostInstructions: hostInstructions)
+        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth, hostInstructions: hostInstructions,
+                                  projectStandards: launch.projectStandards)
         guard piSessionTransportEnabled() else {
             return PiAgentRunner(config: config)
         }
@@ -2110,7 +2126,8 @@ final class AgentSupervisor {
     /// defaulted parameter is exactly how that happened once; it does not get a
     /// second chance.
     nonisolated static func runnerConfig(
-        for record: AgentRecord, spawnDepth: Int, hostInstructions: HostLaunchInstructions = .shared
+        for record: AgentRecord, spawnDepth: Int, hostInstructions: HostLaunchInstructions = .shared,
+        projectStandards: Bool = false
     ) -> PiAgentRunner.Config {
         let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         // `model`/`thinking` come from the RECORD: the role already decided them at
@@ -2140,9 +2157,11 @@ final class AgentSupervisor {
             // refusing after the fact: it never proposes what it cannot have.
             extraArgs: record.role.map {
                 RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
-                    .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth)
+                    .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth,
+                                    projectStandards: projectStandards)
             } ?? [],
-            processOwner: AgentProcessAttribution.ownerTag(for: record.id)
+            processOwner: AgentProcessAttribution.ownerTag(for: record.id),
+            projectStandards: projectStandards
         )
         // Resolved per process launch, off the main thread (see codexRunnerConfig).
         config.launchArguments = { hostInstructions.piArguments($0) }
@@ -3730,10 +3749,10 @@ final class AgentSupervisor {
             } else {
                 idle.stop()
                 interruptWorkingClaudeMirroredChildren(of: id)
-                runner = makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
+                runner = makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
             }
         } else {
-            runner = makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
+            runner = makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
         }
         pendingModeRestarts.remove(id)
         runningModes[id] = record.mode
@@ -9275,7 +9294,7 @@ final class AgentSupervisor {
             else { return .refused(.turnNotReady) }
 
             let candidate = (runners[agentID] ?? idleSessionRunners[agentID]
-                ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: agentID), workspaceMCP: workspaceMCPConfigurationProvider?(agentID, record.harness ?? .pi)))))
+                ?? makeRunner(accountLaunch(runnerLaunch(for: agentID, record: record))))
             guard let compacting = candidate as? AgentCompactionRunning,
                   compacting.compactionCapabilities.supportsManual else {
                 return .refused(.unsupported)
@@ -21243,7 +21262,7 @@ private func checkSpawnFromToolCall(
     let childRunnerArgs = AgentSupervisor.runnerConfig(for: child, spawnDepth: childDepth).extraArgs
     // CX-01: Array's host bridge tools follow every roled pi agent, at any depth.
     let expectedChildTools = "\(scoutTools), "
-        + (RoleRegistry.spawnToolNames(for: .pi) + RoleRegistry.hostToolNames(for: .pi)).joined(separator: ", ")
+        + (RoleRegistry.spawnToolNames(for: .pi) + RoleRegistry.hostToolNames(for: .pi, projectStandards: false)).joined(separator: ", ")
     guard childRunnerArgs == ["--tools", expectedChildTools] else {
         throw fail("the child's runner would not pass its role's tools plus the spawn verbs it is under the cap for: \(childRunnerArgs)")
     }

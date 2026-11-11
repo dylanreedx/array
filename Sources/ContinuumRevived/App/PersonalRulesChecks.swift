@@ -405,7 +405,7 @@ enum PersonalRulesChecks {
                 submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0),
                 idleRunnerTimeout: idle)
             if let workspaceMCP {
-                supervisor.workspaceMCPConfigurationProvider = { _, harness in harness == .claudeCode ? workspaceMCP : nil }
+                supervisor.workspaceMCPConfigurationProvider = { _, harness, _ in harness == .claudeCode ? workspaceMCP : nil }
             }
             return supervisor
         }

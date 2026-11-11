@@ -104,6 +104,13 @@ public enum WorkspaceMCPToolCatalog {
 
     public static func tool(named name: String) -> Tool? { tools.first { $0.name == name } }
 
+    /// The tools one agent is offered: `array_standards` only when its launch
+    /// found standards (`docs/internals/project-standards-on-demand.md`). Pi's
+    /// extension applies the same rule to the same op.
+    public static func tools(projectStandards: Bool) -> [Tool] {
+        tools.filter { projectStandards || $0.operation != .standardsRead }
+    }
+
     /// The operations a caller can reach through a tool. `workspace.context`
     /// advertises only these: an operation without a tool is not a capability.
     public static var exposedOperations: Set<WorkspaceAPIOp> { Set(tools.map(\.operation)) }

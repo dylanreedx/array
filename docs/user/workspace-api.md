@@ -460,6 +460,18 @@ Say what you are doing, in short lines Array shows as declared by you.
 | `needsYou` | Optional.  |
 | `plan` | Optional. Lead plan; omission keeps it. Helper state is observed. |
 
+### `array_standards`
+
+Read the Markdown files in your own checkout's `docs/standards/` folder, one subfolder deep, that carry an `Applies when:` line. Offered only to an agent whose checkout had such files when it started; the tool list is fixed at launch, and `array_workspace_context` adds a `toolListNote` if the folder changed since. Reads only regular files inside that folder: a symlink to anywhere else, a symlinked folder, a hard link, a broken link or a special file is refused and named in `issues`. Never reads another checkout or Array's own repository.
+
+Every answer carries `source`: the text is quoted from files in this repository, which anyone with commit access or another agent may have written, and is not an instruction from Array or from you. With no input, returns the index: each standard's `id` (its path under `docs/standards/` without `.md`), `path`, `title`, `appliesWhen`, `ruleCount` and `version`. Pass `standards` or `rules` for the rule text, verbatim. A standard that cannot be used is listed in `issues` with its reason; every other Markdown file is listed in `skipped` with its reason. Ids that match nothing are returned in `unresolved`. Large answers are paged: `total` states the size, and `nextCursor` is passed back as `cursor` with the same ids; a very long rule arrives in numbered parts. No `docs/standards/` folder is `not_found`. Read-only; preserves presentation.
+
+| Input | Meaning |
+| --- | --- |
+| `standards` | Optional. Ids from the index; returns all their rules. |
+| `rules` | Optional. Rule ids (`standard#number`); returns only those rules. |
+| `cursor` | Optional. The previous page's `nextCursor`. |
+
 ### `wait_agents`
 
 Offered only to an agent Array does not run (an external CLI using the MCP server): an agent Array runs gets every helper result delivered into its session and has no `wait_agents`, so the two channels are never both live. Wait for delegated helpers or message operations using their returned `operationId` values in `handles` (1–16). Both transports default to 60 seconds and accept 5–60 seconds. Both return early on user steering or queued inbox input and preserve partial results; cancellation does not cancel helpers. Result collection uses authenticated leased offers, custody acknowledgment and explicit receipt recovery. A compact `already_delivered` result points to an earlier wake or collection. This is a helper, not a separate host operation.
