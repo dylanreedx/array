@@ -128,7 +128,10 @@ fix to pass.
 `sandbox_profile` (Python) and `ReplaySandbox` (Swift) deny by default. They
 allow reads of the run root and the toolchain only (system libraries, `/bin`,
 `/usr/bin`, the interpreter's own prefix, `/dev`), writes only inside the run
-root, signals only inside the sandbox, no mach services and no network. Each
+root, signals only inside the sandbox, no mach services and no network.
+Grading may also run programs from inside the run root, because a task's
+own check scripts write helpers there and run them, plus each single binary
+the task declares in `tools` (the perf task declares `node`). Each
 run root holds the project export and its own support, build, tmux,
 temporary and home directories; the environment is built fresh, with no
 `TMUX`. The working copy is an export of the base tree with only the base
@@ -160,6 +163,80 @@ delegates; a Codex resume without a baseline read as complete; the ledger
 rows' flags dropped; missing counted as zero; Codex cache writes counted as
 incomplete; helpers' usage left out of the task; a failed run's record
 vanishes (Swift). An import, syntax or build failure never counts as RED.
+
+## Live runs
+
+`run_pilot.py` runs real Claude Code agents through `Array
+--replay-live-run`. The production runner launches each agent's CLI through
+`live_claude.py`, which runs the real CLI in a deny-default sandbox. The CLI
+signs in with its own Keychain login and keeps its config and sessions in the
+run root. It can reach only a host proxy that forwards to `api.anthropic.com`,
+and this run's workspace MCP port. `live-config.json` holds the model, effort,
+deadline, allowed hosts and arms. `pilot-results.md` has the runs so far, and
+the sandbox rules in full.
+
+Arms:
+
+- `solo`: Managed mode off. The lead has the workspace MCP server, as every
+  production agent does, and the workspace API refuses its delegation call by
+  call. `delegationAttempts` counts each refused `array_delegate` call, read
+  from the lead's session file, plus anything on the runner's spawn channel.
+- `managed`: Managed mode as built. The lead loses Edit and Write but keeps
+  its shell.
+- `managed-strict`: Managed mode with the strict-lead switch on, so the lead's
+  shell cannot write its checkout. The switch is an environment variable named
+  in `live-config.json` (`strictLeadSwitch.env`). While that is null, the arm
+  is reported as not runnable and skipped.
+
+Every agent in every arm runs with the CLI's own subagent tool (`Agent`,
+`Task`) switched off, so the only fan-out is delegation through Array.
+
+`leadChanges` records what the lead changed itself, from its own session file.
+`editToolCalls` and `delegateCalls` are exact counts. `shellWrites` lists the
+Bash commands that look like writes: redirects, `sed -i`, `git apply`, Python
+`open(..., 'w')` and the like. It is a heuristic, so the verdict names its
+basis:
+
+- `yes: edit tool`
+- `likely: shell write (heuristic)`
+- `none seen`
+- `unknown`, when the session file is missing
+
+How to read the cache columns: the provider's prompt cache is warm or cold
+depending on what ran just before, so cache read and cache write in one run
+depend on the run before it. The arms rotate per task, so each arm runs
+first, second and third about equally often across tasks. Each record's
+`runOrder` gives its position and the task's sequence. Compare cache columns
+across arms only over the whole set, or at matching positions. Within a
+single task, a difference in cache write between arms is mostly run order.
+Uncached input and output do not depend on order.
+
+The comparison (`replay.py compare`) prints every run as a row: grade, wall
+and active time, tokens by type in total and per agent, helpers, what the
+lead changed, delegation attempts and run order. A Managed run that did not
+fan out is never compared as fan-out, but it is still shown beside solo as
+"managed, did not fan out", with its differences.
+
+Temp folders: macOS `mktemp` uses the per-user system temp folder even when
+`TMPDIR` is set, so `mktemp -d` failed inside a run. `live-bin/mktemp` is
+first on the agent's PATH and puts default and `-t` names in the run's own
+`tmp`, which is `TMPDIR`. Python's `tempfile` already honours `TMPDIR`. A
+script that hard-codes `/tmp`, or calls `/usr/bin/mktemp` by full path, still
+cannot write there.
+
+Tasks (`pilot_tasks.py`, each validated to fail on its base and pass on its
+real fix):
+
+| Task | Size | From | What |
+|---|---|---|---|
+| prepass-deleted-once | small | ac055cd2 | a deleted file listed twice in the pre-pass coverage report |
+| prepass-targeted-only | small | 2f96d775 | let the coverage manifest declare hand-run checks, with validation |
+| replay-ledger-schema | medium | 0421980d | move the replay record to the ledger's four token types (replay.py and manifest.json) |
+| perf-runner-interrupt | medium | d7bdc709 | clean up the perf runner's temp folders and app on SIGINT/SIGTERM, and extend its contract test |
+| three-independent-fixes | larger | 9f7fc19e, 02bb9f34, 7270328f | three parts in three files: the banner census, a cost line in the motion analyser, resolved MCP paths |
+
+`prepass-two-parts` is a separate delegation test: its request asks for one
+helper per part, so it is never paired with a solo run.
 
 ## Before a live pilot
 
