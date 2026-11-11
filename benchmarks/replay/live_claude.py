@@ -29,7 +29,7 @@ import sys
 from urllib.parse import urlparse
 
 HOME = Path(os.path.expanduser('~'))
-TOOLCHAIN = ['/dev', '/bin', '/usr/bin', '/usr/lib', '/usr/libexec', '/usr/share', '/System/Library', '/System/Cryptexes',
+TOOLCHAIN = ['/bin', '/usr/bin', '/usr/lib', '/usr/libexec', '/usr/share', '/System/Library', '/System/Cryptexes',
              '/System/Volumes/Preboot/Cryptexes', '/private/var/db/dyld', '/Library/Developer/CommandLineTools',
              '/Applications/Xcode.app/Contents', '/private/var/db/xcode_select_link',
              '/private/etc', '/private/var/db/timezone', '/Library/Preferences/Logging']
@@ -38,8 +38,9 @@ KEYCHAIN = [str(HOME / 'Library/Keychains'), '/Library/Keychains', '/private/var
             '/Library/Preferences/com.apple.security.plist', '/Library/Preferences/com.apple.dt.Xcode.plist']
 MACH = ['com.apple.SecurityServer', 'com.apple.securityd.xpc', 'com.apple.system.opendirectoryd.libinfo',
         'com.apple.system.opendirectoryd.membership', 'com.apple.system.notification_center',
-        'com.apple.system.logger', 'com.apple.logd', 'com.apple.diagnosticd', 'com.apple.trustd',
-        'com.apple.trustd.agent', 'com.apple.ocspd', 'com.apple.CoreServices.coreservicesd']
+        'com.apple.system.logger', 'com.apple.logd', 'com.apple.diagnosticd']
+# Device files a shell, git and python need; never a terminal's tty.
+DEVICES = ['/dev/null', '/dev/zero', '/dev/random', '/dev/urandom', '/dev/dtracehelper']
 HOOK_PROBE_PARENT = os.path.realpath(subprocess.check_output(['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']).decode().strip()).rstrip('/')
 XCODE_TOOLS = '/Applications/Xcode.app/Contents/Developer/usr/bin'
 # The subagent tool's name, and its older one.
@@ -58,32 +59,46 @@ def workspace_mcp(args):
     server = json.loads(Path(config_path).read_text())['mcpServers']['array_workspace']
     env = server.get('env', {})
     port = urlparse(env['ARRAY_WORKSPACE_MCP_ENDPOINT']).port
-    executable = os.path.realpath(server['command'])
     # The sandbox matches resolved paths: /var/folders is /private/var/folders.
+    # The server binary links only system libraries and the Swift runtime.
     files = [os.path.realpath(config_path), os.path.realpath(env['ARRAY_WORKSPACE_MCP_TOKEN_FILE'])]
-    return files, [os.path.dirname(executable)], [port]
+    return [os.path.realpath(server['command'])], files, [port]
 
 
-def profile(root, claude, proxy_port, extra_files=(), extra_dirs=(), extra_ports=()):
-    readable = TOOLCHAIN + KEYCHAIN + [root] + list(extra_dirs)
-    literals = [claude] + list(extra_files)
-    ancestors = sorted({str(a) for p in readable + literals for a in Path(p).parents} - set(readable))
-    executable = TOOLCHAIN + [root] + list(extra_dirs)
+def hook_probe_folder(cwd):
+    """Array's hook probe (AgentHookSurfaceCatalog) runs the CLI in its own
+    fresh folder in the user's temp directory and has a hook touch a marker
+    there. That launch, and only that one, may write in that one folder."""
+    cwd = os.path.realpath(cwd)
+    if os.path.dirname(cwd) == HOOK_PROBE_PARENT and os.path.basename(cwd).startswith('array-hook-probe-'):
+        return cwd
+    return None
+
+
+def profile(root, claude, proxy_port, programs=(), extra_files=(), extra_ports=(), probe_folder=None):
+    """Exec: the toolchain, the run root, the CLI and the MCP server binary.
+    Read: those, plus the Keychain files and the MCP config and token files.
+    Write: the run root and a few device files. Metadata (stat) is readable
+    everywhere; directory listings and contents are not."""
+    readable = TOOLCHAIN + KEYCHAIN + [root]
+    programs = [claude] + list(programs)
+    literals = programs + list(extra_files)
+    executable = TOOLCHAIN + [root]
+    writable = [root] + ([probe_folder] if probe_folder else [])
     ports = [proxy_port] + list(extra_ports)
     return ''.join([
         '(version 1)(deny default)',
         '(allow process-fork)(allow sysctl-read)(allow signal (target same-sandbox))',
-        '(allow file-read-metadata)(allow ipc-posix-shm)(allow ipc-posix-sem)(allow pseudo-tty)',
-        '(allow process-exec ', ' '.join('(subpath %s)' % q(p) for p in executable), ' (literal %s))' % q(claude),
-        '(allow file-read* (literal "/") ',
+        '(allow file-read-metadata)(allow ipc-posix-shm)(allow ipc-posix-sem)',
+        '(allow process-exec ', ' '.join('(subpath %s)' % q(p) for p in executable), ' ',
+        ' '.join('(literal %s)' % q(p) for p in programs), ')',
+        '(allow file-read* (literal "/") (subpath "/dev/fd") ',
         ' '.join('(subpath %s)' % q(p) for p in readable), ' ',
-        ' '.join('(literal %s)' % q(p) for p in literals + ancestors), ')',
-        '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (subpath "/dev/fd") ',
-        '(regex #"^/dev/ttys[0-9]+$") (literal "/dev/ptmx") (subpath %s) ' % q(root),
-        # Array's hook probe (AgentHookSurfaceCatalog) touches a marker in its own
-        # folder in the user's temp directory; without it Array launches no hooks.
-        '(regex %s))' % q('^' + re.escape(HOOK_PROBE_PARENT) + '/array-hook-probe-[^/]+(/|$)'),
-        '(allow file-ioctl (literal "/dev/dtracehelper") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))',
+        ' '.join('(literal %s)' % q(p) for p in literals + DEVICES), ')',
+        '(allow file-write* (subpath "/dev/fd") ',
+        ' '.join('(literal %s)' % q(p) for p in DEVICES), ' ',
+        ' '.join('(subpath %s)' % q(p) for p in writable), ')',
+        '(allow file-ioctl (literal "/dev/dtracehelper"))',
         '(allow network-outbound ', ' '.join('(remote tcp %s)' % q('localhost:%d' % p) for p in ports), ')',
         '(allow mach-lookup ', ' '.join('(global-name %s)' % q(m) for m in MACH), ')'])
 
@@ -93,7 +108,7 @@ def main(argv):
     root = os.path.realpath(env['REPLAY_LIVE_ROOT'])
     claude = os.path.realpath(env['REPLAY_LIVE_CLAUDE'])
     port = int(env['REPLAY_LIVE_PROXY_PORT'])
-    files, dirs, ports = workspace_mcp(argv)
+    programs, files, ports = workspace_mcp(argv)
     config = Path(root) / 'claude-config'
     config.mkdir(exist_ok=True)
     child = {k: v for k, v in env.items() if not k.startswith('REPLAY_LIVE_')}
@@ -116,7 +131,7 @@ def main(argv):
     if env.get('REPLAY_LIVE_LOG'):
         with open(os.path.join(env['REPLAY_LIVE_LOG'], 'launches.jsonl'), 'a') as log:
             log.write(json.dumps(dict(pid=os.getpid(), cwd=os.getcwd(), root=root, args=args, ports=[port] + ports)) + '\n')
-    sandbox = profile(root, claude, port, files, dirs, ports)
+    sandbox = profile(root, claude, port, programs, files, ports, hook_probe_folder(os.getcwd()))
     os.execve('/usr/bin/sandbox-exec', ['/usr/bin/sandbox-exec', '-p', sandbox, claude] + args, child)
 
 
