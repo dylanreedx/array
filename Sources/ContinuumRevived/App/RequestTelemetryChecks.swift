@@ -520,34 +520,40 @@ enum RequestTelemetryChecks {
     }
 
     /// Reports that arrive after their turn completed are written at once for
-    /// the turn they name, never folded into the next turn.
+    /// the turn they name, never folded into the turn that is running. They
+    /// arrive inside the next turn's stream: the runner tears its app-server
+    /// down after the primary `turn/completed` unless a child thread is live, so
+    /// a primary frame sent after it races that teardown (child frames are kept;
+    /// `codexChild` covers them).
     static func codexLate() async throws {
         print("request-telemetry: codex usage after its turn")
         let (b, lead, root, tearDown) = try codexBench("codex-late")
         defer { tearDown() }
         let f = try singleAgent()
-        // In the turn: f1, f2 → 6,134 / 26,112 / 153. After turn/completed: f3, f4
-        // → late rows f3 - f2 (1,181 / 15,104 / 116) and f4 - f3 (337 / 16,128 / 44).
-        try stage([f[0], f[1], after(f[2]), after(f[3])], "late", in: root)
-        try await soloTurn(b, lead, "FRAMES-late")
-        try await wait("late reports not recorded") {
-            b.supervisor.runLedger.drain(); return usage(lead).filter { $0["late"] as? Bool == true }.count == 2
+        // Turn 1: f1, f2 → 6,134 / 26,112 / 153.
+        try stage([f[0], f[1]], "first", in: root)
+        try await soloTurn(b, lead, "FRAMES-first")
+        let first = usage(lead)
+        try expect(first.count == 1, "turn 1: one row, got \(first)")
+        try expectRow(first.first, "turn 1", model: ManagedCodexChecks.model, source: "record", counts(6_134, 26_112, nil, 153))
+        guard let turn1 = first[0]["turn"] as? String else { throw WorkspaceAgentReportChecks.Failure(description: "request-telemetry: turn 1 row names no turn") }
+        // Turn 2's stream carries f3 and f4 naming turn 1: late rows for turn 1,
+        // f3 - f2 (1,181 / 15,104 / 116) and f4 - f3 (337 / 16,128 / 44); turn 2
+        // itself reported nothing and is unknown.
+        let stale = [f[2], f[3]].map { frame -> [String: Any] in
+            var frame = frame, params = frame["params"] as? [String: Any] ?? [:]
+            params["turnId"] = turn1; frame["params"] = params; return frame
         }
-        let rows = usage(lead)
-        let onTime = rows.filter { $0["late"] == nil }, late = rows.filter { $0["late"] as? Bool == true }
-        try expect(onTime.count == 1, "one on-time row, got \(rows)")
-        try expectRow(onTime.first, "the turn", model: ManagedCodexChecks.model, source: "record", counts(6_134, 26_112, nil, 153))
-        let turn = onTime[0]["turn"] as? String
-        try expect(turn != nil && late.allSatisfy { $0["turn"] as? String == turn && $0["task"] as? String == onTime[0]["task"] as? String },
-                   "late rows must name their own turn and task: \(late)")
+        try stage(stale, "second", in: root)
+        try await soloTurn(b, lead, "FRAMES-second")
+        let rows = Array(usage(lead).dropFirst(first.count))
+        let late = rows.filter { $0["late"] as? Bool == true }, onTime = rows.filter { $0["late"] == nil }
+        try expect(late.count == 2 && late.allSatisfy { $0["turn"] as? String == turn1 && $0["task"] as? String == first[0]["task"] as? String },
+                   "late rows must name turn 1 and its task: \(late)")
         try expect(total(late) == counts(1_518, 31_232, nil, 160), "late rows must add f4 - f2: \(total(late))")
-        print("  late rows: \(describe(total(late))) on the same turn")
-        // The next turn reports nothing: it gets only its own unknown row.
-        try stage([], "next", in: root)
-        try await soloTurn(b, lead, "FRAMES-next")
-        let next = Array(usage(lead).dropFirst(rows.count))
-        try expect(next.count == 1, "the next turn must not receive the late usage: \(next)")
-        try expectRow(next.first, "next turn", model: ManagedCodexChecks.model, source: "record", nil, incomplete: ["noUsage"])
+        print("  late rows: \(describe(total(late))) on turn 1")
+        try expect(onTime.count == 1 && onTime[0]["turn"] as? String != turn1, "turn 2 must get only its own row: \(onTime)")
+        try expectRow(onTime.first, "turn 2", model: ManagedCodexChecks.model, source: "record", nil, incomplete: ["noUsage"])
     }
 
     /// A Codex lead whose provider-run child reports on its own thread, after
