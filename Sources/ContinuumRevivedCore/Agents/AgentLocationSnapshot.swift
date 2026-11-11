@@ -118,16 +118,21 @@ public struct AgentObservedActivity: Equatable, Sendable {
     public let startedAt: Date
     public let updatedAt: Date
     public let evidenceSource: EvidenceSource
+    /// Every further path one call edited (a Codex `fileChange` names several).
+    /// Host-local; the location projector reads only `targetPath`.
+    public let otherTargets: [URL]
 
     public init(
         operation: Operation,
         targetPath: URL?,
         startedAt: Date,
         updatedAt: Date,
-        evidenceSource: EvidenceSource
+        evidenceSource: EvidenceSource,
+        otherTargets: [URL] = []
     ) {
         self.operation = operation
         self.targetPath = targetPath.map(normalizedFileURL)
+        self.otherTargets = otherTargets.map(normalizedFileURL)
         self.startedAt = startedAt
         self.updatedAt = updatedAt
         self.evidenceSource = evidenceSource

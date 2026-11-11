@@ -2,7 +2,8 @@ import Foundation
 import ContinuumRevivedCore
 
 /// Host-only facts. All reduction, recovery and disk access share this queue.
-/// No prompt, report prose, paths or diffs cross this boundary.
+/// No prompt, report prose, command text, file contents or diffs cross this
+/// boundary; the only paths are checkout-relative paths a helper edited.
 final class ManagedRunLedger: @unchecked Sendable {
     struct Row: Codable {
         var v = 1
@@ -20,39 +21,27 @@ final class ManagedRunLedger: @unchecked Sendable {
         var findings: [String: Int]?
         var openParts: [UUID]?
         var evidence: [String: String]?
+        var files: [HelperEvidence.FileFact]?
     }
-    // Constant space per helper; independent of the supervisor's receipt ring.
-    // These counts establish capture only, never command success or coverage.
-    private struct Capture {
-        var pre = 0
-        var post = 0
-        var shell = 0
+    // Live only: a helper delegated before this process started has no entry,
+    // and its report records that instead of pretending to have watched it.
+    private var evidence: [UUID: HelperEvidence] = [:]
+    /// A helper's tool call, as its translator reported it. Folded on the queue.
+    func observeTool(agent: UUID, _ observation: AgentRuntimeObservation) {
+        queue.async { self.evidence[agent]?.observe(observation) }
     }
-    private var captures: [UUID: Capture] = [:]
-    func observeHook(agent: UUID, event: String, shell: Bool) {
-        queue.async {
-            var capture = self.captures[agent] ?? Capture()
-            if event == "PreToolUse" { capture.pre += 1 }
-            if event == "PostToolUse" {
-                capture.post += 1
-                if shell { capture.shell += 1 }
-            }
-            self.captures[agent] = capture
-        }
-    }
-    /// Enqueues only. No receipt text, shell output or filesystem access on the
-    /// report path. Missing call correlation and coverage remain explicit gaps.
-    func helperEvidence(agent: UUID, source: String) {
+    /// One hand-off on the report path; the manifest read and the fold run here.
+    func helperEvidence(agent: UUID, at: Date, root: String, exitProven: Bool) {
         queue.async {
             guard let task = self.delegatedTask[agent] else { return }
-            let capture = self.captures[agent] ?? Capture()
-            self.append(Row(kind: "helperEvidence", task: task, agent: agent,
-                part: self.parts[agent], source: "evidence/" + source, evidence: [
-                    "preToolUses": String(capture.pre), "postToolUses": String(capture.post),
-                    "shellCompletions": String(capture.shell),
-                    "afterCoveredEdit": "unknown", "checkFilesModified": "unknown",
-                    "exitZero": "unknown", "captureGap": "true"
-                ]))
+            var row = Row(kind: "helperEvidence", task: task, agent: agent, part: self.parts[agent],
+                          source: "evidence/\(agent)/\(at.timeIntervalSinceReferenceDate)")
+            if let watched = self.evidence[agent] {
+                (row.files, row.evidence) = watched.facts(root: URL(fileURLWithPath: root), exitProven: exitProven)
+            } else {
+                row.evidence = ["observed": "notSinceDelegation"]
+            }
+            self.append(row)
         }
     }
     private let queue = DispatchQueue(label: "dev.array.run-ledger", qos: .utility)
@@ -149,6 +138,7 @@ final class ManagedRunLedger: @unchecked Sendable {
         queue.async {
             guard let task = self.active[parent] else { return }
             self.sessionTasks[child] = task
+            self.evidence[child] = HelperEvidence()
             self.append(Row(kind: "delegated", task: task, agent: child, part: child, source: "delegate/\(source)"))
         }
     }

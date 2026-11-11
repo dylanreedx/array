@@ -136,24 +136,61 @@ order differs per process) against the digest the scanning reducer produced.
 `scale` preloads 50,001 rows and fails only if a fact costs five times more
 than on an empty ledger; it measured 0.99–1.03×.
 
-## Helper evidence shadow capture
+## Helper evidence, shadow only (plan 8 step 1)
 
-`helperEvidence` rows extend v1 with an `evidence` dictionary. The host queues
-hook counters independently of the 128-receipt ring and snapshots them when a
-helper files a report. Task and part ids come from the ledger's delegation row.
-Only counts and fixed enum words are stored; no command, path or report text.
-The report, courier, UI and agent output never read these rows.
+When a helper files a report, the ledger appends one `helperEvidence` row under
+its task and part. Nothing reads it: no agent, wake, `wait_agents` result or
+UI. It denies and delays nothing. Recording follows `qaRunLedgerRecording`.
 
-This initial subset records pre/post tool counts and shell completion counts.
-`afterCoveredEdit`, `checkFilesModified` and `exitZero` are always `unknown`;
-`captureGap` is always `true`. A hook completion is not a verified check run.
-Counters are process-local; report snapshots survive restart, but recovery does
-not pretend it recovered unreported hook activity. Queue backlog or process death
-can lose observations. This is not complete provider correlation.
+**Source.** The runtime observations each translator already emits on the
+host-local side channel, keyed by the provider's call id:
+`.toolActivity(editing)` carries the absolute paths a call edited, and
+`.toolDetail` carries a shell call's command (start) and outcome (end). The
+supervisor hands only those two cases to the ledger queue for helpers; command
+classification, manifest reading and the fold all run there. Codex sends
+several paths in one `fileChange`; `AgentObservedActivity.otherTargets` now
+carries the paths after the first (the location projector reads only the
+first, as before). `FileChange.path` is reduced to a basename for display, so
+it is not used.
 
-The gate-owned manifest is deliberately not copied here. Exact check identity,
-covered-path freshness, snapshots, call-id/stream correlation for both harnesses,
-and known numeric terminal exits remain unimplemented. The provider check flag
-currently exercises only this conservative subset through the production helper
-report and authenticated Claude hook paths. It does not prove the full part 8
-step 1 contract or the before/after-edit cases.
+**Check identity.** A shell command runs a check when it names a `--*-check`
+flag, or a `.py`/`.sh` script the manifest names. The manifest is
+`scripts/check-coverage-manifest.json` in the helper's checkout, owned by the
+gate pre-pass and read, never copied. A check's identity is the flag in its
+`invocation`, else the script.
+
+**Per edited file**, relative to the helper's checkout: `after` (a covering
+check completed after the last edit), `before` (only before it), `none` (no
+covering run seen), `unmapped` (the manifest maps no check to it), or `unknown`
+with a reason: `noManifest`, `checkIncomplete` (a covering run started and did
+not finish, or was interrupted, timed out or backgrounded), or
+`shellCommandNotObserved` (a shell call after the edit whose command the host
+did not see, as when "Show shell commands in transcripts" is off). Each fact
+names the check, the edit and check call ids and their order.
+
+**Exit status.** Codex: the numeric `exitCode` the app-server transport
+reports (recorded in `codex-appserver-single-agent.jsonl`), unless the command
+was compound. Claude: always `unknown` (`notReportedByHarness`); no recorded
+fixture shows the host a numeric exit, and a successful Bash result has none.
+
+**What stays unobserved.** Files written by shell commands; edits made by a
+Claude in-process subagent (its tool calls are not on the side channel);
+anything before this process started (`observed: notSinceDelegation`);
+observations still in the runner's pipe when the report arrives. Counters live
+in memory per helper, constant in size per file and check, with no 128-event
+window.
+
+**Stored.** Ids, checkout-relative paths, check names, sequence numbers and
+fixed words. No command text, output, file contents, diffs or prompt text; an
+edit outside the checkout is only counted.
+
+`--helper-evidence-provider-check` drives a Managed Claude lead delegating one
+Claude and one Codex helper through the production MCP binary into a temporary
+git checkout with a manifest. CLI doubles replay frames in the recorded fixture
+shapes through the production runners and translators (no recorded Claude
+Edit frame exists; Edit and Write reuse the recorded `file_path` input). It
+asserts each status for both harnesses, past 140 calls; that the lead receives
+the same message content in the same order, and `array_report` replies the
+same, with recording on and off; that no agent receives evidence words; and
+that the ledger holds no prompt, content, diff, output, command or absolute
+path. It prints the report path's cost with recording on and off.
