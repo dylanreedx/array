@@ -8381,6 +8381,8 @@ final class AgentSupervisor {
         guard var record = records[id], record.capabilities.locallyManaged else { return false }
         guard record.mode != mode else { return true }
         record.mode = mode
+        record.managedBriefedSessions = []
+        managedHookStates.removeValue(forKey: id)
         guard persist(record) else { return false }
         records[id] = record
         if record.harness == .claudeCode || record.harness == .codex { pendingModeRestarts.insert(id) }
@@ -8396,7 +8398,16 @@ final class AgentSupervisor {
         guard record.parentAgentID == nil,
               let harness = record.harness, harness == .claudeCode || harness == .codex,
               (runningModes[record.id] ?? record.mode) == .managed else { return nil }
-        return managedHookStates[record.id, default: ManagedLeadHookState()].reply(payload: payload, harness: harness)
+        var state = managedHookStates[record.id] ?? ManagedLeadHookState()
+        state.briefedSessions = records[record.id]?.managedBriefedSessions ?? []
+        let reply = state.reply(payload: payload, harness: harness)
+        if var current = records[record.id], current.managedBriefedSessions != state.briefedSessions {
+            current.managedBriefedSessions = state.briefedSessions
+            records[record.id] = current
+            _ = persist(current)
+        }
+        managedHookStates[record.id] = state
+        return reply
     }
 
     // MARK: - Model and thinking level (P6.1)

@@ -3671,6 +3671,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--managed-lead-context-transition-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedLeadTransitionChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--managed-mode-persistence-check") {
             _ = NSApplication.shared
             Task { @MainActor in

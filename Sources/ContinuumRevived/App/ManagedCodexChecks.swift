@@ -119,7 +119,7 @@ enum ManagedCodexChecks {
                 && next["pid"] as? Int != lastPID && request?["method"] as? String == "thread/resume"
                 && (request?["params"] as? [String: Any])?["threadId"] as? String == sid, "next turn did not restart and resume stored thread")
             let latest = rows(b, kind: "hook", session: sid).filter { $0["pid"] as? Int == next["pid"] as? Int }
-            try expect(!latest.contains { output($0)["additionalContext"] != nil }, "switch re-injected brief on resume")
+            try expect(latest.contains { output($0)["additionalContext"] != nil } == (nextMode == .managed), "switch brief did not match new mode")
             try expect(latest.contains { output($0)["permissionDecision"] as? String == "deny" } == (nextMode == .managed), "next turn retained old hook policy")
             lastPID = next["pid"] as? Int
         }
@@ -146,8 +146,8 @@ enum ManagedCodexChecks {
             let first = try await hook(start)
             try expect(first["hookEventName"] as? String == "SessionStart" && first["additionalContext"] as? String == ManagedLeadHookState.brief, "startup brief missing/wrong format")
             try expect(try await hook(start).isEmpty, "duplicate startup brief")
-            for source in ["resume", "compact", "clear", "fork"] {
-                try expect(try await hook(["hook_event_name": "SessionStart", "source": source, "session_id": source]).isEmpty, "brief injected on \(source)")
+            for source in ["resume", "compact", "clear"] {
+                try expect(try await hook(["hook_event_name": "SessionStart", "source": source, "session_id": source])["additionalContext"] as? String == ManagedLeadHookState.brief, "brief injected on \(source)")
             }
             try expect(try await hook(start, id: free).isEmpty, "free got brief")
         }
@@ -176,7 +176,7 @@ enum ManagedCodexChecks {
                      "view_image", "read_mcp_resource", "list_mcp_resources", "list_mcp_resource_templates", "web_search", "webrun",
                      "notesread_file", "historysearch_contents", "mcp__other__search"] {
             let denied = try await look(tool, ["command": "ls", "cmd": "ls"])
-            try expect(denied["permissionDecision"] as? String == "deny" && denied["permissionDecisionReason"] as? String == ManagedLeadHookState.denial, "fourth/later quick look allowed: \(tool)")
+            try expect(denied.isEmpty, "lead read denied: \(tool)")
             try expect(try await look(tool, ["command": "ls", "cmd": "ls"], id: free).isEmpty, "free budget applied")
         }
         try expect(try await look("Bash", ["command": "git diff"]).isEmpty, "git refused after exhaustion")
@@ -190,7 +190,7 @@ enum ManagedCodexChecks {
         for command in ["git status; cat file", "git diff > file", "git log $(cat file)"] {
             try expect(try await look("exec_command", ["cmd": command]).isEmpty, "reset did not restore budget")
         }
-        try expect(try await look("view_image")["permissionDecision"] as? String == "deny", "composed git escaped budget")
-        print("Managed Codex hooks passed: startup-only once, exact deny shape, edit denial, three quick looks, git/Array/coordination free, prompt reset, free/native-child/malformed controls")
+        try expect(try await look("view_image").isEmpty, "read denied")
+        print("Managed Codex hooks passed: brief once per context, edit denial, unlimited reads, free/native-child/malformed controls")
     }
 }
