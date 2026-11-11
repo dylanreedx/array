@@ -51,8 +51,10 @@ and passing on the real fix.
   wider one, below):
   - Run programs: the toolchain (system folders, Xcode, the command line
     tools), the run root, the CLI binary, the MCP server binary.
-  - Read: those, plus the Keychain files, `/private/etc`, and this run's MCP
-    config and token files.
+  - Read: those, plus the Keychain files, `/private/etc`, this run's MCP
+    config and token files, and Core's resource bundle beside the MCP server
+    (its tool catalogue). The server's own folder may be listed (names only,
+    because `Bundle.main` needs it), but no other file in it can be read.
   - Write: the run root, `/dev/fd`, and `/dev/null`, `/dev/zero`,
     `/dev/random`, `/dev/urandom`, `/dev/dtracehelper`. Never a terminal.
     The hook probe's launch, and only that one, may also write its own probe
@@ -93,6 +95,61 @@ and passing on the real fix.
   Edit, so they were not rerun. The solo and managed arms did not have the same
   shell.
 
+## Delegation run (kept out of the table)
+
+One Managed run to prove the delegation path works live. Its prompt asked the
+lead outright to give each part to its own helper, so it tests the path, not
+whether a lead chooses to delegate. It has no solo partner and is not in the
+table above. Task `prepass-two-parts` is the two pilot fixes together: the
+parent of `ac055cd2` up to `2f96d775` (plus one unrelated one-line commit
+between them). They touch different functions. Both hidden checks were
+validated as before. Run `3a0a2245`; Sonnet 5.5 for every agent, effort
+medium.
+
+- The lead called `array_delegate` three times. The first call had empty
+  arguments and the host refused it (`invalid_request`). Then it made one
+  valid call per part.
+- The host launched both helpers. Part 1's helper worked in the lead's
+  checkout. Part 2's got its own worktree (`.worktrees/part-2-...`). Each
+  was a sandboxed `claude` with the workspace tools.
+- Both results came back. The lead's transcript holds two "finished:
+  succeeded" messages, one per helper, and each started a new lead turn.
+- Host grade: passed. Both hidden checks and the neighbour check passed. The
+  only changed path is `scripts/gate-prepass.py`.
+- The ledger shows 2 helpers (`delegated` rows), equal to the production
+  records. Fanned out: yes.
+- Time to answer 47.1 s. Active time 61.0 s, which is longer because the
+  lead's turns after the task closed still count (gap 8). The process ran
+  69 s.
+- Usage complete, every type known:
+
+| Agent | Uncached in | Cache read | Cache write | Output |
+|---|---|---|---|---|
+| lead (3 turns) | 20 | 136,879 | 13,437 | 2,553 |
+| helper, part 1 | 16 | 109,619 | 20,620 | 2,110 |
+| helper, part 2 | 26 | 302,308 | 19,243 | 4,038 |
+| total | 62 | 548,806 | 53,300 | 8,701 |
+
+- The lead wrote no code itself. It changed files through the shell only to
+  bring part 2 in: `git diff` in the helper's worktree, then `git apply` in
+  its own checkout.
+- Part 1's helper sharing the lead's checkout is current production
+  behaviour, not a rig defect. The first helper gets the lead's checkout and
+  a concurrent second one gets a worktree. That lets two agents write one
+  checkout. Here they did not overlap: the lead applied part 2 only after both
+  helpers had finished. Nothing prevents an overlap, and that is a design
+  risk to decide on.
+- Neither helper could run the fixture test, `scripts/check-gate-prepass.py`.
+  It creates its folders in `/tmp`, which the sandbox does not allow. Each
+  said so in its report.
+- Attempt 1 of this run (`8d134d72`) failed for a rig reason. Narrowing the
+  sandbox had cut off the MCP server's tool catalogue (Core's resource
+  bundle), so the CLI offered no `array_*` tools. The lead's ToolSearch for
+  `array_delegate` found nothing, so it did both parts itself (host grade:
+  passed). The fix was to read only that bundle and list the server's folder.
+  Before the rerun, a test showed a tool call from inside the sandbox reaching
+  a loopback host and getting its answer back. Rerun once.
+
 ## How fair the table is
 
 - The solo baseline is low by about 680 input tokens per request. The solo
@@ -112,9 +169,8 @@ and passing on the real fix.
 
 ## Not verified
 
-- Delegation inside the sandbox. No lead called `array_delegate`, so the path
-  from the MCP server to the host listener to a helper launch never ran live.
-  The tools were listed, but listing does not need the host.
+- Delegation is proven for one run only, with a prompt that asks for it. The
+  pilot's own Managed leads never chose to delegate.
 - Hooks: verified in the CLI sessions, recorded nowhere durable. In both
   managed reruns, Array's hooks ran: a SessionStart hook succeeded (exit 0)
   and delivered the Managed lead brief, and the stop hook reported no errors.
@@ -123,8 +179,9 @@ and passing on the real fix.
   reads them (`WorkspaceAPIService.swift`, near line 366). This is a gap, and
   is not fixed here. The first managed attempt for task 1 launched with no
   hooks, so its lead had no brief.
-- `mktemp` in the agent's shell still used the system temp folder (refused).
-  The cause is unknown.
+- `mktemp` in the agent's shell still uses the system temp folder (refused),
+  though the wrapper sets `TMPDIR`. The cause is unknown. Scripts that write in
+  `/tmp` also fail.
 - Inside the sandbox, the agent can read the CLI's Keychain login through
   `/usr/bin/security`, as it can in production. The proxy means it can send
   it only to `api.anthropic.com`.
