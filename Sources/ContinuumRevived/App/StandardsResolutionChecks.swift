@@ -79,9 +79,14 @@ enum StandardsResolutionChecks {
 
         // MARK: Claude and Codex launch configuration
 
-        guard let claudeConfig = f.delegate.workspaceMCPConfiguration(for: claudeA, harness: .claudeCode),
-              let codexConfig = f.delegate.workspaceMCPConfiguration(for: codexA, harness: .codex),
-              let claudeBConfig = f.delegate.workspaceMCPConfiguration(for: claudeB, harness: .claudeCode) else {
+        // The supervisor's own launch builder: the one presence decision, and
+        // the MCP configuration the production provider makes from it.
+        func launch(_ id: AgentID) throws -> AgentRunnerLaunch { supervisor.runnerLaunch(for: id, record: try record(id)) }
+        let launchA = try launch(claudeA), launchCodex = try launch(codexA), launchB = try launch(claudeB)
+        try expect(launchA.projectStandards && launchCodex.projectStandards && !launchB.projectStandards,
+                   "the launch decides presence from the agent's own checkout")
+        guard let claudeConfig = launchA.workspaceMCP, let codexConfig = launchCodex.workspaceMCP,
+              let claudeBConfig = launchB.workspaceMCP else {
             throw Failure(description: "production MCP configuration unavailable (build array-workspace-mcp first)")
         }
         defer {
@@ -148,8 +153,9 @@ enum StandardsResolutionChecks {
 
         // MARK: Pi launch configuration, argv and extension
 
-        let piConfig = AgentSupervisor.runnerConfig(for: try record(piA), spawnDepth: 0)
-        let piBConfig = AgentSupervisor.runnerConfig(for: try record(piB), spawnDepth: 0)
+        let piLaunch = try launch(piA), piBLaunch = try launch(piB)
+        let piConfig = AgentSupervisor.runnerConfig(for: piLaunch.record, spawnDepth: 0, projectStandards: piLaunch.projectStandards)
+        let piBConfig = AgentSupervisor.runnerConfig(for: piBLaunch.record, spawnDepth: 0, projectStandards: piBLaunch.projectStandards)
         try expect(piConfig.projectStandards && !piBConfig.projectStandards, "Pi's runner config follows its own checkout")
         let toolsA = piConfig.extraArgs.last?.components(separatedBy: ", ") ?? []
         try expect(toolsA.contains("array_standards"), "a roled Pi agent with standards is allowed array_standards: \(toolsA)")

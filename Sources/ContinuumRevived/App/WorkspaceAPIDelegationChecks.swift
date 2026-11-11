@@ -398,7 +398,8 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
                            "a lookup after delivery gives the lead a pointer, never the result again: \(looked)")
                 guard let helper = AppDelegate.workspaceMCPExecutablePath(),
                       let config = delegate.workspaceMCPHost.configuration(for: parent, serverExecutable: helper,
-                                                                           resultDelivery: supervisor.resultDelivery(for: parent)) else {
+                                                                           resultDelivery: supervisor.resultDelivery(for: parent),
+                                                                           projectStandards: false) else {
                     throw Failure(message: "missing MCP helper")
                 }
                 let client = try WorkspaceMCPCheckClient(executable: helper, environment: config.environment)
@@ -1155,7 +1156,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
     // so the user is asked again over MCP exactly as over the pi bridge.
     _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, false)
     _ = supervisor.setWorkspaceToolsEnabled(agentID: parentId, true)
-    guard let mcpConfig = delegate.workspaceMCPHost.configuration(for: parentId, serverExecutable: helper) else {
+    guard let mcpConfig = delegate.workspaceMCPHost.configuration(for: parentId, serverExecutable: helper, projectStandards: false) else {
         throw Failure(message: "the production MCP host issued no registration")
     }
     let client = try WorkspaceMCPCheckClient(executable: helper, environment: mcpConfig.environment)
@@ -1172,9 +1173,12 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
     guard let catalogURL = PiExtensionInstaller.bundledExtensionURL(fileName: WorkspaceMCPToolCatalog.fileName),
           let catalogData = FileManager.default.contents(atPath: catalogURL.path),
           let catalogRoot = try JSONSerialization.jsonObject(with: catalogData) as? [String: Any],
-          let rawTools = catalogRoot["tools"] as? [[String: Any]] else {
+          let allRawTools = catalogRoot["tools"] as? [[String: Any]] else {
         throw Failure(message: "the shared catalog beside the pi extension is unreadable")
     }
+    // This checkout has no docs/standards, so its launch offers every tool but
+    // array_standards (`docs/internals/project-standards-on-demand.md`).
+    let rawTools = allRawTools.filter { $0["op"] as? String != WorkspaceAPIOp.standardsRead.rawValue }
     // An agent Array runs is on the push channel: exactly pi's catalog, and
     // no wait_agents (that is the collect channel's alone).
     try expect(listedTools.compactMap { $0["name"] as? String }

@@ -23921,12 +23921,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The MCP server config a runner launches with. Its result channel is
     /// the supervisor's, by capability, so the server and the host agree on
     /// whether `wait_agents` exists for this agent.
-    func workspaceMCPConfiguration(for agentID: AgentID, harness: AgentHarness) -> WorkspaceMCPConfiguration? {
+    func workspaceMCPConfiguration(for agentID: AgentID, harness: AgentHarness, projectStandards: Bool) -> WorkspaceMCPConfiguration? {
         guard harness == .claudeCode || harness == .codex,
               let executable = Self.workspaceMCPExecutablePath() else { return nil }
-        let projectStandards = agentSupervisor.records[agentID].map {
-            ProjectStandards.isPresent(checkoutRoot: URL(fileURLWithPath: $0.checkoutRoot, isDirectory: true))
-        } ?? false
         return workspaceMCPHost.configuration(for: agentID, serverExecutable: executable,
                                               resultDelivery: agentSupervisor.resultDelivery(for: agentID),
                                               projectStandards: projectStandards)
@@ -24096,8 +24093,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             self.workspaceAPI.handleMCPRequest(request, completion: reply)
         }
-        agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness in
-            self?.workspaceMCPConfiguration(for: agentID, harness: harness)
+        agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness, projectStandards in
+            self?.workspaceMCPConfiguration(for: agentID, harness: harness, projectStandards: projectStandards)
         }
         agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in
             self?.workspaceAPI.policyChanged(agentId: agentId, enabled: enabled)

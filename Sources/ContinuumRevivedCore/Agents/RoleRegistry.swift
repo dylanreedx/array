@@ -71,12 +71,9 @@ public struct RoleRegistry: Sendable {
     /// every ROLED pi agent's `--tools` allowlist regardless of depth — reading
     /// your own context and opening a file are not delegation. A roleless agent
     /// sends no `--tools` and already has them.
-    public static func hostToolNames(for harness: AgentHarness) -> [String] {
-        hostToolNames(for: harness, projectStandards: true)
-    }
-
-    /// The host tools one checkout's agents are offered: `array_standards`
-    /// only where the checkout has standards.
+    /// `projectStandards` is the launch's decision (`AgentRunnerLaunch`):
+    /// `array_standards` joins only when it is true. No default, so no caller
+    /// can get it by omission.
     public static func hostToolNames(for harness: AgentHarness, projectStandards: Bool) -> [String] {
         switch harness {
         case .pi: return WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards).map(\.name)
@@ -87,7 +84,6 @@ public struct RoleRegistry: Sendable {
     private let ordered: [HarnessRole]
     private let byID: [String: HarnessRole]
     private let harness: AgentHarness
-    private let projectRoot: URL
 
     /// Whether this project declares any roles for this harness at all.
     ///
@@ -106,7 +102,6 @@ public struct RoleRegistry: Sendable {
     /// callers share.
     public init(projectRoot: URL, harness: AgentHarness = .pi, fileManager: FileManager = .default) {
         self.harness = harness
-        self.projectRoot = projectRoot
         let directory = projectRoot.appendingPathComponent(
             RoleRegistry.directoryName(for: harness), isDirectory: true)
         let declared = ((try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [])
@@ -151,7 +146,7 @@ public struct RoleRegistry: Sendable {
     ///
     /// A role that declares NO tool list is left alone: pi's default is not ours
     /// to invent, and it already includes spawning.
-    public func toolsArguments(roleId: String?, allowingSpawn: Bool) -> [String] {
+    public func toolsArguments(roleId: String?, allowingSpawn: Bool, projectStandards: Bool = false) -> [String] {
         guard let roleId, let tools = byID[roleId]?.tools else { return [] }
         let declared = tools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         var missing: [String] = []
@@ -162,8 +157,7 @@ public struct RoleRegistry: Sendable {
             missing += RoleRegistry.spawnToolNames(for: harness).filter { !declared.contains($0) }
         }
         // CX-01: the host bridge tools are not depth-gated.
-        let standards = harness == .pi && ProjectStandards.isPresent(checkoutRoot: projectRoot)
-        missing += RoleRegistry.hostToolNames(for: harness, projectStandards: standards)
+        missing += RoleRegistry.hostToolNames(for: harness, projectStandards: projectStandards)
             .filter { !declared.contains($0) && !missing.contains($0) }
         guard !missing.isEmpty else { return ["--tools", tools] }
         return ["--tools", (declared + missing).joined(separator: ", ")]

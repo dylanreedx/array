@@ -330,6 +330,9 @@ public struct WorkspaceContextResponse: Codable, Equatable, Sendable {
     public var approvalRequired: [WorkspaceAPIOp]
     public var recentOperations: [WorkspaceRecentOperation]
     public var observedAt: Date
+    /// Present only when `docs/standards` appeared or vanished after this
+    /// agent's process started: its tool list is fixed at launch.
+    public var toolListNote: String?
 
     public init(
         agentId: AgentID,

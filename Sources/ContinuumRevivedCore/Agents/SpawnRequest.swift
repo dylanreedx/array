@@ -262,11 +262,16 @@ public struct AgentRunnerLaunch: Sendable {
     /// nil is the CLI's default login. Resolved by the supervisor, which owns
     /// the accounts; the record carries only the account's id.
     public var accountConfigDirectory: String?
+    /// The ONE decision, made at launch, whether this agent is offered
+    /// `array_standards` (`docs/internals/project-standards-on-demand.md`).
+    /// Off unless the supervisor found standards in the agent's checkout.
+    public let projectStandards: Bool
 
     public init(
         record: AgentRecord, spawnDepth: Int, workspaceMCP: WorkspaceMCPConfiguration? = nil,
-        accountConfigDirectory: String? = nil
+        accountConfigDirectory: String? = nil, projectStandards: Bool = false
     ) {
+        self.projectStandards = projectStandards
         self.record = record
         self.spawnDepth = spawnDepth
         self.workspaceMCP = workspaceMCP

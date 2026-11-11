@@ -32,7 +32,7 @@ final class WorkspaceMCPHost {
 
     func configuration(for agentID: AgentID, serverExecutable: String,
                        resultDelivery: WorkspaceResultDelivery = .push,
-                       projectStandards: Bool = false) -> WorkspaceMCPConfiguration? {
+                       projectStandards: Bool) -> WorkspaceMCPConfiguration? {
         if let registration = registrations[agentID] {
             return WorkspaceMCPConfiguration(serverExecutable: serverExecutable, endpoint: registration.endpoint,
                                              agentID: agentID.rawValue.uuidString, token: registration.token,

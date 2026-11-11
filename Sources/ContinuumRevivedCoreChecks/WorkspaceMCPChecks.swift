@@ -33,12 +33,12 @@ func runWorkspaceMCPChecks() {
     // The push channel's catalogue (every agent Array runs, pi included);
     // wait_agents is the collect channel's alone and pi has no collect channel.
     let mcpNames = Set(tools.map(\.name))
-    let piNames = Set(RoleRegistry.hostToolNames(for: .pi) + RoleRegistry.spawnToolNames(for: .pi))
+    let piNames = Set(RoleRegistry.hostToolNames(for: .pi, projectStandards: true) + RoleRegistry.spawnToolNames(for: .pi))
     let expected = piNames.subtracting(piOnlyToolNames.keys)
     // RED before T3: the MCP catalog held six tools and no wait.
     expect(mcpNames == expected,
            "Claude/Codex MCP tools must equal pi's minus the written pi-only list: missing \(expected.subtracting(mcpNames).sorted()), extra \(mcpNames.subtracting(expected).sorted())")
-    expect(tools.map(\.name) == RoleRegistry.hostToolNames(for: .pi),
+    expect(tools.map(\.name) == RoleRegistry.hostToolNames(for: .pi, projectStandards: true),
            "the catalog's host tools must be exactly pi's --tools host allowlist, in order: \(tools.map(\.name))")
     expect(Set(tools.map(\.operation)) == Set(WorkspaceAPIOp.allCases) && Set(tools.map(\.operation)).count == tools.count,
            "every host operation needs exactly one tool, or context() would advertise an op no tool reaches")

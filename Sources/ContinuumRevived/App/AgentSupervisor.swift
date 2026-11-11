@@ -1164,7 +1164,22 @@ final class AgentSupervisor {
 
     /// Native Claude/Codex MCP launch material. The app wires this to its
     /// per-agent host listener; nil keeps checks and unmanaged runners inert.
-    var workspaceMCPConfigurationProvider: ((AgentID, AgentHarness) -> WorkspaceMCPConfiguration?)?
+    var workspaceMCPConfigurationProvider: ((AgentID, AgentHarness, _ projectStandards: Bool) -> WorkspaceMCPConfiguration?)?
+    /// Whether each agent's latest launch was offered `array_standards`.
+    /// `workspace.context` reads this rather than the folder, so it agrees
+    /// with the tool list the process actually has.
+    private(set) var standardsOfferedAtLaunch: [AgentID: Bool] = [:]
+
+    /// What a turn's runner is built from. Decides standards presence ONCE
+    /// (a name listing, no file reads) and hands that one answer to the MCP
+    /// configuration, Pi's argv and environment, and `workspace.context`.
+    func runnerLaunch(for id: AgentID, record: AgentRecord) -> AgentRunnerLaunch {
+        let standards = ProjectStandards.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
+        standardsOfferedAtLaunch[id] = standards
+        return AgentRunnerLaunch(record: record, spawnDepth: depth(of: id),
+                                 workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi, standards),
+                                 projectStandards: standards)
+    }
 
     /// CX-01 (§14.1): fired after `setWorkspaceToolsEnabled` persists a change, so
     /// the host grant table can revoke (or start honouring) the agent's policy.
@@ -1931,7 +1946,7 @@ final class AgentSupervisor {
     /// every prompt. The one-shot JSON runner remains as an explicit diagnostic
     /// escape hatch (`CONTINUUM_PI_TRANSPORT=oneshot`) and parity baseline.
     nonisolated static func piRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
-        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth)
+        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth, projectStandards: launch.projectStandards)
         guard piSessionTransportEnabled() else {
             return PiAgentRunner(config: config)
         }
@@ -2069,7 +2084,7 @@ final class AgentSupervisor {
     /// defaulted parameter is exactly how that happened once; it does not get a
     /// second chance.
     nonisolated static func runnerConfig(
-        for record: AgentRecord, spawnDepth: Int
+        for record: AgentRecord, spawnDepth: Int, projectStandards: Bool = false
     ) -> PiAgentRunner.Config {
         let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         // `model`/`thinking` come from the RECORD: the role already decided them at
@@ -2099,11 +2114,11 @@ final class AgentSupervisor {
             // refusing after the fact: it never proposes what it cannot have.
             extraArgs: record.role.map {
                 RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
-                    .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth)
+                    .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth,
+                                    projectStandards: projectStandards)
             } ?? [],
             processOwner: AgentProcessAttribution.ownerTag(for: record.id),
-            projectStandards: ProjectStandards.isPresent(
-                checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
+            projectStandards: projectStandards
         )
     }
 
@@ -3682,10 +3697,10 @@ final class AgentSupervisor {
             } else {
                 idle.stop()
                 interruptWorkingClaudeMirroredChildren(of: id)
-                runner = makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
+                runner = makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
             }
         } else {
-            runner = makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
+            runner = makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
         }
         pendingModeRestarts.remove(id)
         runningModes[id] = record.mode
@@ -20935,7 +20950,7 @@ private func checkSpawnFromToolCall(
     let childRunnerArgs = AgentSupervisor.runnerConfig(for: child, spawnDepth: childDepth).extraArgs
     // CX-01: Array's host bridge tools follow every roled pi agent, at any depth.
     let expectedChildTools = "\(scoutTools), "
-        + (RoleRegistry.spawnToolNames(for: .pi) + RoleRegistry.hostToolNames(for: .pi)).joined(separator: ", ")
+        + (RoleRegistry.spawnToolNames(for: .pi) + RoleRegistry.hostToolNames(for: .pi, projectStandards: false)).joined(separator: ", ")
     guard childRunnerArgs == ["--tools", expectedChildTools] else {
         throw fail("the child's runner would not pass its role's tools plus the spawn verbs it is under the cap for: \(childRunnerArgs)")
     }

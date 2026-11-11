@@ -108,7 +108,7 @@ enum WorkspaceAgentReportChecks {
         }
 
         func configuration(for agent: AgentID) throws -> WorkspaceMCPConfiguration {
-            guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper) else {
+            guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper, projectStandards: false) else {
                 throw Failure(description: "the production MCP host issued no registration for \(agent)")
             }
             try config.materialize()
@@ -121,7 +121,7 @@ enum WorkspaceAgentReportChecks {
         /// and lookups hand out bodies under leases.
         func collectConfiguration(for agent: AgentID) throws -> WorkspaceMCPConfiguration {
             f.delegate.agentSupervisor.helperCompletionEnabled = { _ in false }
-            guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper, resultDelivery: .collect) else {
+            guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper, resultDelivery: .collect, projectStandards: false) else {
                 throw Failure(description: "the production MCP host issued no registration for \(agent)")
             }
             try config.materialize()

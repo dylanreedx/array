@@ -233,11 +233,28 @@ public enum ProjectStandards {
                                      issues: issues.sorted { ($0.path, $0.line ?? 0) < ($1.path, $1.line ?? 0) })
     }
 
-    /// Whether `array_standards` is offered to an agent in this checkout.
-    public static func isPresent(checkoutRoot: URL) -> Bool {
-        guard let index = scan(checkoutRoot: checkoutRoot) else { return false }
-        return !index.standards.isEmpty || !index.issues.isEmpty
+    /// Whether an agent launched in this checkout is offered `array_standards`.
+    /// The one definition of presence: a name listing that reads no file.
+    /// True when `docs/standards` is a symlink (reads then refuse it, naming
+    /// it), or holds a `*.md` other than `README.md` at its top level or one
+    /// folder down.
+    public static func isPresent(checkoutRoot: URL, fileManager: FileManager = .default) -> Bool {
+        let folder = checkoutRoot.appendingPathComponent(directory, isDirectory: true)
+        guard let type = (try? fileManager.attributesOfItem(atPath: folder.path))?[.type] as? FileAttributeType else { return false }
+        if type == .typeSymbolicLink { return true }
+        guard type == .typeDirectory else { return false }
+        func isCandidate(_ name: String) -> Bool { name.hasSuffix(".md") && name != readmeName }
+        for name in (try? fileManager.contentsOfDirectory(atPath: folder.path)) ?? [] {
+            if isCandidate(name) { return true }
+            let nested = (try? fileManager.contentsOfDirectory(atPath: folder.appendingPathComponent(name).path)) ?? []
+            if nested.contains(where: isCandidate) { return true }
+        }
+        return false
     }
+
+    /// What `workspace.context` says when presence changed after launch.
+    public static let toolListNote =
+        "Tools are fixed when this agent starts; docs/standards changed since, so array_standards updates at its next start."
 
     public static func version(of data: Data) -> String {
         "sha256:" + SHA256.hash(data: data).prefix(8).map { String(format: "%02x", $0) }.joined()
