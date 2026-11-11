@@ -43,6 +43,8 @@ MACH = ['com.apple.SecurityServer', 'com.apple.securityd.xpc', 'com.apple.system
 DEVICES = ['/dev/null', '/dev/zero', '/dev/random', '/dev/urandom', '/dev/dtracehelper']
 HOOK_PROBE_PARENT = os.path.realpath(subprocess.check_output(['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']).decode().strip()).rstrip('/')
 CORE_RESOURCES = 'continuum-revived_ContinuumRevivedCore.bundle'
+# Host-owned stand-ins first on the agent's PATH (read-only to the agent).
+LIVE_BIN = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'live-bin')
 XCODE_TOOLS = '/Applications/Xcode.app/Contents/Developer/usr/bin'
 # The subagent tool's name, and its older one.
 BUILT_IN_SUBAGENTS = 'Agent,Task'
@@ -86,10 +88,10 @@ def profile(root, claude, proxy_port, programs=(), extra_files=(), extra_folders
     Read: those, plus the Keychain files and the MCP config and token files.
     Write: the run root and a few device files. Metadata (stat) is readable
     everywhere; directory listings and contents are not."""
-    readable = TOOLCHAIN + KEYCHAIN + [root] + list(extra_folders)
+    readable = TOOLCHAIN + KEYCHAIN + [root, LIVE_BIN] + list(extra_folders)
     programs = [claude] + list(programs)
     literals = programs + list(extra_files)
-    executable = TOOLCHAIN + [root]
+    executable = TOOLCHAIN + [root, LIVE_BIN]
     writable = [root] + ([probe_folder] if probe_folder else [])
     ports = [proxy_port] + list(extra_ports)
     return ''.join([
@@ -121,7 +123,7 @@ def main(argv):
     proxy = 'http://127.0.0.1:%d' % port
     # Xcode's own git and python3 first: the /usr/bin shims need a cache in the
     # user's temp folder, which is outside the run.
-    child['PATH'] = XCODE_TOOLS + ':' + child.get('PATH', '/usr/bin:/bin')
+    child['PATH'] = LIVE_BIN + ':' + XCODE_TOOLS + ':' + child.get('PATH', '/usr/bin:/bin')
     child.update(CLAUDE_CONFIG_DIR=str(config), CLAUDE_SECURESTORAGE_CONFIG_DIR='',
                  HTTPS_PROXY=proxy, HTTP_PROXY=proxy, https_proxy=proxy, http_proxy=proxy,
                  NO_PROXY='localhost,127.0.0.1', no_proxy='localhost,127.0.0.1',
