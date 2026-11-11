@@ -1,0 +1,29 @@
+HOLD-lead SECRET-PROMPT
+<next>
+<array-agent-message from="id0" name="HOLD-shared FRAMES-shared SECRET-BRIEF When done, call…">
+HOLD-shared FRAMES-shared SECRET-BRIEF When done, call… finished: succeeded
+SECRET-REPORT-shared
+</array-agent-message>
+<next>
+<array-agent-message from="id1" name="HOLD-claude FRAMES-claude SECRET-BRIEF When done, call…">
+HOLD-claude FRAMES-claude SECRET-BRIEF When done, call… finished: succeeded
+SECRET-REPORT-claude
+</array-agent-message>
+<next>
+<array-agent-message from="id2" name="HOLD-codex FRAMES-codex SECRET-BRIEF When done, call…">
+HOLD-codex FRAMES-codex SECRET-BRIEF When done, call… finished: succeeded
+SECRET-REPORT-codex
+</array-agent-message>
+<next>
+<array-agent-message from="id3" name="HOLD-lost FRAMES-lost SECRET-BRIEF When done, call…">
+HOLD-lost FRAMES-lost SECRET-BRIEF When done, call… finished: succeeded
+SECRET-REPORT-lost
+</array-agent-message>
+<next>
+{"requestId":"id4","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
+<next>
+{"requestId":"id5","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
+<next>
+{"requestId":"id6","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
+<next>
+{"requestId":"id7","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
