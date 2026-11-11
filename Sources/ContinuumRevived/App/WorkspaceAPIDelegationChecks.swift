@@ -290,7 +290,10 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
         // sidebar until popped out. Exercise the same cross-harness contract in
         // both modes. Ignore ambient argument/global defaults as well as the
         // user's app preferences, and remove the private suite after the run.
-        let modeSuite = "array.qa.cross-harness-mode"
+        // The suite is a per-user cfprefsd domain shared by every process, so
+        // its name is unique per run: a fixed name let a concurrent run of this
+        // fixture flip the policy mid-assertion.
+        let modeSuite = "array.qa.cross-harness-mode.\(UUID().uuidString)"
         let modePolicy = QAIsolatedDefaults(isolatedSuiteName: modeSuite)!
         modePolicy.removePersistentDomain(forName: modeSuite)
         defer { modePolicy.removePersistentDomain(forName: modeSuite) }
