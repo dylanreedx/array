@@ -348,6 +348,8 @@ struct SettingsFieldRow: View {
         switch field {
         case let .toggle(key, _, _) where key == PersonalRulesConfig.enabledKey:
             PersonalRulesToggleRow(row: row, model: model)
+        case let .toggle(key, _, _) where key == ReplyStandard.enabledKey:
+            ReplyRulesToggleRow(row: row, model: model)
         case .toggle:
             ToggleRow(row: row, model: model)
         case let .choice(key, _, _, _, _) where key == AgentModelConfig.modelKey:
@@ -416,6 +418,26 @@ struct PersonalRulesToggleRow: View {
                        instructions: HostLaunchInstructions = .shared) -> String {
         guard let outcome = source.lastOutcome else { return "Not read yet: it is read when the next Codex or Pi agent starts." }
         return [outcome.summary, instructions.codexNote.value.map { $0 + "." }].compactMap { $0 }.joined(separator: " ")
+    }
+}
+
+/// The reply-rules switch with why the last Codex launch went without host
+/// text, when it did. Reading state only.
+struct ReplyRulesToggleRow: View {
+    let row: SettingsRow
+    let model: SettingsModel
+
+    var body: some View {
+        let binding = model.binding(for: row.field)
+        let status = binding.bool ? ReplyRulesToggleRow.status() : nil
+        Toggle(isOn: Binding(get: { binding.bool }, set: { binding.set(.bool($0)) })) {
+            SettingsRowLabel(title: row.field.label, help: [row.help, status].compactMap { $0 }.joined(separator: " "))
+        }
+        .toggleStyle(.switch)
+    }
+
+    static func status(instructions: HostLaunchInstructions = .shared) -> String? {
+        instructions.codexNote.value.map { $0 + "." }
     }
 }
 

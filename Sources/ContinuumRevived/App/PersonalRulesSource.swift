@@ -134,17 +134,20 @@ struct HostLaunchInstructions: Sendable {
     func codexArguments(_ config: CodexAgentRunner.Config) -> [String] {
         let blocks = blocks()
         guard !blocks.isEmpty else { return config.extraArgs }
+        let userText: String?
         switch codexUserInstructions(config.codexHome, config.cwd) {
         case .unknown(let reason):
             codexNote.set("Not added to Codex: " + reason)
             return config.extraArgs
-        case .none:
-            codexNote.set(nil)
-            return Self.render(blocks, codex: true, existingArguments: config.extraArgs)
-        case .text(let own):
-            codexNote.set(nil)
-            return Self.render(blocks, codex: true, existingArguments: config.extraArgs, userText: own)
+        case .none: userText = nil
+        case .text(let own): userText = own
         }
+        let arguments = Self.render(blocks, codex: true, existingArguments: config.extraArgs, userText: userText)
+        // With blocks to add, `render` leaves the arguments as they were only
+        // when instruction text already in them cannot be decoded.
+        codexNote.set(arguments == config.extraArgs
+            ? "Not added to Codex: instructions already set for this launch could not be read" : nil)
+        return arguments
     }
 
     func piArguments(_ config: PiAgentRunner.Config) -> [String] {
