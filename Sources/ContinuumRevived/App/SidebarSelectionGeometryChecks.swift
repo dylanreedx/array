@@ -92,15 +92,37 @@ enum SidebarSelectionGeometryChecks {
                         }
                         continue
                     }
+                    _ = inbox.selectRowForQA(id: lead)
+                    inbox.layoutViewportForQA()
+                    for helper in [parent] + Array(helpers.prefix(count)) {
+                        if let selectedCell = inbox.cellForQA(id: helper.id),
+                           lights(selectedCell).contains(where: { !$0.isHidden }) {
+                            throw Failure(message: "selected group retains a second tinted or outlined surface")
+                        }
+                    }
+                    inbox.clearSelectionForQA()
+                    inbox.layoutViewportForQA()
                     for _ in 0..<2 {
                         guard let cell = inbox.cellForQA(id: lead), let light = lights(cell).first else { throw Failure(message: "missing lead light") }
                         if style != .classic && !light.isHidden {
                             let card = cell.qaCardFrameForQA
                             guard let surface = light.layer?.sublayers?.first,
-                                  abs(surface.frame.height - card.height) < 0.5,
-                                  light.bounds.contains(surface.frame), surface.cornerRadius > 0,
-                                  surface.sublayers?.contains(where: { ($0 as? CAShapeLayer)?.strokeColor != nil }) == true else {
-                                throw Failure(message: "\(style)/dark-\(dark): expanded lead selection loses its complete rounded surface or even outline")
+                                  let slice = inbox.ownershipSliceForQA(id: lead),
+                                  abs(surface.frame.height - (slice.groupHeight - SidebarDensityProposal.production.gapBetweenRows)) < 0.5,
+                                  style == .sheen || surface.sublayers?.contains(where: { ($0 as? CAShapeLayer)?.strokeColor != nil }) != true else {
+                                throw Failure(message: "family tint is split into a second outlined surface or an internal slab edge")
+                            }
+                            let family = light.convert(surface.frame, to: inbox)
+                            for helper in helpers {
+                                if let helperCell = inbox.cellForQA(id: helper.id),
+                                   let helperLight = lights(helperCell).first, !helperLight.isHidden,
+                                   let helperSurface = helperLight.layer?.sublayers?.first {
+                                    let other = helperLight.convert(helperSurface.frame, to: inbox)
+                                    guard abs(other.minY - family.minY) < 0.5,
+                                          abs(other.height - family.height) < 0.5 else {
+                                        throw Failure(message: "tint slices disagree and create an internal hard edge")
+                                    }
+                                }
                             }
                         }
                         let selectedCard = cell.convert(cell.qaCardFrameForQA, to: inbox)
@@ -108,16 +130,6 @@ enum SidebarSelectionGeometryChecks {
                             if let helperCell = inbox.cellForQA(id: helper.id),
                                selectedCard.intersects(helperCell.convert(helperCell.bounds, to: inbox)) {
                                 throw Failure(message: "helper paint overlaps the lead selection corners")
-                            }
-                        }
-                        if !light.isHidden, let surface = light.layer?.sublayers?.first {
-                            var ancestor = light.superview
-                            while let owner = ancestor, owner !== inbox {
-                                let fullSurface = owner.convert(surface.frame, from: light)
-                                if owner.clipsToBounds && !owner.bounds.insetBy(dx: -0.5, dy: -0.5).contains(fullSurface) {
-                                    throw Failure(message: "lead selection clipped by \(type(of: owner))")
-                                }
-                                ancestor = owner.superview
                             }
                         }
                         inbox.toggleCollapse(parentId: lead)
@@ -128,10 +140,9 @@ enum SidebarSelectionGeometryChecks {
                             guard let sampled = inbox.cellForQA(id: lead), let light = lights(sampled).first else { throw Failure(message: "missing sampled lead") }
                             if !light.isHidden {
                                 guard let surface = light.layer?.sublayers?.first,
-                                      light.bounds.contains(surface.frame),
-                                      abs(surface.frame.height - sampled.qaCardFrameForQA.height) < 0.5,
-                                      surface.cornerRadius > 0,
-                                      surface.sublayers?.contains(where: { ($0 as? CAShapeLayer)?.strokeColor != nil }) == true else {
+                                      let slice = inbox.ownershipSliceForQA(id: lead),
+                                      abs(surface.frame.height - (slice.groupHeight - SidebarDensityProposal.production.gapBetweenRows)) < 0.5,
+                                      style == .sheen || surface.sublayers?.contains(where: { ($0 as? CAShapeLayer)?.strokeColor != nil }) != true else {
                                     throw Failure(message: "selection corners or outline clipped during fold")
                                 }
                             }

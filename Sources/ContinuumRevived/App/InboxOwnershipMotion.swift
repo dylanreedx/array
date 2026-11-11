@@ -476,18 +476,13 @@ struct InboxOwnershipChrome {
                 spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat, indicatorStyle: String) {
         let bleed = spacing / 2
         let top = slice.continuesAbove ? -bleed : 0
-        let leadSurfaceHeight = max(1, slice.leadHeight + Self.headOverlap - gap)
-        let leadSurface = slice.rowIndex == 0 && slice.activeGroup && indicatorStyle != "current"
-        let bottom = max(bounds.height + (slice.continuesBelow ? bleed : 0),
-                         leadSurface ? gap / 2 + leadSurfaceHeight : 0)
+        let bottom = bounds.height + (slice.continuesBelow ? bleed : 0)
         let clip = NSRect(x: 0, y: top, width: bounds.width, height: max(0, bottom - top))
         let card = NSRect(x: gutter, y: -slice.offset + gap / 2,
                           width: max(0, bounds.width - gutter * 2), height: max(0, slice.groupHeight - gap))
 
         groupLight.frame = clip
-        var lightCard = card.offsetBy(dx: 0, dy: -top)
-        if leadSurface { lightCard.size.height = leadSurfaceHeight }
-        groupLight.show(slice, card: lightCard, style: indicatorStyle)
+        groupLight.show(slice, card: card.offsetBy(dx: 0, dy: -top), style: indicatorStyle)
         sheet.clipsToBounds = false
         sheet.frame = clip
         let strip = card.intersection(clip)

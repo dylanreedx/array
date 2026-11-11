@@ -2827,6 +2827,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 if case .agent(let row) = items[$0] { return row.id == openAgentId || (SidebarActiveIndicatorScope.resolve(in: indicatorDefaults) == .working && row.state == .working) }
                 return false
             }
+            let hasSelectedMember = (start...end).contains { tableView.selectedRowIndexes.contains($0) }
             let focusHeight = max(1, groupHeight - SidebarDensityProposal.production.gapBetweenRows)
             let focusTarget = runningOffset.map { $0 / focusHeight } ?? min(0.9, heights[0] / focusHeight * 0.8)
             if let old = groupFocusMemory[lead.id] {
@@ -2845,7 +2846,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
                     sweepPhase: sweepPhase, sweepColour: lead.identityColor,
                     raisedAsk: index == start ? ask : nil,
-                    activeGroup: activeGroup,
+                    activeGroup: activeGroup && !hasSelectedMember,
                     leadHeight: heights[0], runningY: runningOffset,
                     rowIndex: index - start, focusFrom: focusMemory?.from,
                     focusChangedAt: focusMemory?.changedAt)
@@ -4433,6 +4434,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // selections — with a range selected, a single index cannot name them.
         let previous = selectedRowsForEmphasis
         selectedRowsForEmphasis = tableView.selectedRowIndexes
+        ownershipByTableRow = ownsSubagents ? ownershipSlices() : []
+        refreshVisibleOwnership()
         // P1.4: which INPUT moved the selection decides whether the focus ring is
         // armed, and it is resolved before the rows are redrawn so the ring and
         // the fill are painted by the SAME rebuild — see `setKeyboardFocus`.
