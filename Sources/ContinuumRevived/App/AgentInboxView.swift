@@ -3414,13 +3414,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// Select `ids` again after a full reload, the rows still drawn only, and
-    /// repaint them and the bulk bar from that selection.
+    /// repaint them and the bulk bar from that selection. A selection that moves
+    /// reaches `tableViewSelectionDidChange`, which already redraws the rows whose
+    /// emphasis changed; reloading them again here built each restored row twice.
     private func restoreSelection(ids: [UUID]) {
         let restored = IndexSet(ids.compactMap(tableRow(forAgentId:)))
         guard !restored.isEmpty else { return }
+        let stale = selectedRowsForEmphasis.symmetricDifference(restored)
+        let selectionMoves = tableView.selectedRowIndexes != restored
         tableView.selectRowIndexes(restored, byExtendingSelection: false)
-        selectedRowsForEmphasis = restored
-        tableView.reloadData(forRowIndexes: restored, columnIndexes: IndexSet(integer: 0))
+        if !selectionMoves {
+            selectedRowsForEmphasis = restored
+            redraw(tableRows: Array(stale))
+        }
         updateBulkBar()
     }
 
