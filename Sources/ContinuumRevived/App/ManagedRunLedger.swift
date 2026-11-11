@@ -27,6 +27,11 @@ final class ManagedRunLedger: @unchecked Sendable {
         var effort: String?
         var tokens: TokenUsageSnapshot.TypedCounts?
         var incomplete: [String]?
+        var modelSource: String?
+        var parent: UUID?
+        var turn: String?
+        var late: Bool?
+        var mode: String?
     }
     // Live only: a helper delegated before this process started has no entry,
     // and its report records that instead of pretending to have watched it.
@@ -129,11 +134,13 @@ final class ManagedRunLedger: @unchecked Sendable {
             append(Row(kind: "taskInterrupted", task: task, agent: agent, source: "interrupted/\(task)", openParts: pending))
         }
     }
-    func submission(agent: UUID, project: UUID?) {
+    func submission(agent: UUID, project: UUID?, mode: String? = nil) {
         queue.async {
             let task = self.active[agent] ?? UUID()
             if self.active[agent] == nil {
-                self.append(Row(kind: "taskOpened", task: task, agent: agent, source: "open/\(task)", previousTask: self.previous[agent], project: project))
+                var opened = Row(kind: "taskOpened", task: task, agent: agent, source: "open/\(task)", previousTask: self.previous[agent], project: project)
+                opened.mode = mode
+                self.append(opened)
             }
             self.sessionTasks[agent] = task
             self.append(Row(kind: "submission", task: task, agent: agent, source: UUID().uuidString))
@@ -166,75 +173,188 @@ final class ManagedRunLedger: @unchecked Sendable {
     // MARK: Token usage (`.plans/116` part 14 step 1)
 
     typealias Counts = TokenUsageSnapshot.TypedCounts
-    private struct UsageBuffer { var task: UUID; var tokens: Counts?; var incomplete = Set<String>() }
-    /// Per agent that ran the work, per (task, model): counters since its last
-    /// turn end. Memory only; a turn end hands them to `append`.
-    private var usageBuffers: [UUID: [String: UsageBuffer]] = [:]
-    private var usageObserved = Set<UUID>()
+    /// Who ran the work, read from the agent's record on the event path.
+    struct UsageIdentity {
+        var harness: String?
+        /// The record's model id: used only where the stream names none.
+        var model: String?
+        var effort: String?
+        var parent: UUID?
+        /// A provider-run child whose usage the provider reports only inside
+        /// its parent's (Claude in-process subagents).
+        var reportedByParent = false
+    }
+    /// A model id and where it came from (`cli` or `record`); nil is unknown.
+    struct UsageModel: Hashable { var id: String?; var source: String? }
+    private struct UsageKey: Hashable { var task: UUID; var model: UsageModel }
+    private struct UsageBuffer { var tokens: Counts?; var incomplete = Set<String>() }
+    private struct OpenTurn {
+        var turn: String
+        var observed = false
+        var identity: UsageIdentity?
+        var buffers: [UsageKey: UsageBuffer] = [:]
+    }
+    /// Per agent, the turn whose end has not been seen and its counters so far.
+    /// Memory only; the turn end, a task close or the next turn writes them.
+    private var openTurns: [UUID: OpenTurn] = [:]
+    /// Each agent's parent, as its record names it: a helper or provider-run
+    /// child at any depth is charged to the task its chain leads to.
+    private var usageParents: [UUID: UUID] = [:]
     /// Codex cumulative totals per provider thread, live only: the baseline
     /// each report is differenced against, and its provider time.
     private var codexTotals: [String: (counts: Counts, at: Date?)] = [:]
     private var claudeResults = Set<String>()
+    /// The task of usage whose agent has no task in its chain (a top-level
+    /// agent no human prompted in this process): recorded, never dropped.
+    static let noTask = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
-    /// One usage snapshot, on the event path: one enqueue. `owner` is the agent
-    /// that ran the work (a provider-run child's usage is its parent's).
-    /// `record` false keeps Codex baselines current and records nothing, so
-    /// turning recording back on never charges the off period to a task.
-    func usage(owner: UUID, model: String, _ snapshot: TokenUsageSnapshot, record: Bool) {
+    private func usageTask(_ agent: UUID) -> UUID? {
+        var current = agent
+        for _ in 0..<64 {
+            if let task = sessionTasks[current] { return task }
+            guard let parent = usageParents[current], parent != current else { return nil }
+            current = parent
+        }
+        return nil
+    }
+
+    /// A turn started: later usage that names it (or names no turn) waits for
+    /// its end. A turn that started before the previous one's end was seen
+    /// writes what the previous one gathered, so nothing waits forever.
+    func usageTurnStarted(agent: UUID, turn: String) {
         queue.async {
-            for (model, step) in Self.usageSteps(snapshot, model: model, codexTotals: &self.codexTotals, claudeResults: &self.claudeResults) {
-                // An agent with no task (a solo Free agent) has no request id
-                // in this ledger yet; its usage stops here.
-                guard record, let task = self.sessionTasks[owner] else { continue }
-                self.usageObserved.insert(owner)
-                var buffer = self.usageBuffers[owner]?["\(task)|\(model)"] ?? UsageBuffer(task: task)
-                switch step {
-                case let .add(counts, reason):
-                    buffer.tokens = buffer.tokens.map { Self.sum($0, counts) } ?? counts
-                    if let reason { buffer.incomplete.insert(reason) }
-                case let .unknown(reason): buffer.incomplete.insert(reason)
-                case .ignore: continue
+            if let open = self.openTurns[agent] {
+                if open.turn == turn { return }
+                self.writeBuffers(agent, open, sourcePrefix: "usage-unended", extra: ["turnEndNotSeen"])
+            }
+            self.openTurns[agent] = OpenTurn(turn: turn)
+        }
+    }
+
+    /// One usage snapshot, on the event path: one enqueue. `record` false keeps
+    /// Codex baselines current and records nothing, so turning recording back
+    /// on never charges the off period to a task.
+    func usage(agent: UUID, _ identity: UsageIdentity, _ snapshot: TokenUsageSnapshot, record: Bool) {
+        queue.async {
+            let steps = Self.usageSteps(snapshot, recordModel: identity.model,
+                                        codexTotals: &self.codexTotals, claudeResults: &self.claudeResults)
+            if let parent = identity.parent { self.usageParents[agent] = parent }
+            let turn = snapshot.accountingTurn ?? self.openTurns[agent]?.turn
+            let task = self.usageTask(agent) ?? Self.noTask
+            if let turn, var open = self.openTurns[agent], open.turn == turn {
+                open.observed = true
+                if record {
+                    open.identity = identity
+                    for (model, step) in steps {
+                        var buffer = open.buffers[UsageKey(task: task, model: model)] ?? UsageBuffer()
+                        if Self.fold(step, into: &buffer) { open.buffers[UsageKey(task: task, model: model)] = buffer }
+                    }
                 }
-                self.usageBuffers[owner, default: [:]]["\(task)|\(model)"] = buffer
+                self.openTurns[agent] = open
+                return
+            }
+            // Its turn's rows are already written, or it names no turn: a late
+            // row for the turn it names, never folded into another turn.
+            guard record else { return }
+            for (model, step) in steps {
+                var buffer = UsageBuffer()
+                guard Self.fold(step, into: &buffer) else { continue }
+                self.append(self.usageRow(agent, identity, turn: turn, task: task, model: model, buffer,
+                                          source: "usage-late/\(agent)/\(UUID().uuidString)", late: true))
             }
         }
     }
 
-    /// The agent's turn ended: its buffered counters become rows. A turn of an
-    /// agent with a task that reported no usage at all is recorded as unknown.
-    func usageTurnEnded(agent: UUID, turn: String, harness: String?, model: String, effort: String?, record: Bool) {
+    /// The agent's turn ended: its buffered counters become rows. A turn that
+    /// reported no usage at all is recorded as unknown.
+    func usageTurnEnded(agent: UUID, turn: String, _ identity: UsageIdentity, record: Bool) {
         queue.async {
-            let buffers = self.usageBuffers.removeValue(forKey: agent) ?? [:]
-            let observed = self.usageObserved.remove(agent) != nil
+            guard let open = self.openTurns[agent], open.turn == turn else { return }
+            self.openTurns[agent] = nil
             guard record else { return }
-            func row(_ task: UUID, _ model: String, _ tokens: Counts?, _ incomplete: Set<String>) -> Row {
-                var row = Row(kind: "usage", task: task, agent: agent, part: self.parts[agent],
-                              source: "usage/\(agent)/\(turn)/\(task)/\(model)")
-                (row.harness, row.model, row.effort, row.tokens) = (harness, model, effort, tokens)
-                row.incomplete = incomplete.isEmpty ? nil : incomplete.sorted()
-                return row
+            if let parent = identity.parent { self.usageParents[agent] = parent }
+            if !open.observed {
+                let model = identity.model.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+                let buffer = UsageBuffer(tokens: nil, incomplete: [identity.reportedByParent ? "reportedByParent" : "noUsage"])
+                self.append(self.usageRow(agent, identity, turn: turn, task: self.usageTask(agent) ?? Self.noTask,
+                                          model: UsageModel(id: model, source: model == nil ? nil : "record"), buffer,
+                                          source: "usage/\(agent)/\(turn)/none", late: false))
             }
-            if buffers.isEmpty, !observed, let task = self.sessionTasks[agent] {
-                self.append(row(task, model, nil, ["noUsage"]))
-            }
-            for (key, buffer) in buffers.sorted(by: { $0.key < $1.key }) {
-                self.append(row(buffer.task, String(key.split(separator: "|", maxSplits: 1)[1]), buffer.tokens, buffer.incomplete))
-            }
+            var withIdentity = open
+            withIdentity.identity = identity
+            self.writeBuffers(agent, withIdentity, sourcePrefix: "usage", extra: [])
         }
+    }
+
+    private func writeBuffers(_ agent: UUID, _ open: OpenTurn, sourcePrefix: String, extra: Set<String>, task only: UUID? = nil) {
+        let identity = open.identity ?? UsageIdentity()
+        let keys = open.buffers.keys.filter { only == nil || $0.task == only }
+            .sorted { ($0.task.uuidString, $0.model.id ?? "") < ($1.task.uuidString, $1.model.id ?? "") }
+        for key in keys {
+            guard var buffer = open.buffers[key] else { continue }
+            buffer.incomplete.formUnion(extra)
+            self.append(usageRow(agent, identity, turn: open.turn, task: key.task, model: key.model, buffer,
+                                 source: "\(sourcePrefix)/\(agent)/\(open.turn)/\(key.task)/\(key.model.id ?? "-")", late: false))
+        }
+    }
+
+    /// A task closed: what its agents' open turns gathered so far is written
+    /// now; anything those turns report later is written at their end.
+    private func flushUsage(task: UUID) {
+        for (agent, open) in openTurns where open.buffers.keys.contains(where: { $0.task == task }) {
+            writeBuffers(agent, open, sourcePrefix: "usage-close", extra: [], task: task)
+            var rest = open
+            rest.buffers = rest.buffers.filter { $0.key.task != task }
+            openTurns[agent] = rest
+        }
+    }
+
+    private func usageRow(_ agent: UUID, _ identity: UsageIdentity, turn: String?, task: UUID, model: UsageModel,
+                          _ buffer: UsageBuffer, source: String, late: Bool) -> Row {
+        var row = Row(kind: "usage", task: task, agent: agent, part: parts[agent], source: source)
+        (row.harness, row.effort, row.parent, row.turn) = (identity.harness, identity.effort, identity.parent, turn)
+        (row.model, row.modelSource) = (model.id, model.id == nil ? nil : model.source)
+        (row.tokens, row.late) = (buffer.tokens, late ? true : nil)
+        var flags = buffer.incomplete
+        if task == Self.noTask { flags.insert("noTask") }
+        row.incomplete = flags.isEmpty ? nil : flags.sorted()
+        return row
+    }
+
+    /// Whether the step leaves anything to record.
+    private static func fold(_ step: UsageStep, into buffer: inout UsageBuffer) -> Bool {
+        switch step {
+        case let .add(counts, reason):
+            buffer.tokens = buffer.tokens.map { sum($0, counts) } ?? counts
+            if let reason { buffer.incomplete.insert(reason) }
+        case let .unknown(reason): buffer.incomplete.insert(reason)
+        case .ignore: return false
+        }
+        return true
     }
 
     enum UsageStep: Equatable { case add(Counts, String?), unknown(String), ignore }
 
     /// What one snapshot adds, per model. Claude: the result's share, once per
-    /// result id. Codex: the cumulative total differenced per thread, in
-    /// provider time; a report older than the newest is already inside it.
-    static func usageSteps(_ snapshot: TokenUsageSnapshot, model: String,
+    /// result id, under the model ids the CLI names. Codex: the cumulative
+    /// total differenced per thread, in provider time; a report older than the
+    /// newest is already inside it. A thread with no baseline here charges
+    /// nothing unless this process saw it start: its first total becomes the
+    /// baseline and the turn is marked.
+    static func usageSteps(_ snapshot: TokenUsageSnapshot, recordModel: String?,
                            codexTotals: inout [String: (counts: Counts, at: Date?)],
-                           claudeResults: inout Set<String>) -> [(String, UsageStep)] {
+                           claudeResults: inout Set<String>) -> [(UsageModel, UsageStep)] {
+        func known(_ id: String?) -> String? { id.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 } }
+        let model = known(snapshot.accountingModel).map { UsageModel(id: $0, source: "cli") }
+            ?? UsageModel(id: known(recordModel), source: known(recordModel) == nil ? nil : "record")
         if let byModel = snapshot.typedCountsByModel {
             if let id = snapshot.accountingObservationID, !claudeResults.insert(id).inserted { return [(model, .ignore)] }
+            if byModel.isEmpty { return [(model, .unknown("untyped"))] }
             let reason = snapshot.accountingReconciled == false ? "unreconciled" : nil
-            return byModel.sorted { $0.key < $1.key }.map { ($0.key, .add($0.value, reason)) }
+            return byModel.sorted { $0.key < $1.key }.map { entry in
+                let id = known(entry.key)
+                return (UsageModel(id: id, source: id == nil ? nil : "cli"), .add(entry.value, reason))
+            }
         }
         guard let session = snapshot.accountingSession, let current = snapshot.typedCounts else {
             return [(model, .unknown("untyped"))]
@@ -279,5 +399,6 @@ final class ManagedRunLedger: @unchecked Sendable {
               leadBoundary.kind == "turnEnded" else { return }
         let closing = leadBoundary.outcome == "completed" ? "taskClosed" : "taskInterrupted"
         append(Row(kind: closing, task: task, agent: owner, source: "close/\(task)", openParts: closing == "taskInterrupted" ? [] : nil))
+        flushUsage(task: task)
     }
 }
