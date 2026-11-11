@@ -619,9 +619,17 @@
             ],
             "description": "Child CLI; omit to inherit yours. Must be installed and signed in."
           },
+          "effort": {
+            "type": "string",
+            "description": "Optional effort advertised by the selected harness live catalogue for the selected model. Unknown or unavailable efforts are refused."
+          },
           "retryOf": {
             "type": "string",
-            "description": "Failed/stopped child of yours to continue; carries its brief, changed files and report."
+            "description": "Failed/stopped child of yours to continue; carries its brief, effort, contract, changed files and report."
+          },
+          "contract": {
+            "type": "object",
+            "description": "owns, shared, mustNotTouch, checks, decisions: string lists; costLimit, report: strings. Paths checkout-relative. Overlap with live siblings is advice in the result."
           },
           "model": {
             "type": "string",

@@ -87,6 +87,7 @@ public enum ClaudeCLIBackend {
               (envelope["subtype"] as? String) == "success",
               let response = envelope["response"] as? [String: Any],
               let entries = response["models"] as? [[String: Any]] else { return nil }
+        var efforts: [String: [String]] = [:]
         var models: [String] = []
         var names: [String: String] = [:]
         var defaultModel: String?
@@ -95,6 +96,8 @@ public enum ClaudeCLIBackend {
             let resolved = (entry["resolvedModel"] as? String) ?? value
             guard resolved.hasPrefix("claude-") else { continue }
             let id = "anthropic/\(resolved)"
+            if entry["supportsEffort"] as? Bool == true,
+               let levels = entry["supportedEffortLevels"] as? [String] { efforts[id] = levels }
             if value == "default" {
                 defaultModel = id
                 continue
@@ -107,7 +110,7 @@ public enum ClaudeCLIBackend {
         guard !models.isEmpty else { return nil }
         return AgentHarnessCatalogSnapshot(
             harness: .claudeCode, readiness: .ready, models: models,
-            displayNames: names, defaultModel: defaultModel)
+            displayNames: names, effortLevels: efforts, defaultModel: defaultModel)
     }
 
     /// `claude auth status --json` → is a subscription login present. Pure —

@@ -20,6 +20,35 @@ func runCodexAgentBackendChecks() {
     runCodexBackendPolicyChecks()
     runCodexCatalogUnionChecks()
     runCodexLoginProbeStderrChecks()
+    runCodexModelListFixtureChecks()
+}
+
+/// A real `model/list` result from codex-cli 0.167.0's app-server, captured
+/// 2026-11-11 with the production probe's argv and requests from an empty
+/// directory under /tmp with an empty CODEX_HOME (no sign-in, nothing under
+/// ~/.codex). Only `result` is kept; initialize's user agent, home and
+/// platform were dropped. Runs through the production parser.
+private func runCodexModelListFixtureChecks() {
+    let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .appendingPathComponent("Fixtures/codex-0.167-model-list.json")
+    guard let data = try? Data(contentsOf: url),
+          let result = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          let snapshot = AgentModelCatalog.parseCodexModelListResponse(result) else {
+        expect(false, "codex model/list fixture: the production parser must read the real capture")
+        return
+    }
+    let five = ["low", "medium", "high", "xhigh", "max"]
+    let expected: [String: [String]] = [
+        "openai-codex/gpt-6-astra": five + ["ultra"],
+        "openai-codex/gpt-6-luna": five,
+        "openai-codex/gpt-5.5": ["low", "medium", "high", "xhigh"],
+    ]
+    for (model, levels) in expected {
+        expect(snapshot.effortLevels[model] == levels,
+               "codex model/list fixture: \(model) efforts must be \(levels), got \(String(describing: snapshot.effortLevels[model]))")
+    }
+    expect(snapshot.models.count == 9 && snapshot.effortLevels.count == 9 && snapshot.seedModel == "openai-codex/gpt-6.1-sol",
+           "codex model/list fixture: every model must keep its effort list and the CLI's default, got \(snapshot.models.count) models, \(snapshot.effortLevels.count) effort lists, seed \(String(describing: snapshot.seedModel))")
 }
 
 private let codexTID = "019fe980-21f0-7df1-b2a0-49d7839c7937"

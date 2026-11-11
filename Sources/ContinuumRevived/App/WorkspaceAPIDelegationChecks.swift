@@ -201,11 +201,29 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
     // Every runner each agent was given, across turns: a one-shot runner is
     // replaced per turn, and delivery is counted over all of them.
     var fixtureRunnerHistory: [AgentID: [ScriptedAgentRunner]] = [:]
+    // Delegate effort: every Claude/Codex launch's config, read off the runner
+    // production builds for it, and the leads whose helpers run on a fake that
+    // can also compact.
+    var effortLaunches: [AgentID: [EffortLaunch]] = [:]
+    var effortLeads: Set<AgentID> = []
+    let effortCompactions = EffortCompactionCounter()
     let supervisor = AgentSupervisor(store: AgentStore(
         applicationSupportDirectory: URL(fileURLWithPath: appSupportPath, isDirectory: true)
             .appendingPathComponent("workspace-api-delegation-check", isDirectory: true)), makeRunner: { launch -> AgentRunning in
             inspectLaunch?(launch)
             if !crossHarness { return AgentSupervisor.productionRunner(for: launch) }
+            if launch.record.harness == .claudeCode || launch.record.harness == .codex {
+                switch AgentSupervisor.productionRunner(for: launch) {
+                case let claude as ClaudeAgentRunner: effortLaunches[launch.record.id, default: []].append(.claude(claude.config))
+                case let codex as CodexAgentRunner: effortLaunches[launch.record.id, default: []].append(.codex(codex.config))
+                default: break
+                }
+            }
+            if let lead = launch.record.parentAgentID, effortLeads.contains(lead) {
+                return EffortFixtureRunner(
+                    codexThread: launch.record.harness == .codex ? "effort-thread-\(launch.record.id.rawValue.uuidString)" : nil,
+                    compactions: effortCompactions)
+            }
             let runner = ScriptedAgentRunner(script: [.turnStarted(threadId: "fixture", turnId: "done"),
                                                       .turnCompleted(threadId: "fixture", turnId: "done", outcome: .completed, errorMessage: nil)])
             fixtureRunners[launch.record.id] = runner
@@ -426,6 +444,184 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                 try expect(offered.allSatisfy { refusedBare.message.contains($0) }, "model refusal must list the exact catalogue ids \(offered): \(refusedBare.message)")
             }
         }
+        // MARK: Delegate effort (.plans/116 part 6)
+        // Production dispatch, spawn and runner configs; only the CLI process is
+        // a fake. What reaches the CLI is read off the runner production built for
+        // each launch, through the runners' own argv builders (Claude `--effort`,
+        // Codex exec `model_reasoning_effort`); Codex's app-server `turn/start`
+        // sends the same config field as `effort`. Failures are collected so one
+        // run names every broken behaviour.
+        modePolicy.set(false, forKey: AgentManagedModeConfig.enabledKey)
+        supervisor.configureManagedMode(defaults: modePolicy)
+        var effortFailures: [String] = []
+        func check(_ condition: Bool, _ message: String) { if !condition { effortFailures.append(message) } }
+        func childId(_ reply: WorkspaceAPIService.Reply, _ what: String) -> AgentID? {
+            guard case let .result(object) = reply, let raw = object["childAgentId"]?.string, let uuid = UUID(uuidString: raw) else {
+                check(false, "\(what): expected a helper, got \(reply)")
+                return nil
+            }
+            return AgentID(rawValue: uuid)
+        }
+        func refusal(_ reply: WorkspaceAPIService.Reply, _ what: String) -> String? {
+            guard case let .error(error) = reply, error.code == .unsupported else {
+                check(false, "\(what): expected an unsupported refusal, got \(reply)")
+                return nil
+            }
+            return error.message
+        }
+        func settle(_ id: AgentID, launch: Int, _ what: String) async -> EffortLaunch? {
+            let ok = await waitUntil(timeout: 10, pollInterval: 0.02) {
+                (effortLaunches[id]?.count ?? 0) >= launch && !supervisor.isRunning(id)
+            }
+            check(ok, "\(what): launch \(launch) must run and settle; saw \(effortLaunches[id]?.count ?? 0)")
+            return ok ? effortLaunches[id]?[launch - 1] : nil
+        }
+        func expectEffort(_ launch: EffortLaunch?, _ effort: String, resumed: Bool, _ what: String) {
+            guard let launch else { return }
+            check(launch.resumed == resumed, "\(what): expected a \(resumed ? "resumed" : "first") launch")
+            check(launch.effort == effort && launch.carries(effort),
+                  "\(what): \(effort) must reach the CLI; launch effort \(String(describing: launch.effort)), argv effort \(launch.effortArguments)")
+        }
+        var effortKey = 0
+        func delegateEffort(_ lead: AgentID, _ fields: [String: Any]) -> WorkspaceAPIService.Reply {
+            effortKey += 1
+            var payload: [String: Any] = ["task": "effort task", "idempotencyKey": "effort-\(effortKey)", "presentation": ["camera": "preserve"]]
+            payload.merge(fields) { $1 }
+            return api.dispatch(agentId: lead, requestId: "effort-\(effortKey)", op: "agent.delegate", payload: payload)
+        }
+        func message(_ lead: AgentID, _ child: AgentID, _ text: String) {
+            effortKey += 1
+            let reply = api.dispatch(agentId: lead, requestId: "effort-message-\(effortKey)", op: "agent.message",
+                                     payload: ["agentId": child.rawValue.uuidString, "text": text, "idempotencyKey": "effort-message-\(effortKey)"])
+            if case .error = reply { check(false, "message to helper refused: \(reply)") }
+        }
+        func effortLead(_ harness: AgentHarness) throws -> AgentID {
+            let lead = supervisor.spawn(role: nil, prompt: nil, cwd: pbRoot, harness: harness,
+                                        model: AgentModelCatalog.shared.snapshot(for: harness).seedModel!, thinking: "low",
+                                        projectId: projectPb, projectRoot: pbRoot)
+            _ = supervisor.setWorkspaceToolsEnabled(agentID: lead, true)
+            let scope = CreationScope(projectId: projectPb, projectRoot: pbRoot.path, homeRelativePath: nil, source: .zone, zoneId: zoneB)
+            guard case let .spawned(tile) = try runtime.ensureSpawner(forProjectId: projectPb)
+                .spawnManagedAgentForExistingAgent(lead, supervisor: supervisor, creationScope: scope) else {
+                throw Failure(message: "effort lead must have a tile")
+            }
+            supervisor.attach(agentID: lead, to: tile)
+            delegate.wireManagedAgentTile(tile, agentID: lead)
+            effortLeads.insert(lead)
+            return lead
+        }
+        let effortLeadIds: [AgentHarness: AgentID] = [.claudeCode: try effortLead(.claudeCode), .codex: try effortLead(.codex)]
+        for (source, target) in [(AgentHarness.claudeCode, AgentHarness.claudeCode), (.codex, .codex), (.claudeCode, .codex), (.codex, .claudeCode)] {
+            let lead = effortLeadIds[source]!
+            let pair = "\(source.rawValue) → \(target.rawValue)"
+            let harness: [String: Any] = source == target ? [:] : ["harness": target.rawValue]
+            func with(_ extra: [String: Any]) -> [String: Any] { harness.merging(extra) { $1 } }
+            let model = source == target ? supervisor.records[lead]!.model : AgentModelCatalog.shared.snapshot(for: target).seedModel!
+            let accepted = AgentModelCatalog.shared.efforts(for: model, harness: target) ?? []
+            check(accepted.contains("high"), "\(pair): the fixture catalogue must list high for \(model)")
+
+            // Listed: the first turn, a resumed turn, the compaction, the turn after it.
+            if let child = childId(delegateEffort(lead, with(["effort": "high"])), "\(pair) listed effort") {
+                check(supervisor.records[child]?.thinking == "high", "\(pair): the helper record must hold the delegated effort")
+                expectEffort(await settle(child, launch: 1, "\(pair) first turn"), "high", resumed: false, "\(pair) first turn")
+                message(lead, child, "effort follow up")
+                expectEffort(await settle(child, launch: 2, "\(pair) resumed turn"), "high", resumed: true, "\(pair) resumed turn")
+                let compactionsBefore = effortCompactions.count
+                let compacted = await supervisor.accept(.compact(AgentCompactionRequest()), for: child)
+                check(compacted == .accepted, "\(pair): compaction must be accepted, got \(compacted)")
+                expectEffort(await settle(child, launch: 3, "\(pair) compaction"), "high", resumed: true, "\(pair) compaction launch")
+                check(effortCompactions.count == compactionsBefore + 1, "\(pair): the provider must have been asked to compact")
+                message(lead, child, "after compaction")
+                expectEffort(await settle(child, launch: 4, "\(pair) after compaction"), "high", resumed: true, "\(pair) turn after compaction")
+            }
+
+            // retryOf continues the same work: the retry inherits the failed
+            // helper's stored effort, and an effort the call names wins.
+            func failedHelper(_ effort: String, _ what: String) async -> AgentID? {
+                guard let failed = childId(delegateEffort(lead, with(["effort": effort, "task": "EFFORT-FAIL"])), what) else { return nil }
+                _ = await settle(failed, launch: 1, what)
+                let retryable = await waitUntil(timeout: 5, pollInterval: 0.02) { supervisor.mayRetry(failed, from: lead) }
+                check(retryable, "\(what): the failed helper must be retryable")
+                return failed
+            }
+            for (override, expected) in [(String?.none, "high"), ("xhigh", "xhigh")] {
+                let what = "\(pair) retryOf \(override == nil ? "inherited" : "overridden")"
+                guard let failed = await failedHelper("high", what) else { continue }
+                var fields: [String: Any] = ["task": "effort retry", "retryOf": failed.rawValue.uuidString]
+                if let override { fields["effort"] = override }
+                if let retried = childId(delegateEffort(lead, with(fields)), what) {
+                    check(supervisor.records[retried]?.delegationContext?.retryOf == failed, "\(what): the retry must carry retryOf")
+                    check(supervisor.records[retried]?.thinking == expected, "\(what): the retried helper must hold \(expected), got \(String(describing: supervisor.records[retried]?.thinking))")
+                    expectEffort(await settle(retried, launch: 1, what), expected, resumed: false, what)
+                }
+            }
+
+            // Omitted: the thinking and argv a helper got before the field existed.
+            if let child = childId(delegateEffort(lead, harness), "\(pair) omitted effort") {
+                let expected = source == target ? supervisor.records[lead]!.thinking : AgentModelConfig.defaultThinking
+                check(supervisor.records[child]?.thinking == expected, "\(pair): omitted effort must keep \(expected), got \(String(describing: supervisor.records[child]?.thinking))")
+                if let launch = await settle(child, launch: 1, "\(pair) omitted effort") {
+                    let legacy = target == .codex ? CodexCLIBackend.effortArgument(forThinking: expected) : ClaudeCLIBackend.effortArgument(forThinking: expected)
+                    let today = launch.argv(effort: legacy), now = launch.argv(effort: launch.effort)
+                    check(launch.effort == legacy && today.count == now.count && zip(today, now).allSatisfy { $0 == $1 },
+                          "\(pair): omitted effort argv must equal today's element by element; differing \(zip(today, now).filter { $0 != $1 }), lengths \(today.count)/\(now.count)")
+                }
+            }
+
+            // Unlisted, and a model the catalogue gives no effort data: refused, nothing created.
+            let recordsBefore = supervisor.records.count, tilesBefore = agentTileCount()
+            if let message = refusal(delegateEffort(lead, with(["effort": "unlisted-effort"])), "\(pair) unlisted effort") {
+                check(message.contains("unlisted-effort") && accepted.allSatisfy { message.contains($0) },
+                      "\(pair): the refusal must name the value and every accepted one \(accepted): \(message)")
+            }
+            if let bare = AgentModelCatalog.shared.snapshot(for: target).models.first(where: { AgentModelCatalog.shared.efforts(for: $0, harness: target) == nil }) {
+                if let message = refusal(delegateEffort(lead, with(["effort": "high", "model": bare])), "\(pair) no effort data") {
+                    check(message.contains("no effort data") && message.contains(bare), "\(pair): a model without effort data must be refused clearly: \(message)")
+                }
+            } else {
+                check(false, "\(pair): the fixture catalogue must hold a model without effort data")
+            }
+            check(supervisor.records.count == recordsBefore && agentTileCount() == tilesBefore,
+                  "\(pair): refused efforts must create no helper record or tile")
+        }
+
+        // Stale: the CLI stops listing a helper's stored effort after delegation.
+        for target in [AgentHarness.claudeCode, .codex] {
+            let lead = effortLeadIds[target]!
+            let model = supervisor.records[lead]!.model
+            let fixture = target == .codex ? AgentCatalogQAFixture.codex : AgentCatalogQAFixture.claude
+            guard let child = childId(delegateEffort(lead, ["effort": "xhigh"]), "\(target.rawValue) stale setup") else { continue }
+            _ = await settle(child, launch: 1, "\(target.rawValue) stale setup")
+            let staleFailed = childId(delegateEffort(lead, ["effort": "xhigh", "task": "EFFORT-FAIL"]), "\(target.rawValue) stale retry setup")
+            if let staleFailed { _ = await settle(staleFailed, launch: 1, "\(target.rawValue) stale retry setup") }
+            var levels = fixture.effortLevels
+            levels[model] = levels[model]?.filter { $0 != "xhigh" }
+            AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+                harness: target, readiness: .ready, models: fixture.models, displayNames: fixture.displayNames,
+                contextWindows: fixture.contextWindows, effortLevels: levels, defaultModel: fixture.defaultModel))
+            message(lead, child, "after the catalogue changed")
+            if let launch = await settle(child, launch: 2, "\(target.rawValue) stale effort") {
+                check(launch.effort == nil && !launch.argv(effort: launch.effort).contains { $0.contains("xhigh") },
+                      "\(target.rawValue): a stale effort must not reach the CLI; launch effort \(String(describing: launch.effort)), argv effort \(launch.effortArguments)")
+                check(supervisor.records[child]?.thinking == "xhigh", "\(target.rawValue): nothing rewrites the stored effort")
+                check(supervisor.records[child]?.latestTerminalEvent?.outcome == .succeeded, "\(target.rawValue): the stale helper's turn must still run")
+            }
+            // A retry inherits the now-stale effort: not refused, kept on the
+            // record, left off the launch.
+            let retryable = await waitUntil(timeout: 5, pollInterval: 0.02) { staleFailed.map { supervisor.mayRetry($0, from: lead) } ?? false }
+            check(retryable, "\(target.rawValue): the stale helper must be retryable")
+            if let staleFailed, let retried = childId(delegateEffort(lead, ["task": "stale retry", "retryOf": staleFailed.rawValue.uuidString]), "\(target.rawValue) stale inherited retry") {
+                check(supervisor.records[retried]?.thinking == "xhigh", "\(target.rawValue): the retry must inherit the stale effort, got \(String(describing: supervisor.records[retried]?.thinking))")
+                if let launch = await settle(retried, launch: 1, "\(target.rawValue) stale inherited retry") {
+                    check(launch.effort == nil && launch.effortArguments.isEmpty,
+                          "\(target.rawValue): an inherited stale effort must not reach the CLI; launch effort \(String(describing: launch.effort)), argv effort \(launch.effortArguments)")
+                }
+            }
+            AgentModelCatalog.shared.resetForQA(snapshot: fixture)
+        }
+        try expect(effortFailures.isEmpty, "delegate effort:\n" + effortFailures.joined(separator: "\n"))
+        print("delegate effort: a listed effort reaches Claude and Codex on the first, resumed, compaction, post-compaction and retryOf launches; a retry inherits the failed helper's effort unless it names one, and a stale inherited effort is left off; omitted effort keeps today's argv; unlisted and no-data efforts are refused with nothing created; a stale effort is left off the launch")
+
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .loggedOut, models: []))
         _ = try failure(dispatch("agent.delegate", ["task": "unready", "idempotencyKey": "unready", "harness": "Codex"]), .unsupported, "signed out harness")
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .missing, models: []))
@@ -1397,5 +1593,101 @@ private final class WorkspaceMCPCheckClient: @unchecked Sendable {
     func close() {
         output.fileHandleForReading.readabilityHandler = nil
         if process.isRunning { process.terminate() }
+    }
+}
+
+/// One launch of a delegate-effort helper: the config production built for it.
+private enum EffortLaunch {
+    case claude(ClaudeAgentRunner.Config)
+    case codex(CodexAgentRunner.Config)
+
+    var effort: String? {
+        switch self {
+        case .claude(let config): return config.effort
+        case .codex(let config): return config.effort
+        }
+    }
+    var resumed: Bool {
+        switch self {
+        case .claude(let config): return config.conversationMayExist
+        case .codex(let config): return config.threadId != nil
+        }
+    }
+    /// The argv the runner's own builder makes for this launch, with `effort`.
+    func argv(effort: String?) -> [String] {
+        switch self {
+        case .claude(let c):
+            return ClaudeAgentRunner.processArguments(
+                model: c.model, effort: effort,
+                sessionMode: c.forkSession ? .fork : (c.conversationMayExist ? .resume : .start),
+                sessionId: c.sessionId, extraArgs: c.extraArgs, workspaceMCP: c.workspaceMCP, mode: c.mode)
+        case .codex(let c):
+            return CodexCLIBackend.processArguments(
+                model: c.model, effort: effort, sessionMode: c.threadId == nil ? .fresh : .resume,
+                threadId: c.threadId, cwdPath: c.cwd.path, extraArgs: c.extraArgs,
+                prompt: AgentPrompt(text: "fixture"), workspaceMCP: c.workspaceMCP)
+        }
+    }
+    /// The effort elements of this launch's argv.
+    var effortArguments: [String] {
+        let args = argv(effort: effort)
+        return zip(args, args.dropFirst()).compactMap { $0 == "--effort" ? "--effort \($1)" : nil }
+            + args.filter { $0.hasPrefix("model_reasoning_effort=") }
+    }
+    func carries(_ level: String) -> Bool {
+        let args = argv(effort: effort)
+        switch self {
+        case .claude: return zip(args, args.dropFirst()).contains { $0 == "--effort" && $1 == level }
+        case .codex: return args.contains("model_reasoning_effort=\(level)")
+        }
+    }
+}
+
+final class EffortCompactionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var count: Int { lock.withLock { value } }
+    func add() { lock.withLock { value += 1 } }
+}
+
+/// A delegate-effort helper's CLI: completes each turn (fails one whose prompt
+/// says EFFORT-FAIL, so it can be retried), reports a Codex thread so the next
+/// turn resumes it, and completes a manual compaction.
+private final class EffortFixtureRunner: AgentRunning, AgentCompactionRunning, @unchecked Sendable {
+    private let codexThread: String?
+    private let compactions: EffortCompactionCounter
+    private let lock = NSLock()
+    private var observer: (@Sendable (AgentRuntimeObservation) -> Void)?
+
+    init(codexThread: String?, compactions: EffortCompactionCounter) {
+        self.codexThread = codexThread
+        self.compactions = compactions
+    }
+
+    var compactionCapabilities: AgentCompactionCapabilities {
+        AgentCompactionCapabilities(supportsManual: true, supportsFocus: false)
+    }
+
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        if let codexThread { lock.withLock { observer }?(.threadId(codexThread)) }
+        let turn = UUID().uuidString
+        let failed = prompt.text.contains("EFFORT-FAIL")
+        onEvent(.turnStarted(threadId: "fixture", turnId: turn))
+        onEvent(.turnCompleted(threadId: "fixture", turnId: turn, outcome: failed ? .failed : .completed,
+                               errorMessage: failed ? "fixture failure" : nil))
+    }
+
+    func compact(_ request: AgentCompactionRequest, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        compactions.add()
+        for phase in [AgentCompactionPhase.running, .succeeded] {
+            onEvent(.compactionChanged(threadId: "fixture", event: AgentCompactionLifecycleEvent(
+                operationID: request.operationID, phase: phase, trigger: .manual, provider: "fixture")))
+        }
+    }
+
+    func stop() {}
+    func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+    func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {
+        lock.withLock { observer = handler }
     }
 }

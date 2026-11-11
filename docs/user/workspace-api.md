@@ -181,10 +181,14 @@ Create a child agent in Array, inheriting your checkout and, by default, harness
 | `title` | Optional. Short human label for the child's tile. |
 | `idempotencyKey` | Required. Stable key for this delegation. Reuse for transport retries; new attempts need a new key. |
 | `harness` | Optional. Child CLI; omit to inherit yours. Must be installed and signed in. Values: `Claude Code`, `Codex`, `Pi`. |
-| `retryOf` | Optional. Failed/stopped child of yours to continue; carries its brief, changed files and report. |
+| `effort` | Optional. Optional effort advertised by the selected harness live catalogue for the selected model. Unknown or unavailable efforts are refused. |
+| `retryOf` | Optional. Failed/stopped child of yours to continue; carries its brief, effort, contract, changed files and report. |
+| `contract` | Optional. owns, shared, mustNotTouch, checks, decisions: string lists; costLimit, report: strings. Paths checkout-relative. Overlap with live siblings is advice in the result. |
 | `model` | Optional. Exact fully qualified id from the selected CLI catalogue. Omit to inherit on the same harness, or use a different harness's own default. |
 | `placement` | Optional.  |
 | `presentation` | Optional.  |
+
+A `contract` never stops a delegation. Array keeps it with the child's brief, tells the child once, and a retry inherits it unless the retry passes its own. Paths are relative to the checkout: `./` is the checkout root, `a//b` and `a/./b` read as `a/b`, and an absolute path inside the checkout is made relative. An entry Array cannot use (outside the checkout, a `..` step, a home path, empty) is left out and named in the result's `contractNotes`; a glob is not expanded, and a note says it is compared as written. Owned and shared paths are compared case-insensitively with each live sibling's; symlinks are not resolved. An overlap comes back in `ownershipOverlaps` with the sibling and the paths, unless both sides list the path in `shared`. Above a few thousand claimed paths, `contractNotes` says the overlap was not computed. A contract with nothing usable in it counts as no contract.
 
 ### `array_reveal_agent`
 

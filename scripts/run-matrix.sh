@@ -1040,6 +1040,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --managed-codex-launch-check
   run_app_check .build/debug/Array --managed-codex-hooks-check
   run_app_check .build/debug/Array --helper-retry-check
+  run_app_check .build/debug/Array --part-contract-check
   run_app_check .build/debug/Array --helper-worktree-check
   run_app_check .build/debug/Array --helper-tile-lifecycle-check
   run_app_check .build/debug/Array --helper-tile-cap-check
@@ -1324,6 +1325,7 @@ run_app_check .build/debug/Array --managed-lead-plan-check
 run_app_check .build/debug/Array --managed-codex-launch-check
 run_app_check .build/debug/Array --managed-codex-hooks-check
 run_app_check .build/debug/Array --helper-retry-check
+run_app_check .build/debug/Array --part-contract-check
 run_app_check .build/debug/Array --helper-worktree-check
 run_app_check .build/debug/Array --helper-tile-lifecycle-check
 run_app_check .build/debug/Array --helper-tile-cap-check

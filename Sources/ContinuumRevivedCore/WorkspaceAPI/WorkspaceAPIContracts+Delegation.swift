@@ -67,6 +67,11 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     public var provider: String?
     /// Exact catalogue id. Omitted: inherit for the same harness, otherwise use its seed.
     public var model: String?
+    /// An effort the selected harness's live catalogue lists for the selected
+    /// model. Omitted: the same thinking a helper got before this field existed.
+    public var effort: String?
+    /// What the child owns and owes, stored with its brief. Omitted: none.
+    public var contract: AgentDelegationContract?
     public var placement: Placement?
     public var presentationPolicy: WorkspacePresentationPolicy
     /// REQUIRED for delegation: a spawn without a key cannot be retried safely.
@@ -82,6 +87,8 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         title: String? = nil,
         provider: String? = nil,
         model: String? = nil,
+        effort: String? = nil,
+        contract: AgentDelegationContract? = nil,
         placement: Placement? = nil,
         presentationPolicy: WorkspacePresentationPolicy = .defaultExplicitOpen,
         idempotencyKey: String? = nil,
@@ -93,6 +100,8 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         self.task = task
         self.title = title
         self.provider = provider
+        self.effort = effort
+        self.contract = contract
         self.model = model
         self.placement = placement
         self.presentationPolicy = presentationPolicy
@@ -100,13 +109,15 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case task, mode, retryOf, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
+        case effort, contract, task, mode, retryOf, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
     }
 
     /// Tolerant of the model-facing shape (`presentation`, short names, any
     /// subset). Unknown keys are ignored, so a forged `authorized` is inert.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        effort = try c.decodeIfPresent(String.self, forKey: .effort)
+        contract = try c.decodeIfPresent(AgentDelegationContract.self, forKey: .contract)
         harness = try c.decodeIfPresent(String.self, forKey: .harness)
         retryOf = try c.decodeIfPresent(AgentID.self, forKey: .retryOf)
         mode = try c.decodeIfPresent(AgentMode.self, forKey: .mode)
@@ -122,6 +133,8 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(effort, forKey: .effort)
+        try c.encodeIfPresent(contract, forKey: .contract)
         try c.encodeIfPresent(harness, forKey: .harness)
         try c.encodeIfPresent(retryOf, forKey: .retryOf)
         try c.encodeIfPresent(mode, forKey: .mode)
@@ -164,6 +177,24 @@ public struct AgentDelegateResult: Codable, Equatable, Sendable {
     public var checkoutNotice: String?
     /// Host coordination advice, separate from any helper-authored content.
     public var coordinationNote: String?
+    /// Advice only: live siblings whose contracts claim a path this child's
+    /// contract also claims. The delegation went ahead regardless.
+    public var ownershipOverlaps: [OwnershipOverlap]?
+    /// Contract entries Array left out or compared as written, and an overlap
+    /// it did not compute. Advice only.
+    public var contractNotes: [String]?
+
+    public struct OwnershipOverlap: Codable, Equatable, Sendable {
+        public var agentId: AgentID
+        public var title: String
+        public var paths: [String]
+
+        public init(agentId: AgentID, title: String, paths: [String]) {
+            self.agentId = agentId
+            self.title = title
+            self.paths = paths
+        }
+    }
 
     public init(
         operationId: String,

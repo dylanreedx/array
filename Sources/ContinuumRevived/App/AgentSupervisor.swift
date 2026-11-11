@@ -7,6 +7,7 @@ import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedSync
 import Foundation
 import ImageIO
+import os
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.3-agent-supervisor.md
 //
@@ -2004,6 +2005,26 @@ final class AgentSupervisor {
         (record.lastObservedWhere, record.providerSessionId ?? claudeSessionId(for: record.id))
     }
 
+    /// The effort a Claude or Codex launch passes. When the CLI's live catalogue
+    /// lists efforts for the record's model, only a listed one is passed; a stored
+    /// value it does not list (stale since delegation, or never offered) is left
+    /// off so the CLI runs at its own default instead of refusing the turn, and
+    /// the drop is logged. With no catalogue data, the exact-match rule
+    /// (`legacy`) applies unchanged.
+    nonisolated static func launchEffort(
+        for record: AgentRecord, harness: AgentHarness, legacy: (String) -> String?
+    ) -> String? {
+        guard let listed = AgentModelCatalog.shared.efforts(for: record.model, harness: harness), !listed.isEmpty else {
+            return legacy(record.thinking)
+        }
+        if listed.contains(record.thinking) { return record.thinking }
+        if legacy(record.thinking) != nil {
+            Logger(subsystem: "continuum.agents", category: "effort").notice(
+                "agent \(record.id.rawValue.uuidString, privacy: .public): effort \(record.thinking, privacy: .public) is not listed for \(record.model, privacy: .public); launching at the CLI default")
+        }
+        return nil
+    }
+
     nonisolated static func claudeRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> ClaudeAgentRunner.Config {
         // B7.2 — a pending `/clear` rotation overrides the normal sessionId
         // choice entirely: this ONE launch resumes-and-forks the OLD session
@@ -2015,7 +2036,7 @@ final class AgentSupervisor {
             return ClaudeAgentRunner.Config(
                 model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
                 mode: record.mode,
-                effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+                effort: launchEffort(for: record, harness: .claudeCode, legacy: ClaudeCLIBackend.effortArgument(forThinking:)),
                 cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
                 sessionId: forkFrom,
                 forkSession: true,
@@ -2027,7 +2048,7 @@ final class AgentSupervisor {
         return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             mode: record.mode,
-            effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+            effort: launchEffort(for: record, harness: .claudeCode, legacy: ClaudeCLIBackend.effortArgument(forThinking:)),
             cwd: URL(fileURLWithPath: location.cwd, isDirectory: true),
             sessionId: location.sessionId,
             // An agent that has never had a turn cannot have a conversation to
@@ -2059,7 +2080,7 @@ final class AgentSupervisor {
     nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, hostInstructions: HostLaunchInstructions = .shared) -> CodexAgentRunner.Config {
         var config = CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
-            effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
+            effort: launchEffort(for: record, harness: .codex, legacy: CodexCLIBackend.effortArgument(forThinking:)),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             threadId: record.codexThreadId,
             workspaceMCP: workspaceMCP,
@@ -3116,7 +3137,8 @@ final class AgentSupervisor {
         checkoutOverride: URL? = nil,
         managedIsolation: Bool = false,
         isolationTitle: String? = nil,
-        baseHead: String? = nil
+        baseHead: String? = nil,
+        namingText: String? = nil
     ) throws -> AgentID {
         // The id is minted HERE, before anything is created, because the slug is
         // derived from it — `WorktreeManager.slug` id-suffixes so two agents given the
@@ -3162,7 +3184,8 @@ final class AgentSupervisor {
             parentAgentID: parentAgentID,
             sourceItemId: sourceItemId,
             tileId: tileId,
-            displayName: displayName
+            displayName: displayName,
+            namingText: namingText
         )
     }
 
@@ -3184,7 +3207,8 @@ final class AgentSupervisor {
         parentAgentID: AgentID? = nil,
         sourceItemId: String? = nil,
         tileId: UUID?,
-        displayName: String? = nil
+        displayName: String? = nil,
+        namingText: String? = nil
     ) -> AgentID {
         // Retain the old internal argument for callers; Settings owns the policy.
         let mode = targetMode(harness: harness, parent: parentAgentID)
@@ -3269,8 +3293,11 @@ final class AgentSupervisor {
         }
         if let prompt, !prompt.isEmpty {
             if let parentAgentID {
+                // A delegated child is named by its task, never by what Array
+                // appends to it (a contract, a retry handoff, the report line).
                 _ = sendPrepared(PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: id), to: id,
-                                 taskParent: companionParentRun(for: parentAgentID))
+                                 taskParent: companionParentRun(for: parentAgentID),
+                                 sharedInputPermit: namingText.map { .init(agentID: id, namingText: $0) })
             } else { send(prompt, to: id) }
         } else {
             applyDerivedNameIfNeeded(to: id, firstPrompt: nil)
@@ -5828,7 +5855,7 @@ final class AgentSupervisor {
     ///
     /// Returns nil on a refusal, having said so in the parent's transcript.
     @discardableResult
-    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil) -> AgentID? {
+    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil, contract: AgentDelegationContract? = nil) -> AgentID? {
         guard let parent = records[parentId] else {
             return refuseSpawn(.unknownParent, for: parentId)
         }
@@ -5934,12 +5961,13 @@ final class AgentSupervisor {
                 checkoutOverride: managed ? checkout : nil,
                 managedIsolation: overlapping,
                 isolationTitle: request.displayLabel ?? originalBrief ?? request.prompt,
-                baseHead: isolate ? baseHead : nil
+                baseHead: isolate ? baseHead : nil,
+                namingText: originalBrief
             )
             guard var spawned = records[childID] else { return nil }
             spawned.delegationContext = AgentDelegationContext(
                 brief: originalBrief ?? request.prompt, baseHead: baseHead, retryOf: retryOf,
-                createdWorktree: overlapping && isolate, checkoutNotice: notice)
+                createdWorktree: overlapping && isolate, checkoutNotice: notice, contract: contract)
             records[childID] = spawned
             persist(spawned)
             // The child record remembers the tool call that asked for it, so its

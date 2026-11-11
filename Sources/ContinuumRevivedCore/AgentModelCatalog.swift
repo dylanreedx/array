@@ -57,6 +57,15 @@ public final class AgentModelCatalog: @unchecked Sendable {
     public typealias ProbeExecutor = @Sendable (PiAgentRunner.ResolvedCommand, [String], TimeInterval) -> String?
     private let probeExecutor: ProbeExecutor?
     #endif
+    private var advertisedEfforts: [AgentHarness: [String: [String]]] = [:]
+    public func efforts(for model: String, harness: AgentHarness) -> [String]? {
+        lock.withLock {
+            if let levels = advertisedEfforts[harness] { return levels[model] }
+            guard !liveRefreshEnabled, harness != .pi else { return nil }
+            return (harness == .claudeCode ? AgentCatalogQAFixture.claude : AgentCatalogQAFixture.codex).effortLevels[model]
+        }
+    }
+
     private var probeLaunchCount = 0
 
     private var readinessByHarness: [AgentHarness: HarnessReadiness] = [
@@ -230,6 +239,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
     /// this is account-aware and is the production source of membership.
     public static func parseCodexModelListResponse(_ result: [String: Any]) -> AgentHarnessCatalogSnapshot? {
         guard let entries = result["data"] as? [[String: Any]] else { return nil }
+        var efforts: [String: [String]] = [:]
         var models: [String] = []
         var names: [String: String] = [:]
         var defaultModel: String?
@@ -239,6 +249,9 @@ public final class AgentModelCatalog: @unchecked Sendable {
                   !slug.isEmpty else { continue }
             let id = "openai-codex/\(slug)"
             guard !models.contains(id) else { continue }
+            if let levels = entry["supportedReasoningEfforts"] as? [[String: Any]] {
+                efforts[id] = levels.compactMap { $0["reasoningEffort"] as? String }
+            }
             models.append(id)
             if let name = entry["displayName"] as? String, !name.isEmpty { names[id] = name }
             if (entry["isDefault"] as? Bool) == true, defaultModel == nil { defaultModel = id }
@@ -246,7 +259,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
         guard !models.isEmpty else { return nil }
         return AgentHarnessCatalogSnapshot(
             harness: .codex, readiness: .ready, models: models, displayNames: names,
-            defaultModel: defaultModel)
+            effortLevels: efforts, defaultModel: defaultModel)
     }
 
     // `parseClaudeModelAliases(helpOutput:)` lived here: it scraped the quoted
@@ -297,6 +310,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
     public func apply(claudeBackendAvailable available: Bool) {
         lock.withLock {
             if !available {
+                advertisedEfforts[.claudeCode] = [:]
                 claudeBackendModels = []
                 claudeBackendDisplayNames = [:]
                 claudeBackendDefault = nil
@@ -311,6 +325,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
     public func apply(claudeCatalog snapshot: AgentHarnessCatalogSnapshot) {
         guard snapshot.harness == .claudeCode, !snapshot.models.isEmpty else { return }
         lock.withLock {
+            advertisedEfforts[.claudeCode] = snapshot.effortLevels
             claudeBackendModels = snapshot.models
             claudeBackendDisplayNames = snapshot.displayNames
             claudeBackendDefault = snapshot.defaultModel
@@ -332,6 +347,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
     public func apply(codexBackendAvailable available: Bool) {
         lock.withLock {
             if !available {
+                advertisedEfforts[.codex] = [:]
                 codexBackendModels = []
                 codexBackendDisplayNames = [:]
                 codexBackendContextWindows = [:]
@@ -345,6 +361,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
     public func apply(codexCatalog snapshot: AgentHarnessCatalogSnapshot) {
         guard snapshot.harness == .codex, !snapshot.models.isEmpty else { return }
         lock.withLock {
+            advertisedEfforts[.codex] = snapshot.effortLevels
             codexBackendModels = snapshot.models
             codexBackendDisplayNames = snapshot.displayNames
             codexBackendContextWindows = snapshot.contextWindows
@@ -356,6 +373,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
 
     public func resetForQA(options: [String]? = nil, displayNames: [String: String] = [:]) {
         lock.withLock {
+            advertisedEfforts = [:]
             liveOptions = options
             liveDisplayNames = displayNames
             claudeBackendModels = []
@@ -379,8 +397,10 @@ public final class AgentModelCatalog: @unchecked Sendable {
             if let refreshedAt = snapshot.refreshedAt { refreshedAtByHarness[snapshot.harness] = refreshedAt }
             switch snapshot.harness {
             case .claudeCode:
+                advertisedEfforts[.claudeCode] = snapshot.effortLevels
                 claudeBackendModels = snapshot.models; claudeBackendDisplayNames = snapshot.displayNames; claudeBackendDefault = snapshot.defaultModel
             case .codex:
+                advertisedEfforts[.codex] = snapshot.effortLevels
                 codexBackendModels = snapshot.models; codexBackendDisplayNames = snapshot.displayNames; codexBackendContextWindows = snapshot.contextWindows; codexBackendDefault = snapshot.defaultModel
             case .pi:
                 liveOptions = snapshot.models; liveDisplayNames = snapshot.displayNames; liveContextWindows = snapshot.contextWindows
