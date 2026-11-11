@@ -522,6 +522,15 @@ final class ReplaySupervisorDriver {
         let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("support")),
                                          makeRunner: { launch in
             let isLead = launch.record.parentAgentID == nil
+            var launch = launch
+            // Production hands every Claude agent the workspace MCP server and
+            // refuses a Free agent's delegation per call. A live solo lead gets
+            // no server at all, as this driver's solo condition states.
+            if condition.live != nil, isLead, !condition.managed {
+                launch = AgentRunnerLaunch(record: launch.record, spawnDepth: launch.spawnDepth, workspaceMCP: nil,
+                                           accountConfigDirectory: launch.accountConfigDirectory,
+                                           projectStandards: launch.projectStandards)
+            }
             if isLead { facts.leadLaunch(hasTools: launch.workspaceMCP != nil) }
             let agent: AgentRunning = condition.live != nil
                 ? AgentSupervisor.productionRunner(for: launch)
@@ -584,7 +593,8 @@ final class ReplaySupervisorDriver {
             try await Task.sleep(nanoseconds: condition.live == nil ? 20_000_000 : 250_000_000)
             let ids = Array(supervisor.records.keys)
             let busy = ids.contains { supervisor.isRunning($0) } || supervisor.qaHasPendingHelperResults(for: lead)
-            let begun = condition.live == nil ? !facts.intervals.isEmpty : outcomes.completedTurns > 0
+            let begun = condition.live == nil ? !facts.intervals.isEmpty
+                : outcomes.completedTurns > 0 || !outcomes.failedTurns.isEmpty
             if busy || !begun { settledSince = nil; continue }
             await supervisor.flushHelperCompletions()
             let now = ProcessInfo.processInfo.systemUptime

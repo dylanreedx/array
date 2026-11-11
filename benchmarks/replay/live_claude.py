@@ -55,7 +55,8 @@ def workspace_mcp(args):
     env = server.get('env', {})
     port = urlparse(env['ARRAY_WORKSPACE_MCP_ENDPOINT']).port
     executable = os.path.realpath(server['command'])
-    files = [config_path, env['ARRAY_WORKSPACE_MCP_TOKEN_FILE']]
+    # The sandbox matches resolved paths: /var/folders is /private/var/folders.
+    files = [os.path.realpath(config_path), os.path.realpath(env['ARRAY_WORKSPACE_MCP_TOKEN_FILE'])]
     return files, [os.path.dirname(executable)], [port]
 
 
