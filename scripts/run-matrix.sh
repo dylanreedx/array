@@ -1315,6 +1315,7 @@ run_app_check .build/debug/Array --managed-setting-check
 run_app_check .build/debug/Array --managed-mode-launch-check
 run_app_check .build/debug/Array --managed-mode-hooks-check
 run_app_check .build/debug/Array --managed-lead-context-transition-check
+run_app_check .build/debug/Array --managed-compaction-tools-check
 run_app_check .build/debug/Array --managed-mode-persistence-check
 run_app_check .build/debug/Array --managed-lead-plan-check
 run_app_check .build/debug/Array --managed-codex-launch-check

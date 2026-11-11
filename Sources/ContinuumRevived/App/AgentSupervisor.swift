@@ -1375,7 +1375,7 @@ final class AgentSupervisor {
         guard var record = records[id], runners[id] == nil else { return false }
         let runner = preferredRunner
             ?? idleSessionRunners[id]
-            ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id))))
+            ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
         guard let compacting = runner as? AgentCompactionRunning,
               compacting.compactionCapabilities.supportsManual else { return false }
         if idleSessionRunners[id] === runner { idleSessionRunners[id] = nil }
@@ -9031,7 +9031,7 @@ final class AgentSupervisor {
             else { return .refused(.turnNotReady) }
 
             let candidate = (runners[agentID] ?? idleSessionRunners[agentID]
-                ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: agentID)))))
+                ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: agentID), workspaceMCP: workspaceMCPConfigurationProvider?(agentID, record.harness ?? .pi)))))
             guard let compacting = candidate as? AgentCompactionRunning,
                   compacting.compactionCapabilities.supportsManual else {
                 return .refused(.unsupported)
