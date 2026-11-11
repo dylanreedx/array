@@ -1,9 +1,9 @@
 {
-  "v": 3,
+  "v": 4,
   "tasks": [],
   "conditions": {
     "harnesses": ["claude", "codex"],
-    "modes": ["solo", "managed", "chooser"]
+    "modes": ["solo", "managed", "managed-strict", "chooser"]
   },
   "fixturePolicy": "Repository public history only; neutral requests; no session or memory text",
   "liveEnabled": false,
@@ -18,7 +18,10 @@
     {"name": "requestHash", "type": "sha256", "meaning": "hash of the exact request text"},
     {"name": "checksHash", "type": "sha256", "meaning": "hash of the hidden checks, neighbouring check paths and protected paths"},
     {"name": "harness", "type": "claude|codex", "meaning": "CLI that ran every agent in the run"},
-    {"name": "mode", "type": "solo|managed|chooser", "meaning": "condition requested"},
+    {"name": "mode", "type": "solo|managed|managed-strict|chooser", "meaning": "condition requested; managed-strict is Managed mode with the strict-lead switch on"},
+    {"name": "runOrder", "type": "object|null", "meaning": "live runs: position, of and sequence of this run among its task's arms; cache read and write depend on it. null for fake runs"},
+    {"name": "switches", "type": "object", "meaning": "environment switches set for the run, name to value (the strict-lead switch for managed-strict)"},
+    {"name": "leadChanges", "type": "object|null", "meaning": "live runs: what the lead changed itself, from its own session file: editToolCalls and delegateCalls exact, shellWrites a heuristic match over its Bash commands, changed a verdict naming its basis. null for fake runs"},
     {"name": "actualChoice", "type": "solo|managed|null", "meaning": "what a chooser run did; null otherwise"},
     {"name": "simulated", "type": "bool", "meaning": "true for fake agent processes; never evidence"},
     {"name": "outcome", "type": "completed|failed|timeout|interrupted|containmentFailed|driverFailed", "meaning": "how the run ended"},
@@ -26,7 +29,7 @@
     {"name": "fannedOut", "type": "bool|null", "meaning": "managed: true only if the run ledger recorded at least one delegated helper; null for solo"},
     {"name": "helperCount", "type": "int", "meaning": "the run ledger's delegated rows for the task; must equal the helpers on the production record"},
     {"name": "helpers", "type": "list", "meaning": "per helper: agent id and checkout, relative to the run root"},
-    {"name": "delegationAttempts", "type": "int", "meaning": "delegation requests seen from a lead whose condition forbids them"},
+    {"name": "delegationAttempts", "type": "int", "meaning": "delegation requests seen from a lead whose condition forbids them: the runner's spawn channel, plus a live solo lead's array_delegate calls, which the workspace API refuses"},
     {"name": "tokens", "type": "object", "meaning": "uncachedInput, cacheRead, cacheWrite, output for the task, lead and helpers together, from the ledger through the usage page's derivation; each int, or null when unknown or not reported, never zero for missing"},
     {"name": "tokensNotReported", "type": "list", "meaning": "token types the harness never reports (Codex: cacheWrite); null in tokens and not a reason for incomplete usage"},
     {"name": "usageComplete", "type": "bool", "meaning": "true only when the ledger task closed and every token type is known or not reported, with no row marked incomplete"},

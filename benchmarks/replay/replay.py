@@ -419,6 +419,7 @@ def new_record(task, harness, mode, simulated=True):
                 checksHash=task['checksHash'], harness=harness, mode=mode, actualChoice=None,
                 simulated=simulated, outcome='driverFailed', failure=None,
                 fannedOut=None if mode == 'solo' else False, helperCount=0, helpers=[], delegationAttempts=0,
+                runOrder=None, switches={}, leadChanges=None,
                 tokens={t: None for t in TOKEN_TYPES}, tokensNotReported=[], usageComplete=False,
                 usageProblems=['no usage observed'], usageRows=[], wallSeconds=None, activeSeconds=None, humanSteps=None,
                 diffHash=None, changedPaths=[], tampered=[], checks={}, gradeResult='notGraded',
@@ -499,43 +500,105 @@ def pair_exclusion(solo, managed):
     return None
 
 
+MANAGED_ARMS = ('managed', 'managed-strict')
+
+
+def arm_label(r):
+    if r['mode'] in MANAGED_ARMS and r['fannedOut'] is not True:
+        return '%s, did not fan out' % r['mode']
+    return r['mode']
+
+
+def figure(value):
+    return '-' if value is None else str(value)
+
+
+def agent_totals(r):
+    """Tokens by type per agent, summed over the agent's usage rows; a type
+    any of its rows lacks stays unknown."""
+    agents = collections.OrderedDict()
+    for row in r['usageRows']:
+        entry = agents.setdefault(row['agent'], dict(role=row['role'], tokens={t: 0 for t in TOKEN_TYPES}))
+        for t in TOKEN_TYPES:
+            value = (row.get('tokens') or {}).get(t)
+            entry['tokens'][t] = None if value is None or entry['tokens'][t] is None else entry['tokens'][t] + value
+    return agents
+
+
+def lead_changed(r):
+    changes = r.get('leadChanges')
+    return 'not recorded' if not changes else changes.get('changed', 'unknown')
+
+
+def row_lines(r):
+    t = r['tokens']
+    order = r.get('runOrder') or {}
+    lines = ['row %s %s %-34s %s wall %s active %s tokens in/cacheRead/cacheWrite/out %s/%s/%s/%s helpers %d '
+             'lead changed: %s; delegation attempts %d; order %s' % (
+                 r['task'][:12], r['harness'], arm_label(r), 'PASS' if r['passed'] else 'FAIL (%s)' % r['gradeResult'],
+                 '-' if r['wallSeconds'] is None else '%.1fs' % r['wallSeconds'],
+                 '-' if r['activeSeconds'] is None else '%.1fs' % r['activeSeconds'],
+                 figure(t['uncachedInput']), figure(t['cacheRead']), figure(t['cacheWrite']), figure(t['output']),
+                 r['helperCount'], lead_changed(r), r['delegationAttempts'],
+                 '%s/%s %s' % (order['position'], order['of'], ','.join(order['sequence'])) if order else '-')]
+    for agent, entry in agent_totals(r).items():
+        a = entry['tokens']
+        lines.append('    %-6s %s %s/%s/%s/%s' % (entry['role'], agent[:8], figure(a['uncachedInput']), figure(a['cacheRead']),
+                                                 figure(a['cacheWrite']), figure(a['output'])))
+    if not r['usageComplete']:
+        lines.append('    usage incomplete: %s' % '; '.join(r['usageProblems']))
+    return lines
+
+
 def compare(records):
-    """Differences only for matched solo/managed pairs that both completed with
-    complete usage, each figure printed beside both sides' pass/fail."""
+    """Every run as a row, per task and arm. Differences only for matched
+    solo/managed pairs that both completed with complete usage, each figure
+    printed beside both sides' pass/fail. A Managed run that did not fan out
+    is never compared as fan-out: it is excluded and counted, and its row is
+    printed beside solo as "did not fan out" with its own differences."""
     for r in records:
         check_record(r)
     groups = collections.defaultdict(lambda: collections.defaultdict(list))
     for r in records:
         groups[(r['task'], r['harness'])][r['mode']].append(r)
     tasks = sorted({r['task'] for r in records})
-    expected = [(t, h) for t in tasks for h in HARNESSES]
+    expected = [(t, h, 'managed') for t in tasks for h in HARNESSES]
+    expected += [(t, h, 'managed-strict') for t in tasks for h in HARNESSES if groups[(t, h)].get('managed-strict')]
     excluded = collections.Counter()
     pairs, lines = [], []
 
     def verdict(r):
         return 'PASS' if r['passed'] else 'FAIL'
-    for key in expected:
-        modes = groups.get(key, {})
-        solo, managed = modes.get('solo', []), modes.get('managed', [])
+
+    def differences(a, b, arm):
+        side = '(solo %s, %s %s)' % (verdict(a), arm, verdict(b))
+        tokens = {t: b['tokens'][t] - a['tokens'][t] for t in TOKEN_TYPES
+                  if a['tokens'][t] is not None and b['tokens'][t] is not None}
+        wall = None if a['wallSeconds'] is None or b['wallSeconds'] is None else b['wallSeconds'] - a['wallSeconds']
+        figures = ['%s %+d %s' % (t, tokens[t], side) if t in tokens
+                   else '%s not reported' % t if t in a['tokensNotReported'] else '%s unknown' % t for t in TOKEN_TYPES]
+        return tokens, wall, '%s %s wall %s %s' % (' '.join(figures), '', 'unknown' if wall is None else '%+.2fs' % wall, side)
+    for task, harness, arm in expected:
+        modes = groups.get((task, harness), {})
+        solo, managed = modes.get('solo', []), modes.get(arm, [])
         if len(solo) != 1 or len(managed) != 1:
-            excluded['unmatched (solo %d, managed %d)' % (len(solo), len(managed))] += 1
+            excluded['unmatched (solo %d, %s %d)' % (len(solo), arm, len(managed))
+                     if arm != 'managed' else 'unmatched (solo %d, managed %d)' % (len(solo), len(managed))] += 1
             continue
         a, b = solo[0], managed[0]
         reason = pair_exclusion(a, b)
         if reason:
             excluded[reason] += 1
+            if reason == 'managed did not fan out' and a['outcome'] == b['outcome'] == 'completed':
+                _, _, text = differences(a, b, arm)
+                lines.append('%s, did not fan out, beside solo: %s %s %s' % (arm, harness, task[:12], text))
             continue
-        side = '(solo %s, managed %s)' % (verdict(a), verdict(b))
-        tokens = {t: b['tokens'][t] - a['tokens'][t] for t in TOKEN_TYPES
-                  if a['tokens'][t] is not None and b['tokens'][t] is not None}
-        pair = dict(task=key[0], harness=key[1], soloPassed=a['passed'], managedPassed=b['passed'],
-                    tokens=tokens, wallSeconds=b['wallSeconds'] - a['wallSeconds'])
-        pairs.append(pair)
-        figures = ['%s %+d %s' % (t, tokens[t], side) if t in tokens
-                   else '%s not reported' % t if t in a['tokensNotReported'] else '%s unknown' % t for t in TOKEN_TYPES]
-        lines.append('%s %s %s wall %+.2fs %s' % (key[1], key[0][:12], ' '.join(figures), pair['wallSeconds'], side))
+        tokens, wall, text = differences(a, b, arm)
+        pairs.append(dict(task=task, harness=harness, arm=arm, soloPassed=a['passed'], managedPassed=b['passed'],
+                          tokens=tokens, wallSeconds=wall))
+        lines.append('%s %s %s' % (harness, task[:12], text))
     by_mode = collections.Counter((r['mode'], r['passed']) for r in records)
-    fan_out = sum(1 for r in records if r['mode'] == 'managed' and r['fannedOut'] is True)
+    fan_out = sum(1 for r in records if r['mode'] in MANAGED_ARMS and r['fannedOut'] is True)
     lines.append('runs %d; pairs compared %d of %d expected; coverage %d/%d' % (
         len(records), len(pairs), len(expected), len(pairs), len(expected)))
     for reason, count in sorted(excluded.items()):
@@ -543,6 +606,9 @@ def compare(records):
     for mode in MODES:
         lines.append('%s: %d passed, %d failed' % (mode, by_mode[(mode, True)], by_mode[(mode, False)]))
     lines.append('managed runs that fanned out: %d' % fan_out)
+    ordered = sorted(records, key=lambda r: (r['task'], r['harness'], (r.get('runOrder') or {}).get('position', 0), r['mode']))
+    for r in ordered:
+        lines.extend(row_lines(r))
     if any(r['simulated'] for r in records):
         lines.append('simulated records: not evidence of any model behaviour')
     return dict(runs=len(records), pairs=pairs, expected=len(expected), coverage='%d/%d' % (len(pairs), len(expected)),
