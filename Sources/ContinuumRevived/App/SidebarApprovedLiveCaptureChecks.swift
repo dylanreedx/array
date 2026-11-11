@@ -18,6 +18,11 @@ enum SidebarApprovedLiveCaptureChecks {
         inbox.setScope(.all)
         inbox.foldsUntouchedGroups = false
         inbox.prefersReducedMotion = { false }
+        if let screen = NSScreen.main?.visibleFrame {
+            window.setFrameOrigin(NSPoint(x: screen.minX + 40,
+                y: max(screen.minY + 40, screen.maxY - window.frame.height - 40)))
+        }
+        NSApplication.shared.activate()
         window.makeKeyAndOrderFront(nil)
         var paths: [String] = []
         func capture(_ name: String) async throws {

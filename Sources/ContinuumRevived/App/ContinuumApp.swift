@@ -8444,7 +8444,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     }
                     try await SidebarApprovedLiveCaptureChecks.run(window: window, inbox: inbox, directory: directory)
                     report("Approved sidebar live captures complete")
-                } catch { report("FAIL: \(error)") }
+                } catch {
+                    report("FAIL: \(error)")
+                    try? String(describing: error).write(to: directory.appendingPathComponent("capture-error.txt"), atomically: true, encoding: .utf8)
+                }
             }
             return
         }
