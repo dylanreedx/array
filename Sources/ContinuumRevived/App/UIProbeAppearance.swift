@@ -1215,6 +1215,9 @@ enum UIProbeAppearance {
             return [hex((kind == .background || kind == .fill
                          ? SurfaceToken.overlay.color : LineToken.borderStrong.color).cgColor(for: theme))]
         }
+        if owner == "AgentInboxCardView", kind == .border || kind == .stroke {
+            values.insert(hex(AgentInboxCardView.selectionOutline(theme: theme)))
+        }
         if owner == "KanbanColumnView" {
             return [hex(SurfaceToken.tileBody.color.cgColor(for: theme))]
         }

@@ -60,10 +60,10 @@ enum SidebarSortChecks {
     }
 
     static func build(dark: Bool, rows: [AgentInboxRow] = fixture(), width: CGFloat = 340, height: CGFloat = 460,
-                      leadOpen: Bool = true) -> (AgentInboxView, NSWindow)
+                      leadOpen: Bool = true, scope: SidebarActiveIndicatorScope? = nil) -> (AgentInboxView, NSWindow)
     {
         let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height),
-                                   indicatorDefaults: ClassicSidebarDefaultsForChecks.make())
+                                   indicatorDefaults: ClassicSidebarDefaultsForChecks.make(scope: scope))
         inbox.clock = { now }
         inbox.prefersReducedMotion = { false }
         inbox.hoverCardEnabled = false
@@ -364,43 +364,55 @@ enum SidebarSortChecks {
         }
         report.append("persistence: first launch Most active, a pick stored and restored by the host, junk reads Most active")
 
-        // 8. The working glyph on a lead whose helper works, open or folded, beside
-        //    the outline it shares a fact with; gone once the helper finishes.
+        // 8. The working glyph on a lead whose helper works, open or folded. The
+        //    glyph is the working fact and always shows; the outline is the active
+        //    style, which shows iff the group works AND (scope = all working OR the
+        //    group is selected). Both go once the helper finishes.
         for open in [true, false] {
-            let shape = open ? "open" : "folded"
-            let (leads, leadWindow) = build(dark: false, leadOpen: open)
-            defer { leadWindow.orderOut(nil) }
-            leads.setSortMode(.mostActive)
-            leads.layoutForQA()
-            func lead(_ n: Int) throws -> AgentInbox96CellView {
-                guard let cell = leads.ownershipCellForQA(id: uuid(n)) else {
-                    throw Failure(description: "\(shape): no row for \(String(n, radix: 16))")
+            for (scope, selectLead) in [(SidebarActiveIndicatorScope.working, false), (.selected, false), (.selected, true)] {
+                let shape = "\(open ? "open" : "folded")/\(scope.rawValue)/\(selectLead ? "lead selected" : "none selected")"
+                let (leads, leadWindow) = build(dark: false, leadOpen: open, scope: scope)
+                defer { leadWindow.orderOut(nil) }
+                leads.setSortMode(.mostActive)
+                leads.layoutForQA()
+                if selectLead {
+                    guard leads.selectRowForQA(id: uuid(epsilon)) else {
+                        throw Failure(description: "\(shape): could not select the Epsilon lead")
+                    }
+                    leads.layoutForQA()
                 }
-                cell.layoutSubtreeIfNeeded()
-                return cell
-            }
-            guard open == leads.drawnSequenceForQA.contains("Epsilon helper") else {
-                throw Failure(description: "\(shape): the helper's fold is wrong: \(leads.drawnSequenceForQA)")
-            }
-            let busyLead = try lead(epsilon)
-            guard busyLead.showsWorkingGlyphForQA, busyLead.isSweepingForQA else {
-                throw Failure(description: "\(shape): an idle lead with a working helper draws glyph "
-                    + "\(busyLead.showsWorkingGlyphForQA), outline \(busyLead.isSweepingForQA)")
-            }
-            guard try lead(beta).showsWorkingGlyphForQA, try !lead(alpha).showsWorkingGlyphForQA else {
-                throw Failure(description: "\(shape): a working lead must show the glyph and an idle one must not")
-            }
-            var finished = fixture()
-            if let index = finished.firstIndex(where: { $0.id == uuid(helper) }) {
-                finished[index] = row(helper, "Epsilon helper", project: "Film", activeMinutesAgo: 0.1,
-                                      createdMinutesAgo: 15, parent: epsilon)
-            }
-            leads.apply(rows: finished, changed: .init(added: [], updated: [uuid(helper)], removed: []))
-            leads.layoutForQA()
-            let restingLead = try lead(epsilon)
-            guard !restingLead.showsWorkingGlyphForQA, !restingLead.isSweepingForQA else {
-                throw Failure(description: "\(shape): the lead kept glyph \(restingLead.showsWorkingGlyphForQA), "
-                    + "outline \(restingLead.isSweepingForQA) after its last helper finished")
+                func lead(_ n: Int) throws -> AgentInbox96CellView {
+                    guard let cell = leads.ownershipCellForQA(id: uuid(n)) else {
+                        throw Failure(description: "\(shape): no row for \(String(n, radix: 16))")
+                    }
+                    cell.layoutSubtreeIfNeeded()
+                    return cell
+                }
+                guard open == leads.drawnSequenceForQA.contains("Epsilon helper") else {
+                    throw Failure(description: "\(shape): the helper's fold is wrong: \(leads.drawnSequenceForQA)")
+                }
+                let expectsOutline = scope == .working || selectLead
+                let busyLead = try lead(epsilon)
+                guard busyLead.showsWorkingGlyphForQA, busyLead.isSweepingForQA == expectsOutline else {
+                    throw Failure(description: "\(shape): an idle lead with a working helper draws glyph "
+                        + "\(busyLead.showsWorkingGlyphForQA), outline \(busyLead.isSweepingForQA); expected glyph true, "
+                        + "outline \(expectsOutline)")
+                }
+                guard try lead(beta).showsWorkingGlyphForQA, try !lead(alpha).showsWorkingGlyphForQA else {
+                    throw Failure(description: "\(shape): a working lead must show the glyph and an idle one must not")
+                }
+                var finished = fixture()
+                if let index = finished.firstIndex(where: { $0.id == uuid(helper) }) {
+                    finished[index] = row(helper, "Epsilon helper", project: "Film", activeMinutesAgo: 0.1,
+                                          createdMinutesAgo: 15, parent: epsilon)
+                }
+                leads.apply(rows: finished, changed: .init(added: [], updated: [uuid(helper)], removed: []))
+                leads.layoutForQA()
+                let restingLead = try lead(epsilon)
+                guard !restingLead.showsWorkingGlyphForQA, !restingLead.isSweepingForQA else {
+                    throw Failure(description: "\(shape): the lead kept glyph \(restingLead.showsWorkingGlyphForQA), "
+                        + "outline \(restingLead.isSweepingForQA) after its last helper finished")
+                }
             }
         }
         // The character reads the same fact: a lead with a working helper poses as working.
@@ -411,7 +423,7 @@ enum SidebarSortChecks {
             throw Failure(description: "the lead's working fact does not follow its helpers")
         }
         report.append("header: search and compose above trailing-aligned sort and scope at 280 and 220 pt; sort remains available while typing")
-        report.append("lead glyph: on with a working helper (open and folded) beside the outline, off when it finishes")
+        report.append("lead glyph: on with a working helper (open and folded); outline under All working, or Selected with the lead selected, absent unselected under Selected; both off when it finishes")
 
         // 9. Stills.
         if let outputDirectory {

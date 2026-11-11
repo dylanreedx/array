@@ -2803,6 +2803,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let ask = ownershipAskByLead[lead.id]
             let working = lead.state == .working || (rollup?.working ?? 0) > 0
             let sweepPhase = working ? InboxOwnershipClock.phase(for: lead.id) : nil
+            // A group that asks raises Needs you on its lead and stops its sweep, as
+            // in 0.7.47; the scope rule below decides only whether it may light.
             // The lanes, read backwards: a lane runs through a row while a later
             // row at its level is still to come, and ends in a foot at the last.
             var laterAt = [Bool](repeating: false, count: AgentInboxRow.maxDepth + 2)
@@ -2852,7 +2854,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     offset: offset, groupHeight: groupHeight,
                     continuesAbove: index > start, continuesBelow: index < end,
                     leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
-                    sweepPhase: activeGroup ? sweepPhase : nil, sweepColour: lead.identityColor,
+                    sweepPhase: activeGroup && ask == nil ? sweepPhase : nil, sweepColour: lead.identityColor,
                     raisedAsk: index == start ? ask : nil,
                     activeGroup: activeGroup, groupSelected: hasSelectedMember,
                     leadHeight: heights[0], runningY: runningOffset,
@@ -3412,13 +3414,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// Select `ids` again after a full reload, the rows still drawn only, and
-    /// repaint them and the bulk bar from that selection.
+    /// repaint them and the bulk bar from that selection. A selection that moves
+    /// reaches `tableViewSelectionDidChange`, which already redraws the rows whose
+    /// emphasis changed; reloading them again here built each restored row twice.
     private func restoreSelection(ids: [UUID]) {
         let restored = IndexSet(ids.compactMap(tableRow(forAgentId:)))
         guard !restored.isEmpty else { return }
+        let stale = selectedRowsForEmphasis.symmetricDifference(restored)
+        let selectionMoves = tableView.selectedRowIndexes != restored
         tableView.selectRowIndexes(restored, byExtendingSelection: false)
-        selectedRowsForEmphasis = restored
-        tableView.reloadData(forRowIndexes: restored, columnIndexes: IndexSet(integer: 0))
+        if !selectionMoves {
+            selectedRowsForEmphasis = restored
+            redraw(tableRows: Array(stale))
+        }
         updateBulkBar()
     }
 
@@ -9909,6 +9917,11 @@ final class AgentInboxCardView: NSView, TokenThemed {
     private let indicatorEdge = CALayer()
     private let indicatorSheen = CAGradientLayer()
     var suppressesSelectionOutlineForFold = false { didSet { applyIndicator() } }
+    /// The one even selection outline: primary text, softened. The appearance
+    /// census admits exactly this value for the card's border slot.
+    static func selectionOutline(theme: TokenTheme) -> CGColor {
+        TextToken.textPrimary.color.cgColor(for: theme).copy(alpha: theme == .dark ? 0.55 : 0.35)!
+    }
     var indicatorReducesMotion = false { didSet { applyIndicator() } }
     private var motionSignature: String?
 
@@ -9929,8 +9942,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         indicatorEdge.frame = bounds.insetBy(dx: 0.5, dy: 0.5)
         indicatorEdge.cornerRadius = max(0, Radius.card - 0.5)
         indicatorEdge.borderWidth = isSelected || isCanvasSelection ? 1 : 0
-        indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
-            .withAlphaComponent(effectiveTokenTheme == .dark ? 0.55 : 0.35).cgColor
+        indicatorEdge.borderColor = Self.selectionOutline(theme: effectiveTokenTheme)
         indicatorEdge.isHidden = suppressesSelectionOutlineForFold || (!isSelected && !isCanvasSelection)
         let enabled = !sharesGroupLight && style != "current" && isIndicatorWorking
         indicatorWash.isHidden = !enabled
@@ -9994,8 +10006,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
             indicatorEdge.isHidden = true
         }
         indicatorEdge.borderWidth = isSelected || isCanvasSelection ? 1 : 0
-        indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
-            .withAlphaComponent(dark ? 0.55 : 0.35).cgColor
+        indicatorEdge.borderColor = Self.selectionOutline(theme: dark ? .dark : .light)
         // Only the open agent animates. Multi-selection remains a static indication.
         let moving = isIndicatorWorking && !indicatorReducesMotion
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && window != nil

@@ -11,6 +11,7 @@ enum SidebarIndicatorTruthTableChecks {
     static func run() throws {
         var failures: [String] = []
         var passed = 0
+        var total = 0
         for dark in [false, true] {
             for style in SidebarActiveIndicatorStyle.allCases {
                 for scope in ["selected", "working"] {
@@ -29,12 +30,16 @@ enum SidebarIndicatorTruthTableChecks {
                     window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                     window.orderFrontOffscreenForChecks()
                     for selection in ["lead", "helper", "none"] {
-                        for working in [false, true] {
+                        // "helper": an idle lead whose helper works — the group still works.
+                        for work in ["none", "both", "helper"] {
+                            let working = work != "none"
                             for fold in ["collapsed", "expanded", "mid-fold", "live-add"] {
                                 autoreleasepool {
-                                    let label = "\(style.rawValue)/\(scope)/\(selection)/\(working)/\(fold)/\(dark)"
+                                    total += 1
+                                    let label = "\(style.rawValue)/\(scope)/\(selection)/\(work)/\(fold)/\(dark)"
                                     func row(_ id: UUID, parent: UUID? = nil) -> AgentInboxRow {
-                                        AgentInboxRow(id: id, title: id == lead ? "Selected lead" : "Helper", state: working ? .working : .ready,
+                                        let rowWorks = id == lead ? work == "both" : working
+                                        return AgentInboxRow(id: id, title: id == lead ? "Selected lead" : "Helper", state: rowWorks ? .working : .ready,
                                             depth: parent == nil ? 0 : 1, createdAt: now, parentId: parent)
                                     }
                                     inbox.foldMotionForQA.cancel()
@@ -150,7 +155,7 @@ enum SidebarIndicatorTruthTableChecks {
                 }
             }
         }
-        print("SidebarIndicatorTruthTableChecks: \(passed)/384 cells passed")
+        print("SidebarIndicatorTruthTableChecks: \(passed)/\(total) cells passed")
         if !failures.isEmpty { throw Failure(description: failures.prefix(16).joined(separator: "\n")) }
     }
 }

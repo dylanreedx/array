@@ -233,11 +233,21 @@ enum SidebarIndicatorSettingsChecks {
 
 /// Immutable input for existing witnesses that specifically exercise Classic's
 /// sweep/shimmer/fade. No preference writes and no fallback to an app domain.
+/// `scope` stands in for "Show style on"; nil reads as unset, so the shipped
+/// default (Selected agent) applies. A check may change it and post the setting.
 final class ClassicSidebarDefaultsForChecks: UserDefaults, @unchecked Sendable {
-    static func make() -> ClassicSidebarDefaultsForChecks {
-        ClassicSidebarDefaultsForChecks(suiteName: "array.sidebar.classic-check.\(UUID().uuidString)")!
+    var scope: SidebarActiveIndicatorScope?
+    static func make(scope: SidebarActiveIndicatorScope? = nil) -> ClassicSidebarDefaultsForChecks {
+        let defaults = ClassicSidebarDefaultsForChecks(suiteName: "array.sidebar.classic-check.\(UUID().uuidString)")!
+        defaults.scope = scope
+        return defaults
     }
     override func object(forKey key: String) -> Any? {
-        key == SidebarActiveIndicatorStyle.defaultsKey ? SidebarActiveIndicatorStyle.classic.rawValue : nil
+        switch key {
+        case SidebarActiveIndicatorStyle.defaultsKey: return SidebarActiveIndicatorStyle.classic.rawValue
+        case SidebarActiveIndicatorScope.defaultsKey: return scope?.rawValue
+        default: return nil
+        }
     }
+    override func string(forKey key: String) -> String? { object(forKey: key) as? String }
 }
