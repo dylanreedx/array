@@ -12,6 +12,40 @@ enum SidebarSelectionGeometryChecks {
         func cards(_ view: NSView) -> [AgentInboxCardView] {
             ((view as? AgentInboxCardView).map { [$0] } ?? []) + view.subviews.flatMap(cards)
         }
+        func sheets(_ view: NSView) -> [InboxGroupBackgroundView] {
+            ((view as? InboxGroupBackgroundView).map { [$0] } ?? []) + view.subviews.flatMap(sheets)
+        }
+        func checkBottom(_ inbox: AgentInboxView, lead: UUID, helpers: [AgentInboxRow]) throws {
+            let visible = helpers.compactMap { inbox.cellForQA(id: $0.id) }
+            guard let last = helpers.first(where: {
+                inbox.ownershipSliceForQA(id: $0.id)?.continuesBelow == false
+                    && inbox.cellForQA(id: $0.id) != nil
+            }), let cell = inbox.cellForQA(id: last.id),
+                  let slice = inbox.ownershipSliceForQA(id: last.id),
+                  let leadCell = inbox.cellForQA(id: lead) else { return }
+            let actualHeight = leadCell.bounds.height + visible.reduce(0) { $0 + $1.bounds.height }
+                + CGFloat(visible.count) * CGFloat(AgentInboxView.rowSpacing)
+            guard abs(slice.groupHeight - actualHeight) < 0.5 else {
+                throw Failure(message: "group height is stale after live helper changes")
+            }
+            guard let sheet = sheets(cell).first, let strip = sheet.ownershipStrip,
+                  strip.roundsBottom, sheet.bounds.contains(strip.rect) else {
+                throw Failure(message: "group bottom corners are clipped")
+            }
+            let title = sheet.convert(cell.qaTitleFrameForQA, from: cell)
+            guard strip.rect.maxY - title.maxY >= InboxOwnershipChrome.footPad - 0.5 else {
+                throw Failure(message: "last helper has no group bottom padding")
+            }
+            if let light = lights(cell).first, !light.isHidden,
+               let surface = light.layer?.sublayers?.first {
+                let bottomCorners = CGRect(x: surface.frame.minX,
+                    y: surface.frame.maxY - surface.cornerRadius,
+                    width: surface.frame.width, height: surface.cornerRadius)
+                guard surface.cornerRadius > 0, light.bounds.contains(bottomCorners) else {
+                    throw Failure(message: "group light clips its bottom corners")
+                }
+            }
+        }
         for dark in [false, true] {
             for style in SidebarActiveIndicatorStyle.allCases {
                 let suite = "array.selection-geometry.\(UUID())"
@@ -31,16 +65,20 @@ enum SidebarSelectionGeometryChecks {
                 window.contentView = inbox
                 window.orderFrontOffscreenForChecks()
                 defer { window.orderOut(nil) }
-                for (transition, count) in [0, 2, 0, 2].enumerated() {
-                    let next = [parent] + (count == 0 ? [] : helpers)
+                var previousHelpers: Set<UUID> = []
+                for (transition, count) in [0, 1, 2, 1, 0, 2].enumerated() {
+                    let next = [parent] + Array(helpers.prefix(count))
+                    let currentHelpers = Set(helpers.prefix(count).map(\.id))
                     if transition == 0 {
                         inbox.reload(rows: next)
                     } else {
                         inbox.apply(rows: next, changed: AgentsBoardChangeSet(
-                            added: count == 2 ? Set(helpers.map(\.id)) : [],
-                            updated: [lead], removed: count == 0 ? Set(helpers.map(\.id)) : []))
+                            added: currentHelpers.subtracting(previousHelpers),
+                            updated: [lead], removed: previousHelpers.subtracting(currentHelpers)))
                     }
+                    previousHelpers = currentHelpers
                     inbox.layoutViewportForQA()
+                    try checkBottom(inbox, lead: lead, helpers: helpers)
                     if count == 0 {
                         guard let cell = inbox.cellForQA(id: lead), let card = cards(cell).first,
                               card.layer?.cornerRadius ?? 0 > 0 else {
@@ -86,6 +124,7 @@ enum SidebarSelectionGeometryChecks {
                         inbox.layoutViewportForQA()
                         for _ in 0..<24 {
                             inbox.foldMotionForQA.advance(by: 1.0 / 120)
+                            try checkBottom(inbox, lead: lead, helpers: helpers)
                             guard let sampled = inbox.cellForQA(id: lead), let light = lights(sampled).first else { throw Failure(message: "missing sampled lead") }
                             if !light.isHidden {
                                 guard let surface = light.layer?.sublayers?.first,
@@ -107,6 +146,6 @@ enum SidebarSelectionGeometryChecks {
                 }
             }
         }
-        print("SidebarSelectionGeometryChecks passed: live 0→2→0→2 helpers, both appearances, all four styles, 24 fold samples and settling per transition")
+        print("SidebarSelectionGeometryChecks passed: live 0→1→2→1→0→2 helpers, group height, bottom padding/corners, both appearances, all four styles, 24 fold samples and settling per transition")
     }
 }
