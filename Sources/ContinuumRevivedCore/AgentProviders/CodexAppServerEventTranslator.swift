@@ -358,7 +358,10 @@ public struct CodexAppServerEventTranslator {
                         targetPath: target,
                         startedAt: now(),
                         updatedAt: now(),
-                        evidenceSource: .toolEvent)))
+                        evidenceSource: .toolEvent,
+                        otherTargets: otherChangePaths(item).compactMap {
+                            Self.resolvedTarget($0, workingDirectory: workingDirectory)
+                        })))
             }
             if let onRuntimeObservation {
                 onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
@@ -735,6 +738,11 @@ public struct CodexAppServerEventTranslator {
     private func firstChangePath(_ item: [String: Any]) -> String? {
         guard let changes = item["changes"] as? [[String: Any]] else { return nil }
         return changes.lazy.compactMap { $0["path"] as? String }.first
+    }
+
+    private func otherChangePaths(_ item: [String: Any]) -> [String] {
+        guard let changes = item["changes"] as? [[String: Any]] else { return [] }
+        return Array(changes.compactMap { $0["path"] as? String }.dropFirst())
     }
 
     private func changeBasenames(_ item: [String: Any]) -> [String] {

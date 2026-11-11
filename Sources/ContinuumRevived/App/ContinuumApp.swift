@@ -2388,6 +2388,51 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // `.plans/116` part 12 step 1: the host-kept run ledger, through the
+        // composer's accept, the real MCP binary and a restart.
+        if CommandLine.arguments.contains("--managed-run-ledger-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedRunLedgerChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // `.plans/116` part 8 step 1: shadow evidence of the checks a helper ran
+        // after its edits, for Claude and Codex, recording on and off.
+        if CommandLine.arguments.contains("--helper-evidence-provider-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperEvidenceChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // Targeted only, never a matrix leg: prints what the run ledger adds to
+        // the request path and asserts nothing about time.
+        if CommandLine.arguments.contains("--managed-run-ledger-timing-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedRunLedgerTimingChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--helper-message-result-check") {
             _ = NSApplication.shared
             Task { @MainActor in

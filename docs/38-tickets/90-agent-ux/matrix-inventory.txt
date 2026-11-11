@@ -170,6 +170,7 @@ check --gesture-telemetry-check
 check --helper-command-evidence-check
 check --helper-completion-check
 check --helper-liveness-check
+check --helper-evidence-provider-check
 check --helper-message-result-check
 check --helper-provider-retry-check
 check --helper-retry-check
@@ -212,6 +213,7 @@ check --managed-lead-plan-check
 check --managed-mode-hooks-check
 check --managed-mode-launch-check
 check --managed-mode-persistence-check
+check --managed-run-ledger-check
 check --managed-setting-check
 check --menu-contract-check
 check --multi-zone-render-check
@@ -635,6 +637,7 @@ leg run_app_check .build/debug/Array --gesture-telemetry-check
 leg run_app_check .build/debug/Array --helper-command-evidence-check
 leg run_app_check .build/debug/Array --helper-completion-check
 leg run_app_check .build/debug/Array --helper-liveness-check
+leg run_app_check .build/debug/Array --helper-evidence-provider-check
 leg run_app_check .build/debug/Array --helper-message-result-check
 leg run_app_check .build/debug/Array --helper-provider-retry-check
 leg run_app_check .build/debug/Array --helper-retry-check
@@ -674,6 +677,7 @@ leg run_app_check .build/debug/Array --managed-lead-plan-check
 leg run_app_check .build/debug/Array --managed-mode-hooks-check
 leg run_app_check .build/debug/Array --managed-mode-launch-check
 leg run_app_check .build/debug/Array --managed-mode-persistence-check
+leg run_app_check .build/debug/Array --managed-run-ledger-check
 leg run_app_check .build/debug/Array --managed-setting-check
 leg run_app_check .build/debug/Array --menu-contract-check
 leg run_app_check .build/debug/Array --multi-zone-render-check

@@ -1044,6 +1044,8 @@ final class AgentSupervisor {
     static let replayCap = 500
 
     private let store: AgentStore
+    let runLedger: ManagedRunLedger
+    var qaRunLedgerRecording = true
     private var wakeupScheduler: AgentWakeupScheduler?
     private var scheduledQueueAdmissions: Set<UUID> = []
     var qaAfterScheduledQueueWrite: (() async -> Void)?
@@ -1826,6 +1828,7 @@ final class AgentSupervisor {
     ) {
         self.idleRunnerTimeout = idleRunnerTimeout
         self.store = store
+        self.runLedger = ManagedRunLedger(support: store.layout.applicationSupportDirectory)
         self.makeRunner = makeRunner
         self.warn = warn
         do { self.companionTaskLedger = try CompanionTaskLedger(applicationSupportDirectory: store.layout.applicationSupportDirectory) }
@@ -6406,6 +6409,12 @@ final class AgentSupervisor {
         helperFoldEligibleSince[id] = nil
         record.lastReport = AgentFiledReport(report: report, filedAt: date)
         guard persist(record) else { return false }
+        if qaRunLedgerRecording {
+            runLedger.reported(agent: id.rawValue, at: date, checks: report.checks, findings: report.findings)
+            if record.parentAgentID != nil {
+                runLedger.helperEvidence(agent: id.rawValue, at: date)
+            }
+        }
         onSelfReportChanged?(id)
         // A report filed between turns is a result: it releases a turn held
         // as progress, or follows a result already delivered as a note.
@@ -9034,7 +9043,15 @@ final class AgentSupervisor {
     /// same main-actor turn, so an accepted send/stop cannot be refused by a second
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
-        await accept(intent.neutralizingTypedEnvelopes, for: agentID, sharedAdmission: nil)
+        let result = await accept(intent.neutralizingTypedEnvelopes, for: agentID, sharedAdmission: nil)
+        if qaRunLedgerRecording, result == .accepted, effectiveMode(for: agentID) == .managed, records[agentID]?.parentAgentID == nil {
+            switch intent {
+            case .send, .sendPrompt, .queue:
+                runLedger.submission(agent: agentID.rawValue, project: records[agentID]?.projectId)
+            default: break
+            }
+        }
+        return result
     }
 
     /// Whether a teammate's send-now prompt would start at once. When it would
@@ -12014,6 +12031,13 @@ final class AgentSupervisor {
         // The presence owner reduces EVERY event first; the record stamps below
         // are side effects of the same transitions, never a second state.
         facts.presence.reduce(event, at: now)
+        switch event {
+        case let .turnStarted(_, turnID):
+            if qaRunLedgerRecording { runLedger.working(agent: id.rawValue, turn: turnID) }
+        case let .turnCompleted(_, turnID, outcome, _):
+            if qaRunLedgerRecording { runLedger.ended(agent: id.rawValue, turn: turnID, outcome: outcome) }
+        default: break
+        }
         switch event {
         case .turnStarted:
             // P3.3: THE elapsed anchor is stamped by the presence owner at the one

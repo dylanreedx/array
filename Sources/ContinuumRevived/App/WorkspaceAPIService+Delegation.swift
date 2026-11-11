@@ -236,6 +236,19 @@ extension WorkspaceAPIService {
             let reason = supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
             return fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true)
         }
+        if supervisor.qaRunLedgerRecording, let child = supervisor.records[childId] {
+            // `.plans/116` part 8: shadow evidence of the child's own tool calls,
+            // through the supervisor's observer seam; nothing reads it back.
+            supervisor.runLedger.delegated(parent: agentId.rawValue, child: childId.rawValue, source: requestId,
+                root: child.checkoutRoot, base: child.delegationContext?.baseHead,
+                shared: WorktreeManager.resolved(URL(fileURLWithPath: child.checkoutRoot))
+                    == WorktreeManager.resolved(URL(fileURLWithPath: record.checkoutRoot)))
+            let ledger = supervisor.runLedger
+            _ = supervisor.addRuntimeObservationObserver(for: childId) { [weak supervisor] observation in
+                guard supervisor?.qaRunLedgerRecording == true, let sighting = HelperEvidence.Sighting(observation) else { return }
+                ledger.observeTool(agent: childId.rawValue, sighting)
+            }
+        }
         operations.update(operationId: requestId) { op in
             op.steps.creation = .succeeded
             op.childAgentId = childId
