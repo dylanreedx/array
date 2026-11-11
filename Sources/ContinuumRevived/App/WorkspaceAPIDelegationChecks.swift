@@ -476,7 +476,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
             guard let launch else { return }
             check(launch.resumed == resumed, "\(what): expected a \(resumed ? "resumed" : "first") launch")
             check(launch.effort == effort && launch.carries(effort),
-                  "\(what): \(effort) must reach the CLI; effort \(String(describing: launch.effort)), argv \(launch.argv(effort: launch.effort))")
+                  "\(what): \(effort) must reach the CLI; launch effort \(String(describing: launch.effort)), argv effort \(launch.effortArguments)")
         }
         var effortKey = 0
         func delegateEffort(_ lead: AgentID, _ fields: [String: Any]) -> WorkspaceAPIService.Reply {
@@ -550,7 +550,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
                     let legacy = target == .codex ? CodexCLIBackend.effortArgument(forThinking: expected) : ClaudeCLIBackend.effortArgument(forThinking: expected)
                     let today = launch.argv(effort: legacy), now = launch.argv(effort: launch.effort)
                     check(launch.effort == legacy && today.count == now.count && zip(today, now).allSatisfy { $0 == $1 },
-                          "\(pair): omitted effort argv must equal today's element by element: \(now) vs \(today)")
+                          "\(pair): omitted effort argv must equal today's element by element; differing \(zip(today, now).filter { $0 != $1 }), lengths \(today.count)/\(now.count)")
                 }
             }
 
@@ -586,7 +586,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
             message(lead, child, "after the catalogue changed")
             if let launch = await settle(child, launch: 2, "\(target.rawValue) stale effort") {
                 check(launch.effort == nil && !launch.argv(effort: launch.effort).contains { $0.contains("xhigh") },
-                      "\(target.rawValue): a stale effort must not reach the CLI; effort \(String(describing: launch.effort))")
+                      "\(target.rawValue): a stale effort must not reach the CLI; launch effort \(String(describing: launch.effort)), argv effort \(launch.effortArguments)")
                 check(supervisor.records[child]?.thinking == "xhigh", "\(target.rawValue): nothing rewrites the stored effort")
                 check(supervisor.records[child]?.latestTerminalEvent?.outcome == .succeeded, "\(target.rawValue): the stale helper's turn must still run")
             }
@@ -1600,6 +1600,12 @@ private enum EffortLaunch {
                 threadId: c.threadId, cwdPath: c.cwd.path, extraArgs: c.extraArgs,
                 prompt: AgentPrompt(text: "fixture"), workspaceMCP: c.workspaceMCP)
         }
+    }
+    /// The effort elements of this launch's argv.
+    var effortArguments: [String] {
+        let args = argv(effort: effort)
+        return zip(args, args.dropFirst()).compactMap { $0 == "--effort" ? "--effort \($1)" : nil }
+            + args.filter { $0.hasPrefix("model_reasoning_effort=") }
     }
     func carries(_ level: String) -> Bool {
         let args = argv(effort: effort)
