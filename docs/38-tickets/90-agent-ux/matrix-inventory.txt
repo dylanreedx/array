@@ -235,6 +235,7 @@ check --perf-budget-raster-check
 check --perf-budget-surface-host-slope-check
 check --perf-budget-transcript-delta-check
 check --persistence-crash-safe-check
+check --personal-rules-delegation-check
 check --pi-extension-load-check
 check --picker-epoch-fence-check
 check --portal-board-check
@@ -686,6 +687,7 @@ leg run_app_check .build/debug/Array --perf-budget-raster-check
 leg run_app_check .build/debug/Array --perf-budget-surface-host-slope-check
 leg run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
+leg run_app_check .build/debug/Array --personal-rules-delegation-check
 leg run_app_check .build/debug/Array --pi-extension-load-check
 leg run_app_check .build/debug/Array --picker-epoch-fence-check
 leg run_app_check .build/debug/Array --portal-board-check

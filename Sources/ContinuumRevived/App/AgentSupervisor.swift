@@ -1823,6 +1823,7 @@ final class AgentSupervisor {
         },
         idleRunnerTimeout: TimeInterval = AgentSupervisor.defaultIdleRunnerTimeout
     ) {
+        _ = PersonalRulesSource.shared
         self.idleRunnerTimeout = idleRunnerTimeout
         self.store = store
         self.makeRunner = makeRunner
@@ -2043,12 +2044,13 @@ final class AgentSupervisor {
     /// `model_reasoning_effort` only on exact match, and — the one difference
     /// from claude — continuity is STORED: `record.codexThreadId` (nil ⇒ fresh)
     /// is read back so a later turn resumes the same codex thread.
-    nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> CodexAgentRunner.Config {
+    nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, personalRules: PersonalRulesSource = .shared) -> CodexAgentRunner.Config {
         CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
             effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             threadId: record.codexThreadId,
+            extraArgs: personalRules.arguments(codex: true),
             workspaceMCP: workspaceMCP,
             processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
@@ -2069,7 +2071,7 @@ final class AgentSupervisor {
     /// defaulted parameter is exactly how that happened once; it does not get a
     /// second chance.
     nonisolated static func runnerConfig(
-        for record: AgentRecord, spawnDepth: Int
+        for record: AgentRecord, spawnDepth: Int, personalRules: PersonalRulesSource = .shared
     ) -> PiAgentRunner.Config {
         let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         // `model`/`thinking` come from the RECORD: the role already decided them at
@@ -2097,10 +2099,10 @@ final class AgentSupervisor {
             // T5 — the spawn verbs are appended only below Array's own cap, so the
             // model is never OFFERED a verb it cannot use. That is better than
             // refusing after the fact: it never proposes what it cannot have.
-            extraArgs: record.role.map {
+            extraArgs: (record.role.map {
                 RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
                     .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth)
-            } ?? [],
+            } ?? []) + personalRules.arguments(codex: false),
             processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
     }
