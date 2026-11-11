@@ -27,17 +27,17 @@ final class ManagedRunLedger: @unchecked Sendable {
     // and its report records that instead of pretending to have watched it.
     private var evidence: [UUID: HelperEvidence] = [:]
     /// A helper's tool call, as its translator reported it. Folded on the queue.
-    func observeTool(agent: UUID, _ observation: AgentRuntimeObservation) {
-        queue.async { self.evidence[agent]?.observe(observation) }
+    func observeTool(agent: UUID, _ sighting: HelperEvidence.Sighting) {
+        queue.async { self.evidence[agent]?.observe(sighting) }
     }
-    /// One hand-off on the report path; the manifest read and the fold run here.
-    func helperEvidence(agent: UUID, at: Date, root: String, exitProven: Bool) {
+    /// One hand-off on the report path; git, the manifest and the fold run here.
+    func helperEvidence(agent: UUID, at: Date) {
         queue.async {
             guard let task = self.delegatedTask[agent] else { return }
             var row = Row(kind: "helperEvidence", task: task, agent: agent, part: self.parts[agent],
                           source: "evidence/\(agent)/\(at.timeIntervalSinceReferenceDate)")
-            if let watched = self.evidence[agent] {
-                (row.files, row.evidence) = watched.facts(root: URL(fileURLWithPath: root), exitProven: exitProven)
+            if self.evidence[agent] != nil {
+                (row.files, row.evidence) = self.evidence[agent]!.facts()
             } else {
                 row.evidence = ["observed": "notSinceDelegation"]
             }
@@ -134,11 +134,14 @@ final class ManagedRunLedger: @unchecked Sendable {
             self.append(Row(kind: "submission", task: task, agent: agent, source: UUID().uuidString))
         }
     }
-    func delegated(parent: UUID, child: UUID, source: String) {
+    /// `root`, `base` and `shared` describe the child's checkout for its evidence.
+    func delegated(parent: UUID, child: UUID, source: String, root: String? = nil, base: String? = nil, shared: Bool = true) {
         queue.async {
             guard let task = self.active[parent] else { return }
             self.sessionTasks[child] = task
-            self.evidence[child] = HelperEvidence()
+            if let root, self.evidence[child] == nil {
+                self.evidence[child] = HelperEvidence(root: URL(fileURLWithPath: root), base: base, shared: shared)
+            }
             self.append(Row(kind: "delegated", task: task, agent: child, part: child, source: "delegate/\(source)"))
         }
     }

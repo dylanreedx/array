@@ -2194,14 +2194,6 @@ final class AgentSupervisor {
         for id: AgentID
     ) {
         guard let record = records[id] else { return }
-        // `.plans/116` part 8: a helper's tool calls, folded off this thread
-        // into shadow evidence nobody reads. Only these two cases are handed off.
-        if qaRunLedgerRecording, record.parentAgentID != nil {
-            switch observation {
-            case .toolActivity, .toolDetail: runLedger.observeTool(agent: id.rawValue, observation)
-            default: break
-            }
-        }
         // A captured codex thread id is host-local persistence state, not a Home
         // / Where / What fact: persist it and stop. The guard on inequality
         // makes this a no-op when `thread.started` re-fires the same id on
@@ -6199,8 +6191,7 @@ final class AgentSupervisor {
         if qaRunLedgerRecording {
             runLedger.reported(agent: id.rawValue, at: date, checks: report.checks, findings: report.findings)
             if record.parentAgentID != nil {
-                runLedger.helperEvidence(agent: id.rawValue, at: date, root: record.checkoutRoot,
-                                         exitProven: record.harness == .codex)
+                runLedger.helperEvidence(agent: id.rawValue, at: date)
             }
         }
         onSelfReportChanged?(id)

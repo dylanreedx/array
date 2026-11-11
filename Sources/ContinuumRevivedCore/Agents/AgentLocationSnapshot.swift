@@ -137,6 +137,13 @@ public struct AgentObservedActivity: Equatable, Sendable {
         self.updatedAt = updatedAt
         self.evidenceSource = evidenceSource
     }
+
+    /// Equality is what it was before `otherTargets`: change detection and the
+    /// location projector must not fire more often for a multi-file edit.
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.operation == rhs.operation && lhs.targetPath == rhs.targetPath && lhs.startedAt == rhs.startedAt
+            && lhs.updatedAt == rhs.updatedAt && lhs.evidenceSource == rhs.evidenceSource
+    }
 }
 
 /// The single host-local snapshot UI, harness tools, and provider adapters will
