@@ -2418,6 +2418,21 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // `.plans/116` part 14 step 1: tokens by type per task, lead and helpers,
+        // Claude and Codex, through production delegation and recorded frames.
+        if CommandLine.arguments.contains("--request-telemetry-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await RequestTelemetryChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         // Targeted only, never a matrix leg: prints what the run ledger adds to
         // the request path and asserts nothing about time.
         if CommandLine.arguments.contains("--managed-run-ledger-timing-check") {
