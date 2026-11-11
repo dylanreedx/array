@@ -3671,6 +3671,62 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--managed-compaction-tools-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runManagedCompactionToolsChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--reply-rules-launch-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ReplyRulesChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--personal-rules-delegation-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await PersonalRulesChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--managed-lead-context-transition-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedLeadTransitionChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--managed-mode-persistence-check") {
             _ = NSApplication.shared
             Task { @MainActor in

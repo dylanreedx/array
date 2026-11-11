@@ -17,7 +17,7 @@ import Foundation
 ///
 /// What each act would say when it goes red is written beside it.
 @MainActor
-func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
+func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: ((AgentRunnerLaunch) -> Void)? = nil) async throws {
     struct Failure: Error, CustomStringConvertible {
         let message: String
         var description: String { message }
@@ -204,6 +204,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
     let supervisor = AgentSupervisor(store: AgentStore(
         applicationSupportDirectory: URL(fileURLWithPath: appSupportPath, isDirectory: true)
             .appendingPathComponent("workspace-api-delegation-check", isDirectory: true)), makeRunner: { launch -> AgentRunning in
+            inspectLaunch?(launch)
             if !crossHarness { return AgentSupervisor.productionRunner(for: launch) }
             let runner = ScriptedAgentRunner(script: [.turnStarted(threadId: "fixture", turnId: "done"),
                                                       .turnCompleted(threadId: "fixture", turnId: "done", outcome: .completed, errorMessage: nil)])
@@ -289,7 +290,10 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
         // sidebar until popped out. Exercise the same cross-harness contract in
         // both modes. Ignore ambient argument/global defaults as well as the
         // user's app preferences, and remove the private suite after the run.
-        let modeSuite = "array.qa.cross-harness-mode"
+        // The suite is a per-user cfprefsd domain shared by every process, so
+        // its name is unique per run: a fixed name let a concurrent run of this
+        // fixture flip the policy mid-assertion.
+        let modeSuite = "array.qa.cross-harness-mode.\(UUID().uuidString)"
         let modePolicy = QAIsolatedDefaults(isolatedSuiteName: modeSuite)!
         modePolicy.removePersistentDomain(forName: modeSuite)
         defer { modePolicy.removePersistentDomain(forName: modeSuite) }

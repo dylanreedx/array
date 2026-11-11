@@ -203,8 +203,10 @@ check --managed-agent-model-spawn-check
 check --managed-agent-page-zoom-check
 check --managed-codex-hooks-check
 check --managed-codex-launch-check
+check --managed-compaction-tools-check
 check --managed-duckherd-check
 check --managed-duckherd-live-check
+check --managed-lead-context-transition-check
 check --managed-lead-plan-check
 check --managed-mode-hooks-check
 check --managed-mode-launch-check
@@ -233,6 +235,7 @@ check --perf-budget-raster-check
 check --perf-budget-surface-host-slope-check
 check --perf-budget-transcript-delta-check
 check --persistence-crash-safe-check
+check --personal-rules-delegation-check
 check --pi-extension-load-check
 check --picker-epoch-fence-check
 check --portal-board-check
@@ -248,6 +251,7 @@ check --provider-request-response-check
 check --push-payload-dump-check
 check --refused-spawn-teardown-check
 check --relationship-geometry-check
+check --reply-rules-launch-check
 check --reserved-dispatch-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
@@ -452,9 +456,6 @@ leg run scripts/make-app-bundle.sh --skip-build --configuration debug --output "
 leg run swift build
 leg run swift build --disable-sandbox --skip-update
 leg run swift build --disable-sandbox --skip-update --product Array
-leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
-leg run swift build --disable-sandbox --skip-update --product continuum-relay
-leg run swift build --disable-sandbox --skip-update --product continuum-relay-legacy
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
@@ -462,6 +463,9 @@ leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRe
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedSyncChecks
+leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
+leg run swift build --disable-sandbox --skip-update --product continuum-relay
+leg run swift build --disable-sandbox --skip-update --product continuum-relay-legacy
 leg run swift build --product Array
 leg run swift build --product ContinuumRevivedCoreChecks
 leg run_app_check .build/debug/Array --add-zone-check
@@ -654,6 +658,8 @@ leg run_app_check .build/debug/Array --managed-agent-model-spawn-check
 leg run_app_check .build/debug/Array --managed-agent-page-zoom-check
 leg run_app_check .build/debug/Array --managed-codex-hooks-check
 leg run_app_check .build/debug/Array --managed-codex-launch-check
+leg run_app_check .build/debug/Array --managed-compaction-tools-check
+leg run_app_check .build/debug/Array --managed-lead-context-transition-check
 leg run_app_check .build/debug/Array --managed-lead-plan-check
 leg run_app_check .build/debug/Array --managed-mode-hooks-check
 leg run_app_check .build/debug/Array --managed-mode-launch-check
@@ -682,6 +688,7 @@ leg run_app_check .build/debug/Array --perf-budget-raster-check
 leg run_app_check .build/debug/Array --perf-budget-surface-host-slope-check
 leg run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
+leg run_app_check .build/debug/Array --personal-rules-delegation-check
 leg run_app_check .build/debug/Array --pi-extension-load-check
 leg run_app_check .build/debug/Array --picker-epoch-fence-check
 leg run_app_check .build/debug/Array --portal-board-check
@@ -696,6 +703,7 @@ leg run_app_check .build/debug/Array --provider-request-response-check
 leg run_app_check .build/debug/Array --push-payload-dump-check
 leg run_app_check .build/debug/Array --refused-spawn-teardown-check
 leg run_app_check .build/debug/Array --relationship-geometry-check
+leg run_app_check .build/debug/Array --reply-rules-launch-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
@@ -938,6 +946,7 @@ leg run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 leg run_leg npm --prefix Tools/TaskEditor test
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
+leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg python3 scripts/check-collaboration-pair-features.py
 leg run_leg python3 scripts/check-collaboration-pair.py
 leg run_leg python3 scripts/check-gate-prepass.py
@@ -947,7 +956,6 @@ leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode te
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --skip-build
 leg run_leg python3 scripts/check-notification-map.py --self-test
-leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg scripts/capture-cli-fixtures.sh check
 leg run_leg scripts/check-app-bundle.sh --configuration debug --bundle "$MATRIX_RESULTS/Array.app"
 leg run_leg scripts/check-color-hygiene.sh

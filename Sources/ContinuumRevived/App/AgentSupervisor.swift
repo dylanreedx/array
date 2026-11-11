@@ -1375,7 +1375,7 @@ final class AgentSupervisor {
         guard var record = records[id], runners[id] == nil else { return false }
         let runner = preferredRunner
             ?? idleSessionRunners[id]
-            ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id))))
+            ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
         guard let compacting = runner as? AgentCompactionRunning,
               compacting.compactionCapabilities.supportsManual else { return false }
         if idleSessionRunners[id] === runner { idleSessionRunners[id] = nil }
@@ -1911,15 +1911,22 @@ final class AgentSupervisor {
     /// backend preference and the availability reads are live. The DEFAULT
     /// backend (`.pi`) preserves the shipped native-preferring behaviour exactly.
     nonisolated static func productionRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
+        productionRunner(for: launch, hostInstructions: .shared)
+    }
+
+    /// `productionRunner(for:)` with the host instruction sources injected (checks).
+    nonisolated static func productionRunner(
+        for launch: AgentRunnerLaunch, hostInstructions: HostLaunchInstructions
+    ) -> AgentRunning {
         let record = launch.record
         switch record.harness {
         case .claudeCode:
             return claudeRunner(for: record, workspaceMCP: launch.workspaceMCP,
-                                configDirectory: launch.accountConfigDirectory)
+                                configDirectory: launch.accountConfigDirectory, hostInstructions: hostInstructions)
         case .codex:
             return codexRunner(for: record, workspaceMCP: launch.workspaceMCP,
-                               codexHome: launch.accountConfigDirectory)
-        case .pi: return piRunner(for: launch)
+                               codexHome: launch.accountConfigDirectory, hostInstructions: hostInstructions)
+        case .pi: return piRunner(for: launch, hostInstructions: hostInstructions)
         case nil: return RefusingAgentRunner(reason: "This agent has unresolved harness ownership. Choose Claude Code, Codex, or Pi in the agent composer. Help → Environment Setup…")
         }
     }
@@ -1930,8 +1937,10 @@ final class AgentSupervisor {
     /// avoids paying process, resource, extension, and session-resume startup on
     /// every prompt. The one-shot JSON runner remains as an explicit diagnostic
     /// escape hatch (`CONTINUUM_PI_TRANSPORT=oneshot`) and parity baseline.
-    nonisolated static func piRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
-        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth)
+    nonisolated static func piRunner(
+        for launch: AgentRunnerLaunch, hostInstructions: HostLaunchInstructions = .shared
+    ) -> AgentRunning {
+        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth, hostInstructions: hostInstructions)
         guard piSessionTransportEnabled() else {
             return PiAgentRunner(config: config)
         }
@@ -1956,10 +1965,13 @@ final class AgentSupervisor {
     /// The only `ClaudeAgentRunner(` construction in the app, mirroring
     /// `piRunner(for:)` so the same ownership scan can hold for both.
     nonisolated static func claudeRunner(
-        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, configDirectory: String? = nil
+        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, configDirectory: String? = nil,
+        hostInstructions: HostLaunchInstructions = .shared
     ) -> AgentRunning {
         var config = claudeRunnerConfig(for: record, workspaceMCP: workspaceMCP)
         config.configDirectory = configDirectory
+        // Resolved per process launch, off the main thread (see codexRunnerConfig).
+        config.hostInstructions = { hostInstructions.claudeText() }
         return ClaudeAgentRunner(config: config)
     }
 
@@ -2031,9 +2043,10 @@ final class AgentSupervisor {
     /// The only `CodexAgentRunner(` construction in the app, mirroring
     /// `claudeRunner(for:)` so the same ownership scan holds for all three.
     nonisolated static func codexRunner(
-        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, codexHome: String? = nil
+        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, codexHome: String? = nil,
+        hostInstructions: HostLaunchInstructions = .shared
     ) -> AgentRunning {
-        var config = codexRunnerConfig(for: record, workspaceMCP: workspaceMCP)
+        var config = codexRunnerConfig(for: record, workspaceMCP: workspaceMCP, hostInstructions: hostInstructions)
         config.codexHome = codexHome
         return CodexAgentRunner(config: config)
     }
@@ -2043,8 +2056,8 @@ final class AgentSupervisor {
     /// `model_reasoning_effort` only on exact match, and — the one difference
     /// from claude — continuity is STORED: `record.codexThreadId` (nil ⇒ fresh)
     /// is read back so a later turn resumes the same codex thread.
-    nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> CodexAgentRunner.Config {
-        CodexAgentRunner.Config(
+    nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, hostInstructions: HostLaunchInstructions = .shared) -> CodexAgentRunner.Config {
+        var config = CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
             effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
@@ -2052,6 +2065,10 @@ final class AgentSupervisor {
             workspaceMCP: workspaceMCP,
             processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
+        // Resolved per process launch, off the main thread: the rules file and
+        // the user's Codex setting are read then, never when the runner is built.
+        config.launchArguments = { hostInstructions.codexArguments($0) }
+        return config
     }
 
     /// What the production runner is built with. Split out of `piRunner(for:)` so the
@@ -2069,7 +2086,7 @@ final class AgentSupervisor {
     /// defaulted parameter is exactly how that happened once; it does not get a
     /// second chance.
     nonisolated static func runnerConfig(
-        for record: AgentRecord, spawnDepth: Int
+        for record: AgentRecord, spawnDepth: Int, hostInstructions: HostLaunchInstructions = .shared
     ) -> PiAgentRunner.Config {
         let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         // `model`/`thinking` come from the RECORD: the role already decided them at
@@ -2078,7 +2095,7 @@ final class AgentSupervisor {
         // read live, and via `toolsArguments` rather than `resolve` (cross-review):
         // resolving would also validate the role's model/reasoning, so a typo in a
         // field this call ignores would silently drop the agent's `--tools`.
-        return PiAgentRunner.Config(
+        var config = PiAgentRunner.Config(
             model: record.model,
             thinking: record.thinking,
             cwd: cwd,
@@ -2103,6 +2120,9 @@ final class AgentSupervisor {
             } ?? [],
             processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
+        // Resolved per process launch, off the main thread (see codexRunnerConfig).
+        config.launchArguments = { hostInstructions.piArguments($0) }
+        return config
     }
 
     // MARK: - Host-local Home / Where / What (Queue 91 P2)
@@ -8381,6 +8401,8 @@ final class AgentSupervisor {
         guard var record = records[id], record.capabilities.locallyManaged else { return false }
         guard record.mode != mode else { return true }
         record.mode = mode
+        record.managedBriefedSessions = []
+        managedHookStates.removeValue(forKey: id)
         guard persist(record) else { return false }
         records[id] = record
         if record.harness == .claudeCode || record.harness == .codex { pendingModeRestarts.insert(id) }
@@ -8396,7 +8418,16 @@ final class AgentSupervisor {
         guard record.parentAgentID == nil,
               let harness = record.harness, harness == .claudeCode || harness == .codex,
               (runningModes[record.id] ?? record.mode) == .managed else { return nil }
-        return managedHookStates[record.id, default: ManagedLeadHookState()].reply(payload: payload, harness: harness)
+        var state = managedHookStates[record.id] ?? ManagedLeadHookState()
+        state.briefedSessions = records[record.id]?.managedBriefedSessions ?? []
+        let reply = state.reply(payload: payload, harness: harness)
+        if var current = records[record.id], current.managedBriefedSessions != state.briefedSessions {
+            current.managedBriefedSessions = state.briefedSessions
+            records[record.id] = current
+            _ = persist(current)
+        }
+        managedHookStates[record.id] = state
+        return reply
     }
 
     // MARK: - Model and thinking level (P6.1)
@@ -9020,7 +9051,7 @@ final class AgentSupervisor {
             else { return .refused(.turnNotReady) }
 
             let candidate = (runners[agentID] ?? idleSessionRunners[agentID]
-                ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: agentID)))))
+                ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: agentID), workspaceMCP: workspaceMCPConfigurationProvider?(agentID, record.harness ?? .pi)))))
             guard let compacting = candidate as? AgentCompactionRunning,
                   compacting.compactionCapabilities.supportsManual else {
                 return .refused(.unsupported)
