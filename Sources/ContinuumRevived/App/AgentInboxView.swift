@@ -9882,7 +9882,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         indicatorWash.frame = bounds
-        indicatorEdge.frame = bounds.insetBy(dx: 1.5, dy: 1.5)
+        indicatorEdge.frame = bounds.insetBy(dx: 0.5, dy: 0.5)
         applyIndicator()
         CATransaction.commit()
     }
@@ -9913,7 +9913,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         indicatorWash.cornerRadius = Radius.card
         indicatorWash.startPoint = CGPoint(x: 0, y: 0.5)
         indicatorWash.endPoint = CGPoint(x: 1, y: 0.5)
-        indicatorEdge.cornerRadius = CGFloat(CornerRole.radius(base: CornerRole.card.base - 1.5))
+        indicatorEdge.cornerRadius = max(0, Radius.card - 0.5)
         indicatorEdge.borderWidth = 0
         indicatorEdge.shadowOpacity = 0
         indicatorEdge.backgroundColor = nil
@@ -9951,6 +9951,9 @@ final class AgentInboxCardView: NSView, TokenThemed {
             indicatorWash.isHidden = true
             indicatorEdge.isHidden = true
         }
+        indicatorEdge.borderWidth = isSelected ? 1 : 0
+        indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
+            .withAlphaComponent(dark ? 0.55 : 0.35).cgColor
         // Only the open agent animates. Multi-selection remains a static indication.
         let moving = (isRouteActive || isIndicatorWorking) && !indicatorReducesMotion
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && window != nil

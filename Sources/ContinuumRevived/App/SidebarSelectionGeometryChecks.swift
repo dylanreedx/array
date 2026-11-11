@@ -94,6 +94,12 @@ enum SidebarSelectionGeometryChecks {
                     }
                     _ = inbox.selectRowForQA(id: lead)
                     inbox.layoutViewportForQA()
+                    if style != .classic, let selectedCell = inbox.cellForQA(id: lead),
+                       let selectedCard = cards(selectedCell).first {
+                        guard selectedCard.qaIndicatorLayers.edge.borderWidth == 1 else {
+                            throw Failure(message: "selected lead lacks its single even outline")
+                        }
+                    }
                     for helper in [parent] + Array(helpers.prefix(count)) {
                         if let selectedCell = inbox.cellForQA(id: helper.id),
                            lights(selectedCell).contains(where: { !$0.isHidden }) {
