@@ -6420,6 +6420,24 @@ final class AgentSupervisor {
         noteHelperProgress(id, last: String((receipt.toolName ?? receipt.event).split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40)))
     }
 
+    /// `.plans/116` gap 21: a Managed lead's hook receipt reaches the run
+    /// ledger as a compact row: which hook and what Array answered.
+    func recordLeadHook(_ receipt: AgentHookReceipt, reply: [String: Any], for id: AgentID) {
+        guard qaRunLedgerRecording, effectiveMode(for: id) == .managed else { return }
+        runLedger.hook(agent: id.rawValue, event: receipt.event, outcome: Self.hookOutcome(reply),
+                       harness: records[id]?.harness?.rawValue)
+    }
+
+    /// What Array's hook reply did: `none`, `denied`, `blocked`, `context` or `other`.
+    static func hookOutcome(_ reply: [String: Any]) -> String {
+        guard let output = reply[WorkspaceAgentHook.hookOutputKey] as? [String: Any] else { return "none" }
+        let specific = output["hookSpecificOutput"] as? [String: Any]
+        if specific?["permissionDecision"] as? String == "deny" { return "denied" }
+        if output["decision"] as? String == "block" { return "blocked" }
+        if specific?["additionalContext"] != nil { return "context" }
+        return "other"
+    }
+
     /// `.plans/102` P2a: each agent's latest `array_report`, with when it was
     /// filed. A delegated child's report is handed to its parent with the turn
     /// it was filed in (`writeTerminalSpawnResult`), never with a later one.

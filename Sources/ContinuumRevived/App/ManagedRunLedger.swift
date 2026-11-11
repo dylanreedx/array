@@ -36,6 +36,8 @@ final class ManagedRunLedger: @unchecked Sendable {
         var changed: [String: Int]?
         /// Checkout-relative paths, at most `LeadCheckoutWatch.maxPaths`.
         var paths: [String]?
+        /// `hook`: the hook event's name, one of the events Array registers.
+        var hook: String?
     }
     // Live only: a helper delegated before this process started has no entry,
     // and its report records that instead of pretending to have watched it.
@@ -182,6 +184,22 @@ final class ManagedRunLedger: @unchecked Sendable {
             self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", outcome: outcome.rawValue)
         }
     }
+
+    /// `.plans/116` gap 21: one row per hook a Managed lead's CLI ran. The
+    /// event is named only if Array registers it; no payload text is kept.
+    func hook(agent: UUID, event: String, outcome: String, harness: String?) {
+        let at = Date()
+        queue.async {
+            var row = Row(kind: "hook", task: self.sessionTasks[agent] ?? Self.noTask, agent: agent,
+                          source: "hook/\(agent)/\(UUID().uuidString)")
+            row.at = at
+            row.hook = Self.hookEvents.contains(event) ? event : "other"
+            row.outcome = outcome
+            row.harness = harness
+            self.append(row)
+        }
+    }
+    static let hookEvents = Set(WorkspaceAgentHook.claudeEvents + WorkspaceAgentHook.codexEvents)
 
     // MARK: A Managed lead's own checkout changes (`.plans/116` gap 20)
 

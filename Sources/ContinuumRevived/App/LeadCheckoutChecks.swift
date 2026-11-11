@@ -39,7 +39,84 @@ enum LeadCheckoutChecks {
     }
 
     static func run() async throws {
-        try await seen()
+        let section = ProcessInfo.processInfo.environment["CONTINUUM_LEAD_CHECKOUT_CASE"]
+        if section == nil || section == "seen" { try await seen() }
+        if section == nil || section == "hooks" { try await hooks() }
+    }
+
+    /// Gap 21: each hook a Managed lead's CLI runs reaches the ledger as one
+    /// compact row, through the real hook binary and the production handler.
+    static func hooks() async throws {
+        let b = try ManagedModeChecks.bench("lead-hooks")
+        defer { b.tearDown() }
+        let (lead, root) = try HelperEvidenceChecks.prepare(b)
+        let supervisor = b.supervisor
+        try expect(await supervisor.accept(.sendPrompt(AgentPrompt("HOLD-hooks")), for: lead) == .accepted, "lead submission refused")
+        try await AgentPresenceChecks.eventually("lead-checkout: lead did not start", timeout: 20) { supervisor.isRunning(lead) }
+        let reply = try await WorkspaceAgentReportChecks.call(b.configuration(for: lead), "array_delegate", [
+            "task": "HOLD-child", "title": "Child", "harness": "Claude Code",
+            "model": ManagedModeChecks.model, "idempotencyKey": UUID().uuidString])
+        guard let raw = (reply.reply["result"] as? [String: Any])?["childAgentId"] as? String, let uuid = UUID(uuidString: raw) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout: delegation failed: \(reply.reply)")
+        }
+        let child = AgentID(rawValue: uuid)
+        func send(_ agent: AgentID, _ body: [String: Any]) async throws {
+            let config = try b.configuration(for: agent)
+            let text = String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self)
+            // Off main, so the production handler can answer on main meanwhile.
+            let arguments = [WorkspaceAgentHook.subcommand, "--endpoint", config.endpoint, "--agent-id", agent.rawValue.uuidString,
+                             "--token-file", config.tokenFilePath]
+            let helper = b.helper
+            let status = await Task.detached { () -> (Int32, String) in
+                let process = Process(), input = Pipe(), output = Pipe()
+                process.executableURL = URL(fileURLWithPath: helper)
+                process.arguments = arguments
+                var environment = ProcessInfo.processInfo.environment
+                environment[PiAgentRunner.arrayHostedEnvironmentKey] = "1"
+                process.environment = environment
+                process.standardInput = input; process.standardOutput = output
+                guard (try? process.run()) != nil else { return (-1, "") }
+                input.fileHandleForWriting.write(Data(text.utf8))
+                try? input.fileHandleForWriting.close()
+                let printed = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                process.waitUntilExit()
+                return (process.terminationStatus, printed)
+            }.value
+            try expect(status.0 == 0, "the hook command failed: \(status)")
+        }
+        let session = "hooks-session"
+        try await send(lead, ["hook_event_name": "SessionStart", "source": "startup", "session_id": session])
+        try await send(lead, ["hook_event_name": "UserPromptSubmit", "session_id": session, "prompt": "SECRET-HOOK-PROMPT"])
+        try await send(lead, ["hook_event_name": "PreToolUse", "session_id": session, "tool_name": "Bash",
+                        "tool_input": ["command": "SECRET-HOOK-CMD"]])
+        try await send(lead, ["hook_event_name": "PostToolUse", "session_id": session, "tool_name": "Bash",
+                        "tool_input": ["command": "SECRET-HOOK-CMD"], "tool_response": ["stdout": "SECRET-HOOK-OUT"]])
+        try await send(lead, ["hook_event_name": "SECRET-HOOK-EVENT", "session_id": session])
+        try await send(child, ["hook_event_name": "PreToolUse", "session_id": "child", "tool_name": "Bash", "tool_input": ["command": "true"]])
+        supervisor.runLedger.drain()
+
+        let ledgerURL = AgentStore(smokeTest: false).layout.applicationSupportDirectory.appendingPathComponent("run-ledger/ledger.jsonl")
+        let text = (try? String(contentsOf: ledgerURL, encoding: .utf8)) ?? ""
+        let rows = ManagedRunLedgerChecks.rows(ledgerURL, "hook")
+        let task = ManagedRunLedgerChecks.rows(ledgerURL, "taskOpened", agent: lead).first?["task"] as? String
+        var failures: [String] = []
+        func check(_ ok: Bool, _ message: @autoclosure () -> String) { if !ok { failures.append(message()) } }
+        let leadRows = rows.filter { $0["agent"] as? String == lead.rawValue.uuidString }
+        check(leadRows.map { $0["hook"] as? String ?? "" } == ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "other"],
+              "hooks recorded: \(leadRows.map { $0["hook"] ?? "nil" })")
+        check(leadRows.map { $0["outcome"] as? String ?? "" } == ["context", "none", "none", "none", "none"],
+              "outcomes recorded: \(leadRows.map { $0["outcome"] ?? "nil" })")
+        check(leadRows.allSatisfy { $0["task"] as? String == task && $0["harness"] as? String == AgentHarness.claudeCode.rawValue },
+              "hook rows not under the lead's task and harness: \(leadRows)")
+        check(!rows.contains { $0["agent"] as? String == child.rawValue.uuidString }, "a helper's hook was recorded as a lead's")
+        for secret in ["SECRET-HOOK-PROMPT", "SECRET-HOOK-CMD", "SECRET-HOOK-OUT", "SECRET-HOOK-EVENT", session, "You are an Array Managed lead"]
+        where text.contains(secret) { check(false, "ledger stores \(secret)") }
+        for row in ManagedRunLedgerChecks.rows(ledgerURL) {
+            check(Set(row.keys).isSubset(of: ManagedRunLedgerChecks.allowedKeys), "unexpected row keys: \(row.keys.sorted())")
+        }
+        for marker in ["release-hooks", "release-child"] { try Data().write(to: root.appendingPathComponent(marker)) }
+        if !failures.isEmpty { throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout hooks:\n- " + failures.joined(separator: "\n- ")) }
+        print("Lead hooks passed: five hook receipts of a Managed lead, through the real hook binary, each one ledger row under its task: event named (an unknown event as other), Array's answer as the outcome (the brief as context), no prompt, command, output, session or brief text; a helper's hook not recorded")
     }
 
     static func seen() async throws {

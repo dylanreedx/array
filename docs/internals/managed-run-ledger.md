@@ -322,3 +322,20 @@ shared first helper runs is `ambiguous`; the helper's own write is never the
 lead's; no command, prompt or absolute path is stored. Observed RED with the
 supervisor hand-off removed (no rows) and with the shared-checkout test removed
 (the write charged to the lead).
+
+## Hook receipts (gap 21)
+
+Hook receipts still go to the supervisor's in-memory ring. For a Managed lead
+(top-level, effective mode Managed) each receipt also appends one `hook` row
+under the lead's task (the all-zero task when it has none): `hook` (the event,
+one of `WorkspaceAgentHook.claudeEvents`/`codexEvents`, else `other`),
+`outcome` (what Array's reply did: `none`, `context`, `denied`, `blocked`,
+`other`) and `harness`. No prompt, command, output, session id or reply text.
+Helpers' and Free agents' hooks are not recorded. The hook path pays one
+enqueue; the reply is unchanged. A Claude in-process subagent's hooks come
+through the lead's token and are counted as the lead's.
+
+`--lead-checkout-ledger-check` (section `hooks`, alone through
+`CONTINUUM_LEAD_CHECKOUT_CASE=hooks`) posts five lead hooks and one helper hook
+through the real `array-workspace-mcp hook` binary to the production handler
+and reads the rows back. Observed RED with the handler's ledger call removed.
