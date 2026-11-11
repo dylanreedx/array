@@ -115,7 +115,7 @@ extension WorkspaceAPIService {
         func effortRefusal() -> String? {
             guard let effort = request.effort else { return nil }
             guard let accepted = AgentModelCatalog.shared.efforts(for: childModel, harness: childHarness), !accepted.isEmpty else {
-                return "The live catalogue has no effort data for \(childModel); explicit effort is unavailable."
+                return "The live catalogue has no effort data for \(childModel); explicit effort is unavailable. Omit effort to use the CLI default."
             }
             return accepted.contains(effort) ? nil : "Unsupported effort '\(effort)' for \(childModel). Accepted values: \(accepted.joined(separator: ", "))."
         }

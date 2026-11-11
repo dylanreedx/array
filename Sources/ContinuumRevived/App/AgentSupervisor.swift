@@ -7,6 +7,7 @@ import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedSync
 import Foundation
 import ImageIO
+import os
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.3-agent-supervisor.md
 //
@@ -1992,6 +1993,26 @@ final class AgentSupervisor {
         (record.lastObservedWhere, record.providerSessionId ?? claudeSessionId(for: record.id))
     }
 
+    /// The effort a Claude or Codex launch passes. When the CLI's live catalogue
+    /// lists efforts for the record's model, only a listed one is passed; a stored
+    /// value it does not list (stale since delegation, or never offered) is left
+    /// off so the CLI runs at its own default instead of refusing the turn, and
+    /// the drop is logged. With no catalogue data, the exact-match rule
+    /// (`legacy`) applies unchanged.
+    nonisolated static func launchEffort(
+        for record: AgentRecord, harness: AgentHarness, legacy: (String) -> String?
+    ) -> String? {
+        guard let listed = AgentModelCatalog.shared.efforts(for: record.model, harness: harness), !listed.isEmpty else {
+            return legacy(record.thinking)
+        }
+        if listed.contains(record.thinking) { return record.thinking }
+        if legacy(record.thinking) != nil {
+            Logger(subsystem: "continuum.agents", category: "effort").notice(
+                "agent \(record.id.rawValue.uuidString, privacy: .public): effort \(record.thinking, privacy: .public) is not listed for \(record.model, privacy: .public); launching at the CLI default")
+        }
+        return nil
+    }
+
     nonisolated static func claudeRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> ClaudeAgentRunner.Config {
         // B7.2 — a pending `/clear` rotation overrides the normal sessionId
         // choice entirely: this ONE launch resumes-and-forks the OLD session
@@ -2003,7 +2024,7 @@ final class AgentSupervisor {
             return ClaudeAgentRunner.Config(
                 model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
                 mode: record.mode,
-                effort: AgentModelCatalog.shared.efforts(for: record.model, harness: .claudeCode)?.contains(record.thinking) == true ? record.thinking : ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+                effort: launchEffort(for: record, harness: .claudeCode, legacy: ClaudeCLIBackend.effortArgument(forThinking:)),
                 cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
                 sessionId: forkFrom,
                 forkSession: true,
@@ -2015,7 +2036,7 @@ final class AgentSupervisor {
         return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             mode: record.mode,
-            effort: AgentModelCatalog.shared.efforts(for: record.model, harness: .claudeCode)?.contains(record.thinking) == true ? record.thinking : ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+            effort: launchEffort(for: record, harness: .claudeCode, legacy: ClaudeCLIBackend.effortArgument(forThinking:)),
             cwd: URL(fileURLWithPath: location.cwd, isDirectory: true),
             sessionId: location.sessionId,
             // An agent that has never had a turn cannot have a conversation to
@@ -2046,7 +2067,7 @@ final class AgentSupervisor {
     nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> CodexAgentRunner.Config {
         CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
-            effort: AgentModelCatalog.shared.efforts(for: record.model, harness: .codex)?.contains(record.thinking) == true ? record.thinking : CodexCLIBackend.effortArgument(forThinking: record.thinking),
+            effort: launchEffort(for: record, harness: .codex, legacy: CodexCLIBackend.effortArgument(forThinking:)),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             threadId: record.codexThreadId,
             workspaceMCP: workspaceMCP,

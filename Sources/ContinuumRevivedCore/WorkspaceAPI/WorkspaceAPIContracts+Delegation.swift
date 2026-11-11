@@ -66,8 +66,10 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     /// Legacy alias for harness. Conflicting selectors are invalid.
     public var provider: String?
     /// Exact catalogue id. Omitted: inherit for the same harness, otherwise use its seed.
-    public var effort: String?
     public var model: String?
+    /// An effort the selected harness's live catalogue lists for the selected
+    /// model. Omitted: the same thinking a helper got before this field existed.
+    public var effort: String?
     public var placement: Placement?
     public var presentationPolicy: WorkspacePresentationPolicy
     /// REQUIRED for delegation: a spawn without a key cannot be retried safely.
