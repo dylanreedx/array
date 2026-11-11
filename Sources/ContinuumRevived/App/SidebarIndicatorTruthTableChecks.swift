@@ -78,6 +78,17 @@ enum SidebarIndicatorTruthTableChecks {
                                             !$0.renderedLayersForChecks.contains { ($0 as? CAShapeLayer)?.strokeColor != nil }
                                         }
                                     }
+                                    correct = correct && cards.allSatisfy { ($0.layer?.cornerRadius ?? 0) > 0 }
+                                    for card in cards where !card.qaIndicatorLayers.edge.isHidden {
+                                        let edge = card.qaIndicatorLayers.edge
+                                        correct = correct && edge.frame == card.bounds.insetBy(dx: 0.5, dy: 0.5)
+                                            && edge.cornerRadius > 0 && (edge.borderColor?.alpha ?? 0) > 0
+                                    }
+                                    if visibleCells.count == 1, let cell = visibleCells.first,
+                                       let sheet = descendants(cell, InboxGroupBackgroundView.self).first,
+                                       let strip = sheet.ownershipStrip {
+                                        correct = correct && strip.roundsTop && strip.roundsBottom && sheet.bounds.contains(strip.rect)
+                                    }
                                     let actualHeight = visibleCells.reduce(CGFloat(0)) { $0 + $1.bounds.height }
                                         + CGFloat(max(0, visibleCells.count - 1)) * CGFloat(AgentInboxView.rowSpacing)
                                     for id in [lead, helper, arrival] {
