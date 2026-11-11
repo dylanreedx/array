@@ -30,10 +30,15 @@ public extension CanvasEngine {
     ///     these zones may delete a tile. Passing an empty set makes the merge
     ///     purely additive, which is the correct behaviour when nothing of this
     ///     project is on screen.
+    ///   - bareCovered: this project's bare tiles (`isBare`, nil stamp) are
+    ///     installed too (`.plans/auto-layout-night`), so a bare persisted tile
+    ///     absent from `installed` was deleted. An unmarked nil-stamped tile is
+    ///     never dropped either way: nothing can prove its deletion.
     static func mergeProjectTilesForPersistence(
         persisted: [Tile],
         installed: [Tile],
-        coveredZoneIds: Set<UUID>
+        coveredZoneIds: Set<UUID>,
+        bareCovered: Bool = false
     ) -> [Tile] {
         let installedByID = Dictionary(installed.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var emitted = Set<UUID>()
@@ -50,6 +55,9 @@ public extension CanvasEngine {
             // is allowed to say "this tile is gone"; every other absence is just a
             // zone we cannot see from here.
             if let zoneId = tile.zoneId, coveredZoneIds.contains(zoneId) {
+                continue
+            }
+            if tile.zoneId == nil, tile.isBare, bareCovered {
                 continue
             }
             result.append(tile)

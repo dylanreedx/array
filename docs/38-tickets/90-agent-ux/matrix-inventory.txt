@@ -46,6 +46,7 @@ check --ambient-tile-frame-space-check
 check --app-support-channel-check
 check --attention-notification-check
 check --auto-layout-fanout-app-check
+check --bare-tile-check
 check --board-comments-check
 check --board-interaction-check
 check --board-library-check
@@ -507,6 +508,7 @@ leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --attention-notification-check
 leg run_app_check .build/debug/Array --auto-layout-fanout-app-check
+leg run_app_check .build/debug/Array --bare-tile-check
 leg run_app_check .build/debug/Array --board-comments-check
 leg run_app_check .build/debug/Array --board-interaction-check
 leg run_app_check .build/debug/Array --board-library-check
