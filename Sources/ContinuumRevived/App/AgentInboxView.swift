@@ -2782,6 +2782,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func ownershipSlices() -> [InboxOwnershipSlice] {
         var slices = Array(repeating: InboxOwnershipSlice(), count: items.count)
         let spacing = CGFloat(AgentInboxView.rowSpacing)
+        let nativeSelection = tableView.selectedRowIndexes
+        var canvasLead = nativeSelection.isEmpty
+            ? allRows.first(where: { $0.id == openAgentId }) : nil
+        var visited: Set<UUID> = []
+        while let row = canvasLead, let parentId = row.parentId, visited.insert(row.id).inserted,
+              let parent = allRows.first(where: { $0.id == parentId }) { canvasLead = parent }
         var start = 0
         while start < items.count {
             guard case .agent(let lead) = items[start], nesting(atTableRow: start).depth == 0 else {
@@ -2824,7 +2830,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     scan += heights[i - start] + spacing
                 }
             }
-            let hasSelectedMember = (start...end).contains { tableView.selectedRowIndexes.contains($0) }
+            let hasSelectedMember = (start...end).contains { nativeSelection.contains($0) }
+                || canvasLead?.id == lead.id
+                || (nativeSelection.isEmpty && (start...end).contains { items[$0].agentRow?.id == openAgentId })
             let activeGroup = working && (SidebarActiveIndicatorScope.resolve(in: indicatorDefaults) == .working || hasSelectedMember)
             let focusHeight = max(1, groupHeight - SidebarDensityProposal.production.gapBetweenRows)
             let focusTarget = runningOffset.map { $0 / focusHeight } ?? min(0.9, heights[0] / focusHeight * 0.8)
@@ -4444,6 +4452,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         selectedRowsForEmphasis = tableView.selectedRowIndexes
         ownershipByTableRow = ownsSubagents ? ownershipSlices() : []
         refreshVisibleOwnership()
+        let visible = tableView.rows(in: tableView.visibleRect)
+        if visible.length > 0 {
+            for index in visible.location..<min(tableView.numberOfRows, visible.location + visible.length) {
+                (tableView.view(atColumn: 0, row: index, makeIfNecessary: false) as? AgentInboxRowCell)?
+                    .applyInteraction(interaction(forTableRow: index))
+            }
+        }
         // P1.4: which INPUT moved the selection decides whether the focus ring is
         // armed, and it is resolved before the rows are redrawn so the ring and
         // the fill are painted by the SAME rebuild — see `setKeyboardFocus`.
@@ -5743,6 +5758,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             isPressed: row == pressedTableRow,
             isRouteActive: id == openAgentId,
             isIndicatorWorking: items[row].agentRow?.state == .working && ownership(atTableRow: row).activeGroup,
+            isCanvasSelection: tableView.selectedRowIndexes.isEmpty &&
+                (id == openAgentId || (nesting(atTableRow: row).depth == 0
+                    && ownership(atTableRow: row).groupSelected && tableRow(forAgentId: openAgentId) == nil)),
             hasKeyboardFocus: id == keyboardFocusAgentId
         )
     }
@@ -8769,6 +8787,7 @@ struct RowInteraction: Equatable {
     var isPressed = false
     var isRouteActive = false
     var isIndicatorWorking = false
+    var isCanvasSelection = false
     var hasKeyboardFocus = false
 
     static let none = RowInteraction()
@@ -9901,10 +9920,10 @@ final class AgentInboxCardView: NSView, TokenThemed {
         if let layer, indicatorEdge.superlayer == nil { layer.addSublayer(indicatorEdge) }
         indicatorEdge.frame = bounds.insetBy(dx: 0.5, dy: 0.5)
         indicatorEdge.cornerRadius = max(0, Radius.card - 0.5)
-        indicatorEdge.borderWidth = isSelected ? 1 : 0
+        indicatorEdge.borderWidth = isSelected || isCanvasSelection ? 1 : 0
         indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
             .withAlphaComponent(effectiveTokenTheme == .dark ? 0.55 : 0.35).cgColor
-        indicatorEdge.isHidden = !isSelected
+        indicatorEdge.isHidden = !isSelected && !isCanvasSelection
         let enabled = !sharesGroupLight && style != "current" && isIndicatorWorking
         indicatorWash.isHidden = !enabled
         guard enabled, let layer else {
@@ -9966,7 +9985,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
             indicatorWash.isHidden = true
             indicatorEdge.isHidden = true
         }
-        indicatorEdge.borderWidth = isSelected ? 1 : 0
+        indicatorEdge.borderWidth = isSelected || isCanvasSelection ? 1 : 0
         indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
             .withAlphaComponent(dark ? 0.55 : 0.35).cgColor
         // Only the open agent animates. Multi-selection remains a static indication.
@@ -10068,6 +10087,9 @@ final class AgentInboxCardView: NSView, TokenThemed {
     }
     /// The agent whose tile is open — the loudest step, because it answers
     /// "where am I" from anywhere in the list.
+    var isCanvasSelection = false {
+        didSet { if isCanvasSelection != oldValue { applyFill(fading: false) } }
+    }
     var isIndicatorWorking = false {
         didSet { if isIndicatorWorking != oldValue { applyFill(fading: false) } }
     }
@@ -10867,6 +10889,7 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.isIndicatorWorking = interaction.isIndicatorWorking
+        card.isCanvasSelection = interaction.isCanvasSelection
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
     }
 
@@ -11793,6 +11816,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.isIndicatorWorking = interaction.isIndicatorWorking
+        card.isCanvasSelection = interaction.isCanvasSelection
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
         let on = interaction.isHovered && (onHoverAction != nil || onBackgroundStop != nil)
         hoverActionShown = on

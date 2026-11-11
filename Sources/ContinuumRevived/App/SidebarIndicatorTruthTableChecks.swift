@@ -39,6 +39,7 @@ enum SidebarIndicatorTruthTableChecks {
                                     window.orderFrontOffscreenForChecks()
                                     let rows = [row(lead), row(helper, parent: lead)]
                                     inbox.reload(rows: rows)
+                                    inbox.openAgentId = selection == "none" ? nil : (selection == "lead" ? lead : helper)
                                     inbox.layoutViewportForQA()
                                     if selection != "none" { _ = inbox.selectRowForQA(id: selection == "lead" ? lead : helper) }
                                     if fold == "expanded" && selection == "helper" {
@@ -57,14 +58,9 @@ enum SidebarIndicatorTruthTableChecks {
                                     let lights = visibleCells.flatMap { descendants($0, InboxExpandedGroupLight.self) }
                                     let sweeps = visibleCells.flatMap { descendants($0, InboxSweepBorderView.self) }
                                     let cards = visibleCells.flatMap { descendants($0, AgentInboxCardView.self) }
-                                    let localPresent = cards.contains { !$0.qaIndicatorLayers.wash.isHidden }
-                                    let localMoving = cards.contains {
-                                        !($0.qaIndicatorLayers.wash.animationKeys() ?? []).isEmpty
-                                            || !($0.qaIndicatorLayers.sheen.animationKeys() ?? []).isEmpty
-                                    }
                                     let present = style == .classic ? sweeps.contains { !$0.isHidden }
-                                        : (localPresent || lights.contains { !$0.isHidden })
-                                    let moving = style == .classic ? sweeps.contains { $0.isMovingForQA } : localMoving || lights.contains {
+                                        : lights.contains { !$0.isHidden }
+                                    let moving = style == .classic ? sweeps.contains { $0.isMovingForQA } : lights.contains {
                                         !$0.isHidden && $0.renderedLayersForChecks.contains { !($0.animationKeys() ?? []).isEmpty }
                                     }
                                     let outlines = cards.filter {
@@ -101,6 +97,21 @@ enum SidebarIndicatorTruthTableChecks {
                                                 correct = correct && surface.cornerRadius > 0 && light.bounds.contains(corner)
                                             }
                                         }
+                                    }
+                                    if selection != "none" {
+                                        inbox.clearSelectionForQA()
+                                        inbox.layoutViewportForQA()
+                                        let routeCells = [lead, helper, arrival].compactMap { inbox.cellForQA(id: $0) }
+                                        let routeLights = routeCells.flatMap { descendants($0, InboxExpandedGroupLight.self) }
+                                        let routeSweeps = routeCells.flatMap { descendants($0, InboxSweepBorderView.self) }
+                                        let routePresent = style == .classic ? routeSweeps.contains { !$0.isHidden }
+                                            : routeLights.contains { !$0.isHidden }
+                                        let routeMoving = style == .classic ? routeSweeps.contains { $0.isMovingForQA }
+                                            : routeLights.contains { !$0.isHidden && $0.renderedLayersForChecks.contains { !($0.animationKeys() ?? []).isEmpty } }
+                                        let routeOutlines = routeCells.flatMap { descendants($0, AgentInboxCardView.self) }.filter {
+                                                !$0.qaIndicatorLayers.edge.isHidden && $0.qaIndicatorLayers.edge.borderWidth > 0
+                                            }.count
+                                        correct = correct && routePresent == expected && routeMoving == expected && routeOutlines == 1
                                     }
                                     if correct { passed += 1 } else {
                                         failures.append("\(label): style=\(present) motion=\(moving) expected=\(expected) outlines=\(outlines)")

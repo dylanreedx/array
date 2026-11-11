@@ -2977,6 +2977,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
         card.isIndicatorWorking = interaction.isIndicatorWorking
+        card.isCanvasSelection = interaction.isCanvasSelection
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
         hoverActionsHovered = interaction.isHovered
         setHoverActionsShown(interaction.isHovered)
