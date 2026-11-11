@@ -47,8 +47,28 @@ and passing on the real fix.
   own Keychain item, which the CLI reads itself. `CLAUDE_CONFIG_DIR` points at
   the run root, and `CLAUDE_SECURESTORAGE_CONFIG_DIR=""` keeps the default
   Keychain name. Nothing is copied and nothing is written under `~/.claude`.
-  Reads are limited to the run root, the toolchain, the CLI, the MCP server and
-  its config, and the Keychain files.
+- The sandbox profile, as it is now (after the review; the pilot ran on a
+  wider one, below):
+  - Run programs: the toolchain (system folders, Xcode, the command line
+    tools), the run root, the CLI binary, the MCP server binary.
+  - Read: those, plus the Keychain files, `/private/etc`, and this run's MCP
+    config and token files.
+  - Write: the run root, `/dev/fd`, and `/dev/null`, `/dev/zero`,
+    `/dev/random`, `/dev/urandom`, `/dev/dtracehelper`. Never a terminal.
+    The hook probe's launch, and only that one, may also write its own probe
+    folder.
+  - Stat (file metadata) works on any path. Directory listings and file
+    contents outside the lists above are refused.
+  - Mach services: the Keychain's, directory lookups, notifications and
+    logging.
+- The pilot's four runs had a wider profile. It allowed writes and ioctl on
+  every `/dev/ttysN`, which could reach the owner's other terminals. It also
+  allowed reads on all of `/dev`, and reading and running anything in the
+  SwiftPM debug build folder. It allowed writes to any `array-hook-probe-*`
+  folder in the shared user temp folder, and listing every ancestor folder of
+  an allowed path (names, never contents). It allowed the trustd, ocspd and
+  coreservicesd services. A review found these, and the profile above removes
+  them. Nothing in the pilot's output shows any of them was used.
 - `egress_proxy.py` is a host CONNECT proxy that lets only `api.anthropic.com`
   through. The sandbox allows only loopback, to the proxy and this run's MCP
   port. The proxy refused `mcp-proxy.anthropic.com` (claude.ai connectors) 20
@@ -73,13 +93,36 @@ and passing on the real fix.
   Edit, so they were not rerun. The solo and managed arms did not have the same
   shell.
 
+## How fair the table is
+
+- The solo baseline is low by about 680 input tokens per request. The solo
+  lead has no MCP server, so it gets no MCP instructions and no Managed brief.
+  First requests: 14,393 solo against 15,077 managed on task 1, and 14,565
+  against 15,243 on task 2. On managed task 2's 16 requests, that is about
+  11,000 of its 406,328 cache-read tokens.
+- The cache columns depend on run order. Solo task 1 ran first and wrote the
+  cold cache (14,391 tokens); later runs read it. Compare cache read and cache
+  write across rows only with that in mind.
+- Neither Managed lead loaded any `array_*` workspace tool, or ToolSearch,
+  which is how a deferred tool is loaded (runs 750e2a66 and 935d2f76). The MCP
+  server connected and offered 39 deferred tools, including `array_delegate`.
+  The brief told each lead to post a plan and to delegate. Both did the work in
+  Bash instead (3 and 15 Bash calls). Without Edit and Write, managed task 2
+  edited by shell here-documents and made 16 requests, against 6 for solo.
+
 ## Not verified
 
 - Delegation inside the sandbox. No lead called `array_delegate`, so the path
   from the MCP server to the host listener to a helper launch never ran live.
   The tools were listed, but listing does not need the host.
-- Array's observation hooks in the managed reruns. The hook probe's marker is
-  allowed now, but the ledger has no hook rows.
+- Hooks: verified in the CLI sessions, recorded nowhere durable. In both
+  managed reruns, Array's hooks ran: a SessionStart hook succeeded (exit 0)
+  and delivered the Managed lead brief, and the stop hook reported no errors.
+  The ledger has no hook rows because Array never writes any. Hook receipts
+  go to an in-memory ring (`AgentSupervisor.recordHookReceipt`), and nothing
+  reads them (`WorkspaceAPIService.swift`, near line 366). This is a gap, and
+  is not fixed here. The first managed attempt for task 1 launched with no
+  hooks, so its lead had no brief.
 - `mktemp` in the agent's shell still used the system temp folder (refused).
   The cause is unknown.
 - Inside the sandbox, the agent can read the CLI's Keychain login through
