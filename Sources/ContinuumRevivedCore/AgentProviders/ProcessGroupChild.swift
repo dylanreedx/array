@@ -163,7 +163,13 @@ public final class ProcessGroupChild: @unchecked Sendable {
         // and everything it started — including the workspace host's listening
         // socket, which a detached dev server then held open after Array quit and
         // which any process in the agent's tree could `accept()` on.
-        guard posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT)) == 0,
+        // Dispatch worker threads block signals for their own event routing.
+        // A native CLI starts with an empty mask, independent of which host
+        // thread launched it. Signal dispositions remain the CLI's contract.
+        var childSignalMask = sigset_t()
+        guard sigemptyset(&childSignalMask) == 0,
+              posix_spawnattr_setsigmask(&attributes, &childSignalMask) == 0,
+              posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK)) == 0,
               posix_spawnattr_setpgroup(&attributes, 0) == 0 else {
             throw SpawnError.attributesUnavailable
         }
