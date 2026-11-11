@@ -210,6 +210,8 @@ check --managed-mode-hooks-check
 check --managed-mode-launch-check
 check --managed-mode-persistence-check
 check --managed-setting-check
+check --markdown-visible-rows-check
+check --markdown-visible-rows-zoom-cost-check
 check --menu-contract-check
 check --multi-zone-render-check
 check --nav-mode-check
@@ -659,6 +661,8 @@ leg run_app_check .build/debug/Array --managed-mode-hooks-check
 leg run_app_check .build/debug/Array --managed-mode-launch-check
 leg run_app_check .build/debug/Array --managed-mode-persistence-check
 leg run_app_check .build/debug/Array --managed-setting-check
+leg run_app_check .build/debug/Array --markdown-visible-rows-check
+leg run_app_check .build/debug/Array --markdown-visible-rows-zoom-cost-check
 leg run_app_check .build/debug/Array --menu-contract-check
 leg run_app_check .build/debug/Array --multi-zone-render-check
 leg run_app_check .build/debug/Array --nav-mode-check

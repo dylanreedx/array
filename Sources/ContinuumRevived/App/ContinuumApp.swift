@@ -2708,6 +2708,41 @@ enum ContinuumApp {
             }
         }
 
+        // Markdown rows attached only where the clip shows them: pixels,
+        // scrolling, selection/copy and accessibility against the switch-off
+        // document, off-screen.
+        if CommandLine.arguments.contains("--markdown-visible-rows-check") {
+            do {
+                _ = NSApplication.shared
+                NSApp.setActivationPolicy(.accessory)
+                try MarkdownVisibleRowsChecks.run()
+                print("ContinuumRevivedMarkdownVisibleRowsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        // Zoom cost with the visible-rows switch on and off, interleaved pairs
+        // in the motion workload's real scene, off-screen.
+        if CommandLine.arguments.contains("--markdown-visible-rows-zoom-cost-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                do {
+                    try await CanvasZoomStepCostChecks.runVisibleRowsComparison()
+                    print("ContinuumRevivedMarkdownVisibleRowsZoomCostChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
+
         if CommandLine.arguments.contains("--file-markdown-perf-check") {
             do {
                 _ = NSApplication.shared
