@@ -720,6 +720,7 @@ public struct ClaudeEventTranslator {
                 let byModel = accounting?.models ?? model.map { [$0: TokenUsageSnapshot.TypedCounts(
                     uncachedInput: input, cacheRead: cacheRead, cacheWrite: cacheWrite, output: output)] }
                 snapshot.typedCountsByModel = byModel
+                snapshot.accountingTurn = currentTurnId
                 snapshot.typedCounts = byModel.flatMap { Self.typedSum(Array($0.values)) }
                 if !mainMessageUsage.isEmpty {
                     let sum = mainMessageUsage.values.reduce((0, 0, 0)) { ($0.0 + ($1.input ?? 0), $0.1 + ($1.cacheRead ?? 0), $0.2 + ($1.cacheWrite ?? 0)) }

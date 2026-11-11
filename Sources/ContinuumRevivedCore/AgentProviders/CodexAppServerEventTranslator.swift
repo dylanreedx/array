@@ -98,6 +98,12 @@ public struct CodexAppServerEventTranslator {
     /// Threads this process saw start, so their first cumulative total counts
     /// from zero; a resumed thread's first total carries its history.
     private var startedThreads = Set<String>()
+    /// The model id `thread/started` named per thread, when it did.
+    private var modelByThread: [String: String] = [:]
+    /// Set by `CodexAgentRunner` on the `thread/started` it synthesizes after a
+    /// `thread/resume`: that thread did not start here, and its first total
+    /// carries history this process never watched.
+    public static let resumedMarker = "arrayResumed"
     private var recountedCompactionTokensByThread: [String: Int] = [:]
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
@@ -221,7 +227,8 @@ public struct CodexAppServerEventTranslator {
               let id = thread["id"] as? String, !id.isEmpty
         else { return [] }
         if let parent = thread["forkedFromId"] as? String, !parent.isEmpty, parent != id { forkedFromByThread[id] = parent }
-        startedThreads.insert(id)
+        if (params[Self.resumedMarker] as? Bool) != true { startedThreads.insert(id) }
+        if let model = thread["model"] as? String, !model.trimmingCharacters(in: .whitespaces).isEmpty { modelByThread[id] = model }
         // Fire session-ready/running once, on the first thread/started this
         // translator ever sees (the primary thread). A measured caveat: no
         // captured session ever delivered a SECOND thread/started for a child,
@@ -680,6 +687,8 @@ public struct CodexAppServerEventTranslator {
                     cacheRead: cached, cacheWrite: nil, output: output)
                 snapshot.accountingSession = threadId
                 snapshot.accountingSessionStarted = startedThreads.contains(threadId)
+                snapshot.accountingTurn = (params["turnId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                snapshot.accountingModel = modelByThread[threadId]
                 events.append(.tokenUsageUpdated(threadId: threadId, snapshot: snapshot))
             }
         }
