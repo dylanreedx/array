@@ -124,11 +124,6 @@ final class WorkspaceAPIService {
 
     // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
     var grants: [AgentID: [WorkspaceToolGrant]] = [:]
-    /// The shadow observation seam for `standards.read`
-    /// (`docs/internals/project-standards-on-demand.md`): ids and versions of
-    /// each answered read, never rule text. Production sets none; the run
-    /// ledger or telemetry attaches here when it exists.
-    var standardsRetrievalObserver: ((StandardsRetrieval) -> Void)?
     private var revocationGenerations: [AgentID: UInt64] = [:]
     /// Explicit user approvals belong to the app session and project/action
     /// scope. Per-agent grants still carry revocation and enabled-state checks.

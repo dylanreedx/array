@@ -103,8 +103,6 @@ enum StandardsResolutionChecks {
 
         // MARK: The real MCP server against the mounted app
 
-        var observed: [StandardsRetrieval] = []
-        f.api.standardsRetrievalObserver = { observed.append($0) }
         let claudeReplies = try mcp(claudeConfig, calls: [[:], ["rules": ["project/builds#2"]],
                                                          ["standards": ["../../outside/leak", "/etc/passwd", "project/escape", "broken"]]])
         try expect(claudeReplies.tools == everyTool,
@@ -196,20 +194,6 @@ enum StandardsResolutionChecks {
               off.code == .permissionDenied else {
             throw Failure(description: "with workspace tools off, standards.read is denied like every operation")
         }
-
-        // MARK: Observation seam: ids and versions only
-
-        try expect(observed.count == 5, "five answered reads were observed (three Claude, one Codex, one Pi), errors none: \(observed.count)")
-        // The MCP server runs each call in its own task, so arrival order is not fixed.
-        try expect(observed.filter { $0.agentId == claudeA }.count == 3 && observed.filter { $0.agentId == codexA }.count == 1
-                   && observed.filter { $0.agentId == piA }.count == 1, "each record names its caller")
-        let claudeRecords = observed.filter { $0.agentId == claudeA }
-        try expect(claudeRecords.contains { $0.ruleIds == ["project/builds#2"] && $0.versions == ["project/builds": version] && !$0.index }
-                   && claudeRecords.contains { $0.index && $0.ruleIds.isEmpty && $0.standardIds == ["project/builds"] }
-                   && claudeRecords.contains { $0.unresolved.count == 4 && $0.standardIds.isEmpty },
-                   "records carry rule ids, versions, index flag and unresolved ids: \(observed)")
-        let encoded = String(decoding: try JSONEncoder().encode(observed), as: UTF8.self)
-        try expect(!encoded.contains("make lint") && !encoded.contains("regenerated"), "no rule text in the observation records")
     }
 
     // MARK: - Helpers

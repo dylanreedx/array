@@ -82,34 +82,3 @@ public struct StandardsReadResult: Codable, Equatable, Sendable {
         self.unresolved = unresolved
     }
 }
-
-/// What one answered `standards.read` hands the observation seam
-/// (`WorkspaceAPIService.standardsRetrievalObserver`). Ids and versions only,
-/// never rule text. Host-owned shadow record; not persisted by this part.
-public struct StandardsRetrieval: Codable, Equatable, Sendable {
-    public var agentId: AgentID
-    public var at: Date
-    /// true for an index read (no ids requested).
-    public var index: Bool
-    public var standardIds: [String]
-    public var ruleIds: [String]
-    /// standard id -> version, for every standard returned.
-    public var versions: [String: String]
-    public var unresolved: [String]
-    public var issueCount: Int
-
-    public enum CodingKeys: String, CodingKey, CaseIterable {
-        case agentId, at, index, standardIds, ruleIds, versions, unresolved, issueCount
-    }
-
-    public init(agentId: AgentID, at: Date, request: StandardsReadRequest, result: StandardsReadResult) {
-        self.agentId = agentId
-        self.at = at
-        self.index = request.isIndex
-        self.standardIds = result.standards.map(\.id)
-        self.ruleIds = result.standards.flatMap { $0.rules?.map(\.id) ?? [] }
-        self.versions = Dictionary(uniqueKeysWithValues: result.standards.map { ($0.id, $0.version) })
-        self.unresolved = result.unresolved
-        self.issueCount = result.issues.count
-    }
-}

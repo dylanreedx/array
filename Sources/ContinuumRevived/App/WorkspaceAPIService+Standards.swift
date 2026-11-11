@@ -23,7 +23,7 @@ extension WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: .notFound, message: "This checkout has no \(ProjectStandards.directory) directory."))
         }
         let result = StandardsReadResult.answer(request, index: index)
-        standardsRetrievalObserver?(StandardsRetrieval(agentId: agentId, at: Date(), request: request, result: result))
+        // Part 12/14 seam: a retrieval fact (agent, ids, versions; never text) is appended here once a ledger exists.
         guard let object = Self.jsonObject(result) else {
             return .error(WorkspaceAPIError(code: .unsupported, message: "The standards could not be encoded."))
         }

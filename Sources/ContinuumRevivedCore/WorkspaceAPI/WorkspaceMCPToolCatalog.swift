@@ -58,9 +58,6 @@ public enum WorkspaceMCPToolCatalog {
         public let promptGuidelines: [String]
         public let operation: WorkspaceAPIOp
         public let inputSchema: [String: WorkspaceMCPJSON]
-        /// nil: offered to every agent. `projectStandards`: offered only when
-        /// the agent's checkout has standards (`ProjectStandards.isPresent`).
-        public let advertisedWhen: String?
 
         /// What an MCP client shows the model. Pi lifts `promptGuidelines` into
         /// its system prompt; MCP has no such slot, so the same guidelines ride
@@ -100,29 +97,18 @@ public enum WorkspaceMCPToolCatalog {
                 if case .string(let text) = value { return text }
                 return nil
             }
-            var advertisedWhen: String?
-            if case .string(let condition)? = fields["advertisedWhen"] {
-                guard condition == projectStandardsCondition else {
-                    throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "unknown advertisedWhen \(condition) on \(name)"))
-                }
-                advertisedWhen = condition
-            }
             return Tool(name: name, label: label, description: description, promptSnippet: snippet,
-                        promptGuidelines: guidelines, operation: operation, inputSchema: parameters,
-                        advertisedWhen: advertisedWhen)
+                        promptGuidelines: guidelines, operation: operation, inputSchema: parameters)
         }
     }
 
     public static func tool(named name: String) -> Tool? { tools.first { $0.name == name } }
 
-    /// `docs/internals/project-standards-on-demand.md`: the one condition a
-    /// tool may carry. Pi's extension reads the same field and environment key.
-    public static let projectStandardsCondition = "projectStandards"
-
-    /// The tools one agent is offered. A checkout without standards gets
-    /// exactly the catalogue it got before `array_standards` existed.
+    /// The tools one agent is offered: `array_standards` only when its launch
+    /// found standards (`docs/internals/project-standards-on-demand.md`). Pi's
+    /// extension applies the same rule to the same op.
     public static func tools(projectStandards: Bool) -> [Tool] {
-        tools.filter { $0.advertisedWhen == nil || projectStandards }
+        tools.filter { projectStandards || $0.operation != .standardsRead }
     }
 
     /// The operations a caller can reach through a tool. `workspace.context`

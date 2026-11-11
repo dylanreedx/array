@@ -141,13 +141,5 @@ func runProjectStandardsIndexChecks() {
         expect(request.rules == ["a#1"] && request.standards.isEmpty && !request.isIndex, "request: rules decode")
     } else { expect(false, "request: a rules list is valid") }
 
-    // The observation record carries ids and versions, never rule text.
-    let record = StandardsRetrieval(agentId: AgentID(rawValue: UUID()), at: Date(), request: StandardsReadRequest(rules: ["project/alpha#2", "nope"]), result: picked)
-    expect(record.ruleIds == ["project/alpha#2"] && record.standardIds == ["project/alpha"] && record.unresolved == ["project/alpha#99", "../../etc/passwd"]
-           && record.versions["project/alpha"]?.hasPrefix("sha256:") == true && !record.index,
-           "retrieval: ids, versions and unresolved are recorded")
-    let encoded = (try? JSONEncoder().encode(record)).map { String(decoding: $0, as: UTF8.self) } ?? ""
-    expect(!encoded.contains("main checkout") && !encoded.isEmpty, "retrieval: no rule text in the record")
-
     print("PASS project standards index (\(index.standards.count) standards, \(index.issues.count) issues)")
 }

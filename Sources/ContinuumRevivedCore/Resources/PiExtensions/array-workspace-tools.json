@@ -2123,7 +2123,6 @@
       "name": "array_standards",
       "label": "Array Standards",
       "op": "standards.read",
-      "advertisedWhen": "projectStandards",
       "description": "Read this checkout's written standards (docs/standards). No arguments returns the index: each standard's id, Applies when line, rule ids and version, plus issues. Pass standard or rule ids for verbatim rule text; ids that match nothing come back in unresolved. Read-only.",
       "promptSnippet": "Read this checkout's written standards",
       "promptGuidelines": [
