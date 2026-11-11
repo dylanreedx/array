@@ -23,10 +23,16 @@ runs on a request or event path, and opening Settings starts no count.
   period (last 7 days, last 30 days, all time). Open and interrupted tasks are
   listed and never counted.
 - **Fully counted**: every agent that ran a turn left a usage row, no row is
-  marked incomplete, and all four kinds are known. Codex never reports cache
-  writes, so a Codex task is never fully counted; its other kinds still count.
-- **Unknown** is never zero. A total that is partly unknown shows the known part
-  and how many tasks are missing from it.
+  marked incomplete, and every kind its harness reports is known. A kind a
+  harness never reports (`UsageReport.notReported`: Codex cache writes) shows
+  as a dash, explained once under the table, and does not make a task partial.
+- **Unknown** is never zero. A total missing part of its count reads "at least"
+  the known part; one line under the table says how many tasks are missing
+  something. Figures are compact on the page (5.4M, 320K, 139) and exact in an
+  opened task and in the export.
+- **Task rows**: one aligned row per task (closed, time to answer, solo or
+  helpers, total tokens, model); clicking it opens the Lead / Helpers / All
+  table for that task. One page of 30 rows, then "Show more".
 - **Lead and helpers**: a usage row whose agent opened the task is the lead's;
   any other is a helper's. A provider-run subagent's tokens are its parent's.
 - **Split**: solo, one helper, two or more, by `delegated` rows. Counts only,
