@@ -11787,7 +11787,20 @@ final class AgentSupervisor {
         case let .turnStarted(_, turnID):
             if qaRunLedgerRecording { runLedger.working(agent: id.rawValue, turn: turnID) }
         case let .turnCompleted(_, turnID, outcome, _):
+            if qaRunLedgerRecording, let record = records[id] {
+                runLedger.usageTurnEnded(agent: id.rawValue, turn: turnID, harness: record.harness?.rawValue, model: record.model,
+                                         effort: record.thinking.isEmpty ? nil : record.thinking,
+                                         record: AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults))
+            }
             if qaRunLedgerRecording { runLedger.ended(agent: id.rawValue, turn: turnID, outcome: outcome) }
+        case let .tokenUsageUpdated(_, snapshot):
+            // `.plans/116` part 14: a provider-run child's usage is its parent's.
+            var owner = id
+            while records[owner]?.capabilities == .observedReadOnly, let parent = records[owner]?.parentAgentID { owner = parent }
+            if qaRunLedgerRecording, let record = records[id] {
+                runLedger.usage(owner: owner.rawValue, model: record.model, snapshot,
+                                record: AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults))
+            }
         default: break
         }
         switch event {

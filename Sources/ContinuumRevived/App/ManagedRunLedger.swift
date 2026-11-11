@@ -22,6 +22,11 @@ final class ManagedRunLedger: @unchecked Sendable {
         var openParts: [UUID]?
         var evidence: [String: String]?
         var files: [HelperEvidence.FileFact]?
+        var harness: String?
+        var model: String?
+        var effort: String?
+        var tokens: TokenUsageSnapshot.TypedCounts?
+        var incomplete: [String]?
     }
     // Live only: a helper delegated before this process started has no entry,
     // and its report records that instead of pretending to have watched it.
@@ -157,6 +162,112 @@ final class ManagedRunLedger: @unchecked Sendable {
     func ended(agent: UUID, turn: String, outcome: TurnOutcome) {
         queue.async { self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", outcome: outcome.rawValue) }
     }
+
+    // MARK: Token usage (`.plans/116` part 14 step 1)
+
+    typealias Counts = TokenUsageSnapshot.TypedCounts
+    private struct UsageBuffer { var task: UUID; var tokens: Counts?; var incomplete = Set<String>() }
+    /// Per agent that ran the work, per (task, model): counters since its last
+    /// turn end. Memory only; a turn end hands them to `append`.
+    private var usageBuffers: [UUID: [String: UsageBuffer]] = [:]
+    private var usageObserved = Set<UUID>()
+    /// Codex cumulative totals per provider thread, live only: the baseline
+    /// each report is differenced against, and its provider time.
+    private var codexTotals: [String: (counts: Counts, at: Date?)] = [:]
+    private var claudeResults = Set<String>()
+
+    /// One usage snapshot, on the event path: one enqueue. `owner` is the agent
+    /// that ran the work (a provider-run child's usage is its parent's).
+    /// `record` false keeps Codex baselines current and records nothing, so
+    /// turning recording back on never charges the off period to a task.
+    func usage(owner: UUID, model: String, _ snapshot: TokenUsageSnapshot, record: Bool) {
+        queue.async {
+            for (model, step) in Self.usageSteps(snapshot, model: model, codexTotals: &self.codexTotals, claudeResults: &self.claudeResults) {
+                // An agent with no task (a solo Free agent) has no request id
+                // in this ledger yet; its usage stops here.
+                guard record, let task = self.sessionTasks[owner] else { continue }
+                self.usageObserved.insert(owner)
+                var buffer = self.usageBuffers[owner]?["\(task)|\(model)"] ?? UsageBuffer(task: task)
+                switch step {
+                case let .add(counts, reason):
+                    buffer.tokens = buffer.tokens.map { Self.sum($0, counts) } ?? counts
+                    if let reason { buffer.incomplete.insert(reason) }
+                case let .unknown(reason): buffer.incomplete.insert(reason)
+                case .ignore: continue
+                }
+                self.usageBuffers[owner, default: [:]]["\(task)|\(model)"] = buffer
+            }
+        }
+    }
+
+    /// The agent's turn ended: its buffered counters become rows. A turn of an
+    /// agent with a task that reported no usage at all is recorded as unknown.
+    func usageTurnEnded(agent: UUID, turn: String, harness: String?, model: String, effort: String?, record: Bool) {
+        queue.async {
+            let buffers = self.usageBuffers.removeValue(forKey: agent) ?? [:]
+            let observed = self.usageObserved.remove(agent) != nil
+            guard record else { return }
+            func row(_ task: UUID, _ model: String, _ tokens: Counts?, _ incomplete: Set<String>) -> Row {
+                var row = Row(kind: "usage", task: task, agent: agent, part: self.parts[agent],
+                              source: "usage/\(agent)/\(turn)/\(task)/\(model)")
+                (row.harness, row.model, row.effort, row.tokens) = (harness, model, effort, tokens)
+                row.incomplete = incomplete.isEmpty ? nil : incomplete.sorted()
+                return row
+            }
+            if buffers.isEmpty, !observed, let task = self.sessionTasks[agent] {
+                self.append(row(task, model, nil, ["noUsage"]))
+            }
+            for (key, buffer) in buffers.sorted(by: { $0.key < $1.key }) {
+                self.append(row(buffer.task, String(key.split(separator: "|", maxSplits: 1)[1]), buffer.tokens, buffer.incomplete))
+            }
+        }
+    }
+
+    enum UsageStep: Equatable { case add(Counts, String?), unknown(String), ignore }
+
+    /// What one snapshot adds, per model. Claude: the result's share, once per
+    /// result id. Codex: the cumulative total differenced per thread, in
+    /// provider time; a report older than the newest is already inside it.
+    static func usageSteps(_ snapshot: TokenUsageSnapshot, model: String,
+                           codexTotals: inout [String: (counts: Counts, at: Date?)],
+                           claudeResults: inout Set<String>) -> [(String, UsageStep)] {
+        if let byModel = snapshot.typedCountsByModel {
+            if let id = snapshot.accountingObservationID, !claudeResults.insert(id).inserted { return [(model, .ignore)] }
+            let reason = snapshot.accountingReconciled == false ? "unreconciled" : nil
+            return byModel.sorted { $0.key < $1.key }.map { ($0.key, .add($0.value, reason)) }
+        }
+        guard let session = snapshot.accountingSession, let current = snapshot.typedCounts else {
+            return [(model, .unknown("untyped"))]
+        }
+        let at = snapshot.observedAt
+        guard let previous = codexTotals[session] else {
+            codexTotals[session] = (current, at)
+            // A fork's or a resumed thread's first total holds history from
+            // before this process watched it.
+            if snapshot.accountingForkedFrom != nil { return [(model, .unknown("fork"))] }
+            return [(model, snapshot.accountingSessionStarted == true ? .add(current, nil) : .unknown("noBaseline"))]
+        }
+        if let at, let seen = previous.at, at < seen { return [(model, .ignore)] }
+        func lower(_ a: Int?, _ b: Int?) -> Bool { a.flatMap { a in b.map { a < $0 } } ?? false }
+        let input = { (c: Counts) in c.uncachedInput.flatMap { u in c.cacheRead.map { u + $0 } } }
+        codexTotals[session] = (current, at)
+        if lower(input(current), input(previous.counts)) || lower(current.cacheRead, previous.counts.cacheRead)
+            || lower(current.output, previous.counts.output) {
+            return [(model, .unknown("reset"))]
+        }
+        func minus(_ a: Int?, _ b: Int?) -> Int? { a.flatMap { a in b.map { a - $0 } } }
+        return [(model, .add(.init(uncachedInput: minus(current.uncachedInput, previous.counts.uncachedInput),
+                                   cacheRead: minus(current.cacheRead, previous.counts.cacheRead),
+                                   cacheWrite: minus(current.cacheWrite, previous.counts.cacheWrite),
+                                   output: minus(current.output, previous.counts.output)), nil))]
+    }
+
+    static func sum(_ a: Counts, _ b: Counts) -> Counts {
+        func add(_ x: Int?, _ y: Int?) -> Int? { x.flatMap { x in y.map { x + $0 } } }
+        return .init(uncachedInput: add(a.uncachedInput, b.uncachedInput), cacheRead: add(a.cacheRead, b.cacheRead),
+                     cacheWrite: add(a.cacheWrite, b.cacheWrite), output: add(a.output, b.output))
+    }
+
     private func fact(kind: String, agent: UUID, source: String, outcome: String? = nil, checks: [String: Int]? = nil, findings: [String: Int]? = nil) {
         let part = parts[agent]
         guard let task = sessionTasks[agent],
