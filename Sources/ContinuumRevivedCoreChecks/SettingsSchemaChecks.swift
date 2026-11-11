@@ -54,6 +54,7 @@ func runSettingsSchemaChecks() {
     let expectedKeys: Set<String> = [
         AgentManagedModeConfig.enabledKey,
         AgentManagedModeConfig.showIndicatorKey,
+        AgentManagedModeConfig.stallAlertsKey,
         ZoneChromeFeature.userDefaultsKey,
         DeleteConfirmPolicy.userDefaultsKey,
         DefaultBrowserURL.userDefaultsKey,

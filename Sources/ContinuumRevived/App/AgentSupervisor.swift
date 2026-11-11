@@ -6088,6 +6088,67 @@ final class AgentSupervisor {
     /// A "no progress" alert waiting in its lead's queue. Stopping the helper
     /// withdraws it, so the lead never spends a turn on news already stale.
     private var queuedHelperAlerts: [AgentID: (parent: AgentID, messageID: UUID)] = [:]
+    /// Each helper's liveness as of the last sweep (or the progress that ended
+    /// a quiet spell). In memory; `agent.inspect` reports it.
+    private(set) var helperLiveness: [AgentID: HelperLivenessFact] = [:]
+    /// Quiet this long, with nothing running, reads as stalled. Classifies only.
+    var helperLivenessQuietAfter = HelperLiveness.defaultQuietAfter
+    /// With `AgentManagedModeConfig.stallAlertsKey` on, a lead hears once its
+    /// stalled helper has gone this long without progress. Informs only.
+    static let defaultHelperStallAlertAfter: TimeInterval = 3 * 60
+    var helperStallAlertAfter = AgentSupervisor.defaultHelperStallAlertAfter
+    /// With the switch on, waiting on a process or tool call is not a stall,
+    /// but waiting this long without progress is worth one message. Informs only.
+    static let defaultHelperWaitCeiling: TimeInterval = 30 * 60
+    var helperWaitCeiling = AgentSupervisor.defaultHelperWaitCeiling
+    private static let stallClock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+    static func stallClockText(_ date: Date) -> String { stallClock.string(from: date) }
+
+    /// The one place a helper's liveness is written. A run ledger would append
+    /// a transition here, when `state` differs from the stored one.
+    private func recordHelperLiveness(_ id: AgentID, _ state: HelperLiveness, lastProgressAt: Date,
+                                      liveChildren: Int, openToolCalls: Int, subHelpers: Int = 0,
+                                      detail: String? = nil, now: Date) {
+        let since = helperLiveness[id].flatMap { $0.state == state ? $0.since : nil } ?? now
+        helperLiveness[id] = HelperLivenessFact(state: state, since: since, lastProgressAt: lastProgressAt,
+                                                liveChildren: liveChildren, openToolCalls: openToolCalls,
+                                                subHelpers: subHelpers, detail: detail)
+    }
+
+    /// In a turn or not, and what keeps a helper busy without a tool: one
+    /// turn snapshot, the same owner `presenceRowStatus` reads.
+    private func helperTurnState(_ id: AgentID) -> (status: AgentStatus?, busy: String?) {
+        let state = turnSnapshot(for: id)?.state
+        let status: AgentStatus?
+        var busy: String?
+        switch state {
+        case .starting?: status = .working; busy = "starting"
+        case .compacting?: status = .working; busy = "compacting"
+        case .queued?: status = .working; busy = "queued"
+        case .working?: status = .working
+        case .needsAction?: status = .needsAttention
+        case .ready?, .failed?, .restored?, nil: status = nil
+        }
+        if status == .working, turnFacts[id]?.presence.retry != nil { busy = "retrying" }
+        return (status, busy)
+    }
+
+    /// One word for a process: its command's first word, never its arguments.
+    private static func firstWord(_ text: String?) -> String? {
+        guard let word = text?.split(whereSeparator: \.isWhitespace).first else { return nil }
+        let name = URL(fileURLWithPath: String(word)).lastPathComponent
+        return name.isEmpty ? nil : String(name.prefix(40))
+    }
+
+    /// The parent a helper reports to: its delegator, else whoever messaged it.
+    private func helperParent(_ id: AgentID) -> AgentID? {
+        records[id]?.parentAgentID ?? helperMessageSubscriptions[id]?.first?.parent
+    }
 
     private func withdrawQueuedHelperAlert(_ id: AgentID) {
         pendingHelperAlerts[id] = nil
@@ -6105,8 +6166,23 @@ final class AgentSupervisor {
 
     private func noteHelperProgress(_ id: AgentID, last: String) {
         guard !helperParents(id).isEmpty else { return }
-        helperProgress[id] = HelperProgress(at: helperWatchdogNow(), last: last, status: presenceRowStatus(for: id))
+        let now = helperWatchdogNow()
+        let turn = helperTurnState(id)
+        helperProgress[id] = HelperProgress(at: now, last: last, status: turn.status)
         pendingHelperAlerts[id] = nil
+        // With the switch on, news already stale leaves the lead's queue.
+        if queuedHelperAlerts[id] != nil, AgentManagedModeConfig.stallAlerts(defaults: managedModeDefaults) {
+            withdrawQueuedHelperAlert(id)
+        }
+        // Progress means quiet is zero: in a turn it is working, busy or
+        // blocked; otherwise finished. Counts carry until the next sweep.
+        let fact = helperLiveness[id]
+        let state = HelperLiveness.classify(
+            inTurn: turn.status == .working || turn.status == .needsAttention, blocked: turn.status == .needsAttention,
+            busy: turn.busy != nil, lastProgressAt: now, liveChildren: 0, openToolCalls: 0, now: now, quietAfter: .infinity)
+        recordHelperLiveness(id, state, lastProgressAt: now, liveChildren: fact?.liveChildren ?? 0,
+                             openToolCalls: fact?.openToolCalls ?? 0, subHelpers: fact?.subHelpers ?? 0,
+                             detail: state == .busy ? turn.busy : nil, now: now)
         if records[id]?.helperWatchdogNeedsYou != nil {
             records[id]?.helperWatchdogNeedsYou = nil
             notifyLeadPlanChanged(id)
@@ -6114,17 +6190,38 @@ final class AgentSupervisor {
         }
     }
 
+    private enum HelperAlertKind { case noProgress, stalled, stillWaiting }
+
     /// Runs on the same actor as hook and transcript ingestion. The clock is
     /// injected by the witness; the production timer samples every 30 seconds.
     func sweepHelperWatchdog() async {
         let now = helperWatchdogNow()
-        for id in Array(records.keys) {
+        let stallAlerts = AgentManagedModeConfig.stallAlerts(defaults: managedModeDefaults)
+        let ids = Array(records.keys)
+        var turns: [AgentID: (status: AgentStatus?, busy: String?)] = [:]
+        for id in ids where helperParent(id) != nil { turns[id] = helperTurnState(id) }
+        func inTurn(_ id: AgentID) -> Bool { turns[id]?.status == .working || turns[id]?.status == .needsAttention }
+        // Who waits on whom: a helper in a turn holds each of its parents.
+        var subHelpers: [AgentID: Int] = [:]
+        for id in ids where inTurn(id) {
+            for parent in helperParents(id) { subHelpers[parent, default: 0] += 1 }
+        }
+
+        // 1. Classify every helper first, so routing below reads this sweep.
+        var candidates: [(id: AgentID, parent: AgentID, record: AgentRecord)] = []
+        for id in ids {
             // Delegated or messaged: a stuck helper alerts whoever waits on it.
-            guard let record = records[id], let parent = record.parentAgentID ?? helperMessageSubscriptions[id]?.first?.parent else { continue }
-            let status = presenceRowStatus(for: id)
+            guard let record = records[id], let parent = helperParent(id) else { continue }
+            let status = turns[id]?.status
             guard status == .working || status == .needsAttention else {
+                // Waiting out Array's own provider retry is busy, not finished.
+                let retrying = helperProviderRetryErrors[id] != nil
+                recordHelperLiveness(id, retrying ? .busy : .finished,
+                                     lastProgressAt: helperProgress[id]?.at ?? helperLiveness[id]?.lastProgressAt ?? now,
+                                     liveChildren: 0, openToolCalls: 0, detail: retrying ? "retrying" : nil, now: now)
                 helperProgress[id] = nil
                 pendingHelperAlerts[id] = nil
+                if stallAlerts, queuedHelperAlerts[id] != nil { withdrawQueuedHelperAlert(id) }
                 if records[id]?.helperWatchdogNeedsYou != nil {
                     records[id]?.helperWatchdogNeedsYou = nil
                     notifyLeadPlanChanged(id)
@@ -6135,18 +6232,94 @@ final class AgentSupervisor {
             if helperProgress[id] == nil || helperProgress[id]?.status != status {
                 noteHelperProgress(id, last: status == .needsAttention ? "needs you" : "working")
             }
-            guard var progress = helperProgress[id], !progress.escalated,
-                  now.timeIntervalSince(progress.at) >= helperWatchdogThreshold else { continue }
+            if let at = helperProgress[id]?.at {
+                // The tracker's last published list, the runner's open tool
+                // items and the records: no process inspection here. A process
+                // from an earlier turn (a forgotten dev server) holds nothing.
+                let turnStart = turnFacts[id]?.presence.startedAt ?? record.latestTurnAt
+                let jobs = (processTracker?.jobs(for: id) ?? []).filter { job in
+                    turnStart.map { job.startedAt >= $0.addingTimeInterval(-1) } ?? true
+                }
+                let open = openToolItems[id] ?? []
+                let tools = (openToolDetails[id] ?? [:]).filter { open.contains($0.key) }
+                openToolDetails[id] = tools.isEmpty ? nil : tools
+                let subagentItems = tools.values.filter { $0.kind == .subagent }.count
+                let toolCalls = open.count - subagentItems
+                let helpers = (subHelpers[id] ?? 0) + subagentItems
+                let modelSilent = runners[id] != nil && !HelperLiveness.reasoningStreams(for: record.harness ?? .pi)
+                let state = HelperLiveness.classify(
+                    inTurn: true, blocked: status == .needsAttention, busy: turns[id]?.busy != nil, lastProgressAt: at,
+                    subHelpers: helpers, liveChildren: jobs.count, openToolCalls: toolCalls, modelSilent: modelSilent,
+                    now: now, quietAfter: helperLivenessQuietAfter)
+                let detail: String?
+                switch state {
+                case .busy: detail = turns[id]?.busy
+                case .waitingOnChild: detail = Self.firstWord(jobs.first?.label)
+                case .waitingOnToolCall: detail = tools.values.first(where: { $0.kind != .subagent })?.name
+                default: detail = nil
+                }
+                recordHelperLiveness(id, state, lastProgressAt: at, liveChildren: jobs.count, openToolCalls: toolCalls,
+                                     subHelpers: helpers, detail: detail, now: now)
+            }
+            candidates.append((id, parent, record))
+        }
+
+        // 2. Decide alerts. Quiet is measured from the last real progress.
+        for (id, parent, record) in candidates {
+            guard var progress = helperProgress[id], !progress.escalated else { continue }
+            let quiet = now.timeIntervalSince(progress.at)
+            // Switch off: ten minutes without progress, whatever the helper is
+            // doing. On: by what it is doing.
+            let fact = stallAlerts ? helperLiveness[id] : nil
+            let kind: HelperAlertKind?
+            switch fact?.state {
+            case .waitingOnHelper?, .working?, .finished?: kind = nil
+            case .waitingOnChild?, .waitingOnToolCall?: kind = quiet >= helperWaitCeiling ? .stillWaiting : nil
+            case .stalled?: kind = quiet >= helperStallAlertAfter ? .stalled : nil
+            case .busy?, .waitingOnModel?, .blocked?, nil: kind = quiet >= helperWatchdogThreshold ? .noProgress : nil
+            }
+            guard let kind else { continue }
             progress.escalated = true
             helperProgress[id] = progress
             let minutes = max(1, Int(helperWatchdogThreshold / 60))
-            records[id]?.helperWatchdogNeedsYou = "no progress for \(minutes) min"
+            let quietMinutes = max(1, Int(quiet / 60))
+            let since = Self.stallClockText(progress.at)
+            let process = fact?.state == .waitingOnChild
+            let waitedOn = (process ? "a process it started" : "a tool call") + (fact?.detail.map { " (\($0))" } ?? "")
+            switch kind {
+            case .noProgress: records[id]?.helperWatchdogNeedsYou = "no progress for \(minutes) min"
+            case .stalled: records[id]?.helperWatchdogNeedsYou = "stalled, no progress for \(quietMinutes) min"
+            case .stillWaiting:
+                records[id]?.helperWatchdogNeedsYou = "still waiting on \(process ? "a process" : "a tool call") for \(quietMinutes) min"
+            }
             notifyLeadPlanChanged(id)
             onSelfReportChanged?(id)
+            // With the switch on, the alert goes past every ancestor already in
+            // a turn waiting on this chain, so the chain alerts once, at the
+            // first ancestor free to read it (in practice the top lead).
+            var target = parent
+            if stallAlerts {
+                var seen: Set<AgentID> = [id]
+                while helperLiveness[target]?.state == .waitingOnHelper, inTurn(target),
+                      let up = helperParent(target), records[up] != nil, seen.insert(target).inserted {
+                    target = up
+                }
+            }
             // A gone parent gets no message. The child's sidebar still speaks.
-            if records[parent] != nil {
-                let name = String(record.humanDisplayName.split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40))
-                pendingHelperAlerts[id] = (parent, "Helper \(name) has shown no progress for \(minutes) min (last: \(progress.last)). Check it, message it, or stop it.")
+            guard records[target] != nil else { continue }
+            let name = String(record.humanDisplayName.split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40))
+            var label = "Helper \(name)"
+            if target != parent, let parentRecord = records[parent] {
+                let parentName = String(parentRecord.humanDisplayName.split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40))
+                label += " (a helper of \(parentName))"
+            }
+            switch kind {
+            case .noProgress:
+                pendingHelperAlerts[id] = (target, "\(label) has shown no progress for \(minutes) min (last: \(progress.last)). Check it, message it, or stop it.")
+            case .stalled:
+                pendingHelperAlerts[id] = (target, "\(label) is stalled: no progress since \(since) (\(quietMinutes) min), nothing it started is running and no tool call is open (last: \(progress.last)). Check it, message it, or stop it.")
+            case .stillWaiting:
+                pendingHelperAlerts[id] = (target, "\(label) is still waiting on \(waitedOn) for \(quietMinutes) min, with no progress since \(since) (last: \(progress.last)). Check it, message it, or stop it.")
             }
         }
         for (child, alert) in pendingHelperAlerts {
@@ -6773,6 +6946,7 @@ final class AgentSupervisor {
         hookReceipts.removeValue(forKey: id)
         codexHookPushBacks.removeValue(forKey: id)
         helperProgress[id] = nil
+        helperLiveness[id] = nil
         pendingHelperAlerts[id] = nil
         helperFoldEligibleSince[id] = nil
         pendingHelperFolds.remove(id)
@@ -9754,6 +9928,20 @@ final class AgentSupervisor {
         deliver(event, to: id, now: now)
     }
 
+    /// Waits for `id`'s serialized queue writes, so a reader counts what is stored.
+    func qaQueueWritesSettled(for id: AgentID) async {
+        await queueOpTasks[id]?.value
+    }
+
+    /// One event as the bound runner's own stream delivers it, through the same
+    /// generation-checked path (tool boundaries included). False with no runner.
+    @discardableResult
+    func qaDeliverFromBoundRunner(_ event: AgentRuntimeEvent, to id: AgentID) -> Bool {
+        guard let runner = runners[id], let generation = runnerGenerationTokens[id] else { return false }
+        deliver(event, from: runner, generation: generation, to: id)
+        return true
+    }
+
     #if ARRAY_FILM
     /// Film build only: one host-local runtime observation through the production
     /// fan-out, exactly as a provider translator's `onRuntimeObservation` hands it
@@ -10752,6 +10940,10 @@ final class AgentSupervisor {
     /// Tool items open in the bound runner's turn — the boundary a held steer
     /// waits for.
     private var openToolItems: [AgentID: Set<String>] = [:]
+    /// What each open tool item is, for the liveness sweep: its kind and one
+    /// word naming it. Read only through `openToolItems`, which owns closing.
+    private struct OpenToolDetail { let kind: ItemKind; let name: String }
+    private var openToolDetails: [AgentID: [String: OpenToolDetail]] = [:]
     // A provider acceptance receipt (notably Codex turn/steer) can precede
     // sampling the input. Keep the wake signal until the blocking tools finish.
     private var helperWaitSteerTools: [AgentID: Set<String>] = [:]
@@ -11403,8 +11595,11 @@ final class AgentSupervisor {
         deliver(event, to: id, now: now)
         // T5 — the bound runner's own stream says where the tool boundaries are.
         switch event {
-        case let .itemStarted(_, itemID, kind, _) where kind.isToolBoundary:
+        case let .itemStarted(_, itemID, kind, title) where kind.isToolBoundary:
             openToolItems[id, default: []].insert(itemID)
+            let name = title?.split(whereSeparator: \.isWhitespace).first.map { String($0.prefix(40)) }
+            openToolDetails[id, default: [:]][itemID] = OpenToolDetail(
+                kind: kind, name: name ?? AgentTurnPresence.Tool(itemID: itemID, kind: kind, title: nil).name)
             handOverHeldSteers(for: id)
         case let .itemCompleted(_, itemID, _, _):
             openToolItems[id]?.remove(itemID)

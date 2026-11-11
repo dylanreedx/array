@@ -86,6 +86,8 @@ Rank the managed agents Array knows in your checkout (under Agent permissions Fr
 
 Bounded, attributed evidence about ONE agent by agentId: identity, observed status, lastActivityAt, latestPromptAt/latestTurnAt, terminalOutcome, promptTitle, a byte-capped excerpt of its most recent transcript items ({kind, at, text}, newest last, `recentEventsTruncated` when cut), checkout-relative referencedFiles, evidenceSource and observedAt. Everything is a projection of what Array observed. `transcriptAvailable: false` with a note means Array holds no evidence — NOT that the agent did nothing. Inspecting yourself needs no approval. Inspecting another agent asks the user in Array, unless Agent permissions is Free and the agent is in your project. Read-only: never messages, interrupts or steers the agent.
 
+For a helper (an agent another agent delegated or messaged), the answer also carries `liveness`, Array's observed reading as of its last 30-second check: `state` (`working`, `busy`, `waitingOnHelper`, `waitingOnChild`, `waitingOnToolCall`, `waitingOnModel`, `stalled`, `blocked` or `finished`), `since`, `lastProgressAt`, `liveChildren`, `openToolCalls`, `subHelpers` and `detail` (one word: what it is busy with, the command's first word or the tool's name). It is an observation, present whatever the stall-alert setting, and never a verdict that the helper failed.
+
 | Input | Meaning |
 | --- | --- |
 | `agentId` | Required. The agentId from array_find_agent or array_workspace_context. |
