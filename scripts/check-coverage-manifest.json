@@ -59,7 +59,7 @@
     },
     {
       "invocation": "python3 scripts/check-notification-map.py --self-test",
-      "covers": ["docs/internals/notification-paths.md", "docs/internals/notification-senders.json", "Sources/ContinuumRevived/App/AgentCLIUpdateCenter.swift", "Sources/ContinuumRevived/App/AgentSoundSystem.swift", "Sources/ContinuumRevived/App/NeedsAttentionNotification.swift", "Sources/ContinuumRevivedCore/APNSPushService.swift", "Sources/ContinuumRevivedRelayCore/RelayAPNSService.swift", "iOS/Continuum/Sources/SystemSurfaceCoordinator.swift"],
+      "covers": ["docs/internals/notification-paths.md", "docs/internals/notification-senders.json", "Sources/ContinuumRevived/App/AgentCLIUpdateCenter.swift", "Sources/ContinuumRevived/App/AgentSoundSystem.swift", "Sources/ContinuumRevived/App/NeedsAttentionNotification.swift", "Sources/ContinuumRevivedCore/APNSPushService.swift", "Sources/ContinuumRevivedRelayCore/RelayAPNSService.swift", "ios/Continuum/Sources/SystemSurfaceCoordinator.swift"],
       "checkFiles": ["scripts/check-notification-map.py"],
       "owner": "notifications",
       "reason": "sender census against the maintained notification map (structural, not behavioural)"

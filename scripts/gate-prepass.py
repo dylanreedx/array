@@ -107,7 +107,7 @@ class Repo:
     def resolve(self, rev):
         if not rev or rev.startswith("-"):
             raise PrepassError("invalid revision %r" % rev)
-        proc = subprocess.run(["git", "-C", self.path, "rev-parse", "--verify", "--quiet", rev + "^{commit}"],
+        proc = subprocess.run(["git", "-C", self.path, "rev-parse", "--verify", rev + "^{commit}"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         err = proc.stderr.decode(errors="replace")
         if "ambiguous" in err:
@@ -466,7 +466,7 @@ def check_swift(repo, head, renamed_diff, unrenamed_diff, reg, manifest, notify_
             if number - 1 >= len(keep):
                 continue
             kept, bare, raw = keep[number - 1], code[number - 1], change["added"][number]
-            flags = [m for rx in DISPATCH_RES for m in rx.findall(kept)]
+            flags = [] if is_checks_path(path) else [m for rx in DISPATCH_RES for m in rx.findall(kept)]
             for flag in sorted(set(flags)):
                 if flag in removed_flags or flag in reg["matrix"]:
                     continue
@@ -480,7 +480,7 @@ def check_swift(repo, head, renamed_diff, unrenamed_diff, reg, manifest, notify_
                 add_line_finding(found, manifest, "unregistered-check-flag", "fail",
                                  "%s is dispatched but no matrix leg or bundle-harness self-check list runs it" % flag,
                                  path, number, raw, flag=flag)
-            if not flags:
+            if not flags and not is_checks_path(path):
                 for rx in UNCERTAIN_RES:
                     for flag in rx.findall(kept):
                         if flag in reg["matrix"] or flag in reg["bundle"] or flag in removed_flags:
@@ -548,7 +548,7 @@ def check_dated_paths(repo, base, changes):
 def coverage(manifest, changes):
     checks, covered = {}, set()
     for change in changes:
-        for path, role in ((change["path"], change["status"]), (change["old"], "old path of " + change["status"])):
+        for path, role in ((change["path"], change["status"]), (change["old"] if change["old"] != change["path"] else None, "old path of " + change["status"])):
             if not path:
                 continue
             for entry in (manifest or {}).get("checks", []):
