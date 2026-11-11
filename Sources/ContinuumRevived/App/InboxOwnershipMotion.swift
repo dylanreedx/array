@@ -454,9 +454,8 @@ struct InboxOwnershipChrome {
     static let subagentHeight: CGFloat = 18
     /// The room under a card's last subagent, inside the card.
     static let footPad: CGFloat = 6
-    /// How far an open lead's row overlaps its first subagent, so the first row
-    /// sits right under the lead's second line.
-    static let headOverlap: CGFloat = 6
+    /// The lead's rounded selection surface ends before its first helper.
+    static let headOverlap: CGFloat = 0
     /// Where a subagent row's content starts in the card: just right of the
     /// stem, the same for every lead whatever its count and dot.
     static var subagentLeading: CGFloat { laneX + 10 }
@@ -477,13 +476,18 @@ struct InboxOwnershipChrome {
                 spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat, indicatorStyle: String) {
         let bleed = spacing / 2
         let top = slice.continuesAbove ? -bleed : 0
-        let bottom = bounds.height + (slice.continuesBelow ? bleed : 0)
+        let leadSurfaceHeight = max(1, slice.leadHeight + Self.headOverlap - gap)
+        let leadSurface = slice.rowIndex == 0 && slice.activeGroup && indicatorStyle != "current"
+        let bottom = max(bounds.height + (slice.continuesBelow ? bleed : 0),
+                         leadSurface ? gap / 2 + leadSurfaceHeight : 0)
         let clip = NSRect(x: 0, y: top, width: bounds.width, height: max(0, bottom - top))
         let card = NSRect(x: gutter, y: -slice.offset + gap / 2,
                           width: max(0, bounds.width - gutter * 2), height: max(0, slice.groupHeight - gap))
 
         groupLight.frame = clip
-        groupLight.show(slice, card: card.offsetBy(dx: 0, dy: -top), style: indicatorStyle)
+        var lightCard = card.offsetBy(dx: 0, dy: -top)
+        if leadSurface { lightCard.size.height = leadSurfaceHeight }
+        groupLight.show(slice, card: lightCard, style: indicatorStyle)
         sheet.clipsToBounds = false
         sheet.frame = clip
         let strip = card.intersection(clip)
