@@ -2,7 +2,7 @@ import Foundation
 
 /// Read-only, launch-local experiment. Never consult CLI homes or memory.
 /// An unavailable cache never delays or refuses a launch. Restart to reload.
-final class PersonalRulesSource: @unchecked Sendable {
+final class PersonalRulesSource: HostLaunchInstructionSource, @unchecked Sendable {
     static let shared = PersonalRulesSource(environment: ProcessInfo.processInfo.environment)
     private let lock = NSLock()
     private var text: String?
@@ -21,7 +21,7 @@ final class PersonalRulesSource: @unchecked Sendable {
                 let bytes = try file.read(upToCount: Self.byteLimit + 1) ?? Data()
                 if bytes.count > Self.byteLimit { result = (nil, "oversized") }
                 else if let value = String(data: bytes, encoding: .utf8) {
-                    result = (value.isEmpty ? nil : "Personal working rules:\n" + value, "loaded")
+                    result = (value.isEmpty ? nil : value, "loaded")
                 } else { result = (nil, "invalid-utf8") }
             } catch { result = (nil, "unavailable") }
             lock.lock(); text = result.0; state = result.1; lock.unlock()
@@ -31,15 +31,76 @@ final class PersonalRulesSource: @unchecked Sendable {
     }
 
     var status: String { lock.lock(); defer { lock.unlock() }; return state }
-    func arguments(codex: Bool) -> [String] {
+    var launchInstructionBlock: HostLaunchInstructionBlock? {
         lock.lock(); let value = text; lock.unlock()
-        guard let value else { return [] }
+        guard let value else { return nil }
+        return HostLaunchInstructionBlock(name: "personal-rules", label: "Personal working rules", text: value)
+    }
+}
+
+/// Each layer retains its own bytes and identity. Only argv rendering joins them.
+struct HostLaunchInstructionBlock: Sendable, Equatable {
+    let name: String
+    let label: String
+    let text: String
+}
+
+protocol HostLaunchInstructionSource: Sendable {
+    var launchInstructionBlock: HostLaunchInstructionBlock? { get }
+}
+
+/// The host's registration order is the delivery order, independent of load timing.
+/// Keep sources separate; a future host-owned layer registers its own source here.
+struct HostLaunchInstructions: Sendable {
+    static let shared = HostLaunchInstructions(sources: [PersonalRulesSource.shared])
+    let sources: [any HostLaunchInstructionSource]
+
+    var blocks: [HostLaunchInstructionBlock] {
+        var names = Set<String>()
+        return sources.compactMap { $0.launchInstructionBlock }.filter { names.insert($0.name).inserted }
+    }
+
+    func arguments(codex: Bool) -> [String] {
+        let rendered = blocks.map { $0.label + ":\n" + $0.text }.joined(separator: "\n\n")
+        guard !rendered.isEmpty else { return [] }
         if codex {
-            // JSON string syntax is valid TOML basic-string syntax for this payload.
-            guard let bytes = try? { () throws -> Data in let encoder = JSONEncoder(); encoder.outputFormatting = .withoutEscapingSlashes; return try encoder.encode(value) }(),
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .withoutEscapingSlashes
+            guard let bytes = try? encoder.encode(rendered),
                   let quoted = String(data: bytes, encoding: .utf8) else { return [] }
             return ["-c", "developer_instructions=\(quoted)"]
         }
-        return ["--append-system-prompt", value]
+        return ["--append-system-prompt", rendered]
+    }
+}
+
+/// Fixture-only second source: no additional production instruction block exists.
+enum HostLaunchInstructionChecks {
+    private struct FixtureSource: HostLaunchInstructionSource {
+        let launchInstructionBlock: HostLaunchInstructionBlock?
+    }
+
+    static func run() throws {
+        func expect(_ value: Bool, _ message: String) throws {
+            if !value { throw NSError(domain: "HostLaunchInstructionChecks", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: message]) }
+        }
+        let first = HostLaunchInstructionBlock(name: "first-fixture", label: "First fixture", text: "one\n  unchanged")
+        let second = HostLaunchInstructionBlock(name: "second-fixture", label: "Second fixture", text: "two / \"quoted\"")
+        let sources = [FixtureSource(launchInstructionBlock: first), FixtureSource(launchInstructionBlock: nil),
+                       FixtureSource(launchInstructionBlock: second), FixtureSource(launchInstructionBlock: first)]
+        let instructions = HostLaunchInstructions(sources: sources)
+        try expect(instructions.blocks == [first, second], "named blocks lost order or were duplicated")
+        let expected = "First fixture:\n" + first.text + "\n\nSecond fixture:\n" + second.text
+        try expect(instructions.arguments(codex: false) == ["--append-system-prompt", expected], "Pi block rendering changed")
+        let codex = instructions.arguments(codex: true)
+        try expect(codex.count == 2 && codex[0] == "-c", "Codex instruction switch changed")
+        let prefix = "developer_instructions="
+        try expect(codex[1].hasPrefix(prefix), "Codex instruction key changed")
+        let decoded = try JSONDecoder().decode(String.self, from: Data(codex[1].dropFirst(prefix.count).utf8))
+        try expect(decoded == expected, "Codex block rendering changed")
+        try expect(sources[0].launchInstructionBlock == first && sources[2].launchInstructionBlock == second,
+                   "renderer changed a source")
+        try expect(HostLaunchInstructions(sources: []).arguments(codex: true).isEmpty, "empty host changed launch")
     }
 }

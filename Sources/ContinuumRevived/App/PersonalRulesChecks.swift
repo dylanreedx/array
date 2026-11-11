@@ -21,25 +21,27 @@ enum PersonalRulesChecks {
         }
         let on = await source(file.path)
         let off = await source(file.path, enabled: false)
+        try HostLaunchInstructionChecks.run()
+        try expect(on.launchInstructionBlock?.text == text, "personal source rewrote text")
         var record = AgentRecord(id: AgentID(rawValue: UUID()), displayName: "fixture", model: "fixture/model", thinking: "medium", cwd: root.path, createdAt: Date(timeIntervalSince1970: 0), lastActivityAt: Date(timeIntervalSince1970: 0))
         for thread in [nil, "resumed-fixture"] as [String?] {
             record.codexThreadId = thread
-            let codex = AgentSupervisor.codexRunnerConfig(for: record, personalRules: on)
-            let baseline = AgentSupervisor.codexRunnerConfig(for: record, personalRules: off)
+            let codex = AgentSupervisor.codexRunnerConfig(for: record, hostInstructions: HostLaunchInstructions(sources: [on]))
+            let baseline = AgentSupervisor.codexRunnerConfig(for: record, hostInstructions: HostLaunchInstructions(sources: [off]))
             for mode in [CodexCLIBackend.SessionMode.fresh, .resume] {
                 let args = CodexCLIBackend.processArguments(model: codex.model, effort: codex.effort, sessionMode: mode, threadId: thread, cwdPath: root.path, extraArgs: codex.extraArgs, prompt: AgentPrompt("fixture task"))
                 try expect(args.filter { $0.contains(text) }.count == 1, "Codex rules not delivered once")
             }
             try expect(baseline.extraArgs.isEmpty, "off changed Codex")
-            let pi = AgentSupervisor.runnerConfig(for: record, spawnDepth: 1, personalRules: on)
+            let pi = AgentSupervisor.runnerConfig(for: record, spawnDepth: 1, hostInstructions: HostLaunchInstructions(sources: [on]))
             let args = PiAgentRunner.processArguments(model: pi.model, thinking: pi.thinking, sessionId: pi.sessionId, extraArgs: pi.extraArgs, prompt: "fixture task", extensionPaths: [])
             try expect(args.filter { $0.contains(text) }.count == 1, "Pi rules not delivered once")
-            try expect(AgentSupervisor.runnerConfig(for: record, spawnDepth: 1, personalRules: off).extraArgs.isEmpty, "off changed Pi")
+            try expect(AgentSupervisor.runnerConfig(for: record, spawnDepth: 1, hostInstructions: HostLaunchInstructions(sources: [off])).extraArgs.isEmpty, "off changed Pi")
         }
-        let rpc = AgentSupervisor.runnerConfig(for: record, spawnDepth: 1, personalRules: on)
+        let rpc = AgentSupervisor.runnerConfig(for: record, spawnDepth: 1, hostInstructions: HostLaunchInstructions(sources: [on]))
         let rpcArgs = PiRpcAgentRunner.processArguments(model: rpc.model, thinking: rpc.thinking, sessionId: rpc.sessionId, extraArgs: rpc.extraArgs, extensionPaths: [])
         try expect(rpcArgs.filter { $0.contains(text) }.count == 1, "Pi RPC rules not delivered once")
-        let server = AgentSupervisor.codexRunnerConfig(for: record, personalRules: on)
+        let server = AgentSupervisor.codexRunnerConfig(for: record, hostInstructions: HostLaunchInstructions(sources: [on]))
         try expect(CodexCLIBackend.appServerArguments(extraArgs: server.extraArgs).filter { $0.contains(text) }.count == 1, "Codex app-server rules not delivered once")
         var observed: [AgentHarness: [Int]] = [:]
         try await runWorkspaceAPIDelegationChecks(crossHarness: true, inspectLaunch: { launch in
@@ -47,9 +49,9 @@ enum PersonalRulesChecks {
             let args: [String]
             switch harness {
             case .codex:
-                args = CodexCLIBackend.appServerArguments(extraArgs: AgentSupervisor.codexRunnerConfig(for: launch.record, personalRules: on).extraArgs)
+                args = CodexCLIBackend.appServerArguments(extraArgs: AgentSupervisor.codexRunnerConfig(for: launch.record, hostInstructions: HostLaunchInstructions(sources: [on])).extraArgs)
             case .pi:
-                let c = AgentSupervisor.runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth, personalRules: on)
+                let c = AgentSupervisor.runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth, hostInstructions: HostLaunchInstructions(sources: [on]))
                 args = PiRpcAgentRunner.processArguments(model: c.model, thinking: c.thinking, sessionId: c.sessionId, extraArgs: c.extraArgs, extensionPaths: [])
             case .claudeCode:
                 // Claude never consumes this source; its existing frozen-argv witness guards parity.
@@ -62,10 +64,10 @@ enum PersonalRulesChecks {
             try expect(observed[harness]!.allSatisfy { $0 == (harness == .claudeCode ? 0 : 1) }, "API helper rules count changed")
         }
         let missing = await source(root.appendingPathComponent("absent").path)
-        try expect(missing.status == "unavailable" && missing.arguments(codex: true).isEmpty, "missing must continue")
+        try expect(missing.status == "unavailable" && HostLaunchInstructions(sources: [missing]).arguments(codex: true).isEmpty, "missing must continue")
         try Data(repeating: 65, count: PersonalRulesSource.byteLimit + 1).write(to: root.appendingPathComponent("large"))
         let large = await source(root.appendingPathComponent("large").path)
-        try expect(large.status == "oversized" && large.arguments(codex: false).isEmpty, "oversize silently truncated")
+        try expect(large.status == "oversized" && HostLaunchInstructions(sources: [large]).arguments(codex: false).isEmpty, "oversize silently truncated")
         try expect(try Data(contentsOf: file) == Data(text.utf8), "source changed")
         let after = try FileManager.default.attributesOfItem(atPath: file.path)
         try expect(before[.modificationDate] as? Date == after[.modificationDate] as? Date, "source metadata changed")

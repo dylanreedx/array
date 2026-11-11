@@ -13,6 +13,13 @@ Restart to reload. Until loaded, launches proceed without rules. Status is
 available on the source; diagnostics record status only. Missing, unreadable,
 invalid UTF-8 and oversized files never refuse launch or truncate the payload.
 
+`HostLaunchInstructions` is the single host-owned launch seam. It holds separate
+sources in fixed registration order and obtains named blocks from each. Each
+block retains its own raw text and label; duplicate names are delivered once.
+Joining happens only while rendering the transient argv payload. The only
+production registration is `personal-rules`; no Array guidance block is added.
+The personal cache stores the original text without adding or rewriting prose.
+
 Codex receives a per-process `-c developer_instructions` override on both exec
 and app-server; Pi receives `--append-system-prompt` on JSON and RPC launches.
 Claude's configuration is untouched. These arguments do not edit provider
@@ -51,3 +58,16 @@ Observed verification:
 Plan correction: Claude receives no injected personal payload, per the master
 plan. Oversized/unreadable sources record status and continue, following the
 owner's instruction rather than the individual plan's visible-failure wording.
+
+The seam fixture supplies two independent named sources and a duplicate. It
+asserts registration order, one delivery per name, unchanged source blocks,
+empty-source behavior and decoded Codex/Pi argument payloads. A reversed-order
+mutation was observed RED (exit 1); production rendering was GREEN in the
+standalone source harness. The initial standalone RED driver left its error
+uncaught and trapped; it was corrected to catch and exit 1 before rerunning.
+Per-launch switch semantics in real CLIs await the parallel probe; argument
+builder checks do not establish provider obedience or compaction retention.
+
+After introducing the ordered host seam, every app leg listed above and the
+Core workspace API contract arm were rerun successfully. Debug Array,
+array-workspace-mcp and CoreChecks builds and matrix inventory validation passed.
