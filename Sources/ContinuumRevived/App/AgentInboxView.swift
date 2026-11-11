@@ -2832,7 +2832,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             }
             let hasSelectedMember = (start...end).contains { nativeSelection.contains($0) }
                 || canvasLead?.id == lead.id
-                || (nativeSelection.isEmpty && (start...end).contains { items[$0].agentRow?.id == openAgentId })
+                || (nativeSelection.isEmpty && openAgentId != nil
+                    && (start...end).contains { items[$0].agentRow?.id == openAgentId })
             let activeGroup = working && (SidebarActiveIndicatorScope.resolve(in: indicatorDefaults) == .working || hasSelectedMember)
             let focusHeight = max(1, groupHeight - SidebarDensityProposal.production.gapBetweenRows)
             let focusTarget = runningOffset.map { $0 / focusHeight } ?? min(0.9, heights[0] / focusHeight * 0.8)
