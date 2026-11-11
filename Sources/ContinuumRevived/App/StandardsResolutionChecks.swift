@@ -35,6 +35,42 @@ enum StandardsResolutionChecks {
         let fm = FileManager.default
         let supervisor = f.delegate.qaAgentSupervisor
 
+        // MARK: Without standards: identical to the base commit, all three harnesses
+
+        func launched(_ id: AgentID) throws -> AgentRunnerLaunch {
+            guard let value = supervisor.records[id] else { throw Failure(description: "no record for \(id)") }
+            return supervisor.runnerLaunch(for: id, record: value)
+        }
+        let capture = try StandardsBaseCapture.capture(f, launch: .init(
+            mcp: { id, _ in
+                guard let config = try launched(id).workspaceMCP else { throw Failure(description: "no MCP configuration") }
+                return config },
+            piArgs: { id in
+                let launch = try launched(id)
+                return AgentSupervisor.runnerConfig(for: launch.record, spawnDepth: 0, projectStandards: launch.projectStandards).extraArgs },
+            piEnvironment: { id, base in
+                let launch = try launched(id)
+                let config = AgentSupervisor.runnerConfig(for: launch.record, spawnDepth: 0, projectStandards: launch.projectStandards)
+                return PiAgentRunner.childEnvironment(base: base, extraDirs: [], processOwner: "o", projectStandards: config.projectStandards) }))
+        guard let baseData = fm.contents(atPath: StandardsBaseCapture.fixturePath),
+              var baseCapture = try JSONSerialization.jsonObject(with: baseData) as? [String: Any] else {
+            throw Failure(description: "\(StandardsBaseCapture.fixturePath) is missing; run from the repository root")
+        }
+        var headCapture = try JSONSerialization.jsonObject(with: StandardsBaseCapture.encoded(capture)) as? [String: Any] ?? [:]
+        if ((headCapture["pi"] as? [String: Any])?["extension"] as? [String: Any])?.isEmpty == true {
+            print("standards resolution: node is not installed; the Pi extension part of the base comparison is skipped")
+            for key in ["base", "head"] {
+                var pi = (key == "base" ? baseCapture : headCapture)["pi"] as? [String: Any] ?? [:]
+                pi["extension"] = nil
+                if key == "base" { baseCapture["pi"] = pi } else { headCapture["pi"] = pi }
+            }
+        }
+        if !(headCapture as NSDictionary).isEqual(to: baseCapture) {
+            let out = fm.temporaryDirectory.appendingPathComponent("standards-head-capture.json")
+            try StandardsBaseCapture.encoded(headCapture).write(to: out)
+            throw Failure(description: "a checkout without standards no longer launches as on the base commit: compare \(out.path) with \(StandardsBaseCapture.fixturePath)")
+        }
+
         // The repository: Pa, made a git repository, with standards written here.
         let repo = f.paRoot
         try git(["init", "-q"], in: repo)
