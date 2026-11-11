@@ -998,11 +998,13 @@ func runReplayDriverChecks() async throws {
         let line: [String: Any] = ["type": "assistant", "message": ["content": [["type": "tool_use", "id": id, "name": name, "input": input]]]]
         return String(decoding: try! JSONSerialization.data(withJSONObject: line), as: UTF8.self)
     }
+    // Each case its own projects folder: one session id lives in one place.
     func lead(_ lines: [String]) throws -> [String: Any] {
-        let folder = sessions.appendingPathComponent("p-\(UUID().uuidString)")
+        let projects = sessions.appendingPathComponent(UUID().uuidString)
+        let folder = projects.appendingPathComponent("p")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try lines.joined(separator: "\n").write(to: folder.appendingPathComponent("lead.jsonl"), atomically: true, encoding: .utf8)
-        return ReplayLeadTranscript.read(projects: sessions, sessionId: "lead")
+        return ReplayLeadTranscript.read(projects: projects, sessionId: "lead")
     }
     let reads = try lead([call("a", "Bash", ["command": "grep -n old scripts/x.py 2>/dev/null"]),
                           call("b", "Read", ["file_path": "x"]), call("c", "Bash", ["command": "ls > /dev/null"])])
