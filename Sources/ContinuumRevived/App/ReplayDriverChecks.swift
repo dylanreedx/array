@@ -94,6 +94,21 @@ struct ReplayCondition {
     /// The lead's Codex thread began in an earlier process: its first turn
     /// resumes it, carrying history this process never watched.
     var codexResumed = false
+    /// A live run: the production runner and the real CLI instead of the fakes.
+    var live: ReplayLiveSettings?
+}
+
+/// What a live run needs that a fake run does not. The CLI itself runs inside
+/// `benchmarks/replay/live_claude.py`, which the caller puts first on PATH.
+struct ReplayLiveSettings {
+    /// Exact catalogue id, used for every agent the run starts.
+    let model: String
+    let effort: String
+    /// Wall-time cap from the submission; a run still going is cut off.
+    let deadlineSeconds: Double
+    /// Host directory the run's ledger, transcripts and diff are copied to
+    /// before its root is cleaned.
+    let keep: URL
 }
 
 /// Recorded provider streams, translated by the PRODUCTION translators so the
@@ -183,6 +198,7 @@ enum ReplayStreams {
 /// never counted here: the run ledger records it (`ReplayLedgerRecord`).
 struct ReplayTurnOutcomes {
     private(set) var failedTurns: [AgentID: Int] = [:]
+    private(set) var completedTurns = 0
 
     mutating func observe(_ agent: AgentID, _ event: AgentRuntimeEvent) {
         switch event {
@@ -190,6 +206,8 @@ struct ReplayTurnOutcomes {
             failedTurns[agent, default: 0] += 1
         case let .sessionStateChanged(state) where state == .error:
             failedTurns[agent, default: 0] += 1
+        case .turnCompleted:
+            completedTurns += 1
         default:
             break
         }
@@ -421,8 +439,34 @@ final class ReplaySupervisorDriver {
         } catch {
             fputs("replay: record write failed: \(error)\n", stderr)
         }
-        if let root { Self.removeRoot(root) }
+        if let root {
+            if let live = condition.live { Self.keepArtifacts(of: root, in: live.keep, record: record) }
+            Self.removeRoot(root)
+        }
         return record
+    }
+
+    /// The run's own ledger, Array transcripts, the CLI's session files and the
+    /// working copy's diff, copied out for reading; never the CLI's login.
+    static func keepArtifacts(of root: URL, in keep: URL, record: [String: Any]) {
+        let fm = FileManager.default
+        let target = keep.appendingPathComponent(record["run"] as? String ?? UUID().uuidString)
+        try? fm.createDirectory(at: target, withIntermediateDirectories: true)
+        for path in ["support/run-ledger", "support/transcripts", "claude-config/projects"] {
+            let source = root.appendingPathComponent(path)
+            guard fm.fileExists(atPath: source.path) else { continue }
+            try? fm.copyItem(at: source, to: target.appendingPathComponent(path.replacingOccurrences(of: "/", with: "-")))
+        }
+        let project = root.appendingPathComponent("project")
+        if let diff = try? command("/usr/bin/git", ["-c", "core.quotepath=off", "diff", "HEAD"], in: project) {
+            try? diff.write(to: target.appendingPathComponent("project.diff"))
+        }
+        if let status = try? command("/usr/bin/git", ["status", "--porcelain", "--untracked-files=all"], in: project) {
+            try? status.write(to: target.appendingPathComponent("project-status.txt"))
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: target.appendingPathComponent("record.json"))
+        }
     }
 
     private func blankRecord(_ condition: ReplayCondition) -> [String: Any] {
@@ -430,7 +474,7 @@ final class ReplaySupervisorDriver {
         return ["v": version, "run": UUID().uuidString.lowercased(), "task": task.task, "ledgerTask": NSNull(),
                 "fixture": task.fixture, "base": task.base, "requestHash": task.requestHash,
                 "checksHash": task.checksHash, "harness": condition.harness == .codex ? "codex" : "claude",
-                "mode": condition.managed ? "managed" : "solo", "actualChoice": NSNull(), "simulated": true,
+                "mode": condition.managed ? "managed" : "solo", "actualChoice": NSNull(), "simulated": condition.live == nil,
                 "outcome": "driverFailed", "failure": NSNull(),
                 "fannedOut": condition.managed ? false as Any : NSNull(), "helperCount": 0, "helpers": [Any](),
                 "delegationAttempts": 0,
@@ -464,15 +508,24 @@ final class ReplaySupervisorDriver {
         policy.set(condition.managed, forKey: AgentManagedModeConfig.enabledKey)
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
         AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
-        guard let model = AgentModelCatalog.shared.snapshot(for: condition.harness).seedModel else {
+        guard let model = condition.live?.model ?? AgentModelCatalog.shared.snapshot(for: condition.harness).seedModel else {
             throw ReplayFailure(description: "fixture catalog missing")
+        }
+        if let live = condition.live {
+            guard condition.harness == .claudeCode,
+                  AgentModelCatalog.shared.snapshot(for: condition.harness).models.contains(live.model) else {
+                throw ReplayFailure(description: "live runs are Claude Code only, on a catalogue model id")
+            }
+            setenv("REPLAY_LIVE_ROOT", root.path, 1)
         }
 
         let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("support")),
                                          makeRunner: { launch in
             let isLead = launch.record.parentAgentID == nil
             if isLead { facts.leadLaunch(hasTools: launch.workspaceMCP != nil) }
-            let agent = ReplayFakeAgent(launch: launch, isLead: isLead, condition: condition, facts: facts, sandbox: sandbox)
+            let agent: AgentRunning = condition.live != nil
+                ? AgentSupervisor.productionRunner(for: launch)
+                : ReplayFakeAgent(launch: launch, isLead: isLead, condition: condition, facts: facts, sandbox: sandbox)
             // Solo closes the runner's own spawn channel: an attempt is a fact.
             return ReplaySpawnGate(inner: agent, forbid: !condition.managed && isLead, facts: facts)
         }, warn: { fputs("replay supervisor: " + $0 + "\n", stderr) },
@@ -499,7 +552,7 @@ final class ReplaySupervisorDriver {
         defer { supervisor.removeDeliveredEventObserver(observation) }
 
         let lead = supervisor.spawn(role: nil, prompt: nil, cwd: project, harness: condition.harness, model: model,
-                                    thinking: "low", projectId: world.projectId, projectRoot: project)
+                                    thinking: condition.live?.effort ?? "low", projectId: world.projectId, projectRoot: project)
         // Solo: no delegation tool on the record, so no MCP server reaches the CLI.
         _ = supervisor.setWorkspaceToolsEnabled(agentID: lead, condition.managed)
         guard supervisor.records[lead]?.workspaceToolsEnabled == condition.managed else {
@@ -524,15 +577,18 @@ final class ReplaySupervisorDriver {
         }
         record["outcome"] = "timeout"
         var settledSince: Double?
-        let deadline = started + 30
+        let deadline = started + (condition.live?.deadlineSeconds ?? 30)
+        // A live lead can sit idle between a helper's result and its next turn.
+        let settle = condition.live == nil ? 0.3 : 5
         while ProcessInfo.processInfo.systemUptime < deadline {
-            try await Task.sleep(nanoseconds: 20_000_000)
+            try await Task.sleep(nanoseconds: condition.live == nil ? 20_000_000 : 250_000_000)
             let ids = Array(supervisor.records.keys)
             let busy = ids.contains { supervisor.isRunning($0) } || supervisor.qaHasPendingHelperResults(for: lead)
-            if busy || (facts.intervals.isEmpty) { settledSince = nil; continue }
+            let begun = condition.live == nil ? !facts.intervals.isEmpty : outcomes.completedTurns > 0
+            if busy || !begun { settledSince = nil; continue }
             await supervisor.flushHelperCompletions()
             let now = ProcessInfo.processInfo.systemUptime
-            if let since = settledSince, now - since > 0.3 { record["outcome"] = "completed"; break }
+            if let since = settledSince, now - since > settle { record["outcome"] = "completed"; break }
             if settledSince == nil { settledSince = now }
         }
         supervisor.stopAll()
@@ -1039,4 +1095,31 @@ func runReplayDriverChecks() async throws {
         print("replay driver: \(r["harness"] ?? "") \(r["mode"] ?? "") outcome=\(r["outcome"] ?? "") passed=\(r["passed"] ?? "") helpers=\(r["helperCount"] ?? "") fannedOut=\(r["fannedOut"] ?? "") attempts=\(r["delegationAttempts"] ?? "") complete=\(r["usageComplete"] ?? "") tokens=\(r["tokens"] ?? "")")
     }
     green = true
+}
+
+// MARK: - One live run
+
+/// `--replay-live-run TASK_JSON SINK solo|managed MODEL EFFORT DEADLINE_SECONDS KEEP_DIR`.
+/// One condition, one record appended to SINK; the raw run is copied to KEEP_DIR.
+/// The caller supplies containment: `live_claude.py` first on PATH as `claude`,
+/// and the egress proxy's port (`benchmarks/replay/run_pilot.py`).
+@MainActor
+func runReplayLive(_ arguments: [String]) async throws {
+    guard let at = arguments.firstIndex(of: "--replay-live-run"), arguments.count >= at + 8,
+          ["solo", "managed"].contains(arguments[at + 3]), let deadline = Double(arguments[at + 6]) else {
+        throw ReplayFailure(description: "usage: --replay-live-run TASK SINK solo|managed MODEL EFFORT DEADLINE KEEP")
+    }
+    let value = { (offset: Int) in arguments[at + offset] }
+    for key in ["REPLAY_LIVE_CLAUDE", "REPLAY_LIVE_PROXY_PORT"] where ProcessInfo.processInfo.environment[key] == nil {
+        throw ReplayFailure(description: "\(key) is not set; start live runs through run_pilot.py")
+    }
+    AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
+    let task = try ReplayTask.load(URL(fileURLWithPath: value(1)))
+    let driver = ReplaySupervisorDriver(task: task, sink: URL(fileURLWithPath: value(2)))
+    let live = ReplayLiveSettings(model: value(4), effort: value(5), deadlineSeconds: deadline,
+                                  keep: URL(fileURLWithPath: value(7), isDirectory: true))
+    let record = await driver.run(ReplayCondition(harness: .claudeCode, managed: value(3) == "managed",
+                                                  lead: .repairs, live: live))
+    let data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
 }
