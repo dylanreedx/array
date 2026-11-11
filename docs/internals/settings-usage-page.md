@@ -34,9 +34,21 @@ runs on a request or event path, and opening Settings starts no count.
   helpers, total tokens, model); clicking it opens the Lead / Helpers / All
   table for that task. One page of 30 rows, then "Show more".
 - **Lead and helpers**: a usage row whose agent opened the task is the lead's;
-  any other is a helper's. A provider-run subagent's tokens are its parent's.
-- **Split**: solo, one helper, two or more, by `delegated` rows. Counts only,
-  never averages side by side.
+  any other, at any depth, is a helper's. A helper's own helpers have no
+  `delegated` row; their usage rows name a parent and land on the root task.
+  A Claude in-process subagent's tokens are inside its parent's result: its
+  `reportedByParent` rows are neither missing nor a helper.
+- **Split and mode**: solo, one helper, two or more, by every agent under the
+  lead; Managed or Free from `taskOpened.mode` ("not recorded" on older rows).
+  Counts only, never averages side by side.
+- **Late rows**: every usage row of a task is summed, each `source` once. A
+  turn's `noUsage` row is dropped once a row with tokens names the same turn.
+- **Missing, not unreported**: `noBaseline` (a resumed Codex thread with no
+  trusted start), `reset`, `noUsage` and the like make a figure "at least".
+- **No task**: usage under the all-zero task id is never listed; one line says
+  how much of it fell in the period.
+- **Model**: a blank id reads unknown and never borrows a helper's; a model
+  named by the agent's settings rather than the stream says so when opened.
 - **Time to answer**: the task's first submission (`taskOpened`) to its close.
   Because a task closes when the lead's turn ends with no open parts, there is
   no user wait inside it.
