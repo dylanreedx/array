@@ -740,6 +740,7 @@ run_ios_build() {
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+run_leg python3 scripts/check-gate-prepass.py
 if [[ "$BROWSER_SCHEDULING_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run_app_check .build/debug/Array --browser-background-scheduling-check

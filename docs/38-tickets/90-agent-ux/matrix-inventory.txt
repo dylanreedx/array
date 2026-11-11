@@ -940,6 +940,7 @@ leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
 leg run_leg python3 scripts/check-collaboration-pair-features.py
 leg run_leg python3 scripts/check-collaboration-pair.py
+leg run_leg python3 scripts/check-gate-prepass.py
 leg run_leg python3 scripts/check-interruptible-helper-waits.py
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --skip-build
