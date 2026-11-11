@@ -203,10 +203,10 @@ enum ReplyRulesChecks {
             }
         }
 
-        // 5. The switch is read at each Claude process launch, not when the
-        //    runner is built: the session process exits on its own (EXITIDLE),
-        //    the switch is turned off, and the same runner's next launch goes
-        //    without.
+        // 5. The switch is read at launch: the session process exits on its
+        //    own (EXITIDLE), the switch is turned off, and the next launch (a
+        //    new runner, since the supervisor keeps a Claude runner only while
+        //    its process lives) goes without.
         await scenario("claude switch per launch") {
             let name = try suite(reply: true, personal: false)
             let h = try harness(.claudeBare, "toggle", instructions(name))
@@ -239,6 +239,39 @@ enum ReplyRulesChecks {
             try expect(launches.count == 3 && launches[1].contains("--resume") && launches[2].contains("--session-id"),
                        "expected first, a rejected resume and a fresh relaunch, saw \(launches.map { $0.filter { $0.hasPrefix("--resume") || $0.hasPrefix("--session-id") } })")
             for (index, argv) in launches.enumerated() { try verify(argv, .claudeBare, "launch \(index + 1)") }
+        }
+
+        // 5c. The two Codex launches that get no host text record why, and the
+        //     reply-rules switch shows it: a user Codex setting Array cannot
+        //     read, and instruction text already in the launch's arguments that
+        //     cannot be decoded.
+        await scenario("codex no-text cases") {
+            let profiled = root.appendingPathComponent("codex-profiled", isDirectory: true)
+            try fm.createDirectory(at: profiled, withIntermediateDirectories: true)
+            try Data("[profiles.work]\ndeveloper_instructions = \"theirs\"\n".utf8).write(to: profiled.appendingPathComponent("config.toml"))
+            var unreadable = instructions(try suite(reply: true, personal: false))
+            unreadable.codexUserInstructions = { _, cwd in
+                CodexUserInstructions.read(codexHome: profiled.path, cwd: cwd, environment: [:], homeDirectory: root)
+            }
+            let h = try harness(.codex, "notext", unreadable)
+            defer { h.tearDown() }
+            let id = h.spawn(.codex)
+            try await h.turn("PLAIN unreadable", id)
+            let argv = h.launches(cli: "codex", owner: id).first ?? []
+            try expect(!argv.isEmpty && !argv.contains { $0.contains("developer_instructions") }, "an unreadable user setting was replaced: \(argv)")
+            try expect(ReplyRulesToggleRow.status(instructions: unreadable)?.contains("cannot read") == true,
+                       "unreadable setting: switch status \(String(describing: ReplyRulesToggleRow.status(instructions: unreadable)))")
+
+            let undecodable = instructions(try suite(reply: true, personal: false))
+            guard let record = h.supervisor.records[id] else { throw Failure(description: "no Codex record") }
+            var config = AgentSupervisor.codexRunnerConfig(for: record, hostInstructions: undecodable)
+            config.extraArgs = ["-c", "developer_instructions=not a TOML string"]
+            try expect(config.resolvedExtraArgs() == config.extraArgs, "undecodable instructions were replaced")
+            try expect(ReplyRulesToggleRow.status(instructions: undecodable)?.contains("could not be read") == true,
+                       "undecodable instructions: switch status \(String(describing: ReplyRulesToggleRow.status(instructions: undecodable)))")
+            config.extraArgs = []
+            try expect(config.resolvedExtraArgs().contains { $0.hasPrefix("developer_instructions=") }
+                       && ReplyRulesToggleRow.status(instructions: undecodable) == nil, "a good launch did not clear the reason")
         }
 
         // 6. Both switches off: every launch argv equals the base (no host

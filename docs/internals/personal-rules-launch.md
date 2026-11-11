@@ -59,9 +59,19 @@ Claude spawn. On Claude it is joined after `WorkspaceMCPConfiguration.agentGuida
 in the ONE `--append-system-prompt` value (a second flag replaces the first);
 with workspace tools off it is that flag's only value. Personal rules never
 reach Claude (`HostLaunchInstructionSource.reachesClaude`). With both switches
-off every argv equals the base launch element by element. If the user's own
-Codex setting cannot be read with confidence, that Codex launch gets neither
-block, as before.
+off every argv equals the base launch element by element. The switch applies
+from an agent's next launch; a running agent keeps what it started with.
+
+What does not receive the block today:
+
+- Terminal-face agents (an agent flipped to an interactive terminal). They get
+  no Array text at all.
+- Pi role runs (`HarnessRoleRunBuilder`), which run `pi` in a terminal tile, not
+  through the managed runner.
+- Codex launches in two cases, where passing text would replace instructions
+  Array cannot keep: the user's own Codex setting cannot be read with
+  confidence, or instruction text already in the launch's arguments cannot be
+  decoded. Both record the reason, shown under both switches in Settings.
 
 `--reply-rules-launch-check` drives the same production path and fake CLIs as
 the personal-rules witness: Claude with and without workspace tools, Codex and
