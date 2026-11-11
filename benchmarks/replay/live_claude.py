@@ -22,22 +22,26 @@ REPLAY_LIVE_PROXY_PORT, and optionally REPLAY_LIVE_LOG (a host directory for
 one launch line per process)."""
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 import sys
 from urllib.parse import urlparse
 
 HOME = Path(os.path.expanduser('~'))
-TOOLCHAIN = ['/bin', '/usr/bin', '/usr/lib', '/usr/libexec', '/usr/share', '/System/Library', '/System/Cryptexes',
+TOOLCHAIN = ['/dev', '/bin', '/usr/bin', '/usr/lib', '/usr/libexec', '/usr/share', '/System/Library', '/System/Cryptexes',
              '/System/Volumes/Preboot/Cryptexes', '/private/var/db/dyld', '/Library/Developer/CommandLineTools',
-             '/Applications/Xcode.app/Contents/Developer', '/private/var/db/xcode_select_link',
+             '/Applications/Xcode.app/Contents', '/private/var/db/xcode_select_link',
              '/private/etc', '/private/var/db/timezone', '/Library/Preferences/Logging']
 KEYCHAIN = [str(HOME / 'Library/Keychains'), '/Library/Keychains', '/private/var/db/mds',
             str(HOME / 'Library/Preferences/com.apple.security.plist'),
-            '/Library/Preferences/com.apple.security.plist']
+            '/Library/Preferences/com.apple.security.plist', '/Library/Preferences/com.apple.dt.Xcode.plist']
 MACH = ['com.apple.SecurityServer', 'com.apple.securityd.xpc', 'com.apple.system.opendirectoryd.libinfo',
         'com.apple.system.opendirectoryd.membership', 'com.apple.system.notification_center',
         'com.apple.system.logger', 'com.apple.logd', 'com.apple.diagnosticd', 'com.apple.trustd',
         'com.apple.trustd.agent', 'com.apple.ocspd', 'com.apple.CoreServices.coreservicesd']
+HOOK_PROBE_PARENT = os.path.realpath(subprocess.check_output(['/usr/bin/getconf', 'DARWIN_USER_TEMP_DIR']).decode().strip()).rstrip('/')
+XCODE_TOOLS = '/Applications/Xcode.app/Contents/Developer/usr/bin'
 # The subagent tool's name, and its older one.
 BUILT_IN_SUBAGENTS = 'Agent,Task'
 
@@ -74,8 +78,11 @@ def profile(root, claude, proxy_port, extra_files=(), extra_dirs=(), extra_ports
         '(allow file-read* (literal "/") ',
         ' '.join('(subpath %s)' % q(p) for p in readable), ' ',
         ' '.join('(literal %s)' % q(p) for p in literals + ancestors), ')',
-        '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") ',
-        '(regex #"^/dev/ttys[0-9]+$") (literal "/dev/ptmx") (subpath %s))' % q(root),
+        '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (subpath "/dev/fd") ',
+        '(regex #"^/dev/ttys[0-9]+$") (literal "/dev/ptmx") (subpath %s) ' % q(root),
+        # Array's hook probe (AgentHookSurfaceCatalog) touches a marker in its own
+        # folder in the user's temp directory; without it Array launches no hooks.
+        '(regex %s))' % q('^' + re.escape(HOOK_PROBE_PARENT) + '/array-hook-probe-[^/]+(/|$)'),
         '(allow file-ioctl (literal "/dev/dtracehelper") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))',
         '(allow network-outbound ', ' '.join('(remote tcp %s)' % q('localhost:%d' % p) for p in ports), ')',
         '(allow mach-lookup ', ' '.join('(global-name %s)' % q(m) for m in MACH), ')'])
@@ -91,11 +98,20 @@ def main(argv):
     config.mkdir(exist_ok=True)
     child = {k: v for k, v in env.items() if not k.startswith('REPLAY_LIVE_')}
     proxy = 'http://127.0.0.1:%d' % port
+    # Xcode's own git and python3 first: the /usr/bin shims need a cache in the
+    # user's temp folder, which is outside the run.
+    child['PATH'] = XCODE_TOOLS + ':' + child.get('PATH', '/usr/bin:/bin')
     child.update(CLAUDE_CONFIG_DIR=str(config), CLAUDE_SECURESTORAGE_CONFIG_DIR='',
                  HTTPS_PROXY=proxy, HTTP_PROXY=proxy, https_proxy=proxy, http_proxy=proxy,
                  NO_PROXY='localhost,127.0.0.1', no_proxy='localhost,127.0.0.1',
                  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1', DISABLE_AUTOUPDATER='1',
-                 TMPDIR=str(Path(root) / 'tmp'), CLAUDE_CODE_TMPDIR=str(Path(root) / 'tmp'))
+                 TMPDIR=str(Path(root) / 'tmp'), CLAUDE_CODE_TMPDIR=str(Path(root) / 'tmp'),
+                 TMPPREFIX=str(Path(root) / 'tmp' / 'zsh'),
+                 # The user's git config is unreadable here; a placeholder identity
+                 # lets a helper commit inside the run.
+                 XDG_CONFIG_HOME=str(Path(root) / 'tmp' / 'xdg'), GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1',
+                 GIT_AUTHOR_NAME='replay agent', GIT_AUTHOR_EMAIL='replay@invalid',
+                 GIT_COMMITTER_NAME='replay agent', GIT_COMMITTER_EMAIL='replay@invalid')
     args = ['--disallowedTools', BUILT_IN_SUBAGENTS] + argv
     if env.get('REPLAY_LIVE_LOG'):
         with open(os.path.join(env['REPLAY_LIVE_LOG'], 'launches.jsonl'), 'a') as log:
