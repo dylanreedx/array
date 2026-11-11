@@ -3117,7 +3117,8 @@ final class AgentSupervisor {
         checkoutOverride: URL? = nil,
         managedIsolation: Bool = false,
         isolationTitle: String? = nil,
-        baseHead: String? = nil
+        baseHead: String? = nil,
+        namingText: String? = nil
     ) throws -> AgentID {
         // The id is minted HERE, before anything is created, because the slug is
         // derived from it — `WorktreeManager.slug` id-suffixes so two agents given the
@@ -3163,7 +3164,8 @@ final class AgentSupervisor {
             parentAgentID: parentAgentID,
             sourceItemId: sourceItemId,
             tileId: tileId,
-            displayName: displayName
+            displayName: displayName,
+            namingText: namingText
         )
     }
 
@@ -3185,7 +3187,8 @@ final class AgentSupervisor {
         parentAgentID: AgentID? = nil,
         sourceItemId: String? = nil,
         tileId: UUID?,
-        displayName: String? = nil
+        displayName: String? = nil,
+        namingText: String? = nil
     ) -> AgentID {
         // Retain the old internal argument for callers; Settings owns the policy.
         let mode = targetMode(harness: harness, parent: parentAgentID)
@@ -3270,8 +3273,11 @@ final class AgentSupervisor {
         }
         if let prompt, !prompt.isEmpty {
             if let parentAgentID {
+                // A delegated child is named by its task, never by what Array
+                // appends to it (a contract, a retry handoff, the report line).
                 _ = sendPrepared(PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: id), to: id,
-                                 taskParent: companionParentRun(for: parentAgentID))
+                                 taskParent: companionParentRun(for: parentAgentID),
+                                 sharedInputPermit: namingText.map { .init(agentID: id, namingText: $0) })
             } else { send(prompt, to: id) }
         } else {
             applyDerivedNameIfNeeded(to: id, firstPrompt: nil)
@@ -5935,7 +5941,8 @@ final class AgentSupervisor {
                 checkoutOverride: managed ? checkout : nil,
                 managedIsolation: overlapping,
                 isolationTitle: request.displayLabel ?? originalBrief ?? request.prompt,
-                baseHead: isolate ? baseHead : nil
+                baseHead: isolate ? baseHead : nil,
+                namingText: originalBrief
             )
             guard var spawned = records[childID] else { return nil }
             spawned.delegationContext = AgentDelegationContext(
