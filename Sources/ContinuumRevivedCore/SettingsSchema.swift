@@ -15,7 +15,7 @@ public enum SettingsSchema {
         [
             general(), appearance(), agentCharacters(), canvas(),
             agents(), editor(), terminal(), browser(),
-            notificationsAndSounds(), keyboard(), iPhone(), advanced(),
+            notificationsAndSounds(), keyboard(), iPhone(), usage(), advanced(),
         ]
     }
 
@@ -437,6 +437,18 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: PersistedPushCategoryPreferences.key(for: category), label: title, default: category.defaultEnabled),
                             keywords: ["push", "notify", "alert"])
             }),
+        ])
+    }
+
+    /// `.plans/116` part 21: how Array did the work on this Mac, read from the
+    /// run ledger. One bespoke group; the page records nothing.
+    private static func usage() -> SettingsSection {
+        SettingsSection(id: "usage", title: "Usage", iconSystemName: "chart.bar",
+                        keywords: ["usage", "tokens", "metrics", "tasks", "helpers", "time"], groups: [
+            SettingsGroup(id: "usage.report", title: nil, rows: [
+                SettingsRow(.custom(id: "usage", label: "Usage on this Mac"),
+                            keywords: ["tokens", "cache", "tasks", "helpers", "time", "metrics"]),
+            ]),
         ])
     }
 

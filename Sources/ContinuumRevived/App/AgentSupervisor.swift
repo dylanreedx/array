@@ -1045,6 +1045,8 @@ final class AgentSupervisor {
 
     private let store: AgentStore
     private(set) var runLedger: ManagedRunLedger
+    /// The ledger file the Settings usage page reads (never the writer's queue).
+    var runLedgerURL: URL { RunLedgerUsageReader.ledgerURL(applicationSupport: store.layout.applicationSupportDirectory) }
     var qaRunLedgerRecording = true
     private var wakeupScheduler: AgentWakeupScheduler?
     private var scheduledQueueAdmissions: Set<UUID> = []

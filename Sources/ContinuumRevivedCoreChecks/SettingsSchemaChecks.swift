@@ -15,22 +15,22 @@ func runSettingsSchemaChecks() {
     expect(
         sections.map(\.title) == [
             "General", "Appearance", "Agent Icons", "Canvas", "Agents", "Editor", "Terminal", "Browser",
-            "Notifications & Sounds", "Keyboard", "iPhone", "Advanced",
+            "Notifications & Sounds", "Keyboard", "iPhone", "Usage", "Advanced",
         ],
-        "settings exposes the twelve product panes in stable order, got \(sections.map(\.title))"
+        "settings exposes the thirteen product panes in stable order, got \(sections.map(\.title))"
     )
     // Pane ids are what the app and these checks look panes up by: retitled, never renamed.
     expect(
         sections.map(\.id) == [
             "general", "appearance", "agentCharacters", "canvasAndZones", "agents", "editor", "terminal", "browser",
-            "activityAndNotifications", "keybindings", "companion", "advanced",
+            "activityAndNotifications", "keybindings", "companion", "usage", "advanced",
         ],
         "settings pane ids must be stable and ordered, got \(sections.map(\.id))"
     )
     // The Tiles heading sits over one contiguous run: Agents, Editor, Terminal, Browser.
     expect(
         sections.map { $0.sidebarHeading == SettingsSchema.tilesHeading } == [
-            false, false, false, false, true, true, true, true, false, false, false, false,
+            false, false, false, false, true, true, true, true, false, false, false, false, false,
         ],
         "the Tiles sidebar heading must cover exactly Agents, Editor, Terminal and Browser"
     )

@@ -4372,6 +4372,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--settings-usage-check") {
+            do {
+                _ = NSApplication.shared
+                try SettingsUsageChecks.run()
+                print("ContinuumRevivedSettingsUsageChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--keybind-edit-check") {
             do {
                 _ = NSApplication.shared
@@ -15049,6 +15061,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             },
         ]
         model.canvasBackground = makeCanvasBackgroundEditor()
+        model.usage.ledgerURL = agentSupervisor.runLedgerURL
         if let checkForUpdates = ContinuumApp.checkForUpdatesAction {
             model.actionHandlers["checkForUpdates"] = checkForUpdates
         }
