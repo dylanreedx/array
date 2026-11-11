@@ -30,13 +30,19 @@ enum SidebarApprovedLiveCaptureChecks {
             CATransaction.flush()
             try await Task.sleep(for: .milliseconds(200))
             let path = directory.appendingPathComponent(name + ".png").path
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-            process.arguments = ["-x", "-o", "-l", String(window.windowNumber), path]
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: path) else {
-                throw NSError(domain: "SidebarLiveCapture", code: 1, userInfo: [NSLocalizedDescriptionKey: "Window screencapture failed: " + path])
+            let request: [String: Any] = ["windowNumber": window.windowNumber,
+                "pid": ProcessInfo.processInfo.processIdentifier, "path": path, "name": name]
+            try JSONSerialization.data(withJSONObject: request).write(
+                to: directory.appendingPathComponent("pending-capture.json"), options: .atomic)
+            let acknowledgment = directory.appendingPathComponent(name + ".captured")
+            for _ in 0..<200 {
+                if FileManager.default.fileExists(atPath: acknowledgment.path) { break }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            guard FileManager.default.fileExists(atPath: path),
+                  FileManager.default.fileExists(atPath: acknowledgment.path) else {
+                throw NSError(domain: "SidebarLiveCapture", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Window capture acknowledgment missing: " + path])
             }
             paths.append(path)
         }
