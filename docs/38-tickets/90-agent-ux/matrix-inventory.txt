@@ -242,6 +242,7 @@ check --project-icon-check
 check --project-lock-check
 check --project-picker-resolution-check
 check --project-root-resolution-check
+check --project-standards-index-check
 check --provider-context-support-check
 check --provider-model-picker-check
 check --provider-request-response-check
@@ -308,6 +309,7 @@ check --spawn-live-framing-check
 check --spawn-placement-check
 check --spawn-rate-limit-check
 check --spawn-sizing-check
+check --standards-resolution-check
 check --stranded-tile-recovery-check
 check --stray-window-audit-check
 check --streaming-ingest-check
@@ -754,6 +756,7 @@ leg run_app_check .build/debug/Array --spawn-live-framing-check
 leg run_app_check .build/debug/Array --spawn-placement-check
 leg run_app_check .build/debug/Array --spawn-rate-limit-check
 leg run_app_check .build/debug/Array --spawn-sizing-check
+leg run_app_check .build/debug/Array --standards-resolution-check
 leg run_app_check .build/debug/Array --stranded-tile-recovery-check
 leg run_app_check .build/debug/Array --stray-window-audit-check
 leg run_app_check .build/debug/Array --streaming-ingest-check
@@ -910,6 +913,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --project-standards-index-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
@@ -974,7 +978,7 @@ count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 205
+count ContinuumRevivedCoreChecks 206
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
