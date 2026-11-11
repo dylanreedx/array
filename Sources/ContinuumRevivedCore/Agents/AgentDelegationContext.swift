@@ -48,13 +48,15 @@ public struct AgentDelegationContext: Codable, Equatable, Sendable {
     }
 }
 
-/// What a lead states a helper owns and owes (`.plans/116` part 4). Model-authored
-/// claims: Array stores them, tells the helper once and compares ownership with
-/// live siblings as advice. Nothing here is enforced.
+/// What a lead states a helper owns and owes (`.plans/116` part 4). The lead's
+/// words: Array stores them, tells the helper once and compares claimed paths
+/// with live siblings as advice. Nothing here is enforced or refused.
 public struct AgentDelegationContract: Codable, Equatable, Sendable {
-    /// Repository-relative files or directories the helper owns.
+    /// Checkout-relative files or directories the helper owns.
     public var owns: [String]
-    /// Repository-relative paths the helper must not touch.
+    /// Checkout-relative paths the helper may touch that other helpers touch too.
+    public var shared: [String]
+    /// Checkout-relative paths the helper must not touch.
     public var mustNotTouch: [String]
     /// Checks the helper owes, by flag or invocation.
     public var checks: [String]
@@ -65,8 +67,10 @@ public struct AgentDelegationContract: Codable, Equatable, Sendable {
     /// What the helper reports back.
     public var report: String?
 
-    public init(owns: [String] = [], mustNotTouch: [String] = [], checks: [String] = [], decisions: [String] = [], costLimit: String? = nil, report: String? = nil) {
+    public init(owns: [String] = [], shared: [String] = [], mustNotTouch: [String] = [], checks: [String] = [],
+                decisions: [String] = [], costLimit: String? = nil, report: String? = nil) {
         self.owns = owns
+        self.shared = shared
         self.mustNotTouch = mustNotTouch
         self.checks = checks
         self.decisions = decisions
@@ -74,12 +78,13 @@ public struct AgentDelegationContract: Codable, Equatable, Sendable {
         self.report = report
     }
 
-    private enum CodingKeys: String, CodingKey { case owns, mustNotTouch, checks, decisions, costLimit, report }
+    private enum CodingKeys: String, CodingKey { case owns, shared, mustNotTouch, checks, decisions, costLimit, report }
 
     /// Any subset of the fields; an absent list is empty.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         owns = try c.decodeIfPresent([String].self, forKey: .owns) ?? []
+        shared = try c.decodeIfPresent([String].self, forKey: .shared) ?? []
         mustNotTouch = try c.decodeIfPresent([String].self, forKey: .mustNotTouch) ?? []
         checks = try c.decodeIfPresent([String].self, forKey: .checks) ?? []
         decisions = try c.decodeIfPresent([String].self, forKey: .decisions) ?? []
@@ -87,63 +92,150 @@ public struct AgentDelegationContract: Codable, Equatable, Sendable {
         report = try c.decodeIfPresent(String.self, forKey: .report)
     }
 
-    /// Files every new check has to edit, so two parts touching them is expected
-    /// (`.plans/116` README c7): the check dispatch, the matrix and its inventory.
-    public static let sharedRegistries: Set<String> = [
-        "Sources/ContinuumRevived/App/ContinuumApp.swift",
-        "scripts/run-matrix.sh",
-        "docs/38-tickets/90-agent-ux/matrix-inventory.txt",
-    ]
+    /// Empty fields are left out.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        for (key, list) in [(CodingKeys.owns, owns), (.shared, shared), (.mustNotTouch, mustNotTouch), (.checks, checks), (.decisions, decisions)]
+        where !list.isEmpty { try c.encode(list, forKey: key) }
+        try c.encodeIfPresent(costLimit, forKey: .costLimit)
+        try c.encodeIfPresent(report, forKey: .report)
+    }
 
-    public struct InvalidPath: LocalizedError { public let errorDescription: String? }
+    public var isEmpty: Bool {
+        owns.isEmpty && shared.isEmpty && mustNotTouch.isEmpty && checks.isEmpty && decisions.isEmpty
+            && costLimit == nil && report == nil
+    }
 
-    /// The same contract with exact repository-relative paths ("./a/" -> "a").
-    /// Throws for an absolute path or a `..` step: neither can be compared with
-    /// a sibling's claim.
-    public func normalized() throws -> AgentDelegationContract {
-        var copy = self
-        for keyPath in [\AgentDelegationContract.owns, \.mustNotTouch] {
-            var paths: [String] = []
-            for raw in self[keyPath: keyPath] {
-                var path = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                while path.hasPrefix("./") { path.removeFirst(2) }
-                while path.hasSuffix("/") { path.removeLast() }
-                if path.isEmpty || path.hasPrefix("/") || path.hasPrefix("~") || path.split(separator: "/").contains("..") {
-                    throw InvalidPath(errorDescription: "contract paths must be repository-relative without '..'; got '\(raw)'.")
+    /// The contract Array keeps, and a note for every entry it could not use.
+    /// Never refuses: an unusable entry is left out and named. Paths become
+    /// checkout-relative (`./` and `a/./b//c` read as `.` and `a/b/c`); an
+    /// absolute path inside `checkoutRoot` is made relative. Nil when nothing
+    /// usable is left, which is the same as no contract.
+    public func prepared(checkoutRoot: String) -> (contract: AgentDelegationContract?, notes: [String]) {
+        var notes: [String] = []
+        var root = checkoutRoot
+        while root.count > 1, root.hasSuffix("/") { root.removeLast() }
+        /// One pass over the bytes: most entries are already clean.
+        func isClean(_ raw: String) -> Bool {
+            var previous: UInt8 = UInt8(ascii: "/"), dots = 0, count = 0
+            for byte in raw.utf8 {
+                switch byte {
+                case UInt8(ascii: "/"):
+                    if previous == UInt8(ascii: "/") || (dots > 0 && dots == count) { return false }
+                    dots = 0; count = 0
+                case UInt8(ascii: "."): dots += 1; count += 1
+                case UInt8(ascii: "~"), UInt8(ascii: "*"), UInt8(ascii: "?"), UInt8(ascii: "["): return false
+                case 0...32, 127...: return false
+                default: count += 1
                 }
-                paths.append(path)
+                previous = byte
             }
-            copy[keyPath: keyPath] = paths
+            return previous != UInt8(ascii: "/") && !(dots > 0 && dots == count)
         }
-        return copy
+        func path(_ raw: String) -> String? {
+            if isClean(raw) { return raw }
+            var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let shown = String(reflecting: raw)
+            if text.isEmpty { notes.append("ignored: \(shown), empty"); return nil }
+            if text.hasPrefix("~") { notes.append("ignored: \(shown), a home path is not in the checkout"); return nil }
+            if text.hasPrefix("/") {
+                if text.compare(root, options: .caseInsensitive) == .orderedSame { text = "." }
+                else if let inside = text.range(of: root + "/", options: [.caseInsensitive, .anchored]) { text = String(text[inside.upperBound...]) }
+                else { notes.append("ignored: \(shown), outside the helper's checkout"); return nil }
+            }
+            let parts = text.split(separator: "/").filter { $0 != "." }
+            if parts.contains("..") { notes.append("ignored: \(shown), a '..' step leaves the checkout"); return nil }
+            let path = parts.isEmpty ? "." : parts.joined(separator: "/")
+            if path.contains(where: { "*?[".contains($0) }) { notes.append("not expanded: \(shown) is compared as written") }
+            return path
+        }
+        func text(_ raw: String?) -> String? {
+            raw.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : $0 }
+        }
+        let kept = AgentDelegationContract(
+            owns: owns.compactMap(path), shared: shared.compactMap(path), mustNotTouch: mustNotTouch.compactMap(path),
+            checks: checks.compactMap(text), decisions: decisions.compactMap(text),
+            costLimit: text(costLimit), report: text(report))
+        return (kept.isEmpty ? nil : kept, notes)
     }
 
-    /// Owned paths this contract shares with `other`'s: the more specific path
-    /// of each overlapping pair, leaving out the shared registries.
-    public func ownershipOverlap(with other: AgentDelegationContract) -> [String] {
-        var shared: [String] = []
-        for mine in owns {
-            for theirs in other.owns {
-                let path: String
-                if mine == theirs || mine.hasPrefix(theirs + "/") { path = mine }
-                else if theirs.hasPrefix(mine + "/") { path = theirs }
-                else { continue }
-                if !Self.sharedRegistries.contains(path), !shared.contains(path) { shared.append(path) }
-            }
+    /// Paths this contract and `other` both claim (owned or shared), as the more
+    /// specific path of each pair. Case-insensitive, like the default macOS
+    /// volume; symlinks are not resolved. A path both sides list as shared is
+    /// expected and left out. Hash lookups of each path's parents keep it
+    /// O((m + n) x depth), with no sort and no pairwise comparison.
+    public func claimOverlap(with other: AgentDelegationContract) -> [String] {
+        typealias Claim = (path: String, shared: Bool)
+        typealias Key = ArraySlice<UInt8>
+        /// Lowercased UTF-8; ASCII without allocating a String.
+        func key(_ path: String) -> Key {
+            path.utf8.allSatisfy { $0 < 128 }
+                ? Key(path.utf8.map { $0 >= 65 && $0 <= 90 ? $0 + 32 : $0 })
+                : Key(path.lowercased().utf8)
         }
-        return shared
+        func index(_ c: AgentDelegationContract) -> (keys: [(Key, Claim)], byKey: [Key: Claim]) {
+            let keys = c.owns.map { (key($0), Claim($0, false)) } + c.shared.map { (key($0), Claim($0, true)) }
+            var byKey: [Key: Claim] = [:]
+            byKey.reserveCapacity(keys.count)
+            for (key, claim) in keys where byKey[key] == nil { byKey[key] = claim }
+            return (keys, byKey)
+        }
+        let mine = index(self), theirs = index(other)
+        let root = Key(".".utf8), slash = UInt8(ascii: "/")
+        var found: [String] = [], seen: Set<Key> = []
+        func add(_ mine: Claim, _ their: Claim, _ specific: Claim, _ specificKey: Key) {
+            if mine.shared && their.shared { return }
+            if seen.insert(specificKey).inserted { found.append(specific.path) }
+        }
+        /// Calls `body` with each parent of `key` ("a/b/c" -> "a/b", "a", "."),
+        /// and with `key` itself first when `including` it.
+        func parents(of key: Key, including: Bool, _ body: (Key) -> Void) {
+            if including { body(key) }
+            guard key != root else { return }
+            var end = key.endIndex
+            while let cut = key[key.startIndex..<end].lastIndex(of: slash) { end = cut; body(key[key.startIndex..<end]) }
+            body(root)
+        }
+        // Mine is, or is inside, one of theirs.
+        for (key, claim) in mine.keys {
+            parents(of: key, including: true) { if let their = theirs.byKey[$0] { add(claim, their, claim, key) } }
+        }
+        // Theirs is inside one of mine.
+        for (key, claim) in theirs.keys {
+            parents(of: key, including: false) { if let own = mine.byKey[$0] { add(own, claim, claim, key) } }
+        }
+        return found
     }
 
-    /// The one block the helper is told, in a fixed order; empty fields are left out.
+    /// The one block the helper is told. Each field is one line and each entry
+    /// is quoted with its newlines and control characters escaped, so the
+    /// lead's words cannot pass for lines of Array's own.
     public var promptText: String {
-        let lines = [
-            ("Owns", owns.joined(separator: ", ")),
-            ("Must not touch", mustNotTouch.joined(separator: ", ")),
-            ("Checks owed", checks.joined(separator: "; ")),
-            ("Decisions", decisions.joined(separator: "; ")),
-            ("Cost limit", costLimit ?? ""),
-            ("Report", report ?? ""),
-        ].filter { !$0.1.isEmpty }.map { "- \($0.0): \($0.1)" }
-        return (["Contract from your lead (recorded by Array):"] + lines).joined(separator: "\n")
+        func quoted(_ entry: String) -> String {
+            var out = "\""
+            for scalar in entry.unicodeScalars {
+                switch scalar {
+                case "\"": out += "\\\""
+                case "\\": out += "\\\\"
+                case "\n": out += "\\n"
+                case "\t": out += "\\t"
+                default:
+                    switch scalar.properties.generalCategory {
+                    case .control, .format, .lineSeparator, .paragraphSeparator:
+                        out += "\\u{" + String(scalar.value, radix: 16) + "}"
+                    default: out.unicodeScalars.append(scalar)
+                    }
+                }
+            }
+            return out + "\""
+        }
+        func line(_ name: String, _ entries: [String]) -> String? {
+            entries.isEmpty ? nil : "\(name): " + entries.map(quoted).joined(separator: ", ")
+        }
+        let fields = [line("owns", owns), line("shared", shared), line("must not touch", mustNotTouch),
+                      line("checks", checks), line("decisions", decisions),
+                      line("cost limit", costLimit.map { [$0] } ?? []), line("report", report.map { [$0] } ?? [])]
+        return (["Your lead's contract for this task, in your lead's words (Array stored it and checked nothing):", "<lead-contract>"]
+            + fields.compactMap { $0 } + ["</lead-contract>"]).joined(separator: "\n")
     }
 }

@@ -177,9 +177,12 @@ public struct AgentDelegateResult: Codable, Equatable, Sendable {
     public var checkoutNotice: String?
     /// Host coordination advice, separate from any helper-authored content.
     public var coordinationNote: String?
-    /// Advice only: live siblings whose contracts own a path this child's
-    /// contract also owns. The delegation went ahead regardless.
+    /// Advice only: live siblings whose contracts claim a path this child's
+    /// contract also claims. The delegation went ahead regardless.
     public var ownershipOverlaps: [OwnershipOverlap]?
+    /// Contract entries Array left out or compared as written, and an overlap
+    /// it did not compute. Advice only.
+    public var contractNotes: [String]?
 
     public struct OwnershipOverlap: Codable, Equatable, Sendable {
         public var agentId: AgentID

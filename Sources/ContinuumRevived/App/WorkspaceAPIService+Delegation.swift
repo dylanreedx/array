@@ -38,10 +38,8 @@ extension WorkspaceAPIService {
         guard let idempotencyKey = request.idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines), !idempotencyKey.isEmpty else {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "idempotencyKey is required for agent.delegate: a spawn without one cannot be retried safely."))
         }
-        let requestedContract: AgentDelegationContract?
-        do { requestedContract = try request.contract?.normalized() } catch {
-            return .error(WorkspaceAPIError(code: .invalidRequest, message: error.localizedDescription))
-        }
+        // Never refused: entries Array cannot use are left out and named.
+        let prepared = request.contract?.prepared(checkoutRoot: record.checkoutRoot)
         let generationAtDispatch = runtime.interactionGeneration
 
         // 2. Reserve the operation BEFORE any effect (§10.2). Same key + same
@@ -221,7 +219,7 @@ extension WorkspaceAPIService {
         }
         // Told once, after the task; a retry keeps the failed helper's contract
         // unless this call states its own.
-        let contract = requestedContract ?? retryContract
+        let contract = prepared?.contract ?? retryContract
         if let contract { prompt += "\n\n" + contract.promptText }
         // A Managed lead's helper reports through array_report (.plans/102).
         if supervisor.effectiveMode(for: agentId) == .managed {
@@ -267,17 +265,29 @@ extension WorkspaceAPIService {
         result.checkoutRoot = child?.checkoutRoot
         result.worktreeBranch = child?.worktreeBranch
         result.checkoutNotice = child?.delegationContext?.checkoutNotice
-        // Advice, never a refusal: owned paths a live sibling's contract also
-        // claims. Records are already in memory; nothing waits on disk.
-        if let contract, !contract.owns.isEmpty {
-            let overlaps = supervisor.children(of: agentId).compactMap { sibling -> AgentDelegateResult.OwnershipOverlap? in
+        // Advice, never a refusal: paths a live sibling's contract also claims.
+        // Records are already in memory; nothing waits on disk. Past the size
+        // where comparing could cost the main actor about a millisecond, the
+        // result says so instead of comparing.
+        var notes = prepared?.notes ?? []
+        if let contract, !(contract.owns.isEmpty && contract.shared.isEmpty) {
+            let siblings = supervisor.children(of: agentId).compactMap { sibling -> (AgentID, AgentRecord, AgentDelegationContract)? in
                 guard sibling != childId, supervisor.isRunning(sibling) || supervisor.turnPresence(for: sibling)?.phase.isLive == true,
                       let record = supervisor.records[sibling], let theirs = record.delegationContext?.contract else { return nil }
-                let paths = contract.ownershipOverlap(with: theirs)
-                return paths.isEmpty ? nil : .init(agentId: sibling, title: record.humanDisplayName, paths: paths)
+                return (sibling, record, theirs)
             }
-            if !overlaps.isEmpty { result.ownershipOverlaps = overlaps }
+            let claims = siblings.reduce(contract.owns.count + contract.shared.count) { $0 + $1.2.owns.count + $1.2.shared.count }
+            if claims > Self.overlapClaimBudget {
+                notes.append("ownership overlap not computed: \(claims) claimed paths across live siblings")
+            } else {
+                let overlaps = siblings.compactMap { sibling, record, theirs -> AgentDelegateResult.OwnershipOverlap? in
+                    let paths = contract.claimOverlap(with: theirs)
+                    return paths.isEmpty ? nil : .init(agentId: sibling, title: record.humanDisplayName, paths: paths)
+                }
+                if !overlaps.isEmpty { result.ownershipOverlaps = overlaps }
+            }
         }
+        if !notes.isEmpty { result.contractNotes = notes }
 
         // 7. Attachment: a tile in the PARENT's zone, framed against that zone
         //    (hazard 9), through the existing managed-agent tile route.
@@ -978,6 +988,11 @@ extension WorkspaceAPIService {
         guard let data = try? encoder.encode(normalized) else { return UUID().uuidString }
         return String(decoding: data, as: UTF8.self)
     }
+
+    /// Claimed paths (the new contract's plus its live siblings') above which
+    /// the overlap comparison is skipped and the result says so; measured to
+    /// stay near a millisecond on the main actor (about 0.35 µs a path, optimized).
+    static let overlapClaimBudget = 3_000
 
     private static func payloadHash(_ request: AgentDelegateRequest) -> String {
         var normalized = request
