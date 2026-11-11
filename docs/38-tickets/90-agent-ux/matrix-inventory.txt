@@ -456,6 +456,7 @@ leg run python3 scripts/check-multiplayer-journey.py --relay local --name "$jour
 leg run scripts/make-app-bundle.sh --skip-build --configuration debug --output "$MATRIX_RESULTS/Array.app"
 leg run swift build
 leg run swift build --configuration debug --product Array -j 2
+leg run swift build --configuration debug --product array-workspace-mcp -j 2
 leg run swift build --disable-sandbox --skip-update
 leg run swift build --disable-sandbox --skip-update --product Array
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks

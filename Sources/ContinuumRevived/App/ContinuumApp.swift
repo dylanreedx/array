@@ -3271,6 +3271,7 @@ enum ContinuumApp {
         // idempotency conflict, child tile in the parent's zone, presentation
         // failure repaired by agent.reveal, operation.get, cancellation truth.
         if CommandLine.arguments.contains("--replay-driver-check") {
+            _ = NSApplication.shared
             Task { @MainActor in
                 do {
                     try await runReplayDriverChecks()
@@ -3281,7 +3282,7 @@ enum ContinuumApp {
                     Foundation.exit(1)
                 }
             }
-            dispatchMain()
+            NSApp.run()
         }
 
         if CommandLine.arguments.contains("--workspace-api-delegation-check") {

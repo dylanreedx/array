@@ -749,6 +749,7 @@ if [[ "${REPLAY_CHECKS_ONLY:-0}" == "1" ]]; then
 fi
 
 if [[ "${REPLAY_DRIVER_ONLY:-0}" == "1" ]]; then
+  run swift build --configuration debug --product array-workspace-mcp -j 2
   run swift build --configuration debug --product Array -j 2
   run_app_check .build/debug/Array --replay-driver-check
   matrix_finish_jobs

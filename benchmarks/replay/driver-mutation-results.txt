@@ -1,18 +1,4 @@
---replay-driver-check RED exit=1
-replay worker: touch: /var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-owned-39C23BDA-8111-41CE-8C35-82793A6B593F/outside-worker: Operation not permitted
-replay worker: touch: /var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-owned-29C65B3D-0483-4210-BDD1-C9EE8517757A/outside-worker: Operation not permitted
-FAIL: condition produced wrong child count
-replay driver: claudeCode managed=false children=0
-
---replay-driver-check GREEN exit=0
-replay worker: touch: /var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-owned-B9179E52-7CDA-45AB-8742-3CC91298357C/outside-worker: Operation not permitted
-replay worker: touch: /var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-owned-3208B6B3-5748-46EA-AEA4-E526ACCDB544/outside-worker: Operation not permitted
-replay worker: touch: /var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-owned-3208B6B3-5748-46EA-AEA4-E526ACCDB544/outside-worker: Operation not permitted
-replay worker: touch: /var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-owned-3C0363C6-1EBC-4AD6-9597-D748469CD644/outside-worker: Operation not permitted
-replay worker: touch: /var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-owned-696205AD-4091-492A-9BC8-67ABE74C94C6/outside-worker: Operation not permitted
-replay worker: touch: /var/folders/3s/qqwk1k6n6dq40lmvnzh_jzcw0000gn/T/replay-owned-696205AD-4091-492A-9BC8-67ABE74C94C6/outside-worker: Operation not permitted
-replay driver: claudeCode managed=false children=0
-replay driver: claudeCode managed=true children=1
-replay driver: codex managed=false children=0
-replay driver: codex managed=true children=1
-ReplayDriverChecks passed
+solo run that delegates: RED exit=1 FAIL: solo run delegated: the production record has 1 helper(s)
+codex stream with a reset: RED exit=1 FAIL: a Codex reset was not marked: ["cacheRead unknown: no typed cache counter", "cacheWrite unknown: no typed cache counter"]
+failed run's record vanishes: RED exit=1 FAIL: a failed run's record vanished
+restored: GREEN exit=0 ReplayDriverChecks passed

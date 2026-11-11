@@ -1,146 +1,159 @@
 # Offline replay machinery
 
-No live CLI runner is enabled. No usage budget is requested or enforced.
-The version 1 manifest contains zero historical tasks; curation is step 4.
-One synthetic two-commit repository tests the machinery, not model quality.
-No session transcripts, memory or other projects supply prompts.
+Replays one task two ways, a solo agent and a Managed lead that may delegate,
+on Claude and Codex, and records tokens, time and whether the task's own
+checks pass. Everything here runs fake agent processes. There is no live
+runner, no usage budget, and nothing stops or caps a run because of spend.
+The manifest has zero historical tasks; curation is step 4 of plan 15. The
+synthetic two-commit repository tests the machinery, not model quality. No
+session transcripts, memory or other projects supply any text.
 
-Run offline Python checks, including a real sandboxed fake subprocess:
+## Run it
 
 ```
-REPLAY_CHECKS_ONLY=1 PYTHONDONTWRITEBYTECODE=1 scripts/run-matrix.sh
+REPLAY_DRIVER_ONLY=1 PYTHONDONTWRITEBYTECODE=1 scripts/run-matrix.sh
 python3 benchmarks/replay/mutation_checks.py
-```
-
-The matrix subset reports grader, isolation, scoring and containment as four
-separate legs. Mutation checks change disposable copies of the implementation,
-run the same witnesses, restore the implementation and rerun. Both outputs
-are retained in `mutation-results.txt`. They test invalid graders accepted,
-future git objects imported, outside writes permitted and incomplete matched
-pairs reported. Missing-module failures are not counted as behavioral RED.
-
-The validator exports parent and fix trees, checks the immutable grader hash,
-rejects syntax/tool errors as RED, and requires an assertion failure on the
-parent and pass on the fix. It currently supports Python grader source, not
-extracted Swift patches with separate compilation receipts.
-
-`Workspace` exports only a base tree and reconstructs its exact commit object
-without ancestors, remotes or future objects. Each run has separate project,
-support, build and tmux directories. Links and special files are rejected.
-`ContainedRun` creates its own temporary root and uses macOS sandbox-exec to
-deny network and all writes except those owned directories. It refuses replaced
-storage before launching. The witness permits an in-project write, denies an
-outside sentinel write and confirms the sentinel unchanged. Real sleeping
-fake processes are killed/reaped on deadline or interruption, with process-group
-cleanup. No real tmux server is used. Disposable tmux socket verification remains
-required before a terminal-enabled adapter can launch.
-
-`run_contained` appends one fsynced JSONL record per returned subprocess outcome,
-including condition, fixture ID, hashes, wall/active time, hidden result and
-failure/timeout/interruption. It grades a fresh tree only after termination.
-Its usage counters remain null and incomplete until typed telemetry is joined.
-The scripted scoring fixture independently proves message deduplication, typed
-input/output sums, interval union, hidden/neighbor failures and failed-record
-preservation. Cached input is a subset of input; unknown cache values stay null.
-Comparisons show run/pair counts and coverage and suppress differences for
-missing harnesses, missing/duplicate pairs or incomplete observations. These
-are simulated records, never evidence of a model efficiency improvement.
-
-## Production supervisor seam
-
-`ReplaySupervisorDriver` in `ReplayDriverChecks.swift` exercises
-`AgentSupervisor.spawn` → `send` with `ScriptedAgentRunner` injection, for Claude
-and Codex, solo and forced Managed fan-out. Fan-out uses `handleSpawnRequest`,
-the same child-creation funnel called by `WorkspaceAPIService.delegate`. It does
-not exercise that service's approval, dispatch or canvas presentation layer.
-It verifies exact lead prompt delivery, the selected condition's child count,
-helper execution and completed runner cleanup. Its store is isolated; storage
-must belong to the driver's in-memory set of roots created by `createRoot`,
-resolve under temporary storage, and contain the project. Caller-created marker
-files cannot confer ownership. The headless entry uses dispatchMain, no window.
-
-After preparing GhosttyKit and a successful debug build, the targeted entry is:
-
-```
-.build/debug/Array --replay-driver-check
-```
-
-The supervisor injects `ReplayContainedScriptedRunner`: before delivering its
-scripted stream it starts kernel-contained fake subprocesses and checks an
-allowed write plus outside-write denial. Python separately covers real deadline
-and interruption cleanup. A real CLI adapter is deliberately absent; do not
-substitute a CLI for these fakes without witnessing its full lifecycle.
-
-## Ledger seam and remaining pilot work
-
-`task` is a UUID. A live adapter must consume the host ledger's task identity,
-not infer it from prompts. Fake fixtures use deterministic UUIDs for matching;
-`run` identifies a condition/repeat. Benchmark artifacts are separate from ledger
-rows; never append this record format to `ManagedRunLedger`. Its reviewed v1
-metadata append seam has no published typed usage schema yet. Bind counters via
-part 14's typed observation seam when available; cumulative reset/gap/fork
-handling must mark usage incomplete, not manufacture totals.
-
-There is no live pilot command. Remaining prerequisites: extend containment to the real CLI runner lifecycle; join typed telemetry and ledger IDs; preserve
-raw event/build/grader receipts; validate extracted Swift graders; verify an
-isolated tmux socket if used; pin host/CLI/model versions; curate 9–12 public-history
-tasks and actual assertion RED/GREEN receipts. Three eligible tasks × two
-harnesses × three modes form the later pilot. Chooser requires part 1. Report all
-usage, including failures, with no spend cap. No quality or efficiency claim is
-supported by offline witnesses.
-
-The production-driver witness additionally records input/output counters from
-`addDeliveredEventObserver`, deduplicated by agent plus observation identity,
-and union active intervals measured at each contained runner. Its held fake
-turns are stopped deliberately, so their receipts say interrupted and never
-pass the task. Missing cache counters remain null, with usage incomplete. A
-startup failure writes a failed receipt with unavailable measurements unknown.
-These witness receipts are not eligible pilot results: host ledger task IDs,
-typed cache observations and hidden task grading still need their published
-production seams. `TokenUsageSnapshot` on this base has input/output accounting
-fields but no typed cache counters; the separately revised run-ledger branch
-is not a dependency of this bench.
-
-The targeted driver matrix, after GhosttyKit preparation, is:
-
-```
-REPLAY_DRIVER_ONLY=1 scripts/run-matrix.sh
 python3 benchmarks/replay/mutation_driver.py
 ```
 
-The second command builds a deliberate delegation bypass, observes the child
-count assertion fail, restores the source, rebuilds, and observes GREEN. It
-never substitutes a real provider for the contained scripted runners. Build
-logs remain local and ignored; check output is retained in
+The first runs the four Python legs and `--replay-driver-check` (it builds
+`array-workspace-mcp` and `Array`, debug). The other two are the mutation
+proofs; their output is kept in `mutation-results.txt` and
 `driver-mutation-results.txt`.
 
-## Observed verification
+## One record schema
 
-`mutation-results.txt` contains behavioral RED and restored GREEN for grader,
-isolation, scoring and containment. `driver-mutation-results.txt` contains
-`--replay-driver-check` RED (`condition produced wrong child count` after bypassing
-delegation) and GREEN for all four harness/mode conditions after restoration.
-Both mutation scripts test build/check exit status directly.
+`manifest.json` holds the only field list (`recordFields`, with types and
+meanings). `replay.write_record` and `ReplayRecordSchema.write` are the one
+writer per language; both refuse a record whose keys differ from the list,
+and refuse a sink inside a run directory. `replay.compare` reads both.
+The task id has one derivation, `replay.task_id(base, requestHash,
+checksHash)`; Swift copies it from `task.json` and never derives one.
+`ledgerTask` and `tokens.cacheRead`/`cacheWrite` are reserved and null
+until the run ledger (branch `array/run-ledger`) and typed cache counters
+are on this base.
 
-During development, the first Swift build failed because the driver source was
-edited during compilation. Later successful debug builds superseded it. The
-first driver executions failed because a Foundation-resolved `/var` path was
-not canonical enough for sandbox subpath matching; POSIX `realpath` fixed this.
-The next run exposed a witness race that stopped Codex before queued usage
-observations arrived; waiting for the expected observations fixed it. These
-failures are resolved, not excluded from the verification history.
+A record is written before its run directory is cleaned, for every outcome,
+including driver failures and refused storage.
 
-Still blocked for eligible pilot records: the base branch has no host run-ledger
-task identity ingress and `TokenUsageSnapshot` lacks typed cache counters. The
-separate ledger branch is under revision and was read only through its documented
-seam. Until parts 12/14 publish these joins, production-driver receipts cannot be
-promoted to complete benchmark records. Extracted historical hidden graders and
-a live CLI adapter also remain prerequisites for the later pilot. The full matrix
-was not run under the targeted-only instruction; no installed app or tmux server
-was accessed, and no provider process was started.
+## Conditions and delegation
 
-Final targeted gate: `REPLAY_DRIVER_ONLY=1 PYTHONDONTWRITEBYTECODE=1
-scripts/run-matrix.sh` exited 0 and printed `Replay driver matrix: 5 leg(s) run`,
-with grader, isolation, scoring, containment and driver all passing. The driver
-ran both harnesses in solo and Managed conditions. Matrix inventory validation
-passed with 997 committed records. Shell syntax and `git diff --check` passed.
+The Swift driver submits the request to a lead through `AgentSupervisor.send`
+and does nothing else to the run. It mounts one project through the
+production boot mount so the workspace API has its scene.
+
+- Managed: the lead's record is Managed with workspace tools on. The fake
+  lead calls `tools/call array_delegate` through the production
+  `array-workspace-mcp` server named in its own launch configuration, which
+  reaches `WorkspaceAPIService.delegate` and `handleSpawnRequest`. Helper
+  count and each helper's checkout come from the production records. The
+  first helper shares the lead's checkout; the concurrent second gets its own
+  worktree. A Managed lead that delegates nothing is recorded with
+  `fannedOut: false`, kept, and never compared as fan-out.
+- Solo: the lead's workspace tools are off, so its launch carries no MCP
+  server and the workspace API refuses it (the driver probes this). The
+  runner's own spawn channel is closed by `ReplaySpawnGate`: every request
+  there is counted in `delegationAttempts` and never forwarded. Zero helpers
+  is asserted on the production record. A solo run with an attempt or a
+  helper is excluded from comparison.
+
+The run ends when no agent is running and the production supervisor has no
+helper result still on its way to the lead.
+
+## Usage
+
+Usage is read from production-delivered events. The fakes emit recorded
+streams through the production translators: Claude
+`claude-2.1.291-opus-turn.jsonl` (a new result uuid per turn, as the CLI
+does), Codex `codex-appserver-single-agent.jsonl` (a persistent thread, so
+later turns continue the running total). Every usage report is delivered
+twice.
+
+- Claude: de-duplicated by `accountingObservationID` per agent. A report
+  without one makes usage incomplete.
+- Codex: running totals differenced per session and per token type. A total
+  that goes down (reset), a forked session, or a turn with no usage report
+  (gap) makes usage incomplete and the totals null, never zero or negative.
+- `TokenUsageSnapshot` has no typed cache counters, so cache is unknown and
+  every Swift record is usage-incomplete today. The comparison therefore
+  prints no difference for any driver record yet. That is the honest result.
+
+## Grading
+
+`replay.grade(task, tree)` grades a finished working copy on a pristine
+export of the base. Hidden checks are the fix commit's added checks, held in
+host memory; neighbouring checks come from the pristine export. Only the
+agent's changes to unprotected paths are carried over, including new and
+deleted files. Changing, adding or deleting a protected path, or leaving a
+link or special file, is tampering: the verdict is `tampered` and the run is
+not a pass. Nested checkouts (helper worktrees) and host-owned paths (`.git`,
+`.array`) are not content.
+
+Each check runs in its own sandboxed process under a host-owned harness
+passed with `-c`. A pass requires the harness's own report for that check,
+tagged with a per-check nonce, on a pipe only the harness was handed. An
+exit status is never a result: an import-time `os._exit(0)` gives
+`noResult`, `sys.exit(0)` gives `error:SystemExit`. `validate` requires every
+hidden check to fail by assertion on the parent (an error is not RED) and the
+fix to pass.
+
+## Containment
+
+`sandbox_profile` (Python) and `ReplaySandbox` (Swift) deny by default. They
+allow reads of the run root and the toolchain only (system libraries, `/bin`,
+`/usr/bin`, the interpreter's own prefix, `/dev`), writes only inside the run
+root, signals only inside the sandbox, no mach services and no network. Each
+run root holds the project export and its own support, build, tmux,
+temporary and home directories; the environment is built fresh, with no
+`TMUX`. The working copy is an export of the base tree with only the base
+commit object, so no later object is reachable.
+
+Ownership is a directory this process created, checked by path, device and
+inode, and not a link; a caller-made or replaced directory is refused.
+
+Sandbox experiment (`socket_experiment`, a socket the test owns in its own
+temporary directory): a unix-socket connect is denied under the deny-default
+profile, and connects once a `network-outbound` unix-socket rule names that
+path. So the profile, not some other effect, is what blocks it. Before this
+change the allow-default profile also blocked unix-socket and loopback TCP
+connects (its `deny network*` covers both), but allowed reading the host
+repository and `~/Library/Application Support`, listing `/private/tmp`, and
+signalling processes outside the sandbox. All four are denied now. The
+first, second and fourth are witnessed by `--replay-containment-check`;
+`/private/tmp` was checked only in the one-off experiment.
+
+## Mutation proofs
+
+Each is shown RED for its named reason, then GREEN restored:
+an exit(0) fools the grader; a tampered check file; a run reads the host
+repository; a run writes outside its directories; a Managed run that did not
+delegate is compared as fan-out; a comparison from a failed pair; from an
+unmatched pair; a failed run's record vanishes (Python); a solo run that
+delegates; a Codex stream with a reset; a failed run's record vanishes
+(Swift). An import, syntax or build failure never counts as RED.
+
+## Before a live pilot
+
+- Typed cache counters on `TokenUsageSnapshot` (plan part 14). Until then no
+  pair compares.
+- The run ledger's task id joined into `ledgerTask`.
+- A live adapter that runs the real CLI runner inside this sandbox. It needs
+  provider egress, which `sandbox-exec` can only filter by address and port,
+  not host name, so network isolation against answer leakage needs another
+  mechanism or the run is invalid. It needs loopback to the workspace MCP
+  host port, and the CLI's own login state without Array copying or storing
+  credentials. None of this exists.
+- Claude's built-in Agent tool and Codex's own subagents cannot be closed
+  through any Array route. In a live solo run they arrive as observed
+  children: counted as attempts, and the run excluded. Disabling them needs
+  a launch option production does not have.
+- Curated historical tasks with Swift graders and compile receipts; the
+  chooser mode (needs part 1); a coding rubric for `humanSteps`; a
+  disposable-socket check before any terminal-enabled adapter.
+
+## Limits
+
+Grading has to run agent-written code. It runs sandboxed, but a check and the
+code it imports share a process, so an agent that knew the harness protocol
+could read the nonce and forge a report. Plan 15 already treats grader
+blindness as a validity constraint, not a security guarantee.
