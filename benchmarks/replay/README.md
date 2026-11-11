@@ -138,3 +138,9 @@ promoted to complete benchmark records. Extracted historical hidden graders and
 a live CLI adapter also remain prerequisites for the later pilot. The full matrix
 was not run under the targeted-only instruction; no installed app or tmux server
 was accessed, and no provider process was started.
+
+Final targeted gate: `REPLAY_DRIVER_ONLY=1 PYTHONDONTWRITEBYTECODE=1
+scripts/run-matrix.sh` exited 0 and printed `Replay driver matrix: 5 leg(s) run`,
+with grader, isolation, scoring, containment and driver all passing. The driver
+ran both harnesses in solo and Managed conditions. Matrix inventory validation
+passed with 997 committed records. Shell syntax and `git diff --check` passed.
