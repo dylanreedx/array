@@ -8435,6 +8435,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             report("FAIL: refusing to run against \(projectRoot)")
             Foundation.exit(2)
         }
+        if ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_APPROVED_CAPTURE"] == "1" {
+            Task { @MainActor in
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                    guard let inbox = self.workspaceSidebarView?.agentInbox else {
+                        throw NSError(domain: "SidebarLiveCapture", code: 2)
+                    }
+                    try await SidebarApprovedLiveCaptureChecks.run(window: window, inbox: inbox, directory: directory)
+                    report("Approved sidebar live captures complete")
+                } catch {
+                    report("FAIL: \(error)")
+                    try? String(describing: error).write(to: directory.appendingPathComponent("capture-error.txt"), atomically: true, encoding: .utf8)
+                }
+            }
+            return
+        }
         let requestedWidth = WorkspaceSidebarConfig.resolveWidth(defaults: .standard)
 
         // A Task rather than a fixed delay: the app is still finishing its own boot at

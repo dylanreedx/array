@@ -2045,6 +2045,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         groupBackground.setDeck(nil, animated: false)
         spine.isHidden = true
         let sub = isSubagentRow
+        // Ownership chrome paints through the spacing between native table slots.
+        superview?.clipsToBounds = false
         card.indicatorStyle = activeIndicatorStyle
         card.sharesGroupLight = ownership.activeGroup && activeIndicatorStyle != "current"
         let pad = InboxOwnershipChrome.pad
@@ -2965,14 +2967,29 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return frame
     }
 
-    func clearSelectionForFold() {
-        shown?.isSelected = false
-        card.isSelected = false
+    func captureFoldImage(in rect: NSRect, beforeRaster: () -> Void) -> NSImage? {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        card.suppressesSelectionOutlineForFold = true
+        defer {
+            card.suppressesSelectionOutlineForFold = false
+            CATransaction.commit()
+        }
+        beforeRaster()
+        return InboxFoldMotion.image(of: self, in: rect)
+    }
+
+    func setSelectionForFold(_ selected: Bool) {
+        shown?.isSelected = selected
+        card.isSelected = selected
     }
 
     func applyInteraction(_ interaction: RowInteraction) {
+        card.isPressed = interaction.isPressed
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
+        card.isIndicatorWorking = interaction.isIndicatorWorking
+        card.isCanvasSelection = interaction.isCanvasSelection
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
         hoverActionsHovered = interaction.isHovered
         setHoverActionsShown(interaction.isHovered)

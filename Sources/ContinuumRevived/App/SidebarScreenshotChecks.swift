@@ -277,8 +277,46 @@ enum SidebarScreenshotChecks {
 
     // MARK: - The run
 
+    private static func compactHeaderWitness(directory: URL) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let defaults = QAIsolatedDefaults(isolatedSuiteName: "array.header-check.\(UUID().uuidString)")!
+        for appearanceName in appearances {
+            let appearance = NSAppearance(named: appearanceName)!
+            NSApp.appearance = appearance
+            for style in SidebarHeaderBackground.allCases {
+                defaults.set(style.rawValue, forKey: SidebarHeaderBackground.defaultsKey)
+                guard SidebarHeaderBackground.resolve(in: defaults) == style else {
+                    throw Failure(description: "Header background preference did not round trip")
+                }
+                let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 360, height: 220), indicatorDefaults: defaults)
+                let window = NSWindow(contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.appearance = appearance
+                window.contentView = inbox
+                window.orderFrontOffscreenForChecks()
+                inbox.layoutForQA()
+                let frames = inbox.headerFramesForQA
+                let height = inbox.bounds.height - frames.listTop
+                let chrome = measureSidebarInboxHeight(sidebarHeight: 662, width: 360, appearance: appearance).chrome
+                print("compact header \(style.rawValue) \(shortName(appearanceName)): inbox \(height)pt + host \(chrome)pt = \(height + chrome)pt")
+                guard let compose = frames.newAgent,
+                      abs(compose.midY - frames.search.midY) < 2,
+                      frames.scope.maxY < frames.search.minY,
+                      abs(frames.scope.maxX - compose.maxX) < 3,
+                      height + chrome <= 80,
+                      frames.search.width > inbox.bounds.width * 0.75 else {
+                    throw Failure(description: "Compact header geometry failed: \(frames)")
+                }
+                let rep = try UIProbe.bitmap(of: inbox, id: "header-\(style.rawValue)")
+                try writePNG(rep, to: directory.appendingPathComponent("\(style.rawValue)-\(shortName(appearanceName)).png"))
+                window.orderOut(nil)
+            }
+        }
+    }
+
     static func run() async throws {
         let directory = try outputDirectory()
+        try compactHeaderWitness(directory: directory.appendingPathExtension("headers"))
         let now = Date(timeIntervalSince1970: 1_900_600_000)
         let world = try AppDelegate.makeSidebarCorpusWorld(now: now)
         defer { world.tearDown() }
@@ -1070,16 +1108,15 @@ private func assertSearchPlaceholderIsVerticallyCentered(inbox: AgentInboxView) 
           drawing.height < field.bounds.height,
           inbox.searchLeadingInsetForQA > 0,
           drawing.minX >= icon.maxX + CGFloat(Space.s) - 0.5,
-          // One header row (confidence pass): search first and widest, scope beside.
+          // Search leads the first row and scope sits below.
           field.frame.width > scope.width,
-          abs(field.frame.midY - scope.midY) <= 1,
-          field.frame.maxX <= scope.minX else {
+          scope.maxY < field.frame.minY else {
         throw SidebarScreenshotChecks.Failure(description:
-            "the production 96 search header is not one row, centred, or clear of its icon "
+            "the compact search header geometry or text alignment failed "
             + "(field \(field.frame), scope \(scope), drawing \(drawing), icon \(icon), "
             + "leading inset \(inbox.searchLeadingInsetForQA), measured height \(measuredHeight))")
     }
-    print("SidebarScreenshotChecks: production 96 search shares one row with scope and its centred placeholder clears the magnifier by \(Int(drawing.minX - icon.maxX))pt")
+    print("SidebarScreenshotChecks: compact search sits above scope and its centred placeholder clears the magnifier by \(Int(drawing.minX - icon.maxX))pt")
 }
 
 /// The 96 status is quiet, fixed-width telemetry; provider silhouettes need the

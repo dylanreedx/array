@@ -293,6 +293,8 @@ private final class AgentInboxTableView: NSTableView {
         if event.modifierFlags.contains(.control) {
             contextHandler?.presentContextMenu(for: event)
         } else {
+            contextHandler?.beginRowPress(event)
+            defer { contextHandler?.endRowPress() }
             super.mouseDown(with: event)
         }
     }
@@ -306,13 +308,18 @@ private final class AgentInboxTableView: NSTableView {
         super.addCursorRect(rect, cursor: object)
     }
 
-    // No row cursor. A pointing hand over every whole row is a web idiom;
-    // native sidebars (Finder, Mail, Xcode) keep the arrow, and with the hand
-    // everywhere the row's real buttons gave no distinct feedback.
     override func resetCursorRects() {
         registeredCursorsForQA = []
         super.resetCursorRects()
+        let visible = rows(in: visibleRect)
+        guard visible.length > 0 else { return }
+        for row in visible.location..<min(numberOfRows, visible.location + visible.length) {
+            if contextHandler?.isClickableRow(row) == true {
+                addCursorRect(rect(ofRow: row).intersection(visibleRect), cursor: .pointingHand)
+            }
+        }
     }
+
 }
 
 @MainActor
@@ -645,6 +652,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private let scopeButton: ChoiceButton
+    private let headerPattern = SidebarHeaderPatternView()
     private let searchField: NSTextField
     /// The leading magnifier, drawn only when a header override asks for field
     /// chrome. An `NSImageView` rather than another `TokenThemed` view: its tint
@@ -796,6 +804,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var foldChoices: [UUID: Bool] = [:]
     private let foldMotion = InboxFoldMotion()
     var foldMotionForQA: InboxFoldMotion { foldMotion }
+    var onFoldRasterForQA: ((String, NSView) -> Void)?
     /// Reports a fold or unfold by the person, with every choice made so far, so
     /// the host can remember them across launches. Not called by `restoreParentFolds`.
     var onParentFoldChange: (([UUID: Bool]) -> Void)?
@@ -1507,6 +1516,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         scopeButton.setAccessibilityHelp("Opens the agent scope choices")
 
         addSubview(scopeButton)
+        addSubview(headerPattern, positioned: .below, relativeTo: nil)
         addSubview(searchField)
         newAgentButton.translatesAutoresizingMaskIntoConstraints = false
         newAgentButton.target = self
@@ -1624,11 +1634,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
             scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.s),
         ]
-        // T3 nightly's one row: [search ………][scope][+]. The scope control sizes
-        // to its title and search takes the rest, down to the room its glyph and a
-        // one-word placeholder need; only below that does the scope label yield.
-        // Capping the scope instead (104pt, or 30% of the sidebar) ellipsized
-        // "This workspace" beside a search field that was mostly empty.
+        // Search and compose lead, with the scope and sort controls below.
         let searchFloor = searchField.widthAnchor.constraint(
             greaterThanOrEqualToConstant: Self.searchFieldFloorWidth)
         // Both stay under `defaultLow`: nothing in this row may outrank the
@@ -1637,31 +1643,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         searchFloor.priority = Self.searchFloorPriority
         oneRowHeaderConstraints = [
             searchField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Space.m),
-            searchField.topAnchor.constraint(equalTo: topAnchor, constant: Space.s),
+            searchField.topAnchor.constraint(equalTo: topAnchor, constant: Space.xs),
             searchField.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            scopeButton.leadingAnchor.constraint(equalTo: searchField.trailingAnchor, constant: Space.s),
-            scopeButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
-            searchFloor,
-            // .plans/113: the sort button sits in the field's reserved trailing
-            // slot, inset from the edge as far as from the top and bottom, so the
-            // row keeps its three controls and their widths. Typing swaps it for
-            // the clear button.
-            // The field's trailing anchor is its ALIGNMENT edge, inset from the
-            // painted frame, so that inset is given back.
-            sortButton.trailingAnchor.constraint(
-                equalTo: searchField.trailingAnchor,
-                constant: -((ChoiceButton.controlHeight - Self.sortButtonSide) / 2
-                    - searchField.alignmentRectInsets.right)),
-            sortButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
-            sortButton.widthAnchor.constraint(equalToConstant: Self.sortButtonSide),
-            sortButton.heightAnchor.constraint(equalToConstant: Self.sortButtonSide),
-            newAgentButton.leadingAnchor.constraint(equalTo: scopeButton.trailingAnchor, constant: Space.xs),
+            searchField.trailingAnchor.constraint(equalTo: newAgentButton.leadingAnchor, constant: -Space.xs),
             newAgentButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
             newAgentButton.centerYAnchor.constraint(equalTo: searchField.centerYAnchor),
             newAgentButton.widthAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
             newAgentButton.heightAnchor.constraint(equalToConstant: Self.headerIconButtonSide),
-            scrollView.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.s),
+            scopeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.m),
+            scopeButton.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: Space.xs),
+            scopeButton.heightAnchor.constraint(equalToConstant: ChoiceButton.controlHeight),
+            sortButton.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: Space.m),
+            sortButton.trailingAnchor.constraint(equalTo: scopeButton.leadingAnchor, constant: -Space.xs),
+            sortButton.centerYAnchor.constraint(equalTo: scopeButton.centerYAnchor),
+            sortButton.widthAnchor.constraint(equalToConstant: Self.sortButtonSide),
+            sortButton.heightAnchor.constraint(equalToConstant: Self.sortButtonSide),
+            scrollView.topAnchor.constraint(equalTo: scopeButton.bottomAnchor, constant: Space.xs),
+            searchFloor,
         ]
         NSLayoutConstraint.activate(defaultHeaderConstraints)
         NSLayoutConstraint.activate([
@@ -1733,6 +1731,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         NotificationCenter.default.addObserver(
             self, selector: #selector(activeIndicatorSettingDidChange),
             name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorStyle.defaultsKey)), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(headerBackgroundDidChange),
+            name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarHeaderBackground.defaultsKey)), object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(activeIndicatorSettingDidChange),
+            name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey)), object: nil)
         // Plan 110: characters turned on or off, a new set, new motion settings, or a
         // window's visibility. Rare events; each touches the visible cells only.
         NotificationCenter.default.addObserver(
@@ -1743,10 +1746,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             name: AgentCharacterController.visibilityDidChangeNotification, object: nil)
     }
 
+    @objc private func headerBackgroundDidChange() {
+        headerPattern.style = SidebarHeaderBackground.resolve(in: indicatorDefaults)
+    }
+
     @objc private func activeIndicatorSettingDidChange() {
         let next = SidebarActiveIndicatorStyle.resolve(in: indicatorDefaults)
-        guard next != activeIndicatorStyle else { return }
         activeIndicatorStyle = next
+        ownershipByTableRow = ownsSubagents ? ownershipSlices() : []
+        refreshVisibleOwnership()
         for tail in fanoutRemainderCellsByParent.values {
             tail.activeIndicatorStyle = next.rawValue
         }
@@ -1754,6 +1762,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         for row in 0..<tableView.numberOfRows {
             if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
                 applyActiveIndicatorStyle(to: cell)
+                cell.applyInteraction(interaction(forTableRow: row))
             }
         }
     }
@@ -1809,6 +1818,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `AgentInboxCellView.viewDidChangeEffectiveAppearance` for the words, each
     /// on the view that owns the colour.
     func applyTokens() {
+        headerPattern.needsDisplay = true
         for cell in recentCells.values { cell.appearance = effectiveAppearance }
         foldMotion.cancel()
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
@@ -1857,10 +1867,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         updateSortButtonVisibility()
     }
 
-    /// .plans/113: one-row header only, and only while the field is empty — the
-    /// clear button takes the same slot while there is text to clear.
+    /// The compact header keeps sorting available while searching.
     private func updateSortButtonVisibility() {
-        let shown = headerStyleOverride?.oneRow == true && searchField.stringValue.isEmpty
+        let shown = headerStyleOverride?.oneRow == true
         guard sortButton.isHidden == shown else { return }
         sortButton.isHidden = !shown
         if !shown, sortPopover.isPresented { sortPopover.dismiss(); sortButton.isActive = false }
@@ -2059,6 +2068,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         defer { syncElapsedTickTimer() }
         let columnWidthAtLayoutEntry = column.width
         super.layout()
+        headerPattern.frame = NSRect(x: 0, y: scrollView.frame.maxY, width: bounds.width, height: max(0, bounds.height - scrollView.frame.maxY))
+        headerPattern.style = SidebarHeaderBackground.resolve(in: indicatorDefaults)
         fitSearchPlaceholder()
         let viewportHeight = scrollView.contentView.bounds.height
         if lastSpacerViewportHeight != viewportHeight {
@@ -2151,6 +2162,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         externalSessionHiding?.noteDiscovered(Set(newRows.compactMap(\.externalSession?.sessionKey)))
         updateScopeMenu()
         render(display(from: newRows))
+        if !selectionOnEntry.isEmpty { restoreSelection(ids: selectionOnEntry) }
         completePendingAdvance(selectionOnEntry: selectionOnEntry)
     }
 
@@ -2368,7 +2380,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // frozen order never reorders on a push, so a multi-selection used to
             // survive every push; `render` empties the table's selection, so the
             // rows still on screen are selected again by id.
-            let keptSelection = sortMode != .newest ? selectedRows.map(\.id) : []
+            let keptSelection = selectedRows.map(\.id)
             render(next)
             if !keptSelection.isEmpty { restoreSelection(ids: keptSelection) }
             if slides {
@@ -2771,6 +2783,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func ownershipSlices() -> [InboxOwnershipSlice] {
         var slices = Array(repeating: InboxOwnershipSlice(), count: items.count)
         let spacing = CGFloat(AgentInboxView.rowSpacing)
+        let nativeSelection = tableView.selectedRowIndexes
+        var canvasLead = nativeSelection.isEmpty
+            ? allRows.first(where: { $0.id == openAgentId }) : nil
+        var visited: Set<UUID> = []
+        while let row = canvasLead, let parentId = row.parentId, visited.insert(row.id).inserted,
+              let parent = allRows.first(where: { $0.id == parentId }) { canvasLead = parent }
         var start = 0
         while start < items.count {
             guard case .agent(let lead) = items[start], nesting(atTableRow: start).depth == 0 else {
@@ -2784,7 +2802,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let rollup = rollupsByParent[lead.id]
             let ask = ownershipAskByLead[lead.id]
             let working = lead.state == .working || (rollup?.working ?? 0) > 0
-            let sweepPhase = working && ask == nil ? InboxOwnershipClock.phase(for: lead.id) : nil
+            let sweepPhase = working ? InboxOwnershipClock.phase(for: lead.id) : nil
             // The lanes, read backwards: a lane runs through a row while a later
             // row at its level is still to come, and ends in a foot at the last.
             var laterAt = [Bool](repeating: false, count: AgentInboxRow.maxDepth + 2)
@@ -2813,10 +2831,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     scan += heights[i - start] + spacing
                 }
             }
-            let activeGroup = end > start && (start...end).contains {
-                if case .agent(let row) = items[$0] { return row.id == openAgentId }
-                return false
-            }
+            let hasSelectedMember = (start...end).contains { nativeSelection.contains($0) }
+                || canvasLead?.id == lead.id
+                || (nativeSelection.isEmpty && openAgentId != nil
+                    && (start...end).contains { items[$0].agentRow?.id == openAgentId })
+            let activeGroup = working && (SidebarActiveIndicatorScope.resolve(in: indicatorDefaults) == .working || hasSelectedMember)
             let focusHeight = max(1, groupHeight - SidebarDensityProposal.production.gapBetweenRows)
             let focusTarget = runningOffset.map { $0 / focusHeight } ?? min(0.9, heights[0] / focusHeight * 0.8)
             if let old = groupFocusMemory[lead.id] {
@@ -2833,9 +2852,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     offset: offset, groupHeight: groupHeight,
                     continuesAbove: index > start, continuesBelow: index < end,
                     leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
-                    sweepPhase: sweepPhase, sweepColour: lead.identityColor,
+                    sweepPhase: activeGroup ? sweepPhase : nil, sweepColour: lead.identityColor,
                     raisedAsk: index == start ? ask : nil,
-                    activeGroup: activeGroup,
+                    activeGroup: activeGroup, groupSelected: hasSelectedMember,
                     leadHeight: heights[0], runningY: runningOffset,
                     rowIndex: index - start, focusFrom: focusMemory?.from,
                     focusChangedAt: focusMemory?.changedAt)
@@ -2926,10 +2945,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The identity sequence changes, but only by one contiguous block, so the
     /// table inserts or removes exactly those rows (`applyFoldIncrementally`)
     /// rather than reloading whole; anything else falls back to a full render.
-    /// Selection and hover are dropped for the same reason `setScope` drops them —
-    /// their indexes belong to the list that just went away, and a bulk action
-    /// (P3.11) must never reach a row you cannot see.
+    /// Selection follows agent identity through the fold. A hidden selected helper
+    /// is represented by its lead until the group opens again.
     func toggleCollapse(parentId: UUID) {
+        let currentSelection = selectedRows.map(\.id)
+        let deferredSelection = foldedSelectionByParent.removeValue(forKey: parentId)
+        let keptSelection = collapsedParents.contains(parentId) && currentSelection == [parentId]
+            ? (deferredSelection ?? currentSelection) : currentSelection
         updatingFold = true
         defer { updatingFold = false }
         let animates = window != nil && !prefersReducedMotion()
@@ -2983,6 +3005,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.layoutSubtreeIfNeeded()
         layoutSubtreeIfNeeded()
         restoreScrollAnchor(anchor)
+        if !keptSelection.isEmpty {
+            let visible = keptSelection.filter { tableRow(forAgentId: $0) != nil }
+            if visible.isEmpty { foldedSelectionByParent[parentId] = keptSelection }
+            restoreSelection(ids: visible.isEmpty ? [parentId] : visible)
+            layoutSubtreeIfNeeded()
+        }
         guard animates else { return }
         let after = captureFoldRows(reusing: before, excluding: relit, capturePixels: !liveMotion)
         if liveMotion {
@@ -3184,7 +3212,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                    let reused = earlier.snapshots[key]?.image, reused.size == local.size {
                     image = reused
                 } else {
-                    image = InboxFoldMotion.image(of: cell, in: local)
+                    if let row = cell as? AgentInbox96CellView {
+                        image = row.captureFoldImage(in: local) { self.onFoldRasterForQA?(key, cell) }
+                    } else {
+                        onFoldRasterForQA?(key, cell)
+                        image = InboxFoldMotion.image(of: cell, in: local)
+                    }
                     if (cell as? AgentInbox96CellView)?.qaDeckIsPosedForQA == true { qaPosedDecksPhotographed += 1 }
                 }
             }
@@ -4112,7 +4145,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let keepsContent = updatingFold && reusesRecentCell && cell is AgentInbox96CellView
             && recentCellModels[model.id] == model && !parentsWithChildren.contains(model.id)
         if keepsContent {
-            (cell as? AgentInbox96CellView)?.clearSelectionForFold()
+            (cell as? AgentInbox96CellView)?.setSelectionForFold(tableView.selectedRowIndexes.contains(row))
             (cell as? AgentInbox96CellView)?.updateElapsedClock(now: renderNow)
             _ = cell.updateEmphasisInPlace(AgentInboxRow.emphasis(
                 for: model.state, attention: model.attention, isInteracting: interacting))
@@ -4387,6 +4420,34 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }?.id
     }
 
+    private var pressedTableRow: Int?
+    private var foldedSelectionByParent: [UUID: [UUID]] = [:]
+    fileprivate func isClickableRow(_ row: Int) -> Bool {
+        guard items.indices.contains(row) else { return false }
+        switch items[row] {
+        case .agent, .fanoutRemainder: return true
+        default: return false
+        }
+    }
+
+    fileprivate func beginRowPress(_ event: NSEvent) {
+        let row = tableView.row(at: tableView.convert(event.locationInWindow, from: nil))
+        guard isClickableRow(row), agentIdForTableRow(row) != nil else { return }
+        pressedTableRow = row
+        if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
+            cell.applyInteraction(interaction(forTableRow: row))
+            CATransaction.flush()
+        }
+    }
+
+    fileprivate func endRowPress() {
+        guard let row = pressedTableRow else { return }
+        pressedTableRow = nil
+        if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
+            cell.applyInteraction(interaction(forTableRow: row))
+        }
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
         // Selection clears recession on the row you moved onto and restores it on
         // the one you left, so exactly those two are redrawn — the emphasis is
@@ -4396,6 +4457,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // selections — with a range selected, a single index cannot name them.
         let previous = selectedRowsForEmphasis
         selectedRowsForEmphasis = tableView.selectedRowIndexes
+        ownershipByTableRow = ownsSubagents ? ownershipSlices() : []
+        refreshVisibleOwnership()
+        let visible = tableView.rows(in: tableView.visibleRect)
+        if visible.length > 0 {
+            for index in visible.location..<min(tableView.numberOfRows, visible.location + visible.length) {
+                (tableView.view(atColumn: 0, row: index, makeIfNecessary: false) as? AgentInboxRowCell)?
+                    .applyInteraction(interaction(forTableRow: index))
+            }
+        }
         // P1.4: which INPUT moved the selection decides whether the focus ring is
         // armed, and it is resolved before the rows are redrawn so the ring and
         // the fill are painted by the SAME rebuild — see `setKeyboardFocus`.
@@ -4407,6 +4477,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
     @objc private func rowClicked(_ sender: Any?) {
+        if let id = agentIdForTableRow(tableView.clickedRow) { foldedSelectionByParent.removeValue(forKey: id) }
         _ = activateRow(
             atTableRow: tableView.clickedRow,
             event: NSApp.currentEvent)
@@ -5691,7 +5762,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let id = agentIdForTableRow(row) else { return .none }
         return RowInteraction(
             isHovered: id == hoveredAgentId,
+            isPressed: row == pressedTableRow,
             isRouteActive: id == openAgentId,
+            isIndicatorWorking: items[row].agentRow?.state == .working && ownership(atTableRow: row).activeGroup,
+            isCanvasSelection: tableView.selectedRowIndexes.isEmpty &&
+                (id == openAgentId || (nesting(atTableRow: row).depth == 0
+                    && ownership(atTableRow: row).groupSelected && tableRow(forAgentId: openAgentId) == nil)),
             hasKeyboardFocus: id == keyboardFocusAgentId
         )
     }
@@ -8487,6 +8563,7 @@ final class AgentInboxRemainderView: NSTableCellView {
     /// `ChromeIconButton`'s ladder: held, the row-selected step; under the
     /// pointer, the hover step.
     private func applyInteraction() {
+        fill.isPressed = isPressed
         fill.isSelected = isPressed
         fill.isHovered = isHovered && !isPressed
     }
@@ -8592,6 +8669,7 @@ private final class InboxPressReportingButton: NSButton {
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
         onPressChange?(true)
+        CATransaction.flush()
         defer { onPressChange?(false) }
         super.mouseDown(with: event)
     }
@@ -8713,7 +8791,10 @@ extension AgentInboxRowCell {
 /// row Return will act on.
 struct RowInteraction: Equatable {
     var isHovered = false
+    var isPressed = false
     var isRouteActive = false
+    var isIndicatorWorking = false
+    var isCanvasSelection = false
     var hasKeyboardFocus = false
 
     static let none = RowInteraction()
@@ -9827,6 +9908,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
     private let indicatorWash = CAGradientLayer()
     private let indicatorEdge = CALayer()
     private let indicatorSheen = CAGradientLayer()
+    var suppressesSelectionOutlineForFold = false { didSet { applyIndicator() } }
     var indicatorReducesMotion = false { didSet { applyIndicator() } }
     private var motionSignature: String?
 
@@ -9836,16 +9918,22 @@ final class AgentInboxCardView: NSView, TokenThemed {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         indicatorWash.frame = bounds
-        indicatorEdge.frame = bounds.insetBy(dx: 1.5, dy: 1.5)
+        indicatorEdge.frame = bounds.insetBy(dx: 0.5, dy: 0.5)
         applyIndicator()
         CATransaction.commit()
     }
 
     private func applyIndicator() {
         let style = indicatorStyle
-        let enabled = !sharesGroupLight && style != "current" && (isRouteActive || isSelected)
+        if let layer, indicatorEdge.superlayer == nil { layer.addSublayer(indicatorEdge) }
+        indicatorEdge.frame = bounds.insetBy(dx: 0.5, dy: 0.5)
+        indicatorEdge.cornerRadius = max(0, Radius.card - 0.5)
+        indicatorEdge.borderWidth = isSelected || isCanvasSelection ? 1 : 0
+        indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
+            .withAlphaComponent(effectiveTokenTheme == .dark ? 0.55 : 0.35).cgColor
+        indicatorEdge.isHidden = suppressesSelectionOutlineForFold || (!isSelected && !isCanvasSelection)
+        let enabled = !sharesGroupLight && style != "current" && isIndicatorWorking
         indicatorWash.isHidden = !enabled
-        indicatorEdge.isHidden = !enabled
         guard enabled, let layer else {
             stopIndicatorMotion()
             return
@@ -9867,7 +9955,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         indicatorWash.cornerRadius = Radius.card
         indicatorWash.startPoint = CGPoint(x: 0, y: 0.5)
         indicatorWash.endPoint = CGPoint(x: 1, y: 0.5)
-        indicatorEdge.cornerRadius = CGFloat(CornerRole.radius(base: CornerRole.card.base - 1.5))
+        indicatorEdge.cornerRadius = max(0, Radius.card - 0.5)
         indicatorEdge.borderWidth = 0
         indicatorEdge.shadowOpacity = 0
         indicatorEdge.backgroundColor = nil
@@ -9905,8 +9993,11 @@ final class AgentInboxCardView: NSView, TokenThemed {
             indicatorWash.isHidden = true
             indicatorEdge.isHidden = true
         }
+        indicatorEdge.borderWidth = isSelected || isCanvasSelection ? 1 : 0
+        indicatorEdge.borderColor = TextToken.textPrimary.color.nsColor(in: self)
+            .withAlphaComponent(dark ? 0.55 : 0.35).cgColor
         // Only the open agent animates. Multi-selection remains a static indication.
-        let moving = isRouteActive && !indicatorReducesMotion
+        let moving = isIndicatorWorking && !indicatorReducesMotion
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion && window != nil
         let signature = moving ? "\(style):\(bounds.size)" : nil
         guard signature != motionSignature else { return }
@@ -9935,7 +10026,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
             focus.values = [0.2, 0.85, 0.2]
             focus.keyTimes = [0, 0.5, 1]
             focus.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut), CAMediaTimingFunction(name: .easeInEaseOut)]
-            focus.duration = 6
+            focus.duration = 4
             focus.repeatCount = .infinity
             indicatorSheen.add(focus, forKey: "indicator.focus")
         case "sheen":
@@ -9969,6 +10060,13 @@ final class AgentInboxCardView: NSView, TokenThemed {
     /// them because they no longer do: each resolves to a different step of the
     /// ladder, and "selected" and "hovered" and "route-active" have to be
     /// distinguishable from each other, not merely from resting.
+    var isPressed = false {
+        didSet {
+            guard isPressed != oldValue else { return }
+            layer?.removeAnimation(forKey: Self.fillFadeKey)
+            applyFill(fading: false)
+        }
+    }
     var isSelected = false {
         didSet { guard isSelected != oldValue else { return }; applyFill(fading: true) }
     }
@@ -9997,6 +10095,12 @@ final class AgentInboxCardView: NSView, TokenThemed {
     }
     /// The agent whose tile is open — the loudest step, because it answers
     /// "where am I" from anywhere in the list.
+    var isCanvasSelection = false {
+        didSet { if isCanvasSelection != oldValue { applyFill(fading: false) } }
+    }
+    var isIndicatorWorking = false {
+        didSet { if isIndicatorWorking != oldValue { applyFill(fading: false) } }
+    }
     var isRouteActive = false {
         didSet { guard isRouteActive != oldValue else { return }; applyFill(fading: true) }
     }
@@ -10028,7 +10132,8 @@ final class AgentInboxCardView: NSView, TokenThemed {
     /// RENDERED row and not merely of the token table: pointing at a selected
     /// row lifts it to hover rather than leaving it at the quieter step.
     var surfaceRole: SidebarSurfaceRole {
-        if isRouteActive { return .active }
+        if isPressed { return .selected }
+        if isRouteActive || isIndicatorWorking { return .active }
         if isHovered { return .hover }
         if isSelected { return .selected }
         return .resting
@@ -10114,9 +10219,9 @@ final class AgentInboxCardView: NSView, TokenThemed {
             underlay: underlayAlpha)
         applyIndicator()
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
-        layer.backgroundColor = sharesGroupLight ? nil : fill
+        layer.backgroundColor = sharesGroupLight && !isPressed ? nil : fill
         if sharesGroupLight { layer.removeAnimation(forKey: Self.fillFadeKey) }
-        guard !sharesGroupLight, fading, window != nil, presented != fill else { return }
+        guard !isPressed, !sharesGroupLight, fading, window != nil, presented != fill else { return }
         if indicatorStyle != "current",
            indicatorReducesMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             layer.removeAnimation(forKey: Self.fillFadeKey)
@@ -10788,8 +10893,11 @@ final class AgentInboxCellView: NSTableCellView, AgentInboxRowCell {
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
     func applyInteraction(_ interaction: RowInteraction) {
+        card.isPressed = interaction.isPressed
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
+        card.isIndicatorWorking = interaction.isIndicatorWorking
+        card.isCanvasSelection = interaction.isCanvasSelection
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
     }
 
@@ -11712,8 +11820,11 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P1.2-interaction-fill-ladder.md
     func applyInteraction(_ interaction: RowInteraction) {
+        card.isPressed = interaction.isPressed
         card.isHovered = interaction.isHovered
         card.isRouteActive = interaction.isRouteActive
+        card.isIndicatorWorking = interaction.isIndicatorWorking
+        card.isCanvasSelection = interaction.isCanvasSelection
         card.hasKeyboardFocus = interaction.hasKeyboardFocus
         let on = interaction.isHovered && (onHoverAction != nil || onBackgroundStop != nil)
         hoverActionShown = on

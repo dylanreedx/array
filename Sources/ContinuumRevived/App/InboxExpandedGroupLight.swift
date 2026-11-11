@@ -101,9 +101,20 @@ final class InboxExpandedGroupLight: NSView {
                     b.add(settle, forKey: "group.settle." + key)
                 }
             }
-            let breath = CAKeyframeAnimation(keyPath: "opacity"); breath.values = [0.2,0.85,0.2]; breath.keyTimes = [0,0.5,1]; breath.duration = 6
+            let breath = CAKeyframeAnimation(keyPath: "opacity"); breath.values = [0.2,0.85,0.2]; breath.keyTimes = [0,0.5,1]; breath.duration = 4
             breath.timingFunctions = [.init(name: .easeInEaseOut),.init(name: .easeInEaseOut)]
             animate(breath,on:b,key:"group.focus")
+            // Keep the diagonal pair anchored horizontally; only the right light
+            // eases six points farther down and returns over the existing breath.
+            for (key, point) in [("startPoint", b.startPoint), ("endPoint", b.endPoint)] {
+                let travel = CAKeyframeAnimation(keyPath: key)
+                travel.values = [point, CGPoint(x: point.x, y: point.y + min(6 / h, max(0, 0.88 - y))), point]
+                    .map { NSValue(point: $0) }
+                travel.keyTimes = [0, 0.5, 1]; travel.duration = 4
+                travel.timingFunctions = [.init(name: .easeInEaseOut), .init(name: .easeInEaseOut)]
+                animate(travel, on: b, key: "group.travel." + key)
+            }
+
         case "gradient":
             let a: CGFloat = dark ? 0.15 : 0.11
             let g = gradient(a)
@@ -133,8 +144,7 @@ final class InboxExpandedGroupLight: NSView {
             sweep.values = [-card.width,-card.width,card.width * 2,card.width * 2];sweep.keyTimes = [0,0.12,0.38,1];sweep.duration = 6
             sweep.timingFunctions = [.init(name:.linear),.init(name:.easeInEaseOut),.init(name:.linear)]
             animate(sweep,on:shine,key:"group.sheen",delay:Double(slice.rowIndex) * 0.22)
-            let rim = CAShapeLayer();rim.frame = whole.bounds;rim.path = CGPath(roundedRect:whole.bounds.insetBy(dx:0.5,dy:0.5),cornerWidth:Radius.card,cornerHeight:Radius.card,transform:nil)
-            rim.fillColor = nil;rim.strokeColor = colour.withAlphaComponent(dark ? 0.10 : 0.075).cgColor;rim.lineWidth = 1;whole.addSublayer(rim)
+
         }
     }
 }
