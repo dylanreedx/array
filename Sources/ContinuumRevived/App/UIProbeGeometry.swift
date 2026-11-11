@@ -4658,10 +4658,13 @@ enum UIProbeGeometry {
                                 "\(label): the nudge moves over the title while the row is hovered")
                 }
                 _ = probe.inbox.hoverRowForQA(id: nil)
-                // The row's cursor is the system arrow: no row registers a cursor.
+                // 0.7.48: every agent card on screen is clickable and registers the
+                // pointing hand; the list registers no other cursor.
                 let cursors = probe.inbox.rowCursorsForQA()
-                try require(!cursors.contains(where: { $0 == NSCursor.pointingHand }),
-                            "\(label): sidebar rows register a pointing-hand cursor (\(cursors.count) rect(s)); native sidebars use the arrow")
+                let cards = probe.inbox.visibleCharacterCellsForQA.count
+                try require(cards > 0 && cursors.filter({ $0 == NSCursor.pointingHand }).count >= cards
+                                && cursors.allSatisfy({ $0 == NSCursor.pointingHand }),
+                            "\(label): \(cards) card(s) on screen but the list registered \(cursors.filter({ $0 == NSCursor.pointingHand }).count) pointing-hand rect(s) of \(cursors.count)")
                 guard failures.isEmpty else {
                     throw fail("sidebar-ux-check.nudge: \(failures.count) failure(s):\n  " + failures.joined(separator: "\n  "))
                 }
@@ -4705,32 +4708,42 @@ enum UIProbeGeometry {
                 let scopeFrame = probe.inbox.scopeControlFrameForQA
                 let searchDrawing = probe.inbox.searchTextDrawingRectForQA
                 let searchIcon = probe.inbox.searchIconFrameInFieldForQA
-                // Confidence pass: T3's ONE header row — search first and widest,
-                // the scope control beside it on the same line, the placeholder still
-                // readable at 220pt.
-                guard abs(searchFrame.midY - scopeFrame.midY) <= 1,
-                      searchFrame.maxX <= scopeFrame.minX,
-                      searchDrawing.width >= 40,
+                // The compact two-row header (0.7.48). Row 1: search, filling the row
+                // up to the new-agent button. Row 2, below it: sort then scope, flush to
+                // the trailing edge. 70pt from the top to the list. The placeholder
+                // stays readable at 220pt and clear of the magnifier.
+                let header = probe.inbox.headerFramesForQA
+                let sortFrame = probe.inbox.sortButtonForQA.frame
+                let trailing = probe.inbox.bounds.width - CGFloat(Space.m)
+                let headerHeight = probe.inbox.bounds.height - header.listTop
+                guard let newAgent = header.newAgent,
+                      abs(searchFrame.midY - newAgent.midY) <= 1,
+                      abs(searchField.alignmentRect(forFrame: searchFrame).maxX + CGFloat(Space.xs) - newAgent.minX) <= 0.5,
+                      abs(newAgent.maxX - trailing) <= 0.5,
+                      searchFrame.width > 0.75 * probe.inbox.bounds.width,
+                      scopeFrame.maxY <= searchFrame.minY,
                       !searchFrame.intersects(scopeFrame),
+                      abs(scopeFrame.maxX - trailing) <= 0.5,
+                      !probe.inbox.sortButtonForQA.isHidden,
+                      sortFrame.maxX <= scopeFrame.minX,
+                      abs(sortFrame.midY - scopeFrame.midY) <= 1,
+                      abs(headerHeight - 70) <= 0.5,
+                      searchDrawing.width >= 40,
                       probe.inbox.searchLeadingInsetForQA > 0,
                       searchDrawing.minX >= searchIcon.maxX + CGFloat(Space.s) - 0.5 else {
-                    throw fail("\(label): production one-row search/scope geometry or magnifier clearance escaped (search=\(searchFrame), scope=\(scopeFrame), drawing=\(searchDrawing), icon=\(searchIcon))")
+                    throw fail("\(label): production two-row header geometry or magnifier clearance escaped (search=\(searchFrame), newAgent=\(String(describing: header.newAgent)), scope=\(scopeFrame), sort=\(sortFrame), header=\(headerHeight)pt, width=\(probe.inbox.bounds.width), drawing=\(searchDrawing), icon=\(searchIcon))")
                 }
-                // The scope label sizes to its title; it may only ellipsize once the
-                // search field has given up everything above its floor, and the
-                // placeholder the field shows always draws whole. A 104pt cap read
-                // "This w…" beside a mostly empty search field.
+                // The scope label sizes to its title on its own row; it may only
+                // ellipsize once that row is full (the sort button pressed against the
+                // leading inset), and the search placeholder always draws whole.
                 func assertScopeTitleYieldsOnlyAtSearchFloor(_ phase: String) throws {
-                    // The floor constrains the ALIGNMENT rect; a text field's frame
-                    // is 2pt wider each side.
-                    let search = searchField.alignmentRect(forFrame: probe.inbox.searchFieldFrameForQA)
                     let drawing = probe.inbox.searchTextDrawingRectForQA
                     let placeholder = searchField.placeholderString ?? ""
                     let placeholderNeed = ChoiceLabelMetrics.labelWidth(for: placeholder, font: searchField.font ?? .token(.label))
-                    guard scopeButton.qaTitleDrawsWithoutTruncation
-                            || search.width <= AgentInboxView.searchFieldFloorWidth + 0.5,
+                    let sortMinX = probe.inbox.sortButtonForQA.frame.minX
+                    guard scopeButton.qaTitleDrawsWithoutTruncation || sortMinX <= CGFloat(Space.m) + 0.5,
                           !placeholder.isEmpty, placeholderNeed <= drawing.width + 0.5 else {
-                        throw fail("\(label) [\(phase)]: the scope title '\(scopeButton.qaRenderedTitle)' ellipsized at \(probe.inbox.scopeControlFrameForQA.width)pt while search held \(search.width)pt (floor \(AgentInboxView.searchFieldFloorWidth)), or the placeholder '\(placeholder)' needs \(placeholderNeed)pt of a \(drawing.width)pt text rect")
+                        throw fail("\(label) [\(phase)]: the scope title '\(scopeButton.qaRenderedTitle)' ellipsized at \(probe.inbox.scopeControlFrameForQA.width)pt with the sort button at x=\(sortMinX), or the placeholder '\(placeholder)' needs \(placeholderNeed)pt of a \(drawing.width)pt text rect")
                     }
                 }
                 try assertScopeTitleYieldsOnlyAtSearchFloor("default scope")
