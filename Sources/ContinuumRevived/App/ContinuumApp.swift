@@ -4260,6 +4260,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--settings-usage-check") {
+            do {
+                _ = NSApplication.shared
+                try SettingsUsageChecks.run()
+                print("ContinuumRevivedSettingsUsageChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--keybind-edit-check") {
             do {
                 _ = NSApplication.shared

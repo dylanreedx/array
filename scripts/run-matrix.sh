@@ -1360,6 +1360,7 @@ run_app_check .build/debug/Array --settings-panel-check
 # Launch polish: settings as an in-window modal, and its search.
 run_app_check .build/debug/Array --settings-modal-check
 run_app_check .build/debug/Array --settings-search-check
+run_app_check .build/debug/Array --settings-usage-check
 run_app_check .build/debug/Array --cli-update-settings-check
 run_app_check .build/debug/Array --agent-awareness-check
 run_app_check .build/debug/Array --completion-awareness-check

@@ -264,6 +264,7 @@ check --settings-modal-check
 check --settings-panel-check
 check --settings-schema-check
 check --settings-search-check
+check --settings-usage-check
 check --settle-closes-tile-check
 check --share-agent-relay-check
 check --share-copy-latency-check
@@ -713,6 +714,7 @@ leg run_app_check .build/debug/Array --session-resume-check
 leg run_app_check .build/debug/Array --settings-modal-check
 leg run_app_check .build/debug/Array --settings-panel-check
 leg run_app_check .build/debug/Array --settings-search-check
+leg run_app_check .build/debug/Array --settings-usage-check
 leg run_app_check .build/debug/Array --settle-closes-tile-check
 leg run_app_check .build/debug/Array --share-agent-relay-check
 leg run_app_check .build/debug/Array --share-copy-latency-check
