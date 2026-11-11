@@ -2458,6 +2458,20 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--helper-liveness-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperLivenessChecks.run()
+                    print("HelperLivenessChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--helper-command-evidence-check") {
             _ = NSApplication.shared
             Task { @MainActor in

@@ -178,6 +178,7 @@ extension WorkspaceAPIService {
             evidenceSource: document == nil ? "record" : "supervisor.transcriptProjection",
             note: document == nil ? AgentInspectResponse.absentEvidenceNote : nil,
             observedAt: now)
+        response.liveness = supervisor.helperLiveness[target.id]
         if let document {
             response.promptTitle = Self.promptTitle(from: document)
             let bounded = AgentInspectExcerpt.bound(

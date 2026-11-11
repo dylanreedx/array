@@ -6040,6 +6040,18 @@ final class AgentSupervisor {
     /// A "no progress" alert waiting in its lead's queue. Stopping the helper
     /// withdraws it, so the lead never spends a turn on news already stale.
     private var queuedHelperAlerts: [AgentID: (parent: AgentID, messageID: UUID)] = [:]
+    /// Each helper's liveness as of the last sweep (or the progress that ended
+    /// a quiet spell). Observation only, in memory; `agent.inspect` reports it.
+    private(set) var helperLiveness: [AgentID: HelperLivenessFact] = [:]
+    /// Quiet this long, with no live child, reads as stalled. Classifies only.
+    var helperLivenessQuietAfter = HelperLiveness.defaultQuietAfter
+
+    /// The one place a helper's liveness is written. A run ledger would append
+    /// a transition here, when `state` differs from the stored one.
+    private func recordHelperLiveness(_ id: AgentID, _ state: HelperLiveness, lastProgressAt: Date, liveChildren: Int, now: Date) {
+        let since = helperLiveness[id].flatMap { $0.state == state ? $0.since : nil } ?? now
+        helperLiveness[id] = HelperLivenessFact(state: state, since: since, lastProgressAt: lastProgressAt, liveChildren: liveChildren)
+    }
 
     private func withdrawQueuedHelperAlert(_ id: AgentID) {
         pendingHelperAlerts[id] = nil
@@ -6057,8 +6069,12 @@ final class AgentSupervisor {
 
     private func noteHelperProgress(_ id: AgentID, last: String) {
         guard !helperParents(id).isEmpty else { return }
-        helperProgress[id] = HelperProgress(at: helperWatchdogNow(), last: last, status: presenceRowStatus(for: id))
+        let now = helperWatchdogNow()
+        helperProgress[id] = HelperProgress(at: now, last: last, status: presenceRowStatus(for: id))
         pendingHelperAlerts[id] = nil
+        if let fact = helperLiveness[id], fact.state == .stalled || fact.state == .waitingOnChild {
+            recordHelperLiveness(id, .working, lastProgressAt: now, liveChildren: fact.liveChildren, now: now)
+        }
         if records[id]?.helperWatchdogNeedsYou != nil {
             records[id]?.helperWatchdogNeedsYou = nil
             notifyLeadPlanChanged(id)
@@ -6075,6 +6091,8 @@ final class AgentSupervisor {
             guard let record = records[id], let parent = record.parentAgentID ?? helperMessageSubscriptions[id]?.first?.parent else { continue }
             let status = presenceRowStatus(for: id)
             guard status == .working || status == .needsAttention else {
+                recordHelperLiveness(id, .finished, lastProgressAt: helperProgress[id]?.at ?? helperLiveness[id]?.lastProgressAt ?? now,
+                                     liveChildren: processTracker?.jobs(for: id).count ?? 0, now: now)
                 helperProgress[id] = nil
                 pendingHelperAlerts[id] = nil
                 if records[id]?.helperWatchdogNeedsYou != nil {
@@ -6086,6 +6104,13 @@ final class AgentSupervisor {
             }
             if helperProgress[id] == nil || helperProgress[id]?.status != status {
                 noteHelperProgress(id, last: status == .needsAttention ? "needs you" : "working")
+            }
+            if let at = helperProgress[id]?.at {
+                // The tracker's last published list: no process inspection here.
+                let children = processTracker?.jobs(for: id).count ?? 0
+                recordHelperLiveness(id, HelperLiveness.classify(
+                    inTurn: true, blocked: status == .needsAttention, lastProgressAt: at, liveChildren: children,
+                    now: now, quietAfter: helperLivenessQuietAfter), lastProgressAt: at, liveChildren: children, now: now)
             }
             guard var progress = helperProgress[id], !progress.escalated,
                   now.timeIntervalSince(progress.at) >= helperWatchdogThreshold else { continue }
@@ -6725,6 +6750,7 @@ final class AgentSupervisor {
         hookReceipts.removeValue(forKey: id)
         codexHookPushBacks.removeValue(forKey: id)
         helperProgress[id] = nil
+        helperLiveness[id] = nil
         pendingHelperAlerts[id] = nil
         helperFoldEligibleSince[id] = nil
         pendingHelperFolds.remove(id)
