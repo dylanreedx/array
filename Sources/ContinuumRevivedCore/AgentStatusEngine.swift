@@ -380,6 +380,12 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
     /// Claude only: the run's per-message usage, de-duplicated by message id,
     /// equals the result's own `usage`. False means they disagree.
     public var accountingReconciled: Bool?
+    /// The provider turn this usage belongs to (Claude's turn id, Codex's
+    /// `turnId`), so a report that arrives after its turn ended is never
+    /// charged to another turn.
+    public var accountingTurn: String?
+    /// Codex only: the model id the CLI named for this thread, when it did.
+    public var accountingModel: String?
 
     public init(inputTokens: Int, outputTokens: Int, totalCostUsd: Double?, accountingObservationID: String? = nil,
                 accountingInputTokens: Int? = nil, observedAt: Date? = nil, accountingOutputTokens: Int? = nil,

@@ -814,7 +814,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
             // time (`CodexEventTranslator.swift:77-88`). Synthesizing the
             // notification here reuses the translator's own parsing rather
             // than duplicating its session-start logic.
-            let synthetic = "{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"\(id)\"}}}"
+            // It carries `resumedMarker`, so usage accounting never mistakes a
+            // resumed thread's history for work done in this run.
+            let synthetic = "{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"\(id)\"},\"\(CodexAppServerEventTranslator.resumedMarker)\":true}}"
             queue.sync {
                 for event in appServerTranslator.translate(line: synthetic) { onEvent(event) }
             }

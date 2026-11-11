@@ -85,6 +85,7 @@ private func runClaudeTranslatorMappingChecks() {
             var snapshot = TokenUsageSnapshot(inputTokens: 24406, outputTokens: 40, totalCostUsd: 0.014992)
             let typed = TokenUsageSnapshot.TypedCounts(uncachedInput: 10, cacheRead: 17900, cacheWrite: 6496, output: 40)
             (snapshot.typedCounts, snapshot.typedCountsByModel) = (typed, ["claude-haiku-4-5-20251001": typed])
+            snapshot.accountingTurn = "\(claudeSID)#run1-t1"
             return snapshot
         }()),
         // The result's OWN counters (10 / 17,900 / 6,496) are the run's sum and

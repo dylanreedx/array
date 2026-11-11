@@ -296,7 +296,7 @@ private func runCodexAppServerTranslatorMappingChecks() {
     // No `cachedInputTokens`: the input's split is unknown, never all uncached.
     var usageSnapshot = TokenUsageSnapshot(inputTokens: 100, outputTokens: 20, totalCostUsd: nil)
     usageSnapshot.typedCounts = .init(uncachedInput: nil, cacheRead: nil, cacheWrite: nil, output: 20)
-    (usageSnapshot.accountingSession, usageSnapshot.accountingSessionStarted) = ("th-SECRET-THREAD", true)
+    (usageSnapshot.accountingSession, usageSnapshot.accountingSessionStarted, usageSnapshot.accountingTurn) = ("th-SECRET-THREAD", true, "turn-1")
     expect(usage == [.tokenUsageUpdated(threadId: "th-SECRET-THREAD", snapshot: usageSnapshot)],
            "thread/tokenUsage/updated must map to tokenUsageUpdated off the cumulative `total` block")
     // T1 — `last` is the request and `modelContextWindow` its window: the live
