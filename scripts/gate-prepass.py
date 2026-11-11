@@ -574,6 +574,7 @@ def coverage(manifest, changes):
 
 
 def notification_patterns():
+    sys.dont_write_bytecode = True
     path = Path(__file__).resolve().with_name("check-notification-map.py")
     spec = importlib.util.spec_from_file_location("check_notification_map", path)
     module = importlib.util.module_from_spec(spec)
