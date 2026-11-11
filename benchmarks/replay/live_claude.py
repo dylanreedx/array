@@ -1,0 +1,107 @@
+"""Stand-in for `claude` on a live replay run's PATH.
+
+The production runner resolves `claude` from PATH, so the live driver puts
+this script first and the production argv reaches it unchanged. It runs the
+real CLI inside a deny-default sandbox:
+
+- Login: the CLI's own Keychain item, read by the CLI itself through
+  /usr/bin/security. CLAUDE_CONFIG_DIR moves its config, sessions and history
+  into the run root; CLAUDE_SECURESTORAGE_CONFIG_DIR="" keeps the Keychain
+  item name the default one. Nothing is copied, and nothing is written under
+  ~/.claude (writes are allowed only inside the run root).
+- Network: loopback only, to the host's egress proxy (which forwards nothing
+  but the allowed provider hosts) and to this run's workspace MCP listener.
+- Reads: the run root, the toolchain, the CLI binary, the workspace MCP server
+  and its config files, and the Keychain files. Not the host repository, not
+  the task file, not the user's home.
+- Built-in subagents: `--disallowedTools Agent` on every agent, so the only
+  fan-out is delegation through Array.
+
+Environment from the driver: REPLAY_LIVE_ROOT, REPLAY_LIVE_CLAUDE,
+REPLAY_LIVE_PROXY_PORT, and optionally REPLAY_LIVE_LOG (a host directory for
+one launch line per process)."""
+import json
+import os
+from pathlib import Path
+import sys
+from urllib.parse import urlparse
+
+HOME = Path(os.path.expanduser('~'))
+TOOLCHAIN = ['/bin', '/usr/bin', '/usr/lib', '/usr/libexec', '/usr/share', '/System/Library', '/System/Cryptexes',
+             '/System/Volumes/Preboot/Cryptexes', '/private/var/db/dyld', '/Library/Developer/CommandLineTools',
+             '/Applications/Xcode.app/Contents/Developer', '/private/var/db/xcode_select_link',
+             '/private/etc', '/private/var/db/timezone', '/Library/Preferences/Logging']
+KEYCHAIN = [str(HOME / 'Library/Keychains'), '/Library/Keychains', '/private/var/db/mds',
+            str(HOME / 'Library/Preferences/com.apple.security.plist'),
+            '/Library/Preferences/com.apple.security.plist']
+MACH = ['com.apple.SecurityServer', 'com.apple.securityd.xpc', 'com.apple.system.opendirectoryd.libinfo',
+        'com.apple.system.opendirectoryd.membership', 'com.apple.system.notification_center',
+        'com.apple.system.logger', 'com.apple.logd', 'com.apple.diagnosticd', 'com.apple.trustd',
+        'com.apple.trustd.agent', 'com.apple.ocspd', 'com.apple.CoreServices.coreservicesd']
+# The subagent tool's name, and its older one.
+BUILT_IN_SUBAGENTS = 'Agent,Task'
+
+
+def q(text):
+    return json.dumps(str(text))
+
+
+def workspace_mcp(args):
+    """Paths and port of the workspace MCP server named in --mcp-config."""
+    if '--mcp-config' not in args:
+        return [], [], []
+    config_path = args[args.index('--mcp-config') + 1]
+    server = json.loads(Path(config_path).read_text())['mcpServers']['array_workspace']
+    env = server.get('env', {})
+    port = urlparse(env['ARRAY_WORKSPACE_MCP_ENDPOINT']).port
+    executable = os.path.realpath(server['command'])
+    files = [config_path, env['ARRAY_WORKSPACE_MCP_TOKEN_FILE']]
+    return files, [os.path.dirname(executable)], [port]
+
+
+def profile(root, claude, proxy_port, extra_files=(), extra_dirs=(), extra_ports=()):
+    readable = TOOLCHAIN + KEYCHAIN + [root] + list(extra_dirs)
+    literals = [claude] + list(extra_files)
+    ancestors = sorted({str(a) for p in readable + literals for a in Path(p).parents} - set(readable))
+    executable = TOOLCHAIN + [root] + list(extra_dirs)
+    ports = [proxy_port] + list(extra_ports)
+    return ''.join([
+        '(version 1)(deny default)',
+        '(allow process-fork)(allow sysctl-read)(allow signal (target same-sandbox))',
+        '(allow file-read-metadata)(allow ipc-posix-shm)(allow ipc-posix-sem)(allow pseudo-tty)',
+        '(allow process-exec ', ' '.join('(subpath %s)' % q(p) for p in executable), ' (literal %s))' % q(claude),
+        '(allow file-read* (literal "/") ',
+        ' '.join('(subpath %s)' % q(p) for p in readable), ' ',
+        ' '.join('(literal %s)' % q(p) for p in literals + ancestors), ')',
+        '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") ',
+        '(regex #"^/dev/ttys[0-9]+$") (literal "/dev/ptmx") (subpath %s))' % q(root),
+        '(allow file-ioctl (literal "/dev/dtracehelper") (literal "/dev/tty") (regex #"^/dev/ttys[0-9]+$"))',
+        '(allow network-outbound ', ' '.join('(remote tcp %s)' % q('localhost:%d' % p) for p in ports), ')',
+        '(allow mach-lookup ', ' '.join('(global-name %s)' % q(m) for m in MACH), ')'])
+
+
+def main(argv):
+    env = os.environ
+    root = os.path.realpath(env['REPLAY_LIVE_ROOT'])
+    claude = os.path.realpath(env['REPLAY_LIVE_CLAUDE'])
+    port = int(env['REPLAY_LIVE_PROXY_PORT'])
+    files, dirs, ports = workspace_mcp(argv)
+    config = Path(root) / 'claude-config'
+    config.mkdir(exist_ok=True)
+    child = {k: v for k, v in env.items() if not k.startswith('REPLAY_LIVE_')}
+    proxy = 'http://127.0.0.1:%d' % port
+    child.update(CLAUDE_CONFIG_DIR=str(config), CLAUDE_SECURESTORAGE_CONFIG_DIR='',
+                 HTTPS_PROXY=proxy, HTTP_PROXY=proxy, https_proxy=proxy, http_proxy=proxy,
+                 NO_PROXY='localhost,127.0.0.1', no_proxy='localhost,127.0.0.1',
+                 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1', DISABLE_AUTOUPDATER='1',
+                 TMPDIR=str(Path(root) / 'tmp'), CLAUDE_CODE_TMPDIR=str(Path(root) / 'tmp'))
+    args = ['--disallowedTools', BUILT_IN_SUBAGENTS] + argv
+    if env.get('REPLAY_LIVE_LOG'):
+        with open(os.path.join(env['REPLAY_LIVE_LOG'], 'launches.jsonl'), 'a') as log:
+            log.write(json.dumps(dict(pid=os.getpid(), cwd=os.getcwd(), root=root, args=args, ports=[port] + ports)) + '\n')
+    sandbox = profile(root, claude, port, files, dirs, ports)
+    os.execve('/usr/bin/sandbox-exec', ['/usr/bin/sandbox-exec', '-p', sandbox, claude] + args, child)
+
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
