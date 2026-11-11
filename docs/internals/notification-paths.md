@@ -90,19 +90,37 @@ Activity sender. It is recorded here because its flag also heads a helper's
 Managed mode ▸ "Tell the lead only when a helper is stuck"
 (`agents.managedMode.stallAlerts`), is off by default.
 - Off (unchanged): one message after 10 minutes without progress, whatever the
-  helper is doing, including during a long build.
-- On, helper waiting on a live child process or an open tool call: quiet. No
-  message, no sidebar needs-you, no wake heading, however long it waits.
-- On, helper stalled (in a turn, 2 minutes without progress, nothing it started
-  running, no tool call open) for 3 minutes: one message naming the state and
-  when it stalled; the flag reads `stalled, no progress for N min`.
-- On, helper blocked on a request: the 10-minute rule, as when off.
-- Every case: one message per episode, re-armed only by the helper's progress;
-  sent on the existing agent-message path (queued behind a running lead turn, a
-  new turn for an idle lead, nothing to a gone lead, withdrawn if the helper is
-  stopped first). The helper is never messaged, stopped or restarted.
-Witnesses: `--helper-liveness-check` (both settings, byte-identical lead stream
-with the switch off) and `--helper-watchdog-check` (off).
+  helper is doing, including during a long build. A queued message is withdrawn
+  only if the helper is stopped first.
+- On: quiet is always measured from the helper's last progress, checked every
+  30 seconds; a flap between waiting and stalled does not restart it.
+- On, stalled (in a turn, nothing it started this turn running, no tool call
+  open, a harness whose model streams while it reasons): one message once it
+  has gone 3 minutes without progress ("is stalled: no progress since HH:mm
+  (N min)"); the flag reads `stalled, no progress for N min`.
+- On, waiting on a process it started this turn or on an open tool call: quiet
+  until 30 minutes without progress, then one message, "is still waiting on a
+  process it started (cmd) | a tool call (Tool) for N min", naming only the
+  command's first word or the tool's name; the flag reads `still waiting on a
+  process | a tool call for N min`. A process from an earlier turn holds nothing.
+- On, waiting on its own helper (an Array sub-helper or a provider subagent in
+  a turn): quiet; the sub-helper's own state speaks. A sub-helper's message
+  goes past every ancestor in a turn waiting on that chain to the first one
+  free to read it, in practice the top lead, and names the helper it belongs
+  to. One message for the chain, not one per level.
+- On, busy (starting, queued, compacting, waiting out a provider retry), on a
+  harness whose model reasons silently (Codex, Pi), or blocked on a request:
+  the 10-minute message, as when off. Never the stall message.
+- On, withdrawn: a message still in the lead's queue leaves it when the helper
+  makes any progress, finishes or is stopped. A message already delivered to
+  an idle lead's new turn cannot be withdrawn.
+- Every case: one message per quiet episode, re-armed only by the helper's
+  progress; sent on the existing agent-message path (queued behind a running
+  lead turn, a new turn for an idle lead, nothing to a gone lead). The helper
+  is never messaged, stopped or restarted.
+Witnesses: `--helper-liveness-check` (the real switch both ways; with it off the
+lead's stream equals a run with classification inert) and `--helper-watchdog-check`
+(off).
 
 Helper completion wakes (0.7.41) are internal agent messages, using the existing
 supervisor send/composer queue. They add no direct Mac banner, sound, badge,

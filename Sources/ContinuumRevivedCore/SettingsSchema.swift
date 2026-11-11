@@ -270,7 +270,7 @@ public enum SettingsSchema {
                             help: "Shows Managed beside the branch in agent tiles.",
                             keywords: ["managed", "badge", "indicator", "header"]),
                 SettingsRow(.toggle(key: AgentManagedModeConfig.stallAlertsKey, label: "Tell the lead only when a helper is stuck", default: false),
-                            help: "Off: the lead hears after 10 minutes without progress, even during a long build. On: no alert while a helper waits on a build or a tool call; the lead hears once a helper has been stalled for 3 minutes.",
+                            help: "Off: the lead hears after 10 minutes without progress, even during a long build. On: the lead hears once a helper has gone 3 minutes without progress with nothing running, and once if it has waited 30 minutes on a build or tool call. Busy helpers and silent model turns keep the 10 minutes.",
                             keywords: ["stalled", "stuck", "watchdog", "helper", "alert", "no progress"]),
             ]),
             SettingsGroup(id: "agents.lifecycle", title: "Finished agents", rows: [
