@@ -32,6 +32,8 @@ enum SidebarIndicatorSettingsChecks {
     }
 
     static func run() throws {
+        try SidebarPressFeedbackChecks.run()
+        try SidebarSelectionGeometryChecks.run()
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             let suite = "array.sidebar-indicator-check.\(UUID().uuidString)"
             let defaults = QAIsolatedDefaults(isolatedSuiteName: suite)!
@@ -86,6 +88,7 @@ enum SidebarIndicatorSettingsChecks {
             defer { window.orderOut(nil) }
             let id = UUID()
             inbox.openAgentId = id
+            try expect(SidebarActiveIndicatorScope.resolve(in: defaults) == .selected, "scope must preserve selected default")
             let lead = AgentInboxRow(id: id, title: "Active indicator witness", state: .working, createdAt: Date(), identityColor: "teal")
             let helpers = (0..<24).map { index in
                 AgentInboxRow(id: UUID(), title: "Helper \(index)", state: .working,
@@ -106,6 +109,16 @@ enum SidebarIndicatorSettingsChecks {
             var renders: [Data] = []
             // Deliberately visit Gradient before Sheen: stale colour-stop counts
             // from a three-stop wash must not survive in a two-colour surface.
+            inbox.openAgentId = nil
+            defaults.set("working", forKey: SidebarActiveIndicatorScope.defaultsKey)
+            NotificationCenter.default.post(name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey)), object: nil)
+            fixture.settle()
+            try expect(descendants(inbox, AgentInboxCardView.self).contains { $0.isIndicatorWorking }, "working scope did not reach cards")
+            defaults.set("selected", forKey: SidebarActiveIndicatorScope.defaultsKey)
+            NotificationCenter.default.post(name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey)), object: nil)
+            inbox.openAgentId = id
+            fixture.settle()
+            try expect(descendants(inbox, AgentInboxCardView.self).allSatisfy { !$0.isIndicatorWorking }, "selected scope retained working indicators")
             for style in [SidebarActiveIndicatorStyle.classic, .gradient, .sheen, .duplex] {
                 let button = try control()
                 // Bring the label/help and control into the Form's viewport.

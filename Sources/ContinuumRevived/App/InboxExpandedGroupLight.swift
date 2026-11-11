@@ -86,7 +86,8 @@ final class InboxExpandedGroupLight: NSView {
             let a = gradient(dark ? 0.20 : 0.13, radial: true)
             a.startPoint = CGPoint(x: 0.1,y: 0.08); a.endPoint = CGPoint(x: 1.1,y: 0.78)
             let b = gradient(dark ? 0.17 : 0.11, radial: true)
-            let y = slice.runningY.map { $0 / h } ?? min(0.9, slice.leadHeight / h * 0.8)
+            let y = slice.runningY.map { min(0.9, $0 / h) }
+                ?? (slice.rowIndex == 0 ? 0.3 : min(0.9, slice.leadHeight / h * 0.8))
             b.startPoint = CGPoint(x: 0.88,y: y); b.endPoint = CGPoint(x: 0.08,y: y + 0.48)
             focus = b
             let elapsed = slice.focusChangedAt.map { CACurrentMediaTime() - $0 } ?? 0
@@ -101,7 +102,7 @@ final class InboxExpandedGroupLight: NSView {
                     b.add(settle, forKey: "group.settle." + key)
                 }
             }
-            let breath = CAKeyframeAnimation(keyPath: "opacity"); breath.values = [0.2,0.85,0.2]; breath.keyTimes = [0,0.5,1]; breath.duration = 6
+            let breath = CAKeyframeAnimation(keyPath: "opacity"); breath.values = [0.2,0.85,0.2]; breath.keyTimes = [0,0.5,1]; breath.duration = 4
             breath.timingFunctions = [.init(name: .easeInEaseOut),.init(name: .easeInEaseOut)]
             animate(breath,on:b,key:"group.focus")
         case "gradient":
@@ -135,6 +136,16 @@ final class InboxExpandedGroupLight: NSView {
             animate(sweep,on:shine,key:"group.sheen",delay:Double(slice.rowIndex) * 0.22)
             let rim = CAShapeLayer();rim.frame = whole.bounds;rim.path = CGPath(roundedRect:whole.bounds.insetBy(dx:0.5,dy:0.5),cornerWidth:Radius.card,cornerHeight:Radius.card,transform:nil)
             rim.fillColor = nil;rim.strokeColor = colour.withAlphaComponent(dark ? 0.10 : 0.075).cgColor;rim.lineWidth = 1;whole.addSublayer(rim)
+        }
+        if slice.rowIndex == 0 && style != "sheen" {
+            let rim = CAShapeLayer()
+            rim.frame = whole.bounds
+            rim.path = CGPath(roundedRect: whole.bounds.insetBy(dx: 0.5, dy: 0.5),
+                              cornerWidth: Radius.card, cornerHeight: Radius.card, transform: nil)
+            rim.fillColor = nil
+            rim.strokeColor = colour.withAlphaComponent(dark ? 0.10 : 0.075).cgColor
+            rim.lineWidth = 1
+            whole.addSublayer(rim)
         }
     }
 }

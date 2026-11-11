@@ -9,6 +9,7 @@ import ContinuumRevivedAgentUI
 enum SidebarRowPresentationChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
     static func run() async throws -> String {
+        try SidebarSelectionGeometryChecks.run()
         let directory = URL(fileURLWithPath: ProcessInfo.processInfo.environment["CONTINUUM_QA_CAPTURE"]
             ?? "qa-runs/sidebar-row-presentation", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -354,7 +354,7 @@ struct SettingsFieldRow: View {
             NeutralThemePickerRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == SidebarHeaderBackground.defaultsKey:
             SidebarHeaderBackgroundSettingsRow(model: model, row: row)
-        case let .choice(key, _, _, _, _) where key == SidebarActiveIndicatorStyle.defaultsKey:
+        case let .choice(key, _, _, _, _) where key == SidebarActiveIndicatorStyle.defaultsKey || key == SidebarActiveIndicatorScope.defaultsKey:
             SidebarActiveIndicatorSettingsRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == CornerStyle.defaultsKey:
             PickerRow(row: row, model: model, segmented: true)
