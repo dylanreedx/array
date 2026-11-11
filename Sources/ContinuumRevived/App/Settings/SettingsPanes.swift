@@ -282,6 +282,8 @@ private struct SettingsPaneForm: View {
                         } else {
                             Section(group.title ?? "") { InfoRow(text: "The canvas background is not available here.") }
                         }
+                    } else if group.rows.count == 1, case .custom("usage", _) = group.rows[0].field {
+                        SettingsUsageSections(settings: model, field: group.rows[0].field)
                     } else if group.rows.count == 1, case .custom("agentCharacters", _) = group.rows[0].field {
                         AgentCharacterSections(model: model.agentCharacters, settings: model, field: group.rows[0].field)
                     } else {
