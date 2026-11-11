@@ -26,9 +26,9 @@ enum RequestTelemetryChecks {
         var script = HelperEvidenceChecks.claude
         let edits = [
             ("    if o.get('type') != 'user': continue\n", "    if o.get('type') != 'user': continue\n    deferred = []\n"),
-            ("for frame in open('frames-' + f.group(1) + '.jsonl'): print(frame.replace('SESSION', sid).strip(), flush=True)\n",
-             "for frame in open('frames-' + f.group(1) + '.jsonl'):\n            frame = frame.replace('SESSION', sid).strip()\n"
-             + "            if json.loads(frame).get('type') == 'result': deferred.append(frame)\n            else: print(frame, flush=True)\n"),
+            ("lambda frame: print(json.dumps(frame).replace('SESSION', sid), flush=True)",
+             "lambda frame: deferred.append(json.dumps(frame).replace('SESSION', sid)) if frame.get('type') == 'result'"
+             + " else print(json.dumps(frame).replace('SESSION', sid), flush=True)"),
             ("    emit({'type':'result','subtype':'success','is_error':False,'session_id':sid,'result':'done','duration_ms':1,'num_turns':1})",
              "    for frame in deferred: print(frame, flush=True)\n"
              + "    if not deferred: emit({'type':'result','subtype':'success','is_error':False,'session_id':sid,'result':'done','duration_ms':1,'num_turns':1})"),
@@ -56,11 +56,9 @@ enum RequestTelemetryChecks {
             ("        result = dict(turn=dict(id='fixture-turn'))\n",
              "        turn_id = 'fixture-turn-' + str(uuid.uuid4())\n        after = []\n        result = dict(turn=dict(id=turn_id))\n"),
             ("turn=dict(id='fixture-turn'))))", "turn=dict(id=turn_id))))"),
-            ("for frame in open('frames-' + frames.group(1) + '.jsonl'): emit(json.loads(frame.replace('SESSION', session_id)))",
-             "for frame in open('frames-' + frames.group(1) + '.jsonl'):\n"
-             + "                    frame = json.loads(frame.replace('SESSION', session_id).replace('TURN', turn_id))\n"
-             + "                    if frame.pop('_after', False): after.append(frame)\n"
-             + "                    else: emit(frame)"),
+            ("lambda frame: emit(json.loads(json.dumps(frame).replace('SESSION', session_id)))",
+             "lambda frame: (lambda f: after.append(f) if f.pop('_after', False) else emit(f))("
+             + "json.loads(json.dumps(frame).replace('SESSION', session_id).replace('TURN', turn_id)))"),
             ("        emit(dict(method='turn/completed', params=dict(threadId=session_id, turn=dict(id='fixture-turn',status='completed'))))",
              "        emit(dict(method='turn/completed', params=dict(threadId=session_id, turn=dict(id=turn_id,status='completed'))))\n"
              + "        for frame in after: emit(frame)"),

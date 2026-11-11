@@ -536,6 +536,14 @@
         "description" : "Create a child agent in Array, inheriting your checkout and, by default, harness and model, and place its tile beside you on the canvas. Returns the real childAgentId, tileId, per-step statuses (creation, attachment, durability, presentation) and childRunning. Requires an idempotencyKey: the same key with the same payload never creates a second child. Under Agent permissions Ask first, the first delegation in a session asks the user (scope_approval_required if declined); under Free it does not. Errors are structured (unsupported, permission_denied, idempotency_conflict, outcome_unknown); concurrent Managed helpers get separate worktrees.\n\nGuidelines:\n- Delegate only when the user asked for it; discussing delegation is not an instruction to spawn.\n- Reuse idempotencyKey for transport retries. For a new attempt, use retryOf and a new key.\n- If the result is partial with retryOp 'agent.reveal', the child EXISTS: call array_reveal_agent with its childAgentId; do not delegate again.\n- On cancelled or outcome_unknown, call array_get_operation with the operationId (or your idempotencyKey) before doing anything else.\n- Optionally pass harness (Claude Code, Codex or Pi) and an exact fully qualified model from that harness's live catalogue. Omit both to inherit; a different harness without model uses its own catalogue default. Unready or exhausted harnesses and unknown models are refused; no silent CLI fallback.\n- Continue independent work or end your turn: Array delivers the helper's result to you by itself, as a message when you are idle or inside the turn you are running. Never poll, sleep or message the helper to check on it.",
         "inputSchema" : {
           "properties" : {
+            "contract" : {
+              "description" : "owns, shared, mustNotTouch, checks, decisions: string lists; costLimit, report: strings. Paths checkout-relative. Overlap with live siblings is advice in the result.",
+              "type" : "object"
+            },
+            "effort" : {
+              "description" : "Optional effort advertised by the selected harness live catalogue for the selected model. Unknown or unavailable efforts are refused.",
+              "type" : "string"
+            },
             "harness" : {
               "description" : "Child CLI; omit to inherit yours. Must be installed and signed in.",
               "enum" : [
@@ -590,7 +598,7 @@
               "type" : "object"
             },
             "retryOf" : {
-              "description" : "Failed\/stopped child of yours to continue; carries its brief, changed files and report.",
+              "description" : "Failed\/stopped child of yours to continue; carries its brief, effort, contract, changed files and report.",
               "type" : "string"
             },
             "task" : {
@@ -2403,6 +2411,14 @@
         "description" : "Create a child agent in Array, inheriting your checkout and, by default, harness and model, and place its tile beside you on the canvas. Returns the real childAgentId, tileId, per-step statuses (creation, attachment, durability, presentation) and childRunning. Requires an idempotencyKey: the same key with the same payload never creates a second child. Under Agent permissions Ask first, the first delegation in a session asks the user (scope_approval_required if declined); under Free it does not. Errors are structured (unsupported, permission_denied, idempotency_conflict, outcome_unknown); concurrent Managed helpers get separate worktrees.\n\nGuidelines:\n- Delegate only when the user asked for it; discussing delegation is not an instruction to spawn.\n- Reuse idempotencyKey for transport retries. For a new attempt, use retryOf and a new key.\n- If the result is partial with retryOp 'agent.reveal', the child EXISTS: call array_reveal_agent with its childAgentId; do not delegate again.\n- On cancelled or outcome_unknown, call array_get_operation with the operationId (or your idempotencyKey) before doing anything else.\n- Optionally pass harness (Claude Code, Codex or Pi) and an exact fully qualified model from that harness's live catalogue. Omit both to inherit; a different harness without model uses its own catalogue default. Unready or exhausted harnesses and unknown models are refused; no silent CLI fallback.\n- Continue independent work or end your turn: Array delivers the helper's result to you by itself, as a message when you are idle or inside the turn you are running. Never poll, sleep or message the helper to check on it.",
         "inputSchema" : {
           "properties" : {
+            "contract" : {
+              "description" : "owns, shared, mustNotTouch, checks, decisions: string lists; costLimit, report: strings. Paths checkout-relative. Overlap with live siblings is advice in the result.",
+              "type" : "object"
+            },
+            "effort" : {
+              "description" : "Optional effort advertised by the selected harness live catalogue for the selected model. Unknown or unavailable efforts are refused.",
+              "type" : "string"
+            },
             "harness" : {
               "description" : "Child CLI; omit to inherit yours. Must be installed and signed in.",
               "enum" : [
@@ -2457,7 +2473,7 @@
               "type" : "object"
             },
             "retryOf" : {
-              "description" : "Failed\/stopped child of yours to continue; carries its brief, changed files and report.",
+              "description" : "Failed\/stopped child of yours to continue; carries its brief, effort, contract, changed files and report.",
               "type" : "string"
             },
             "task" : {
@@ -4336,6 +4352,14 @@
           "name" : "array_delegate",
           "parameters" : {
             "properties" : {
+              "contract" : {
+                "description" : "owns, shared, mustNotTouch, checks, decisions: string lists; costLimit, report: strings. Paths checkout-relative. Overlap with live siblings is advice in the result.",
+                "type" : "object"
+              },
+              "effort" : {
+                "description" : "Optional effort advertised by the selected harness live catalogue for the selected model. Unknown or unavailable efforts are refused.",
+                "type" : "string"
+              },
               "harness" : {
                 "description" : "Child CLI; omit to inherit yours. Must be installed and signed in.",
                 "enum" : [
@@ -4390,7 +4414,7 @@
                 "type" : "object"
               },
               "retryOf" : {
-                "description" : "Failed\/stopped child of yours to continue; carries its brief, changed files and report.",
+                "description" : "Failed\/stopped child of yours to continue; carries its brief, effort, contract, changed files and report.",
                 "type" : "string"
               },
               "task" : {
@@ -6421,6 +6445,14 @@
           "name" : "array_delegate",
           "parameters" : {
             "properties" : {
+              "contract" : {
+                "description" : "owns, shared, mustNotTouch, checks, decisions: string lists; costLimit, report: strings. Paths checkout-relative. Overlap with live siblings is advice in the result.",
+                "type" : "object"
+              },
+              "effort" : {
+                "description" : "Optional effort advertised by the selected harness live catalogue for the selected model. Unknown or unavailable efforts are refused.",
+                "type" : "string"
+              },
               "harness" : {
                 "description" : "Child CLI; omit to inherit yours. Must be installed and signed in.",
                 "enum" : [
@@ -6475,7 +6507,7 @@
                 "type" : "object"
               },
               "retryOf" : {
-                "description" : "Failed\/stopped child of yours to continue; carries its brief, changed files and report.",
+                "description" : "Failed\/stopped child of yours to continue; carries its brief, effort, contract, changed files and report.",
                 "type" : "string"
               },
               "task" : {
