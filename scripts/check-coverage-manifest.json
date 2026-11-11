@@ -73,6 +73,11 @@
       "reason": "fixture histories prove every pre-pass rule red and green"
     }
   ],
-  "targetedOnly": [],
+  "targetedOnly": [
+    {
+      "flag": "--managed-run-ledger-timing-check",
+      "reason": "Prints what the run ledger adds to the request path and asserts nothing about time, so it guards no bug class."
+    }
+  ],
   "exceptions": []
 }
