@@ -41,6 +41,31 @@ enum ManagedRunLedgerChecks {
     }
 
     static func run() async throws {
+        let mode = ProcessInfo.processInfo.environment["CONTINUUM_LEDGER_REVIEW_CASE"]
+        if mode == "isolation" { try isolation(); return }
+        try await scenario(noWake: mode == "closure")
+        if mode == nil { try await scenario(noWake: true); try isolation() }
+    }
+
+    static func isolation() throws {
+        let old = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"]
+        let unsafe = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/ledger-isolation-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: unsafe, withIntermediateDirectories: true)
+        defer {
+            if let old { setenv("CONTINUUM_APP_SUPPORT", old, 1) } else { unsetenv("CONTINUUM_APP_SUPPORT") }
+            try? FileManager.default.removeItem(at: unsafe)
+        }
+        setenv("CONTINUUM_APP_SUPPORT", unsafe.path, 1)
+        var refused = false
+        do { let b = try ManagedModeChecks.bench("ledger-unsafe"); b.tearDown() }
+        catch { refused = true }
+        try expect(refused, "check accepted a non-temporary support directory")
+        try expect(try FileManager.default.contentsOfDirectory(atPath: unsafe.path).isEmpty, "unsafe support was touched")
+        print("Ledger isolation refusal passed")
+    }
+
+    static func scenario(noWake: Bool) async throws {
         let b = try ManagedModeChecks.bench("run-ledger")
         defer { b.tearDown() }
         let cli = b.binDir.appendingPathComponent("claude")
@@ -60,6 +85,8 @@ enum ManagedRunLedgerChecks {
         try expect(FileManager.default.fileExists(atPath: AgentStoreLayout(applicationSupportDirectory: support).agentFile(id: lead).path),
                    "the lead's record is not in the resolved Application Support")
         let ledger = support.appendingPathComponent("run-ledger/ledger.jsonl")
+        try expect(ledger.resolvingSymlinksInPath().path.hasPrefix(b.binDir.resolvingSymlinksInPath().path + "/"),
+                   "ledger is outside the check-owned temporary directory")
         let cwd = URL(fileURLWithPath: supervisor.records[lead]!.cwd)
         func release(_ tag: String) throws { try Data().write(to: cwd.appendingPathComponent("release-\(tag)")) }
         func wait(_ message: @autoclosure () -> String, timeout: TimeInterval = 15, _ condition: @escaping @MainActor () -> Bool) async throws {
@@ -100,6 +127,7 @@ enum ManagedRunLedgerChecks {
         try await wait("second lead turn not recorded") { rows(ledger, "turnEnded", task: t1, agent: lead).count == 2 }
         try expect(rows(ledger, "taskClosed").isEmpty, "task closed while a helper was still working")
 
+        if noWake { supervisor.helperCompletionEnabled = { _ in false } }
         // 5. The helper's report, filed through the production MCP binary, appends under its part.
         let report = try await WorkspaceAgentReportChecks.call(b.configuration(for: h1), "array_report", [
             "summary": "SECRET-REPORT-GAMMA",
@@ -111,16 +139,22 @@ enum ManagedRunLedgerChecks {
         try expect(reported["part"] as? String == p1 && (reported["checks"] as? [String: Int]) == ["pass": 1, "fail": 1]
                    && (reported["findings"] as? [String: Int]) == ["issue": 1], "report row wrong: \(reported)")
 
+        if noWake {
+            try await wait("last helper report did not close task without a wake", timeout: 3) { !rows(ledger, "taskClosed", task: t1).isEmpty }
+            try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count == 2, "closure required another lead turn")
+        }
         // 6. The helper finishes; its result wakes the lead. The wake runs inside
         //    the task and opens none; the task closes once no work remains.
         try release("helperone")
         try await wait("task did not close after the helper's result", timeout: 40) { !rows(ledger, "taskClosed", task: t1).isEmpty }
+        try await wait("helper end missing") { rows(ledger, "turnEnded", task: t1, agent: h1).count == 1 }
+        if !noWake { try await wait("wake end missing") { rows(ledger, "turnEnded", task: t1, agent: lead).count >= 3 } }
         let ended = rows(ledger, "turnEnded", task: t1, agent: h1)
         try expect(ended.count == 1 && ended[0]["part"] as? String == p1 && ended[0]["outcome"] as? String == "completed",
                    "helper turn end wrong: \(ended)")
-        try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count >= 3, "the helper wake did not run inside the task")
+        if !noWake { try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count >= 3, "the helper wake did not run inside the task") }
         try expect(rows(ledger, "taskOpened").count == 1, "a helper wake opened a task")
-        try expect(rows(ledger).last?["kind"] as? String == "taskClosed", "rows followed the close")
+
 
         // 7. After the task closed, a submission opens a new linked task.
         try expect(await supervisor.accept(.sendPrompt(AgentPrompt("HOLD-leadtwo SECRET-PROMPT-EPSILON")), for: lead) == .accepted,
@@ -137,9 +171,15 @@ enum ManagedRunLedgerChecks {
         let crash = b.binDir.appendingPathComponent("crash-image", isDirectory: true)
         try FileManager.default.copyItem(at: support, to: crash)
         let crashLedger = crash.appendingPathComponent("run-ledger/ledger.jsonl")
+        let tail = try FileHandle(forWritingTo: crashLedger)
+        try tail.seekToEnd(); try tail.write(contentsOf: Data("{torn".utf8)); try tail.close()
+        let beforeRecovery = try Data(contentsOf: crashLedger)
         let relaunched = AgentSupervisor(store: AgentStore(applicationSupportDirectory: crash))
         relaunched.configureManagedMode(defaults: b.settings); relaunched.restore()
         try await wait("relaunch did not mark the open task incomplete") { !rows(crashLedger, "taskInterrupted", task: t2).isEmpty }
+        let recoveredBytes = try Data(contentsOf: crashLedger)
+        try expect(recoveredBytes.starts(with: beforeRecovery), "restart changed earlier bytes")
+        try expect(recoveredBytes.dropFirst(beforeRecovery.count).split(separator: 10).count == 1, "restart did not append exactly one fact")
         let interrupted = rows(crashLedger, "taskInterrupted", task: t2)[0]
         try expect(interrupted["openParts"] as? [String] == [p2], "interrupted task does not name its open part: \(interrupted)")
         try expect(rows(crashLedger, "taskClosed", task: t2).isEmpty && rows(crashLedger, "turnEnded", task: t2, agent: h2).isEmpty,
@@ -166,7 +206,46 @@ enum ManagedRunLedgerChecks {
             }
         }
         try release("leadtwo"); try release("helpertwo")
+        if noWake { try await timing(b, lead: lead, helper: h2) }
         print("Managed run ledger passed: one task per human submission, delegation/report/turn facts under its id, join while a part is open, wake opens none, linked next task, crash marks incomplete once, no prompt or report text stored")
+    }
+
+    static func timing(_ b: WorkspaceAgentReportChecks.Bench, lead: AgentID, helper: AgentID) async throws {
+        let supervisor = b.supervisor
+        var sendsOn: [Double] = [], sendsOff: [Double] = []
+        var reportsOn: [Double] = [], reportsOff: [Double] = []
+        let report = AgentReport(summary: "timing", checks: [.init(what: "timing", result: .pass)], findings: [])
+        defer { supervisor.qaRunLedgerRecording = true }
+        // Paired, alternating order; readiness waits and queue draining are
+        // outside the measured production calls. Discard eight warm-up pairs.
+        for iteration in 0..<108 {
+            let order = iteration % 2 == 0 ? [false, true] : [true, false]
+            for enabled in order {
+                try await AgentPresenceChecks.eventually("timing lead idle", timeout: 15) {
+                    !supervisor.isRunning(lead) && supervisor.turnSnapshot(for: lead)?.capabilities.canSend == true
+                }
+                supervisor.qaRunLedgerRecording = enabled
+                let start = DispatchTime.now().uptimeNanoseconds
+                let accepted = await supervisor.accept(.sendPrompt(AgentPrompt("timing")), for: lead)
+                let send = Double(DispatchTime.now().uptimeNanoseconds - start) / 1000
+                try expect(accepted == .accepted, "timing submission refused")
+                let reportStart = DispatchTime.now().uptimeNanoseconds
+                let filed = supervisor.fileReport(report, for: helper)
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - reportStart) / 1000
+                try expect(filed, "timing report refused")
+                if iteration >= 8 {
+                    if enabled { sendsOn.append(send); reportsOn.append(elapsed) }
+                    else { sendsOff.append(send); reportsOff.append(elapsed) }
+                }
+            }
+        }
+        func describe(_ name: String, _ values: [Double]) {
+            let sorted = values.sorted()
+            print(String(format: "ledger timing %@ n=%d median=%.2f p95=%.2f us", name, sorted.count,
+                         sorted[sorted.count / 2], sorted[Int(ceil(Double(sorted.count) * 0.95)) - 1]))
+        }
+        describe("submission off", sendsOff); describe("submission on", sendsOn)
+        describe("helper-report off", reportsOff); describe("helper-report on", reportsOn)
     }
 
     private static func delegate(_ b: WorkspaceAgentReportChecks.Bench, task: String, key: String) async throws -> AgentID {

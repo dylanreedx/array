@@ -1044,6 +1044,7 @@ final class AgentSupervisor {
 
     private let store: AgentStore
     let runLedger: ManagedRunLedger
+    var qaRunLedgerRecording = true
     private var wakeupScheduler: AgentWakeupScheduler?
     private var scheduledQueueAdmissions: Set<UUID> = []
     var qaAfterScheduledQueueWrite: (() async -> Void)?
@@ -6187,9 +6188,9 @@ final class AgentSupervisor {
         helperFoldEligibleSince[id] = nil
         record.lastReport = AgentFiledReport(report: report, filedAt: date)
         guard persist(record) else { return false }
-        runLedger.fact(kind: "reported", agent: id.rawValue, source: UUID().uuidString,
-            checks: Dictionary(grouping: report.checks, by: { $0.result.rawValue }).mapValues { $0.count },
-            findings: Dictionary(grouping: report.findings, by: { $0.level.rawValue }).mapValues { $0.count })
+        if qaRunLedgerRecording {
+            runLedger.reported(agent: id.rawValue, at: date, checks: report.checks, findings: report.findings)
+        }
         onSelfReportChanged?(id)
         // A report filed between turns is a result: it releases a turn held
         // as progress, or follows a result already delivered as a note.
@@ -8804,7 +8805,7 @@ final class AgentSupervisor {
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
         let result = await accept(intent.neutralizingTypedEnvelopes, for: agentID, sharedAdmission: nil)
-        if result == .accepted, effectiveMode(for: agentID) == .managed, records[agentID]?.parentAgentID == nil {
+        if qaRunLedgerRecording, result == .accepted, effectiveMode(for: agentID) == .managed, records[agentID]?.parentAgentID == nil {
             switch intent {
             case .send, .sendPrompt, .queue:
                 runLedger.submission(agent: agentID.rawValue, project: records[agentID]?.projectId)
@@ -11772,9 +11773,9 @@ final class AgentSupervisor {
         facts.presence.reduce(event, at: now)
         switch event {
         case let .turnStarted(_, turnID):
-            runLedger.fact(kind: "working", agent: id.rawValue, source: "working/\(id)/\(turnID)")
+            if qaRunLedgerRecording { runLedger.working(agent: id.rawValue, turn: turnID) }
         case let .turnCompleted(_, turnID, outcome, _):
-            runLedger.fact(kind: "turnEnded", agent: id.rawValue, source: "ended/\(id)/\(turnID)", outcome: String(describing: outcome))
+            if qaRunLedgerRecording { runLedger.ended(agent: id.rawValue, turn: turnID, outcome: outcome) }
         default: break
         }
         switch event {
