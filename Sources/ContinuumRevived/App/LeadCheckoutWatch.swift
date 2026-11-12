@@ -17,7 +17,9 @@ import Foundation
 /// flush and no process; a deleted folder's files, and files written then
 /// committed inside the call, are each seen. Events under `.git/` and `.array/`
 /// never count, nor files git ignores (one `git check-ignore` over the changed
-/// paths only, lock-free, bounded). An event counts for one call at most.
+/// paths only, lock-free, bounded). A file replaced by rename is added only if
+/// git's index does not hold it (one `git ls-files`, same bounds, only when a
+/// call replaced files). An event counts for one call at most.
 ///
 /// Telling the lead from the first helper: that helper shares the lead's
 /// checkout. If any other agent on the same checkout was running when the call
@@ -258,6 +260,17 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         case let .success(set): ignored = set
         case let .failure(reason): return .failure(reason)
         }
+        // An editor's or `sed -i`'s save replaces a file by rename, so FSEvents
+        // calls it created. Git decides: a path it already tracks was modified.
+        let replaced = order.filter { !ignored.contains($0) && (created.contains($0) || removedOrRenamed.contains($0))
+            && FileManager.default.fileExists(atPath: root + "/" + $0) }
+        var tracked = Set<String>()
+        if !replaced.isEmpty {
+            switch Self.trackedPaths(replaced, root: root) {
+            case let .success(set): tracked = set
+            case let .failure(reason): return .failure(reason)
+            }
+        }
         var change = Change()
         for path in order.sorted() where !ignored.contains(path) {
             let exists = FileManager.default.fileExists(atPath: root + "/" + path)
@@ -265,7 +278,7 @@ final class LeadCheckoutWatch: @unchecked Sendable {
                 // Created and removed inside the window: a temporary file, nothing changed.
                 if Self.createdFirst(path, events) { continue }
                 change.deleted += 1
-            } else if created.contains(path) || removedOrRenamed.contains(path) {
+            } else if (created.contains(path) || removedOrRenamed.contains(path)) && !tracked.contains(path) {
                 change.added += 1
             } else {
                 change.modified += 1
@@ -285,9 +298,24 @@ final class LeadCheckoutWatch: @unchecked Sendable {
     /// `git check-ignore` over these paths only: lock-free, timed, capped.
     /// Outside a repository nothing is ignored.
     static func ignoredPaths(_ paths: [String], root: String) -> Result<Set<String>, Unknown> {
+        // 0: some ignored; 1: none; 128: not a repository (nothing ignored).
+        git(["check-ignore", "--stdin", "-z"], stdin: paths, root: root, empty: [1, 128])
+    }
+
+    /// Which of these paths git's index holds, so a file replaced by rename
+    /// reads as modified. A file added and committed inside one call reads as
+    /// modified too. Outside a repository nothing is tracked.
+    static func trackedPaths(_ paths: [String], root: String) -> Result<Set<String>, Unknown> {
+        git(["--literal-pathspecs", "ls-files", "-z", "--"] + paths, stdin: [], root: root, empty: [128])
+    }
+
+    /// Runs git lock-free (`--no-optional-locks`) with
+    /// `gitTimeout` and `maxGitOutput`; the NUL-separated output, or nothing
+    /// for an exit status in `empty`.
+    private static func git(_ arguments: [String], stdin paths: [String], root: String, empty: Set<Int32>) -> Result<Set<String>, Unknown> {
         let process = Process(), input = Pipe(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        process.arguments = ["--no-optional-locks", "-C", root, "check-ignore", "--stdin", "-z"]
+        process.arguments = ["--no-optional-locks", "-C", root] + arguments
         var environment = ProcessInfo.processInfo.environment
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         process.environment = environment
@@ -297,7 +325,7 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         guard (try? process.run()) != nil else { return .failure(.gitFailed) }
         let feed = DispatchQueue(label: "dev.array.lead-checkout.feed")
         feed.async {
-            input.fileHandleForWriting.write(Data(paths.joined(separator: "\0").utf8 + [0]))
+            if !paths.isEmpty { input.fileHandleForWriting.write(Data(paths.joined(separator: "\0").utf8 + [0])) }
             try? input.fileHandleForWriting.close()
         }
         var data = Data(), tooLarge = false
@@ -319,11 +347,8 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         }
         _ = readDone.wait(timeout: .now() + 1)
         if tooLarge { return .failure(.gitOutputTooLarge) }
-        // 0: some ignored; 1: none; 128: not a repository (nothing ignored).
-        switch process.terminationStatus {
-        case 0: return .success(Set(data.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }))
-        case 1, 128: return .success([])
-        default: return .failure(.gitFailed)
-        }
+        if empty.contains(process.terminationStatus) { return .success([]) }
+        guard process.terminationStatus == 0 else { return .failure(.gitFailed) }
+        return .success(Set(data.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }))
     }
 }
