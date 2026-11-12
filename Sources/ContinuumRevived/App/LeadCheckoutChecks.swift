@@ -22,17 +22,34 @@ enum LeadCheckoutChecks {
     /// The helper-evidence double, plus `{"__delete": path}`.
     /// A helper's brief quotes its lead's request, so the LAST `FRAMES-x` names its own.
     static let claude = HelperEvidenceChecks.claude.replacingOccurrences(
-        of: "        if '__write' in o:", with: "        if '__delete' in o: os.unlink(o['__delete'])\n        elif '__sleep' in o: time.sleep(o['__sleep'])\n        elif '__write' in o:")
+        of: "        if '__write' in o:", with: """
+                if '__delete' in o: os.unlink(o['__delete'])
+                elif '__rmtree' in o: __import__('shutil').rmtree(o['__rmtree'])
+                elif '__sleep' in o: time.sleep(o['__sleep'])
+                elif '__wait' in o:
+                    while not os.path.exists(o['__wait']): time.sleep(.02)
+                elif '__git' in o:
+                    r = __import__('subprocess').run(['git', '-c', 'user.name=f', '-c', 'user.email=f@invalid', '-c', 'commit.gpgsign=false'] + o['__git'], capture_output=True)
+                    open('git-exits.txt', 'a').write(str(r.returncode) + '\\n')
+                elif '__write' in o:
+        """)
         .replacingOccurrences(of: "    f = re.search(r'FRAMES-([a-z0-9]+)', json.dumps(o))\n",
                               with: "    f = ([None] + list(re.finditer(r'FRAMES-([a-z0-9]+)', json.dumps(o))))[-1]\n")
 
-    static func frames(_ steps: [Step], root: URL, deleting: [String: String] = [:]) throws -> String {
+    /// `effects[id]` run inside call `id`, before its result; `pause[id]`
+    /// replaces the one second that stands in for a model turn before it.
+    static func frames(_ steps: [Step], root: URL, deleting: [String: String] = [:],
+                       effects: [String: [[String: Any]]] = [:], pause: [String: Double] = [:]) throws -> String {
         var frames: [[String: Any]] = []
         for step in steps {
             var some = HelperEvidenceChecks.claudeFrames([step], root: root)
-            if case let .shell(id, _, _, _) = step, let path = deleting[id] { some.insert(["__delete": path], at: 1) }
-            // A real lead's calls wait on a model turn; one second stands in.
-            frames += [["__sleep": 1.0]] + some
+            var id = ""
+            if case let .shell(call, _, _, _) = step { id = call }
+            if case let .shellWrite(call, _, _) = step { id = call }
+            if let path = deleting[id] { some.insert(["__delete": path], at: 1) }
+            some.insert(contentsOf: effects[id] ?? [], at: some.count - 1)
+            let wait = pause[id] ?? 1.0
+            frames += (wait > 0 ? [["__sleep": wait]] : []) + some
         }
         let lines = try frames.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }
         return lines.joined(separator: "\n") + "\n"
@@ -377,6 +394,14 @@ enum LeadCheckoutChecks {
         print("Lead hooks passed: five hook receipts of a Managed lead, through the real hook binary, each one ledger row under its task: event named (an unknown event as other), Array's answer as the outcome (the brief as context), no prompt, command, output, session or brief text; a helper's hook not recorded")
     }
 
+    /// Puts `{"__wait": marker}` before the frame that starts `call`.
+    static func insertWait(before call: String, marker: String, in url: URL) throws {
+        var lines = try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map(String.init)
+        guard let index = lines.firstIndex(where: { $0.contains(call) }) else { throw WorkspaceAgentReportChecks.Failure(description: "no frame for \(call)") }
+        lines.insert("{\"__wait\": \"\(marker)\"}", at: index)
+        try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
     static func seen() async throws {
         let b = try ManagedModeChecks.bench("lead-checkout")
         defer { b.tearDown() }
@@ -384,7 +409,11 @@ enum LeadCheckoutChecks {
         try expect(claude.contains("__delete") && claude.contains("finditer(r'FRAMES"), "the Claude double changed shape")
         try claude.write(to: b.binDir.appendingPathComponent("claude"), atomically: true, encoding: .utf8)
         let ignore = root.appendingPathComponent(".gitignore")
-        try (try String(contentsOf: ignore, encoding: .utf8) + ".build/\n").write(to: ignore, atomically: true, encoding: .utf8)
+        try (try String(contentsOf: ignore, encoding: .utf8) + ".build/\ngit-exits.txt\n").write(to: ignore, atomically: true, encoding: .utf8)
+        for path in ["docs/sub/a.md", "docs/sub/b.md"] {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(path).deletingLastPathComponent(), withIntermediateDirectories: true)
+            try "a\n".write(to: root.appendingPathComponent(path), atomically: true, encoding: .utf8)
+        }
         for arguments in [["add", "-A"], ["commit", "-q", "-m", "ignore builds"]] { try HelperEvidenceChecks.git(arguments, root) }
         let supervisor = b.supervisor
         func wait(_ message: String, timeout: TimeInterval = 20, _ condition: @escaping @MainActor () -> Bool) async throws {
@@ -427,20 +456,23 @@ enum LeadCheckoutChecks {
         let helperRoot = URL(fileURLWithPath: supervisor.records[helper]!.checkoutRoot)
         try expect(helperRoot.resolvingSymlinksInPath() == root.resolvingSymlinksInPath(), "the first helper does not share the lead's checkout")
         try await wait("helper did not start") { supervisor.isRunning(helper) }
-        try frames([.shellWrite("t1", "sed -i '' s/a/b/ Sources/Theta.swift", "Sources/Theta.swift")], root: root)
+        // t1 writes while the helper runs; n1 writes nothing and starts just
+        // after the helper wrote and ended its turn.
+        try frames([.shellWrite("t1", "sed -i '' s/a/b/ Sources/Theta.swift", "Sources/Theta.swift"), .shell("n1", "true", exit: 0)], root: root,
+                   effects: ["n1": []], pause: ["n1": 0])
             .write(to: root.appendingPathComponent("frames-busy.jsonl"), atomically: true, encoding: .utf8)
+        try insertWait(before: "toolu_n1", marker: "go-after", in: root.appendingPathComponent("frames-busy.jsonl"))
         try marker("go-busy")
         try await wait("busy frames not observed") { ended.contains("toolu_t1") }
-        try marker("release-busy")
-        try await wait("busy turn did not end") { !supervisor.isRunning(lead) }
 
-        // The helper's own shell write, after the lead's calls ended.
+        // The helper's own shell write; its turn ends, then the lead's n1 starts.
         var helperEnded = false
         _ = supervisor.addRuntimeObservationObserver(for: helper) { observation in
             if case let .toolDetail(call, detail) = observation, detail.phase == .ended, call == "toolu_h1" { helperEnded = true }
         }
         try frames([.shellWrite("h1", "echo b >> Sources/Beta.swift", "Sources/Beta.swift")], root: root)
             .write(to: root.appendingPathComponent("frames-shared.jsonl"), atomically: true, encoding: .utf8)
+        try marker("release-shared")
         try marker("go-shared")
         do { try await wait("helper frames not observed") { helperEnded } }
         catch {
@@ -448,8 +480,27 @@ enum LeadCheckoutChecks {
             let argv = (try? String(contentsOf: root.appendingPathComponent("managed-argv.jsonl"), encoding: .utf8)) ?? ""
             throw WorkspaceAgentReportChecks.Failure(description: "\(error): helper running \(supervisor.isRunning(helper)), files \(names.sorted()), launches \(argv.split(separator: "\n").count), helper cwd \(supervisor.records[helper]?.cwd ?? "")")
         }
-        try marker("release-shared")
+        try await wait("helper turn did not end") { !supervisor.isRunning(helper) }
+        try marker("go-after")
+        try await wait("n1 not observed") { ended.contains("toolu_n1") }
+        try marker("release-busy")
         try await wait("helper and lead did not settle", timeout: 40) { !supervisor.isRunning(helper) && !supervisor.isRunning(lead) }
+
+        // Turn 3, no helper running: a folder removed whole, an edit committed
+        // inside its own call, and twelve commits in a burst racing the watch.
+        let burst = (1...12).map { "k\($0)" }
+        try frames([.shell("r1", "rm -rf docs/sub", exit: 0),
+                    .shellWrite("c1", "echo >> Sources/Delta.swift && git commit -qam edit", "Sources/Delta.swift")]
+                   + burst.map { .shellWrite($0, "echo > Sources/\($0).swift && git add -A && git commit -qm \($0)", "Sources/\($0).swift") },
+                   root: root,
+                   effects: ["r1": [["__rmtree": "docs/sub"]], "c1": [["__git": ["commit", "-qam", "edit"]]]]
+                       .merging(Dictionary(uniqueKeysWithValues: burst.map { ($0, [["__git": ["add", "-A"]], ["__git": ["commit", "-qm", $0]]]) })) { a, _ in a },
+                   pause: Dictionary(uniqueKeysWithValues: burst.dropFirst().map { ($0, 0.0) }))
+            .write(to: root.appendingPathComponent("frames-more.jsonl"), atomically: true, encoding: .utf8)
+        try marker("go-more"); try marker("release-more")
+        try expect(await supervisor.accept(.sendPrompt(AgentPrompt("FRAMES-more HOLD-more")), for: lead) == .accepted, "third submission refused")
+        try await wait("burst not observed", timeout: 40) { ended.contains("toolu_k12") }
+        try await wait("third turn did not end", timeout: 40) { !supervisor.isRunning(lead) }
         supervisor.runLedger.drainLeadWatch()
 
         let ledgerURL = AgentStore(smokeTest: false).layout.applicationSupportDirectory.appendingPathComponent("run-ledger/ledger.jsonl")
@@ -473,10 +524,20 @@ enum LeadCheckoutChecks {
         expectRow("w2", ["modified": 0, "added": 1, "deleted": 0], ["docs/new.md"], by: "lead")
         expectRow("d1", ["modified": 0, "added": 0, "deleted": 1], ["docs/notes.md"], by: "lead")
         expectRow("t1", ["modified": 1, "added": 0, "deleted": 0], ["Sources/Theta.swift"], by: "ambiguous")
+        expectRow("n1", ["modified": 1, "added": 0, "deleted": 0], ["Sources/Beta.swift"], by: "ambiguous")
+        expectRow("r1", ["modified": 0, "added": 0, "deleted": 2], ["docs/sub/a.md", "docs/sub/b.md"], by: "lead")
+        expectRow("c1", ["modified": 1, "added": 0, "deleted": 0], ["Sources/Delta.swift"], by: "lead")
+        check((try? HelperEvidenceChecks.gitOutput(["status", "--porcelain", "--", "Sources/Delta.swift"], root)) == "",
+              "the committed edit still shows in git status, so the case proves nothing")
         check(row("b1") == nil, "a build into an ignored directory was recorded")
         check(row("g1") == nil, "a read-only command was recorded")
-        check(!rows.contains { ($0["paths"] as? [String] ?? []).contains("Sources/Beta.swift") }, "the helper's own write was charged to the lead")
-        check(rows.count == 4, "expected four rows, found \(rows.count)")
+        check(!rows.contains { ($0["evidence"] as? [String: String])?["by"] == "lead" && ($0["paths"] as? [String] ?? []).contains("Sources/Beta.swift") },
+              "the helper's own write was charged to the lead")
+        let burstPaths = Set(rows.filter { ($0["evidence"] as? [String: String])?["by"] == "lead" }.flatMap { $0["paths"] as? [String] ?? [] })
+        check(burst.allSatisfy { burstPaths.contains("Sources/\($0).swift") }, "the burst's files were not all recorded as the lead's: \(burstPaths.sorted())")
+        let exits = ((try? String(contentsOf: root.appendingPathComponent("git-exits.txt"), encoding: .utf8)) ?? "").split(separator: "\n")
+        check(exits.count == 25 && exits.allSatisfy { $0 == "0" }, "a lead git command failed while the watch ran: \(exits)")
+        check(!rows.contains { ($0["evidence"] as? [String: String])?["changes"] == "unknown" }, "a row gave up: \(rows)")
         let task = ManagedRunLedgerChecks.rows(ledgerURL, "taskOpened", agent: lead).first?["task"] as? String
         check(row("w1")?["task"] as? String == task, "the row is not under the lead's task")
         for secret in ["SECRET-CMD", "SECRET-PROMPT", "SECRET-BRIEF", "python3", "sed -i", root.path, root.resolvingSymlinksInPath().path]
@@ -485,6 +546,6 @@ enum LeadCheckoutChecks {
             check(Set(row.keys).isSubset(of: ManagedRunLedgerChecks.allowedKeys), "unexpected row keys: \(row.keys.sorted())")
         }
         if !failures.isEmpty { throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout:\n- " + failures.joined(separator: "\n- ") + "\nrows:\n  " + summary) }
-        print("Lead checkout seen passed: the lead's own shell modify, add and delete recorded as the lead's with checkout-relative paths; an ignored build and a read-only command not recorded; a write while the shared first helper had a turn open recorded ambiguous; the helper's own write never the lead's; no command, prompt or absolute path stored")
+        print("Lead checkout seen passed: the lead's own shell modify, add and delete recorded as the lead's with checkout-relative paths; a folder removed whole and an edit committed inside its call recorded; an ignored build and a read-only command not recorded; a write while the shared first helper ran, and a helper's write just before a lead call, recorded ambiguous, never the lead's; twelve lead commits racing the watch all succeeded and were all recorded; no command, prompt or absolute path stored")
     }
 }
