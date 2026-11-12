@@ -212,7 +212,147 @@ enum SettingsUsageChecks {
             try expect(!texts.keys.contains { $0.hasPrefix("usage.tokens.") || $0 == "usage.closed" }, "the empty ledger shows figures")
         }
 
+        try deleteWitness(root: root, now: now)
         try timeLargeLedger(root: root, now: now)
+    }
+
+    // MARK: Delete
+
+    /// Lines of the ledger file on disk, each with the task it names.
+    private static func diskRows(_ url: URL) -> [(task: String, line: String)] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        return text.split(separator: "\n").map { line in
+            let task = (try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])?["task"] as? String ?? "?"
+            return (task, String(line))
+        }
+    }
+
+    /// Delete through the production page and the production writer: the rows
+    /// must leave the disk and the page, a running task must be refused, and the
+    /// ledger must keep working afterwards.
+    static func deleteWitness(root: URL, now: Date) throws {
+        let support = root.appendingPathComponent("delete")
+        let url = RunLedgerUsageReader.ledgerURL(applicationSupport: support)
+        try write(fixture(now: now), to: url)
+        let ledger = ManagedRunLedger(support: support)
+        ledger.drain()
+        try withPane(ledger: url) { fixture, _ in
+            let model = fixture.model
+            model.usage.deleteHandler = { what, done in ledger.delete(what, completion: done) }
+            fixture.select("usage")
+            try waitReady(fixture)
+            guard case let .ready(before, _) = model.usage.phase, before.tasks.count >= 3 else { throw Failure("delete: no report") }
+            let doomed = before.tasks[1]
+            let doomedID = doomed.task.uuidString
+            let allBefore = diskRows(url)
+            let doomedRows = allBefore.filter { $0.task == doomedID }
+            try expect(!doomedRows.isEmpty, "delete: the fixture task has no rows on disk")
+
+            // 1. One task, through the page's own control inside its opened row.
+            model.usage.toggle(doomed.task)
+            fixture.settle(0.2)
+            guard let control = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityIdentifier() == "ArraySettingsUsageDelete.1" }) else {
+                throw Failure("delete: an opened task has no Delete control")
+            }
+            try expect(control.items.count == 1 && control.items[0].destructive, "delete: the control must hold one destructive choice")
+            control.presentsOffscreenForQA = true
+            try expect(control.chooseForQA(id: "delete"), "delete: could not choose Delete")
+            control.dismissPresentedPopover()
+            try waitUntil(fixture, "the delete notice") { model.renderedTexts["usage.deleted"] != nil }
+            try expect(model.renderedTexts["usage.deleted"] == "Deleted that task's records from this Mac.",
+                       "delete: notice \(model.renderedTexts["usage.deleted"] ?? "nil")")
+            let afterOne = diskRows(url)
+            try expect(!afterOne.contains { $0.task == doomedID }, "delete: the task's rows are still on disk")
+            try expect(afterOne.map(\.line) == allBefore.filter { $0.task != doomedID }.map(\.line),
+                       "delete: other tasks' rows changed (\(afterOne.count) rows, expected \(allBefore.count - doomedRows.count))")
+            try waitReady(fixture, closed: "\(before.closed - 1)")
+            guard case let .ready(afterPage, _) = model.usage.phase else { throw Failure("delete: no report after") }
+            try expect(!afterPage.tasks.contains { $0.task == doomed.task } && afterPage.tasks.count == before.tasks.count - 1,
+                       "delete: the page still lists the deleted task")
+            try expect(model.renderedTexts["usage.task.1.detail"] == nil || !model.usage.openTasks.contains(doomed.task),
+                       "delete: a deleted task stayed open")
+
+            // 2. A task still running is refused, by the writer, one or all.
+            let (lead, project) = (UUID(), UUID())
+            ledger.submission(agent: lead, project: project)
+            ledger.working(agent: lead, turn: "run1")
+            ledger.drain()
+            let runningID = diskRows(url).first { $0.line.contains("\"taskOpened\"") && $0.line.contains(lead.uuidString) }?.task
+            guard let runningID, let running = UUID(uuidString: runningID) else { throw Failure("delete: the running task left no row") }
+            let one = deleteNow(ledger, .task(running))
+            try expect(one.keptRunning == 1 && one.rowsRemoved == 0 && diskRows(url).contains { $0.task == runningID },
+                       "delete: a running task must be refused (\(one))")
+            let all = deleteNow(ledger, .allUsage)
+            let left = diskRows(url)
+            try expect(all.keptRunning == 1 && !left.isEmpty && left.allSatisfy { $0.task == runningID },
+                       "delete all must leave only the running task's rows: \(all), \(Set(left.map(\.task)).count) tasks left")
+            try expect(!left.contains { $0.line.contains("\"usage\"") && $0.task != runningID }, "delete all left usage behind")
+
+            // 3. The page after "delete all": only the running task remains, and the notice says so.
+            model.usage.delete(.allUsage)
+            try waitUntil(fixture, "delete-all notice") { model.renderedTexts["usage.deleted"]?.contains("There was nothing to delete.") == true }
+            try expect(model.renderedTexts["usage.deleted"]?.contains("1 still running, kept until it closes.") == true,
+                       "delete all must say what it kept: \(model.renderedTexts["usage.deleted"] ?? "nil")")
+
+            // 4. Once it closes, it can go: the file itself is removed, the page is empty.
+            ledger.ended(agent: lead, turn: "run1", outcome: .completed)
+            ledger.drain()
+            try expect(diskRows(url).contains { $0.line.contains("\"taskClosed\"") }, "delete: the task did not close")
+            model.usage.delete(.allUsage)
+            try waitUntil(fixture, "empty page") { model.renderedTexts["usage.empty"] != nil }
+            try expect(!FileManager.default.fileExists(atPath: url.path), "delete all must remove every row from disk")
+            try expect(model.renderedTexts["usage.deleted"]?.hasPrefix("Deleted 1 task and every other usage record") == true,
+                       "delete all notice: \(model.renderedTexts["usage.deleted"] ?? "nil")")
+            try render(fixture, name: "deleted", appearance: .aqua)
+
+            // 5. The writer keeps working after a delete, and a restart finds nothing.
+            ledger.submission(agent: lead, project: project)
+            ledger.working(agent: lead, turn: "run2")
+            ledger.ended(agent: lead, turn: "run2", outcome: .completed)
+            ledger.drain()
+            let again = diskRows(url)
+            try expect(again.count >= 3 && Set(again.map(\.task)).count == 1 && again.contains { $0.line.contains("\"taskClosed\"") },
+                       "the ledger must record a new task after a delete (\(again.count) rows)")
+            _ = deleteNow(ledger, .allUsage)
+            let restarted = ManagedRunLedger(support: support)
+            restarted.drain()
+            try expect(!FileManager.default.fileExists(atPath: url.path), "a restart brought deleted rows back")
+        }
+
+        // 6. Both controls render in both appearances, with the delete row on the page.
+        let shown = support.appendingPathComponent("shown/run-ledger/ledger.jsonl")
+        try write(fixture(now: now), to: shown)
+        try withPane(ledger: shown) { fixture, _ in
+            fixture.model.usage.deleteHandler = { _, done in done(.init()) }
+            fixture.select("usage")
+            try waitReady(fixture)
+            guard case let .ready(report, _) = fixture.model.usage.phase else { throw Failure("delete: no report") }
+            fixture.model.usage.toggle(report.tasks[1].task)
+            fixture.settle(0.2)
+            let controls = fixture.descendants(ChoiceButton.self).map { $0.accessibilityIdentifier() }
+            try expect(controls.contains("ArraySettingsUsageDeleteAll") && controls.contains("ArraySettingsUsageDelete.1"),
+                       "delete: controls drawn: \(controls)")
+            try expect(!controls.contains("ArraySettingsUsageDelete.0"), "a task that is still open must not offer Delete")
+            try render(fixture, name: "delete-light", appearance: .aqua)
+            try render(fixture, name: "delete-dark", appearance: .darkAqua)
+        }
+    }
+
+    private static func deleteNow(_ ledger: ManagedRunLedger, _ what: ManagedRunLedger.Deletion) -> ManagedRunLedger.DeleteResult {
+        let done = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var result = ManagedRunLedger.DeleteResult()
+        ledger.delete(what) { result = $0; done.signal() }
+        done.wait()
+        return result
+    }
+
+    private static func waitUntil(_ fixture: SettingsFixtureWindow, _ what: String, timeout: TimeInterval = 30, _ condition: () -> Bool) throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            fixture.settle(0.03)
+            if condition() { return }
+        }
+        throw Failure("delete: timed out waiting for \(what)")
     }
 
     // MARK: Fixture

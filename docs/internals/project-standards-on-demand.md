@@ -55,6 +55,14 @@ listing, reading and parsing off it, through `ProjectStandardsCache`, which
 re-reads only when the folder's listing (names, types, sizes, times, inodes,
 link targets) changes. It needs no mounted canvas.
 
+A cached read still re-lists the folder, because a standard edited in place
+changes no directory stamp, so a directory-stamp key alone would serve stale
+rules. The listing is therefore as cheap as a full re-stat can be: `readdir`
+and `lstat` straight from libc, and a byte fingerprint instead of formatted
+text. 10,000 files cost about 680 ms before and about 40 ms now (debug build);
+`--project-standards-index-check` bounds it at 150 ms and checks that an
+in-place edit of one of the 10,000 is still re-read.
+
 No matching, no ranking, no model call. Matching is wave 4.
 
 ## Offered only where there are standards
@@ -73,6 +81,12 @@ than `README.md` at its top level or one folder down.
 - `workspace.context` lists `standards.read` exactly when the launch offered
   it. If the folder changed since, it adds `toolListNote`: the tool list is
   fixed when the agent starts.
+
+The fixed tool list is deliberate and stays out of this release: Claude and
+Codex read the MCP server's tool list when the CLI starts it, and Pi registers
+the tool when its process starts, so a later change reaches an agent only by
+restarting it. The note tells the agent, and nothing is lost: it can still
+read the files.
 
 Every one of those stops defaults to off, and `hostToolNames` and
 `WorkspaceMCPHost.configuration` take the flag with no default. Each stop that

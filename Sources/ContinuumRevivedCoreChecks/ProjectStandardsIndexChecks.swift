@@ -221,12 +221,15 @@ func runProjectStandardsIndexChecks() {
            && second?.standards.first { $0.id == "rfc-1-layers" }?.rules.first?.text == "1.1. Layers MUST NOT overlap at all.",
            "cache: an edited file is re-read")
 
-    // MARK: Timings (printed, never asserted)
+    // MARK: Timings (printed; the 10,000-file cached read is also bounded)
 
-    func time(_ label: String, _ body: () -> Void) {
+    @discardableResult
+    func time(_ label: String, _ body: () -> Void) -> Double {
         let start = DispatchTime.now().uptimeNanoseconds
         body()
-        print(String(format: "timing %@: %.1f ms", label, Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6))
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+        print(String(format: "timing %@: %.1f ms", label, ms))
+        return ms
     }
     for count in [10, 1_000, 10_000] {
         let root = base.appendingPathComponent("timing-\(count)", isDirectory: true)
@@ -239,7 +242,24 @@ func runProjectStandardsIndexChecks() {
         let timingCache = ProjectStandardsCache()
         time("\(count) files presence") { _ = ProjectStandards.isPresent(checkoutRoot: root) }
         time("\(count) files first read") { _ = timingCache.index(checkoutRoot: root) }
-        time("\(count) files cached read") { _ = timingCache.index(checkoutRoot: root) }
+        let cachedMs = time("\(count) files cached read") { _ = timingCache.index(checkoutRoot: root) }
+        if count == 10_000 {
+            // Gap 15: a cached read re-stats the folder, so it must stay cheap. It was
+            // 680 ms (Foundation attributes per file); the bound is far under that and
+            // far over the cost now, so only a return to per-file Foundation work fails.
+            expect(cachedMs < 150, "cache: a cached read of 10,000 files took \(Int(cachedMs)) ms; it must stay under 150 ms")
+            // Cheap must not mean blind: an edit to one file in place, same size, is seen.
+            let target = folder.appendingPathComponent("t5000.md")
+            let before = timingCache.index(checkoutRoot: root)
+            Thread.sleep(forTimeInterval: 0.02)
+            try? Data("# T5000\n\nApplies when: case 5000.\n\n## Rules\n\n1. Rule one of 5xxx.\nWhy: timing.\n\n2. Rule two.\n".utf8).write(to: target)
+            let after = timingCache.index(checkoutRoot: root)
+            expect(after?.version != before?.version
+                   && after?.standards.first { $0.id == "t5000" }?.rules.first?.text.contains("5xxx") == true,
+                   "cache: an in-place edit of one of 10,000 files must be re-read")
+            let unchanged = timingCache.index(checkoutRoot: root)
+            expect(unchanged == after, "cache: the re-read index is kept until the next change")
+        }
         if let timed = timingCache.index(checkoutRoot: root) {
             time("\(count) files index page") { _ = StandardsReadPage.answer(StandardsReadRequest(), index: timed) }
         }

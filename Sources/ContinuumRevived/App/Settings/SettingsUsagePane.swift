@@ -18,6 +18,11 @@ final class SettingsUsageModel {
     }
 
     @ObservationIgnored var ledgerURL: URL?
+    /// The ledger writer's delete path (`ManagedRunLedger.delete`); the page never
+    /// edits the file itself. Its completion may come from any queue.
+    @ObservationIgnored var deleteHandler: ((ManagedRunLedger.Deletion, @escaping @Sendable (ManagedRunLedger.DeleteResult) -> Void) -> Void)?
+    /// What the last delete did, in words; cleared when the period changes.
+    private(set) var deleteNotice: String?
     var period: UsageReport.Period = .week
     private(set) var phase: Phase = .idle
     /// Tasks whose breakdown is open.
@@ -49,9 +54,26 @@ final class SettingsUsageModel {
         if openTasks.remove(task) == nil { openTasks.insert(task) }
     }
 
+    /// Asks the writer to delete, then counts again. The page changes only once
+    /// the rows are gone from disk.
+    func delete(_ what: ManagedRunLedger.Deletion) {
+        guard let deleteHandler else { return }
+        deleteHandler(what) { result in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.deleteNotice = UsageWords.deleted(what, result)
+                    if case let .task(id) = what, result.tasksRemoved > 0 { self.openTasks.remove(id) }
+                    self.worker.queue.async { self.worker.forget() }
+                    self.refresh()
+                }
+            }
+        }
+    }
+
     func select(_ period: UsageReport.Period) {
         guard period != self.period else { return }
         self.period = period
+        deleteNotice = nil
         limit = Self.page
         refresh()
     }
@@ -109,6 +131,8 @@ final class SettingsUsageModel {
         let queue = DispatchQueue(label: "dev.array.settings-usage", qos: .utility)
         private var cached: (url: URL, size: Int, modified: Date, tasks: RunLedgerUsageReader.Ledger)?
 
+        func forget() { cached = nil }
+
         func tasks(at url: URL, isCancelled: () -> Bool) -> RunLedgerUsageReader.Ledger {
             let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
             let size = (attributes?[.size] as? NSNumber)?.intValue ?? -1
@@ -158,6 +182,9 @@ struct SettingsUsageSections: View {
                 Section {
                     let text = "No tasks are recorded on this Mac yet. A task appears here once an agent you prompted finishes it."
                     InfoRow(text: text).settingsRenderedText("usage.empty", text, model: settings)
+                    if let notice = usage.deleteNotice {
+                        InfoRow(text: notice).settingsRenderedText("usage.deleted", notice, model: settings)
+                    }
                 }
             } else {
                 UsageReportSections(report: report, usage: usage, settings: settings)
@@ -170,6 +197,15 @@ struct SettingsUsageSections: View {
                     ButtonRow(title: "Export these figures", buttonTitle: "Export…",
                               help: "Saves the period's figures as a file, with ids only: no names, prompts or paths.",
                               enabled: true) { usage.presentExport(in: settings.hostWindow) }
+                    LabeledContent {
+                        UsageDeleteChoice(usage: usage, task: nil).frame(width: 160, height: 28)
+                    } label: {
+                        SettingsRowLabel(title: "Delete usage records",
+                                         help: "Removes this Mac's task records from Array's own run ledger. It cannot be undone.")
+                    }
+                }
+                if let notice = usage.deleteNotice {
+                    InfoRow(text: notice).settingsRenderedText("usage.deleted", notice, model: settings)
                 }
             } header: {
                 Text("Recording")
@@ -372,6 +408,9 @@ private struct UsageTaskRow: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .settingsRenderedText("usage.task.\(index).detail", detail, model: settings)
                     UsageTokenGrid(table: line.tokens, exact: true, id: "usage.task.\(index).tokens", settings: settings)
+                    if line.state != .open {
+                        UsageDeleteChoice(usage: usage, task: line.task, index: index).frame(width: 190, height: 28)
+                    }
                 }
                 .padding(.leading, UsageTaskColumns.chevron + 6)
                 .padding(.bottom, 4)
@@ -499,6 +538,21 @@ enum UsageWords {
         return parts.joined(separator: " · ")
     }
 
+    /// What a delete did, said plainly; the quiet outcomes included.
+    static func deleted(_ what: ManagedRunLedger.Deletion, _ result: ManagedRunLedger.DeleteResult) -> String {
+        if result.failed { return "Could not delete: the run ledger could not be rewritten. Nothing was changed." }
+        switch what {
+        case .task:
+            if result.keptRunning > 0 { return "That task is still running, so its records were kept." }
+            return result.rowsRemoved > 0 ? "Deleted that task's records from this Mac." : "That task had no records left to delete."
+        case .allUsage:
+            let kept = result.keptRunning > 0 ? " \(count(result.keptRunning)) still running, kept until \(result.keptRunning == 1 ? "it closes" : "they close")." : ""
+            if result.rowsRemoved == 0 { return "There was nothing to delete." + kept }
+            let tasks = result.tasksRemoved == 1 ? "1 task" : "\(count(result.tasksRemoved)) tasks"
+            return "Deleted \(tasks) and every other usage record from this Mac.\(kept)"
+        }
+    }
+
     /// The one line for usage no human-prompted task owns.
     static func untasked(_ report: UsageReport) -> String {
         let turns = report.untaskedRows == 1 ? "1 record" : "\(count(report.untaskedRows)) records"
@@ -524,5 +578,36 @@ private struct UsagePeriodChoice: NSViewRepresentable {
             guard let period = UsageReport.Period(rawValue: item.id) else { return }
             MainActor.assumeIsolated { usage.select(period) }
         }
+    }
+}
+
+/// The delete control: Array's choice button holding one destructive command, so
+/// choosing it is the confirmation (the list names what goes and that it stays
+/// gone). No stock alert, menu or picker. `task` nil deletes everything.
+private struct UsageDeleteChoice: NSViewRepresentable {
+    let usage: SettingsUsageModel
+    let task: UUID?
+    var index: Int?
+
+    private var buttonTitle: String { task == nil ? "Delete…" : "Delete this task…" }
+
+    func makeNSView(context: Context) -> ChoiceButton {
+        let button = ChoiceButton(title: buttonTitle)
+        button.popoverPresentation = .commands
+        button.setAccessibilityLabel(buttonTitle)
+        button.setAccessibilityIdentifier(index.map { "ArraySettingsUsageDelete.\($0)" } ?? "ArraySettingsUsageDeleteAll")
+        return button
+    }
+
+    func updateNSView(_ button: ChoiceButton, context: Context) {
+        let item = task == nil
+            ? ChoiceItem(id: "delete", title: "Delete all local usage", detail: "Every task on this Mac. Cannot be undone.", destructive: true)
+            : ChoiceItem(id: "delete", title: "Delete this task’s usage", detail: "Its records on this Mac. Cannot be undone.", destructive: true)
+        if button.items != [item] { button.items = [item] }
+        button.onSelection = { _ in
+            button.setPresentationTitle(buttonTitle)
+            MainActor.assumeIsolated { usage.delete(task.map { .task($0) } ?? .allUsage) }
+        }
+        if button.selectedID != nil { button.setPresentationTitle(buttonTitle) }
     }
 }

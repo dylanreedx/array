@@ -15123,6 +15123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ]
         model.canvasBackground = makeCanvasBackgroundEditor()
         model.usage.ledgerURL = agentSupervisor.runLedgerURL
+        model.usage.deleteHandler = { [weak self] what, done in self?.agentSupervisor.runLedger.delete(what, completion: done) }
         if let checkForUpdates = ContinuumApp.checkForUpdatesAction {
             model.actionHandlers["checkForUpdates"] = checkForUpdates
         }
