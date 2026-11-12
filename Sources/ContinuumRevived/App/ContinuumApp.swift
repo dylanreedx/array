@@ -2724,6 +2724,25 @@ enum ContinuumApp {
             }
         }
 
+        // Unattached visible-rows Markdown text views must not observe every
+        // view's frame changes: the motion scene, off-screen.
+        if CommandLine.arguments.contains("--markdown-frame-observer-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                do {
+                    try await MarkdownFrameObserverChecks.run()
+                    print("ContinuumRevivedMarkdownFrameObserverChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
+
         // Zoom cost with the visible-rows switch on and off, interleaved pairs
         // in the motion workload's real scene, off-screen.
         if CommandLine.arguments.contains("--markdown-visible-rows-zoom-cost-check") {

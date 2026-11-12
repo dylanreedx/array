@@ -144,6 +144,8 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
     var qaMountedRowIndices: [Int] { body.mountedRowIndices }
     var qaMountChangeCount: Int { body.mountChangeCount }
     var qaRowCount: Int { body.blockViews.count }
+    /// Every row view in document order, attached or not.
+    var qaRowViews: [NSView] { body.blockViews }
     /// Positive control only: detach one row behind the mounting logic's back.
     func qaDetachRow(at index: Int) { body.qaDetachRow(at: index) }
     var qaDocumentVisibleRect: NSRect { scrollView.contentView.documentVisibleRect }
@@ -315,6 +317,7 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
             if truncatedBlockCount > 0, let notice = makeTruncationRow(entryID: entryID, registry: registry) {
                 rows.append(notice)
             }
+            for row in rows { row.view.stopTextViewsObservingEveryViewFrame() }
             mountBuiltRows()
             invalidateMeasurements()
         }
@@ -324,6 +327,7 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
             for row in rows {
                 row.renderer.update(view: row.view, block: row.block, context: context)
                 row.renderer.updateAccessibility(view: row.view, block: row.block, context: context)
+                row.view.stopTextViewsObservingEveryViewFrame()
             }
             invalidateMeasurements()
         }

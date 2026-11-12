@@ -2217,6 +2217,10 @@ run_app_check .build/debug/Array --canvas-zoom-step-cost-check
 # interleaved pairs: switch on must repaint fewer layers every pair, at most half
 # the Markdown text views, and never remount a row during a zoom. ms reported only.
 run_app_check .build/debug/Array --markdown-visible-rows-zoom-cost-check
+# AppKit makes every text view outside a clip view observe EVERY view's frame
+# changes; a visible-rows document's unattached rows made one unrelated frame
+# change cost 423 µs instead of 2.5 in the motion scene.
+run_app_check .build/debug/Array --markdown-frame-observer-check
 # The Slice 2 contract (.plans/22): N input events inside one display interval
 # cause a bounded number of camera commits and preserve the final desired
 # viewport. The control condition drives 6 direct setViewport calls and must
