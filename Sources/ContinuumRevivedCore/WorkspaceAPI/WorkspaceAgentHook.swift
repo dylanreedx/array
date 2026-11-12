@@ -73,10 +73,12 @@ public enum WorkspaceAgentHook {
     /// never passes `--setting-sources`, which drops them. A Managed session
     /// adds `pluginConfigs` (`ClaudeDuckherd`); nil leaves the Free value
     /// byte-identical to P1's.
-    public static func claudeSettingsJSON(command: String?, pluginConfigs: [String: Any]? = nil) -> String {
+    public static func claudeSettingsJSON(command: String?, pluginConfigs: [String: Any]? = nil,
+                                          sandbox: [String: Any]? = nil) -> String {
         var object: [String: Any] = [:]
         if let command { object["hooks"] = claudeHooks(command: command) }
         if let pluginConfigs { object["pluginConfigs"] = pluginConfigs }
+        if let sandbox { object["sandbox"] = sandbox }
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return "{}" }
         return String(decoding: data, as: UTF8.self)
     }

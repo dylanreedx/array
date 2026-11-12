@@ -1943,10 +1943,12 @@ final class AgentSupervisor {
         switch record.harness {
         case .claudeCode:
             return claudeRunner(for: record, workspaceMCP: launch.workspaceMCP,
-                                configDirectory: launch.accountConfigDirectory, hostInstructions: hostInstructions)
+                                configDirectory: launch.accountConfigDirectory, hostInstructions: hostInstructions,
+                                strictLead: launch.strictLead)
         case .codex:
             return codexRunner(for: record, workspaceMCP: launch.workspaceMCP,
-                               codexHome: launch.accountConfigDirectory, hostInstructions: hostInstructions)
+                               codexHome: launch.accountConfigDirectory, hostInstructions: hostInstructions,
+                               strictLead: launch.strictLead)
         case .pi: return piRunner(for: launch, hostInstructions: hostInstructions)
         case nil: return RefusingAgentRunner(reason: "This agent has unresolved harness ownership. Choose Claude Code, Codex, or Pi in the agent composer. Help → Environment Setup…")
         }
@@ -1988,10 +1990,11 @@ final class AgentSupervisor {
     /// `piRunner(for:)` so the same ownership scan can hold for both.
     nonisolated static func claudeRunner(
         for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, configDirectory: String? = nil,
-        hostInstructions: HostLaunchInstructions = .shared
+        hostInstructions: HostLaunchInstructions = .shared, strictLead: Bool = false
     ) -> AgentRunning {
         var config = claudeRunnerConfig(for: record, workspaceMCP: workspaceMCP)
         config.configDirectory = configDirectory
+        config.strictWriteRoot = strictLead ? record.checkoutRoot : nil
         // Resolved per process launch, off the main thread (see codexRunnerConfig).
         config.hostInstructions = { hostInstructions.claudeText() }
         return ClaudeAgentRunner(config: config)
@@ -2086,10 +2089,11 @@ final class AgentSupervisor {
     /// `claudeRunner(for:)` so the same ownership scan holds for all three.
     nonisolated static func codexRunner(
         for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, codexHome: String? = nil,
-        hostInstructions: HostLaunchInstructions = .shared
+        hostInstructions: HostLaunchInstructions = .shared, strictLead: Bool = false
     ) -> AgentRunning {
         var config = codexRunnerConfig(for: record, workspaceMCP: workspaceMCP, hostInstructions: hostInstructions)
         config.codexHome = codexHome
+        config.strictLead = strictLead
         return CodexAgentRunner(config: config)
     }
 
@@ -2556,6 +2560,8 @@ final class AgentSupervisor {
         runnerAccounts[id] = active
         var signed = launch
         signed.accountConfigDirectory = active.configDirectory
+        signed.strictLead = launch.record.parentAgentID == nil && launch.record.mode == .managed
+            && ManagedStrictLead.isEnabled(defaults: managedModeDefaults)
         return signed
     }
 
