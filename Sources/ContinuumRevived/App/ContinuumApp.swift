@@ -39292,14 +39292,12 @@ extension AppDelegate {
     inbox.layoutForQA()
     try expect(inbox.rowCountForQA == withoutOne.count,
                "an agent that went away must leave the list — got \(inbox.rowCountForQA) of \(withoutOne.count)")
-    // 0.7.48: the selection survives the push (it decides the row's style), so the
-    // selected row is built a second time once the selection is restored — a cell
-    // paints selection from the table's, which the full reload emptied. Once, and
-    // only that row: the restore used to build it twice.
-    try expect(inbox.selectedRowIdsForQA == [sorted[0].id],
-               "a push that removed another agent must keep the selection — got \(inbox.selectedRowIdsForQA)")
-    try expect(inbox.cellBuildCountForQA - buildsBeforeRemoval == withoutOne.count + 1,
-               "a list whose agents changed is rebuilt whole, plus the restored selected row once — a partial reload against a shifted array repaints a row with its neighbour's agent — \(inbox.cellBuildCountForQA - buildsBeforeRemoval) built for \(withoutOne.count) rows and 1 selected")
+    // As in 0.7.47, a push that changes the set under the newest-first sort drops
+    // the selection (the order it named is gone) and rebuilds each row once.
+    try expect(inbox.selectedRowIdsForQA.isEmpty,
+               "a push that removed another agent drops the selection, as 0.7.47 did — got \(inbox.selectedRowIdsForQA)")
+    try expect(inbox.cellBuildCountForQA - buildsBeforeRemoval == withoutOne.count,
+               "a list whose agents changed is rebuilt whole — a partial reload against a shifted array repaints a row with its neighbour's agent — \(inbox.cellBuildCountForQA - buildsBeforeRemoval) built for \(withoutOne.count) rows")
 
     // MARK: A3 · P3.8 · the scope filters the list, and flipping it clears selection
 
@@ -40045,11 +40043,10 @@ extension AppDelegate {
                "folding a group hides its children and moves nothing else — got \(nested.titlesForQA)")
     try expect(nested.disclosureGlyphsForQA[parentIndex] == "▸",
                "a folded parent keeps the triangle you unfold it with, pointing the other way — got '\(nested.disclosureGlyphsForQA[parentIndex])'")
-    // 0.7.48: selection follows the agent through a fold. The hidden child is
-    // represented by its lead; no hidden row stays selected, so no bulk action can
-    // reach it. Unfolding hands the selection back to the child.
-    try expect(nested.selectedRowIdsForQA == [parentRow.id],
-               "…and the hidden child's selection moves to its lead — got \(nested.selectedRowIdsForQA)")
+    // As in 0.7.47, the selection goes with the rows that went, so no bulk action
+    // can reach a row you cannot see.
+    try expect(nested.selectedRowCountForQA == 0,
+               "…and the selection goes with the rows that went — \(nested.selectedRowCountForQA) rows still selected")
     // The fold is VIEW state: nothing was taken out of the model, so an unfold
     // restores the list exactly rather than waiting for the next push.
     try expect(nested.collapsedParentsForQA == [parentRow.id],
@@ -40058,8 +40055,6 @@ extension AppDelegate {
     nested.layoutForQA()
     try expect(nested.rowIdsForQA == expandedIds,
                "unfolding restores the group in place — got \(nested.titlesForQA)")
-    try expect(nested.selectedRowIdsForQA == [childRow.id],
-               "…and gives the selection back to the child — got \(nested.selectedRowIdsForQA)")
 
     // A PUSH DOES NOT UNFOLD. An event about the hidden child arrives while its
     // group is folded and the child stays hidden — the fold is yours until you undo
@@ -41994,27 +41989,20 @@ extension AppDelegate {
     try expect(bulk.bulkActionTitlesForQA.contains(InboxBulkAction.delete.title),
                "an agent that stopped working gives its selection Delete back — got \(bulk.bulkActionTitlesForQA)")
 
-    // A WHOLE-LIST PUSH KEEPS IT on the rows still drawn (0.7.48: the selection
-    // decides the row's style, so a push may not drop it), and the bar is rebuilt
-    // from the restored selection. `NSTableView.reloadData()` empties the selection
-    // WITHOUT posting a change, so this needs its own assertion: a bar must never
-    // stand over rows that are not selected, and a row that left the list may not
-    // stay selected.
+    // A WHOLE-LIST PUSH CLEARS IT TOO, and this one needs its own assertion:
+    // `NSTableView.reloadData()` empties the selection WITHOUT posting a selection
+    // change, so nothing else in this section would notice a bar left up over rows that
+    // are no longer selected. (Measured: with the teardown in `render` deleted, every
+    // other clearing assertion here stays green because `deselectAll` does notify.)
     try expect(bulk.selectRowsForQA(ids: [failedRow.id, quietRow.id]), "two rows must be selectable")
     bulk.layoutForQA()
     try expect(bulk.isBulkBarVisibleForQA, "setup: the bar must be up before the push")
     bulk.reload(rows: bulkFixture)
     bulk.layoutForQA()
-    try expect(Set(bulk.selectedRowIdsForQA) == [failedRow.id, quietRow.id] && bulk.isBulkBarVisibleForQA,
-               "a whole-list push keeps the selection and its bar — got \(bulk.selectedRowIdsForQA.count) selected, bar \(bulk.isBulkBarVisibleForQA)")
-    bulk.reload(rows: bulkFixture.filter { $0.id != quietRow.id })
-    bulk.layoutForQA()
-    try expect(bulk.selectedRowIdsForQA == [failedRow.id],
-               "a whole-list push that drops a selected agent keeps only the rows still drawn — got \(bulk.selectedRowIdsForQA)")
+    try expect(bulk.selectedRowIdsForQA.isEmpty,
+               "a whole-list push empties the selection — \(bulk.selectedRowIdsForQA.count) rows still selected")
     try expect(!bulk.isBulkBarVisibleForQA,
-               "…so with one row left the bar must come down, rather than offer actions for a row that went")
-    bulk.reload(rows: bulkFixture)
-    bulk.layoutForQA()
+               "…so the bar must come down with it, rather than offer actions for nothing")
 
     // A SCOPE FLIP CLEARS IT (P3.8's rule, now with a real multiple selection behind
     // it): a bulk action may never reach a row you cannot see.
@@ -42026,29 +42014,18 @@ extension AppDelegate {
                "a scope change clears a multiple selection — \(bulk.selectedRowIdsForQA.count) rows still selected")
     try expect(!bulk.isBulkBarVisibleForQA, "…and takes the bar down with it")
 
-    // Folding a group removes rows, so no row it hides may stay selected (a bulk
-    // action must never reach a row you cannot see). 0.7.48: the selection follows
-    // agent identity — rows still drawn stay selected, and a selection the fold
-    // hid entirely is represented by its lead. The bar follows what is left.
+    // Folding a group does the same thing, for the same reason — it removes rows.
     try expect(bulk.pickScopeForQA(.all), "back to every agent")
     bulk.layoutForQA()
     let parentId = LabFixtures.inboxAgentIds[5]
     try expect(bulk.selectRowsForQA(ids: [failedRow.id, quietRow.id]), "two rows must be selectable again")
     bulk.layoutForQA()
     try expect(bulk.isBulkBarVisibleForQA, "setup: the bar must be up before the fold")
-    let drawnBeforeFold = Set(bulk.rowIdsForQA)
     try expect(bulk.clickDisclosureForQA(id: parentId), "the orchestrator's triangle must be clickable")
     bulk.layoutForQA()
-    let hiddenByFold = drawnBeforeFold.subtracting(bulk.rowIdsForQA)
-    try expect(!hiddenByFold.isEmpty, "setup: the fold must hide at least one row")
-    let keptByFold = [failedRow.id, quietRow.id].filter { !hiddenByFold.contains($0) }
-    let expectedAfterFold = Set(keptByFold.isEmpty ? [parentId] : keptByFold)
-    try expect(Set(bulk.selectedRowIdsForQA) == expectedAfterFold,
-               "folding keeps the drawn selected rows and drops the hidden ones — got \(bulk.selectedRowIdsForQA), wanted \(expectedAfterFold)")
-    try expect(hiddenByFold.isDisjoint(with: bulk.selectedRowIdsForQA),
-               "…and no row the fold hid stays selected")
-    try expect(bulk.isBulkBarVisibleForQA == (expectedAfterFold.count >= AgentInboxView.minimumBulkSelection),
-               "…and the bar follows the selection that is left")
+    try expect(bulk.selectedRowIdsForQA.isEmpty,
+               "folding a group clears the selection — \(bulk.selectedRowIdsForQA.count) rows still selected")
+    try expect(!bulk.isBulkBarVisibleForQA, "…and takes the bar down too")
 
     // WHAT THIS SECTION DOES NOT VERIFY, stated rather than left to be discovered: the
     // three GESTURES. `NSTableView.mouseDown` opens a modal tracking loop that runs until
