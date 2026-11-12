@@ -44,9 +44,12 @@ Known limits (what a script cannot decide, so it says so instead):
   - A flag built from pieces (`"--" + name + "-check"`, interpolation, a
     hasPrefix/hasSuffix family) cannot be enumerated: built-check-flag.
   - run-matrix.sh is read statically. A leg inside a branch on a runtime
-    condition, a while loop, a case arm or after && / || is "cannot tell";
+    condition, a while loop, a case arm or after && / || is "cannot tell"
+    (`FAST` is the one runtime switch it reads: 0 in a full run);
     a leg in a `*_ONLY` mode branch, a heredoc, a literally false branch, an
     uncalled function or after an unconditional exit does not count as run.
+  - It stays a report: nothing in run-matrix.sh, a hook or CI runs it, on
+    purpose, until the manifest is wide enough to trust as a gate.
   - Coverage is only as good as the manifest: it maps a handful of legs, and a
     broad glob over-invalidates (any AgentSupervisor*.swift change recommends
     both delegation checks, whichever part of the supervisor changed).
@@ -364,6 +367,11 @@ def classify_condition(cond):
         ok = {"-eq": a == b, "==": a == b, "=": a == b, "-ne": a != b, "!=": a != b,
               "-lt": a < b, "-gt": a > b, "-le": a <= b, "-ge": a >= b}[op]
         return ("run", "") if ok else ("dead", "`if %s`, which is never true" % c)
+    # `FAST` is 0 unless run-matrix.sh is given --fast, and the pre-pass reads a full run.
+    m = re.fullmatch(r"\[\[?\s*\"?\$\{?FAST\}?\"?\s*(-eq|-ne|==|!=|=)\s*\"?([01])\"?\s*\]\]?", c)
+    if m:
+        full_run_takes = (m.group(2) == "0") == (m.group(1) in ("-eq", "==", "="))
+        return ("run", "") if full_run_takes else ("mode", "the --fast branch (`if %s`, FAST is 0 in a full run)" % c)
     m = re.search(r"\$\{?([A-Z0-9_]*_ONLY)\}?\"?\s*(?:-eq|==|=)\s*\"?1\b", c)
     if m:
         return "mode", "the targeted %s branch (`if %s`)" % (m.group(1), c)

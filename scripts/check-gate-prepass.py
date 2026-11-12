@@ -541,6 +541,24 @@ def cases(w):
                        ("--after-exit-check", "unconditional exit"), ("--extra-check", "undeclared"),
                        ("--opt-in-check", "CONTINUUM_OPT_IN"), ("--and-check", "after &&")]))
 
+    # 20b. `FAST` is 0 in a full run, so `if [[ "$FAST" -eq 0 ]]` is run and a `--fast` branch is not.
+    # (The real matrix guards its bundle probe this way; that read "cannot tell".)
+    fx.start("fastmode")
+    fx.edit(APP, "        // anchor",
+            '        if CommandLine.arguments.contains("--full-run-check") { exit(0) }\n'
+            '        if CommandLine.arguments.contains("--fast-only-check") { exit(0) }\n'
+            '        if CommandLine.arguments.contains("--fast-off-check") { exit(0) }\n        // anchor')
+    fx.edit(MATRIX, "run_leg scripts/check-app-bundle.sh --configuration debug\n",
+            "run_leg scripts/check-app-bundle.sh --configuration debug\n"
+            'if [[ "$FAST" -eq 0 ]]; then\n  run_app_check .build/debug/Array --full-run-check\nfi\n'
+            'if [[ "$FAST" -eq 1 ]]; then\n  run_app_check .build/debug/Array --fast-only-check\nfi\n'
+            'if [[ "$FAST" -ne 0 ]]; then\n  run_app_check .build/debug/Array --fast-off-check\nfi\n')
+    fx.commit("test(matrix): guard legs on the fast switch")
+    w.expect("a leg under FAST -eq 0 is run in a full run; one only a --fast run reaches is not",
+             ["base", "fastmode"], 1, [U,
+        (F, "unregistered-check-flag", "--fast-only-check"), (F, "unregistered-check-flag", "--fast-off-check")],
+             messages([("--fast-only-check", "FAST"), ("--fast-off-check", "FAST")]))
+
     # 21. Attribution in the subject or the body, in every form; prose about a product passes.
     fx.start("attribution")
     attributed = [
