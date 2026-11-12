@@ -114,7 +114,13 @@ final class LeadCheckoutWatch: @unchecked Sendable {
 
     init() {}
 
-    deinit { for stream in streams.values { stop(stream) } }
+    deinit {
+        for stream in streams.values { stop(stream) }
+        // An invalidated stream delivers nothing new, but a delivery already
+        // running on `deliveries` may still be inside a holder. Wait it out
+        // before the holders go.
+        if !streams.isEmpty { deliveries.sync {} }
+    }
 
     private var settling = 0
     /// Waits for every hand-off so far, settled ends included. Checks only.
@@ -214,8 +220,20 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         guard streams[root] == nil else { return }
         let holder = Stream(root: root)
         streams[root] = holder
+        // FSEvents owns a reference to the holder for as long as the stream
+        // lives: a delivery already queued on `deliveries` when the watch is
+        // torn down must not read a freed holder.
         var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(holder).toOpaque(),
-                                           retain: nil, release: nil, copyDescription: nil)
+                                           retain: { info in
+                                               guard let info else { return nil }
+                                               _ = Unmanaged<Stream>.fromOpaque(info).retain()
+                                               return info
+                                           },
+                                           release: { info in
+                                               guard let info else { return }
+                                               Unmanaged<Stream>.fromOpaque(info).release()
+                                           },
+                                           copyDescription: nil)
         let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             guard let info else { return }
             let list = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []

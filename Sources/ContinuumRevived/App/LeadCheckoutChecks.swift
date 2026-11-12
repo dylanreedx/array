@@ -57,6 +57,7 @@ enum LeadCheckoutChecks {
 
     static func run() async throws {
         let section = ProcessInfo.processInfo.environment["CONTINUUM_LEAD_CHECKOUT_CASE"]
+        if section == nil || section == "teardown" { try teardown() }
         if section == nil || section == "seen" { try await seen() }
         if section == nil || section == "hooks" { try await hooks() }
         if section == nil || section == "strict" || section == "strict-claude" { try await strictClaude() }
@@ -65,6 +66,39 @@ enum LeadCheckoutChecks {
         if section == nil || section == "strict" || section == "strict-layouts" { try strictLayouts() }
         // Opt-in, never in the matrix: a live model turn on the user's own login.
         if section == "strict-probe" { try strictProbe() }
+    }
+
+    /// A watch torn down while FSEvents is still delivering for its checkout.
+    /// Before the stream's holder was retained by FSEvents, a delivery queued
+    /// at teardown read a freed holder and the process crashed (SIGSEGV in
+    /// `Stream.received`). The race is timing-dependent: unfixed, this loop
+    /// crashed in 4 of 8 runs; fixed, in none. Passing means the process is
+    /// still here to print.
+    static func teardown() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("lead-watch-teardown-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        final class Flag: @unchecked Sendable { let lock = NSLock(); var raised = false }
+        let stop = Flag()
+        let writer = Thread {
+            var n = 0
+            while !(stop.lock.withLock { stop.raised }) {
+                fm.createFile(atPath: dir.appendingPathComponent("f\(n % 64)").path, contents: Data("\(n)".utf8))
+                n += 1
+            }
+        }
+        writer.start()
+        defer { stop.lock.withLock { stop.raised = true } }
+        let watches = 1_200
+        for _ in 0..<watches {
+            var watch: LeadCheckoutWatch? = LeadCheckoutWatch()
+            watch!.turnStarted(agent: UUID(), root: dir.path, lead: true)
+            watch!.drain()
+            usleep(2_000)
+            watch = nil
+        }
+        print("lead checkout teardown: \(watches) watches torn down while their checkout changed, no crash")
     }
 
     /// How the switch is set for one bench.
