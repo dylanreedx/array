@@ -44,6 +44,7 @@ enum LeadCheckoutChecks {
         if section == nil || section == "hooks" { try await hooks() }
         if section == nil || section == "strict" || section == "strict-claude" { try await strictClaude() }
         if section == nil || section == "strict" || section == "strict-codex" { try await strictCodex() }
+        if section == nil || section == "strict" || section == "strict-toggle" { try await strictToggle() }
     }
 
     /// How the switch is set for one bench.
@@ -113,6 +114,33 @@ enum LeadCheckoutChecks {
             for marker in ["release-strict", "release-strictchild"] { try Data().write(to: root.appendingPathComponent(marker)) }
         }
         print("Lead strict Claude passed: off by default the lead launches with no sandbox; on by \(ManagedStrictLead.enabledKey) or \(ManagedStrictLead.environmentKey) its one --settings carries the CLI sandbox, required, with no unsandboxed escape and its checkout denied for writing, hooks kept; its helper never sandboxed")
+    }
+
+    /// Toggling the switch between turns takes effect at the next turn: the
+    /// idle Claude process is replaced, and without a toggle it is reused.
+    static func strictToggle() async throws {
+        let b = try ManagedModeChecks.bench("lead-strict-toggle")
+        defer { b.tearDown() }
+        let restore = set(.off, b)
+        defer { restore() }
+        let (lead, _) = try HelperEvidenceChecks.prepare(b)
+        let supervisor = b.supervisor
+        func turn(_ text: String) async throws -> (pids: Int, strict: Bool) {
+            try expect(await supervisor.accept(.sendPrompt(AgentPrompt(text)), for: lead) == .accepted, "\(text) refused")
+            try await ManagedModeChecks.settled(b, lead)
+            let pids = Set(ManagedModeChecks.launches(b, lead).compactMap { $0["pid"] as? Int }).count
+            return (pids, try settings(ManagedModeChecks.argv(b, lead))["sandbox"] != nil)
+        }
+        let first = try await turn("one")
+        let second = try await turn("two")
+        try expect(!first.strict && !second.strict && second.pids == first.pids, "without a toggle the idle process was not reused: \(first) \(second)")
+        b.settings.set(true, forKey: ManagedStrictLead.enabledKey)
+        let on = try await turn("three")
+        try expect(on.strict && on.pids == second.pids + 1, "switching on did not apply at the next turn: \(on)")
+        b.settings.set(false, forKey: ManagedStrictLead.enabledKey)
+        let off = try await turn("four")
+        try expect(!off.strict && off.pids == on.pids + 1, "switching off did not apply at the next turn: \(off)")
+        print("Lead strict toggle passed: an idle lead process is reused while the switch is unchanged; turning it on or off applies at the next turn with a new process")
     }
 
     /// Codex is not covered by the switch: with it on by either name, a Managed

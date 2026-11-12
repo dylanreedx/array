@@ -2558,9 +2558,16 @@ final class AgentSupervisor {
         runnerAccounts[id] = active
         var signed = launch
         signed.accountConfigDirectory = active.configDirectory
-        signed.strictLead = harness == .claudeCode && launch.record.parentAgentID == nil && launch.record.mode == .managed
-            && ManagedStrictLead.isEnabled(defaults: managedModeDefaults)
+        signed.strictLead = strictDecision(for: launch.record)
+        launchedStrict[id] = signed.strictLead
         return signed
+    }
+
+    /// What a launch of this record would decide now (`ManagedStrictLead`).
+    private var launchedStrict: [AgentID: Bool] = [:]
+    private func strictDecision(for record: AgentRecord) -> Bool {
+        record.harness == .claudeCode && record.parentAgentID == nil && record.mode == .managed
+            && ManagedStrictLead.isEnabled(defaults: managedModeDefaults)
     }
 
     private func folder(of account: AgentAccount) -> URL {
@@ -3773,7 +3780,10 @@ final class AgentSupervisor {
         // once per turn — not on any per-delta path.
         let runner: AgentRunning
         if let idle = idleSessionRunners.removeValue(forKey: id) {
-            if idle.canAcceptAnotherTurn && !pendingModeRestarts.contains(id) {
+            // A strict-lead toggle since this runner launched restarts it, so
+            // the switch applies at the next turn, never "at some later launch".
+            if idle.canAcceptAnotherTurn && !pendingModeRestarts.contains(id)
+                && launchedStrict[id, default: false] == strictDecision(for: record) {
                 runner = idle
             } else {
                 idle.stop()
