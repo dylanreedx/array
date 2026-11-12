@@ -5887,6 +5887,13 @@ final class AgentSupervisor {
         records[childID] = child
         persist(child)
         bindCompanionObservedChild(childID, parentID: parentId, sourceID: toolUseID)
+        // `.plans/116` gap 6: the harness started this child, so Array never saw
+        // a delegation. Recorded once, at minting, under its parent's open task,
+        // before its own turn events replay below.
+        if qaRunLedgerRecording {
+            runLedger.delegated(parent: parentId.rawValue, child: childID.rawValue,
+                                source: "harness/\(childID.rawValue)", via: "harness")
+        }
         // Anything that arrived before the record existed replays now, in order.
         flushPendingSubagentEvents(for: childID)
         deliver(.childAgentSpawned(

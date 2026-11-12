@@ -255,18 +255,19 @@ enum RunLedgerGapsChecks {
         guard let close = all.firstIndex(where: { $0["kind"] as? String == "taskClosed" && $0["task"] as? String == task }) else {
             throw WorkspaceAgentReportChecks.Failure(description: "run-ledger-gaps: no close row")
         }
-        let wakes = all[close...].filter { $0["kind"] as? String == "working" && $0["agent"] as? String == id(lead) }
+        // The lead's wake after the close: its turn rows and its usage row.
+        let wakes = all[close...].filter { ["working", "usage"].contains($0["kind"] as? String ?? "") && $0["agent"] as? String == id(lead) }
         let line = try line(task)
         guard let answer = line.timeToAnswer, let active = line.activeTime else {
             throw WorkspaceAgentReportChecks.Failure(description: "run-ledger-gaps: time to answer \(String(describing: line.timeToAnswer)), active \(String(describing: line.activeTime))")
         }
-        print(String(format: "  page: time to answer %.2f s, active %.2f s; lead wake turns after the close in the task: %d",
+        print(String(format: "  page: time to answer %.2f s, active %.2f s; lead wake rows after the close in the task: %d",
                      answer, active, wakes.filter { $0["task"] as? String == task }.count))
         try expect(!wakes.isEmpty, "the lead was never woken after the close: the scenario did not run")
         try expect(active <= answer + 0.001,
                    String(format: "active time %.2f s must not exceed time to answer %.2f s", active, answer))
         try expect(wakes.allSatisfy { $0["task"] as? String != task },
-                   "the lead's wake after the close must not start a turn in the closed task: \(wakes.count) did")
+                   "the lead's wake after the close must not be in the closed task: \(wakes.filter { $0["task"] as? String == task }.count) rows were")
         try T.privacy(root: root)
     }
 

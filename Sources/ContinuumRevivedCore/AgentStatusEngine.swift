@@ -386,6 +386,10 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
     public var accountingTurn: String?
     /// Codex only: the model id the CLI named for this thread, when it did.
     public var accountingModel: String?
+    /// A marker, not a report: this turn's usage is known to be partial, and
+    /// why (`trailingFramesCut`: Codex frames after the turn were still unread
+    /// when the runner's drain bound ended). Carries no counters.
+    public var accountingIncomplete: String?
 
     public init(inputTokens: Int, outputTokens: Int, totalCostUsd: Double?, accountingObservationID: String? = nil,
                 accountingInputTokens: Int? = nil, observedAt: Date? = nil, accountingOutputTokens: Int? = nil,

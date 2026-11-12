@@ -62,15 +62,22 @@ public struct UsageReport: Equatable, Encodable, Sendable {
         public var reported = 0
         /// Tasks where the work ran only on harnesses that never report it.
         public var notReported = 0
-        public init(known: Int = 0, unknown: Int = 0, reported: Int = 0, notReported: Int = 0) {
+        /// Tasks where some of this work's tokens are inside its parent's figure
+        /// (a Claude in-process subagent): counted there, never as zero here.
+        public var inParent = 0
+        public init(known: Int = 0, unknown: Int = 0, reported: Int = 0, notReported: Int = 0, inParent: Int = 0) {
             (self.known, self.unknown, self.reported, self.notReported) = (known, unknown, reported, notReported)
+            self.inParent = inParent
         }
         public var isUnknown: Bool { unknown > 0 }
         /// Nothing to show but "not reported".
         public var isNotReported: Bool { unknown == 0 && reported == 0 && notReported > 0 }
+        /// Nothing counted here because it is all inside a parent's figure.
+        public var isInParent: Bool { inParent > 0 && known == 0 && unknown == 0 && reported == 0 }
         mutating func add(_ other: Figure) {
             known += other.known; unknown += other.unknown
             reported += other.reported; notReported += other.notReported
+            inParent += other.inParent
         }
         /// Two shares of ONE task: each flag counts the task once.
         mutating func merge(_ other: Figure) {
@@ -78,6 +85,7 @@ public struct UsageReport: Equatable, Encodable, Sendable {
             unknown = max(unknown, other.unknown)
             reported = max(reported, other.reported)
             notReported = max(notReported, other.notReported)
+            inParent = max(inParent, other.inParent)
         }
     }
 
@@ -102,7 +110,8 @@ public struct UsageReport: Equatable, Encodable, Sendable {
         public var ended: Date?
         /// First submission to close. Nil unless closed.
         public var timeToAnswer: TimeInterval?
-        /// The union of every agent's turns. Nil unless closed with every turn ended.
+        /// The union of every agent's turns, up to the close. Nil unless closed
+        /// with every turn ended.
         public var activeTime: TimeInterval?
         /// `managed` or `free`; nil when not recorded.
         public var mode: String?
@@ -208,7 +217,7 @@ public struct UsageReport: Equatable, Encodable, Sendable {
             // lead with no row at all: everything of this role is missing.
             let ran = task.turns.keys.filter { ($0 == task.lead) == (role == .lead) }
             let silent = ran.contains { agent in !mine.contains { $0.agent == agent } } || (role == .lead && rows.isEmpty)
-            tokens[column] = Self.tokens(rows, silent: silent)
+            tokens[column] = Self.tokens(rows, silent: silent, inParent: rows.isEmpty && mine.contains(where: byParent))
             for row in rows {
                 let model = Model(role: role, harness: row.harness, model: row.model, source: row.modelSource)
                 if !models.contains(model) { models.append(model) }
@@ -225,9 +234,12 @@ public struct UsageReport: Equatable, Encodable, Sendable {
         var active: TimeInterval?
         if task.state == .closed, let opened = task.opened, let ended = task.ended {
             timeToAnswer = ended.timeIntervalSince(opened)
-            let turns = task.turns.values.flatMap { $0 }
+            // Active time stops at the close: a turn under way then counts up
+            // to it, and a turn that started later (a lead's wake, an older
+            // ledger's rows) is not this task's work.
+            let turns = task.turns.values.flatMap { $0 }.filter { $0.start < ended }
             if !turns.isEmpty, turns.allSatisfy({ $0.end != nil }) {
-                active = union(turns.map { ($0.start, $0.end!) })
+                active = union(turns.map { ($0.start, min($0.end!, ended)) })
             }
         }
         return TaskLine(task: task.id, state: task.state, opened: task.opened, ended: task.ended,
@@ -236,7 +248,7 @@ public struct UsageReport: Equatable, Encodable, Sendable {
     }
 
     /// One role's rows of one task (or the untasked rows), by kind and in total.
-    static func tokens(_ rows: [RunLedgerUsageReader.Usage], silent: Bool) -> [TokenType: Figure] {
+    static func tokens(_ rows: [RunLedgerUsageReader.Usage], silent: Bool, inParent: Bool = false) -> [TokenType: Figure] {
         var result: [TokenType: Figure] = [:]
         var total = Figure()
         for type in TokenType.kinds {
@@ -249,8 +261,9 @@ public struct UsageReport: Equatable, Encodable, Sendable {
             figure.unknown = partial ? 1 : 0
             figure.reported = reporting.isEmpty ? 0 : 1
             figure.notReported = !partial && reporting.isEmpty && !rows.isEmpty ? 1 : 0
+            figure.inParent = inParent ? 1 : 0
             result[type] = figure
-            total.merge(Figure(known: figure.known, unknown: figure.unknown, reported: figure.reported))
+            total.merge(Figure(known: figure.known, unknown: figure.unknown, reported: figure.reported, inParent: figure.inParent))
         }
         result[.total] = total
         return result

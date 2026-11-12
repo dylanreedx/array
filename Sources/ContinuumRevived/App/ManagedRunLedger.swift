@@ -38,6 +38,9 @@ final class ManagedRunLedger: @unchecked Sendable {
         var paths: [String]?
         /// `hook`: the hook event's name, one of the events Array registers.
         var hook: String?
+        /// `delegated`: `harness` when the CLI started the child itself (Claude's
+        /// Agent tool, a Codex child thread); absent for an Array delegation.
+        var via: String?
     }
     // Live only: a helper delegated before this process started has no entry,
     // and its report records that instead of pretending to have watched it.
@@ -77,8 +80,18 @@ final class ManagedRunLedger: @unchecked Sendable {
     private var leadBoundary: [UUID: Row] = [:]
     private var needsSeparator = false
     // Replayed transcript events during restore are history, not new run facts.
-    // Keep live attribution after closure for wakes, but never rebuild it from disk.
+    // Kept after closure, but only a turn that started while its task was open
+    // belongs to it (`openTask`); never rebuilt from disk.
     private var sessionTasks: [UUID: UUID] = [:]
+    /// The task each agent's running turn started in: a turn under way when its
+    /// task closes still ends there, and one that starts later is not its.
+    private var turnTask: [UUID: UUID] = [:]
+
+    /// The agent's task while that task is open: its owner's active task.
+    private func openTask(_ agent: UUID) -> UUID? {
+        guard let task = sessionTasks[agent], let owner = owners[task], active[owner] == task else { return nil }
+        return task
+    }
     init(support: URL) {
         url = support.appendingPathComponent("run-ledger/ledger.jsonl")
         leadWatch.onOutcome = { [weak self] lead, call, outcome in self?.leadCheckout(lead, call, outcome) }
@@ -154,14 +167,21 @@ final class ManagedRunLedger: @unchecked Sendable {
         }
     }
     /// `root`, `base` and `shared` describe the child's checkout for its evidence.
-    func delegated(parent: UUID, child: UUID, source: String, root: String? = nil, base: String? = nil, shared: Bool = true) {
+    /// The parent is a lead or, at any depth, a helper in an open task. `via`
+    /// `harness`: the CLI started the child itself; it is attributed to its
+    /// parent and holds no part, so it never keeps the task open.
+    func delegated(parent: UUID, child: UUID, source: String, root: String? = nil, base: String? = nil, shared: Bool = true,
+                   via: String? = nil) {
         queue.async {
-            guard let task = self.active[parent] else { return }
+            guard let task = self.active[parent] ?? self.openTask(parent) else { return }
             self.sessionTasks[child] = task
             if let root, self.evidence[child] == nil {
                 self.evidence[child] = HelperEvidence(root: URL(fileURLWithPath: root), base: base, shared: shared)
             }
-            self.append(Row(kind: "delegated", task: task, agent: child, part: child, source: "delegate/\(source)"))
+            var row = Row(kind: "delegated", task: task, agent: child, part: via == nil ? child : nil, source: "delegate/\(source)")
+            if via != nil || self.owners[task] != parent { row.parent = parent }
+            row.via = via
+            self.append(row)
         }
     }
     /// Typed hand-offs retain the existing value buffers; aggregation and
@@ -273,10 +293,11 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// agent no human prompted in this process): recorded, never dropped.
     static let noTask = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
+    /// The open task the agent's chain leads to. A closed task owns no new turn.
     private func usageTask(_ agent: UUID) -> UUID? {
         var current = agent
         for _ in 0..<64 {
-            if let task = sessionTasks[current] { return task }
+            if sessionTasks[current] != nil { return openTask(current) }
             guard let parent = usageParents[current], parent != current else { return nil }
             current = parent
         }
@@ -420,6 +441,7 @@ final class ManagedRunLedger: @unchecked Sendable {
         func known(_ id: String?) -> String? { id.flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 } }
         let model = known(snapshot.accountingModel).map { UsageModel(id: $0, source: "cli") }
             ?? UsageModel(id: known(recordModel), source: known(recordModel) == nil ? nil : "record")
+        if let reason = snapshot.accountingIncomplete { return [(model, .unknown(reason))] }
         if let byModel = snapshot.typedCountsByModel {
             if let id = snapshot.accountingObservationID, !claudeResults.insert(id).inserted { return [(model, .ignore)] }
             if byModel.isEmpty { return [(model, .unknown("untyped"))] }
@@ -463,8 +485,16 @@ final class ManagedRunLedger: @unchecked Sendable {
 
     private func fact(kind: String, agent: UUID, source: String, outcome: String? = nil, checks: [String: Int]? = nil, findings: [String: Int]? = nil) {
         let part = parts[agent]
-        guard let task = sessionTasks[agent],
-              let owner = owners[task] else { return }
+        // A turn belongs to the task that was open when it started; a turn that
+        // starts after its agent's task closed belongs to none (`.plans/116`
+        // gaps 8 and 9), until a submission opens another.
+        let task: UUID?
+        switch kind {
+        case "working": task = openTask(agent); turnTask[agent] = task
+        case "turnEnded": task = turnTask.removeValue(forKey: agent) ?? openTask(agent)
+        default: task = turnTask[agent] ?? openTask(agent)
+        }
+        guard let task, let owner = owners[task] else { return }
         append(Row(kind: kind, task: task, agent: agent, part: part, source: source, outcome: outcome, checks: checks, findings: findings))
         guard active[owner] == task, kind == "turnEnded" || kind == "reported",
               openByTask[task]?.isEmpty ?? true,
