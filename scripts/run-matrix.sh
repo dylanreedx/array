@@ -1482,6 +1482,10 @@ run_app_check .build/debug/Array --observer-sweep-badge-check
 # survives untouched — while the change-set names exactly the agents that moved.
 run_app_check .build/debug/Array --agent-incremental-refresh-check
 run_app_check .build/debug/Array --sidebar-liveness-check
+# Live-usage profile 2026-11-11: tool chatter patches the chattering agents'
+# rows and a focus move between read agents only moves the open row; neither
+# builds every sidebar row.
+run_app_check .build/debug/Array --sidebar-event-cost-check
 # P2B.8: with no ZoneRuntimeController and no canvas, every agent is still listed
 # from disk with its persisted status and marked as unobserved; a live view or
 # observer status overrides the file and clears the mark.

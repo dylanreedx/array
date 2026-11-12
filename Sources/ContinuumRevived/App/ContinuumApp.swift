@@ -4164,6 +4164,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--sidebar-event-cost-check") {
+            do {
+                _ = NSApplication.shared
+                print(try AppDelegate.runSidebarEventCostChecks())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-incremental-refresh-check") {
             do {
                 _ = NSApplication.shared
@@ -7791,7 +7802,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Coalesces surface pushes on the runner event path. `recordManagedActivity` is
     /// called per streamed token, and a push reloads the sidebar and sweeps the
     /// canvas — debounced exactly like `scheduleCompanionSyncPublish`.
-    private lazy var agentSurfacePush = CoalescedPush { [weak self] in self?.pushAgentSurfaces() }
+    private lazy var agentSurfacePush = CoalescedPush { [weak self] in self?.pushScheduledAgentSurfaces() }
+    /// What asked for the pending coalesced push: agents whose only events were
+    /// tool chatter, and whether anything else (a state change, a report, a
+    /// tile-less turn) did. Chatter alone patches rows; anything else builds them.
+    private var pendingChatterAgents: Set<UUID> = []
+    private var pendingPushBuildsRows = false
+    /// The inbox rows the last full build produced, with chatter patches applied
+    /// since, and the uptime of that build. Every writer of the inbox goes through
+    /// `sidebarInboxRows`, so this is what the sidebar holds.
+    private var lastInboxRows: (rows: [AgentInboxRow], builtAt: TimeInterval)?
+    /// How long chatter may patch rows before a full build runs anyway. Bounds how
+    /// late a time-driven field (auto-settle, closing grace) can be while agents
+    /// stream; those move on a scale of minutes, and chatter used to refresh them
+    /// every 0.5 s only incidentally.
+    static let chatterPatchMaxAge: TimeInterval = 5
+    /// Full inbox row builds (`buildAgentInboxRows`), for the push-cost witness.
+    private(set) var qaInboxRowBuildCount = 0
     private var sidebarTurnObserverToken: UUID?
     /// Every STRUCTURAL sidebar reload (the ones that read disk) — the workspace-
     /// switch witness reads the delta across one switch.
@@ -9380,16 +9407,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// window-level click monitor reports every click inside an already-focused
     /// transcript/composer; reloading the whole sidebar for each one would turn a
     /// read-watermark fix into an interaction performance regression.
+    ///
+    /// A focus move alone changes one thing in the sidebar: which row is open.
+    /// That is `setInboxOpenAgent`, which redraws the two rows involved. Only a
+    /// visit that changed the agent's read state (attention, or an unread turn
+    /// result acknowledged) changes row values, and only that builds every row.
+    /// The live-usage profile (2026-11-11) caught each click into a tile
+    /// rebuilding the whole sidebar synchronously.
     private func synchronizeAgentFocus(to tileId: UUID?, deliberate: Bool = true) {
         let previousAgent = agentSupervisor.focusedAgentID
         let nextAgent = tileId.flatMap { agentSupervisor.agent(forTile: $0) }
         let previousAttention = nextAgent.map { agentSupervisor.attention(for: $0) }
+        let previousUnread = nextAgent.map(terminalResultIsUnread)
         agentSupervisor.focusTile(tileId, deliberate: deliberate)
-        let attentionChanged = nextAgent.map {
-            previousAttention != agentSupervisor.attention(for: $0)
+        let readStateChanged = nextAgent.map {
+            previousAttention != agentSupervisor.attention(for: $0) || previousUnread != terminalResultIsUnread($0)
         } ?? false
-        guard previousAgent != agentSupervisor.focusedAgentID || attentionChanged else { return }
-        reloadWorkspaceSidebar(rebuildAgentActivity: false)
+        if readStateChanged {
+            reloadWorkspaceSidebar(rebuildAgentActivity: false)
+        } else if previousAgent != agentSupervisor.focusedAgentID {
+            workspaceSidebarView?.setInboxOpenAgent(focusedInboxAgentId())
+        }
+    }
+
+    /// `AgentInboxRow.terminalIsUnread`, by the builder's formula.
+    private func terminalResultIsUnread(_ id: AgentID) -> Bool {
+        agentSupervisor.records[id].map {
+            ($0.latestTerminalEvent?.sequence ?? 0) > $0.acknowledgedTerminalSequence
+        } ?? false
     }
 
     /// One deliberate-visit transaction for the two independently-owned truths:
@@ -10775,14 +10820,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `reloadsTopBar`: only a structural refresh can have changed what the top
     /// bar shows (it re-reads the registry and the workspace file); an agent's own
     /// event cannot, so the event path leaves it alone and opens no file.
-    private func pushAgentSurfaces(notify: Bool = true, reloadsTopBar: Bool = false) {
+    /// `chatterOnly`: the push answers tool chatter from these agents and nothing
+    /// else, so their rows are patched instead of every row being built.
+    private func pushAgentSurfaces(notify: Bool = true, reloadsTopBar: Bool = false, chatterOnly: Set<UUID>? = nil) {
         agentActivity.lastChange = AgentsBoardProjection.changeSet(
             from: agentActivityChangeBase, to: agentActivity.snapshot
         )
         agentActivityChangeBase = agentActivity.snapshot
         applyAgentStatusesToCanvas()
         updateAgentAttentionSurface(notify: notify)
-        reloadWorkspaceSidebar(rebuildAgentActivity: false, reloadsTopBar: reloadsTopBar)
+        reloadWorkspaceSidebar(rebuildAgentActivity: false, reloadsTopBar: reloadsTopBar, chatterOnly: chatterOnly)
+    }
+
+    /// The coalesced push firing: chatter-only when nothing else asked.
+    private func pushScheduledAgentSurfaces() {
+        let chatter = pendingPushBuildsRows || pendingChatterAgents.isEmpty ? nil : pendingChatterAgents
+        pendingChatterAgents = []
+        pendingPushBuildsRows = false
+        pushAgentSurfaces(chatterOnly: chatter)
+    }
+
+    /// The cached rows with each chattering agent's row re-derived
+    /// (`AgentInboxRowBuilder.refreshingChatter`), or nil when a full build is
+    /// owed: no cache, a cache older than `chatterPatchMaxAge`, or a row whose
+    /// chatter could have moved more than those fields.
+    private func chatterPatchedInboxRows(for agents: Set<UUID>) -> [AgentInboxRow]? {
+        guard let cache = lastInboxRows,
+              ProcessInfo.processInfo.systemUptime - cache.builtAt < Self.chatterPatchMaxAge else { return nil }
+        let now = AgentElapsedClock.now()
+        var rows = cache.rows
+        for agent in agents {
+            let id = AgentID(rawValue: agent)
+            guard let index = rows.firstIndex(where: { $0.id == agent }),
+                  let record = agentSupervisor.records[id],
+                  let snapshot = agentSupervisor.turnSnapshot(for: id),
+                  let updatedAt = agentActivity.snapshot.byAgent[agent]?.updatedAt,
+                  let patched = AgentInboxRowBuilder.refreshingChatter(
+                    rows[index], turnSnapshot: snapshot, record: record, boardUpdatedAt: updatedAt,
+                    lastActivity: agentSupervisor.lastActivity(for: id), now: now)
+            else { return nil }
+            rows[index] = patched
+        }
+        lastInboxRows = (rows, cache.builtAt)
+        return rows
     }
 
     /// P2B.7: an agent's own event folds straight into the snapshot the desktop is
@@ -10818,7 +10898,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// plus a canvas sweep per streamed token is the jumpiness this ticket removes.
     /// It pushes; it does NOT rebuild — the snapshot was already advanced
     /// incrementally by the time this fires.
-    private func scheduleAgentSurfacePush(debounce: TimeInterval) {
+    /// `chatterFrom`: the request is tool chatter from this agent (see
+    /// `pushScheduledAgentSurfaces`).
+    private func scheduleAgentSurfacePush(debounce: TimeInterval, chatterFrom agent: AgentID? = nil) {
+        if let agent { pendingChatterAgents.insert(agent.rawValue) } else { pendingPushBuildsRows = true }
         agentSurfacePush.request(within: debounce)
     }
 
@@ -15580,6 +15663,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func buildAgentInboxRows(
         now: Date = AgentElapsedClock.now(), inputs: SidebarModelInputs? = nil
     ) -> [AgentInboxRow] {
+        qaInboxRowBuildCount += 1
         // In memory (R5): the inputs the last structural rebuild read, with the
         // live canvas over them. An agent event never opens a file.
         let inputs = inputs ?? currentSidebarModelInputs()
@@ -15678,7 +15762,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return agentSupervisor.agent(forTile: tileId)?.rawValue ?? tileId
     }
 
-    private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true, reloadsTopBar: Bool? = nil) {
+    private func reloadWorkspaceSidebar(
+        rebuildAgentActivity: Bool = true, reloadsTopBar: Bool? = nil, chatterOnly: Set<UUID>? = nil
+    ) {
         if rebuildAgentActivity {
             WorkspaceSwitchCounters.sidebarReloads += 1
             qaStructuralSidebarReloadCount += 1
@@ -15717,7 +15803,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // and is populated only after readiness". `applyInbox([])` here would be the
         // "no agents" lie with a rendered empty state behind it.
         if agentActivity.isReconciled {
-            sidebar.applyInbox(rows: sidebarInboxRows(inputs: inputs), changed: agentActivity.lastChange)
+            let rows = chatterOnly.flatMap(chatterPatchedInboxRows(for:)) ?? sidebarInboxRows(inputs: inputs)
+            sidebar.applyInbox(rows: rows, changed: agentActivity.lastChange)
         }
         // The workspace tree is never shown (`isWorkspaceTreeVisibleForQA`) and an
         // agent event cannot change its shape — only a structural reload rebuilds it.
@@ -16889,7 +16976,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `buildAgentInboxRows`, which never holds someone else's agent.
     func sidebarInboxRows(now: Date = AgentElapsedClock.now(), inputs: SidebarModelInputs? = nil) -> [AgentInboxRow] {
         let inputs = inputs ?? currentSidebarModelInputs()
-        return buildAgentInboxRows(now: now, inputs: inputs) + sharedAgentSidebarRows(inputs: inputs, now: now)
+        let rows = buildAgentInboxRows(now: now, inputs: inputs) + sharedAgentSidebarRows(inputs: inputs, now: now)
+        lastInboxRows = (rows, ProcessInfo.processInfo.systemUptime)
+        return rows
     }
 
     /// One lead row per `.sharedAgent` tile in any project's canvas, whether or
@@ -21147,7 +21236,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ingestAgentActivityIncrementally(draft: draft)
         // Plan 87: a STATE change (turn start/end, approval, input, failure, spawn)
         // reaches the sidebar within a frame or three; only tool chatter waits.
-        scheduleAgentSurfacePush(debounce: Self.isSidebarStateChange(event) ? 0.05 : 0.5)
+        let isStateChange = Self.isSidebarStateChange(event)
+        scheduleAgentSurfacePush(debounce: isStateChange ? 0.05 : 0.5, chatterFrom: isStateChange ? nil : agentId)
     }
 
     static func isSidebarStateChange(_ event: AgentRuntimeEvent) -> Bool {
@@ -44783,6 +44873,219 @@ extension AppDelegate {
             throw Failure(description: "SidebarLiveness RED:\n  " + failures.joined(separator: "\n  "))
         }
         return "SidebarLiveness: " + report.joined(separator: "; ")
+    }
+}
+
+// Live-usage profile (2026-11-11), the two sidebar costs. Gated on
+// `--sidebar-event-cost-check`. Driven through production: tool events through
+// `AgentSupervisor.qaDeliver` (the runner's delivery seam) and its 0.5 s
+// coalesced push, focus through `FocusBroker.requestFocus` with the canvas
+// wiring `AppDelegate` installs, and the real
+// `AgentInboxView` in an off-screen window. `qaInboxRowBuildCount` counts
+// `buildAgentInboxRows`, the whole-sidebar build both fixes remove.
+extension AppDelegate {
+    static func runSidebarEventCostChecks() throws -> String {
+        struct Failure: Error, CustomStringConvertible { let description: String }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            if !condition() { throw Failure(description: message()) }
+        }
+        var failures: [String] = []
+        func witness(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) {
+            if !condition() { failures.append(message()) }
+        }
+        @discardableResult
+        func spin(timeout: TimeInterval, until done: () -> Bool) -> TimeInterval? {
+            let start = Date()
+            while Date().timeIntervalSince(start) < timeout {
+                if done() { return Date().timeIntervalSince(start) }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+            return done() ? Date().timeIntervalSince(start) : nil
+        }
+        func settle() { spin(timeout: 0.7) { false } }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory
+            .appendingPathComponent("continuum-sidebar-event-cost-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+        for dir in [appSupport, agentsSupport, projectRoot] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let now = Date()
+        let workspaceId = UUID()
+        let projectId = UUID()
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Cost", projectIds: [projectId], createdAt: now, updatedAt: now)]
+        registry.projects = [ProjectEntry(id: projectId, name: "Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+        let supervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: agentsSupport),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        app.agentSupervisor = supervisor
+
+        // The focus wiring `AppDelegate` installs on its canvas: the broker marks
+        // the tile active, then the app's accepted-focus hook runs.
+        final class AgentTileAdapter: FocusSurfaceAdapter {
+            let focusSurfaceID: FocusSurfaceID
+            let focusSurfaceKind: FocusSurfaceKind = .managedAgent
+            init(_ id: UUID) { focusSurfaceID = .tile(id) }
+            func acquireFocus(reason: FocusRequest) -> Bool { true }
+            func releaseFocus(reason: FocusRequest) {}
+            func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool { false }
+        }
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        canvas.delegate = app
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] tileId in canvas?.markActive(tileId: tileId) }
+        app.installAcceptedTileFocusHook()
+        func focus(_ tile: Tile) {
+            _ = app.focusBroker.requestFocus(.tile(tile.id), reason: .userClick)
+        }
+        var adapters: [AgentTileAdapter] = []
+        func agentTile(_ index: Int) -> Tile {
+            let tile = Tile(
+                id: UUID(), kind: .managedAgent, title: "Agent · \(index)",
+                frame: TileFrame(x: Double(index) * 320, y: 0, width: 300, height: 200),
+                zPosition: .fromLegacyRank(index + 1), runtimeRef: nil, metadata: TileMetadata())
+            canvas.install(tileView: TileNSView(tile: tile), for: tile)
+            adapters.append(AgentTileAdapter(tile.id))
+            app.focusBroker.register(adapters[adapters.count - 1])
+            return tile
+        }
+        func spawn(_ name: String, tile: UUID? = nil) -> AgentID {
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                projectId: projectId, parentAgentID: nil, tileId: tile)
+            _ = supervisor.rename(agentID: id, to: name)
+            return id
+        }
+        let tiles = (0..<3).map(agentTile)
+        let tiled = tiles.enumerated().map { spawn("Tiled \($0.offset)", tile: $0.element.id) }
+        let loose = (0..<40).map { spawn("Agent \($0)") }
+
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 4000))
+        let window = NSWindow(contentRect: sidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = sidebar
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
+        app.workspaceSidebarView = sidebar
+        let restoreShelves = WorkspaceSidebarConfig.qaIsolateShelves()
+        defer { restoreShelves() }
+        app.configureWorkspaceSidebar(sidebar)
+        sidebar.configureInboxScope(.all) { _ in }
+        sidebar.agentInbox.setSortMode(.newest)
+        app.refreshAgentSurfaces(notify: false)
+        sidebar.layoutSubtreeIfNeeded()
+        let inbox = sidebar.inboxForQA
+        settle()
+
+        var report: [String] = []
+        func thread(_ id: AgentID) -> String { AgentSupervisor.threadId(for: id) }
+        func action(_ id: AgentID) -> AgentCharacterLoop? { inbox.pushedRowForQA(id: id.rawValue)?.characterActivity?.action }
+
+        // 1 · Tool chatter moves the character with no whole-sidebar build.
+        let streaming = Array(loose.prefix(6))
+        for agent in streaming {
+            supervisor.qaDeliver(.turnStarted(threadId: thread(agent), turnId: "t"), to: agent)
+        }
+        settle()
+        // A working agent keeps talking; its first step confirms the row.
+        for agent in streaming {
+            supervisor.qaDeliver(.itemStarted(threadId: thread(agent), itemId: "warm", kind: .commandExecution, title: "cat README.md"), to: agent)
+        }
+        settle()
+        try expect(streaming.allSatisfy { inbox.pushedRowForQA(id: $0.rawValue)?.state == .working },
+                   "1: fixture: six working rows")
+        try expect(streaming.allSatisfy { action($0) == .read }, "1: fixture: a cat step acts out read — \(streaming.map { String(describing: inbox.pushedRowForQA(id: $0.rawValue)?.characterActivity) })")
+        let buildsBefore = app.qaInboxRowBuildCount
+        let mover = streaming[0]
+        supervisor.qaDeliver(.itemStarted(threadId: thread(mover), itemId: "edit", kind: .fileChange, title: "Edit"), to: mover)
+        let typed = spin(timeout: 1.5) { action(mover) == .type }
+        witness(typed != nil, "1: an edit step never reached the row's character — action \(String(describing: action(mover)))")
+        // A burst like a real stream: every working agent steps twice a second.
+        for round in 0..<3 {
+            for agent in streaming {
+                supervisor.qaDeliver(.itemCompleted(threadId: thread(agent), itemId: "s\(round)", kind: .commandExecution, status: .completed), to: agent)
+                supervisor.qaDeliver(.itemStarted(threadId: thread(agent), itemId: "s\(round)", kind: .commandExecution, title: "rg needle"), to: agent)
+            }
+            spin(timeout: 0.3) { false }
+        }
+        let searched = spin(timeout: 1.5) { streaming.allSatisfy { action($0) == .dabble } }
+        settle()  // the push holding the burst's last round lands
+        witness(searched != nil, "1: a search step never reached every streaming row — \(streaming.map { String(describing: action($0)) })")
+        let chatterBuilds = app.qaInboxRowBuildCount - buildsBefore
+        witness(chatterBuilds == 0, "1: tool chatter from 6 agents built every sidebar row \(chatterBuilds) times")
+        // Oracle: the patched rows are what a full build would have produced.
+        let pushed = streaming.compactMap { inbox.pushedRowForQA(id: $0.rawValue) }
+        let full = app.sidebarInboxRows()
+        func comparable(_ row: AgentInboxRow) -> AgentInboxRow {
+            row.refreshingActivity(lastActiveAt: row.lastActiveAt, characterActivity: row.characterActivity, elapsed: nil)
+        }
+        func fields(_ row: AgentInboxRow) -> [String] {
+            Mirror(reflecting: comparable(row)).children.map { "\($0.label ?? ""): \(String(describing: $0.value))" }
+        }
+        func fieldDiff(_ row: AgentInboxRow) -> String {
+            let fresh = full.first { $0.id == row.id }.map(fields) ?? []
+            let other = full.first { $0.id == row.id }
+            // Dates print to the second; the stamps that move per event, exactly.
+            let stamps = "lastActiveAt \(row.lastActiveAt?.timeIntervalSinceReferenceDate ?? 0) vs \(other?.lastActiveAt?.timeIntervalSinceReferenceDate ?? 0), output \(row.characterActivity?.lastOutputAt?.timeIntervalSinceReferenceDate ?? 0) vs \(other?.characterActivity?.lastOutputAt?.timeIntervalSinceReferenceDate ?? 0) "
+            return row.title + " " + stamps + zip(fields(row), fresh).filter { $0 != $1 }.map { "\($0) ≠ \($1)" }.joined(separator: "; ")
+        }
+        let diverged = pushed.filter { row in full.first { $0.id == row.id }.map(comparable) != comparable(row) }
+        witness(pushed.count == streaming.count && diverged.isEmpty,
+                "1: \(diverged.count) patched rows differ from a full build: \(diverged.map(fieldDiff))")
+        // Positive control: a state change still builds, so the counter counts.
+        let controlBefore = app.qaInboxRowBuildCount
+        supervisor.qaDeliver(.turnCompleted(threadId: thread(mover), turnId: "t", outcome: .completed, errorMessage: nil), to: mover)
+        let ended = spin(timeout: 1.0) { inbox.pushedRowForQA(id: mover.rawValue)?.state != .working }
+        witness(ended != nil && app.qaInboxRowBuildCount > controlBefore,
+                "1: control: a turn end did not build rows (\(app.qaInboxRowBuildCount - controlBefore)) or reach the row")
+        report.append("chatter: \(chatterBuilds) row builds, character moved, rows match a full build")
+
+        // 2 · Moving focus between agent tiles builds no rows; the open row moves.
+        focus(tiles[0])
+        settle()
+        try expect(inbox.openAgentId == tiled[0].rawValue,
+                   "2: fixture: focusing tile 0 did not open its row (open \(String(describing: inbox.openAgentId)))")
+        let focusBefore = app.qaInboxRowBuildCount
+        var opened: [Bool] = []
+        for index in [1, 0, 1] {
+            focus(tiles[index])
+            opened.append(inbox.openAgentId == tiled[index].rawValue)
+        }
+        settle()
+        let focusBuilds = app.qaInboxRowBuildCount - focusBefore
+        witness(opened.allSatisfy { $0 }, "2: a focus move did not move the open row: \(opened)")
+        witness(focusBuilds == 0, "2: three focus moves between read agents built every sidebar row \(focusBuilds) times")
+        // Positive control: visiting an agent with an unread result clears it.
+        let unread = tiled[2]
+        supervisor.qaDeliver(.turnStarted(threadId: thread(unread), turnId: "u"), to: unread)
+        supervisor.qaDeliver(.turnCompleted(threadId: thread(unread), turnId: "u", outcome: .completed, errorMessage: nil), to: unread)
+        settle()
+        try expect(inbox.pushedRowForQA(id: unread.rawValue)?.terminalIsUnread == true,
+                   "2: fixture: the finished agent's result must be unread")
+        let visitBefore = app.qaInboxRowBuildCount
+        focus(tiles[2])
+        let read = spin(timeout: 1.0) { inbox.pushedRowForQA(id: unread.rawValue)?.terminalIsUnread == false }
+        witness(read != nil && app.qaInboxRowBuildCount > visitBefore,
+                "2: control: visiting an unread result did not rebuild rows (\(app.qaInboxRowBuildCount - visitBefore)) or clear it")
+        report.append("focus: \(focusBuilds) row builds over 3 moves, unread visit still rebuilds")
+
+        if !failures.isEmpty {
+            throw Failure(description: "SidebarEventCost RED:\n  " + failures.joined(separator: "\n  "))
+        }
+        return "SidebarEventCost: " + report.joined(separator: "; ")
     }
 }
 

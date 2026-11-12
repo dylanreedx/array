@@ -322,6 +322,38 @@ public enum AgentInboxRowBuilder {
         )
     }
 
+    /// Tool chatter — a step starting or finishing inside a turn — moves three
+    /// fields of a managed agent's row and nothing else: what its character acts
+    /// out (`turnSnapshot.presence`), when it was last active, and the live
+    /// elapsed. This re-derives exactly those, with the same formulas `row(...)`
+    /// uses, onto the row the last full build produced.
+    ///
+    /// nil whenever anything with a cross-row effect could have moved — the state,
+    /// the turn start, an unconfirmed or external or shared row — so the caller
+    /// builds every row instead. Live-usage profile, 2026-11-11: with several
+    /// agents streaming, rebuilding every row twice a second for this was about a
+    /// fifth of the main thread with no input.
+    public static func refreshingChatter(
+        _ row: AgentInboxRow,
+        turnSnapshot: AgentTileTurnSnapshot,
+        record: AgentRecord,
+        boardUpdatedAt: Date,
+        lastActivity: Date?,
+        now: Date
+    ) -> AgentInboxRow? {
+        let state = InboxState.state(forSnapshot: turnSnapshot)
+        guard state == row.state, !row.isUnconfirmed, row.externalSession == nil, row.sharedAgent == nil
+        else { return nil }
+        let start: Date? = state == .working ? (turnSnapshot.turnStartedAt ?? turnSnapshot.submittedAt) : nil
+        guard start == row.elapsedStartedAt else { return nil }
+        return row.refreshingActivity(
+            lastActiveAt: max(boardUpdatedAt, lastActivity ?? .distantPast),
+            characterActivity: AgentCharacterActivityProjection.activity(
+                presence: turnSnapshot.presence, terminalEvent: record.latestTerminalEvent,
+                latestPromptAt: record.latestPromptAt),
+            elapsed: start.map { max(0, now.timeIntervalSince($0)) })
+    }
+
     /// `.plans/102` P2b: what the agent said about its CURRENT turn — the status
     /// it declared and the report it filed since that turn started. Either one
     /// from an earlier turn is history, not news, and never reaches the row: a
