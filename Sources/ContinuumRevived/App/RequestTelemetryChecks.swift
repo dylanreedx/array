@@ -263,7 +263,10 @@ enum RequestTelemetryChecks {
         b.supervisor.runLedger.drain()
         let delivered = Array(usage(lead).dropFirst(rows.count))
         try expect(delivered.count == 1, "one result's usage delivered twice must give one row, got \(delivered)")
-        try expectRow(delivered.first, "same usage delivered twice", model: "claude-opus-5-5", source: "cli", counts(2, 10_695, 11_239, 124))
+        // No submission opened a task for this turn and the last one closed, so
+        // it is in no task (`.plans/116` gap 9).
+        try expectRow(delivered.first, "same usage delivered twice", model: "claude-opus-5-5", source: "cli", counts(2, 10_695, 11_239, 124),
+                      incomplete: ["noTask"])
         try privacy(root: root)
         try await timing(b, lead)
     }
@@ -382,7 +385,14 @@ enum RequestTelemetryChecks {
         try await wait("helpers settled") { !supervisor.isRunning(hc) && !supervisor.isRunning(nested) && !supervisor.isRunning(lead) }
         supervisor.runLedger.drain()
 
-        let leadRows = usage(lead), claudeRows = usage(hc), codexRows = usage(hx), nestedRows = usage(nested)
+        // hx's report closes the task (the lead had ended), so the wake it
+        // causes starts after the close and is in no task (`.plans/116` gap 8).
+        let noTask = ManagedRunLedger.noTask.uuidString
+        let afterClose = usage(lead).filter { $0["task"] as? String == noTask }
+        try expect(afterClose.count == 1, "one lead wake after the close, in no task: \(afterClose)")
+        try expectRow(afterClose.first, "lead wake after the close", model: ManagedModeChecks.model, source: "record", nil,
+                      incomplete: ["noTask", "noUsage"])
+        let leadRows = usage(lead).filter { $0["task"] as? String != noTask }, claudeRows = usage(hc), codexRows = usage(hx), nestedRows = usage(nested)
         let task = taskOf(leadRows)
         try expect(task.count == 1 && taskOf(claudeRows) == task && taskOf(codexRows) == task && taskOf(nestedRows) == task,
                    "lead and helpers at any depth must be one task: \(taskOf(leadRows)) \(taskOf(claudeRows)) \(taskOf(codexRows)) \(taskOf(nestedRows))")

@@ -286,16 +286,23 @@ enum ManagedRunLedgerChecks {
             try await wait("last helper report did not close task without a wake", timeout: 3) { !rows(ledger, "taskClosed", task: t1).isEmpty }
             try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count == 2, "closure required another lead turn")
         }
-        // 6. The helper finishes; its result wakes the lead. The wake runs inside
-        //    the task and opens none; the task closes once no work remains.
+        // 6. The helper finishes; its result wakes the lead. The last report
+        //    already closed the task (the lead had ended), so the wake starts
+        //    after the close: it is not the task's work and opens none
+        //    (`.plans/116` gap 8). Its usage row lands under no task.
         try release("helperone")
         try await wait("task did not close after the helper's result", timeout: 40) { !rows(ledger, "taskClosed", task: t1).isEmpty }
         try await wait("helper end missing") { rows(ledger, "turnEnded", task: t1, agent: h1).count == 1 }
-        if !noWake { try await wait("wake end missing") { rows(ledger, "turnEnded", task: t1, agent: lead).count >= 3 } }
+        if !noWake {
+            try await wait("wake did not run") {
+                rows(ledger, "usage", agent: lead).contains { $0["task"] as? String == ManagedRunLedger.noTask.uuidString }
+            }
+        }
         let ended = rows(ledger, "turnEnded", task: t1, agent: h1)
         try expect(ended.count == 1 && ended[0]["part"] as? String == p1 && ended[0]["outcome"] as? String == "completed",
                    "helper turn end wrong: \(ended)")
-        if !noWake { try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count >= 3, "the helper wake did not run inside the task") }
+        try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count == 2 && rows(ledger, "working", task: t1, agent: lead).count == 2,
+                   "a wake after the close was recorded inside the closed task")
         try expect(rows(ledger, "taskOpened").count == 1, "a helper wake opened a task")
 
 
