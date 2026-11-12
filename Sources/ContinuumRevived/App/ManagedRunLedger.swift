@@ -81,6 +81,7 @@ final class ManagedRunLedger: @unchecked Sendable {
     private var openByTask: [UUID: Set<UUID>] = [:]
     private var delegationOrder: [UUID: [UUID]] = [:]
     private var leadBoundary: [UUID: Row] = [:]
+    private var taskOrder: [UUID: Int] = [:]
     private var needsSeparator = false
     // Replayed transcript events during restore are history, not new run facts.
     // Kept after closure, but only a turn that started while its task was open
@@ -157,7 +158,9 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// The one reducer, for live appends and for the load-time rebuild.
     private func reduce(_ row: Row) {
         switch row.kind {
-        case "taskOpened": active[row.agent] = row.task; previous[row.agent] = row.task; owners[row.task] = row.agent
+        case "taskOpened":
+            active[row.agent] = row.task; previous[row.agent] = row.task; owners[row.task] = row.agent
+            taskOrder[row.task] = taskOrder.count
         case "delegated":
             parts[row.agent] = row.part; delegatedTask[row.agent] = row.task
             if let part = row.part {
@@ -187,7 +190,8 @@ final class ManagedRunLedger: @unchecked Sendable {
                 reduce(row)
             }
         }
-        for (agent, task) in active {
+        // In opening order: a dictionary's order differs per process.
+        for (agent, task) in active.sorted(by: { (taskOrder[$0.value] ?? 0) < (taskOrder[$1.value] ?? 0) }) {
             let pending = (delegationOrder[task] ?? []).filter { open.contains($0) }
             append(Row(kind: "taskInterrupted", task: task, agent: agent, source: "interrupted/\(task)", openParts: pending))
         }
