@@ -3968,6 +3968,18 @@ final class AgentSupervisor {
                 }
             }
         }
+        // `.plans/116` gap 9: usage a provider reports after its turn ended and
+        // the run returned. It names its turn, so the ledger charges that
+        // turn's task; no generation gate, and it reaches nothing but the ledger.
+        if let reporting = runner as? TrailingUsageReporting {
+            reporting.observeTrailingUsage { [weak self] snapshot in
+                DispatchQueue.main.async {
+                    guard let self, self.qaRunLedgerRecording, let record = self.records[id] else { return }
+                    self.runLedger.usage(agent: id.rawValue, Self.usageIdentity(record), snapshot,
+                                         record: AgentTokenTelemetryConfig.enabled(defaults: self.managedModeDefaults))
+                }
+            }
+        }
         // T6: pi's delegated child does not stream on the parent at all — it
         // writes its own run directory — so its runner reports a LOCATION and the
         // supervisor tails it. Different mechanism, same destination: the child's
