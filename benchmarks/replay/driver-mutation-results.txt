@@ -1,8 +1,9 @@
+a lead's tool calls counted once per stream line: RED exit=1 FAIL: a lead's shell writes or delegations were miscounted: ["changed": "likely: shell write (heuristic)", "bashCalls": 3, "editToolCalls": 0, "shellWrites": ["
 solo run that delegates: RED exit=1 FAIL: solo run delegated: the production record has 1 helper(s)
 codex resume without a baseline read as complete: RED exit=1 FAIL: a Codex resume without a baseline was recorded complete: ["uncachedInput unknown", "cacheRead unknown", "cacheWrite unknown", "output unknown", "noBaselin
 ledger rows' incomplete flags dropped: RED exit=1 FAIL: a Codex resume's record does not carry the ledger's noBaseline flag: ["uncachedInput unknown", "cacheRead unknown", "cacheWrite unknown", "output unknown"
-missing counted as zero: RED exit=1 FAIL: a Codex resume without a baseline produced a total: ["uncachedInput": 2613, "cacheWrite": 0, "cacheRead": 46336, "output": 222]
+missing counted as zero: RED exit=1 FAIL: a Codex resume without a baseline produced a total: ["cacheWrite": 0, "cacheRead": 46336, "uncachedInput": 2613, "output": 222]
 codex cache write not reported counted as incomplete: RED exit=1 FAIL: codex solo usage was not complete: ["cacheWrite unknown"]
-helpers' usage left out of the task: RED exit=1 FAIL: claude managed tokens are not 4 recorded turn(s): output 248, expected 496
+helpers' usage left out of the task: RED exit=1 FAIL: claude managed tokens are not 5 recorded turn(s): uncachedInput 6, expected 10
 failed run's record vanishes: RED exit=1 FAIL: a failed run's record vanished
 restored: GREEN exit=0 ReplayDriverChecks passed
