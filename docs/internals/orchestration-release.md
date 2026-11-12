@@ -53,11 +53,11 @@ from plan documents.
 
 | What | Why it is safe |
 |---|---|
-| Run ledger | Recording only, nothing shown. The calling thread does one queue hand-off: 12 µs median per submission, 6 µs per delegation or report. A whole submission with recording on against off: +37 µs median (95% CI −166 to +334 µs). Encoding and file I/O happen on a utility queue. No setting gates it. |
+| Run ledger | Recording only, nothing shown. The calling thread does one queue hand-off: 5 µs median per submission, 3 µs per delegation or report. A whole submission with recording on against off: +0.75 µs median (95% CI −34 to +38 µs). Encoding and file I/O happen on a utility queue. No setting gates it. |
 | Host evidence, shadow | Recording only, nothing shown, nothing acts on it. Main thread: one hop per helper tool event and two `realpath` calls per delegation; git runs on the ledger's queue. |
 | Lead checkout watch | Recording only, nothing shown. One FSEvents stream per lead checkout, delivered on its own queue; classification and git run on the watch's queue. |
 | Token telemetry (`agents.tokenTelemetry.enabled`) | Recording only, local, never uploaded. Turning it off stops new records and deletes nothing. |
-| Helper liveness | A field in `agent.inspect`; nothing shown to the user. With the stall alert off, the lead is told what it was told before. Main thread: classification runs inside the existing 30-second watchdog sweep, which walks the records once and passes over helpers already recorded finished. Over 2,000 finished helpers one sweep takes 5.9 to 6.4 ms, against 5.9 to 7.4 ms on origin/array/integration. |
+| Helper liveness | A field in `agent.inspect`; nothing shown to the user. With the stall alert off, the lead is told what it was told before. Main thread: classification runs inside the existing 30-second watchdog sweep, which walks the records once and passes over helpers already recorded finished. Over 2,000 finished helpers one sweep takes 5.0 to 5.2 ms, against 5.2 to 5.6 ms on origin/array/integration. |
 | Settings ▸ Usage | **User-visible**: a new Settings section. It reads the ledger only when opened, on a background queue. |
 | New Settings rows (Reply rules, Personal rules, stall alert, Token usage) | **User-visible**: rows only. The switches behind them default as listed. |
 | Brief on resume, compact, clear, fork and mode switch | **Changes what an agent receives**: the brief arrives in more places, with one added sentence about `array_message_agent`. It fixes a lead left without its tools after `/compact`. |
@@ -83,16 +83,16 @@ Each stays off until a measured run shows it helps (`.plans/116-agent-standards/
 `--managed-launch-timing-check` (targeted only, no time assertions) drives
 the production paths with a fake Claude CLI that answers at once, so the
 numbers are Array's own. The same file built on origin/array/integration and
-on this head; three alternating rounds of 20 samples on a quiet machine.
+on the final head; three alternating rounds of 20 samples on a quiet machine.
 Medians, with p95 in brackets:
 
 | Path | origin/array/integration | this head |
 |---|---|---|
-| Lead launch: composer submit to CLI start | 33.5–35.2 ms (43–53) | 33.5–34.9 ms (39–45) |
-| First reply: submit to first assistant text Array delivers | 60.2–63.8 ms (70–92) | 61.4–63.3 ms (68–78) |
-| `agent.delegate` to helper CLI start | 73.8–75.5 ms (75–96) | 74.3–77.0 ms (79–85) |
-| Helper result to the lead's next turn | 125.8–130.2 ms (133–139) | 127.4–130.5 ms (132–142) |
-| Watchdog sweep, 2,000 finished helpers (main thread, every 30 s) | 5.9–7.4 ms | 5.9–6.4 ms |
+| Lead launch: composer submit to CLI start | 31.4–31.5 ms (34–37) | 31.3–31.7 ms (34–36) |
+| First reply: submit to first assistant text Array delivers | 58.3–58.5 ms (62–67) | 58.1–58.7 ms (61–66) |
+| `agent.delegate` to helper CLI start | 72.2–73.3 ms (75–76) | 72.5–73.9 ms (76–80) |
+| Helper result to the lead's next turn | 125.3–126.8 ms (130–131) | 126.5–127.5 ms (132–135) |
+| Watchdog sweep, 2,000 finished helpers (main thread, every 30 s) | 5.2–5.6 ms | 5.0–5.2 ms |
 
 The four request paths are unchanged within run-to-run noise. One
 launch-path cost was found and removed on the way: the lead's tool pin
