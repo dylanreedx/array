@@ -98,11 +98,31 @@ func runAgentContextRealRunnerChecks() {
     expect(!claudeCatalog.models.isEmpty, "context live: Claude's installed CLI must offer models")
     expect(!codexCatalog.models.isEmpty, "context live: Codex's installed CLI must offer models")
     expect(!piCatalog.models.isEmpty, "context live: Pi's installed CLI must offer models")
-    let resolver = AgentContextWindowResolver()
-    let unresolved = resolver.unresolvedModels(in: [claudeCatalog, codexCatalog, piCatalog])
-    expect(unresolved.isEmpty, "context live: all actually offered live models must resolve: \(unresolved.joined(separator: ", "))")
+    // An app-support directory, so the remembered rung persists exactly as it
+    // does in the app.
+    let appSupport = root.appendingPathComponent("app-support", isDirectory: true)
+    let resolver = AgentContextWindowResolver(applicationSupportDirectory: appSupport)
+    // Codex and Pi publish every model's window in their own catalogues, so
+    // every model they offer must resolve before any turn. Claude's
+    // `initialize` handshake publishes no window (checked against 2.1.321);
+    // its only statement is a turn result's `modelUsage.contextWindow`. A
+    // Claude model the dated bundled table lacks is therefore honestly
+    // unknown until it runs once. Demanding it resolve here demanded a source
+    // edit for every model Anthropic ships (non-negotiable #5); instead the
+    // first such model is run below and must get its window from the CLI.
+    let unresolved = resolver.unresolvedModels(in: [codexCatalog, piCatalog])
+    expect(unresolved.isEmpty, "context live: all actually offered Codex and Pi models must resolve: \(unresolved.joined(separator: ", "))")
+    let unstatedClaudeModels = claudeCatalog.models.filter {
+        resolver.resolve(harness: .claudeCode, model: $0).tokens == nil
+    }
+    print("context live: claude models awaiting their first stated window: \(unstatedClaudeModels.isEmpty ? "none" : unstatedClaudeModels.joined(separator: ", "))")
 
     let claudeModel = "anthropic/claude-sonnet-5-5"
+    // Positive control: a model the table already covers resolves before any
+    // turn, and the CLI's own statement then supersedes the table.
+    let claudeControl = resolver.resolve(harness: .claudeCode, model: claudeModel)
+    expect(claudeControl.source == .bundled && claudeControl.tokens == 1_000_000,
+           "context live: \(claudeModel) must resolve from the bundled table before any turn; got \(String(describing: claudeControl.tokens)) from \(claudeControl.source)")
     let codexModel = "openai-codex/gpt-5.6-sol"
     let piModel = "openai-codex/gpt-5.6-sol"
     expect(claudeCatalog.models.contains(claudeModel), "context live: Claude 2.1.296 catalog must offer \(claudeModel)")
@@ -137,13 +157,17 @@ func runAgentContextRealRunnerChecks() {
         snapshots.last { AgentContextOccupancy.promptTokens(from: $0).map { $0 > 0 } == true }
     }
 
-    let claude = ClaudeAgentRunner(config: .init(
-        model: ClaudeCLIBackend.modelArgument(forCatalogId: claudeModel),
-        effort: "low", cwd: root, sessionId: UUID().uuidString.lowercased(),
-        extraArgs: ["--settings", #"{"disableAllHooks":true}"#, "--tools", "", "--strict-mcp-config",
-                    "--setting-sources", ""], conversationMayExist: false))
-    let claudeEvents = run("Claude", stop: { claude.stop() }) { handler in try claude.run(prompt: prompt, onEvent: handler) }
-    claude.stop()
+    func claudeTurn(_ model: String) -> [AgentRuntimeEvent] {
+        let claude = ClaudeAgentRunner(config: .init(
+            model: ClaudeCLIBackend.modelArgument(forCatalogId: model),
+            effort: "low", cwd: root, sessionId: UUID().uuidString.lowercased(),
+            extraArgs: ["--settings", #"{"disableAllHooks":true}"#, "--tools", "", "--strict-mcp-config",
+                        "--setting-sources", ""], conversationMayExist: false))
+        let events = run("Claude \(model)", stop: { claude.stop() }) { handler in try claude.run(prompt: prompt, onEvent: handler) }
+        claude.stop()
+        return events
+    }
+    let claudeEvents = claudeTurn(claudeModel)
     let claudeReading = actualPrompt(readings(claudeEvents))
     expect(claudeReading != nil, "context live: Claude must report actual per-request prompt tokens")
     if let claudeReading {
@@ -157,6 +181,37 @@ func runAgentContextRealRunnerChecks() {
         expect((meter.usedTokens ?? 0) > 0 && meter.maxTokens == 1_000_000,
                "context live: Claude must fill the meter from actual tokens/window, got \(String(describing: meter.usedTokens))/\(String(describing: meter.maxTokens))")
         print("context live: claude model=\(claudeModel) used=\(meter.usedTokens ?? 0) window=\(meter.maxTokens ?? 0) source=provider")
+    }
+
+    // A model the Claude CLI offers that no table covers (Fable 5.2 on 2.1.321)
+    // reads as unknown, never guessed, until its first turn; that turn's own
+    // statement fills the meter, and the remembered value outlives the run so
+    // the next agent on the model starts with it.
+    if let newModel = unstatedClaudeModels.first {
+        let before = resolver.resolve(harness: .claudeCode, model: newModel)
+        expect(before.source == .unknown && before.tokens == nil,
+               "context live: \(newModel) must stay visibly unknown before Claude states it; got \(String(describing: before.tokens)) from \(before.source)")
+        let events = claudeTurn(newModel)
+        let reading = actualPrompt(readings(events))
+        expect(reading != nil, "context live: Claude \(newModel) must report actual per-request prompt tokens")
+        let statedWindow = readings(events).compactMap(\.maxTokens).last
+        expect((statedWindow ?? 0) > 0, "context live: Claude's own result must state \(newModel)'s window")
+        let resolved = resolver.resolve(harness: .claudeCode, model: newModel, stated: statedWindow)
+        expect(resolved.source == .provider && resolved.tokens == statedWindow,
+               "context live: \(newModel) must resolve from Claude's statement; got \(String(describing: resolved.tokens)) from \(resolved.source)")
+        if let reading {
+            let meter = AgentContextOccupancy.withDerivedOccupancy(reading, contextWindow: resolved.tokens)
+            expect((meter.usedTokens ?? 0) > 0 && meter.maxTokens == statedWindow,
+                   "context live: Claude \(newModel) must fill the meter, got \(String(describing: meter.usedTokens))/\(String(describing: meter.maxTokens))")
+        }
+        let after = resolver.resolve(harness: .claudeCode, model: newModel)
+        expect(after.source == .remembered && after.tokens == statedWindow,
+               "context live: the next \(newModel) agent must start from the remembered statement; got \(String(describing: after.tokens)) from \(after.source)")
+        let persisted = (try? Data(contentsOf: appSupport.appendingPathComponent("context-windows.json")))
+            .flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) }
+        expect(persisted?["Claude Code:\(newModel)"] == statedWindow,
+               "context live: \(newModel)'s stated window must persist across launches")
+        print("context live: claude model=\(newModel) window=\(statedWindow ?? 0) source=provider then remembered (not in the bundled table)")
     }
 
     // The normal production default is app-server; any inherited emergency
