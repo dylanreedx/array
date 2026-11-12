@@ -57,7 +57,7 @@ from plan documents.
 | Host evidence, shadow | Recording only, nothing shown, nothing acts on it. Main thread: one hop per helper tool event and two `realpath` calls per delegation; git runs on the ledger's queue. |
 | Lead checkout watch | Recording only, nothing shown. One FSEvents stream per lead checkout, delivered on its own queue; classification and git run on the watch's queue. |
 | Token telemetry (`agents.tokenTelemetry.enabled`) | Recording only, local, never uploaded. Turning it off stops new records and deletes nothing. |
-| Helper liveness | A field in `agent.inspect`; nothing shown to the user. With the stall alert off, the lead is told what it was told before. Main thread: classification runs inside the existing 30-second watchdog sweep. Over 2,000 finished helpers one sweep took 8.7 to 10.9 ms, against 5.4 to 5.8 ms on origin/array/integration. |
+| Helper liveness | A field in `agent.inspect`; nothing shown to the user. With the stall alert off, the lead is told what it was told before. Main thread: classification runs inside the existing 30-second watchdog sweep, which walks the records once and passes over helpers already recorded finished. Over 2,000 finished helpers one sweep takes 5.9 to 6.4 ms, against 5.9 to 7.4 ms on origin/array/integration. |
 | Settings ▸ Usage | **User-visible**: a new Settings section. It reads the ledger only when opened, on a background queue. |
 | New Settings rows (Reply rules, Personal rules, stall alert, Token usage) | **User-visible**: rows only. The switches behind them default as listed. |
 | Brief on resume, compact, clear, fork and mode switch | **Changes what an agent receives**: the brief arrives in more places, with one added sentence about `array_message_agent`. It fixes a lead left without its tools after `/compact`. |
@@ -92,12 +92,28 @@ Medians, with p95 in brackets:
 | First reply: submit to first assistant text Array delivers | 60.2–63.8 ms (70–92) | 61.4–63.3 ms (68–78) |
 | `agent.delegate` to helper CLI start | 73.8–75.5 ms (75–96) | 74.3–77.0 ms (79–85) |
 | Helper result to the lead's next turn | 125.8–130.2 ms (133–139) | 127.4–130.5 ms (132–142) |
-| Watchdog sweep, 2,000 finished helpers (main thread, every 30 s) | 5.4–5.8 ms | 8.7–10.9 ms |
+| Watchdog sweep, 2,000 finished helpers (main thread, every 30 s) | 5.9–7.4 ms | 5.9–6.4 ms |
 
 The four request paths are unchanged within run-to-run noise. One
 launch-path cost was found and removed on the way: the lead's tool pin
 rewrote its MCP files on the main thread just before the runner wrote them
-again. The watchdog sweep is the one path that got slower.
+again. Liveness tracking first made the watchdog sweep slower (8.7 to
+10.9 ms): it copied every helper's record four or five times per pass. One
+walk that keeps only what the pass reads brought it back to origin's level.
+
+## Known issues
+
+- `--context-meter-live-check` fails before any model turn: the installed
+  Claude CLI offers `anthropic/claude-fable-5-2`, and Array's context-window
+  resolver has no window for it until that model's first reply reports one.
+  Not caused by this head; the release lead owns the check.
+- `--agent-steering-recovery-check` fails about one run in three under six
+  parallel copies, on origin/array/integration (11 of 36) and on this head
+  (12 of 36) alike: one Pi steering assertion with a 4-second grace timer.
+- `--subagent-sidebar-open-check` fails identically on origin/array/integration.
+- `scripts/capture-cli-fixtures.sh check` fails because the installed CLIs are
+  newer than the committed context-meter captures; new captures are owed at
+  release.
 
 ## Not included
 
