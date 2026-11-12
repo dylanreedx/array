@@ -51,12 +51,6 @@ enum SidebarIndicatorTruthTableChecks {
                                     inbox.openAgentId = selection == "none" ? nil : (selection == "lead" ? lead : helper)
                                     inbox.layoutViewportForQA()
                                     if selection != "none" { _ = inbox.selectRowForQA(id: selection == "lead" ? lead : helper) }
-                                    var rasterOutlines: [String: Int] = [:]
-                                    inbox.onFoldRasterForQA = { key, view in
-                                        rasterOutlines[key] = descendants(view, AgentInboxCardView.self).filter {
-                                            !$0.qaIndicatorLayers.edge.isHidden && $0.qaIndicatorLayers.edge.borderWidth > 0
-                                        }.count
-                                    }
                                     if fold == "expanded" && selection == "helper" {
                                         inbox.toggleCollapse(parentId: lead)
                                         inbox.toggleCollapse(parentId: lead)
@@ -73,33 +67,26 @@ enum SidebarIndicatorTruthTableChecks {
                                     let lights = visibleCells.flatMap { descendants($0, InboxExpandedGroupLight.self) }
                                     let sweeps = visibleCells.flatMap { descendants($0, InboxSweepBorderView.self) }
                                     let cards = visibleCells.flatMap { descendants($0, AgentInboxCardView.self) }
+                                    // A group with one visible row draws its style on the card, as 0.7.47 did.
+                                    let washes = cards.filter { !$0.qaIndicatorLayers.wash.isHidden && $0.qaIndicatorLayers.wash.superlayer != nil }
                                     let present = style == .classic ? sweeps.contains { !$0.isHidden }
-                                        : lights.contains { !$0.isHidden }
+                                        : lights.contains { !$0.isHidden } || !washes.isEmpty
                                     let moving = style == .classic ? sweeps.contains { $0.isMovingForQA } : lights.contains {
                                         !$0.isHidden && $0.renderedLayersForChecks.contains { !($0.animationKeys() ?? []).isEmpty }
-                                    }
-                                    let outlines = inbox.foldMotionForQA.ghostKeysForQA.reduce(0) { $0 + (rasterOutlines[$1] ?? 0) }
-                                        + cards.filter {
+                                    } || washes.contains { !($0.qaIndicatorLayers.sheen.animationKeys() ?? []).isEmpty
+                                        || !($0.qaIndicatorLayers.wash.animationKeys() ?? []).isEmpty }
+                                    // 0.7.47 draws no selection outline on any card, whatever selected it.
+                                    let outlines = cards.filter {
                                         !$0.qaIndicatorLayers.edge.isHidden && $0.qaIndicatorLayers.edge.borderWidth > 0
                                     }.count
-                                    var correct = present == expected && moving == expected && outlines == (selection == "none" ? 0 : 1)
-                                    if selection == "helper" && (fold == "expanded" || fold == "live-add") {
-                                        correct = correct && inbox.selectedRowIdsForQA == [helper]
-                                    }
-                                    if selection != "none" {
-                                        correct = correct && sweeps.allSatisfy { !$0.staticOutlineVisibleForQA }
-                                    }
-                                    if style != .classic {
+                                    var correct = present == expected && moving == expected && outlines == 0
+                                    // Sheen keeps 0.7.47's faint identity rim; the others stroke nothing.
+                                    if style != .classic && style != .sheen {
                                         correct = correct && lights.filter { !$0.isHidden }.allSatisfy {
                                             !$0.renderedLayersForChecks.contains { ($0 as? CAShapeLayer)?.strokeColor != nil }
                                         }
                                     }
                                     correct = correct && cards.allSatisfy { ($0.layer?.cornerRadius ?? 0) > 0 }
-                                    for card in cards where !card.qaIndicatorLayers.edge.isHidden {
-                                        let edge = card.qaIndicatorLayers.edge
-                                        correct = correct && edge.frame == card.bounds.insetBy(dx: 0.5, dy: 0.5)
-                                            && edge.cornerRadius > 0 && (edge.borderColor?.alpha ?? 0) > 0
-                                    }
                                     if visibleCells.count == 1, let cell = visibleCells.first,
                                        let sheet = descendants(cell, InboxGroupBackgroundView.self).first,
                                        let strip = sheet.ownershipStrip {
@@ -130,15 +117,20 @@ enum SidebarIndicatorTruthTableChecks {
                                         inbox.layoutViewportForQA()
                                         let routeCells = [lead, helper, arrival].compactMap { inbox.cellForQA(id: $0) }
                                         let routeLights = routeCells.flatMap { descendants($0, InboxExpandedGroupLight.self) }
+                                        let routeWashes = routeCells.flatMap { descendants($0, AgentInboxCardView.self) }.filter {
+                                            !$0.qaIndicatorLayers.wash.isHidden && $0.qaIndicatorLayers.wash.superlayer != nil
+                                        }
                                         let routeSweeps = routeCells.flatMap { descendants($0, InboxSweepBorderView.self) }
                                         let routePresent = style == .classic ? routeSweeps.contains { !$0.isHidden }
-                                            : routeLights.contains { !$0.isHidden }
+                                            : routeLights.contains { !$0.isHidden } || !routeWashes.isEmpty
                                         let routeMoving = style == .classic ? routeSweeps.contains { $0.isMovingForQA }
                                             : routeLights.contains { !$0.isHidden && $0.renderedLayersForChecks.contains { !($0.animationKeys() ?? []).isEmpty } }
+                                                || routeWashes.contains { !($0.qaIndicatorLayers.sheen.animationKeys() ?? []).isEmpty
+                                                    || !($0.qaIndicatorLayers.wash.animationKeys() ?? []).isEmpty }
                                         let routeOutlines = routeCells.flatMap { descendants($0, AgentInboxCardView.self) }.filter {
                                                 !$0.qaIndicatorLayers.edge.isHidden && $0.qaIndicatorLayers.edge.borderWidth > 0
                                             }.count
-                                        correct = correct && routePresent == expected && routeMoving == expected && routeOutlines == 1
+                                        correct = correct && routePresent == expected && routeMoving == expected && routeOutlines == 0
                                     }
                                     if correct { passed += 1 } else {
                                         failures.append("\(label): style=\(present) motion=\(moving) expected=\(expected) outlines=\(outlines)")

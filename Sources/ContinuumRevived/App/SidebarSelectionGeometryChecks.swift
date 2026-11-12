@@ -87,10 +87,12 @@ enum SidebarSelectionGeometryChecks {
                             throw Failure(message: "singleton lost its rounded selection surface")
                         }
                         if style != .classic {
+                            // A lone lead carries its style on its own card, as in 0.7.47;
+                            // a group light left over from the helpers must not linger.
                             let light = lights(cell).first
-                            let groupHeight = light?.layer?.sublayers?.first?.frame.height ?? 0
-                            guard light?.isHidden == false,
-                                  abs(groupHeight - cell.qaCardFrameForQA.height) < 0.5 else {
+                            let wash = card.qaIndicatorLayers.wash
+                            guard light?.isHidden ?? true, !wash.isHidden, wash.superlayer != nil,
+                                  wash.frame.size == card.bounds.size else {
                                 throw Failure(message: "removing helpers left a stale selection height")
                             }
                         }
@@ -100,8 +102,10 @@ enum SidebarSelectionGeometryChecks {
                     inbox.layoutViewportForQA()
                     if style != .classic, let selectedCell = inbox.cellForQA(id: lead),
                        let selectedCard = cards(selectedCell).first {
-                        guard selectedCard.qaIndicatorLayers.edge.borderWidth == 1 else {
-                            throw Failure(message: "selected lead lacks its single even outline")
+                        // 0.7.47 marks selection by fill and style alone, never an outline.
+                        guard selectedCard.qaIndicatorLayers.edge.isHidden
+                                || selectedCard.qaIndicatorLayers.edge.borderWidth == 0 else {
+                            throw Failure(message: "selected lead paints a selection outline 0.7.47 never drew")
                         }
                     }
                     for helper in [parent] + Array(helpers.prefix(count)) {

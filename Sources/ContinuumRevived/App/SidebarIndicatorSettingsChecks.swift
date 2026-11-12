@@ -33,6 +33,7 @@ enum SidebarIndicatorSettingsChecks {
 
     static func run() throws {
         try SidebarIndicatorTruthTableChecks.run()
+        try SidebarSelectionParityChecks.run()
         try SidebarPressFeedbackChecks.run()
         try SidebarSelectionGeometryChecks.run()
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
@@ -178,7 +179,8 @@ enum SidebarIndicatorSettingsChecks {
                     try expect(gradients.contains { $0.colors?.count == 3 && $0.mask is CAGradientLayer }, "Gradient lost its shared cascading wash")
                     try expect(gradients.contains { $0.animation(forKey: "group.orbit.startPoint")?.duration == 60 } == !reduced, "shared Gradient loop policy wrong")
                 case .sheen:
-                    try expect(!painted.contains { ($0 as? CAShapeLayer)?.strokeColor != nil }, "Sheen added a second group outline")
+                    // 0.7.47's one faint identity rim, and nothing on top of it.
+                    try expect(painted.filter { ($0 as? CAShapeLayer)?.strokeColor != nil }.count <= 1, "Sheen added a second group outline")
                     try expect(painted.contains { $0.animation(forKey: "group.sheen") != nil } == !reduced, "shared Sheen sweep policy wrong")
                 }
                 guard let rep = SettingsFixtureWindow.capture(card.superview ?? card), let png = rep.representation(using: .png, properties: [:]) else {
