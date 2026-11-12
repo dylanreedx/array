@@ -82,7 +82,7 @@ enum SidebarFoldStyleChecks {
                 window.orderFrontOffscreenForChecks()
                 defer { window.orderOut(nil); window.contentView = nil; window.close() }
                 inbox.setScope(.all)
-                inbox.restoreParentFolds([leadA: false, leadB: false])
+                inbox.restoreParentFolds([leadA: true, leadB: true])
                 inbox.reload(rows: rows)
                 inbox.layoutViewportForQA()
 

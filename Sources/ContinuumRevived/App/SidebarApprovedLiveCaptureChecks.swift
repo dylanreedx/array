@@ -175,7 +175,7 @@ enum SidebarApprovedLiveCaptureChecks {
             inbox.reload(rows: [parent])
             inbox.apply(rows: [parent] + helpers,
                 changed: AgentsBoardChangeSet(added: Set(helpers.map(\.id)), updated: [lead], removed: []))
-            inbox.restoreParentFolds([lead: false])
+            inbox.restoreParentFolds([lead: true])
             inbox.layoutViewportForQA()
             try await Task.sleep(for: .milliseconds(300))
             guard let leadCell = inbox.cellForQA(id: lead) else { throw NSError(domain: "SidebarFoldCapture", code: 2) }
