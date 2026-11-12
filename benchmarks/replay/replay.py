@@ -72,15 +72,21 @@ def fixture(root):
 
 
 def checks_hash(task):
-    return digest(json.dumps([task['base'], sorted(task['hidden'].items()), sorted(task['neighbours']),
-                              sorted(task['protected'])], sort_keys=True).encode())
+    frozen = [task['base'], sorted(task['hidden'].items()), sorted(task['neighbours']), sorted(task['protected'])]
+    if task.get('tools'):
+        frozen.append(sorted(task['tools']))
+    return digest(json.dumps(frozen, sort_keys=True).encode())
 
 
-def make_task(repo, base, fix, request, fixture_id, hidden_paths, neighbours, protected):
-    """Hidden checks are the fix commit's added checks, held host-side only."""
+def make_task(repo, base, fix, request, fixture_id, hidden_paths, neighbours, protected, tools=()):
+    """Hidden checks are the fix commit's added checks, held host-side only.
+    `tools` are extra binaries the checks run (absolute paths); grading may
+    read and run exactly those, and puts their folders on PATH."""
     hidden = {p: subprocess.check_output(['git', '-C', str(repo), 'show', fix + ':' + p]).decode() for p in hidden_paths}
     task = dict(fixture=fixture_id, source=str(repo), base=base, fix=fix, request=request,
                 hidden=hidden, neighbours=list(neighbours), protected=sorted(set(protected) | set(hidden)))
+    if tools:
+        task['tools'] = sorted(os.path.realpath(t) for t in tools)
     task['requestHash'] = digest(request.encode())
     task['checksHash'] = checks_hash(task)
     task['task'] = task_id(base, task['requestHash'], task['checksHash'])
@@ -138,7 +144,8 @@ class Workspace:
     tmux, temporary and home directories, and nothing else."""
     FOLDERS = ('support', 'build', 'tmux', 'tmp', 'home')
 
-    def __init__(self, repo, commit):
+    def __init__(self, repo, commit, tools=()):
+        self.tools = [os.path.realpath(t) for t in tools]
         self.root = own_root('replay-')
         self.project = self.root / 'project'
         try:
@@ -164,7 +171,8 @@ class Workspace:
             for folder in self.FOLDERS:
                 (self.root / folder).mkdir()
             # A fresh environment: nothing inherited, so no TMUX or real paths.
-            self.env = dict(PATH='/usr/bin:/bin', LANG='en_US.UTF-8', PYTHONDONTWRITEBYTECODE='1',
+            path = ':'.join(sorted({os.path.dirname(t) for t in self.tools}) + ['/usr/bin', '/bin'])
+            self.env = dict(PATH=path, LANG='en_US.UTF-8', PYTHONDONTWRITEBYTECODE='1',
                             HOME=str(self.root / 'home'), TMPDIR=str(self.root / 'tmp'),
                             TMUX_TMPDIR=str(self.root / 'tmux'), CONTINUUM_APP_SUPPORT=str(self.root / 'support'),
                             REPLAY_BUILD_PATH=str(self.root / 'build'), CONTINUUM_PROJECT_ROOT=str(self.project))
@@ -187,20 +195,25 @@ def toolchain():
                    os.path.realpath(sys.base_prefix), os.path.dirname(PYTHON)})
 
 
-def sandbox_profile(root):
+def sandbox_profile(root, tools=()):
     """Deny by default. Read: the run root and the toolchain. Write: the run root.
-    No network of any kind (unix sockets included), no signals outside the
-    sandbox, no mach services."""
+    Run programs: the toolchain, and files inside the run root (a task's own
+    check scripts write and run helpers there). No network of any kind (unix
+    sockets included), no signals outside the sandbox, no mach services.
+    `tools` are single extra binaries a task's checks declare (absolute,
+    resolved), readable and runnable one by one."""
     q = json.dumps
+    extra = [str(t) for t in tools]
     tools = toolchain()
     readable = tools + [str(root)]
     ancestors = sorted({str(a) for p in readable for a in Path(p).parents} - set(readable))
     return ''.join([
         '(version 1)(deny default)',
         '(allow process-fork)(allow sysctl-read)(allow signal (target same-sandbox))',
-        '(allow process-exec ', ' '.join('(subpath %s)' % q(p) for p in tools), ')',
+        '(allow process-exec ', ' '.join('(subpath %s)' % q(p) for p in tools + [str(root)]),
+        ' '.join(' (literal %s)' % q(p) for p in extra), ')',
         '(allow file-read* (literal "/") (literal "/private/var/select/sh") ',
-        ' '.join('(subpath %s)' % q(p) for p in readable), ')',
+        ' '.join('(subpath %s)' % q(p) for p in readable), ' '.join(' (literal %s)' % q(p) for p in extra), ')',
         '(allow file-read-metadata ', ' '.join('(literal %s)' % q(p) for p in ancestors), ')',
         '(allow file-write* (literal "/dev/null") (subpath %s))' % q(str(root))])
 
@@ -211,7 +224,7 @@ class ContainedRun(Workspace):
         if self.project.resolve() != self.root / 'project':
             raise ValueError('run storage changed')
         started = time.monotonic()
-        process = subprocess.Popen(['/usr/bin/sandbox-exec', '-p', sandbox_profile(self.root), PYTHON, '-I', '-c', code],
+        process = subprocess.Popen(['/usr/bin/sandbox-exec', '-p', sandbox_profile(self.root, self.tools), PYTHON, '-I', '-c', code],
                                    cwd=self.project, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    start_new_session=True)
         outcome = 'completed'
@@ -263,7 +276,7 @@ def run_check(run, name, source, deadline=10):
     require_owned(run.root)
     read_end, write_end = os.pipe()
     nonce = uuid.uuid4().hex
-    process = subprocess.Popen(['/usr/bin/sandbox-exec', '-p', sandbox_profile(run.root), PYTHON, '-I', '-c', HARNESS],
+    process = subprocess.Popen(['/usr/bin/sandbox-exec', '-p', sandbox_profile(run.root, run.tools), PYTHON, '-I', '-c', HARNESS],
                                cwd=run.project, env=run.env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, pass_fds=(write_end,), start_new_session=True)
     os.close(write_end)
@@ -354,7 +367,8 @@ def grade(task, agent_tree):
     memory and the pristine export, never from the agent's tree."""
     if checks_hash(task) != task['checksHash']:
         raise ValueError('checks changed since the task was frozen')
-    with Workspace(task['source'], task['base']) as reference, ContainedRun(task['source'], task['base']) as run:
+    with Workspace(task['source'], task['base']) as reference, \
+            ContainedRun(task['source'], task['base'], task.get('tools', ())) as run:
         changes, unsafe, nested = collect_changes(reference.project, agent_tree)
         tampered = list(unsafe)
         for path, value in sorted(changes.items()):
@@ -419,6 +433,7 @@ def new_record(task, harness, mode, simulated=True):
                 checksHash=task['checksHash'], harness=harness, mode=mode, actualChoice=None,
                 simulated=simulated, outcome='driverFailed', failure=None,
                 fannedOut=None if mode == 'solo' else False, helperCount=0, helpers=[], delegationAttempts=0,
+                runOrder=None, switches={}, leadChanges=None,
                 tokens={t: None for t in TOKEN_TYPES}, tokensNotReported=[], usageComplete=False,
                 usageProblems=['no usage observed'], usageRows=[], wallSeconds=None, activeSeconds=None, humanSteps=None,
                 diffHash=None, changedPaths=[], tampered=[], checks={}, gradeResult='notGraded',
@@ -463,7 +478,7 @@ def run_contained(task, harness, mode, code, destination, deadline=2, interrupt=
     """One fake process run, graded after termination. Usage stays unknown:
     a subprocess has no typed usage, so this adapter never claims any."""
     record = new_record(task, harness, mode)
-    run = ContainedRun(task['source'], task['base'])
+    run = ContainedRun(task['source'], task['base'], task.get('tools', ()))
     try:
         result = run.execute(code, deadline=deadline, interrupt=interrupt)
         record.update(outcome=result['outcome'], wallSeconds=result['wallSeconds'],
@@ -499,43 +514,105 @@ def pair_exclusion(solo, managed):
     return None
 
 
+MANAGED_ARMS = ('managed', 'managed-strict')
+
+
+def arm_label(r):
+    if r['mode'] in MANAGED_ARMS and r['fannedOut'] is not True:
+        return '%s, did not fan out' % r['mode']
+    return r['mode']
+
+
+def figure(value):
+    return '-' if value is None else str(value)
+
+
+def agent_totals(r):
+    """Tokens by type per agent, summed over the agent's usage rows; a type
+    any of its rows lacks stays unknown."""
+    agents = collections.OrderedDict()
+    for row in r['usageRows']:
+        entry = agents.setdefault(row['agent'], dict(role=row['role'], tokens={t: 0 for t in TOKEN_TYPES}))
+        for t in TOKEN_TYPES:
+            value = (row.get('tokens') or {}).get(t)
+            entry['tokens'][t] = None if value is None or entry['tokens'][t] is None else entry['tokens'][t] + value
+    return agents
+
+
+def lead_changed(r):
+    changes = r.get('leadChanges')
+    return 'not recorded' if not changes else changes.get('changed', 'unknown')
+
+
+def row_lines(r):
+    t = r['tokens']
+    order = r.get('runOrder') or {}
+    lines = ['row %s %s %-34s %s wall %s active %s tokens in/cacheRead/cacheWrite/out %s/%s/%s/%s helpers %d '
+             'lead changed: %s; delegation attempts %d; order %s' % (
+                 r['task'][:12], r['harness'], arm_label(r), 'PASS' if r['passed'] else 'FAIL (%s)' % r['gradeResult'],
+                 '-' if r['wallSeconds'] is None else '%.1fs' % r['wallSeconds'],
+                 '-' if r['activeSeconds'] is None else '%.1fs' % r['activeSeconds'],
+                 figure(t['uncachedInput']), figure(t['cacheRead']), figure(t['cacheWrite']), figure(t['output']),
+                 r['helperCount'], lead_changed(r), r['delegationAttempts'],
+                 '%s/%s %s' % (order['position'], order['of'], ','.join(order['sequence'])) if order else '-')]
+    for agent, entry in agent_totals(r).items():
+        a = entry['tokens']
+        lines.append('    %-6s %s %s/%s/%s/%s' % (entry['role'], agent[:8], figure(a['uncachedInput']), figure(a['cacheRead']),
+                                                 figure(a['cacheWrite']), figure(a['output'])))
+    if not r['usageComplete']:
+        lines.append('    usage incomplete: %s' % '; '.join(r['usageProblems']))
+    return lines
+
+
 def compare(records):
-    """Differences only for matched solo/managed pairs that both completed with
-    complete usage, each figure printed beside both sides' pass/fail."""
+    """Every run as a row, per task and arm. Differences only for matched
+    solo/managed pairs that both completed with complete usage, each figure
+    printed beside both sides' pass/fail. A Managed run that did not fan out
+    is never compared as fan-out: it is excluded and counted, and its row is
+    printed beside solo as "did not fan out" with its own differences."""
     for r in records:
         check_record(r)
     groups = collections.defaultdict(lambda: collections.defaultdict(list))
     for r in records:
         groups[(r['task'], r['harness'])][r['mode']].append(r)
     tasks = sorted({r['task'] for r in records})
-    expected = [(t, h) for t in tasks for h in HARNESSES]
+    expected = [(t, h, 'managed') for t in tasks for h in HARNESSES]
+    expected += [(t, h, 'managed-strict') for t in tasks for h in HARNESSES if groups[(t, h)].get('managed-strict')]
     excluded = collections.Counter()
     pairs, lines = [], []
 
     def verdict(r):
         return 'PASS' if r['passed'] else 'FAIL'
-    for key in expected:
-        modes = groups.get(key, {})
-        solo, managed = modes.get('solo', []), modes.get('managed', [])
+
+    def differences(a, b, arm):
+        side = '(solo %s, %s %s)' % (verdict(a), arm, verdict(b))
+        tokens = {t: b['tokens'][t] - a['tokens'][t] for t in TOKEN_TYPES
+                  if a['tokens'][t] is not None and b['tokens'][t] is not None}
+        wall = None if a['wallSeconds'] is None or b['wallSeconds'] is None else b['wallSeconds'] - a['wallSeconds']
+        figures = ['%s %+d %s' % (t, tokens[t], side) if t in tokens
+                   else '%s not reported' % t if t in a['tokensNotReported'] else '%s unknown' % t for t in TOKEN_TYPES]
+        return tokens, wall, '%s %s wall %s %s' % (' '.join(figures), '', 'unknown' if wall is None else '%+.2fs' % wall, side)
+    for task, harness, arm in expected:
+        modes = groups.get((task, harness), {})
+        solo, managed = modes.get('solo', []), modes.get(arm, [])
         if len(solo) != 1 or len(managed) != 1:
-            excluded['unmatched (solo %d, managed %d)' % (len(solo), len(managed))] += 1
+            excluded['unmatched (solo %d, %s %d)' % (len(solo), arm, len(managed))
+                     if arm != 'managed' else 'unmatched (solo %d, managed %d)' % (len(solo), len(managed))] += 1
             continue
         a, b = solo[0], managed[0]
         reason = pair_exclusion(a, b)
         if reason:
             excluded[reason] += 1
+            if reason == 'managed did not fan out' and a['outcome'] == b['outcome'] == 'completed':
+                _, _, text = differences(a, b, arm)
+                lines.append('%s, did not fan out, beside solo: %s %s %s' % (arm, harness, task[:12], text))
             continue
-        side = '(solo %s, managed %s)' % (verdict(a), verdict(b))
-        tokens = {t: b['tokens'][t] - a['tokens'][t] for t in TOKEN_TYPES
-                  if a['tokens'][t] is not None and b['tokens'][t] is not None}
-        pair = dict(task=key[0], harness=key[1], soloPassed=a['passed'], managedPassed=b['passed'],
-                    tokens=tokens, wallSeconds=b['wallSeconds'] - a['wallSeconds'])
-        pairs.append(pair)
-        figures = ['%s %+d %s' % (t, tokens[t], side) if t in tokens
-                   else '%s not reported' % t if t in a['tokensNotReported'] else '%s unknown' % t for t in TOKEN_TYPES]
-        lines.append('%s %s %s wall %+.2fs %s' % (key[1], key[0][:12], ' '.join(figures), pair['wallSeconds'], side))
+        tokens, wall, text = differences(a, b, arm)
+        pairs.append(dict(task=task, harness=harness, arm=arm, soloPassed=a['passed'], managedPassed=b['passed'],
+                          tokens=tokens, wallSeconds=wall))
+        lines.append('%s %s %s' % (harness, task[:12], text))
     by_mode = collections.Counter((r['mode'], r['passed']) for r in records)
-    fan_out = sum(1 for r in records if r['mode'] == 'managed' and r['fannedOut'] is True)
+    fan_out = sum(1 for r in records if r['mode'] in MANAGED_ARMS and r['fannedOut'] is True)
     lines.append('runs %d; pairs compared %d of %d expected; coverage %d/%d' % (
         len(records), len(pairs), len(expected), len(pairs), len(expected)))
     for reason, count in sorted(excluded.items()):
@@ -543,6 +620,9 @@ def compare(records):
     for mode in MODES:
         lines.append('%s: %d passed, %d failed' % (mode, by_mode[(mode, True)], by_mode[(mode, False)]))
     lines.append('managed runs that fanned out: %d' % fan_out)
+    ordered = sorted(records, key=lambda r: (r['task'], r['harness'], (r.get('runOrder') or {}).get('position', 0), r['mode']))
+    for r in ordered:
+        lines.extend(row_lines(r))
     if any(r['simulated'] for r in records):
         lines.append('simulated records: not evidence of any model behaviour')
     return dict(runs=len(records), pairs=pairs, expected=len(expected), coverage='%d/%d' % (len(pairs), len(expected)),

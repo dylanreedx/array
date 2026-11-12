@@ -226,6 +226,23 @@ class Witnesses(unittest.TestCase):
             self.assertEqual(out['coverage'], '1/2', 'a comparison was printed from an excluded pair: ' + reason)
             self.assertEqual(out['excluded'], {reason: 1}, 'exclusion not counted: ' + reason)
             self.assertFalse(any(l.startswith('codex ') for l in out['lines']), 'difference printed for: ' + reason)
+        # A Managed run that did not fan out is shown beside solo, never compared as fan-out.
+        out = replay.compare(records[:3] + [rec('codex', 'managed', fanned=False)])
+        beside = [l for l in out['lines'] if l.startswith('managed, did not fan out, beside solo: codex ')]
+        self.assertEqual(len(beside), 1, 'a managed run that did not fan out was dropped instead of shown beside solo')
+        self.assertIn('(solo PASS, managed PASS)', beside[0])
+        self.assertTrue(any(l.startswith('row ') and 'managed, did not fan out' in l for l in out['lines']),
+                        'the run table does not name a managed run that did not fan out')
+        # Every run is a row, with its agents; a strict arm pairs with solo under its own name.
+        strict = dict(rec('claude', 'managed-strict', tokens=(120, 15)), fannedOut=True, helperCount=1,
+                      usageRows=[dict(agent='a' * 36, role='lead', tokens=dict(uncachedInput=70, cacheRead=0, cacheWrite=0, output=5)),
+                                 dict(agent='b' * 36, role='helper', tokens=dict(uncachedInput=50, cacheRead=0, cacheWrite=0, output=10))])
+        out = replay.compare(records + [strict])
+        self.assertEqual(out['coverage'], '3/3', 'the strict arm was not paired with solo')
+        self.assertTrue(any('(solo PASS, managed-strict PASS)' in l and 'uncachedInput +20' in l for l in out['lines']))
+        self.assertEqual(sum(1 for l in out['lines'] if l.startswith('row ')), 5, 'a run is missing from the table')
+        self.assertTrue(any(l.strip().startswith('helper bbbbbbbb 50/0/0/10') for l in out['lines']),
+                        'per-agent tokens are missing from the table')
         out = replay.compare(records[:2] + [rec('codex', 'solo', attempts=1), records[3]])
         self.assertEqual(out['excluded'], {'solo delegated': 1}, 'a delegating solo run was compared')
         self.assertEqual(replay.compare([rec('codex', 'managed', fanned=False)])['fanOutSamples'], 0,
@@ -254,7 +271,7 @@ class Witnesses(unittest.TestCase):
         saved = replay.read_records(sink)
         self.assertEqual(len({(r['task'], r['base'], r['requestHash'], r['checksHash']) for r in saved}), 1)
         self.assertTrue(all(r['passed'] for r in saved))
-        self.assertEqual(replay.compare(saved)['excluded'], {'usage incomplete': 2})
+        self.assertEqual(replay.compare(saved)['excluded'], {'usage incomplete': 4})
 
 
 if __name__ == '__main__':

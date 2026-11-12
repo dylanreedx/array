@@ -9,6 +9,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / 'Sources/ContinuumRevived/App/ReplayDriverChecks.swift'
 MUTATIONS = [
+    ("a lead's tool calls counted once per stream line",
+     b'                guard let id = item["id"] as? String, seen.insert(id).inserted, let name = item["name"] as? String else { continue }\n',
+     b'                guard item["id"] is String, let name = item["name"] as? String else { continue }\n',
+     "FAIL: a lead's shell writes or delegations were miscounted"),
     ('solo run that delegates',
      b'            if forbid { facts.intercept(); return }\n',
      b'            if false { facts.intercept(); return }\n',

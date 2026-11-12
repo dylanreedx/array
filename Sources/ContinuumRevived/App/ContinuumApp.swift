@@ -3353,6 +3353,23 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // A live replay pilot run (benchmarks/replay/run_pilot.py), not a check:
+        // it spends real provider usage and is never run by the matrix.
+        if CommandLine.arguments.contains("--replay-live-run") {
+            _ = NSApplication.shared
+            // Headless: never a Dock icon, never the user's focus.
+            NSApp.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                do {
+                    try await runReplayLive(CommandLine.arguments)
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         // CX-01 Phase 2b (`.plans/59`, §10): visible delegation with safe retry
         // through the production mount and dispatch — create-once under retry,
         // idempotency conflict, child tile in the parent's zone, presentation
