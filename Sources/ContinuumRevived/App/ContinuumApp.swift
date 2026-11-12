@@ -908,6 +908,24 @@ enum ContinuumApp {
                 }
             }
         }
+        // Selection-parity A/B: one PNG per step, style and appearance.
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-parity-capture-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    let next = CommandLine.arguments.index(after: index)
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("-")
+                        ? URL(fileURLWithPath: CommandLine.arguments[next])
+                        : URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                            .appendingPathComponent("qa-runs/sidebar-parity-capture")
+                    print(try SidebarParityCapture.run(outputDirectory: dir))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // .plans/106: who owns whom — subagents in their lead's card.
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-ownership-check") {
             _ = NSApplication.shared

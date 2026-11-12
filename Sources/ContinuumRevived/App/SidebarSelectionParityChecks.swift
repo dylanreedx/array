@@ -51,6 +51,7 @@ enum SidebarSelectionParityChecks {
     static func run() throws {
         var failures: [String] = []
         var cases = 0
+        var drawnAlike = 0
         let lead = uuid(0x100), helperA = uuid(0x101), helperB = uuid(0x102)
         let single = uuid(0x300), other = uuid(0x200)
         let now = Date()
@@ -204,6 +205,7 @@ enum SidebarSelectionParityChecks {
                         if !drawn.isEmpty {
                             failures.append("\(label): \(input) painted \(drawn.count) selection outline(s); 0.7.47 paints none")
                         }
+                        if got == reference && drawn.isEmpty { drawnAlike += 1 }
                     }
                     if !(reference.groupLight || reference.wash || reference.sweep) {
                         failures.append("\(label): the selected working agent shows no style at all (\(reference))")
@@ -211,7 +213,7 @@ enum SidebarSelectionParityChecks {
                 }
             }
         }
-        print("SidebarSelectionParityChecks: \(cases - failures.count)/\(cases) selections drawn alike")
+        print("SidebarSelectionParityChecks: \(drawnAlike)/\(cases) selections drawn alike, no outline")
         if !failures.isEmpty { throw Failure(description: failures.prefix(20).joined(separator: "\n")) }
     }
 }
