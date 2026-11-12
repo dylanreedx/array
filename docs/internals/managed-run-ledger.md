@@ -10,7 +10,8 @@ installations and must not hold these records.
 
 Each v1 row carries `v`, `at` (Foundation reference-date seconds), `kind`, `task`,
 `agent`, `source`, and `origin` (`host`). Optional fields are `part`,
-`previousTask`, `project`, `outcome`, `checks`, `findings`, and `openParts`.
+`previousTask`, `project`, `outcome`, `checks`, `findings`, `openParts`, and on
+`delegated` rows `parent` and `via`.
 Task, agent, part and project identities are UUIDs. The initial part identity is
 the delegated child UUID. Checks and findings contain counts by declared enum
 value, never claims of host verification. No text, absolute filesystem paths,
@@ -20,13 +21,24 @@ handed off unchanged for background aggregation; only their enum counts persist.
 
 Kinds: `taskOpened`, `submission`, `delegated`, `working`, `reported`,
 `turnEnded`, `taskClosed`, `taskInterrupted`. The opening row identifies the lead
-and project; delegation rows associate helpers and parts. A human send or queued
+and project; delegation rows associate helpers and parts. A helper's own helper,
+at any depth, gets the same row under the open task, with `parent` naming the
+helper that delegated it (gap 7). A child the CLI started itself (Claude's Agent
+tool, a Codex child thread), which Array adopts as a read-only record, gets a
+`delegated` row with `via: harness` and `parent` when its record is minted, and
+no part: it never holds the task open (gap 6). Its edits are still not observed
+(see Helper evidence). A human send or queued
 submission accepted for any top-level agent, Managed or not, opens or joins its
 active task; `taskOpened` records the agent's `mode` (`managed` or `free`), so
 solo and fanned-out work can be told apart.
 A lead turn ending with no open helper parts closes it. Once the lead has
 ended, the last helper report or terminal event also closes it without a wake. Helper wakes do not
-open tasks. The next submission links a new task to the prior one. Restart marks
+open tasks. A turn belongs to the task that was open when it started (gaps 8
+and 9): a turn under way at the close still ends there, and one that starts
+after it (a lead's wake on the last report, a turn an agent message started)
+writes no `working` or `turnEnded` row in the closed task; its usage is in no
+task until a submission opens another. `hook` and `leadCheckoutChanged` rows
+still use the agent's last task. The next submission links a new task to the prior one. Restart marks
 active tasks interrupted without manufacturing terminal helper events.
 
 `ManagedRunLedger.append(_:)` is the single append path. Source event identities
@@ -214,8 +226,9 @@ their parent and are charged to the task their parent chain leads to. Claude's
 in-process subagents have no usage stream of their own; the parent's result
 reports them under their own model ids, so their turns write
 `incomplete: ["reportedByParent"]`. Usage of an agent with no task in its chain
-(a top-level agent no human prompted in this process) is recorded under the
-all-zero task id with `noTask`, never dropped.
+(a top-level agent no human prompted in this process, or a turn that started
+after its task closed) is recorded under the all-zero task id with `noTask`,
+never dropped.
 
 **Which turn.** A report names its turn (Claude: the translator's turn id;
 Codex: the frame's `turnId`). Usage for the agent's open turn waits in memory
@@ -250,6 +263,17 @@ is ignored. A total that goes down is a `reset`: what ran before is unknown.
 No figure is ever negative. The model id is the one `thread/started` named,
 where it did.
 
+**Codex frames after the main turn (gap 9).** After a turn that ended normally
+`CodexAgentRunner` closes the app-server's stdin, which makes it exit (about
+30 ms on codex 0.167.0, measured), and reads its stdout to the end on a utility
+thread; `run` returns as before, so nothing waits on it. A primary-thread usage
+report read then reaches the ledger through `TrailingUsageReporting`, outside
+the runner generation gate, and becomes a late row for the turn it names. If
+stdout is still open after `CodexAgentRunner.trailingFrameBound` (2 s), the
+process is stopped and the turn gets a late row with no tokens and
+`incomplete: ["trailingFramesCut"]`. A stopped or failed turn is torn down at
+once, as before.
+
 Counters live in memory on the ledger queue (open turns, a bounded record of
 each agent's last 16 turns' tasks, per-thread baselines and seen result ids);
 the event path pays one enqueue. Buffered usage is lost if the process dies
@@ -274,6 +298,16 @@ ordering, per-thread differencing, fork detection, the resume marker, baselines
 while off, the off switch, free-agent tasks, nested attribution, a child folded
 into its parent, late rows (lost, and charged to the running task), blank model
 ids, and usage written after closure.
+
+`--run-ledger-gaps-check` (cases through `CONTINUUM_LEDGER_GAPS_CASE`:
+`builtin`, `builtin-codex`, `nested`, `active-time`, `after-close`,
+`codex-trailing`, `codex-drain-bound`) drives the same production paths for
+gaps 6 to 9 and asserts both the rows and the usage page's figures through
+`UsageReport.make` and `UsageWords`. Each case was observed RED before its fix:
+no delegated row for a Claude or Codex subagent or for a helper's own helper;
+active time 1.67 s against 0.23 s to answer, with the lead's wake inside the
+closed task; an agent message after the close charged to it; a Codex frame sent
+300 ms after `turn/completed` lost; no mark when the bound ended.
 
 ## A Managed lead's own checkout changes (gap 20)
 

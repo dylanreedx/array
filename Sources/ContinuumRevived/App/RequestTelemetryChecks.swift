@@ -529,10 +529,9 @@ enum RequestTelemetryChecks {
 
     /// Reports that arrive after their turn completed are written at once for
     /// the turn they name, never folded into the turn that is running. They
-    /// arrive inside the next turn's stream: the runner tears its app-server
-    /// down after the primary `turn/completed` unless a child thread is live, so
-    /// a primary frame sent after it races that teardown (child frames are kept;
-    /// `codexChild` covers them).
+    /// arrive inside the next turn's stream here; a primary frame sent after
+    /// `turn/completed` in the same process is `RunLedgerGapsChecks`'
+    /// `codex-trailing` case.
     static func codexLate() async throws {
         print("request-telemetry: codex usage after its turn")
         let (b, lead, root, tearDown) = try codexBench("codex-late")

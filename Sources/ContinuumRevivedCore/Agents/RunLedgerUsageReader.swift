@@ -8,10 +8,11 @@ import Foundation
 /// Mapping, by row `kind` (rows with another `v` or an unreadable line are skipped):
 /// - `taskOpened`: a task begins at `at`; its `agent` is the lead; `mode` is
 ///   `managed` or `free` (absent on rows from before modes were recorded).
-/// - `delegated`: `agent` is a direct helper of `task`. A helper's own helpers
-///   have no such row; they appear through their usage rows (below).
+/// - `delegated`: `agent` is a helper of `task`: a direct one, a helper's own
+///   helper (`parent` names it), or a child the CLI started itself
+///   (`via: harness`). Helpers also appear through their usage rows (below).
 /// - `working` / `turnEnded`: `agent` started / ended a turn in `task`. Paired per
-///   agent in file order.
+///   agent in file order. A turn may end after the close; active time is cut there.
 /// - `taskClosed`: the task closed at `at`. Only closed tasks are counted.
 /// - `taskInterrupted`: the task stopped without closing (a failed or cancelled
 ///   last turn, or a restart). Listed, never counted.
