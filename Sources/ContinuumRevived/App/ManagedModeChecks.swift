@@ -35,7 +35,9 @@ enum ManagedModeChecks {
     if '--tools' in args: sys.exit(0)  # no titler/probe effects
     sid = args[args.index('--resume')+1] if '--resume' in args else args[args.index('--session-id')+1]
     with open('managed-argv.jsonl', 'a') as f:
-        f.write(json.dumps({'pid':os.getpid(), 'argv':args})+'\n')
+        # The --mcp-config file as it was at launch: a later launch rewrites it.
+        mcp = open(args[args.index('--mcp-config')+1]).read() if '--mcp-config' in args else None
+        f.write(json.dumps({'pid':os.getpid(), 'argv':args, 'mcpConfig':mcp})+'\n')
     def emit(o):
         print(json.dumps(o), flush=True)
     for line in sys.stdin:
