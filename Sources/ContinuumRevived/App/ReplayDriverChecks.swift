@@ -955,14 +955,13 @@ func runReplayDriverChecks() async throws {
                    "\(name) managed usage was not complete: \(problems(managed))")
         // Lead's delegating turn, each helper's turn and the lead's wakes, each
         // one whole recorded turn: the lead's and its helpers' rows together.
-        // The last helper's report closes the task (the lead had ended), so a
-        // lead wake after it is in no task (`.plans/116` gap 8): at most one
-        // run turn, the lead's, falls outside the task's figures.
+        // The wake that reads the helpers' results is the task's (`.plans/116`
+        // gap 8): every run turn is in it, none after its close.
         try expect(managedTurns >= 3, "\(name) managed ran \(managedTurns) turns")
         let usageRows = managed["usageRows"] as? [[String: Any]] ?? []
         let inTask = Set(usageRows.map { "\($0["agent"] ?? "")|\($0["turn"] ?? "")" }).count
         let leadAfterClose = int(managed, "leadTurnsAfterClose") ?? -1
-        try expect(inTask + leadAfterClose == managedTurns && leadAfterClose <= 1,
+        try expect(inTask == managedTurns && leadAfterClose == 0,
                    "\(name) managed: \(managedTurns) run turns, \(inTask) in the task, \(leadAfterClose) lead turns after the close")
         print("replay-driver: \(name) managed ran \(managedTurns) turns, \(inTask) in the task, \(leadAfterClose) lead wake after the close")
         try expectTotals(managed, harness, turns: inTask, "\(name) managed")
@@ -997,10 +996,11 @@ func runReplayDriverChecks() async throws {
     // A reset needs a second turn on one thread: the managed lead's wake after
     // its helpers report. The recorded totals restart instead of continuing.
     let reset = await driver.run(ReplayCondition(harness: .codex, managed: true, lead: .delegatesTwoParts, codexResets: true))
-    // That wake starts after the last report closed the task (`.plans/116`
-    // gap 8), so the reset is marked on the lead's turn outside the task.
-    try expect(int(reset, "leadTurnsAfterClose") == 1 && (reset["afterCloseProblems"] as? [String])?.contains("reset") == true,
-               "a Codex reset was not marked: \(reset["afterCloseProblems"] ?? "") task \(problems(reset))")
+    // That wake is the task's (`.plans/116` gap 8), so the reset marks the task.
+    try expect(problems(reset).contains("reset") && int(reset, "leadTurnsAfterClose") == 0,
+               "a Codex reset was not marked: \(problems(reset)), after the close \(reset["afterCloseProblems"] ?? "")")
+    try expect(["uncachedInput", "cacheRead", "output"].allSatisfy { tokens(reset)[$0] is NSNull } && reset["usageComplete"] as? Bool == false,
+               "a Codex reset produced a total: \(tokens(reset))")
 
     let crash = await driver.run(ReplayCondition(harness: .claudeCode, managed: false, lead: .crashes))
     try expect(string(crash, "outcome") == "failed" && crash["passed"] as? Bool == false,

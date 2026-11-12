@@ -385,14 +385,7 @@ enum RequestTelemetryChecks {
         try await wait("helpers settled") { !supervisor.isRunning(hc) && !supervisor.isRunning(nested) && !supervisor.isRunning(lead) }
         supervisor.runLedger.drain()
 
-        // hx's report closes the task (the lead had ended), so the wake it
-        // causes starts after the close and is in no task (`.plans/116` gap 8).
-        let noTask = ManagedRunLedger.noTask.uuidString
-        let afterClose = usage(lead).filter { $0["task"] as? String == noTask }
-        try expect(afterClose.count == 1, "one lead wake after the close, in no task: \(afterClose)")
-        try expectRow(afterClose.first, "lead wake after the close", model: ManagedModeChecks.model, source: "record", nil,
-                      incomplete: ["noTask", "noUsage"])
-        let leadRows = usage(lead).filter { $0["task"] as? String != noTask }, claudeRows = usage(hc), codexRows = usage(hx), nestedRows = usage(nested)
+        let leadRows = usage(lead), claudeRows = usage(hc), codexRows = usage(hx), nestedRows = usage(nested)
         let task = taskOf(leadRows)
         try expect(task.count == 1 && taskOf(claudeRows) == task && taskOf(codexRows) == task && taskOf(nestedRows) == task,
                    "lead and helpers at any depth must be one task: \(taskOf(leadRows)) \(taskOf(claudeRows)) \(taskOf(codexRows)) \(taskOf(nestedRows))")
