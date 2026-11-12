@@ -145,7 +145,17 @@ enum HelperRetryWorktreeChecks {
         func firstPrompt(_ c: [String: Any]) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: c["prompt"]!), as: UTF8.self) }
         let managedPrompt = try firstPrompt(firstCapture)
         try expect(managedPrompt.contains(ManagedLeadHookState.helperReportLine), "managed helper's first prompt lacks the report line")
-        try expect(WorktreeManager.resolved(URL(fileURLWithPath: firstCapture["cwd"] as! String)) == WorktreeManager.resolved(root), "first helper left shared checkout")
+        // Never two writers on one checkout. A lead that is not strict writes
+        // its own checkout, so even its first helper gets another.
+        let firstRoot = URL(fileURLWithPath: firstCapture["cwd"] as! String)
+        try expect(firstRoot != root && firstRoot.deletingLastPathComponent().lastPathComponent == ".worktrees",
+                   "a lead that is not strict shared its writable checkout with its first helper")
+        // A strict lead cannot write its checkout: its first helper shares it.
+        b.settings.set(true, forKey: ManagedStrictLead.enabledKey)
+        let sharer = try child(await request(b, task: "HOLD strict first helper"))
+        let sharerCapture = try await capture(b, sharer)
+        try expect(WorktreeManager.resolved(URL(fileURLWithPath: sharerCapture["cwd"] as! String)) == WorktreeManager.resolved(root),
+                   "a strict lead's first helper left its checkout")
         let head = try git(root, ["rev-parse", "HEAD"])
         let secondReply = try await request(b, task: "HOLD second helper", title: "Fix ledger totals")
         let second = try child(secondReply), secondCapture = try await capture(b, second)
@@ -188,8 +198,32 @@ enum HelperRetryWorktreeChecks {
         let freePrompt = try firstPrompt(freeCapture)
         try expect(!freePrompt.contains(ManagedLeadHookState.helperReportLine), "free lead's helper got the managed report line")
         try expect(WorktreeManager.resolved(URL(fileURLWithPath: freeCapture["cwd"] as! String)) == WorktreeManager.resolved(root), "free delegation changed checkout")
-        print("Helper worktree checks passed: real runner cwd, first shared, concurrent distinct/title slugs, nested lead HEAD, dirty retention and free unchanged")
+        print("Helper worktree checks passed: real runner cwd, a lead that is not strict never shares, a strict lead's first shared, concurrent distinct/title slugs, nested lead HEAD, dirty retention and free unchanged")
         b.supervisor.stopAll()
+
+        // Two delegations in one moment from a strict lead: one checkout each.
+        let c = try bench("helper-concurrent"); defer { c.tearDown() }
+        let cRoot = URL(fileURLWithPath: c.supervisor.records[c.f.agentId]!.checkoutRoot)
+        try repository(cRoot)
+        try expect(c.supervisor.setProviderSettings(agentID: c.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "concurrent lead harness refused")
+        try expect(c.supervisor.setMode(.managed, for: c.f.agentId), "concurrent lead mode refused")
+        c.settings.set(true, forKey: ManagedStrictLead.enabledKey)
+        final class Replies { var byTask: [String: WorkspaceAgentReportChecks.ToolReply] = [:] }
+        let replies = Replies()
+        let calls = ["one", "two"].map { name in
+            Task { @MainActor in replies.byTask[name] = try? await request(c, task: "HOLD concurrent \(name)") }
+        }
+        for call in calls { await call.value }
+        guard let oneReply = replies.byTask["one"], let twoReply = replies.byTask["two"] else {
+            throw WorkspaceAgentReportChecks.Failure(description: "helper-retry-worktree: a concurrent delegation failed")
+        }
+        let oneCwd = try await capture(c, child(oneReply))["cwd"] as? String
+        let twoCwd = try await capture(c, child(twoReply))["cwd"] as? String
+        try expect(oneCwd != nil && oneCwd.map { WorktreeManager.resolved(URL(fileURLWithPath: $0)) }
+                   != twoCwd.map { WorktreeManager.resolved(URL(fileURLWithPath: $0)) },
+                   "two delegations in one moment shared a writable checkout: \(String(describing: oneCwd))")
+        print("Helper concurrent checks passed: two delegations in one moment from a strict lead get one checkout each")
+        c.supervisor.stopAll()
 
         let n = try bench("helper-nongit"); defer { n.tearDown() }
         try expect(n.supervisor.setMode(.managed, for: n.f.agentId), "non-git lead mode refused")

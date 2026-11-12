@@ -479,6 +479,8 @@ enum HelperEvidenceChecks {
         let restoreCodex = ManagedCodexChecks.runEnvironment(b)
         defer { restoreCodex() }
         let (lead, root) = try prepare(b)
+        // Only a strict lead's first helper shares its checkout.
+        b.settings.set(true, forKey: ManagedStrictLead.enabledKey)
         let supervisor = b.supervisor
         supervisor.qaRunLedgerRecording = recording
         defer { supervisor.qaRunLedgerRecording = true }
@@ -494,8 +496,8 @@ enum HelperEvidenceChecks {
 
         try expect(await supervisor.accept(.sendPrompt(AgentPrompt("HOLD-lead SECRET-PROMPT")), for: lead) == .accepted, "lead submission refused")
         try await wait("lead did not start") { supervisor.isRunning(lead) }
-        // Every part is delegated while the lead's task is open. The first shares
-        // the lead's checkout; the rest overlap it and get their own worktrees.
+        // Every part is delegated while the strict lead's task is open. The first
+        // shares the lead's checkout; the rest overlap it and get their own worktrees.
         var helpers = [Helper(name: "shared", harness: .claudeCode, steps: shared),
                        Helper(name: "claude", harness: .claudeCode, steps: sequences),
                        Helper(name: "codex", harness: .codex, steps: sequences),

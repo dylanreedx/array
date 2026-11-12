@@ -313,7 +313,10 @@ as added.
 Past a bound, a timeout or a git failure, the row says `evidence.changes:
 unknown` with the reason, never a count.
 
-**Lead or the first helper.** The first helper shares the lead's checkout.
+**Lead or the first helper.** Never two writers on one checkout: a lead that
+is not strict gives every helper its own worktree, and a strict lead's first
+helper shares the lead's checkout until a second one arrives
+(`--helper-worktree-check`). Outside git, helpers share with a notice.
 The supervisor passes, at the call's start and end, whether any other agent on
 the same checkout path is running. The watch also marks a call when another
 agent on that checkout ended a turn within 0.5 s before the call started, or

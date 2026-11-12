@@ -5997,11 +5997,15 @@ final class AgentSupervisor {
         do {
             let managed = parent.mode == .managed
             let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
-            let overlapping = managed && records.values.contains {
+            // Never two writers on one checkout. A lead whose running launch is
+            // not strict writes its own checkout, so its helper gets another; a
+            // strict lead's first helper shares it until a second one arrives.
+            let leadWrites = !(launchedStrict[parentId] ?? strictDecision(for: parent))
+            let overlapping = managed && (leadWrites || records.values.contains {
                 $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
                     && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
                     && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)
-            }
+            })
             var isolate = request.isolated || overlapping
             var notice: String?
             var baseHead: String?
@@ -6009,7 +6013,7 @@ final class AgentSupervisor {
             catch WorktreeManager.WorktreeError.invalidRepository {
                 if overlapping && !request.isolated {
                     isolate = false
-                    notice = "Shared checkout: not a git repository; concurrent helper isolation unavailable."
+                    notice = "Shared checkout: not a git repository, so this helper writes the same checkout as its lead or another helper."
                 }
             }
             catch { if isolate { throw error } }

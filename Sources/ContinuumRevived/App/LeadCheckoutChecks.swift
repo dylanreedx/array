@@ -441,7 +441,8 @@ enum LeadCheckoutChecks {
         try await wait("solo turn did not end") { !supervisor.isRunning(lead) }
 
         // Turn 2: the first helper shares the lead's checkout and has a turn open
-        // while the lead's shell writes.
+        // while the lead's shell writes. Only a strict lead's helper shares it.
+        b.settings.set(true, forKey: ManagedStrictLead.enabledKey)
         try expect(await supervisor.accept(.sendPrompt(AgentPrompt("FRAMES-busy HOLD-busy")), for: lead) == .accepted,
                    "second submission refused")
         try await wait("lead did not start") { supervisor.isRunning(lead) }
