@@ -77,6 +77,10 @@
     {
       "flag": "--managed-run-ledger-timing-check",
       "reason": "Prints what the run ledger adds to the request path and asserts nothing about time, so it guards no bug class."
+    },
+    {
+      "flag": "--managed-launch-timing-check",
+      "reason": "Prints Managed lead and helper launch time, request to CLI start, and asserts nothing about time, so it guards no bug class."
     }
   ],
   "exceptions": []
