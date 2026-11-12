@@ -100,52 +100,82 @@ The server-wide `"alwaysLoad": true` was not used: it loads all 36 tools
 (about 22,800 more tokens per request, below) and makes Claude's start wait
 for the server to connect.
 
-Witness: `--managed-lead-tool-loading-check` launches a Managed lead, its
-helper and a solo agent through the production supervisor and Claude runner,
-reads the `--mcp-config` from each real argv, starts the server it names and
-reads `tools/list`.
+Witness: `--managed-lead-tool-loading-check` launches a Claude Managed lead,
+its helper, a solo agent and a Codex Managed lead through the production
+supervisor and runners, then switches the lead to Free and the solo agent to
+Managed. For each launch it takes the server configuration the CLI was given
+at launch (the fixture Claude copies its `--mcp-config` file as it starts;
+Codex carries the server environment in argv), starts that server with that
+environment and reads `tools/list`. Mutation proofs: removing the pin, leaking
+it to every Claude agent, or leaking it to a Codex lead each turn the leg red.
+
+## How to measure
+
+Both modes live in `scripts/measure-lead-tool-tokens.py`; run them from the
+repository root after `swift build --product array-workspace-mcp`.
+
+- `python3 -I scripts/measure-lead-tool-tokens.py count` is offline: it starts
+  the built server, reads `tools/list` and prints every count below (tools,
+  words, characters, the longest tools, the pinned tools' sizes, repeated
+  sentences). Words are whitespace-separated; characters are the
+  description's length and the length of `json.dumps(inputSchema)`.
+- `python3 -I scripts/measure-lead-tool-tokens.py probe` is live: four
+  `claude -p` requests (about 100,000 input tokens, mostly cache reads; the
+  model defaults to `claude-haiku-5-5`, `--model` changes it). It prints each
+  row's total input and the CLI's own count of deferred tools from its debug
+  log. Claude's config writes go to a fresh temp dir, never `~/.claude`; the
+  CLI reads its own login from the Keychain item of the config dir the shell
+  already points at. `--dry-run` prints each row's argv and MCP config and
+  runs nothing.
 
 ## Start-up tokens, measured
 
-One `claude -p` request per row, answering "Reply with the single word ok."
-Claude Code 2.1.321, `claude-haiku-5-5`, the Array work account's own login,
-`CLAUDE_CONFIG_DIR` in a temp dir (no user CLAUDE.md, skills or plugins), an
-empty temp cwd, `--no-session-persistence`. The argv is a lead's: guidance in
+Claude Code 2.1.321, `claude-haiku-5-5`, one request per row answering "Reply
+with the single word ok.", in an empty temp cwd with a temp
+`CLAUDE_CONFIG_DIR` (no user CLAUDE.md, skills or plugins) and
+`--no-session-persistence`. The argv is a lead's: guidance in
 `--append-system-prompt`, the edit tools disallowed, `--strict-mcp-config`,
 the real `array-workspace-mcp` with 36 tools. Not included: Array's hooks and
-the lead brief (about 150 words, the same before and after). Total input =
-uncached + cache write + cache read.
+the lead brief (the same before and after). Total input = uncached + cache
+write + cache read. These figures were taken with an ad-hoc version of the
+script's `probe` rows (same argv and config); the committed script was checked
+with `--dry-run` only, not rerun live.
 
-| Run | Total input | vs. deferred | Deferred tools (CLI debug log) |
+| Run | Total input | vs. the deferred row | Deferred tools (CLI debug log) |
 |---|---:|---:|---|
-| CLI alone, no Array server | 17,227 | | 14 |
+| CLI alone, no Array server | 17,227 | -1,572 | 14 |
 | Lead before: every Array tool deferred | 18,799 | 0 | 50 |
-| Same, built from this branch (pin absent) | 18,807 | +8 | 50 |
-| Lead after: three tools pinned | 21,686 | +2,879 | 47 |
+| Lead after: the three tools pinned | 21,686 | +2,887 | 47 |
 | Whole server `alwaysLoad: true` | 41,611 | +22,812 | 14 |
 
-- Array's deferred surface (names, server instructions, guidance line) costs
-  about 1,570 tokens per request on top of the CLI's own floor.
-- Pinning the three lead tools costs about 2,900 tokens per request, paid
-  only by Claude Managed leads. `array_message_agent` alone is about half.
-- Loading Array's whole tool surface would cost about 22,800 tokens per
-  request, for every agent.
-- The 8-token difference between the two "before" rows is the temp paths.
+Every difference is against the one deferred row (18,799). The "before" row
+ran the server built before the change; the same request on this branch's
+server with no pin read 18,807 (8 tokens apart: temp paths differ in length).
 
-Codex and Pi: no change, so before equals after (the frozen-argv leg
-`--managed-codex-launch-check` passes). Not measured live: a Codex run
-writes state under `~/.codex` even with `--ephemeral`, which this task may
-not do. The earlier probe measured Codex's own floor at 16,515
-(`.plans/116-agent-standards/evidence/probe-helper-context.md`).
+- Array's deferred surface (names, server instructions, guidance line) costs
+  1,572 tokens per request on top of the CLI's own floor.
+- Pinning the three lead tools costs 2,887 tokens per request, paid only by
+  Claude Managed leads. Estimate: `array_message_agent` is 46% of the three
+  tools' description and schema characters (3,673 of 7,991), so about 1,300
+  of those tokens.
+- Loading Array's whole tool surface costs 22,812 tokens per request, for
+  every agent.
+
+Codex and Pi: no change, so before equals after (`--managed-codex-launch-check`
+keeps its frozen argv and the new leg checks the Codex lead's server). Not
+measured live: a Codex run writes state under `~/.codex` even with
+`--ephemeral`, which this task may not do. An earlier probe measured Codex's
+own floor at 16,515 (`.plans/116-agent-standards/evidence/probe-helper-context.md`).
 
 ## Proposal (not implemented): shorter tool descriptions
 
 Rewording descriptions changes every agent's behaviour, so each cut needs its
-own paired replay before it ships. What the numbers say:
+own paired replay before it ships. Counts from `count`:
 
 The surface is 36 tools, 5,010 description words (32,238 characters) and
-983 words of parameter descriptions (23,385 characters of schema JSON).
-Longest, by description plus schema characters:
+983 words of parameter descriptions (23,385 characters of schema JSON). The
+server instructions are 282 words. Longest, by description plus schema
+characters:
 
 | Tool | Description words | Description + schema chars |
 |---|---:|---:|
@@ -165,8 +195,9 @@ What could move out:
 1. Repeated family text: five sentences repeated in 10 to 11 browser tools
    ("Take a snapshot first, act by ref...", "do not fall back to curl or
    Playwright", the retry and effects lines) and three in five device tools.
-   883 words are repeats of a first copy. The browser lines are already in
-   the server instructions; keep them there once.
+   883 words are copies after the first (a sentence counts when it appears
+   verbatim in more than one tool's description). The browser lines are
+   already in the server instructions; keep them there once.
 2. Return shapes and error catalogues in prose ("Returns delivery
    ('delivered', 'queued' or 'refused'), childAgentId...", "Errors are
    structured: permission_denied (...), invalid_request (...)..."). The
@@ -178,11 +209,16 @@ What could move out:
    `array_update_agent`'s renaming rules (288 words) and the delegate/message
    basics.
 
-Expected saving, an estimate: a third of the description words, about 1,700
-words. On the whole surface that is roughly 5,000 to 6,000 tokens. Per
-request at start-up it is small, because deferred tools cost only their
-names; it is paid back on every ToolSearch load and, for a Claude Managed
-lead, at start: a 200-word `array_message_agent` would cut the pin's cost
-from about 2,900 to about 2,000 tokens. Trimming the server instructions
-(282 words), which overlap the guidance line, saves every Claude and Codex
-agent about 250 tokens on every request.
+Expected saving. All of these are estimates. They convert characters to
+tokens at the whole surface's measured rate: 22,812 tokens for 55,623
+characters of description and schema, about 0.41 tokens per character.
+
+- Cutting a third of the description words (about 10,700 of 32,238
+  characters) would save about 4,400 tokens on the whole surface. Per request
+  at start-up it saves little, because deferred tools cost only their names;
+  it is paid back on every ToolSearch load.
+- For a Claude Managed lead, a 200-word `array_message_agent` (about 1,470
+  fewer characters) would cut the pin's 2,887 tokens by about 600.
+- The server instructions repeat much of the guidance line. Removing roughly
+  half of their 282 words (about 900 characters) would save every Claude and
+  Codex agent about 370 tokens on every request.
