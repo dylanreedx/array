@@ -1282,7 +1282,9 @@ public protocol TrailingUsageReporting: AnyObject {
     func observeTrailingUsage(_ handler: @escaping @Sendable (TokenUsageSnapshot) -> Void)
 }
 
+#if os(macOS)
 extension CodexAgentRunner: TrailingUsageReporting {}
+#endif
 
 /// The finished turn's own translator, so a later turn's never sees its
 /// frames. Confined to the runner's queue.
