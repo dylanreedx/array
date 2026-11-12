@@ -42,6 +42,132 @@ enum LeadCheckoutChecks {
         let section = ProcessInfo.processInfo.environment["CONTINUUM_LEAD_CHECKOUT_CASE"]
         if section == nil || section == "seen" { try await seen() }
         if section == nil || section == "hooks" { try await hooks() }
+        if section == nil || section == "strict" || section == "strict-claude" { try await strictClaude() }
+        if section == nil || section == "strict" || section == "strict-codex" { try await strictCodex() }
+    }
+
+    /// How the switch is set for one bench.
+    enum Switch { case off, defaults, environment }
+    static func set(_ value: Switch, _ b: WorkspaceAgentReportChecks.Bench) -> () -> Void {
+        let old = ProcessInfo.processInfo.environment[ManagedStrictLead.environmentKey]
+        switch value {
+        case .off: unsetenv(ManagedStrictLead.environmentKey)
+        case .defaults: unsetenv(ManagedStrictLead.environmentKey); b.settings.set(true, forKey: ManagedStrictLead.enabledKey)
+        case .environment: setenv(ManagedStrictLead.environmentKey, "1", 1)
+        }
+        return { if let old { setenv(ManagedStrictLead.environmentKey, old, 1) } else { unsetenv(ManagedStrictLead.environmentKey) } }
+    }
+
+    /// The one `--settings` value a real launch passed, parsed.
+    static func settings(_ argv: [String]) throws -> [String: Any] {
+        guard let index = argv.lastIndex(of: "--settings"), index + 1 < argv.count,
+              let object = try JSONSerialization.jsonObject(with: Data(argv[index + 1].utf8)) as? [String: Any] else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout: no --settings in \(argv)")
+        }
+        return object
+    }
+
+    /// Part 1's strict lead, Claude: the production launch of a Managed lead
+    /// carries the CLI's sandbox, denying writes in its checkout, only when the
+    /// switch is on (by its defaults key or its environment variable), and
+    /// never for the lead's helper.
+    static func strictClaude() async throws {
+        for condition in [Switch.off, .defaults, .environment] {
+            let b = try ManagedModeChecks.bench("lead-strict")
+            defer { b.tearDown() }
+            let restore = set(condition, b)
+            defer { restore() }
+            let (lead, root) = try HelperEvidenceChecks.prepare(b)
+            let supervisor = b.supervisor
+            try expect(await supervisor.accept(.sendPrompt(AgentPrompt("HOLD-strict")), for: lead) == .accepted, "lead submission refused")
+            try await AgentPresenceChecks.eventually("lead-checkout: strict lead did not start", timeout: 20) { supervisor.isRunning(lead) }
+            let reply = try await WorkspaceAgentReportChecks.call(b.configuration(for: lead), "array_delegate", [
+                "task": "HOLD-strictchild", "title": "Child", "harness": "Claude Code",
+                "model": ManagedModeChecks.model, "idempotencyKey": UUID().uuidString])
+            guard let raw = (reply.reply["result"] as? [String: Any])?["childAgentId"] as? String, let uuid = UUID(uuidString: raw) else {
+                throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout: strict delegation failed: \(reply.reply)")
+            }
+            let child = AgentID(rawValue: uuid)
+            try await AgentPresenceChecks.eventually("lead-checkout: strict child did not launch", timeout: 20) {
+                (try? ManagedModeChecks.argv(b, child)) != nil
+            }
+            let leadSettings = try settings(ManagedModeChecks.argv(b, lead))
+            let childSettings = try settings(ManagedModeChecks.argv(b, child))
+            let sandbox = leadSettings["sandbox"] as? [String: Any]
+            if condition == .off {
+                try expect(sandbox == nil, "the switch is off but the lead launched sandboxed: \(sandbox ?? [:])")
+            } else {
+                let denied = Set(((sandbox?["filesystem"] as? [String: Any])?["denyWrite"] as? [String]) ?? [])
+                try expect(sandbox?["enabled"] as? Bool == true && sandbox?["failIfUnavailable"] as? Bool == true
+                           && sandbox?["allowUnsandboxedCommands"] as? Bool == false,
+                           "\(condition): the lead's sandbox is not on, required and closed: \(sandbox ?? [:])")
+                try expect(denied.contains(root.resolvingSymlinksInPath().path) && denied.contains(supervisor.records[lead]!.checkoutRoot),
+                           "\(condition): the lead's checkout is not denied for writing: \(denied)")
+                try expect(leadSettings["hooks"] != nil, "\(condition): the strict lead lost its hooks")
+            }
+            try expect(childSettings["sandbox"] == nil, "\(condition): the lead's helper launched sandboxed")
+            for marker in ["release-strict", "release-strictchild"] { try Data().write(to: root.appendingPathComponent(marker)) }
+        }
+        print("Lead strict Claude passed: off by default the lead launches with no sandbox; on by \(ManagedStrictLead.enabledKey) or \(ManagedStrictLead.environmentKey) its one --settings carries the CLI sandbox, required, with no unsandboxed escape and its checkout denied for writing, hooks kept; its helper never sandboxed")
+    }
+
+    /// The same for Codex: on, the app-server carries the permission profile and
+    /// no thread or turn pins full access (a pinned dangerFullAccess overrides
+    /// the profile); off, the launch is unchanged.
+    static func strictCodex() async throws {
+        for condition in [Switch.off, .defaults] {
+            let b = try ManagedCodexChecks.bench()
+            let restoreRun = ManagedCodexChecks.runEnvironment(b)
+            let restore = set(condition, b)
+            defer { b.tearDown(); restoreRun(); restore() }
+            let lead = try await ManagedCodexChecks.delegate(b, mode: "managed")
+            try await ManagedModeChecks.settled(b, lead)
+            let session = try ManagedCodexChecks.thread(b, lead)
+            guard let launch = ManagedCodexChecks.rows(b, kind: "launch", session: session).last,
+                  let argv = launch["argv"] as? [String],
+                  let thread = (launch["request"] as? [String: Any])?["params"] as? [String: Any],
+                  let turn = (ManagedCodexChecks.rows(b, kind: "turn", session: session).last?["request"] as? [String: Any])?["params"] as? [String: Any] else {
+                throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout: Codex launch, thread or turn not recorded")
+            }
+            let overrides = stride(from: 0, to: argv.count - 1, by: 1).filter { argv[$0] == "-c" }.map { argv[$0 + 1] }
+            if condition == .off {
+                try expect(argv == (try ManagedCodexChecks.previousArguments(b.configuration(for: lead))), "Codex: off changed the launch argv")
+                try expect(thread["sandbox"] as? String == "danger-full-access" && (turn["sandboxPolicy"] as? [String: Any])?["type"] as? String == "dangerFullAccess",
+                           "Codex: off no longer pins full access: \(thread) \(turn)")
+            } else {
+                try expect(ManagedStrictLead.codexOverrides.allSatisfy(overrides.contains), "Codex: the strict profile is not in the launch: \(overrides)")
+                try expect(thread["sandbox"] == nil && turn["sandboxPolicy"] == nil,
+                           "Codex: a strict lead's thread or turn pins a sandbox over the profile: \(thread) \(turn)")
+                if ProcessInfo.processInfo.environment["CONTINUUM_STRICT_LEAD_REAL_CODEX"] == "1" { try enforceWithRealCodex(overrides, path: b.originalPath) }
+            }
+        }
+        print("Lead strict Codex passed: off the launch argv, thread and turn are unchanged; on the app-server carries the permission profile and neither thread nor turn pins full access")
+    }
+
+    /// Opt-in, never in the matrix: the overrides a real launch carried, applied
+    /// by the installed Codex's own sandbox to a temporary checkout.
+    static func enforceWithRealCodex(_ overrides: [String], path: String) throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lead-strict-codex-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "a\n".write(to: dir.appendingPathComponent("README"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("codex-home"), withIntermediateDirectories: true)
+        let script = "echo x > README; echo root=$?; mkdir -p .build && echo x > .build/o; echo build=$?; cat README >/dev/null; echo read=$?"
+        let process = Process(), out = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["codex", "sandbox"] + overrides.flatMap { ["-c", $0] } + ["--", "sh", "-c", script]
+        process.currentDirectoryURL = dir
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_HOME"] = dir.appendingPathComponent("codex-home").path
+        environment["PATH"] = path  // the bench's double is first on PATH
+        process.environment = environment
+        process.standardOutput = out; process.standardError = out
+        try process.run()
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        try expect(text.contains("root=1") && text.contains("build=0") && text.contains("read=0"),
+                   "Codex: the installed CLI did not enforce the launched profile: \(text)")
+        print("Lead strict Codex enforced by the installed CLI: checkout write refused, .build write and read allowed")
     }
 
     /// Gap 21: each hook a Managed lead's CLI runs reaches the ledger as one
