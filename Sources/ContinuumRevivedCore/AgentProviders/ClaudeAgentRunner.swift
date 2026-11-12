@@ -323,6 +323,9 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         // A strict Managed lead's shell runs in the CLI's own sandbox, in the
         // same one `--settings` value (`ManagedStrictLead`).
         let sandbox = mode == .managed ? strictWriteRoot.map(ManagedStrictLead.claudeSandbox(checkoutRoot:)) : nil
+        // The strict lead is told its limit in the same launch that sets it.
+        let hostInstructions = [hostInstructions, sandbox == nil ? nil : ManagedStrictLead.leadLine]
+            .compactMap { $0 }.joined(separator: "\n\n").nilIfEmptyText
         if mode == .managed {
             args += ["--disallowed-tools", "Edit,Write,MultiEdit,NotebookEdit" + (workspaceMCP == nil ? "" : ",ListAgents")]
             if workspaceMCP == nil || !hookSurfaceAvailable {
@@ -1202,3 +1205,7 @@ extension ClaudeAgentRunner: AgentIdleExitReporting {
     }
 }
 #endif
+
+private extension String {
+    var nilIfEmptyText: String? { isEmpty ? nil : self }
+}

@@ -105,6 +105,10 @@ enum LeadCheckoutChecks {
                            "\(condition): the lead's checkout is not denied for writing: \(denied)")
                 try expect(leadSettings["hooks"] != nil, "\(condition): the strict lead lost its hooks")
             }
+            let leadArgv = try ManagedModeChecks.argv(b, lead), childArgv = try ManagedModeChecks.argv(b, child)
+            func told(_ argv: [String]) -> Bool { argv.contains { $0.contains(ManagedStrictLead.leadLine) } }
+            try expect(told(leadArgv) == (condition != .off), "\(condition): the strict line reached the lead \(told(leadArgv))")
+            try expect(!told(childArgv), "\(condition): the lead's helper was told the strict line")
             try expect(childSettings["sandbox"] == nil, "\(condition): the lead's helper launched sandboxed")
             for marker in ["release-strict", "release-strictchild"] { try Data().write(to: root.appendingPathComponent(marker)) }
         }

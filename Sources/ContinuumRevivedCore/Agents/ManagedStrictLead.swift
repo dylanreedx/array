@@ -32,6 +32,9 @@ public enum ManagedStrictLead {
         return defaults.object(forKey: enabledKey) as? Bool == true
     }
 
+    /// The one line a strict lead is told, in its system prompt. No other agent gets it.
+    public static let leadLine = "Strict lead: your shell cannot write inside your checkout, so helpers make the changes; build outside it with a scratch path, such as swift build --scratch-path \"$TMPDIR/build\"."
+
     /// Claude's `sandbox` setting for a lead whose checkout is `root`. Both the
     /// path as given and with links resolved are denied.
     public static func claudeSandbox(checkoutRoot root: String) -> [String: Any] {
