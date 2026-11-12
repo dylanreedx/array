@@ -496,6 +496,48 @@ enum HelperLivenessChecks {
             progress(claude)
         }
 
+        // 10a. A withdraw never comes back: not when another message joins the
+        //      lead's queue before the withdraw reaches the store, and not when
+        //      it lands while the alert itself is still being queued.
+        await section("withdraw races") {
+            progress(claude)
+            let before = alerts(about: claude).count
+            var t = now
+            now = t.addingTimeInterval(180)
+            try await sweep()
+            check(alerts(about: claude).count == before + 1, "race: the stall alert was not queued")
+            let gate = RemovalGate()
+            supervisor.qaBeforeQueueRemoval = { await gate.wait() }
+            progress(claude)
+            supervisor.qaBeforeQueueRemoval = nil
+            check(alerts(about: claude).count == before, "race: progress left the alert in the lead's queue")
+            let other = await supervisor.accept(.queue(AgentPrompt("PLAIN another note for the lead")), for: lead)
+            check(other == .accepted, "race: the other message was refused: \(other)")
+            check(alerts(about: claude).count == before, "race: a message queued before the withdraw reached the store brought the alert back")
+            await gate.release()
+            await supervisor.qaQueueWritesSettled(for: lead)
+            check(alerts(about: claude).count == before, "race: the alert came back once its removal landed")
+            for note in supervisor.queuedMessages(for: lead) where note.text.contains("another note") {
+                supervisor.cancelQueuedMessage(note.id, for: lead)
+            }
+            await supervisor.qaQueueWritesSettled(for: lead)
+
+            progress(claude)
+            t = now
+            var withdrewInFlight = false
+            supervisor.qaAfterQueueAdmission = {
+                guard !withdrewInFlight else { return }
+                withdrewInFlight = true
+                progress(claude)
+            }
+            now = t.addingTimeInterval(180)
+            try await sweep()
+            supervisor.qaAfterQueueAdmission = nil
+            check(withdrewInFlight, "in flight: the alert was never queued")
+            check(alerts(about: claude).count == before, "in flight: an alert withdrawn while it was being queued stayed in the lead's queue")
+            progress(claude)
+        }
+
         // 10. A queued alert leaves the lead's queue when the helper finishes.
         await section("withdraw on finish") {
             progress(claude)
@@ -566,5 +608,20 @@ enum HelperLivenessChecks {
         let sorted = sweepNanos.sorted()
         print(String(format: "helper-liveness timing: classify %.1f ns/call (%d calls, %d stalled); watchdog sweep median %.1f µs, max %.1f µs over %d sweeps",
                      classifyNs, iterations, tally, Double(sorted[sorted.count / 2]) / 1000, Double(sorted.last ?? 0) / 1000, sorted.count))
+    }
+}
+
+/// Holds a queue removal until the check lets it go.
+private actor RemovalGate {
+    private var open = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        if open { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func release() {
+        open = true
+        waiters.forEach { $0.resume() }
+        waiters = []
     }
 }

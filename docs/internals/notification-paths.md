@@ -113,7 +113,10 @@ Managed mode ▸ "Tell the lead only when a helper is stuck"
   the 10-minute message, as when off. Never the stall message.
 - On, withdrawn: a message still in the lead's queue leaves it when the helper
   makes any progress, finishes or is stopped. A message already delivered to
-  an idle lead's new turn cannot be withdrawn.
+  an idle lead's new turn cannot be withdrawn. A withdraw stays withdrawn when
+  another message joins the lead's queue before it reaches the store, and when
+  it lands while the message itself is still being queued (then the message is
+  cancelled as it lands). Stopping a helper does the same with the switch off.
 - Every case: one message per quiet episode, re-armed only by the helper's
   progress; sent on the existing agent-message path (queued behind a running
   lead turn, a new turn for an idle lead, nothing to a gone lead). The helper

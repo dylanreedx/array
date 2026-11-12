@@ -1720,7 +1720,19 @@ final class AgentSupervisor {
     /// synchronous UI reads (pending chips). The store is the source of truth;
     /// this cache is refreshed after every mutation this supervisor performs
     /// and hydrated lazily on first read for an agent restored across launch.
-    private var queuedWorkItemsCache: [AgentID: [AgentComposerQueuedWorkItem]] = [:]
+    private var queuedWorkItemsCache: [AgentID: [AgentComposerQueuedWorkItem]] = [:] {
+        // A refresh from the store can land before a cancel's durable removal
+        // does; it must not bring the cancelled item back (`pendingQueueRemovals`).
+        didSet {
+            guard !pendingQueueRemovals.isEmpty else { return }
+            for (id, gone) in pendingQueueRemovals where queuedWorkItemsCache[id]?.contains(where: { gone.contains($0.id) }) == true {
+                queuedWorkItemsCache[id]?.removeAll { gone.contains($0.id) }
+            }
+        }
+    }
+    /// Items removed from memory whose removal from the store has not landed.
+    /// Memory is written first, so a cancel shows at once.
+    private var pendingQueueRemovals: [AgentID: Set<UUID>] = [:]
     private var activeCompactionOperations: Set<AgentID> = []
     private var compactingAgents: Set<AgentID> = []
     private var seenCompactionBoundaryIDs: [AgentID: Set<String>] = [:]
@@ -6149,6 +6161,9 @@ final class AgentSupervisor {
     /// A "no progress" alert waiting in its lead's queue. Stopping the helper
     /// withdraws it, so the lead never spends a turn on news already stale.
     private var queuedHelperAlerts: [AgentID: (parent: AgentID, messageID: UUID)] = [:]
+    /// Alerts being queued right now. A withdraw in that moment removes the
+    /// helper here, and the alert is cancelled the moment it lands.
+    private var helperAlertsInFlight: Set<AgentID> = []
     /// Each helper's liveness as of the last sweep (or the progress that ended
     /// a quiet spell). In memory; `agent.inspect` reports it.
     private(set) var helperLiveness: [AgentID: HelperLivenessFact] = [:]
@@ -6213,6 +6228,7 @@ final class AgentSupervisor {
 
     private func withdrawQueuedHelperAlert(_ id: AgentID) {
         pendingHelperAlerts[id] = nil
+        helperAlertsInFlight.remove(id)
         guard let queued = queuedHelperAlerts.removeValue(forKey: id),
               queuedMessages(for: queued.parent).contains(where: { $0.id == queued.messageID }) else { return }
         cancelQueuedMessage(queued.messageID, for: queued.parent)
@@ -6232,7 +6248,8 @@ final class AgentSupervisor {
         helperProgress[id] = HelperProgress(at: now, last: last, status: turn.status)
         pendingHelperAlerts[id] = nil
         // With the switch on, news already stale leaves the lead's queue.
-        if queuedHelperAlerts[id] != nil, AgentManagedModeConfig.stallAlerts(defaults: managedModeDefaults) {
+        if queuedHelperAlerts[id] != nil || helperAlertsInFlight.contains(id),
+           AgentManagedModeConfig.stallAlerts(defaults: managedModeDefaults) {
             withdrawQueuedHelperAlert(id)
         }
         // Progress means quiet is zero: in a turn it is working, busy or
@@ -6282,7 +6299,7 @@ final class AgentSupervisor {
                                      liveChildren: 0, openToolCalls: 0, detail: retrying ? "retrying" : nil, now: now)
                 helperProgress[id] = nil
                 pendingHelperAlerts[id] = nil
-                if stallAlerts, queuedHelperAlerts[id] != nil { withdrawQueuedHelperAlert(id) }
+                if stallAlerts, queuedHelperAlerts[id] != nil || helperAlertsInFlight.contains(id) { withdrawQueuedHelperAlert(id) }
                 if records[id]?.helperWatchdogNeedsYou != nil {
                     records[id]?.helperWatchdogNeedsYou = nil
                     notifyLeadPlanChanged(id)
@@ -6392,18 +6409,23 @@ final class AgentSupervisor {
             // cannot send twice. Use exactly the agent-message envelope/path.
             pendingHelperAlerts[child] = nil
             let accepted: Bool
+            var withdrawn = false
             if isRunning(alert.parent) {
                 let prompt = AgentPrompt(agentMessageText(alert.text, from: child))
                 let before = Set(queuedMessages(for: alert.parent).map(\.id))
+                helperAlertsInFlight.insert(child)
                 let result = await accept(.queue(prompt), for: alert.parent)
+                withdrawn = helperAlertsInFlight.remove(child) == nil
                 if case .accepted = result { accepted = true } else { accepted = false }
                 if accepted, let queued = queuedMessages(for: alert.parent).last(where: { !before.contains($0.id) }) {
-                    queuedHelperAlerts[child] = (alert.parent, queued.id)
+                    // Withdrawn while it was being queued: news already stale.
+                    if withdrawn { cancelQueuedMessage(queued.id, for: alert.parent) }
+                    else { queuedHelperAlerts[child] = (alert.parent, queued.id) }
                 }
             } else {
                 accepted = sendAgentMessage(alert.text, from: child, to: alert.parent)
             }
-            if !accepted, helperProgress[child]?.escalated == true {
+            if !accepted, !withdrawn, helperProgress[child]?.escalated == true {
                 pendingHelperAlerts[child] = alert
             }
         }
@@ -10762,9 +10784,20 @@ final class AgentSupervisor {
         if let item = queuedWorkItemsCache[id]?.first(where: { $0.id == messageID }),
            case .prompt(let message) = item, !cancelAgentMessage(message, for: id) { return }
         updateCompanionTasks { try $0.cancelQueued(messageID) }
+        pendingQueueRemovals[id, default: []].insert(messageID)
         queuedWorkItemsCache[id]?.removeAll { $0.id == messageID }
         notifyTurnCapabilitiesChanged(id)
-        runQueueOp(for: id) { await store.removeQueuedMessage(id: messageID, for: id) }
+        let beforeRemoval = qaBeforeQueueRemoval
+        runQueueOp(for: id) { [weak self] in
+            await beforeRemoval?()
+            _ = await store.removeQueuedMessage(id: messageID, for: id)
+            await self?.queueRemovalLanded([messageID], for: id)
+        }
+    }
+
+    private func queueRemovalLanded(_ ids: [UUID], for id: AgentID) {
+        pendingQueueRemovals[id]?.subtract(ids)
+        if pendingQueueRemovals[id]?.isEmpty == true { pendingQueueRemovals[id] = nil }
     }
 
     /// "Clear" — every queued follow-up at once, still without touching the turn
@@ -10779,10 +10812,12 @@ final class AgentSupervisor {
             return true
         }.map(\.id)
         updateCompanionTasks { ledger in for itemID in followUps { try ledger.cancelQueued(itemID) } }
+        pendingQueueRemovals[id, default: []].formUnion(followUps)
         queuedWorkItemsCache[id]?.removeAll { followUps.contains($0.id) }
         notifyTurnCapabilitiesChanged(id)
-        runQueueOp(for: id) {
+        runQueueOp(for: id) { [weak self] in
             for itemID in followUps { _ = await store.removeQueuedMessage(id: itemID, for: id) }
+            await self?.queueRemovalLanded(followUps, for: id)
         }
     }
 
@@ -11039,6 +11074,8 @@ final class AgentSupervisor {
     /// before the store write, so a check can end the turn in that gap.
     var qaAfterQueueAdmission: (@MainActor () async -> Void)?
     var qaBeforeQueueDrain: (@MainActor () async -> Void)?
+    /// Holds a cancel's durable removal, so a check can queue beside it.
+    var qaBeforeQueueRemoval: (@Sendable () async -> Void)?
     /// How long an acknowledged interrupt may take to end the turn before
     /// Stop falls back to killing the process. Shortened by the checks.
     var interruptGrace: TimeInterval = 5
