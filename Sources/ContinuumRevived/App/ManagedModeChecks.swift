@@ -193,6 +193,10 @@ enum ManagedModeChecks {
         if ProcessInfo.processInfo.environment["CONTINUUM_MANAGED_CHECK_SECTION"] != "budget" {
             let first = try await hook(b, managed, start)
             try expect(first["additionalContext"] as? String == ManagedLeadHookState.brief && AgentReport.wordCount(ManagedLeadHookState.brief) <= 140 && ManagedLeadHookState.brief.contains("array_status"), "managed startup brief absent or too long")
+            // The delivered brief tells the lead to use each tool it starts with loaded.
+            let delivered = first["additionalContext"] as? String ?? ""
+            let unnamed = ManagedLeadHookState.alwaysLoadedTools.filter { !delivered.contains($0) }
+            try expect(unnamed.isEmpty, "the delivered brief never names the always-loaded \(unnamed)")
             try expect(try await hook(b, managed, start).isEmpty, "brief repeated on duplicate startup")
             for source in ["resume", "compact", "clear"] {
                 try expect(try await hook(b, managed, ["hook_event_name": "SessionStart", "source": source, "session_id": "s2"])["additionalContext"] as? String == ManagedLeadHookState.brief, "brief repeated on \(source)")

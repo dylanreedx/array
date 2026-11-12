@@ -81,8 +81,12 @@ deferred. The set lives in `ManagedLeadHookState.alwaysLoadedTools`:
   array_status".
 - `array_delegate`: the brief's core instruction, and the call that went out
   empty in the pilot.
-- `array_message_agent`: how a lead follows up with or redirects a helper it
-  started; the alternative is the shell.
+- `array_message_agent`: the brief tells a lead to send a follow-up to an
+  existing helper with it instead of delegating again. Leads do this often,
+  and a deferred one invites the same empty first call. The brief's "never
+  wait, poll or message a helper to check on it" still stands.
+  `--managed-mode-hooks-check` fails if the delivered brief stops naming any
+  pinned tool.
 
 Not pinned: `array_report` (helpers report, leads do not) and the browser,
 device, board and canvas tools (task-specific).
