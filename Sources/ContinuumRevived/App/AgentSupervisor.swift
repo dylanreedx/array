@@ -4238,7 +4238,23 @@ final class AgentSupervisor {
         if waitsForSessionDiscovery(record) {
             return "Checking whether another app has this session open first."
         }
+        if let writer = otherHelperWriting(checkoutOf: record) {
+            return "\(writer) is writing this checkout now. Send again once it finishes, or delegate a new helper, which gets its own worktree."
+        }
         return Self.sendRefusal(record: record)
+    }
+
+    /// A Managed lead's helper sharing a checkout with a sibling helper that
+    /// is running: a new turn here would make two writers. Its name, or nil.
+    /// Only a helper that has finished a turn: a first turn is the delegation's
+    /// to place. Outside git the helpers were told they share: allowed.
+    private func otherHelperWriting(checkoutOf record: AgentRecord) -> String? {
+        guard let parent = record.parentAgentID, records[parent]?.mode == .managed, runners[record.id] == nil,
+              record.latestTerminalEvent != nil, record.delegationContext?.checkoutNotice == nil else { return nil }
+        return records.values.first {
+            $0.id != record.id && $0.parentAgentID == parent && $0.capabilities != .observedReadOnly
+                && $0.checkoutRoot == record.checkoutRoot && $0.delegationContext?.checkoutNotice == nil && isRunning($0.id)
+        }?.humanDisplayName
     }
 
     /// The rule itself, over a record and a catalogue — pure enough to pin every
@@ -6004,11 +6020,12 @@ final class AgentSupervisor {
         do {
             let managed = parent.mode == .managed
             let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
-            // Never two writers on one checkout. A lead whose running launch is
-            // not strict writes its own checkout, so its helper gets another; a
-            // strict lead's first helper shares it until a second one arrives.
-            let leadWrites = !(launchedStrict[parentId] ?? strictDecision(for: parent))
-            let overlapping = managed && (leadWrites || records.values.contains {
+            // Never two writers on one checkout. The first helper shares it, as
+            // a lead that has not changed it this task is not writing; another
+            // writer there now (a helper still running, or the lead's own
+            // changes in its open task, from the run ledger) means a worktree.
+            let leadWrote = runLedger.leadChangedCheckoutInOpenTask(parentId.rawValue)
+            let overlapping = managed && (leadWrote || records.values.contains {
                 $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
                     && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
                     && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)

@@ -59,6 +59,7 @@ enum LeadCheckoutChecks {
         let section = ProcessInfo.processInfo.environment["CONTINUUM_LEAD_CHECKOUT_CASE"]
         if section == nil || section == "seen" { try await seen() }
         if section == nil || section == "hooks" { try await hooks() }
+        if section == nil || section == "writers" { try await writers() }
         if section == nil || section == "strict" || section == "strict-claude" { try await strictClaude() }
         if section == nil || section == "strict" || section == "strict-codex" { try await strictCodex() }
         if section == nil || section == "strict" || section == "strict-toggle" { try await strictToggle() }
@@ -402,6 +403,41 @@ enum LeadCheckoutChecks {
         try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Never two writers on one checkout: a lead that changed its checkout in
+    /// its open task (its ledger row) gives the next helper its own worktree.
+    static func writers() async throws {
+        let b = try ManagedModeChecks.bench("lead-writers")
+        defer { b.tearDown() }
+        let (lead, root) = try HelperEvidenceChecks.prepare(b)
+        try claude.write(to: b.binDir.appendingPathComponent("claude"), atomically: true, encoding: .utf8)
+        let supervisor = b.supervisor
+        var ended = Set<String>()
+        _ = supervisor.addRuntimeObservationObserver(for: lead) { observation in
+            if case let .toolDetail(call, detail) = observation, detail.phase == .ended { ended.insert(call) }
+        }
+        try frames([.shellWrite("w1", "python3 -c SECRET-CMD", "Sources/Eps.swift")], root: root)
+            .write(to: root.appendingPathComponent("frames-iso.jsonl"), atomically: true, encoding: .utf8)
+        try Data().write(to: root.appendingPathComponent("go-iso"))
+        try expect(await supervisor.accept(.sendPrompt(AgentPrompt("FRAMES-iso HOLD-iso")), for: lead) == .accepted, "lead submission refused")
+        try await AgentPresenceChecks.eventually("lead-checkout: the lead's write was not observed", timeout: 20) { ended.contains("toolu_w1") }
+        supervisor.runLedger.drainLeadWatch()
+        try expect(supervisor.isRunning(lead), "the lead's task ended before it delegated")
+        let reply = try await WorkspaceAgentReportChecks.call(b.configuration(for: lead), "array_delegate", [
+            "task": "HOLD-isochild", "title": "After lead write", "harness": "Claude Code",
+            "model": ManagedModeChecks.model, "idempotencyKey": UUID().uuidString])
+        guard let raw = (reply.reply["result"] as? [String: Any])?["childAgentId"] as? String, let uuid = UUID(uuidString: raw),
+              let child = supervisor.records[AgentID(rawValue: uuid)] else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout: delegation failed: \(reply.reply)")
+        }
+        let childRoot = URL(fileURLWithPath: child.checkoutRoot)
+        try expect(childRoot.resolvingSymlinksInPath() != root.resolvingSymlinksInPath()
+                   && childRoot.deletingLastPathComponent().lastPathComponent == ".worktrees",
+                   "a lead that changed its checkout this task shared it with its new helper")
+        try Data().write(to: root.appendingPathComponent("release-iso"))
+        supervisor.stopAll()
+        print("Lead checkout writers passed: a lead that changed its checkout in its open task gives its next helper its own worktree")
+    }
+
     static func seen() async throws {
         let b = try ManagedModeChecks.bench("lead-checkout")
         defer { b.tearDown() }
@@ -441,8 +477,7 @@ enum LeadCheckoutChecks {
         try await wait("solo turn did not end") { !supervisor.isRunning(lead) }
 
         // Turn 2: the first helper shares the lead's checkout and has a turn open
-        // while the lead's shell writes. Only a strict lead's helper shares it.
-        b.settings.set(true, forKey: ManagedStrictLead.enabledKey)
+        // while the lead's shell writes.
         try expect(await supervisor.accept(.sendPrompt(AgentPrompt("FRAMES-busy HOLD-busy")), for: lead) == .accepted,
                    "second submission refused")
         try await wait("lead did not start") { supervisor.isRunning(lead) }
