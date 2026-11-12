@@ -48,7 +48,10 @@ runs on a request or event path, and opening Settings starts no count.
   trusted start), `reset`, `noUsage` and the like make a figure "at least".
 - **No task**: usage under the all-zero task id is never listed; one line says
   how much of it fell in the period. It includes turns that started after their
-  task closed: a lead's wake on the last report, a turn an agent message started.
+  task closed and that no helper result of the task woke (a turn an agent
+  message started). A lead's wake on a helper result is the task's; one on a
+  result that came after the close rejoins it, flagged `lateHelperWake`, and
+  counts (`TaskLine.lateHelperWakes`).
   `trailingFramesCut` (Codex frames still unread when the runner's bound ended)
   makes a figure "at least", like `noUsage`.
 - **Model**: a blank id reads unknown and never borrows a helper's; a model
@@ -58,8 +61,10 @@ runs on a request or event path, and opening Settings starts no count.
   no user wait inside it.
 - **Active time**: the union of every agent's turns (`working` to `turnEnded`),
   overlap counted once, cut at the close: a turn still running then counts up to
-  it, and a turn that starts later is not the task's. So it never exceeds time
-  to answer. Unknown if any turn has no end.
+  it, and a turn that starts later is not the task's, so it never exceeds time
+  to answer, except by a late helper's wake, which counts whole. A task closes
+  when the lead's wake that reads its helpers' results ends, so time to answer
+  includes that wake. Unknown if any turn has no end.
 
 ## Not recorded yet
 

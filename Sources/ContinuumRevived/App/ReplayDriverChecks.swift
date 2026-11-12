@@ -211,8 +211,8 @@ enum ReplayLedgerRecord {
         let data = (try? Data(contentsOf: url)) ?? Data()
         let read = RunLedgerUsageReader.read(data)
         // `.plans/116` gap 8: the lead's turns that started after its task closed
-        // (a wake on the last helper's report) are in no task. Listed apart with
-        // their flags, never added to the task's figures.
+        // and that no helper result woke are in no task. Listed apart with their
+        // flags, never added to the task's figures.
         let afterClose = read.untasked.filter { $0.agent == lead.rawValue }
         record["leadTurnsAfterClose"] = Set(afterClose.map { $0.turn ?? "" }).count
         record["afterCloseProblems"] = Set(afterClose.flatMap(\.incomplete)).subtracting(["noTask"]).sorted()
