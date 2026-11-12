@@ -28,7 +28,7 @@ enum ManagedRunLedgerChecks {
     /// Every key a row may carry. None of them holds free text.
     static let allowedKeys: Set<String> = ["v", "at", "kind", "task", "agent", "part", "source", "previousTask",
         "project", "intent", "origin", "outcome", "harness", "model", "retryOf", "checks", "findings", "openParts", "evidence", "files",
-        "effort", "tokens", "incomplete", "modelSource", "parent", "turn", "late", "mode", "changed", "paths", "hook", "via"]
+        "effort", "tokens", "incomplete", "modelSource", "parent", "turn", "late", "mode", "changed", "paths", "hook", "via", "flag"]
     static let secrets = ["SECRET-PROMPT", "SECRET-BRIEF", "SECRET-REPORT", "SECRET-CHECK", "SECRET-FINDING", "HOLD-"]
 
     static func rows(_ url: URL) -> [[String: Any]] {

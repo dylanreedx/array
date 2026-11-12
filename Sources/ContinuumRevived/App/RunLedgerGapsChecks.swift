@@ -102,12 +102,12 @@ enum RunLedgerGapsChecks {
             "summary": "SECRET-REPORT", "checks": [["what": "SECRET-CHECK", "result": "pass"]]])
         try expect(!report.isError, "helper report refused: \(report.reply)")
         try await Task.sleep(nanoseconds: UInt64(tail * 1_000_000_000))
-        let woken = inputs(root)
+        let woken = T.usage(lead).count
         for dir in Set([helperRoot.path, root.path]) {
             try Data().write(to: URL(fileURLWithPath: dir).appendingPathComponent("release-ha"))
         }
         try await T.wait("helper did not end") { !supervisor.isRunning(helper) }
-        try await T.wait("the helper's result did not wake the lead", timeout: 40) { inputs(root) > woken }
+        try await T.wait("the helper's result did not wake the lead", timeout: 40) { supervisor.runLedger.drain(); return T.usage(lead).count > woken }
         try await T.wait("lead wake did not settle") { !supervisor.isRunning(lead) }
         try await T.wait("the task did not close") { supervisor.runLedger.drain(); return T.closures() > before }
         return (try taskOpened(by: lead), helper)
@@ -303,7 +303,7 @@ enum RunLedgerGapsChecks {
         let (task, helper) = try await fanOutAndClose(b, lead, root, tail: 0)
         let supervisor = b.supervisor
         let before = try line(task), beforeUsage = T.usage(helper).count, untaskedBefore = try page().untasked.known
-        let woken = inputs(root), closeRows = rows().count
+        let woken = T.usage(lead).count, closeRows = rows().count
         // The lead messages its helper; the helper's turn replays
         // claude-2.1.291-opus-turn: 2 / 10,695 / 11,239 / 124 = 22,060. Its result
         // then wakes the lead: a late helper result for the closed task.
@@ -315,7 +315,7 @@ enum RunLedgerGapsChecks {
             supervisor.runLedger.drain()
             return !supervisor.isRunning(helper) && T.usage(helper).dropFirst(beforeUsage).contains { $0["tokens"] != nil }
         }
-        try await T.wait("the helper's result did not wake the lead", timeout: 40) { inputs(root) > woken }
+        try await T.wait("the helper's result did not wake the lead", timeout: 40) { supervisor.runLedger.drain(); return T.usage(lead).count > woken }
         try await T.wait("lead settled") { !supervisor.isRunning(lead) }
         supervisor.runLedger.drain()
         let added = Array(T.usage(helper).dropFirst(beforeUsage)).filter { $0["tokens"] != nil }

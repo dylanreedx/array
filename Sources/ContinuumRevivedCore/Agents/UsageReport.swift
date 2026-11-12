@@ -238,16 +238,18 @@ public struct UsageReport: Equatable, Encodable, Sendable {
         if task.state == .closed, let opened = task.opened, let ended = task.ended {
             timeToAnswer = ended.timeIntervalSince(opened)
             // Active time stops at the close: a turn under way then counts up
-            // to it, and a turn that started later (a lead's wake, an older
-            // ledger's rows) is not this task's work.
-            let turns = task.turns.values.flatMap { $0 }.filter { $0.start < ended }
+            // to it, and a turn that started later (an older ledger's rows) is
+            // not this task's work. A late helper's wake rejoined it: whole.
+            let turns = task.turns.values.flatMap { $0 }.filter { $0.start < ended || $0.lateHelperWake }
             if !turns.isEmpty, turns.allSatisfy({ $0.end != nil }) {
-                active = union(turns.map { ($0.start, min($0.end!, ended)) })
+                active = union(turns.map { ($0.start, $0.lateHelperWake ? $0.end! : min($0.end!, ended)) })
             }
         }
-        return TaskLine(task: task.id, state: task.state, opened: task.opened, ended: task.ended,
-                        timeToAnswer: timeToAnswer, activeTime: active, mode: task.mode, helpers: helpers.count,
-                        tokens: tokens, fullyCounted: fully, models: models)
+        var line = TaskLine(task: task.id, state: task.state, opened: task.opened, ended: task.ended,
+                            timeToAnswer: timeToAnswer, activeTime: active, mode: task.mode, helpers: helpers.count,
+                            tokens: tokens, fullyCounted: fully, models: models)
+        line.lateHelperWakes = task.turns.values.flatMap { $0 }.filter(\.lateHelperWake).count
+        return line
     }
 
     /// One role's rows of one task (or the untasked rows), by kind and in total.

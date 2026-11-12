@@ -41,6 +41,9 @@ final class ManagedRunLedger: @unchecked Sendable {
         /// `delegated`: `harness` when the CLI started the child itself (Claude's
         /// Agent tool, a Codex child thread); absent for an Array delegation.
         var via: String?
+        /// `working`: `lateHelperWake` when a helper result that arrived after
+        /// the close woke the agent, and the turn rejoined that task.
+        var flag: String?
     }
     // Live only: a helper delegated before this process started has no entry,
     // and its report records that instead of pretending to have watched it.
@@ -83,9 +86,44 @@ final class ManagedRunLedger: @unchecked Sendable {
     // Kept after closure, but only a turn that started while its task was open
     // belongs to it (`openTask`); never rebuilt from disk.
     private var sessionTasks: [UUID: UUID] = [:]
-    /// The task each agent's running turn started in: a turn under way when its
-    /// task closes still ends there, and one that starts later is not its.
-    private var turnTask: [UUID: UUID] = [:]
+    /// Each agent's running turn and the task it belongs to: a turn under way
+    /// when its task closes still ends there; one that starts later is not its,
+    /// unless a helper result of that task woke the agent.
+    private struct TurnStart { var turn: String; var fact: UUID?; var usage: UUID?; var late = false }
+    private var turnStarts: [UUID: TurnStart] = [:]
+    /// The task whose helper result the agent's next turn reads (a wake).
+    private var pendingWake: [UUID: UUID] = [:]
+    /// Per task, the helpers (agents with a part) whose turn is open in it.
+    private var running: [UUID: Set<UUID>] = [:]
+    /// A Managed lead's recent shell calls and the task each started in.
+    private var shellTasks: [UUID: [(call: String, task: UUID?)]] = [:]
+
+    /// Resolved once per turn, by whichever of its start facts comes first.
+    private func startTurn(_ agent: UUID, _ turn: String) -> TurnStart {
+        if let start = turnStarts[agent], start.turn == turn { return start }
+        var start: TurnStart
+        if let wake = pendingWake.removeValue(forKey: agent) {
+            let open = owners[wake].map { active[$0] == wake } ?? false
+            start = TurnStart(turn: turn, fact: wake, usage: wake, late: !open)
+        } else {
+            start = TurnStart(turn: turn, fact: openTask(agent), usage: usageTask(agent))
+        }
+        turnStarts[agent] = start
+        return start
+    }
+    /// The task open for the agent now: its running turn's, else its own.
+    private func currentTask(_ agent: UUID) -> UUID? { turnStarts[agent]?.fact ?? openTask(agent) }
+
+    /// The agent's next turn reads results from these helpers (a wake). Its
+    /// turn belongs to their task, and rejoins it, flagged, if it has closed.
+    /// `nil` withdraws the mark: the turn did not start.
+    func helperWake(agent: UUID, helpers: [UUID]?) {
+        queue.async {
+            guard let helpers else { self.pendingWake[agent] = nil; return }
+            guard let task = helpers.lazy.compactMap({ self.sessionTasks[$0] }).first ?? self.sessionTasks[agent] else { return }
+            self.pendingWake[agent] = task
+        }
+    }
 
     /// The agent's task while that task is open: its owner's active task.
     private func openTask(_ agent: UUID) -> UUID? {
@@ -196,11 +234,17 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// `lead`: a Managed lead, whose checkout the lead watch observes.
     func working(agent: UUID, turn: String, root: String? = nil, lead: Bool = false) {
         leadWatch.turnStarted(agent: agent, root: root, lead: lead)
-        queue.async { self.fact(kind: "working", agent: agent, source: "working/\(agent)/\(turn)") }
+        queue.async { self.fact(kind: "working", agent: agent, source: "working/\(agent)/\(turn)", turn: turn) }
     }
-    func ended(agent: UUID, turn: String, outcome: TurnOutcome) {
+    /// `resultsWaiting`: a helper result is batched or queued for this agent,
+    /// so the turn that reads it is still to come. `noWake`: a helper whose
+    /// parent Array cannot wake; its end is the host's explicit close.
+    func ended(agent: UUID, turn: String, outcome: TurnOutcome, resultsWaiting: Bool = false, noWake: Bool = false) {
         leadWatch.turnEnded(agent: agent)
-        queue.async { self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", outcome: outcome.rawValue) }
+        queue.async {
+            self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", turn: turn, outcome: outcome.rawValue,
+                      resultsWaiting: resultsWaiting, noWake: noWake)
+        }
     }
 
     /// `.plans/116` gap 21: one row per hook a Managed lead's CLI ran. The
@@ -208,7 +252,7 @@ final class ManagedRunLedger: @unchecked Sendable {
     func hook(agent: UUID, event: String, outcome: String, harness: String?) {
         let at = Date()
         queue.async {
-            var row = Row(kind: "hook", task: self.sessionTasks[agent] ?? Self.noTask, agent: agent,
+            var row = Row(kind: "hook", task: self.currentTask(agent) ?? Self.noTask, agent: agent,
                           source: "hook/\(agent)/\(UUID().uuidString)")
             row.at = at
             row.hook = Self.hookEvents.contains(event) ? event : "other"
@@ -227,6 +271,9 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// whether another agent on that checkout is running.
     func leadShellStarted(agent: UUID, call: String, root: String, busy: Bool) {
         leadWatch.shellStarted(lead: agent, call: call, root: root, busy: busy)
+        // Its row is written after the call ends, possibly after the close: it
+        // belongs to the task open when the call started.
+        queue.async { self.shellTasks[agent] = Array((self.shellTasks[agent, default: []] + [(call, self.currentTask(agent))]).suffix(64)) }
     }
     func leadShellEnded(agent: UUID, call: String, busy: Bool) {
         leadWatch.shellEnded(lead: agent, call: call, busy: busy)
@@ -236,7 +283,8 @@ final class ManagedRunLedger: @unchecked Sendable {
 
     private func leadCheckout(_ agent: UUID, _ call: String, _ outcome: LeadCheckoutWatch.Outcome) {
         queue.async {
-            var row = Row(kind: "leadCheckoutChanged", task: self.sessionTasks[agent] ?? Self.noTask, agent: agent,
+            let started = self.shellTasks[agent]?.last(where: { $0.call == call })
+            var row = Row(kind: "leadCheckoutChanged", task: (started.map { $0.task } ?? self.currentTask(agent)) ?? Self.noTask, agent: agent,
                           source: "leadShell/\(agent)/\(call)")
             switch outcome {
             case let .changed(change, ambiguous):
@@ -314,7 +362,7 @@ final class ManagedRunLedger: @unchecked Sendable {
                 self.writeBuffers(agent, open, sourcePrefix: "usage-unended", extra: ["turnEndNotSeen"])
             }
             self.openTurns[agent] = OpenTurn(turn: turn)
-            if let task = self.usageTask(agent) {
+            if let task = self.startTurn(agent, turn).usage {
                 var recent = self.turnTasks[agent, default: []]
                 recent.append((turn, task))
                 self.turnTasks[agent] = Array(recent.suffix(16))
@@ -483,25 +531,43 @@ final class ManagedRunLedger: @unchecked Sendable {
                      cacheWrite: add(a.cacheWrite, b.cacheWrite), output: add(a.output, b.output))
     }
 
-    private func fact(kind: String, agent: UUID, source: String, outcome: String? = nil, checks: [String: Int]? = nil, findings: [String: Int]? = nil) {
+    private func fact(kind: String, agent: UUID, source: String, turn: String? = nil, outcome: String? = nil,
+                      checks: [String: Int]? = nil, findings: [String: Int]? = nil,
+                      resultsWaiting: Bool = false, noWake: Bool = false) {
         let part = parts[agent]
-        // A turn belongs to the task that was open when it started; a turn that
-        // starts after its agent's task closed belongs to none (`.plans/116`
-        // gaps 8 and 9), until a submission opens another.
+        // A turn belongs to the task that was open when it started, or to the
+        // task whose helper result woke it; one that starts after its agent's
+        // task closed belongs to none (`.plans/116` gaps 8 and 9).
         let task: UUID?
+        var late = false
         switch kind {
-        case "working": task = openTask(agent); turnTask[agent] = task
-        case "turnEnded": task = turnTask.removeValue(forKey: agent) ?? openTask(agent)
-        default: task = turnTask[agent] ?? openTask(agent)
+        case "working":
+            let start = startTurn(agent, turn ?? "")
+            (task, late) = (start.fact, start.late)
+        case "turnEnded":
+            let start = turnStarts.removeValue(forKey: agent)
+            task = start?.turn == turn ? start?.fact : openTask(agent)
+        default: task = currentTask(agent)
         }
         guard let task, let owner = owners[task] else { return }
-        append(Row(kind: kind, task: task, agent: agent, part: part, source: source, outcome: outcome, checks: checks, findings: findings))
-        guard active[owner] == task, kind == "turnEnded" || kind == "reported",
-              openByTask[task]?.isEmpty ?? true,
-              let leadBoundary = leadBoundary[task],
-              leadBoundary.kind == "turnEnded" else { return }
+        var row = Row(kind: kind, task: task, agent: agent, part: part, source: source, outcome: outcome, checks: checks, findings: findings)
+        if late { row.flag = "lateHelperWake" }
+        append(row)
+        if part != nil, owner != agent {
+            if kind == "working" { running[task, default: []].insert(agent) }
+            if kind == "turnEnded" { running[task]?.remove(agent) }
+        }
+        // A task closes when its lead's turn ends with no helper part open, none
+        // running and no helper result still on its way to the lead, or when a
+        // helper Array cannot wake its lead for ends with the lead ended. A
+        // helper report never closes it.
+        guard active[owner] == task, kind == "turnEnded",
+              openByTask[task]?.isEmpty ?? true, running[task]?.isEmpty ?? true,
+              let leadBoundary = leadBoundary[task], leadBoundary.kind == "turnEnded",
+              agent == owner ? !resultsWaiting : noWake else { return }
         let closing = leadBoundary.outcome == "completed" ? "taskClosed" : "taskInterrupted"
         append(Row(kind: closing, task: task, agent: owner, source: "close/\(task)", openParts: closing == "taskInterrupted" ? [] : nil))
         flushUsage(task: task)
+        running[task] = nil
     }
 }
