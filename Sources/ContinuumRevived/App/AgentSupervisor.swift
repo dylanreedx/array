@@ -4709,7 +4709,13 @@ final class AgentSupervisor {
         var processOwner: String
         /// `sessionId` is a pending fork's source: the face forks it.
         var forkSession: Bool
+        /// Array's host text, as the managed runner's launch carries it. Read
+        /// at each flip, so a changed switch reaches the next one.
+        var hostText: String?
     }
+
+    /// The Terminal face's host text. Injected by the checks.
+    var terminalFaceHostText: @Sendable () -> String? = { HostLaunchInstructions.shared.claudeText() }
 
     func isInTerminalFace(_ id: AgentID) -> Bool { terminalFaceAgents.contains(id) }
 
@@ -4793,7 +4799,8 @@ final class AgentSupervisor {
             effort: config.effort,
             conversationExists: config.conversationMayExist,
             processOwner: AgentProcessAttribution.ownerTag(for: id),
-            forkSession: config.forkSession)
+            forkSession: config.forkSession,
+            hostText: terminalFaceHostText())
     }
 
     /// The Terminal face let go. What it learned comes back to the record: the

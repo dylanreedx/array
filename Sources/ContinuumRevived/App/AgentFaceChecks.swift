@@ -732,6 +732,7 @@ extension AgentFaceChecks {
         let argv = launch["argv"] as? [String] ?? []
         try expect(argv.starts(with: ["--resume", sessionId]) && argv.contains("claude-haiku-4-5-20251001"),
                    "the terminal claude must resume the agent's session on its model; argv \(argv)")
+        try expect(!argv.contains("--append-system-prompt"), "with no host text on, the terminal claude must carry none; argv \(argv)")
         try expect(supervisor.sendRefusal(for: agentID) != nil, "the supervisor must refuse sends while the Terminal face holds the session")
         try expect(fixture.canvas.tileRecord(for: view.tile.id)?.metadata.agentTerminalFace?.sessionId == sessionId,
                    "the canvas must persist the Terminal face")
@@ -1069,6 +1070,10 @@ extension AgentFaceChecks {
                        && supervisor.records[agentID]?.pendingSessionForkFrom == sourceId,
                        "a face that never reported its fork must not adopt the session it forked from; record has \(String(describing: supervisor.records[agentID]?.providerSessionId)), pending \(String(describing: supervisor.records[agentID]?.pendingSessionForkFrom))")
             let launchesBeforeFork = launches().count
+            // Host text on: the Terminal face carries it, as the managed runner does.
+            let hostText = "Reply rules:\nFACE-HOST-TEXT"
+            supervisor.terminalFaceHostText = { hostText }
+            defer { supervisor.terminalFaceHostText = { nil } }
             // The tile's own switch, through ⌃⌘T's path (the band click is
             // witnessed above).
             try expect(reopened.toggleFace(), "the reopened tile must take the switch")
@@ -1077,6 +1082,9 @@ extension AgentFaceChecks {
             let forkArgv = launches().last?["argv"] as? [String] ?? []
             try expect(forkArgv.starts(with: ["--resume", sourceId, "--fork-session"]),
                        "a pending fork must run `claude --resume <source> --fork-session`, never resume the source itself; argv \(forkArgv)")
+            let hostFlag = forkArgv.firstIndex(of: "--append-system-prompt")
+            try expect(hostFlag.map { forkArgv.indices.contains($0 + 1) && forkArgv[$0 + 1] == hostText } == true,
+                       "the Terminal face must carry Array's host text, as the managed runner does; argv \(forkArgv)")
             guard let forking = reopened.terminalFaceSession else { throw Failure(description: "no fork terminal session") }
             try expect(fixture.pump(until: { forking.sessionIds.count == 2 }, timeout: 8),
                        "the face must follow the fork's own id from claude's live file; ids \(forking.sessionIds)")
