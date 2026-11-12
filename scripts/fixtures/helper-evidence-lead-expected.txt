@@ -20,10 +20,24 @@ HOLD-lost FRAMES-lost SECRET-BRIEF finished: succeeded
 SECRET-REPORT-lost
 </array-agent-message>
 <next>
-{"requestId":"id4","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
+<array-agent-message from="id4" name="HOLD-background FRAMES-background SECRET-BRIEF">
+HOLD-background FRAMES-background SECRET-BRIEF finished: succeeded
+SECRET-REPORT-background
+</array-agent-message>
 <next>
-{"requestId":"id5","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
+<array-agent-message from="id5" name="HOLD-inside FRAMES-inside SECRET-BRIEF">
+HOLD-inside FRAMES-inside SECRET-BRIEF finished: succeeded
+SECRET-REPORT-inside
+</array-agent-message>
 <next>
 {"requestId":"id6","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
 <next>
 {"requestId":"id7","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
+<next>
+{"requestId":"id8","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
+<next>
+{"requestId":"id9","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
+<next>
+{"requestId":"id10","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}
+<next>
+{"requestId":"id11","result":{"recorded":true},"schema":"array.workspace.v1","status":"ok"}

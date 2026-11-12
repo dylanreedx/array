@@ -43,7 +43,7 @@ struct HelperEvidence {
             case shell(String?)
             case delegate
             case report
-            case ended(exit: Int?, incomplete: Bool)
+            case ended(exit: Int?, incomplete: Bool, backgrounded: Bool)
         }
         var call: String
         var kind: Kind
@@ -63,7 +63,8 @@ struct HelperEvidence {
                 }
             case let .toolDetail(call, detail) where detail.phase == .ended:
                 self.call = call
-                kind = .ended(exit: detail.exitCode, incomplete: [.interrupted, .timedOut, .backgrounded].contains(detail.shellOutcome))
+                kind = .ended(exit: detail.exitCode, incomplete: [.interrupted, .timedOut, .backgrounded].contains(detail.shellOutcome),
+                              backgrounded: detail.shellOutcome == .backgrounded)
             default: return nil
             }
         }
@@ -152,11 +153,19 @@ struct HelperEvidence {
         return text.range(of: #"[;|&\n`]|\$\(|<\("#, options: .regularExpression) != nil
     }
 
+    /// A lone `&` (not `&&`, `>&` or `&>`), or a word that detaches a job.
+    static func startsBackgroundJob(_ command: String) -> Bool {
+        let text = command.replacingOccurrences(of: #"\d*>&\d+|&>>?|>&"#, with: " ", options: .regularExpression)
+        if text.range(of: #"(^|[^&])&($|[^&])"#, options: .regularExpression) != nil { return true }
+        return words(text).contains { ["nohup", "disown", "setsid"].contains($0) }
+    }
+
     /// A `swift build` the host saw: which product (nil = all) in which configuration.
     private struct Build { var product: String?; var configuration: String }
-    private struct Shell { var runs: [Int] = []; var possible: [Int] = []; var build: Build?; var hidden = false }
+    /// `background`: the command leaves a job running after the call ends.
+    private struct Shell { var runs: [Int] = []; var possible: [Int] = []; var build: Build?; var hidden = false; var background = false }
     private enum Kind { case edit([URL]), shell(Shell), delegate, report }
-    private struct Call { var id: String; var kind: Kind; var start: Int; var end: Int?; var exit: Int?; var incomplete = false }
+    private struct Call { var id: String; var kind: Kind; var start: Int; var end: Int?; var exit: Int?; var incomplete = false; var backgrounded = false }
 
     let root: URL
     let base: String?
@@ -195,6 +204,7 @@ struct HelperEvidence {
         guard let command else { return Shell(hidden: true) }
         var shell = Shell()
         let simple = !Self.isCompound(command)
+        shell.background = Self.startsBackgroundJob(command)
         var words = Self.words(command.replacingOccurrences(
             of: #"\d*>&\d+|\d*>>?\s*[^\s;|&<>]+|\d*<\s*[^\s;|&<>]+"#, with: " ", options: .regularExpression))
         while let first = words.first, first.range(of: #"^[A-Za-z_][A-Za-z0-9_]*="#, options: .regularExpression) != nil {
@@ -229,9 +239,9 @@ struct HelperEvidence {
     mutating func observe(_ sighting: Sighting) {
         seq += 1
         switch sighting.kind {
-        case let .ended(exit, incomplete):
+        case let .ended(exit, incomplete, backgrounded):
             guard let i = index[sighting.call] else { return }
-            calls[i].end = seq; calls[i].exit = exit; calls[i].incomplete = incomplete
+            calls[i].end = seq; calls[i].exit = exit; calls[i].incomplete = incomplete; calls[i].backgrounded = backgrounded
         case let .edit(targets):
             if let i = index[sighting.call], case let .edit(old) = calls[i].kind { calls[i].kind = .edit(old + targets); return }
             add(sighting.call, .edit(targets))
@@ -333,6 +343,10 @@ struct HelperEvidence {
             if !reportSeen { reasons.append("observationsInFlight") }
             reasons += activity(after: run.start, excluding: run.id, path: path)
             if calls.contains(where: { $0.end == nil && $0.id != run.id && !isReport($0) }) { reasons.append("callStillRunning") }
+            // A job it left running can write after the check, unseen.
+            if calls.contains(where: { call in
+                call.start < run.start && (call.backgrounded || shellOf(call)?.background == true)
+            }) { reasons.append("backgroundJobBeforeCheck") }
             let entry = shellOf(run)!.runs.first(where: covering.contains)!
             if manifest.entries[entry].binary && !fresh(manifest.entries[entry].executable, before: run) { reasons.append("buildFreshnessUnknown") }
             if reasons.isEmpty { fact.status = "after" } else { fact.reasons = Array(Set(reasons)).sorted() }
