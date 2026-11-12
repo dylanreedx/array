@@ -2431,6 +2431,21 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // `.plans/116` gaps 20 and 21: a Managed lead's own checkout changes,
+        // its hook receipts in the run ledger, and the strict lead switch.
+        if CommandLine.arguments.contains("--lead-checkout-ledger-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await LeadCheckoutChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         // `.plans/116` part 14 step 1: tokens by type per task, lead and helpers,
         // Claude and Codex, through production delegation and recorded frames.
         if CommandLine.arguments.contains("--request-telemetry-check") {

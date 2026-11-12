@@ -366,8 +366,9 @@ final class WorkspaceAPIService {
         if op == WorkspaceAgentHook.op {
             if let receipt = AgentHookReceipt(hookPayload: payload, receivedAt: Date(), harness: record.harness) {
                 supervisor.recordHookReceipt(receipt, for: record.id)
-                completion(["schema": WorkspaceAPISchema.v1, "requestId": requestID, "status": "ok",
-                            "result": hookReply(for: record, payload: payload)])
+                let result = hookReply(for: record, payload: payload)
+                supervisor.recordLeadHook(receipt, reply: result, for: record.id)
+                completion(["schema": WorkspaceAPISchema.v1, "requestId": requestID, "status": "ok", "result": result])
             } else {
                 completion(["schema": WorkspaceAPISchema.v1, "requestId": requestID, "status": "error",
                             "error": ["code": "invalid_request", "message": "A hook event needs hook_event_name"]])

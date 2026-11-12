@@ -233,6 +233,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         /// Host instruction text resolved at EACH process launch (never at runner
         /// construction), on the thread that spawns the process; nil adds none.
         public var hostInstructions: (@Sendable () -> String?)?
+        /// A strict Managed lead's checkout (`ManagedStrictLead`); nil otherwise.
+        public var strictWriteRoot: String?
 
         public init(
             model: String,
@@ -288,7 +290,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         mode: AgentMode = .free,
         hookSurfaceAvailable: Bool = true,
         duckherdPluginKeys: [String] = [],
-        hostInstructions: String? = nil
+        hostInstructions: String? = nil,
+        strictWriteRoot: String? = nil
     ) -> [String] {
         let sessionArgs: [String]
         switch sessionMode {
@@ -317,10 +320,16 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         // a Free session's settings are untouched.
         let pluginConfigs = mode == .managed
             ? ClaudeDuckherd.switchedOffPluginConfigs(installedKeys: duckherdPluginKeys) : nil
+        // A strict Managed lead's shell runs in the CLI's own sandbox, in the
+        // same one `--settings` value (`ManagedStrictLead`).
+        let sandbox = mode == .managed ? strictWriteRoot.map(ManagedStrictLead.claudeSandbox(checkoutRoot:)) : nil
+        // The strict lead is told its limit in the same launch that sets it.
+        let hostInstructions = [hostInstructions, sandbox == nil ? nil : ManagedStrictLead.leadLine]
+            .compactMap { $0 }.joined(separator: "\n\n").nilIfEmptyText
         if mode == .managed {
             args += ["--disallowed-tools", "Edit,Write,MultiEdit,NotebookEdit" + (workspaceMCP == nil ? "" : ",ListAgents")]
             if workspaceMCP == nil || !hookSurfaceAvailable {
-                args += ["--settings", WorkspaceAgentHook.claudeSettingsJSON(command: nil, pluginConfigs: pluginConfigs)]
+                args += ["--settings", WorkspaceAgentHook.claudeSettingsJSON(command: nil, pluginConfigs: pluginConfigs, sandbox: sandbox)]
             }
         }
         if let workspaceMCP {
@@ -344,7 +353,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                 + (mode == .free ? ["--disallowedTools", "ListAgents"] : [])
             if hookSurfaceAvailable {
                 args += ["--settings", WorkspaceAgentHook.claudeSettingsJSON(
-                    command: workspaceMCP.claudeHookCommand, pluginConfigs: pluginConfigs)]
+                    command: workspaceMCP.claudeHookCommand, pluginConfigs: pluginConfigs, sandbox: sandbox)]
             }
             args += ["--strict-mcp-config", "--mcp-config", workspaceMCP.claudeMCPConfigPath]
         } else if let hostInstructions {
@@ -925,7 +934,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             hookSurfaceAvailable: config.workspaceMCP != nil && AgentHookSurfaceCatalog.shared.claudeAvailable(command: command),
             duckherdPluginKeys: config.mode == .managed
                 ? ClaudeDuckherd.installedPluginKeys(configDirectory: ClaudeDuckherd.configDirectory(config.configDirectory)) : [],
-            hostInstructions: config.hostInstructions?()
+            hostInstructions: config.hostInstructions?(),
+            strictWriteRoot: config.strictWriteRoot
         )
         let spawned: ProcessGroupChild
         do {
@@ -1195,3 +1205,7 @@ extension ClaudeAgentRunner: AgentIdleExitReporting {
     }
 }
 #endif
+
+private extension String {
+    var nilIfEmptyText: String? { isEmpty ? nil : self }
+}

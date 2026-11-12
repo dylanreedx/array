@@ -13,8 +13,9 @@ Each v1 row carries `v`, `at` (Foundation reference-date seconds), `kind`, `task
 `previousTask`, `project`, `outcome`, `checks`, `findings`, and `openParts`.
 Task, agent, part and project identities are UUIDs. The initial part identity is
 the delegated child UUID. Checks and findings contain counts by declared enum
-value, never claims of host verification. No text, filesystem paths, diffs,
-credentials or report bodies are serialized. Report check/finding arrays are
+value, never claims of host verification. No text, absolute filesystem paths,
+diffs, credentials or report bodies are serialized; the one path a row may
+carry is a checkout-relative file name in `leadCheckoutChanged` (gap 20). Report check/finding arrays are
 handed off unchanged for background aggregation; only their enum counts persist.
 
 Kinds: `taskOpened`, `submission`, `delegated`, `working`, `reported`,
@@ -273,3 +274,134 @@ ordering, per-thread differencing, fork detection, the resume marker, baselines
 while off, the off switch, free-agent tasks, nested attribution, a child folded
 into its parent, late rows (lost, and charged to the running task), blank model
 ids, and usage written after closure.
+
+## A Managed lead's own checkout changes (gap 20)
+
+A Managed lead cannot use the edit tools, but its shell can still write. When
+one of the lead's OWN shell calls ends, the ledger appends one
+`leadCheckoutChanged` row if files in the lead's checkout changed during that
+call. Always on while recording is on (`qaRunLedgerRecording`); nothing blocks,
+prompts or changes what any agent sees.
+
+**Source.** The lead's runtime side channel: `.toolDetail` start for a shell
+tool, and the end of the same call id. A delegated helper has its own record
+and channel, and a Claude in-process subagent's calls are not on the side
+channel, so a call seen here is the lead's. The supervisor hands one enqueue to
+`LeadCheckoutWatch`, which works on its own serial queue; the ledger's queue
+only appends the finished row.
+
+**Which files count.** FSEvents, file by file, for each lead checkout, from
+the lead's first turn. An event counts for a call when it arrives between
+0.5 s before the host saw the call start and the host's flush of pending events
+at its end (settled 0.25 s later, off every request path). So a call that wrote
+nothing costs one flush and starts no process; a folder removed whole counts
+each file in it; a file edited and committed inside the same call still
+counts. Events under `.git/` and `.array/` never count. An event counts for
+one call at most. A file created and removed inside one call is not counted.
+
+**Git, lock-free.** The watch runs git only when a call changed files, and
+only two read-only commands over those paths: `git check-ignore --stdin -z`
+(ignored files, such as a build directory, never count) and, when a call
+replaced files by rename (an editor's save, `sed -i`), `git ls-files` to tell
+a modified tracked file from a new one. Both run with `--no-optional-locks`
+and `GIT_OPTIONAL_LOCKS=0`, so neither takes `index.lock`; each has a 2 s
+timeout and a 1 MB output cap. It never runs `git status`. Outside a git
+repository nothing is ignored or tracked, so a file replaced by rename reads
+as added.
+
+**Bounds.** At most 20,000 events kept per checkout and 2,000 paths per call.
+Past a bound, a timeout or a git failure, the row says `evidence.changes:
+unknown` with the reason, never a count.
+
+**Lead or the first helper.** The first helper shares the lead's checkout.
+The supervisor passes, at the call's start and end, whether any other agent on
+the same checkout path is running. The watch also marks a call when another
+agent on that checkout ended a turn within 0.5 s before the call started, or
+starts or ends a turn while it is open. Any of these makes the row
+`evidence.by: ambiguous` with `reason: sharedCheckoutBusy`. Otherwise
+`by: lead`.
+
+**Stored.** `changed` (counts by `modified`, `added`, `deleted`), `paths`
+(checkout-relative, the first 64 alphabetically; `evidence.pathsTruncated`
+when cut), and `evidence`. No command text, contents, diffs or absolute paths.
+
+**Not seen, or seen wrongly.** A background command's writes after its call
+ended. Writes during the call by a process that is not an Array agent,
+including files a build or tool writes outside ignored folders (recorded as
+the lead's). A helper's background process still writing after its turn ended
+(recorded as the lead's if it lands inside a lead call). A new file added and
+committed inside one call reads as modified.
+
+`--lead-checkout-ledger-check` (section `seen`) drives a Managed Claude lead
+through the production runner and translator over a CLI double that replays
+Bash frames and really changes files. Asserted: modify (in place, by rename),
+add and delete are the lead's with the right paths; a folder removed whole
+(`rm -rf`) records each file; an edit committed inside its own call is
+recorded; an ignored build and a read-only command record nothing; a write
+while the shared first helper runs is `ambiguous`; a helper write followed by
+the helper ending its turn just before a lead call is `ambiguous`, never the
+lead's; twelve lead `git add` + `git commit` calls back to back, racing the
+watch, all exit 0 and are all recorded; no command, prompt or absolute path is
+stored. The watch's git commands do not write the index even without the
+lock-free flags, so the race leg guards against a return to `git status`
+rather than proving the flags themselves.
+
+## Hook receipts (gap 21)
+
+Hook receipts still go to the supervisor's in-memory ring. For a Managed lead
+(top-level, effective mode Managed) each receipt also appends one `hook` row
+under the lead's task (the all-zero task when it has none): `hook` (the event,
+one of `WorkspaceAgentHook.claudeEvents`/`codexEvents`, else `other`),
+`outcome` (what Array's reply did: `none`, `context`, `denied`, `blocked`,
+`other`) and `harness`. No prompt, command, output, session id or reply text.
+Helpers' and Free agents' hooks are not recorded. The hook path pays one
+enqueue; the reply is unchanged. A Claude in-process subagent's hooks come
+through the lead's token and are counted as the lead's.
+
+`--lead-checkout-ledger-check` (section `hooks`, alone through
+`CONTINUUM_LEAD_CHECKOUT_CASE=hooks`) posts five lead hooks and one helper hook
+through the real `array-workspace-mcp hook` binary to the production handler
+and reads the rows back. Observed RED with the handler's ledger call removed.
+
+## Strict lead (switch, off by default; Claude only)
+
+`agents.strictLead.enabled` (defaults) or `ARRAY_STRICT_LEAD` (environment,
+`1`/`true`/`yes`/`on`; when set it wins either way; for the benchmark).
+Decided once per launch in the supervisor's `accountLaunch`, for a top-level
+Managed **Claude** lead only; helpers never. No Settings UI. A toggle while
+the lead is idle applies at its next turn: the idle Claude process is replaced
+rather than reused.
+
+**Claude: proven on Claude Code 2.1.321, in a linked worktree.** The lead's
+`--settings` carries `sandbox` with `enabled`, `failIfUnavailable`,
+`allowUnsandboxedCommands: false`, and `filesystem.denyWrite` naming the
+checkout and, when they sit outside it, the git directories it writes (a
+linked worktree's own `.git/worktrees/<name>` and the shared `.git`; a project
+in a repository subfolder, that repository's `.git`), each as given and with
+links resolved. A live probe ran the real `claude` (haiku, one turn, config in
+a temporary folder, login from the CLI's own Keychain item) with exactly the
+argv Array builds, in a linked worktree. Refused: a shell write and a python
+write in the checkout, a build directory inside it, `git commit`,
+`git branch -f`, `git hash-object -w`, and a call that asked for
+`dangerouslyDisableSandbox`; the host confirmed no file, HEAD, branch or object
+changed. Allowed: reads, `git status`/`log`, and a write to `$TMPDIR`. Result:
+`docs/internals/evidence/strict-lead-claude-probe.json`; rerun with
+`CONTINUUM_LEAD_CHECKOUT_CASE=strict-probe` (a model turn, never in the
+matrix). The offline sections `strict-claude` and `strict-layouts` assert that
+Array still builds those exact settings for a repository root, a subfolder
+project and a linked worktree. Only the linked-worktree layout was probed
+live.
+
+Because `denyWrite` beats `allowWrite`, a strict lead cannot build into
+`.build` inside its checkout; its system prompt carries one line telling it to
+build with a scratch path under `$TMPDIR`. `failIfUnavailable` means a Mac
+without the sandbox fails the lead's launch while the switch is on.
+
+**Codex leads are not covered**: with the switch on they launch exactly as with
+it off. Codex 0.167.0's permission profiles enforce the same limit (probed with
+`codex sandbox` and the app-server's `command/exec`), and win over
+`sandbox_mode=danger-full-access`, but a pinned `dangerFullAccess` thread or
+turn overrides them, and the app-server's sandbox policies cannot name a
+profile. Nothing can pin the profile on `thread/resume` or `turn/start`, and
+whether a thread first run with full access keeps it when resumed is unproven,
+so a Codex strict mode that might not hold is not shipped.

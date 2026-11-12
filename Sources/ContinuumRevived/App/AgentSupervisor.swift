@@ -1960,7 +1960,8 @@ final class AgentSupervisor {
         switch record.harness {
         case .claudeCode:
             return claudeRunner(for: record, workspaceMCP: launch.workspaceMCP,
-                                configDirectory: launch.accountConfigDirectory, hostInstructions: hostInstructions)
+                                configDirectory: launch.accountConfigDirectory, hostInstructions: hostInstructions,
+                                strictLead: launch.strictLead)
         case .codex:
             return codexRunner(for: record, workspaceMCP: launch.workspaceMCP,
                                codexHome: launch.accountConfigDirectory, hostInstructions: hostInstructions)
@@ -2005,10 +2006,11 @@ final class AgentSupervisor {
     /// `piRunner(for:)` so the same ownership scan can hold for both.
     nonisolated static func claudeRunner(
         for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, configDirectory: String? = nil,
-        hostInstructions: HostLaunchInstructions = .shared
+        hostInstructions: HostLaunchInstructions = .shared, strictLead: Bool = false
     ) -> AgentRunning {
         var config = claudeRunnerConfig(for: record, workspaceMCP: workspaceMCP)
         config.configDirectory = configDirectory
+        config.strictWriteRoot = strictLead ? record.checkoutRoot : nil
         // Resolved per process launch, off the main thread (see codexRunnerConfig).
         config.hostInstructions = { hostInstructions.claudeText() }
         return ClaudeAgentRunner(config: config)
@@ -2343,6 +2345,18 @@ final class AgentSupervisor {
             runtimeObservationObservers[id]?.values.forEach { $0(observation) }
             return
         }
+        // `.plans/116` gap 20: a Managed lead's OWN shell call, seen on its
+        // own side channel. One enqueue; git runs on the ledger's queue.
+        // An end names the call, not always the tool; the ledger ignores ends
+        // of calls it never saw start.
+        if qaRunLedgerRecording, case let .toolDetail(call, detail) = observation, effectiveMode(for: id) == .managed {
+            if detail.phase == .started, AgentToolKind.resolve(toolName: detail.toolName) == .shell {
+                runLedger.leadShellStarted(agent: id.rawValue, call: call, root: record.checkoutRoot,
+                                           busy: sharedCheckoutBusy(besides: record))
+            } else if detail.phase == .ended {
+                runLedger.leadShellEnded(agent: id.rawValue, call: call, busy: sharedCheckoutBusy(besides: record))
+            }
+        }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -2350,6 +2364,17 @@ final class AgentSupervisor {
         // immutable agent ID; no raw runtime payload or path enters the event log.
         sharedTranscriptDetails[id]?.captureRuntimeObservation(observation)
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
+    }
+
+    /// Whether another agent on this record's checkout is running now. Path
+    /// text only, no filesystem access: a shared checkout is handed out as the
+    /// lead's own path.
+    private func sharedCheckoutBusy(besides record: AgentRecord) -> Bool {
+        let root = URL(fileURLWithPath: record.checkoutRoot).standardizedFileURL.path
+        return records.values.contains { other in
+            other.id != record.id && isRunning(other.id)
+                && URL(fileURLWithPath: other.checkoutRoot).standardizedFileURL.path == root
+        }
     }
 
     /// The account quota for the account this agent is spending, or nil when
@@ -2550,7 +2575,16 @@ final class AgentSupervisor {
         runnerAccounts[id] = active
         var signed = launch
         signed.accountConfigDirectory = active.configDirectory
+        signed.strictLead = strictDecision(for: launch.record)
+        launchedStrict[id] = signed.strictLead
         return signed
+    }
+
+    /// What a launch of this record would decide now (`ManagedStrictLead`).
+    private var launchedStrict: [AgentID: Bool] = [:]
+    private func strictDecision(for record: AgentRecord) -> Bool {
+        record.harness == .claudeCode && record.parentAgentID == nil && record.mode == .managed
+            && ManagedStrictLead.isEnabled(defaults: managedModeDefaults)
     }
 
     private func folder(of account: AgentAccount) -> URL {
@@ -3763,7 +3797,10 @@ final class AgentSupervisor {
         // once per turn — not on any per-delta path.
         let runner: AgentRunning
         if let idle = idleSessionRunners.removeValue(forKey: id) {
-            if idle.canAcceptAnotherTurn && !pendingModeRestarts.contains(id) {
+            // A strict-lead toggle since this runner launched restarts it, so
+            // the switch applies at the next turn, never "at some later launch".
+            if idle.canAcceptAnotherTurn && !pendingModeRestarts.contains(id)
+                && launchedStrict[id, default: false] == strictDecision(for: record) {
                 runner = idle
             } else {
                 idle.stop()
@@ -6412,6 +6449,24 @@ final class AgentSupervisor {
         if ring.count > AgentHookReceipt.ringCapacity { ring.removeFirst(ring.count - AgentHookReceipt.ringCapacity) }
         hookReceipts[id] = ring
         noteHelperProgress(id, last: String((receipt.toolName ?? receipt.event).split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40)))
+    }
+
+    /// `.plans/116` gap 21: a Managed lead's hook receipt reaches the run
+    /// ledger as a compact row: which hook and what Array answered.
+    func recordLeadHook(_ receipt: AgentHookReceipt, reply: [String: Any], for id: AgentID) {
+        guard qaRunLedgerRecording, effectiveMode(for: id) == .managed else { return }
+        runLedger.hook(agent: id.rawValue, event: receipt.event, outcome: Self.hookOutcome(reply),
+                       harness: records[id]?.harness?.rawValue)
+    }
+
+    /// What Array's hook reply did: `none`, `denied`, `blocked`, `context` or `other`.
+    static func hookOutcome(_ reply: [String: Any]) -> String {
+        guard let output = reply[WorkspaceAgentHook.hookOutputKey] as? [String: Any] else { return "none" }
+        let specific = output["hookSpecificOutput"] as? [String: Any]
+        if specific?["permissionDecision"] as? String == "deny" { return "denied" }
+        if output["decision"] as? String == "block" { return "blocked" }
+        if specific?["additionalContext"] != nil { return "context" }
+        return "other"
     }
 
     /// `.plans/102` P2a: each agent's latest `array_report`, with when it was
@@ -12088,7 +12143,8 @@ final class AgentSupervisor {
         case let .turnStarted(_, turnID):
             if qaRunLedgerRecording {
                 runLedger.usageTurnStarted(agent: id.rawValue, turn: turnID)
-                runLedger.working(agent: id.rawValue, turn: turnID)
+                runLedger.working(agent: id.rawValue, turn: turnID, root: records[id]?.checkoutRoot,
+                                  lead: effectiveMode(for: id) == .managed)
             }
         case let .turnCompleted(_, turnID, outcome, _):
             if qaRunLedgerRecording, let record = records[id] {
