@@ -272,6 +272,7 @@ check --retired-flat-write-check
 check --reveal-in-finder-check
 check --role-registry-check
 check --run-artifacts-tile-check
+check --run-ledger-gaps-check
 check --session-observer-check
 check --session-resume-check
 check --settings-modal-check
@@ -735,6 +736,7 @@ leg run_app_check .build/debug/Array --resize-snap-check
 leg run_app_check .build/debug/Array --retired-flat-write-check
 leg run_app_check .build/debug/Array --reveal-in-finder-check
 leg run_app_check .build/debug/Array --run-artifacts-tile-check
+leg run_app_check .build/debug/Array --run-ledger-gaps-check
 leg run_app_check .build/debug/Array --session-observer-check
 leg run_app_check .build/debug/Array --session-resume-check
 leg run_app_check .build/debug/Array --settings-modal-check

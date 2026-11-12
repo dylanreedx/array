@@ -28,7 +28,7 @@ enum ManagedRunLedgerChecks {
     /// Every key a row may carry. None of them holds free text.
     static let allowedKeys: Set<String> = ["v", "at", "kind", "task", "agent", "part", "source", "previousTask",
         "project", "intent", "origin", "outcome", "harness", "model", "retryOf", "checks", "findings", "openParts", "evidence", "files",
-        "effort", "tokens", "incomplete", "modelSource", "parent", "turn", "late", "mode", "changed", "paths", "hook"]
+        "effort", "tokens", "incomplete", "modelSource", "parent", "turn", "late", "mode", "changed", "paths", "hook", "via", "flag"]
     static let secrets = ["SECRET-PROMPT", "SECRET-BRIEF", "SECRET-REPORT", "SECRET-CHECK", "SECRET-FINDING", "HOLD-"]
 
     static func rows(_ url: URL) -> [[String: Any]] {
@@ -104,8 +104,12 @@ enum ManagedRunLedgerChecks {
         return out + text[last...]
     }
 
-    /// The canonical bytes of `replay()` as the scanning reducer wrote them.
-    static let replayDigest = "2b8f33497cd3253a9b0a6830020c3de4a6e8de5788d8e89c07049613e513c02d"
+    /// The canonical bytes of `replay()`. First the scanning reducer's; reset
+    /// for `.plans/116` gap 8, checked row by row by hand: no helper report or
+    /// end closes a task (this sequence has no wakes), so the second and third
+    /// submissions join the open task and the restart interrupts both tasks,
+    /// in the order they opened.
+    static let replayDigest = "9bb423f157131f3ec76b8b1728938c0ee02e0e391eb11d47db8792a34aaeacd6"
 
     /// One fixed call sequence through the production ledger: joins, a report that
     /// leaves a part open, closure, a linked task, an interrupted task, a torn
@@ -282,20 +286,28 @@ enum ManagedRunLedgerChecks {
         try expect(reported["part"] as? String == p1 && (reported["checks"] as? [String: Int]) == ["pass": 1, "fail": 1]
                    && (reported["findings"] as? [String: Int]) == ["issue": 1], "report row wrong: \(reported)")
 
-        if noWake {
-            try await wait("last helper report did not close task without a wake", timeout: 3) { !rows(ledger, "taskClosed", task: t1).isEmpty }
-            try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count == 2, "closure required another lead turn")
-        }
+        // A helper report never closes a task by itself (`.plans/116` gap 8).
+        try await Task.sleep(nanoseconds: 500_000_000)
+        supervisor.runLedger.drain()
+        try expect(rows(ledger, "taskClosed", task: t1).isEmpty, "a helper report closed the task")
         // 6. The helper finishes; its result wakes the lead. The wake runs inside
-        //    the task and opens none; the task closes once no work remains.
+        //    the task and opens none; the task closes when it ends. With wakes
+        //    off, the helper's end is the host's explicit close.
         try release("helperone")
         try await wait("task did not close after the helper's result", timeout: 40) { !rows(ledger, "taskClosed", task: t1).isEmpty }
         try await wait("helper end missing") { rows(ledger, "turnEnded", task: t1, agent: h1).count == 1 }
+        if noWake { try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count == 2, "closure without a wake required another lead turn") }
         if !noWake { try await wait("wake end missing") { rows(ledger, "turnEnded", task: t1, agent: lead).count >= 3 } }
         let ended = rows(ledger, "turnEnded", task: t1, agent: h1)
         try expect(ended.count == 1 && ended[0]["part"] as? String == p1 && ended[0]["outcome"] as? String == "completed",
                    "helper turn end wrong: \(ended)")
-        if !noWake { try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count >= 3, "the helper wake did not run inside the task") }
+        if !noWake {
+            try expect(rows(ledger, "turnEnded", task: t1, agent: lead).count >= 3, "the helper wake did not run inside the task")
+            let all = rows(ledger)
+            let close = all.firstIndex { $0["kind"] as? String == "taskClosed" && $0["task"] as? String == t1 }
+            let wakeEnd = all.lastIndex { $0["kind"] as? String == "turnEnded" && $0["task"] as? String == t1 && $0["agent"] as? String == lead.rawValue.uuidString }
+            try expect(close != nil && wakeEnd.map { $0 < close! } == true, "the task closed before the wake that reads the result ended")
+        }
         try expect(rows(ledger, "taskOpened").count == 1, "a helper wake opened a task")
 
 

@@ -263,7 +263,10 @@ enum RequestTelemetryChecks {
         b.supervisor.runLedger.drain()
         let delivered = Array(usage(lead).dropFirst(rows.count))
         try expect(delivered.count == 1, "one result's usage delivered twice must give one row, got \(delivered)")
-        try expectRow(delivered.first, "same usage delivered twice", model: "claude-opus-5-5", source: "cli", counts(2, 10_695, 11_239, 124))
+        // No submission opened a task for this turn and the last one closed, so
+        // it is in no task (`.plans/116` gap 9).
+        try expectRow(delivered.first, "same usage delivered twice", model: "claude-opus-5-5", source: "cli", counts(2, 10_695, 11_239, 124),
+                      incomplete: ["noTask"])
         try privacy(root: root)
         try await timing(b, lead)
     }
@@ -519,10 +522,9 @@ enum RequestTelemetryChecks {
 
     /// Reports that arrive after their turn completed are written at once for
     /// the turn they name, never folded into the turn that is running. They
-    /// arrive inside the next turn's stream: the runner tears its app-server
-    /// down after the primary `turn/completed` unless a child thread is live, so
-    /// a primary frame sent after it races that teardown (child frames are kept;
-    /// `codexChild` covers them).
+    /// arrive inside the next turn's stream here; a primary frame sent after
+    /// `turn/completed` in the same process is `RunLedgerGapsChecks`'
+    /// `codex-trailing` case.
     static func codexLate() async throws {
         print("request-telemetry: codex usage after its turn")
         let (b, lead, root, tearDown) = try codexBench("codex-late")
@@ -562,25 +564,7 @@ enum RequestTelemetryChecks {
         print("request-telemetry: codex provider-run child")
         let (b, lead, root, tearDown) = try codexBench("codex-child")
         defer { tearDown() }
-        let parentThread = "00000000-0000-4000-8000-000000000001"
-        var parentTurn: String?, ended = false
-        var frames: [[String: Any]] = []
-        for frame in try capture("codex-appserver-delegating-turn.jsonl") {
-            guard let method = frame["method"] as? String else { continue }
-            let params = frame["params"] as? [String: Any] ?? [:]
-            let thread = (params["threadId"] as? String) ?? ((params["thread"] as? [String: Any])?["id"] as? String)
-            if thread == parentThread, method == "thread/started" { continue }
-            if thread == parentThread, method == "turn/started" { parentTurn = (params["turn"] as? [String: Any])?["id"] as? String; continue }
-            if thread == parentThread, method == "turn/completed" { ended = true; continue }
-            var text = String(decoding: try JSONSerialization.data(withJSONObject: frame), as: UTF8.self)
-                .replacingOccurrences(of: parentThread, with: "SESSION")
-            if let parentTurn { text = text.replacingOccurrences(of: parentTurn, with: "TURN") }
-            guard var replayed = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { continue }
-            if ended { replayed["_after"] = true }
-            frames.append(replayed)
-        }
-        try expect(parentTurn != nil && ended, "delegating capture changed shape")
-        try stage(frames, "child", in: root)
+        try stage(try delegatingFrames(), "child", in: root)
         try await soloTurn(b, lead, "FRAMES-child")
         var child: AgentID?
         try await wait("child usage not recorded") {
@@ -599,6 +583,31 @@ enum RequestTelemetryChecks {
         try expect(childRows.allSatisfy { $0["parent"] as? String == lead.rawValue.uuidString } && taskOf(childRows) == taskOf(leadRows),
                    "child rows must name their parent and sit in its task: \(childRows)")
         print("  child: \(describe(total(childRows))) in \(childRows.count) row(s), parent=lead, same task")
+    }
+
+    /// codex-appserver-delegating-turn on the double's thread and turn: the
+    /// parent's own start, turn start and completion dropped (the double sends
+    /// its own), every frame after the parent's completion marked `_after`.
+    static func delegatingFrames() throws -> [[String: Any]] {
+        let parentThread = "00000000-0000-4000-8000-000000000001"
+        var parentTurn: String?, ended = false
+        var frames: [[String: Any]] = []
+        for frame in try capture("codex-appserver-delegating-turn.jsonl") {
+            guard let method = frame["method"] as? String else { continue }
+            let params = frame["params"] as? [String: Any] ?? [:]
+            let thread = (params["threadId"] as? String) ?? ((params["thread"] as? [String: Any])?["id"] as? String)
+            if thread == parentThread, method == "thread/started" { continue }
+            if thread == parentThread, method == "turn/started" { parentTurn = (params["turn"] as? [String: Any])?["id"] as? String; continue }
+            if thread == parentThread, method == "turn/completed" { ended = true; continue }
+            var text = String(decoding: try JSONSerialization.data(withJSONObject: frame), as: UTF8.self)
+                .replacingOccurrences(of: parentThread, with: "SESSION")
+            if let parentTurn { text = text.replacingOccurrences(of: parentTurn, with: "TURN") }
+            guard var replayed = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { continue }
+            if ended { replayed["_after"] = true }
+            frames.append(replayed)
+        }
+        try expect(parentTurn != nil && ended, "delegating capture changed shape")
+        return frames
     }
 
     /// The ledger seam the supervisor calls, with an empty and a blank model id

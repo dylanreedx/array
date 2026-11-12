@@ -3997,6 +3997,18 @@ final class AgentSupervisor {
                 }
             }
         }
+        // `.plans/116` gap 9: usage a provider reports after its turn ended and
+        // the run returned. It names its turn, so the ledger charges that
+        // turn's task; no generation gate, and it reaches nothing but the ledger.
+        if let reporting = runner as? TrailingUsageReporting {
+            reporting.observeTrailingUsage { [weak self] snapshot in
+                DispatchQueue.main.async {
+                    guard let self, self.qaRunLedgerRecording, let record = self.records[id] else { return }
+                    self.runLedger.usage(agent: id.rawValue, Self.usageIdentity(record), snapshot,
+                                         record: AgentTokenTelemetryConfig.enabled(defaults: self.managedModeDefaults))
+                }
+            }
+        }
         // T6: pi's delegated child does not stream on the parent at all — it
         // writes its own run directory — so its runner reports a LOCATION and the
         // supervisor tails it. Different mechanism, same destination: the child's
@@ -5939,6 +5951,13 @@ final class AgentSupervisor {
         records[childID] = child
         persist(child)
         bindCompanionObservedChild(childID, parentID: parentId, sourceID: toolUseID)
+        // `.plans/116` gap 6: the harness started this child, so Array never saw
+        // a delegation. Recorded once, at minting, under its parent's open task,
+        // before its own turn events replay below.
+        if qaRunLedgerRecording {
+            runLedger.delegated(parent: parentId.rawValue, child: childID.rawValue,
+                                source: "harness/\(childID.rawValue)", via: "harness")
+        }
         // Anything that arrived before the record existed replays now, in order.
         flushPendingSubagentEvents(for: childID)
         deliver(.childAgentSpawned(
@@ -8111,6 +8130,22 @@ final class AgentSupervisor {
     /// A lead that is itself a helper waits on its OWN Array helpers just as on
     /// a shell job: any still running or held, or a result of theirs not yet in
     /// its hands (batched, queued, or in custody), will start its next turn.
+    /// A helper result batched, being staged or queued for `id`, or held: the
+    /// turn that reads it is still to come. Items already handed to a turn are
+    /// that turn's. Run-ledger closure only (`.plans/116` gap 8).
+    private func helperResultsWaiting(_ id: AgentID) -> Bool {
+        if helperCompletionBatches[id]?.updates.isEmpty == false || helperWakesStaging.contains(id) { return true }
+        if (queuedWorkItemsCache[id] ?? []).contains(where: { item in
+            if case .prompt(let message) = item { return message.helperCompletion && !message.helperNote }
+            return false
+        }) { return true }
+        return heldHelperCompletions.keys.contains { records[$0]?.parentAgentID == id }
+    }
+    /// Leads whose helper results are between their batch and their queue.
+    private var helperWakesStaging: Set<AgentID> = []
+    /// The helpers whose results each staged wake carries, until it starts.
+    private var helperWakeSenders: [UUID: [UUID]] = [:]
+
     private func hasPendingArrayHelpers(_ id: AgentID) -> Bool {
         if helperCompletionBatches[id]?.updates.isEmpty == false { return true }
         if !(deliveringSteers[id] ?? []).filter({ $0.message.helperCompletion && !$0.message.helperNote }).isEmpty { return true }
@@ -8575,6 +8610,8 @@ final class AgentSupervisor {
                   helperCompletionDeliveryDate(batch, parent: parent, now: helperCompletionNow()) <= helperCompletionNow(),
                   let cwd = records[parent]?.cwd, wakesForHelperCompletion(parent) else { continue }
             helperCompletionBatches[parent] = nil
+            helperWakesStaging.insert(parent)
+            defer { helperWakesStaging.remove(parent) }
             var states: [SpawnResultFile.Delivery] = []
             var deferred: [(AgentID, String, String)] = []
             do {
@@ -8623,6 +8660,7 @@ final class AgentSupervisor {
                             state.text.map { ($0, senderID: state.helper,
                                 senderName: records[AgentID(rawValue: state.helper)]?.humanDisplayName ?? "Agent") }
                         })
+                        helperWakeSenders[queueID] = group.map(\.helper)
                         try qaBeforeHelperWakeAdmission?()
                         // Always a helper item, idle lead or busy: it queues after
                         // user input and drains with every other pending result.
@@ -11043,8 +11081,20 @@ final class AgentSupervisor {
                 }
                 self.mergedHelperFallbackIDs[id, default: []].formUnion(merged.map(\.id))
             }
+            // `.plans/116` gap 8: this turn reads helper results, so it belongs to
+            // their task, even one that has closed. Marked before the turn starts.
+            var wakeMarked = false
+            if message.helperCompletion {
+                let members = [message] + merged
+                let helpers = members.map { self.helperWakeSenders[$0.id] ?? [] }.joined()
+                if self.qaRunLedgerRecording, members.contains(where: { !$0.helperNote }) {
+                    self.runLedger.helperWake(agent: id.rawValue, helpers: Array(helpers))
+                    wakeMarked = true
+                }
+            }
             guard self.sendPrepared(PreparedAgentPrompt(prompt: turnPrompt, expectedAgentID: id, queuedSource: message), to: id, queuedItemID: message.id,
                                     sharedInputPermit: sharedPermit) else {
+                if wakeMarked { self.runLedger.helperWake(agent: id.rawValue, helpers: nil) }
                 // The runner became busy again in the same beat (a fresh
                 // interactive send won the race) — put the message back rather
                 // than lose it.
@@ -11059,6 +11109,7 @@ final class AgentSupervisor {
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
+            for member in [message] + merged { self.helperWakeSenders[member.id] = nil }
             // Helper fallback remains in durable custody until the runner starts
             // its next turn. Other queue entries keep their existing echo path.
             if !message.helperCompletion { self.echoPrompt(prompt, for: id) }
@@ -12231,7 +12282,14 @@ final class AgentSupervisor {
                 runLedger.usageTurnEnded(agent: id.rawValue, turn: turnID, Self.usageIdentity(record),
                                          record: AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults))
             }
-            if qaRunLedgerRecording { runLedger.ended(agent: id.rawValue, turn: turnID, outcome: outcome) }
+            if qaRunLedgerRecording {
+                // `.plans/116` gap 8: a lead's turn ending while a helper result
+                // is on its way does not close the task; the wake that reads it does.
+                let record = records[id]
+                let noWake = record.map { $0.capabilities.locallyManaged && $0.parentAgentID.map { !wakesForHelperCompletion($0) } == true } ?? false
+                runLedger.ended(agent: id.rawValue, turn: turnID, outcome: outcome,
+                                resultsWaiting: helperResultsWaiting(id), noWake: noWake)
+            }
         case let .tokenUsageUpdated(_, snapshot):
             // `.plans/116` part 14: every agent's usage is its own row, its
             // parent named on it; a provider-run child is never folded in.

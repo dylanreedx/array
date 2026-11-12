@@ -441,10 +441,12 @@ enum UsageWords {
         return (text.hasSuffix(".0") ? String(text.dropLast(2)) : text) + unit
     }
 
-    /// One cell: a number, "at least" a number, "unknown", or a dash for a kind
-    /// the harness never reports.
+    /// One cell: a number, "at least" a number, "unknown", a dash for a kind
+    /// the harness never reports, or "included in parent" for a subagent whose
+    /// tokens its parent's figure already holds.
     static func figure(_ figure: UsageReport.Figure, exact: Bool) -> String {
         if figure.isNotReported { return "—" }
+        if figure.isInParent { return "included in parent" }
         let value = exact ? count(figure.known) : compact(figure.known)
         guard figure.isUnknown else { return value }
         return figure.known == 0 ? "unknown" : "at least \(value)"

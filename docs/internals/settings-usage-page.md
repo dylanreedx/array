@@ -34,10 +34,11 @@ runs on a request or event path, and opening Settings starts no count.
   helpers, total tokens, model); clicking it opens the Lead / Helpers / All
   table for that task. One page of 30 rows, then "Show more".
 - **Lead and helpers**: a usage row whose agent opened the task is the lead's;
-  any other, at any depth, is a helper's. A helper's own helpers have no
-  `delegated` row; their usage rows name a parent and land on the root task.
-  A Claude in-process subagent's tokens are inside its parent's result: its
-  `reportedByParent` rows are neither missing nor a helper.
+  any other, at any depth, is a helper's. A helper's own helper has a
+  `delegated` row naming its parent helper. A child the CLI started itself
+  (`via: harness`) is a helper too. A Claude in-process subagent's tokens are
+  inside its parent's result: its `reportedByParent` rows are not missing, and
+  where they are all a role has, that cell reads "included in parent", never 0.
 - **Split and mode**: solo, one helper, two or more, by every agent under the
   lead; Managed or Free from `taskOpened.mode` ("not recorded" on older rows).
   Counts only, never averages side by side.
@@ -46,14 +47,24 @@ runs on a request or event path, and opening Settings starts no count.
 - **Missing, not unreported**: `noBaseline` (a resumed Codex thread with no
   trusted start), `reset`, `noUsage` and the like make a figure "at least".
 - **No task**: usage under the all-zero task id is never listed; one line says
-  how much of it fell in the period.
+  how much of it fell in the period. It includes turns that started after their
+  task closed and that no helper result of the task woke (a turn an agent
+  message started). A lead's wake on a helper result is the task's; one on a
+  result that came after the close rejoins it, flagged `lateHelperWake`, and
+  counts (`TaskLine.lateHelperWakes`).
+  `trailingFramesCut` (Codex frames still unread when the runner's bound ended)
+  makes a figure "at least", like `noUsage`.
 - **Model**: a blank id reads unknown and never borrows a helper's; a model
   named by the agent's settings rather than the stream says so when opened.
 - **Time to answer**: the task's first submission (`taskOpened`) to its close.
   Because a task closes when the lead's turn ends with no open parts, there is
   no user wait inside it.
 - **Active time**: the union of every agent's turns (`working` to `turnEnded`),
-  overlap counted once. Unknown if any turn has no end.
+  overlap counted once, cut at the close: a turn still running then counts up to
+  it, and a turn that starts later is not the task's, so it never exceeds time
+  to answer, except by a late helper's wake, which counts whole. A task closes
+  when the lead's wake that reads its helpers' results ends, so time to answer
+  includes that wake. Unknown if any turn has no end.
 
 ## Not recorded yet
 

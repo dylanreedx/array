@@ -48,6 +48,9 @@ public final class CodexAppServerTransport: @unchecked Sendable {
     private var pendingSemaphores: [Int: DispatchSemaphore] = [:]
     private var pendingResults: [Int: (result: [String: Any]?, error: [String: Any]?)] = [:]
     private var buffer = Data()
+    /// Queue-confined: stdout reached end of file, and who waits for it.
+    private var ended = false
+    private var endHandler: (() -> Void)?
 
     /// `onNotificationLine` is invoked SYNCHRONOUSLY on this transport's own
     /// serial queue for every line that is not a correlated response — the
@@ -59,9 +62,34 @@ public final class CodexAppServerTransport: @unchecked Sendable {
         self.onNotificationLine = onNotificationLine
         child.standardOutput.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                self?.finish()
+                return
+            }
             self?.consume(chunk)
         }
+    }
+
+    private func finish() {
+        let handler: (() -> Void)? = queue.sync {
+            ended = true
+            defer { endHandler = nil }
+            return endHandler
+        }
+        handler?()
+    }
+
+    /// Closes the app-server's stdin, which makes it finish and exit, while its
+    /// stdout is still read: every frame it sends first is delivered. `onEnd`
+    /// runs once, at end of file (at once if that already came).
+    public func closeInput(onEnd: @escaping () -> Void) {
+        let already: Bool = queue.sync {
+            if !ended { endHandler = onEnd }
+            return ended
+        }
+        try? child.standardInput?.close()
+        if already { onEnd() }
     }
 
     private func consume(_ chunk: Data) {

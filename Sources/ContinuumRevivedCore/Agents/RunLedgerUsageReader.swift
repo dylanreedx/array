@@ -8,10 +8,13 @@ import Foundation
 /// Mapping, by row `kind` (rows with another `v` or an unreadable line are skipped):
 /// - `taskOpened`: a task begins at `at`; its `agent` is the lead; `mode` is
 ///   `managed` or `free` (absent on rows from before modes were recorded).
-/// - `delegated`: `agent` is a direct helper of `task`. A helper's own helpers
-///   have no such row; they appear through their usage rows (below).
+/// - `delegated`: `agent` is a helper of `task`: a direct one, a helper's own
+///   helper (`parent` names it), or a child the CLI started itself
+///   (`via: harness`). Helpers also appear through their usage rows (below).
 /// - `working` / `turnEnded`: `agent` started / ended a turn in `task`. Paired per
-///   agent in file order.
+///   agent in file order. A turn may end after the close; active time is cut there.
+///   `flag: lateHelperWake` marks a wake on a helper result that came after the
+///   close: it rejoined the task and counts whole.
 /// - `taskClosed`: the task closed at `at`. Only closed tasks are counted.
 /// - `taskInterrupted`: the task stopped without closing (a failed or cancelled
 ///   last turn, or a restart). Listed, never counted.
@@ -29,6 +32,9 @@ public enum RunLedgerUsageReader {
     public struct Turn: Equatable, Sendable {
         public var start: Date
         public var end: Date?
+        /// A wake on a helper result that arrived after the close (`flag:
+        /// lateHelperWake`): the task's work, past its close.
+        public var lateHelperWake = false
     }
 
     public struct Usage: Equatable, Sendable {
@@ -78,6 +84,7 @@ public enum RunLedgerUsageReader {
         var agent: UUID
         var source: String?
         var mode: String?
+        var flag: String?
         var parent: UUID?
         var turn: String?
         var harness: String?
@@ -124,7 +131,7 @@ public enum RunLedgerUsageReader {
             case "delegated":
                 if !task.helpers.contains(row.agent) { task.helpers.append(row.agent) }
             case "working":
-                task.turns[row.agent, default: []].append(Turn(start: row.at))
+                task.turns[row.agent, default: []].append(Turn(start: row.at, lateHelperWake: row.flag == "lateHelperWake"))
             case "turnEnded":
                 if let last = task.turns[row.agent]?.indices.last, task.turns[row.agent]![last].end == nil {
                     task.turns[row.agent]![last].end = row.at
