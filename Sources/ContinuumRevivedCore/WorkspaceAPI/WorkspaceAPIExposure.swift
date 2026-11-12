@@ -39,7 +39,7 @@ public enum WorkspaceAPIExposure {
         "agent.harness": .notExposed("Changing an existing harness requires the native settings flow."),
         "agent.mode": .notExposed("App-wide Settings policy owns the next-turn target; helpers and Pi remain free."),
         "agent.model": .notExposed("Existing-agent provider settings are native UI only."),
-        "agent.thinking": .notExposed("Existing-agent provider settings are native UI only."),
+        "agent.thinking": .exposed(.agentDelegate),
         "agent.cwd": .notExposed("Changing an existing agent's home is native UI only."),
         "agent.projectRoot": .internal,
         "agent.checkoutRoot": .internal,
@@ -52,7 +52,7 @@ public enum WorkspaceAPIExposure {
         "agent.capabilities": .internal,
         "agent.sourceItemId": .internal,
         "agent.spawnResultHandle": .internal,
-        "agent.delegationContext": .internal, // Original brief, retry lineage and checkout baseline; host-owned.
+        "agent.delegationContext": .internal, // Original brief, the lead's contract (both set once by agent.delegate, never edited), retry lineage and checkout baseline; host-owned.
         "agent.workspaceToolsEnabled": .notExposed("Only the user may grant workspace-tool access."),
         "agent.identityColor": .exposed(.agentUpdate),
         "agent.characterName": .exposed(.agentUpdate),
@@ -86,6 +86,7 @@ public enum WorkspaceAPIExposure {
         "agent.snoozedAtReferenceInterval": .internal,
         "agent.closeRequestedAtReferenceInterval": .internal,
         "agent.lastReport": .internal, // Written by the agent about itself (agent.report); not user-editable.
+        "agent.managedBriefedSessions": .internal,
         "agent.leadPlanCollapsed": .internal, // Host UI disclosure preference.
         "agent.declaredStatus": .internal, // Written by the agent about itself (agent.status); not user-editable.
 

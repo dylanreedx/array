@@ -72,7 +72,7 @@ enum WorkspaceHookBridgeChecks {
         guard let helper = AppDelegate.workspaceMCPExecutablePath() else {
             throw Failure(description: "array-workspace-mcp is not beside the app binary — build the package, not just the Array product")
         }
-        guard let config = f.delegate.workspaceMCPHost.configuration(for: f.agentId, serverExecutable: helper) else {
+        guard let config = f.delegate.workspaceMCPHost.configuration(for: f.agentId, serverExecutable: helper, projectStandards: false) else {
             throw Failure(description: "the production MCP host issued no registration")
         }
         try config.materialize()
@@ -113,7 +113,7 @@ enum WorkspaceHookBridgeChecks {
         let wrongToken = f.tempRoot.appendingPathComponent("wrong.token")
         try Data("not-the-token".utf8).write(to: wrongToken)
         let stranger = AgentID(rawValue: UUID())
-        guard let strangerConfig = f.delegate.workspaceMCPHost.configuration(for: stranger, serverExecutable: helper) else {
+        guard let strangerConfig = f.delegate.workspaceMCPHost.configuration(for: stranger, serverExecutable: helper, projectStandards: false) else {
             throw Failure(description: "no registration for the second agent")
         }
         try strangerConfig.materialize()

@@ -151,10 +151,8 @@ public enum CodexCLIBackend {
     /// `processArguments` (`approval_policy=never`, `sandbox_mode`). Thread and
     /// turn requests also pin these policies so resumed conversations cannot
     /// restore restrictive permissions from an older rollout.
-    /// `extraArgs` is always `[]` in production today (`codexRunnerConfig`
-    /// never sets it — that field only carries pi's role `--tools` args) but
-    /// is threaded through for the same reason `processArguments` threads it:
-    /// a slot for a future per-agent override, not a currently-used one.
+    /// `extraArgs` carries host instruction arguments resolved at launch
+    /// (`Config.resolvedExtraArgs()`), when the personal rules setting is on.
     public static func appServerArguments(extraArgs: [String], workspaceMCP: WorkspaceMCPConfiguration? = nil, hookOverrides: [String] = []) -> [String] {
         var args = [
             "-c", "approval_policy=never",
@@ -212,6 +210,12 @@ public final class CodexAgentRunner: @unchecked Sendable {
         /// .plans/101 — the account's home, passed as `CODEX_HOME`. nil keeps
         /// the CLI's own (inherited) home.
         public var codexHome: String?
+        /// Host arguments resolved at EACH process launch (never at runner
+        /// construction), on the thread that spawns the process. Given this
+        /// config, returns the full extra-argument list. nil uses `extraArgs`.
+        public var launchArguments: (@Sendable (Config) -> [String])?
+        /// What every spawn passes as its extra arguments.
+        public func resolvedExtraArgs() -> [String] { launchArguments?(self) ?? extraArgs }
         public init(
             model: String,
             effort: String? = nil,
@@ -435,7 +439,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
 
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.resolvedExtraArgs(), workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
         let spawned: ProcessGroupChild
         do {
             spawned = try ProcessGroupChild.spawn(
@@ -628,7 +632,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
     ) throws {
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.resolvedExtraArgs(), workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
 
         queue.sync {
             appServerTranslator = CodexAppServerEventTranslator(workingDirectory: config.cwd)
@@ -814,7 +818,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
             // time (`CodexEventTranslator.swift:77-88`). Synthesizing the
             // notification here reuses the translator's own parsing rather
             // than duplicating its session-start logic.
-            let synthetic = "{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"\(id)\"}}}"
+            // It carries `resumedMarker`, so usage accounting never mistakes a
+            // resumed thread's history for work done in this run.
+            let synthetic = "{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"\(id)\"},\"\(CodexAppServerEventTranslator.resumedMarker)\":true}}"
             queue.sync {
                 for event in appServerTranslator.translate(line: synthetic) { onEvent(event) }
             }
@@ -1047,7 +1053,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
             sessionMode: mode,
             threadId: threadId,
             cwdPath: config.cwd.path,
-            extraArgs: config.extraArgs,
+            extraArgs: config.resolvedExtraArgs(),
             prompt: prompt,
             workspaceMCP: config.workspaceMCP,
             hookOverrides: hookOverrides(command: command)

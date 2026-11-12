@@ -2338,6 +2338,19 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // `.plans/116` part 16: standards.read and its advertising, through the
+        // production launch configuration of all three harnesses.
+        if CommandLine.arguments.contains("--standards-resolution-check") {
+            do {
+                _ = NSApplication.shared
+                try StandardsResolutionChecks.run()
+                print("ContinuumRevivedStandardsResolutionChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-api-agent-colour-check") {
             do {
                 _ = NSApplication.shared
@@ -2380,6 +2393,66 @@ enum ContinuumApp {
             Task { @MainActor in
                 do {
                     try await ManagedLeadPlanChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // `.plans/116` part 12 step 1: the host-kept run ledger, through the
+        // composer's accept, the real MCP binary and a restart.
+        if CommandLine.arguments.contains("--managed-run-ledger-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedRunLedgerChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // `.plans/116` part 8 step 1: shadow evidence of the checks a helper ran
+        // after its edits, for Claude and Codex, recording on and off.
+        if CommandLine.arguments.contains("--helper-evidence-provider-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperEvidenceChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // `.plans/116` part 14 step 1: tokens by type per task, lead and helpers,
+        // Claude and Codex, through production delegation and recorded frames.
+        if CommandLine.arguments.contains("--request-telemetry-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await RequestTelemetryChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // Targeted only, never a matrix leg: prints what the run ledger adds to
+        // the request path and asserts nothing about time.
+        if CommandLine.arguments.contains("--managed-run-ledger-timing-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedRunLedgerTimingChecks.run()
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -2450,6 +2523,20 @@ enum ContinuumApp {
                 do {
                     try await HelperWatchdogChecks.run()
                     print("HelperWatchdogChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        if CommandLine.arguments.contains("--helper-liveness-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperLivenessChecks.run()
+                    print("HelperLivenessChecks passed")
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -3270,6 +3357,21 @@ enum ContinuumApp {
         // through the production mount and dispatch — create-once under retry,
         // idempotency conflict, child tile in the parent's zone, presentation
         // failure repaired by agent.reveal, operation.get, cancellation truth.
+        if CommandLine.arguments.contains("--replay-driver-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runReplayDriverChecks()
+                    print("ReplayDriverChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--workspace-api-delegation-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -3573,6 +3675,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--part-contract-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await PartContractChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--helper-worktree-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -3662,6 +3778,62 @@ enum ContinuumApp {
             Task { @MainActor in
                 do {
                     try await ManagedModeChecks.hooks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--managed-compaction-tools-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runManagedCompactionToolsChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--reply-rules-launch-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ReplyRulesChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--personal-rules-delegation-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await PersonalRulesChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--managed-lead-context-transition-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedLeadTransitionChecks.run()
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -4193,6 +4365,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 try SettingsSelfChecks.runPanelCheck()
                 print("ContinuumRevivedSettingsPanelChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--settings-usage-check") {
+            do {
+                _ = NSApplication.shared
+                try SettingsUsageChecks.run()
+                print("ContinuumRevivedSettingsUsageChecks passed")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -14877,6 +15061,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             },
         ]
         model.canvasBackground = makeCanvasBackgroundEditor()
+        model.usage.ledgerURL = agentSupervisor.runLedgerURL
         if let checkForUpdates = ContinuumApp.checkForUpdatesAction {
             model.actionHandlers["checkForUpdates"] = checkForUpdates
         }
@@ -23908,11 +24093,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The MCP server config a runner launches with. Its result channel is
     /// the supervisor's, by capability, so the server and the host agree on
     /// whether `wait_agents` exists for this agent.
-    func workspaceMCPConfiguration(for agentID: AgentID, harness: AgentHarness) -> WorkspaceMCPConfiguration? {
+    func workspaceMCPConfiguration(for agentID: AgentID, harness: AgentHarness, projectStandards: Bool) -> WorkspaceMCPConfiguration? {
         guard harness == .claudeCode || harness == .codex,
               let executable = Self.workspaceMCPExecutablePath() else { return nil }
         return workspaceMCPHost.configuration(for: agentID, serverExecutable: executable,
-                                              resultDelivery: agentSupervisor.resultDelivery(for: agentID))
+                                              resultDelivery: agentSupervisor.resultDelivery(for: agentID),
+                                              projectStandards: projectStandards)
     }
 
     func qaInstallWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
@@ -24079,8 +24265,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             self.workspaceAPI.handleMCPRequest(request, completion: reply)
         }
-        agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness in
-            self?.workspaceMCPConfiguration(for: agentID, harness: harness)
+        agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness, projectStandards in
+            self?.workspaceMCPConfiguration(for: agentID, harness: harness, projectStandards: projectStandards)
         }
         agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in
             self?.workspaceAPI.policyChanged(agentId: agentId, enabled: enabled)

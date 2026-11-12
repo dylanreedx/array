@@ -193,7 +193,7 @@ enum ManagedModeChecks {
             try expect(first["additionalContext"] as? String == ManagedLeadHookState.brief && AgentReport.wordCount(ManagedLeadHookState.brief) <= 140 && ManagedLeadHookState.brief.contains("array_status"), "managed startup brief absent or too long")
             try expect(try await hook(b, managed, start).isEmpty, "brief repeated on duplicate startup")
             for source in ["resume", "compact", "clear"] {
-                try expect(try await hook(b, managed, ["hook_event_name": "SessionStart", "source": source, "session_id": "s2"]).isEmpty, "brief repeated on \(source)")
+                try expect(try await hook(b, managed, ["hook_event_name": "SessionStart", "source": source, "session_id": "s2"])["additionalContext"] as? String == ManagedLeadHookState.brief, "brief repeated on \(source)")
             }
             try expect(try await hook(b, free, start).isEmpty, "free got lead brief")
         }
@@ -208,7 +208,7 @@ enum ManagedModeChecks {
         for tool in ["Read", "Grep", "Glob"] { try expect(try await look(managed, tool).isEmpty, "one of first three denied") }
         for tool in ["Bash", "WebFetch", "WebSearch", "mcp__other__search"] {
             let denied = try await look(managed, tool, "ls")
-            try expect(denied["permissionDecision"] as? String == "deny" && denied["permissionDecisionReason"] as? String == ManagedLeadHookState.denial, "fourth/later look not denied: \(denied)")
+            try expect(denied.isEmpty, "lead read denied: \(denied)")
         }
         try expect(try await look(managed, "Bash", "git diff").isEmpty, "git denied after budget")
         try expect(try await look(managed, "mcp__array_workspace__wait_agents").isEmpty, "Array denied after budget")
@@ -222,8 +222,8 @@ enum ManagedModeChecks {
         for command in ["git status; cat secret", "git diff > out", "git log $(cat secret)"] {
             try expect(try await look(managed, "Bash", command).isEmpty, "reset did not restore three looks")
         }
-        try expect(try await look(managed, "Read")["permissionDecision"] as? String == "deny", "compound git commands bypassed budget")
-        print("Managed mode hook checks passed: startup brief once, no resume/compact/free injection, three looks then deny, git/Array exemptions, reset, free and malformed/native-child fail open")
+        try expect(try await look(managed, "Read").isEmpty, "compound command denied")
+        print("Managed mode hook checks passed: brief once per context, resumed and compacted contexts briefed, unlimited reads, free and malformed/native-child fail open")
     }
 
     static func persistence() async throws {

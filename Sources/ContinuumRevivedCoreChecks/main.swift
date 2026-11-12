@@ -221,6 +221,11 @@ if CommandLine.arguments.contains("--workspace-mcp-check") {
     runWorkspaceMCPChecks()
     Foundation.exit(0)
 }
+// `.plans/116` part 16: the project standards parser and standards.read answer.
+if CommandLine.arguments.contains("--project-standards-index-check") {
+    runProjectStandardsIndexChecks()
+    Foundation.exit(0)
+}
 // `.plans/102` P2a: report and status bounds, the push-back decision, the
 // courier, the catalogue entries and the Settings toggle.
 if CommandLine.arguments.contains("--agent-report-contract-check") {

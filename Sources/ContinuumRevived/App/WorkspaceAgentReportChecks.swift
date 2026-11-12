@@ -97,18 +97,20 @@ enum WorkspaceAgentReportChecks {
         let helper: String
         let binDir: URL
         let originalPath: String
+        let originalSupport: String
         var supervisor: AgentSupervisor { f.delegate.qaAgentSupervisor }
 
         func tearDown() {
             supervisor.stopAll()
             setenv("PATH", originalPath, 1)
+            setenv("CONTINUUM_APP_SUPPORT", originalSupport, 1)
             settings.removePersistentDomain(forName: settings.suiteDomainName)
             try? FileManager.default.removeItem(at: binDir)
             f.tearDown()
         }
 
         func configuration(for agent: AgentID) throws -> WorkspaceMCPConfiguration {
-            guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper) else {
+            guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper, projectStandards: false) else {
                 throw Failure(description: "the production MCP host issued no registration for \(agent)")
             }
             try config.materialize()
@@ -121,7 +123,7 @@ enum WorkspaceAgentReportChecks {
         /// and lookups hand out bodies under leases.
         func collectConfiguration(for agent: AgentID) throws -> WorkspaceMCPConfiguration {
             f.delegate.agentSupervisor.helperCompletionEnabled = { _ in false }
-            guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper, resultDelivery: .collect) else {
+            guard let config = f.delegate.workspaceMCPHost.configuration(for: agent, serverExecutable: helper, resultDelivery: .collect, projectStandards: false) else {
                 throw Failure(description: "the production MCP host issued no registration for \(agent)")
             }
             try config.materialize()
@@ -143,14 +145,29 @@ enum WorkspaceAgentReportChecks {
         }
     }
 
+    static func isTemporary(_ url: URL) -> Bool {
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        return [FileManager.default.temporaryDirectory, URL(fileURLWithPath: "/tmp")].contains {
+            path.hasPrefix($0.resolvingSymlinksInPath().standardizedFileURL.path + "/")
+        }
+    }
+
     static func makeBench(label: String) throws -> Bench {
-        guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil,
+        guard let originalSupport = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"],
+              isTemporary(URL(fileURLWithPath: originalSupport)),
               Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else {
             throw Failure(description: "\(label) requires isolated CONTINUUM_APP_SUPPORT and a dev binary")
         }
         let fileManager = FileManager.default
         let binDir = fileManager.temporaryDirectory.appendingPathComponent("continuum-\(label)-bin-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: binDir, withIntermediateDirectories: true)
+        let ownedSupport = binDir.appendingPathComponent("support", isDirectory: true)
+        try fileManager.createDirectory(at: ownedSupport, withIntermediateDirectories: true)
+        setenv("CONTINUUM_APP_SUPPORT", ownedSupport.path, 1)
+        let resolvedLedger = AgentStore(smokeTest: false).layout.applicationSupportDirectory.appendingPathComponent("run-ledger")
+        guard resolvedLedger.resolvingSymlinksInPath().path.hasPrefix(ownedSupport.resolvingSymlinksInPath().path + "/") else {
+            throw Failure(description: "ledger escaped the check-owned temporary directory")
+        }
         let executable = binDir.appendingPathComponent("pi")
         try fakePi.write(to: executable, atomically: true, encoding: .utf8)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
@@ -167,7 +184,7 @@ enum WorkspaceAgentReportChecks {
         }
         let f = try WorkspaceAPIChecks.makeFixture(settings: settings)
         f.api.approvalHandler = { _ in .deny }
-        return Bench(f: f, settings: settings, helper: helper, binDir: binDir, originalPath: originalPath)
+        return Bench(f: f, settings: settings, helper: helper, binDir: binDir, originalPath: originalPath, originalSupport: originalSupport)
     }
 
     // MARK: - MCP over the real binary

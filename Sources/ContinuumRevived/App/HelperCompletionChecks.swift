@@ -147,7 +147,7 @@ enum HelperCompletionChecks {
         // The MCP server every Claude and Codex runner launches with lists and
         // serves no wait_agents for an agent Array runs.
         for harness in [AgentHarness.claudeCode, .codex] {
-            guard let config = bench.f.delegate.workspaceMCPConfiguration(for: lead, harness: harness) else {
+            guard let config = bench.f.delegate.workspaceMCPConfiguration(for: lead, harness: harness, projectStandards: false) else {
                 throw WorkspaceAgentReportChecks.Failure(description: "no production MCP config for \(harness.rawValue)")
             }
             try config.materialize()

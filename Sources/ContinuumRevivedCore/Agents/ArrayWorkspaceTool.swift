@@ -51,6 +51,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case report = "array_report"
     case status = "array_status"
     case schedule = "array_schedule_agent"
+    case standards = "array_standards"
 
     public var isBrowser: Bool { rawValue.hasPrefix("array_browser_") }
 
@@ -67,7 +68,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     /// The kind the row is counted as in a fold header and described by.
     public var kind: AgentToolKind {
         switch self {
-        case .workspaceContext, .openDocument, .canvasQuery, .inspectAgent, .getOperation, .boardQuery, .deviceList, .deviceObserve: return .read
+        case .workspaceContext, .openDocument, .canvasQuery, .inspectAgent, .getOperation, .boardQuery, .deviceList, .deviceObserve, .standards: return .read
         case .canvasApply, .boardApply, .boardManage, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun, .report, .status, .schedule: return .edit
         case .findAgent: return .search
         case .delegate: return .delegate
@@ -97,6 +98,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .report: return "doc.text"
         case .status: return "text.bubble"
         case .schedule: return "clock"
+        case .standards: return "book"
         }
     }
 
@@ -146,6 +148,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .report: return "Filed a report"
         case .schedule: return "Updated its schedule"
         case .status: return "Posted its status"
+        case .standards: return "Read the project standards"
         }
     }
 

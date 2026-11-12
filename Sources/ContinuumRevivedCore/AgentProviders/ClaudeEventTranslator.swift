@@ -63,6 +63,13 @@ public struct ClaudeEventTranslator {
     /// a later numbered result without `model_usage_since_last_result` still
     /// yields only its own share.
     private var lastCumulativeModelUsage: (input: Int, output: Int)?
+    /// The same, by model and type, for telemetry's per-type share.
+    private var lastCumulativeModels: [String: TokenUsageSnapshot.TypedCounts]?
+    /// This run's MAIN-conversation prompt counters per message id. Claude
+    /// re-sends one message's frame per content block with the same `usage`,
+    /// so keying by id counts each request once; the result's own `usage`
+    /// must equal the sum (`accountingReconciled`). Cleared by each result.
+    private var mainMessageUsage: [String: (input: Int?, cacheRead: Int?, cacheWrite: Int?)] = [:]
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
 
@@ -381,6 +388,10 @@ public struct ClaudeEventTranslator {
            let snapshot = mainThreadPromptSnapshot(usage) {
             events.append(.contextWindowUpdated(threadId: threadId, snapshot: snapshot))
         }
+        if !isSubagent, let id = message["id"] as? String, let usage = message["usage"] as? [String: Any] {
+            mainMessageUsage[id] = (Self.intValue(usage["input_tokens"]), Self.intValue(usage["cache_read_input_tokens"]),
+                                    Self.intValue(usage["cache_creation_input_tokens"]))
+        }
         for block in content {
             guard (block["type"] as? String) == "tool_use",
                   let id = block["id"] as? String,
@@ -678,6 +689,7 @@ public struct ClaudeEventTranslator {
         // completion for a turn that never began would paint a spurious
         // failed turn during the retry.
         guard turnCounter > 0 else { return [] }
+        defer { mainMessageUsage.removeAll() }
         var events: [AgentRuntimeEvent] = []
         let isError = (object["is_error"] as? Bool) ?? false
         let totalCost = Self.doubleValue(object["total_cost_usd"])
@@ -696,16 +708,25 @@ public struct ClaudeEventTranslator {
             // publishing it would clobber real telemetry with zeros.
             if total > 0 {
                 let accounting = resultAccounting(object)
-                events.append(.tokenUsageUpdated(
-                    threadId: threadId,
-                    snapshot: TokenUsageSnapshot(
-                        inputTokens: summedInput,
-                        outputTokens: output ?? 0,
-                        totalCostUsd: totalCost,
-                        accountingObservationID: accounting?.id,
-                        accountingInputTokens: accounting?.input,
-                        accountingOutputTokens: accounting?.output)
-                ))
+                var snapshot = TokenUsageSnapshot(
+                    inputTokens: summedInput,
+                    outputTokens: output ?? 0,
+                    totalCostUsd: totalCost,
+                    accountingObservationID: accounting?.id,
+                    accountingInputTokens: accounting?.input,
+                    accountingOutputTokens: accounting?.output)
+                // Without `modelUsage` the result's own counters are the run's,
+                // under the model `system/init` named.
+                let byModel = accounting?.models ?? model.map { [$0: TokenUsageSnapshot.TypedCounts(
+                    uncachedInput: input, cacheRead: cacheRead, cacheWrite: cacheWrite, output: output)] }
+                snapshot.typedCountsByModel = byModel
+                snapshot.accountingTurn = currentTurnId
+                snapshot.typedCounts = byModel.flatMap { Self.typedSum(Array($0.values)) }
+                if !mainMessageUsage.isEmpty {
+                    let sum = mainMessageUsage.values.reduce((0, 0, 0)) { ($0.0 + ($1.input ?? 0), $0.1 + ($1.cacheRead ?? 0), $0.2 + ($1.cacheWrite ?? 0)) }
+                    snapshot.accountingReconciled = sum == (input ?? 0, cacheRead ?? 0, cacheWrite ?? 0)
+                }
+                events.append(.tokenUsageUpdated(threadId: threadId, snapshot: snapshot))
                 // The result's own counters are the run's SUM — cost accounting,
                 // and the trap this whole path fell into. Publish them as the
                 // cost/processed figures they are, and carry the occupancy over
@@ -1002,7 +1023,8 @@ public struct ClaudeEventTranslator {
     /// cumulatively for the process and this result's share as
     /// `model_usage_since_last_result` (claude-background-result-turn). The
     /// ephemeral cache-creation splits are subsets and are never added.
-    private mutating func resultAccounting(_ object: [String: Any]) -> (id: String, input: Int, output: Int)? {
+    private mutating func resultAccounting(_ object: [String: Any])
+        -> (id: String, input: Int, output: Int, models: [String: TokenUsageSnapshot.TypedCounts])? {
         func sum(_ raw: Any?) -> (input: Int, output: Int)? {
             guard let models = raw as? [String: Any], !models.isEmpty else { return nil }
             var input = 0, output = 0
@@ -1018,20 +1040,55 @@ public struct ClaudeEventTranslator {
             }
             return (input, output)
         }
+        /// The same block by model and type; a key it lacks is unknown.
+        func typed(_ raw: Any?) -> [String: TokenUsageSnapshot.TypedCounts]? {
+            guard let models = raw as? [String: Any], !models.isEmpty else { return nil }
+            var out: [String: TokenUsageSnapshot.TypedCounts] = [:]
+            for (model, value) in models {
+                guard let usage = value as? [String: Any] else { continue }
+                func count(_ key: String) -> Int? { Self.intValue(usage[key]).flatMap { $0 >= 0 ? $0 : nil } }
+                out[model] = .init(uncachedInput: count("inputTokens"), cacheRead: count("cacheReadInputTokens"),
+                                   cacheWrite: count("cacheCreationInputTokens"), output: count("outputTokens"))
+            }
+            return out
+        }
         let index = Self.intValue(object["result_index"])
         let cumulative = sum(object["modelUsage"])
-        let previous = lastCumulativeModelUsage
-        if index != nil, let cumulative { lastCumulativeModelUsage = cumulative }
+        let cumulativeModels = typed(object["modelUsage"])
+        let previous = lastCumulativeModelUsage, previousModels = lastCumulativeModels
+        if index != nil, let cumulative { lastCumulativeModelUsage = cumulative; lastCumulativeModels = cumulativeModels }
         guard let uuid = object["uuid"] as? String, !uuid.isEmpty else { return nil }
         let id = "claude-result|" + ((object["session_id"] as? String) ?? "") + "|" + uuid
-        if let share = sum(object["model_usage_since_last_result"]) { return (id, share.input, share.output) }
-        guard let cumulative else { return nil }
-        switch index {
-        case nil, 0?: return (id, cumulative.input, cumulative.output)
-        default:
-            guard let previous, cumulative.input >= previous.input, cumulative.output >= previous.output else { return nil }
-            return (id, cumulative.input - previous.input, cumulative.output - previous.output)
+        if let share = sum(object["model_usage_since_last_result"]) {
+            return (id, share.input, share.output, typed(object["model_usage_since_last_result"]) ?? [:])
         }
+        guard let cumulative, let cumulativeModels else { return nil }
+        switch index {
+        case nil, 0?: return (id, cumulative.input, cumulative.output, cumulativeModels)
+        default:
+            guard let previous, let previousModels, cumulative.input >= previous.input, cumulative.output >= previous.output else { return nil }
+            // Each model's own share; a type that went down is unknown, not negative.
+            func minus(_ a: Int?, _ b: Int?) -> Int? { guard let a, let b, a >= b else { return nil }; return a - b }
+            let models = cumulativeModels.reduce(into: [String: TokenUsageSnapshot.TypedCounts]()) { out, entry in
+                let before = previousModels[entry.key] ?? .init(uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0)
+                let share = TokenUsageSnapshot.TypedCounts(
+                    uncachedInput: minus(entry.value.uncachedInput, before.uncachedInput),
+                    cacheRead: minus(entry.value.cacheRead, before.cacheRead),
+                    cacheWrite: minus(entry.value.cacheWrite, before.cacheWrite),
+                    output: minus(entry.value.output, before.output))
+                if share != .init(uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0) { out[entry.key] = share }
+            }
+            return (id, cumulative.input - previous.input, cumulative.output - previous.output, models)
+        }
+    }
+
+    /// Per-type sum; a type any part lacks is unknown in the whole.
+    static func typedSum(_ parts: [TokenUsageSnapshot.TypedCounts]) -> TokenUsageSnapshot.TypedCounts? {
+        guard !parts.isEmpty else { return nil }
+        func add(_ key: KeyPath<TokenUsageSnapshot.TypedCounts, Int?>) -> Int? {
+            parts.reduce(Optional(0)) { total, part in total.flatMap { a in part[keyPath: key].map { a + $0 } } }
+        }
+        return .init(uncachedInput: add(\.uncachedInput), cacheRead: add(\.cacheRead), cacheWrite: add(\.cacheWrite), output: add(\.output))
     }
 
     private static func intValue(_ value: Any?) -> Int? {

@@ -118,19 +118,31 @@ public struct AgentObservedActivity: Equatable, Sendable {
     public let startedAt: Date
     public let updatedAt: Date
     public let evidenceSource: EvidenceSource
+    /// Every further path one call edited (a Codex `fileChange` names several).
+    /// Host-local; the location projector reads only `targetPath`.
+    public let otherTargets: [URL]
 
     public init(
         operation: Operation,
         targetPath: URL?,
         startedAt: Date,
         updatedAt: Date,
-        evidenceSource: EvidenceSource
+        evidenceSource: EvidenceSource,
+        otherTargets: [URL] = []
     ) {
         self.operation = operation
         self.targetPath = targetPath.map(normalizedFileURL)
+        self.otherTargets = otherTargets.map(normalizedFileURL)
         self.startedAt = startedAt
         self.updatedAt = updatedAt
         self.evidenceSource = evidenceSource
+    }
+
+    /// Equality is what it was before `otherTargets`: change detection and the
+    /// location projector must not fire more often for a multi-file edit.
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.operation == rhs.operation && lhs.targetPath == rhs.targetPath && lhs.startedAt == rhs.startedAt
+            && lhs.updatedAt == rhs.updatedAt && lhs.evidenceSource == rhs.evidenceSource
     }
 }
 
