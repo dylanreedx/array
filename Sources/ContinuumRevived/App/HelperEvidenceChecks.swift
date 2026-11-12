@@ -420,6 +420,20 @@ enum HelperEvidenceChecks {
         try expect(git.terminationStatus == 0, "git \(arguments[0]) failed")
     }
 
+    /// One git command's trimmed output; throws when it fails.
+    static func gitOutput(_ arguments: [String], _ root: URL) throws -> String {
+        let git = Process(), out = Pipe()
+        git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        git.currentDirectoryURL = root
+        git.arguments = arguments
+        git.standardOutput = out; git.standardError = FileHandle.nullDevice
+        try git.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        git.waitUntilExit()
+        try expect(git.terminationStatus == 0, "git \(arguments[0]) failed")
+        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func prepare(_ b: Bench) throws -> (lead: AgentID, root: URL) {
         let cli = b.binDir.appendingPathComponent("claude")
         try claude.write(to: cli, atomically: true, encoding: .utf8)

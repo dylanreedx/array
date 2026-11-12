@@ -45,6 +45,9 @@ enum LeadCheckoutChecks {
         if section == nil || section == "strict" || section == "strict-claude" { try await strictClaude() }
         if section == nil || section == "strict" || section == "strict-codex" { try await strictCodex() }
         if section == nil || section == "strict" || section == "strict-toggle" { try await strictToggle() }
+        if section == nil || section == "strict" || section == "strict-layouts" { try strictLayouts() }
+        // Opt-in, never in the matrix: a live model turn on the user's own login.
+        if section == "strict-probe" { try strictProbe() }
     }
 
     /// How the switch is set for one bench.
@@ -114,6 +117,136 @@ enum LeadCheckoutChecks {
             for marker in ["release-strict", "release-strictchild"] { try Data().write(to: root.appendingPathComponent(marker)) }
         }
         print("Lead strict Claude passed: off by default the lead launches with no sandbox; on by \(ManagedStrictLead.enabledKey) or \(ManagedStrictLead.environmentKey) its one --settings carries the CLI sandbox, required, with no unsandboxed escape and its checkout denied for writing, hooks kept; its helper never sandboxed")
+    }
+
+    /// A temporary repository with a linked worktree and a subfolder project.
+    struct Layout { var repo: URL; var worktree: URL; var nested: URL; var dir: URL }
+    static func layout() throws -> Layout {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lead-strict-layout-" + UUID().uuidString)
+        let repo = dir.appendingPathComponent("repo"), worktree = dir.appendingPathComponent("linked")
+        let nested = repo.appendingPathComponent("app")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try "a\n".write(to: repo.appendingPathComponent("README"), atomically: true, encoding: .utf8)
+        try "a\n".write(to: nested.appendingPathComponent("main.txt"), atomically: true, encoding: .utf8)
+        for arguments in [["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "fixture"], ["worktree", "add", "-q", "-b", "linked", worktree.path]] {
+            try HelperEvidenceChecks.git(arguments, repo)
+        }
+        return Layout(repo: repo, worktree: worktree, nested: nested, dir: dir)
+    }
+
+    /// The settings the live probe proved, for the layouts it ran in: a linked
+    /// worktree denies its own git directory and the shared one; a project in a
+    /// subfolder denies its repository's `.git`; a repository root adds nothing.
+    static func strictLayouts() throws {
+        let l = try layout()
+        defer { try? FileManager.default.removeItem(at: l.dir) }
+        func denied(_ root: URL) -> Set<String> {
+            let filesystem = ManagedStrictLead.claudeSandbox(checkoutRoot: root.path)["filesystem"] as? [String: Any]
+            return Set((filesystem?["denyWrite"] as? [String] ?? []).map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path })
+        }
+        func real(_ url: URL) -> String { url.resolvingSymlinksInPath().path }
+        let git = real(l.repo.appendingPathComponent(".git"))
+        try expect(denied(l.worktree) == [real(l.worktree), git, git + "/worktrees/linked"],
+                   "linked worktree: denied \(denied(l.worktree).sorted())")
+        try expect(denied(l.nested) == [real(l.nested), git], "subfolder project: denied \(denied(l.nested).sorted())")
+        try expect(denied(l.repo) == [real(l.repo)], "repository root: denied \(denied(l.repo).sorted())")
+        print("Lead strict layouts passed: a linked worktree denies its own and the shared git directory, a subfolder project its repository's .git, a repository root only itself")
+    }
+
+    /// The real `claude` with the exact argv Array builds for a strict lead in
+    /// a linked worktree, one cheap model turn, its config in a temporary
+    /// folder (never ~/.claude), login read from the CLI's own Keychain item.
+    /// The host then checks the files and git state itself.
+    static func strictProbe() throws {
+        let l = try layout()
+        defer { try? FileManager.default.removeItem(at: l.dir) }
+        let root = l.worktree
+        let tmpName = "lead-strict-probe-\(UUID().uuidString).txt"
+        let commands = [
+            ("write", "echo x > probe-root.txt; echo rc=$?"),
+            ("python", "python3 -c \"open('probe-py.txt','w').write('x')\"; echo rc=$?"),
+            ("build", "mkdir -p .build && echo x > .build/out.o; echo rc=$?"),
+            ("read", "cat README && git status --short && git log --oneline -1; echo rc=$?"),
+            ("tmp", "echo x > \"$TMPDIR/\(tmpName)\" && cat \"$TMPDIR/\(tmpName)\"; echo rc=$?"),
+            ("commit", "git -c user.name=f -c user.email=f@invalid commit --allow-empty -qm probe; echo rc=$?"),
+            ("branch", "git branch -f probe-branch HEAD; echo rc=$?"),
+            ("object", "echo probe-blob | git hash-object -w --stdin; echo rc=$?"),
+            ("escape", "echo x > probe-escape.txt; echo rc=$?"),
+        ]
+        let prompt = "This is a sandbox test. Run each numbered shell command below with the Bash tool, one call per command, exactly as written, in order, even if one fails. Run number 9 with dangerouslyDisableSandbox set to true. Use no other tool and fix nothing. Then reply DONE.\n"
+            + commands.enumerated().map { "\($0.offset + 1). \($0.element.1)" }.joined(separator: "\n")
+        let head = try HelperEvidenceChecks.gitOutput(["rev-parse", "HEAD"], root)
+        let objects = try HelperEvidenceChecks.gitOutput(["count-objects"], root)
+        let config = l.dir.appendingPathComponent("claude-config")
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: true)
+        let argv = ClaudeAgentRunner.processArguments(model: "haiku", effort: nil, sessionMode: .start, sessionId: UUID().uuidString.lowercased(),
+                                                      extraArgs: [], mode: .managed, strictWriteRoot: root.path)
+        let process = Process(), input = Pipe(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["claude"] + argv
+        process.currentDirectoryURL = root
+        var environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("CLAUDE_CODE") && $0.key != "CLAUDECODE" }
+        environment["CLAUDE_CONFIG_DIR"] = config.path
+        environment["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = ""  // the CLI's default Keychain item
+        process.environment = environment
+        process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        try process.run()
+        let message: [String: Any] = ["type": "user", "message": ["role": "user", "content": prompt]]
+        input.fileHandleForWriting.write(try JSONSerialization.data(withJSONObject: message) + Data([10]))
+        var lines: [[String: Any]] = []
+        var buffer = Data()
+        let reader = output.fileHandleForReading
+        while true {
+            let chunk = reader.availableData
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+            while let newline = buffer.firstIndex(of: 10) {
+                let line = buffer[buffer.startIndex..<newline]; buffer = Data(buffer[(newline + 1)...])
+                if let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
+                    lines.append(object)
+                    if object["type"] as? String == "result" { try? input.fileHandleForWriting.close() }
+                }
+            }
+        }
+        process.waitUntilExit()
+        var uses: [String: String] = [:], results: [String: String] = [:], escapeFlag = false
+        for line in lines {
+            for block in ((line["message"] as? [String: Any])?["content"] as? [[String: Any]]) ?? [] {
+                if block["type"] as? String == "tool_use", let input = block["input"] as? [String: Any], let id = block["id"] as? String {
+                    uses[id] = input["command"] as? String ?? ""
+                    if input["dangerouslyDisableSandbox"] as? Bool == true { escapeFlag = true }
+                }
+                if block["type"] as? String == "tool_result", let id = block["tool_use_id"] as? String {
+                    results[id] = (block["content"] as? String) ?? ((block["content"] as? [[String: Any]])?.compactMap { $0["text"] as? String }.joined()) ?? ""
+                }
+            }
+        }
+        var outcome: [String: String] = [:]
+        for (name, command) in commands {
+            guard let id = uses.first(where: { $0.value == command })?.key else { outcome[name] = "notRun"; continue }
+            let text = results[id] ?? ""
+            outcome[name] = text.range(of: #"rc=\d+"#, options: .regularExpression).map { String(text[$0]) } ?? "noStatus"
+        }
+        let exists = { (name: String) in FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path) }
+        let host: [String: Bool] = [
+            "checkoutWriteRefused": !exists("probe-root.txt") && !exists("probe-py.txt") && !exists("probe-escape.txt"),
+            "buildInCheckoutRefused": !exists(".build/out.o"),
+            "headUnchanged": (try? HelperEvidenceChecks.gitOutput(["rev-parse", "HEAD"], root)) == head,
+            "branchNotCreated": (try? HelperEvidenceChecks.gitOutput(["rev-parse", "--verify", "-q", "probe-branch"], root)) == nil,
+            "noObjectWritten": (try? HelperEvidenceChecks.gitOutput(["count-objects"], root)) == objects,
+            "escapeRequested": escapeFlag,
+        ]
+        let summary: [String: Any] = ["claude": (try? String(decoding: { let p = Process(), o = Pipe(); p.executableURL = URL(fileURLWithPath: "/usr/bin/env"); p.arguments = ["claude", "--version"]; p.standardOutput = o; try p.run(); p.waitUntilExit(); return o.fileHandleForReading.readDataToEndOfFile() }(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) ?? "unknown",
+                                      "layout": "linked worktree", "shell": outcome, "host": host,
+                                      "settings": ManagedStrictLead.claudeSandbox(checkoutRoot: root.path).keys.sorted()]
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys, .prettyPrinted]), as: UTF8.self)
+        print(text)
+        if let out = ProcessInfo.processInfo.environment["CONTINUUM_STRICT_PROBE_OUT"] { try text.write(toFile: out, atomically: true, encoding: .utf8) }
+        let refused = ["write", "python", "build", "commit", "branch", "object", "escape"]
+        try expect(refused.allSatisfy { outcome[$0] != nil && outcome[$0] != "rc=0" && outcome[$0] != "notRun" } && outcome["read"] == "rc=0" && outcome["tmp"] == "rc=0",
+                   "probe shell outcomes: \(outcome)")
+        try expect(host.allSatisfy { $0.value }, "probe host checks: \(host)")
+        print("Lead strict probe passed: in a linked worktree the real claude refused checkout, build-dir, commit, branch, object and escape writes; reads, git status and the temp folder worked")
     }
 
     /// Toggling the switch between turns takes effect at the next turn: the

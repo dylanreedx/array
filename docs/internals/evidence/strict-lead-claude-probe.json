@@ -1,0 +1,29 @@
+{
+  "claude" : "2.1.321 (Claude Code)",
+  "host" : {
+    "branchNotCreated" : true,
+    "buildInCheckoutRefused" : true,
+    "checkoutWriteRefused" : true,
+    "escapeRequested" : true,
+    "headUnchanged" : true,
+    "noObjectWritten" : true
+  },
+  "layout" : "linked worktree",
+  "settings" : [
+    "allowUnsandboxedCommands",
+    "enabled",
+    "failIfUnavailable",
+    "filesystem"
+  ],
+  "shell" : {
+    "branch" : "rc=128",
+    "build" : "rc=1",
+    "commit" : "rc=128",
+    "escape" : "rc=1",
+    "object" : "rc=128",
+    "python" : "rc=1",
+    "read" : "rc=0",
+    "tmp" : "rc=0",
+    "write" : "rc=1"
+  }
+}

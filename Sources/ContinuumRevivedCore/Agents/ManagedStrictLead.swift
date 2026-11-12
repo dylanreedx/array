@@ -35,11 +35,45 @@ public enum ManagedStrictLead {
     /// The one line a strict lead is told, in its system prompt. No other agent gets it.
     public static let leadLine = "Strict lead: your shell cannot write inside your checkout, so helpers make the changes; build outside it with a scratch path, such as swift build --scratch-path \"$TMPDIR/build\"."
 
-    /// Claude's `sandbox` setting for a lead whose checkout is `root`. Both the
-    /// path as given and with links resolved are denied.
+    /// Claude's `sandbox` setting for a lead whose checkout is `root`. Denied
+    /// for writing, as given and with links resolved: the checkout, and the
+    /// git directories it uses when they live outside it (a linked worktree's
+    /// own git directory and the shared one holding objects and refs; or an
+    /// enclosing repository's `.git`). A strict lead may read git; it may not
+    /// commit, move a branch or write objects: committing is a helper's job.
     public static func claudeSandbox(checkoutRoot root: String) -> [String: Any] {
-        let resolved = URL(fileURLWithPath: root).resolvingSymlinksInPath().path
+        var denied = [root] + gitDirectories(checkoutRoot: root)
+        denied += denied.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
         return ["enabled": true, "failIfUnavailable": true, "allowUnsandboxedCommands": false,
-                "filesystem": ["denyWrite": Array(Set([root, resolved])).sorted()]]
+                "filesystem": ["denyWrite": Array(Set(denied)).sorted()]]
+    }
+
+    /// The git directories outside `root` that its repository writes: file
+    /// reads only, no git process. Empty when `.git` is inside the checkout.
+    static func gitDirectories(checkoutRoot root: String) -> [String] {
+        let fileManager = FileManager.default
+        var directory = URL(fileURLWithPath: root).standardizedFileURL
+        while true {
+            let dotGit = directory.appendingPathComponent(".git")
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: dotGit.path, isDirectory: &isDirectory) {
+                if isDirectory.boolValue {
+                    return directory.path == URL(fileURLWithPath: root).standardizedFileURL.path ? [] : [dotGit.path]
+                }
+                guard let text = try? String(contentsOf: dotGit, encoding: .utf8),
+                      let line = text.split(separator: "\n").first(where: { $0.hasPrefix("gitdir:") }) else { return [] }
+                let path = line.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespaces)
+                let gitDir = URL(fileURLWithPath: path, relativeTo: directory).standardizedFileURL
+                var found = [gitDir.path]
+                if let common = try? String(contentsOf: gitDir.appendingPathComponent("commondir"), encoding: .utf8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !common.isEmpty {
+                    found.append(URL(fileURLWithPath: common, relativeTo: gitDir).standardizedFileURL.path)
+                }
+                return found
+            }
+            let parent = directory.deletingLastPathComponent()
+            if parent.path == directory.path { return [] }
+            directory = parent
+        }
     }
 }
