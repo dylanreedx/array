@@ -420,7 +420,8 @@ def new_record(task, harness, mode, simulated=True):
                 simulated=simulated, outcome='driverFailed', failure=None,
                 fannedOut=None if mode == 'solo' else False, helperCount=0, helpers=[], delegationAttempts=0,
                 tokens={t: None for t in TOKEN_TYPES}, tokensNotReported=[], usageComplete=False,
-                usageProblems=['no usage observed'], usageRows=[], wallSeconds=None, activeSeconds=None, humanSteps=None,
+                usageProblems=['no usage observed'], usageRows=[], wallSeconds=None, activeSeconds=None,
+                leadTurnsAfterClose=0, afterCloseProblems=[], humanSteps=None,
                 diffHash=None, changedPaths=[], tampered=[], checks={}, gradeResult='notGraded',
                 hiddenPassed=None, neighbourPassed=None, passed=False)
 

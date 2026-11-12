@@ -1,5 +1,5 @@
 {
-  "v": 3,
+  "v": 4,
   "tasks": [],
   "conditions": {
     "harnesses": ["claude", "codex"],
@@ -34,6 +34,8 @@
     {"name": "usageRows", "type": "list", "meaning": "the ledger's usage rows for the task: agent, role (lead or helper), parent, harness, model, modelSource, turn, tokens by type (null when absent) and incomplete flags"},
     {"name": "wallSeconds", "type": "number|null", "meaning": "Swift driver: time to answer as the usage page derives it, the task's opening submission to its close, null unless closed; Python subprocess adapter: the process's wall time"},
     {"name": "activeSeconds", "type": "number|null", "meaning": "Swift driver: active time as the usage page derives it, the union of every agent's turns in the task, null unless closed with every turn ended; Python subprocess adapter: the process's run time"},
+    {"name": "leadTurnsAfterClose", "type": "int", "meaning": "Swift driver: the lead's turns that started after its task closed (a wake on the last helper's report), which the usage page puts in no task and leaves out of tokens; Python subprocess adapter: 0"},
+    {"name": "afterCloseProblems", "type": "list", "meaning": "Swift driver: the incomplete flags on those turns' usage rows, noTask left out (reset, noBaseline, noUsage, ...); Python subprocess adapter: empty"},
     {"name": "humanSteps", "type": "int|null", "meaning": "interventions; null until coded"},
     {"name": "diffHash", "type": "sha256|null", "meaning": "hash of the carried-over changes"},
     {"name": "changedPaths", "type": "list", "meaning": "paths the agent changed, added or removed"},

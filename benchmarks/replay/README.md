@@ -83,7 +83,9 @@ It has no usage arithmetic of its own.
 | `usageProblems` | unknown types, a task not closed, and the rows' flags (`noBaseline`, `reset`, `fork`, `noUsage`, ...) |
 | `usageRows` | each usage row: agent, lead or helper, parent, harness, model, model source, turn, tokens, flags |
 | `wallSeconds` | the page's time to answer: opening submission to close |
-| `activeSeconds` | the page's active time: the union of every agent's turns in the task |
+| `activeSeconds` | the page's active time: the union of every agent's turns in the task, up to its close |
+| `leadTurnsAfterClose` | the lead's turns that started after its task closed (a wake on the last helper's report): in no task, not in `tokens` |
+| `afterCloseProblems` | those turns' row flags, `noTask` left out (`reset`, `noUsage`, ...) |
 
 Missing is never zero: an unknown type is null. A ledger that disagrees with
 the production records (task count, mode, helper count) fails the run as
