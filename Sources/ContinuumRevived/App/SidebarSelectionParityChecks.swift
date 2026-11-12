@@ -210,6 +210,19 @@ enum SidebarSelectionParityChecks {
                     if !(reference.groupLight || reference.wash || reference.sweep) {
                         failures.append("\(label): the selected working agent shows no style at all (\(reference))")
                     }
+                    // Focus moves to a tile that is not an agent: the table still
+                    // selects the row and nothing is open. 0.7.47 swept every working
+                    // Classic group, and the scope rule keeps a selected working
+                    // agent's style, so Classic still sweeps it.
+                    if style == .classic {
+                        reset()
+                        try click(target)
+                        inbox.openAgentId = nil
+                        let kept = try treatment(target)
+                        if !kept.sweep {
+                            failures.append("\(label): selected with nothing open drew \(kept); Classic keeps its sweep")
+                        }
+                    }
                 }
             }
         }

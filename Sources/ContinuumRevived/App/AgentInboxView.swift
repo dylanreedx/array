@@ -2837,6 +2837,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // agents, on every working group; selection never takes it away.
             let lit = working && (lightsEveryWorkingGroup || openLead?.id == lead.id)
             let activeGroup = end > start && lit
+            // Classic's sweep also keeps a selected working agent's style when
+            // nothing open holds the group; 0.7.47 swept every working group.
+            let selectedWorks = (start...end).contains {
+                tableView.selectedRowIndexes.contains($0)
+                    && ($0 == start ? working : items[$0].agentRow?.state == .working)
+            }
             let focusHeight = max(1, groupHeight - SidebarDensityProposal.production.gapBetweenRows)
             let focusTarget = runningOffset.map { $0 / focusHeight } ?? min(0.9, heights[0] / focusHeight * 0.8)
             if let old = groupFocusMemory[lead.id] {
@@ -2853,7 +2859,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     offset: offset, groupHeight: groupHeight,
                     continuesAbove: index > start, continuesBelow: index < end,
                     leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
-                    sweepPhase: lit && ask == nil ? sweepPhase : nil, sweepColour: lead.identityColor,
+                    sweepPhase: (lit || selectedWorks) && ask == nil ? sweepPhase : nil, sweepColour: lead.identityColor,
                     raisedAsk: index == start ? ask : nil,
                     activeGroup: activeGroup,
                     leadHeight: heights[0], runningY: runningOffset,
@@ -4443,6 +4449,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // selections — with a range selected, a single index cannot name them.
         let previous = selectedRowsForEmphasis
         selectedRowsForEmphasis = tableView.selectedRowIndexes
+        // Classic's sweep follows a selected working agent (`ownershipSlices`).
+        ownershipByTableRow = ownsSubagents ? ownershipSlices() : []
+        refreshVisibleOwnership()
         let visible = tableView.rows(in: tableView.visibleRect)
         if visible.length > 0 {
             for index in visible.location..<min(tableView.numberOfRows, visible.location + visible.length) {
