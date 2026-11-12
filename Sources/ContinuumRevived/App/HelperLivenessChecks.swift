@@ -593,6 +593,24 @@ enum HelperLivenessChecks {
         check(try inspected(helper) == HelperLiveness.finished.rawValue, "agent.inspect disagreed for a finished helper")
         try expect(failures.isEmpty, failures.joined(separator: "\n"))
 
+        // 13. The sweep passes over helpers already recorded finished; one that
+        //     is messaged again and running is still classified on the next pass.
+        let claudeDir = URL(fileURLWithPath: supervisor.records[claude]!.cwd)
+        try? FileManager.default.removeItem(at: claudeDir.appendingPathComponent("managed-release"))
+        try expect(supervisor.send("HOLD-claude-again", to: claude), "re-messaged: the finished helper refused a new turn")
+        let again = await waitUntil(timeout: 15, pollInterval: 0.02) {
+            supervisor.isRunning(claude) && supervisor.presenceRowStatus(for: claude) == .working
+        }
+        try expect(again, "re-messaged: the finished helper never started its new turn")
+        await supervisor.sweepHelperWatchdog()
+        try expect(state(claude) != nil && state(claude) != .finished,
+                   "re-messaged: a finished helper running again still read \(fact(claude)) after a sweep")
+        try claudeRelease(claude)
+        let endedAgain = await waitUntil(timeout: 15, pollInterval: 0.02) { !supervisor.isRunning(claude) }
+        try expect(endedAgain, "re-messaged: the helper's new turn did not end")
+        await supervisor.sweepHelperWatchdog()
+        try expect(state(claude) == .finished, "re-messaged: the helper did not read finished again: \(fact(claude))")
+
         // Cost, printed and not asserted.
         let iterations = 200_000
         var tally = 0

@@ -6320,25 +6320,38 @@ final class AgentSupervisor {
     func sweepHelperWatchdog() async {
         let now = helperWatchdogNow()
         let stallAlerts = AgentManagedModeConfig.stallAlerts(defaults: managedModeDefaults)
-        let ids = Array(records.keys)
+        // Delegated or messaged: a stuck helper alerts whoever waits on it.
+        // One walk of the records, keeping what the pass reads: in a
+        // long-lived store they are thousands, and an `AgentRecord` copy is
+        // not cheap. A helper in a turn reads its full record below.
+        var helpers: [(id: AgentID, parent: AgentID, needsYou: Bool, status: AgentStatus?)] = []
+        // Only helpers in a turn, which are few.
         var turns: [AgentID: (status: AgentStatus?, busy: String?)] = [:]
-        for id in ids where helperParent(id) != nil { turns[id] = helperTurnState(id) }
-        func inTurn(_ id: AgentID) -> Bool { turns[id]?.status == .working || turns[id]?.status == .needsAttention }
+        for (id, record) in records {
+            guard let parent = record.parentAgentID ?? helperMessageSubscriptions[id]?.first?.parent else { continue }
+            let turn = helperTurnState(id)
+            if turn.status == .working || turn.status == .needsAttention { turns[id] = turn }
+            helpers.append((id, parent, record.helperWatchdogNeedsYou != nil, turn.status))
+        }
+        func inTurn(_ id: AgentID) -> Bool { turns[id] != nil }
         // Who waits on whom: a helper in a turn holds each of its parents.
         var subHelpers: [AgentID: Int] = [:]
-        for id in ids where inTurn(id) {
+        for id in turns.keys {
             for parent in helperParents(id) { subHelpers[parent, default: 0] += 1 }
         }
 
         // 1. Classify every helper first, so routing below reads this sweep.
         var candidates: [(id: AgentID, parent: AgentID, record: AgentRecord)] = []
-        for id in ids {
-            // Delegated or messaged: a stuck helper alerts whoever waits on it.
-            guard let record = records[id], let parent = helperParent(id) else { continue }
-            let status = turns[id]?.status
+        for (id, parent, needsYou, status) in helpers {
             guard status == .working || status == .needsAttention else {
                 // Waiting out Array's own provider retry is busy, not finished.
                 let retrying = helperProviderRetryErrors[id] != nil
+                // Already recorded finished and nothing to clear: this pass
+                // would write back what is there. Most helpers in a long-lived
+                // store are like this, so the sweep's cost follows live ones.
+                if !retrying, helperLiveness[id]?.state == .finished, helperProgress[id] == nil,
+                   pendingHelperAlerts[id] == nil, queuedHelperAlerts[id] == nil, !helperAlertsInFlight.contains(id),
+                   !needsYou { continue }
                 recordHelperLiveness(id, retrying ? .busy : .finished,
                                      lastProgressAt: helperProgress[id]?.at ?? helperLiveness[id]?.lastProgressAt ?? now,
                                      liveChildren: 0, openToolCalls: 0, detail: retrying ? "retrying" : nil, now: now)
@@ -6352,6 +6365,8 @@ final class AgentSupervisor {
                 }
                 continue
             }
+            // In a turn: few, so the full record is read here.
+            guard let record = records[id] else { continue }
             if helperProgress[id] == nil || helperProgress[id]?.status != status {
                 noteHelperProgress(id, last: status == .needsAttention ? "needs you" : "working")
             }
