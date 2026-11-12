@@ -122,6 +122,13 @@ final class ManagedRunLedger: @unchecked Sendable {
         case "taskClosed", "taskInterrupted": active[row.agent] = nil
         default: break
         }
+        if ["taskOpened", "taskClosed", "taskInterrupted", "leadCheckoutChanged"].contains(row.kind) {
+            let task = active[row.agent]
+            leadWritesLock.withLock {
+                if row.kind == "leadCheckoutChanged", let task, row.task == task { leadWroteTask[row.agent] = task }
+                if task == nil || leadWroteTask[row.agent] != task { leadWroteTask[row.agent] = nil }
+            }
+        }
         if (row.kind == "working" || row.kind == "turnEnded"), owners[row.task] == row.agent { leadBoundary[row.task] = row }
     }
     private func recover() {
@@ -289,6 +296,16 @@ final class ManagedRunLedger: @unchecked Sendable {
 
     /// Works on its own queue; only the finished row comes here.
     private let leadWatch = LeadCheckoutWatch()
+    /// Each lead whose own checkout changed during its open task, by a
+    /// `leadCheckoutChanged` row of that task. Read from the main thread.
+    private let leadWritesLock = NSLock()
+    private var leadWroteTask: [UUID: UUID] = [:]
+    /// Whether the lead changed its checkout in the task still open. A row
+    /// still on the watch's queue is not seen yet.
+    func leadChangedCheckoutInOpenTask(_ agent: UUID) -> Bool {
+        leadWritesLock.withLock { leadWroteTask[agent] != nil }
+    }
+
     /// A Managed lead's own shell call started. `root` is its checkout; `busy`,
     /// whether another agent on that checkout is running.
     func leadShellStarted(agent: UUID, call: String, root: String, busy: Bool) {

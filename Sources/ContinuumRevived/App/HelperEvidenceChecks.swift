@@ -84,6 +84,8 @@ enum HelperEvidenceChecks {
       \(entry("bash scripts/check-eta.sh", ["Sources/Eta.swift"])),
       \(entry("python3 scripts/check-theta.py", ["Sources/Theta.swift"])),
       \(entry("python3 scripts/check-omicron.py", ["Sources/Omicron.swift"])),
+      \(entry("python3 scripts/check-psi.py", ["Sources/Psi.swift"])),
+      \(entry("python3 scripts/check-chi.py", ["Sources/Chi.swift"])),
       \(entry("make lambda", ["Sources/Lambda.swift"]))
     ], "targetedOnly": [], "exceptions": []}
     """
@@ -139,6 +141,15 @@ enum HelperEvidenceChecks {
     ]
     /// Shares the lead's checkout: an otherwise clean pass is still unknown.
     static let shared: [Step] = [.edit("t1", "Sources/Theta.swift"), .shell("t2", "python3 scripts/check-theta.py", exit: 0), .report("zz")]
+    /// A background job started before the check can write after it.
+    static let background: [Step] = [
+        .shell("p0", "(sleep 5; echo b >> Sources/Psi.swift) &", exit: 0),
+        .edit("p1", "Sources/Psi.swift"), .shell("p2", "python3 scripts/check-psi.py", exit: 0), .report("zz"),
+    ]
+    /// The check run itself rewrites the file it covers.
+    static let inside: [Step] = [
+        .edit("c1", "Sources/Chi.swift"), .shellWrite("c2", "python3 scripts/check-chi.py", "Sources/Chi.swift"), .report("zz"),
+    ]
     /// A check still running, a call still running, no report call seen, git gone.
     static let unverifiable: [Step] = [
         .edit("g1", "Sources/Gamma.swift"), .shell("g2", ".build/debug/Array --evidence-gamma-check", exit: nil, ends: false),
@@ -356,6 +367,12 @@ enum HelperEvidenceChecks {
         expectFact("lost", lostFacts, "Sources/Theta.swift", "unknown",
                    reasons: ["changesUnverifiable", "observationsInFlight", "callStillRunning"], "an unverifiable record gave after")
         expectFact("lost", lostFacts, "Sources/Gamma.swift", "unknown", reasons: ["checkIncomplete"], "an unfinished check was not unknown")
+        // A background job started before the check may write after it.
+        expectFact("background", files(row("background")), "Sources/Psi.swift", "unknown", reasons: ["backgroundJobBeforeCheck"], exactly: true,
+                   "a background job started before the check left it after")
+        // Not seen: the check run itself rewriting the file it covers reads
+        // as after (docs/internals/managed-run-ledger.md, helper evidence).
+        expectFact("inside", files(row("inside")), "Sources/Chi.swift", "after", "the recorded blind spot for a check's own writes changed")
 
         // Recording off records nothing.
         check(!off.rows.contains { $0["kind"] as? String == "helperEvidence" }, "evidence recorded with recording off")
@@ -378,7 +395,7 @@ enum HelperEvidenceChecks {
             check(Set(row.keys).isSubset(of: ManagedRunLedgerChecks.allowedKeys), "unexpected row keys: \(row.keys.sorted())")
         }
         if !failures.isEmpty { throw WorkspaceAgentReportChecks.Failure(description: "helper-evidence:\n- " + failures.joined(separator: "\n- ")) }
-        print("Helper evidence passed: Claude and Codex: unobserved shell and subagent edits recorded editNotObserved; grep, guarded, syntax-check and same-named-script commands are possible runs; a failed start is no run; one Claude batch is orderUnknown; no rebuild, a rebuild of another product or no reported build exit is buildFreshnessUnknown; a check file's edit is covered by its check; every path of a Codex file change is an observed edit and other paths alone change no location activity; a shell after the check, a shared checkout, git failure, a call still running and no report call seen each block after; manifest read from the baseline with its edit, check-file edit and unparsed entry recorded; lead input and report replies match the base behaviour on and off; nothing shown to any agent; nothing sensitive stored")
+        print("Helper evidence passed: Claude and Codex: unobserved shell and subagent edits recorded editNotObserved; grep, guarded, syntax-check and same-named-script commands are possible runs; a failed start is no run; one Claude batch is orderUnknown; no rebuild, a rebuild of another product or no reported build exit is buildFreshnessUnknown; a check file's edit is covered by its check; every path of a Codex file change is an observed edit and other paths alone change no location activity; a shell after the check, a background job started before it, a shared checkout, git failure, a call still running and no report call seen each block after; a check rewriting its own file still reads after (known blind spot); manifest read from the baseline with its edit, check-file edit and unparsed entry recorded; lead input and report replies match the base behaviour on and off; nothing shown to any agent; nothing sensitive stored")
         try await timing()
     }
 
@@ -452,6 +469,7 @@ enum HelperEvidenceChecks {
         for path in ["Sources/Alpha.swift", "Sources/Beta.swift", "Sources/Gamma.swift", "Sources/Delta.swift", "Sources/Eta.swift",
                      "Sources/Theta.swift", "Sources/Iota.swift", "Sources/Kappa.swift", "Sources/Zeta.swift", "Sources/Mu.swift",
                      "Sources/Omicron.swift", "Sources/Lambda.swift", "Sources/Rho.swift", "Sources/Eps.swift", "Sources/AlphaChecks.swift",
+                     "Sources/Psi.swift", "Sources/Chi.swift", "scripts/check-psi.py", "scripts/check-chi.py",
                      "docs/notes.md", "scripts/check-eta.sh", "scripts/check-theta.py", "scripts/check-omicron.py", manifestPath] {
             let url = root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -499,7 +517,9 @@ enum HelperEvidenceChecks {
         var helpers = [Helper(name: "shared", harness: .claudeCode, steps: shared),
                        Helper(name: "claude", harness: .claudeCode, steps: sequences),
                        Helper(name: "codex", harness: .codex, steps: sequences),
-                       Helper(name: "lost", harness: .claudeCode, steps: unverifiable)]
+                       Helper(name: "lost", harness: .claudeCode, steps: unverifiable),
+                       Helper(name: "background", harness: .claudeCode, steps: background),
+                       Helper(name: "inside", harness: .claudeCode, steps: inside)]
         var seen: [AgentID: Set<String>] = [:]
         var activities: [AgentID: [String: AgentObservedActivity]] = [:]
         for index in helpers.indices {

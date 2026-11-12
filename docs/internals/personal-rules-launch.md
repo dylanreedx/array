@@ -62,12 +62,17 @@ reach Claude (`HostLaunchInstructionSource.reachesClaude`). With both switches
 off every argv equals the base launch element by element. The switch applies
 from an agent's next launch; a running agent keeps what it started with.
 
+Terminal-face agents (a Claude agent flipped to an interactive terminal) get
+the blocks that reach Claude on their own `--append-system-prompt`, read at
+each flip (`--agent-face-flip-check`). They do not get the workspace guidance
+the managed runner joins before them.
+
 What does not receive the block today:
 
-- Terminal-face agents (an agent flipped to an interactive terminal). They get
-  no Array text at all.
 - Pi role runs (`HarnessRoleRunBuilder`), which run `pi` in a terminal tile, not
-  through the managed runner.
+  through the managed runner. Left out: the palette asks for the task on the
+  main thread, the personal-rules read must stay off it, and Pi cannot be run
+  live on the reference Mac to show the text is used.
 - Codex launches in two cases, where passing text would replace instructions
   Array cannot keep: the user's own Codex setting cannot be read with
   confidence, or instruction text already in the launch's arguments cannot be

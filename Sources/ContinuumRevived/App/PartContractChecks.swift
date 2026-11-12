@@ -19,7 +19,7 @@ enum PartContractChecks {
         try await toldOnce(&failures)
         timings()
         try expect(failures.isEmpty, "\n" + failures.joined(separator: "\n"))
-        print("Part contract checks passed: never refused, unusable entries named, stored and told once in a delimited block, survives restart, retry inherits and its own wins, empty counts as none, live overlap advised by case and path form with shared exempt only on both sides, finished sibling not advised, named by its task, omitted matches the base for Claude and Codex, told once across resumed and compaction turns")
+        print("Part contract checks passed: never refused, unusable entries named, stored and told once in a delimited block, survives restart, retry inherits and its own wins, empty counts as none, live overlap advised by case and path form with shared exempt only on both sides, finished sibling not advised, named by its task, omitted matches the base for Claude and Codex, told once across resumed and compaction turns for Claude, Codex and Pi")
     }
 
     static func delegate(_ b: Checks.Bench, _ task: String, contract: [String: Any]? = nil, retry: AgentID? = nil,
@@ -213,8 +213,10 @@ enum PartContractChecks {
             if let originalTransport { setenv("CONTINUUM_CODEX_TRANSPORT", originalTransport, 1) } else { unsetenv("CONTINUUM_CODEX_TRANSPORT") }
         }
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .ready, models: [ManagedCodexChecks.model]))
+        let piModel = AgentCatalogQAFixture.pi[0]
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: [piModel]))
         for (harness, label, model) in [(AgentSteeringQAFakes.Harness.claude, "Claude Code", ManagedModeChecks.model),
-                                        (.codex, "Codex", ManagedCodexChecks.model)] {
+                                        (.codex, "Codex", ManagedCodexChecks.model), (.pi, "Pi", piModel)] {
             let dir = b.binDir.appendingPathComponent("steer-\(harness.rawValue)", isDirectory: true)
             let fake = try AgentSteeringQAFakes.install(harness, in: dir)
             if harness == .codex {
@@ -233,6 +235,18 @@ enum PartContractChecks {
                 """)
                 try source.write(to: fake, atomically: true, encoding: .utf8)
             }
+            if harness == .pi {
+                // The steering fake answers compact but never compacts; do it
+                // the way pi's rpc mode does: start, end, then the response.
+                let source = try String(contentsOf: fake, encoding: .utf8).replacingOccurrences(of: "    elif kind == \"get_commands\":", with: """
+                    elif kind == "compact":
+                        out({"type": "compaction_start", "reason": "manual"})
+                        out({"type": "compaction_end", "result": {"tokensBefore": 1000, "estimatedTokensAfter": 200, "firstKeptEntryId": "e1"}})
+                        respond(obj, data={})
+                    elif kind == "get_commands":
+                """)
+                try source.write(to: fake, atomically: true, encoding: .utf8)
+            }
             setenv("PATH", "\(dir.path):\(originalPath)", 1)
             func settled(_ what: String, _ id: AgentID) async {
                 let ok = await waitUntil(timeout: 20, pollInterval: 0.05) { !b.supervisor.isRunning(id) }
@@ -244,7 +258,7 @@ enum PartContractChecks {
             await settled("resumed turn", id)
             let compacted = await b.supervisor.accept(.compact(AgentCompactionRequest()), for: id)
             if compacted != .accepted { failures.append("\(label): compaction was not accepted: \(compacted)") }
-            let compactFrame = harness == .codex ? "thread/compact/start" : "/compact"
+            let compactFrame = harness == .codex ? "thread/compact/start" : harness == .pi ? #""type":"compact""# : "/compact"
             func readFrames() -> String {
                 ((try? String(contentsOf: dir.appendingPathComponent("stdin.jsonl"), encoding: .utf8)) ?? "").replacingOccurrences(of: "\\/", with: "/")
             }

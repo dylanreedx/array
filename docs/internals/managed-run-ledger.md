@@ -168,8 +168,11 @@ covering run seen), `unmapped` (the manifest maps no check to it), or `unknown`
 with a reason: `noManifest`, `checkIncomplete` (a covering run started and did
 not finish, or was interrupted, timed out or backgrounded), or
 `shellCommandNotObserved` (a shell call after the edit whose command the host
-did not see, as when "Show shell commands in transcripts" is off). Each fact
-names the check, the edit and check call ids and their order.
+did not see, as when "Show shell commands in transcripts" is off), or
+`backgroundJobBeforeCheck` (a shell call before the check left a job running:
+a lone `&`, `nohup`, `disown` or `setsid`, or a call the harness reported
+backgrounded; the job can write after the check). Each fact names the check,
+the edit and check call ids and their order.
 
 **Exit status.** Codex: the numeric `exitCode` the app-server transport
 reports (recorded in `codex-appserver-single-agent.jsonl`), unless the command
@@ -177,7 +180,10 @@ was compound. Claude: always `unknown` (`notReportedByHarness`); no recorded
 fixture shows the host a numeric exit, and a successful Bash result has none.
 
 **What stays unobserved.** Files written by shell commands; edits made by a
-Claude in-process subagent (its tool calls are not on the side channel);
+Claude in-process subagent (its tool calls are not on the side channel); a
+check run rewriting the file it covers, which still reads `after` (the host
+sees the check as one call and has no per-file write times; witnessed as such);
+a job started inside an unseen (hidden) shell command;
 anything before this process started (`observed: notSinceDelegation`);
 observations still in the runner's pipe when the report arrives. Counters live
 in memory per helper, constant in size per file and check, with no 128-event
@@ -313,7 +319,14 @@ as added.
 Past a bound, a timeout or a git failure, the row says `evidence.changes:
 unknown` with the reason, never a count.
 
-**Lead or the first helper.** The first helper shares the lead's checkout.
+**Lead or the first helper.** The first helper shares the lead's checkout,
+with no worktree. Never two writers on one checkout: a new helper gets its own
+worktree when a helper there is still running or the lead changed the checkout
+in its open task (a `leadCheckoutChanged` row of that task; a row still on the
+watch's queue is not seen yet). A finished helper re-messaged while a sibling
+writes the same checkout is refused until that sibling finishes. Outside git,
+helpers share with a notice. Witnesses: `--helper-worktree-check`,
+`--lead-checkout-ledger-check` (section `writers`).
 The supervisor passes, at the call's start and end, whether any other agent on
 the same checkout path is running. The watch also marks a call when another
 agent on that checkout ended a turn within 0.5 s before the call started, or
