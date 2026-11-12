@@ -235,15 +235,19 @@ public enum ProjectStandards {
     static func listing(checkoutRoot: URL, fileManager: FileManager) -> Listing? {
         let root = URL(fileURLWithPath: checkoutRoot.path, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath()
         let folder = root.appendingPathComponent(directory, isDirectory: true)
+        // `lstat` and `readdir` straight from libc: a cached read pays this for
+        // every file, and Foundation's attribute dictionaries cost about 50x more.
+        let folderPath = folder.path
         func entry(_ relative: String) -> Entry? {
-            let path = folder.appendingPathComponent(relative).path
-            guard let attributes = try? fileManager.attributesOfItem(atPath: path),
-                  let type = attributes[.type] as? FileAttributeType else { return nil }
+            let path = folderPath + "/" + relative
+            var info = stat()
+            guard lstat(path, &info) == 0 else { return nil }
+            let type = Self.fileType(info.st_mode)
             return Entry(relative: relative, type: type,
-                         size: (attributes[.size] as? NSNumber)?.uint64Value ?? 0,
-                         modified: (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0,
-                         inode: (attributes[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0,
-                         links: (attributes[.referenceCount] as? NSNumber)?.intValue ?? 1,
+                         size: UInt64(info.st_size),
+                         modified: TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9,
+                         inode: UInt64(info.st_ino),
+                         links: Int(info.st_nlink),
                          destination: type == .typeSymbolicLink ? try? fileManager.destinationOfSymbolicLink(atPath: path) : nil)
         }
         guard let folderAttributes = try? fileManager.attributesOfItem(atPath: folder.path),
@@ -257,19 +261,49 @@ public enum ProjectStandards {
                            version: version(of: Data("symlinked:\(resolvedFolder)".utf8)))
         }
         guard folderType == .typeDirectory else { return nil }
-        func names(_ path: String) -> [String] { ((try? fileManager.contentsOfDirectory(atPath: path)) ?? []).sorted() }
+        func names(_ path: String) -> [String] {
+            guard let directory = opendir(path) else { return [] }
+            defer { closedir(directory) }
+            var found: [String] = []
+            while let item = readdir(directory) {
+                let name = withUnsafePointer(to: &item.pointee.d_name) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: Int(item.pointee.d_namlen) + 1) { String(cString: $0) }
+                }
+                if name != "." && name != ".." { found.append(name) }
+            }
+            return found.sorted()
+        }
         var entries: [Entry] = []
         for name in names(folder.path) {
             guard let top = entry(name) else { continue }
             entries.append(top)
             if top.type == .typeDirectory {
-                entries += names(folder.appendingPathComponent(name).path).compactMap { entry(name + "/" + $0) }
+                entries += names(folderPath + "/" + name).compactMap { entry(name + "/" + $0) }
             }
         }
-        let fingerprint = entries.map {
-            "\($0.relative)|\($0.type.rawValue)|\($0.size)|\($0.modified)|\($0.inode)|\($0.links)|\($0.destination ?? "")"
-        }.joined(separator: "\n")
-        return Listing(root: root, folder: folder, folderIssue: nil, entries: entries, version: version(of: Data(fingerprint.utf8)))
+        // The fingerprint is bytes, not text: 10,000 formatted lines cost more than the stats.
+        var fingerprint = Data()
+        fingerprint.reserveCapacity(entries.count * 64)
+        func add<T>(_ value: T) { withUnsafeBytes(of: value) { fingerprint.append(contentsOf: $0) } }
+        for entry in entries {
+            fingerprint.append(contentsOf: entry.relative.utf8); add(UInt8(0))
+            fingerprint.append(contentsOf: entry.type.rawValue.utf8); add(UInt8(0))
+            add(entry.size); add(entry.modified.bitPattern); add(entry.inode); add(entry.links)
+            fingerprint.append(contentsOf: (entry.destination ?? "").utf8); add(UInt8(10))
+        }
+        return Listing(root: root, folder: folder, folderIssue: nil, entries: entries, version: version(of: fingerprint))
+    }
+
+    private static func fileType(_ mode: mode_t) -> FileAttributeType {
+        switch mode & S_IFMT {
+        case S_IFREG: return .typeRegular
+        case S_IFDIR: return .typeDirectory
+        case S_IFLNK: return .typeSymbolicLink
+        case S_IFCHR: return .typeCharacterSpecial
+        case S_IFBLK: return .typeBlockSpecial
+        case S_IFSOCK: return .typeSocket
+        default: return .typeUnknown
+        }
     }
 
     /// Every standard in `checkoutRoot/docs/standards`, one folder deep. nil
