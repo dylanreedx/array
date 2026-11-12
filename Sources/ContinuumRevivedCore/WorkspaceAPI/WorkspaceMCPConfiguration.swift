@@ -84,12 +84,12 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
         try? materialize()
     }
 
-    /// This configuration with `tools` always loaded, its Claude config file
-    /// rewritten to match (best effort; a launch materializes again).
+    /// This configuration with `tools` always loaded. Writes nothing: the
+    /// Claude runner materializes its configuration before every launch, so a
+    /// write here only added file I/O to the launch path.
     public func alwaysLoading(_ tools: [String]) -> WorkspaceMCPConfiguration {
         var copy = self
         copy.alwaysLoadedTools = tools
-        try? copy.materialize()
         return copy
     }
 
