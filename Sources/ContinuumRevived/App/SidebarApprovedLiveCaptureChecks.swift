@@ -8,8 +8,12 @@ import ContinuumRevivedAgentUI
 enum SidebarApprovedLiveCaptureChecks {
     static func run(window: NSWindow, inbox: AgentInboxView, directory: URL) async throws {
         let defaults = UserDefaults.standard
-        let oldScope = defaults.object(forKey: SidebarActiveIndicatorScope.defaultsKey)
-        let oldStyle = defaults.object(forKey: SidebarActiveIndicatorStyle.defaultsKey)
+        // Restore what is PERSISTED, never what `object(forKey:)` resolves: a launch
+        // argument such as `-continuum.sidebar.activeAgentScope selected` resolves
+        // through the argument domain, and writing it back made it permanent.
+        let persisted = Bundle.main.bundleIdentifier.flatMap { defaults.persistentDomain(forName: $0) } ?? [:]
+        let oldScope = persisted[SidebarActiveIndicatorScope.defaultsKey]
+        let oldStyle = persisted[SidebarActiveIndicatorStyle.defaultsKey]
         defer {
             defaults.set(oldScope, forKey: SidebarActiveIndicatorScope.defaultsKey)
             defaults.set(oldStyle, forKey: SidebarActiveIndicatorStyle.defaultsKey)
