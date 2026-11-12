@@ -35,7 +35,9 @@ enum ManagedModeChecks {
     if '--tools' in args: sys.exit(0)  # no titler/probe effects
     sid = args[args.index('--resume')+1] if '--resume' in args else args[args.index('--session-id')+1]
     with open('managed-argv.jsonl', 'a') as f:
-        f.write(json.dumps({'pid':os.getpid(), 'argv':args})+'\n')
+        # The --mcp-config file as it was at launch: a later launch rewrites it.
+        mcp = open(args[args.index('--mcp-config')+1]).read() if '--mcp-config' in args else None
+        f.write(json.dumps({'pid':os.getpid(), 'argv':args, 'mcpConfig':mcp})+'\n')
     def emit(o):
         print(json.dumps(o), flush=True)
     for line in sys.stdin:
@@ -191,6 +193,10 @@ enum ManagedModeChecks {
         if ProcessInfo.processInfo.environment["CONTINUUM_MANAGED_CHECK_SECTION"] != "budget" {
             let first = try await hook(b, managed, start)
             try expect(first["additionalContext"] as? String == ManagedLeadHookState.brief && AgentReport.wordCount(ManagedLeadHookState.brief) <= 140 && ManagedLeadHookState.brief.contains("array_status"), "managed startup brief absent or too long")
+            // The delivered brief tells the lead to use each tool it starts with loaded.
+            let delivered = first["additionalContext"] as? String ?? ""
+            let unnamed = ManagedLeadHookState.alwaysLoadedTools.filter { !delivered.contains($0) }
+            try expect(unnamed.isEmpty, "the delivered brief never names the always-loaded \(unnamed)")
             try expect(try await hook(b, managed, start).isEmpty, "brief repeated on duplicate startup")
             for source in ["resume", "compact", "clear"] {
                 try expect(try await hook(b, managed, ["hook_event_name": "SessionStart", "source": source, "session_id": "s2"])["additionalContext"] as? String == ManagedLeadHookState.brief, "brief repeated on \(source)")

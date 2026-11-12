@@ -1181,8 +1181,13 @@ final class AgentSupervisor {
     func runnerLaunch(for id: AgentID, record: AgentRecord) -> AgentRunnerLaunch {
         let standards = ProjectStandards.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
         standardsOfferedAtLaunch[id] = standards
+        var workspaceMCP = workspaceMCPConfigurationProvider?(id, record.harness ?? .pi, standards)
+        // Only Claude reads the always-load pin; a helper is Free and parented.
+        if record.mode == .managed, record.parentAgentID == nil, record.harness == .claudeCode {
+            workspaceMCP = workspaceMCP?.alwaysLoading(ManagedLeadHookState.alwaysLoadedTools)
+        }
         return AgentRunnerLaunch(record: record, spawnDepth: depth(of: id),
-                                 workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi, standards),
+                                 workspaceMCP: workspaceMCP,
                                  projectStandards: standards)
     }
 
@@ -1393,12 +1398,24 @@ final class AgentSupervisor {
     ) -> Bool {
         if sharedAgentControlGates[id]?.isEmpty == false, sharedInputPermit?.agentID != id { return false }
         guard var record = records[id], runners[id] == nil else { return false }
+        var preferredRunner = preferredRunner
+        // A mode switch applies at the next launch, as in `send`: the idle
+        // process still carries the old mode's tools and hooks.
+        if pendingModeRestarts.contains(id), let idle = idleSessionRunners[id],
+           preferredRunner == nil || preferredRunner === idle {
+            idleSessionRunners[id] = nil
+            idle.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+            preferredRunner = nil
+        }
         let runner = preferredRunner
             ?? idleSessionRunners[id]
             ?? makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
         guard let compacting = runner as? AgentCompactionRunning,
               compacting.compactionCapabilities.supportsManual else { return false }
         if idleSessionRunners[id] === runner { idleSessionRunners[id] = nil }
+        pendingModeRestarts.remove(id)
+        runningModes[id] = record.mode
 
         let now = Date()
         let providerName = record.harness?.rawValue ?? "agent"

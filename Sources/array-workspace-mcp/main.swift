@@ -71,6 +71,9 @@ struct ArrayWorkspaceMCP {
         let delivery: WorkspaceResultDelivery
         /// The host found standards in this agent's checkout at launch.
         let projectStandards: Bool
+        /// Listed with `_meta["anthropic/alwaysLoad"]`: a Claude Managed lead's
+        /// first tools, loaded up front rather than through tool search.
+        let alwaysLoadedTools: Set<String>
         let session: URLSession
         let writer = ResponseWriter()
         let requests = RequestTasks()
@@ -90,6 +93,8 @@ struct ArrayWorkspaceMCP {
             self.endpoint = endpoint; self.agentID = agentID; self.token = token
             self.delivery = WorkspaceResultDelivery(environmentValue: environment[WorkspaceResultDelivery.environmentKey])
             self.projectStandards = environment[ProjectStandards.environmentKey] == "1"
+            self.alwaysLoadedTools = Set((environment[WorkspaceMCPConfiguration.alwaysLoadedToolsEnvironmentKey] ?? "")
+                .split(separator: ",").map(String.init))
             // URLSession's default request timeout is 60 s. The host answers a
             // delegation only after the user answers its approval alert, so a
             // slow answer used to read "bridge unavailable" here while the
@@ -144,9 +149,14 @@ struct ArrayWorkspaceMCP {
                 ])]))
             case "tools/list":
                 var tools = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards).map { tool in
-                    WorkspaceMCPJSON.object(["name": .string(tool.name),
-                                             "description": .string(WorkspaceMCPToolCatalog.mcpDescription(tool, for: delivery)),
-                                             "inputSchema": .object(tool.inputSchema)])
+                    var listed: [String: WorkspaceMCPJSON] = [
+                        "name": .string(tool.name),
+                        "description": .string(WorkspaceMCPToolCatalog.mcpDescription(tool, for: delivery)),
+                        "inputSchema": .object(tool.inputSchema)]
+                    if alwaysLoadedTools.contains(tool.name) {
+                        listed["_meta"] = .object(["anthropic/alwaysLoad": .bool(true)])
+                    }
+                    return WorkspaceMCPJSON.object(listed)
                 }
                 if delivery == .collect {
                     tools.append(.object(["name": .string(WorkspaceMCPToolCatalog.waitAgentsName),
