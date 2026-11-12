@@ -32,6 +32,7 @@ enum SidebarIndicatorSettingsChecks {
     }
 
     static func run() throws {
+        try SidebarFoldStyleChecks.run()
         try SidebarIndicatorTruthTableChecks.run()
         try SidebarSelectionParityChecks.run()
         try SidebarPressFeedbackChecks.run()
@@ -90,7 +91,7 @@ enum SidebarIndicatorSettingsChecks {
             defer { window.orderOut(nil) }
             let id = UUID()
             inbox.openAgentId = id
-            try expect(SidebarActiveIndicatorScope.resolve(in: defaults) == .selected, "scope must preserve selected default")
+            try expect(SidebarActiveIndicatorScope.resolve(in: defaults) == .working, "an unset scope must read as All working agents")
             let lead = AgentInboxRow(id: id, title: "Active indicator witness", state: .working, createdAt: Date(), identityColor: "teal")
             let helpers = (0..<24).map { index in
                 AgentInboxRow(id: UUID(), title: "Helper \(index)", state: .working,
@@ -236,7 +237,7 @@ enum SidebarIndicatorSettingsChecks {
 /// Immutable input for existing witnesses that specifically exercise Classic's
 /// sweep/shimmer/fade. No preference writes and no fallback to an app domain.
 /// `scope` stands in for "Show style on"; nil reads as unset, so the shipped
-/// default (Selected agent) applies. A check may change it and post the setting.
+/// default (All working agents) applies. A check may change it and post the setting.
 final class ClassicSidebarDefaultsForChecks: UserDefaults, @unchecked Sendable {
     var scope: SidebarActiveIndicatorScope?
     static func make(scope: SidebarActiveIndicatorScope? = nil) -> ClassicSidebarDefaultsForChecks {

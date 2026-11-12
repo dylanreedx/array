@@ -160,8 +160,8 @@ enum SidebarOwnershipChecks {
         var report: [String] = []
         for dark in [true, false] {
             var actions: [(InboxRowAction, [UUID])] = []
-            // "Show style on: All working agents", so every working group may light;
-            // step 5 also walks the default, Selected agent.
+            // "Show style on: All working agents" (the default), so every working
+            // group may light; step 5 also walks Selected agent.
             let indicatorDefaults = ClassicSidebarDefaultsForChecks.make(scope: .working)
             let (inbox, window) = build(dark: dark, defaults: indicatorDefaults) { actions.append(($0, $1)) }
             defer { window.orderOut(nil) }
@@ -229,8 +229,9 @@ enum SidebarOwnershipChecks {
             guard open.isSweepingForQA, probe.isSweepingForQA, folded.isSweepingForQA else {
                 throw Failure(description: "\(label): a running card's light is not running in every slice")
             }
-            // Under Selected agent (the default) nothing lights until a group is
-            // selected; then that group's every slice lights and no other group does.
+            // Under Selected agent nothing lights until a group holds the OPEN agent;
+            // then that group's every slice lights and no other group does. The
+            // table's selection alone lights nothing.
             func setScope(_ scope: SidebarActiveIndicatorScope?) {
                 indicatorDefaults.scope = scope
                 SettingChangeEvent.post(SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey))
@@ -239,23 +240,30 @@ enum SidebarOwnershipChecks {
             func sweeping() throws -> [Bool] {
                 try [verify, verify + 1, collab].map { try cell($0).isSweepingForQA }
             }
-            setScope(nil)
+            setScope(.selected)
             guard try sweeping() == [false, false, false] else {
                 throw Failure(description: "\(label): with Selected agent and nothing selected, a light runs: "
                     + "open/probe/folded \(try sweeping())")
             }
             guard inbox.selectRowForQA(id: uuid(verify)) else {
-                throw Failure(description: "\(label): could not select the open running lead")
+                throw Failure(description: "\(label): could not select the running lead")
             }
             inbox.layoutForQA()
-            guard try sweeping() == [true, true, false] else {
-                throw Failure(description: "\(label): with Selected agent and the open lead selected, "
-                    + "open/probe/folded light \(try sweeping()); expected the selected group's slices only")
+            guard try sweeping() == [false, false, false] else {
+                throw Failure(description: "\(label): with Selected agent, the table's selection alone lit "
+                    + "open/probe/folded \(try sweeping()); only the open agent counts")
             }
+            inbox.openAgentId = uuid(verify)
+            inbox.layoutForQA()
+            guard try sweeping() == [true, true, false] else {
+                throw Failure(description: "\(label): with Selected agent and the running lead open, "
+                    + "open/probe/folded light \(try sweeping()); expected the open group's slices only")
+            }
+            inbox.openAgentId = nil
             inbox.clearSelectionForQA()
-            setScope(.working)
+            setScope(nil)
             guard try sweeping() == [true, true, true] else {
-                throw Failure(description: "\(label): returning to All working agents left lights \(try sweeping())")
+                throw Failure(description: "\(label): the default, All working agents, left lights \(try sweeping())")
             }
             guard open.isTitleShimmeringForQA, probe.isTitleShimmeringForQA, probe.isPulsingForQA else {
                 throw Failure(description: "\(label): working text does not shimmer or a working subagent does not pulse")
