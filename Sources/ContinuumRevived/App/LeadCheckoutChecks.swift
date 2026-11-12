@@ -31,8 +31,8 @@ enum LeadCheckoutChecks {
         for step in steps {
             var some = HelperEvidenceChecks.claudeFrames([step], root: root)
             if case let .shell(id, _, _, _) = step, let path = deleting[id] { some.insert(["__delete": path], at: 1) }
-            // A real lead's next call waits on a model turn; one second stands in.
-            frames += (frames.isEmpty ? [] : [["__sleep": 1.0]]) + some
+            // A real lead's calls wait on a model turn; one second stands in.
+            frames += [["__sleep": 1.0]] + some
         }
         let lines = try frames.map { String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self) }
         return lines.joined(separator: "\n") + "\n"
@@ -351,7 +351,7 @@ enum LeadCheckoutChecks {
                         "tool_input": ["command": "SECRET-HOOK-CMD"], "tool_response": ["stdout": "SECRET-HOOK-OUT"]])
         try await send(lead, ["hook_event_name": "SECRET-HOOK-EVENT", "session_id": session])
         try await send(child, ["hook_event_name": "PreToolUse", "session_id": "child", "tool_name": "Bash", "tool_input": ["command": "true"]])
-        supervisor.runLedger.drain()
+        supervisor.runLedger.drainLeadWatch()
 
         let ledgerURL = AgentStore(smokeTest: false).layout.applicationSupportDirectory.appendingPathComponent("run-ledger/ledger.jsonl")
         let text = (try? String(contentsOf: ledgerURL, encoding: .utf8)) ?? ""
@@ -450,7 +450,7 @@ enum LeadCheckoutChecks {
         }
         try marker("release-shared")
         try await wait("helper and lead did not settle", timeout: 40) { !supervisor.isRunning(helper) && !supervisor.isRunning(lead) }
-        supervisor.runLedger.drain()
+        supervisor.runLedger.drainLeadWatch()
 
         let ledgerURL = AgentStore(smokeTest: false).layout.applicationSupportDirectory.appendingPathComponent("run-ledger/ledger.jsonl")
         let text = (try? String(contentsOf: ledgerURL, encoding: .utf8)) ?? ""

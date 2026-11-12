@@ -12126,7 +12126,8 @@ final class AgentSupervisor {
         case let .turnStarted(_, turnID):
             if qaRunLedgerRecording {
                 runLedger.usageTurnStarted(agent: id.rawValue, turn: turnID)
-                runLedger.working(agent: id.rawValue, turn: turnID, root: records[id]?.checkoutRoot)
+                runLedger.working(agent: id.rawValue, turn: turnID, root: records[id]?.checkoutRoot,
+                                  lead: effectiveMode(for: id) == .managed)
             }
         case let .turnCompleted(_, turnID, outcome, _):
             if qaRunLedgerRecording, let record = records[id] {

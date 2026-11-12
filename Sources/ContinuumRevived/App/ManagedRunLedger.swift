@@ -81,6 +81,7 @@ final class ManagedRunLedger: @unchecked Sendable {
     private var sessionTasks: [UUID: UUID] = [:]
     init(support: URL) {
         url = support.appendingPathComponent("run-ledger/ledger.jsonl")
+        leadWatch.onOutcome = { [weak self] lead, call, outcome in self?.leadCheckout(lead, call, outcome) }
         queue.async { self.recover() }
     }
     /// Waits for every fact handed off so far to reach disk. Checks only.
@@ -172,17 +173,14 @@ final class ManagedRunLedger: @unchecked Sendable {
                 findings: Dictionary(grouping: findings, by: { $0.level.rawValue }).mapValues { $0.count })
         }
     }
-    func working(agent: UUID, turn: String, root: String? = nil) {
-        queue.async {
-            self.leadWatch.turnStarted(agent: agent, root: root)
-            self.fact(kind: "working", agent: agent, source: "working/\(agent)/\(turn)")
-        }
+    /// `lead`: a Managed lead, whose checkout the lead watch observes.
+    func working(agent: UUID, turn: String, root: String? = nil, lead: Bool = false) {
+        leadWatch.turnStarted(agent: agent, root: root, lead: lead)
+        queue.async { self.fact(kind: "working", agent: agent, source: "working/\(agent)/\(turn)") }
     }
     func ended(agent: UUID, turn: String, outcome: TurnOutcome) {
-        queue.async {
-            self.leadWatch.turnEnded(agent: agent)
-            self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", outcome: outcome.rawValue)
-        }
+        leadWatch.turnEnded(agent: agent)
+        queue.async { self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", outcome: outcome.rawValue) }
     }
 
     /// `.plans/116` gap 21: one row per hook a Managed lead's CLI ran. The
@@ -203,25 +201,33 @@ final class ManagedRunLedger: @unchecked Sendable {
 
     // MARK: A Managed lead's own checkout changes (`.plans/116` gap 20)
 
-    private var leadWatch = LeadCheckoutWatch()
+    /// Works on its own queue; only the finished row comes here.
+    private let leadWatch = LeadCheckoutWatch()
     /// A Managed lead's own shell call started. `root` is its checkout; `busy`,
     /// whether another agent on that checkout is running.
     func leadShellStarted(agent: UUID, call: String, root: String, busy: Bool) {
-        let at = Date()
-        queue.async { self.leadWatch.shellStarted(lead: agent, call: call, root: root, at: at, busy: busy) }
+        leadWatch.shellStarted(lead: agent, call: call, root: root, busy: busy)
     }
-    /// The call ended: git and the comparison run here, never on the caller.
     func leadShellEnded(agent: UUID, call: String, busy: Bool) {
-        let at = Date()
+        leadWatch.shellEnded(lead: agent, call: call, busy: busy)
+    }
+    /// Waits for the watch and then the ledger. Checks only.
+    func drainLeadWatch() { leadWatch.drain(); drain() }
+
+    private func leadCheckout(_ agent: UUID, _ call: String, _ outcome: LeadCheckoutWatch.Outcome) {
         queue.async {
-            guard let (change, ambiguous) = self.leadWatch.shellEnded(lead: agent, call: call, at: at, busy: busy) else { return }
             var row = Row(kind: "leadCheckoutChanged", task: self.sessionTasks[agent] ?? Self.noTask, agent: agent,
                           source: "leadShell/\(agent)/\(call)")
-            row.changed = ["modified": change.modified, "added": change.added, "deleted": change.deleted]
-            row.paths = change.paths
-            row.evidence = ["by": ambiguous ? "ambiguous" : "lead"]
-            if ambiguous { row.evidence?["reason"] = "sharedCheckoutBusy" }
-            if change.paths.count < change.count { row.evidence?["pathsTruncated"] = "true" }
+            switch outcome {
+            case let .changed(change, ambiguous):
+                row.changed = ["modified": change.modified, "added": change.added, "deleted": change.deleted]
+                row.paths = change.paths
+                row.evidence = ["by": ambiguous ? "ambiguous" : "lead"]
+                if ambiguous { row.evidence?["reason"] = "sharedCheckoutBusy" }
+                if change.paths.count < change.count { row.evidence?["pathsTruncated"] = "true" }
+            case let .unknown(reason, ambiguous):
+                row.evidence = ["by": ambiguous ? "ambiguous" : "lead", "changes": "unknown", "changesReason": reason]
+            }
             self.append(row)
         }
     }
