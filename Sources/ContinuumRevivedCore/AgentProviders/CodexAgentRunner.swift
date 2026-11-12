@@ -361,6 +361,10 @@ public final class CodexAgentRunner: @unchecked Sendable {
     private var steerReceipts = CodexSteerReceiptTracker()
     private var steerDispositionHandler: (@Sendable (UUID, AgentSteerDisposition) -> Void)?
 
+    /// How long a finished turn's app-server may keep sending frames after
+    /// its main `turn/completed`, off every request path.
+    public static let trailingFrameBound: TimeInterval = 2
+
     public init(config: Config) {
         self.config = config
         self.translator = CodexEventTranslator(workingDirectory: config.cwd)

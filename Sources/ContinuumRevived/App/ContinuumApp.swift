@@ -2461,6 +2461,22 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // `.plans/116` section 4 B, items 6 to 9: a CLI's own subagents and a
+        // helper's own helper in the ledger, active time and usage after a
+        // task closed, and Codex frames after its main turn.
+        if CommandLine.arguments.contains("--run-ledger-gaps-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await RunLedgerGapsChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         // Targeted only, never a matrix leg: prints what the run ledger adds to
         // the request path and asserts nothing about time.
         if CommandLine.arguments.contains("--managed-run-ledger-timing-check") {
