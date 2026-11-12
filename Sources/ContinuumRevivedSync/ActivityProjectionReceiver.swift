@@ -97,7 +97,7 @@ public actor ActivityProjectionReceiver {
                 return
             }
 
-            snapshot = apply(snapshot, event)
+            applyInPlace(&snapshot, event)
             appliedSequenceByReplica[event.replicaId] = event.sequence
             remoteActivitySeen = true
             if gapReplicaId == event.replicaId {

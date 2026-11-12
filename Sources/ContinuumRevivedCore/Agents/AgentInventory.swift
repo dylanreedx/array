@@ -80,7 +80,7 @@ public enum AgentInventory {
                 sequence: UInt64(offset + 1),
                 replicaId: replicaId
             )
-            snapshot = apply(snapshot, event)
+            applyInPlace(&snapshot, event)
         }
 
         var sequence = UInt64(sortedDescriptors.count)
@@ -106,7 +106,7 @@ public enum AgentInventory {
                 : recorded.map { rebound($0, toTile: record.tileId) }
             for draft in drafts {
                 sequence += 1
-                snapshot = apply(snapshot, AgentActivityEvent(stamping: draft, sequence: sequence, replicaId: replicaId))
+                applyInPlace(&snapshot, AgentActivityEvent(stamping: draft, sequence: sequence, replicaId: replicaId))
             }
         }
         return snapshot

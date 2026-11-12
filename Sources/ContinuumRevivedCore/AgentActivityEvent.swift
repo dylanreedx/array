@@ -290,39 +290,52 @@ public struct AgentActivity: Codable, Equatable, Sendable {
 // MAX over canonical order, never off "whichever event arrived most recently".
 public func apply(_ tree: ActivityLogSnapshot, _ event: AgentActivityEvent) -> ActivityLogSnapshot {
     var next = tree
-
-    if (event.sequence, event.replicaId.uuidString) > (next.snapshotSequence, next.snapshotReplicaId.uuidString) {
-        next.snapshotSequence = event.sequence
-        next.snapshotReplicaId = event.replicaId
-    }
-
-    var agent = next.byAgent[event.agentId] ?? AgentActivity(
-        status: .idle, lastSummary: "", recent: [], updatedAt: event.occurredAt, tileId: event.tileId
-    )
-
-    // Insert in canonical order (not arrival order), then cap at 200 by dropping the
-    // canonically-OLDEST survivors (not whichever arrived first). Deriving status /
-    // lastSummary / updatedAt from the canonically-last element below is what makes
-    // this fold order-independent: inserting the same set of events into a sorted
-    // array in any order yields the same final array, hence the same last element.
-    let insertIndex = agent.recent.firstIndex {
-        (event.sequence, event.replicaId.uuidString) < ($0.sequence, $0.replicaId.uuidString)
-    } ?? agent.recent.count
-    agent.recent.insert(event, at: insertIndex)
-    if agent.recent.count > 200 {
-        agent.recent.removeFirst(agent.recent.count - 200)
-    }
-
-    if let winner = agent.recent.last {
-        agent.status = winner.status
-        agent.lastSummary = winner.summary
-        agent.updatedAt = winner.occurredAt
-        // The view binding moves (attach / detach / close), so the hint is read off the
-        // canonically-last event like every other derived field — never off arrival order.
-        agent.tileId = winner.tileId
-    }
-    next.byAgent[event.agentId] = agent
+    applyInPlace(&next, event)
     return next
+}
+
+/// `apply`, folding into the caller's snapshot. This is the one implementation;
+/// `apply` is a copy around it.
+///
+/// A caller folding many events (a rebuild, a replay, the live event path) uses
+/// this. `snapshot = apply(snapshot, event)` keeps the caller's reference alive
+/// while the fold writes, so every event copied the whole per-agent dictionary:
+/// quadratic in agents for a rebuild, which the live-usage profile (2026-11-12)
+/// caught at 2,228 agents. Here the dictionary entry is changed where it lives.
+public func applyInPlace(_ tree: inout ActivityLogSnapshot, _ event: AgentActivityEvent) {
+    if (event.sequence, event.replicaId.uuidString) > (tree.snapshotSequence, tree.snapshotReplicaId.uuidString) {
+        tree.snapshotSequence = event.sequence
+        tree.snapshotReplicaId = event.replicaId
+    }
+    tree.byAgent[event.agentId, default: AgentActivity(
+        status: .idle, lastSummary: "", recent: [], updatedAt: event.occurredAt, tileId: event.tileId
+    )].fold(event)
+}
+
+private extension AgentActivity {
+    mutating func fold(_ event: AgentActivityEvent) {
+        // Insert in canonical order (not arrival order), then cap at 200 by dropping the
+        // canonically-OLDEST survivors (not whichever arrived first). Deriving status /
+        // lastSummary / updatedAt from the canonically-last element below is what makes
+        // this fold order-independent: inserting the same set of events into a sorted
+        // array in any order yields the same final array, hence the same last element.
+        let insertIndex = recent.firstIndex {
+            (event.sequence, event.replicaId.uuidString) < ($0.sequence, $0.replicaId.uuidString)
+        } ?? recent.count
+        recent.insert(event, at: insertIndex)
+        if recent.count > 200 {
+            recent.removeFirst(recent.count - 200)
+        }
+
+        if let winner = recent.last {
+            status = winner.status
+            lastSummary = winner.summary
+            updatedAt = winner.occurredAt
+            // The view binding moves (attach / detach / close), so the hint is read off the
+            // canonically-last event like every other derived field — never off arrival order.
+            tileId = winner.tileId
+        }
+    }
 }
 
 // Stream item: exactly the two cases a subscriber can receive.

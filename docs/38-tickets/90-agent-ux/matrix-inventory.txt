@@ -1,3 +1,4 @@
+check --activity-snapshot-scaling-check
 check --add-zone-check
 check --agent-account-manage-check
 check --agent-account-usage-check
@@ -984,6 +985,7 @@ leg run_leg .build/debug/ContinuumRevivedCollaborationChecks --note-text-only
 leg run_leg .build/debug/ContinuumRevivedCollaborationChecks --terminal-stream-only
 leg run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 leg run_leg .build/debug/ContinuumRevivedCoreChecks
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --activity-snapshot-scaling-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-composer-draft-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-prompt-image-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
@@ -1082,7 +1084,7 @@ count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 208
+count ContinuumRevivedCoreChecks 209
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

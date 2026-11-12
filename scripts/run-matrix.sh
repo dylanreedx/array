@@ -1401,6 +1401,9 @@ run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check
 run_leg .build/debug/ContinuumRevivedCoreChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
+# Live-usage profile 2026-11-12: the activity fold copied every agent entry per
+# event (a rebuild went quadratic in agents). Scaling ratio at 575 vs 2,300 agents.
+run_leg .build/debug/ContinuumRevivedCoreChecks --activity-snapshot-scaling-check
 # .plans/116 part 16: the project standards parser over fixtures it writes,
 # with explicit issues for broken standards and nothing read outside the checkout.
 run_leg .build/debug/ContinuumRevivedCoreChecks --project-standards-index-check

@@ -11394,8 +11394,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// any structural rebuild has listed it would otherwise be filtered out of every
     /// surface until something unrelated moved.
     private func ingestAgentActivityIncrementally(draft: AgentActivityEventDraft) {
-        agentActivity.snapshot = AgentsBoardProjection.appendLocal(
-            draft, to: agentActivity.snapshot, replicaId: Self.agentActivityReplicaId
+        AgentsBoardProjection.appendLocal(
+            draft, into: &agentActivity.snapshot, replicaId: Self.agentActivityReplicaId
         )
         agentActivity.agentIdentities.insert(draft.agentId)
         // P3.16: and the inbox's row source, for exactly the same reason — every
