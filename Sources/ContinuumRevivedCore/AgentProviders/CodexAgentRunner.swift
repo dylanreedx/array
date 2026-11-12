@@ -214,9 +214,6 @@ public final class CodexAgentRunner: @unchecked Sendable {
         /// construction), on the thread that spawns the process. Given this
         /// config, returns the full extra-argument list. nil uses `extraArgs`.
         public var launchArguments: (@Sendable (Config) -> [String])?
-        /// A strict Managed lead (`ManagedStrictLead`): the permission profile
-        /// rides in the `-c` overrides and no thread or turn pins full access.
-        public var strictLead = false
         /// What every spawn passes as its extra arguments.
         public func resolvedExtraArgs() -> [String] { launchArguments?(self) ?? extraArgs }
         public init(
@@ -442,7 +439,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
 
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.resolvedExtraArgs(), workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command) + strictOverrides)
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.resolvedExtraArgs(), workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
         let spawned: ProcessGroupChild
         do {
             spawned = try ProcessGroupChild.spawn(
@@ -545,8 +542,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
         _ = try transport.sendRequest(
             method: "thread/resume",
             params: [
-                "threadId": threadId, "model": config.model, "approvalPolicy": "never",
-            ].merging(threadSandbox) { a, _ in a },
+                "threadId": threadId, "model": config.model,
+                "sandbox": CodexCLIBackend.sandboxMode, "approvalPolicy": "never",
+            ],
             timeout: 30)
         _ = try transport.sendRequest(
             method: "thread/compact/start",
@@ -634,7 +632,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
     ) throws {
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.resolvedExtraArgs(), workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command) + strictOverrides)
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.resolvedExtraArgs(), workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
 
         queue.sync {
             appServerTranslator = CodexAppServerEventTranslator(workingDirectory: config.cwd)
@@ -792,10 +790,11 @@ public final class CodexAgentRunner: @unchecked Sendable {
                 params: [
                     "cwd": config.cwd.path,
                     "model": config.model,
+                    "sandbox": CodexCLIBackend.sandboxMode,
                     "approvalPolicy": "never",
                     "skipGitRepoCheck": true,
                     "multiAgentMode": "explicitRequestOnly",
-                ].merging(threadSandbox) { a, _ in a },
+                ],
                 timeout: 30)
             guard let thread = result["thread"] as? [String: Any], let id = thread["id"] as? String, !id.isEmpty
             else { throw RunError.appServerFailed("thread/start returned no thread id") }
@@ -805,8 +804,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
             _ = try transport.sendRequest(
                 method: "thread/resume",
                 params: [
-                    "threadId": id, "model": config.model, "approvalPolicy": "never",
-                ].merging(threadSandbox) { a, _ in a },
+                    "threadId": id, "model": config.model,
+                    "sandbox": CodexCLIBackend.sandboxMode, "approvalPolicy": "never",
+                ],
                 timeout: 30)
             resolvedThreadId = id
             // Measured 2026-08-24: unlike a fresh `thread/start`, a successful
@@ -834,9 +834,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
         var turnParams: [String: Any] = [
             "threadId": resolvedThreadId,
             "input": [["type": "text", "text": CodexCLIBackend.promptArgument(prompt)]],
+            "sandboxPolicy": ["type": "dangerFullAccess"],
             "approvalPolicy": "never",
         ]
-        if !config.strictLead { turnParams["sandboxPolicy"] = ["type": "dangerFullAccess"] }
         if let effort = config.effort { turnParams["effort"] = effort }
         let turnResult = try transport.sendRequest(method: "turn/start", params: turnParams, timeout: 15)
         guard let turn = turnResult["turn"] as? [String: Any], let turnId = turn["id"] as? String, !turnId.isEmpty
@@ -1036,11 +1036,6 @@ public final class CodexAgentRunner: @unchecked Sendable {
         return AgentHookSurfaceCatalog.shared.codexOverrides(command: command, hookCommand: workspaceMCP.claudeHookCommand)
     }
 
-    /// `ManagedStrictLead.codexOverrides` for a strict lead, else nothing.
-    private var strictOverrides: [String] { config.strictLead ? ManagedStrictLead.codexOverrides : [] }
-    /// The thread's sandbox pin; none for a strict lead, so its profile holds.
-    private var threadSandbox: [String: Any] { config.strictLead ? [:] : ["sandbox": CodexCLIBackend.sandboxMode] }
-
     // MARK: - one spawn
 
     private func runOnce(
@@ -1061,7 +1056,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
             extraArgs: config.resolvedExtraArgs(),
             prompt: prompt,
             workspaceMCP: config.workspaceMCP,
-            hookOverrides: hookOverrides(command: command) + strictOverrides
+            hookOverrides: hookOverrides(command: command)
         )
 
         queue.sync {

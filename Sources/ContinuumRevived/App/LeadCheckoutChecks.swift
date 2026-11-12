@@ -111,11 +111,12 @@ enum LeadCheckoutChecks {
         print("Lead strict Claude passed: off by default the lead launches with no sandbox; on by \(ManagedStrictLead.enabledKey) or \(ManagedStrictLead.environmentKey) its one --settings carries the CLI sandbox, required, with no unsandboxed escape and its checkout denied for writing, hooks kept; its helper never sandboxed")
     }
 
-    /// The same for Codex: on, the app-server carries the permission profile and
-    /// no thread or turn pins full access (a pinned dangerFullAccess overrides
-    /// the profile); off, the launch is unchanged.
+    /// Codex is not covered by the switch: with it on by either name, a Managed
+    /// Codex lead launches exactly as with it off (frozen argv, full access
+    /// pinned on thread and turn), because nothing can pin a strict profile on
+    /// resume (`ManagedStrictLead`).
     static func strictCodex() async throws {
-        for condition in [Switch.off, .defaults] {
+        for condition in [Switch.off, .defaults, .environment] {
             let b = try ManagedCodexChecks.bench()
             let restoreRun = ManagedCodexChecks.runEnvironment(b)
             let restore = set(condition, b)
@@ -129,45 +130,11 @@ enum LeadCheckoutChecks {
                   let turn = (ManagedCodexChecks.rows(b, kind: "turn", session: session).last?["request"] as? [String: Any])?["params"] as? [String: Any] else {
                 throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout: Codex launch, thread or turn not recorded")
             }
-            let overrides = stride(from: 0, to: argv.count - 1, by: 1).filter { argv[$0] == "-c" }.map { argv[$0 + 1] }
-            if condition == .off {
-                try expect(argv == (try ManagedCodexChecks.previousArguments(b.configuration(for: lead))), "Codex: off changed the launch argv")
-                try expect(thread["sandbox"] as? String == "danger-full-access" && (turn["sandboxPolicy"] as? [String: Any])?["type"] as? String == "dangerFullAccess",
-                           "Codex: off no longer pins full access: \(thread) \(turn)")
-            } else {
-                try expect(ManagedStrictLead.codexOverrides.allSatisfy(overrides.contains), "Codex: the strict profile is not in the launch: \(overrides)")
-                try expect(thread["sandbox"] == nil && turn["sandboxPolicy"] == nil,
-                           "Codex: a strict lead's thread or turn pins a sandbox over the profile: \(thread) \(turn)")
-                if ProcessInfo.processInfo.environment["CONTINUUM_STRICT_LEAD_REAL_CODEX"] == "1" { try enforceWithRealCodex(overrides, path: b.originalPath) }
-            }
+            try expect(argv == (try ManagedCodexChecks.previousArguments(b.configuration(for: lead))), "Codex \(condition): the launch argv changed")
+            try expect(thread["sandbox"] as? String == "danger-full-access" && (turn["sandboxPolicy"] as? [String: Any])?["type"] as? String == "dangerFullAccess",
+                       "Codex \(condition): full access is no longer pinned: \(thread) \(turn)")
         }
-        print("Lead strict Codex passed: off the launch argv, thread and turn are unchanged; on the app-server carries the permission profile and neither thread nor turn pins full access")
-    }
-
-    /// Opt-in, never in the matrix: the overrides a real launch carried, applied
-    /// by the installed Codex's own sandbox to a temporary checkout.
-    static func enforceWithRealCodex(_ overrides: [String], path: String) throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lead-strict-codex-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try "a\n".write(to: dir.appendingPathComponent("README"), atomically: true, encoding: .utf8)
-        try FileManager.default.createDirectory(at: dir.appendingPathComponent("codex-home"), withIntermediateDirectories: true)
-        let script = "echo x > README; echo root=$?; mkdir -p .build && echo x > .build/o; echo build=$?; cat README >/dev/null; echo read=$?"
-        let process = Process(), out = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["codex", "sandbox"] + overrides.flatMap { ["-c", $0] } + ["--", "sh", "-c", script]
-        process.currentDirectoryURL = dir
-        var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_HOME"] = dir.appendingPathComponent("codex-home").path
-        environment["PATH"] = path  // the bench's double is first on PATH
-        process.environment = environment
-        process.standardOutput = out; process.standardError = out
-        try process.run()
-        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        process.waitUntilExit()
-        try expect(text.contains("root=1") && text.contains("build=0") && text.contains("read=0"),
-                   "Codex: the installed CLI did not enforce the launched profile: \(text)")
-        print("Lead strict Codex enforced by the installed CLI: checkout write refused, .build write and read allowed")
+        print("Lead strict Codex passed: off and on by either name, a Managed Codex lead's argv, thread and turn are unchanged (Codex is not covered by the switch)")
     }
 
     /// Gap 21: each hook a Managed lead's CLI runs reaches the ledger as one

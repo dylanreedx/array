@@ -340,39 +340,18 @@ through the lead's token and are counted as the lead's.
 through the real `array-workspace-mcp hook` binary to the production handler
 and reads the rows back. Observed RED with the handler's ledger call removed.
 
-## Strict lead (switch, off by default)
+## Strict lead (switch, off by default; Claude only)
 
-`agents.strictLead.enabled` (defaults) or `ARRAY_STRICT_LEAD=1` (environment,
-wins when set; for the benchmark). Decided once per launch in the supervisor's
-`accountLaunch`, for a top-level Managed Claude or Codex lead only; helpers
-never. A launch already running keeps what it started with. No Settings UI.
+`agents.strictLead.enabled` (defaults) or `ARRAY_STRICT_LEAD` (environment,
+`1`/`true`/`yes`/`on`; when set it wins either way; for the benchmark).
+Decided once per launch in the supervisor's `accountLaunch`, for a top-level
+Managed **Claude** lead only; helpers never. No Settings UI.
 
-**Claude** (2.1.321): the lead's one `--settings` value gains `sandbox`
-(`enabled`, `failIfUnavailable`, `allowUnsandboxedCommands: false`,
-`filesystem.denyWrite` = the checkout, as given and resolved). Probed live under
-Array's own `bypassPermissions`: shell and interpreter writes in the checkout,
-`git commit` and a `dangerouslyDisableSandbox` call are refused; reads,
-`git status`/`log`, `$TMPDIR` writes and network work; hooks still run outside
-the sandbox. `denyWrite` beats `allowWrite`, so a build directory inside the
-checkout (SwiftPM's `.build`) is refused: a strict Claude lead builds outside
-it (`swift build --scratch-path "$TMPDIR/..."`).
-
-**Codex** (0.167.0): the app-server's `-c` overrides gain a permission profile
-(`default_permissions="array-strict-lead"`: everything read-only, `.build` under
-the workspace root and the temp folders writable, network on), and thread
-start/resume and turn start pin no sandbox. Probed: the profile wins over
-`sandbox_mode=danger-full-access`, but a pinned `dangerFullAccess` turn or
-command overrides it, which is why strict pins none. The `codex exec` fallback
-carries the same overrides.
-
-**Unverified.** No live model turn has run either strict lead end to end in
-Array. Whether a Codex thread first run with full access keeps it when resumed
-strict (a rollout may restore its old policy) is unprobed.
-
-`--lead-checkout-ledger-check` sections `strict-claude` and `strict-codex`
-drive the production launch: off, nothing changes (Codex argv equals the frozen
-recipe, full access pinned); on by either name, the lead's launch carries the
-sandbox or profile and the helper's does not. With
-`CONTINUUM_STRICT_LEAD_REAL_CODEX=1` (never in the matrix) the installed Codex
-applies the overrides the launch carried to a temporary checkout. Observed RED
-with the launch decision forced off.
+**Codex leads are not covered**: with the switch on they launch exactly as with
+it off. Codex 0.167.0's permission profiles enforce the same limit (probed with
+`codex sandbox` and the app-server's `command/exec`), and win over
+`sandbox_mode=danger-full-access`, but a pinned `dangerFullAccess` thread or
+turn overrides them, and the app-server's sandbox policies cannot name a
+profile. Nothing can pin the profile on `thread/resume` or `turn/start`, and
+whether a thread first run with full access keeps it when resumed is unproven,
+so a Codex strict mode that might not hold is not shipped.

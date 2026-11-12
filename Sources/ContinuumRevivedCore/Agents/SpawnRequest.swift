@@ -266,8 +266,8 @@ public struct AgentRunnerLaunch: Sendable {
     /// `array_standards` (`docs/internals/project-standards-on-demand.md`).
     /// Off unless the supervisor found standards in the agent's checkout.
     public let projectStandards: Bool
-    /// Decided by the supervisor at launch: a Managed Claude or Codex lead
-    /// whose shell may not write in its checkout (`ManagedStrictLead`).
+    /// Decided by the supervisor at launch: a Managed Claude lead whose shell
+    /// may not write in its checkout (`ManagedStrictLead`). Never Codex.
     public var strictLead = false
 
     public init(
