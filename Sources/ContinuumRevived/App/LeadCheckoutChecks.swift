@@ -321,6 +321,32 @@ enum LeadCheckoutChecks {
 
     /// Gap 21: each hook a Managed lead's CLI runs reaches the ledger as one
     /// compact row, through the real hook binary and the production handler.
+    /// One hook through the real `array-workspace-mcp hook` binary to the
+    /// production handler, off main so the handler can answer meanwhile.
+    static func postHook(_ b: WorkspaceAgentReportChecks.Bench, _ agent: AgentID, _ body: [String: Any]) async throws {
+        let config = try b.configuration(for: agent)
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self)
+        let arguments = [WorkspaceAgentHook.subcommand, "--endpoint", config.endpoint, "--agent-id", agent.rawValue.uuidString,
+                         "--token-file", config.tokenFilePath]
+        let helper = b.helper
+        let status = await Task.detached { () -> (Int32, String) in
+            let process = Process(), input = Pipe(), output = Pipe()
+            process.executableURL = URL(fileURLWithPath: helper)
+            process.arguments = arguments
+            var environment = ProcessInfo.processInfo.environment
+            environment[PiAgentRunner.arrayHostedEnvironmentKey] = "1"
+            process.environment = environment
+            process.standardInput = input; process.standardOutput = output
+            guard (try? process.run()) != nil else { return (-1, "") }
+            input.fileHandleForWriting.write(Data(text.utf8))
+            try? input.fileHandleForWriting.close()
+            let printed = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            process.waitUntilExit()
+            return (process.terminationStatus, printed)
+        }.value
+        try expect(status.0 == 0, "the hook command failed: \(status)")
+    }
+
     static func hooks() async throws {
         let b = try ManagedModeChecks.bench("lead-hooks")
         defer { b.tearDown() }
@@ -335,30 +361,7 @@ enum LeadCheckoutChecks {
             throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout: delegation failed: \(reply.reply)")
         }
         let child = AgentID(rawValue: uuid)
-        func send(_ agent: AgentID, _ body: [String: Any]) async throws {
-            let config = try b.configuration(for: agent)
-            let text = String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self)
-            // Off main, so the production handler can answer on main meanwhile.
-            let arguments = [WorkspaceAgentHook.subcommand, "--endpoint", config.endpoint, "--agent-id", agent.rawValue.uuidString,
-                             "--token-file", config.tokenFilePath]
-            let helper = b.helper
-            let status = await Task.detached { () -> (Int32, String) in
-                let process = Process(), input = Pipe(), output = Pipe()
-                process.executableURL = URL(fileURLWithPath: helper)
-                process.arguments = arguments
-                var environment = ProcessInfo.processInfo.environment
-                environment[PiAgentRunner.arrayHostedEnvironmentKey] = "1"
-                process.environment = environment
-                process.standardInput = input; process.standardOutput = output
-                guard (try? process.run()) != nil else { return (-1, "") }
-                input.fileHandleForWriting.write(Data(text.utf8))
-                try? input.fileHandleForWriting.close()
-                let printed = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-                process.waitUntilExit()
-                return (process.terminationStatus, printed)
-            }.value
-            try expect(status.0 == 0, "the hook command failed: \(status)")
-        }
+        func send(_ agent: AgentID, _ body: [String: Any]) async throws { try await postHook(b, agent, body) }
         let session = "hooks-session"
         try await send(lead, ["hook_event_name": "SessionStart", "source": "startup", "session_id": session])
         try await send(lead, ["hook_event_name": "UserPromptSubmit", "session_id": session, "prompt": "SECRET-HOOK-PROMPT"])

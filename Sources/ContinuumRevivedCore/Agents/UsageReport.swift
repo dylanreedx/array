@@ -115,6 +115,9 @@ public struct UsageReport: Equatable, Encodable, Sendable {
         public var activeTime: TimeInterval?
         /// `managed` or `free`; nil when not recorded.
         public var mode: String?
+        /// Lead wakes on a helper result that arrived after the close: they
+        /// rejoined the task, flagged, and count toward it.
+        public var lateHelperWakes = 0
         /// Every agent under the lead, at any depth.
         public var helpers: Int
         /// Exact figures; inside one task each count is 0 or 1.

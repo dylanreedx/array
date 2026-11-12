@@ -11,8 +11,11 @@ import Foundation
 /// ledger file, in `UsageWords`), never source text.
 ///
 /// Cases (`CONTINUUM_LEDGER_GAPS_CASE`): `builtin` and `builtin-codex` (B6),
-/// `nested` (B7), `active-time` (B8), `after-close` (B9, agent message),
-/// `codex-trailing` and `codex-drain-bound` (B9, Codex frames after the turn).
+/// `nested` (B7), `active-time` (B8: the wake that reads helper results is the
+/// task's, a later turn is not), `after-close` (B9: an agent message after the
+/// close, and a late helper's wake rejoining), `hooks-after-close` (hook rows
+/// follow the open task), `codex-trailing` and `codex-drain-bound` (B9, Codex
+/// frames after the turn).
 @MainActor
 enum RunLedgerGapsChecks {
     typealias T = RequestTelemetryChecks
@@ -26,7 +29,7 @@ enum RunLedgerGapsChecks {
         let only = ProcessInfo.processInfo.environment["CONTINUUM_LEDGER_GAPS_CASE"]
         let cases: [(String, () async throws -> Void)] = [
             ("builtin", builtinClaude), ("builtin-codex", builtinCodex), ("nested", nested),
-            ("active-time", activeTime), ("after-close", afterClose),
+            ("active-time", activeTime), ("after-close", afterClose), ("hooks-after-close", hooksAfterClose),
             ("codex-trailing", codexTrailing), ("codex-drain-bound", codexDrainBound),
         ]
         for (name, body) in cases where only == nil || only == name { try await body() }
@@ -81,8 +84,8 @@ enum RunLedgerGapsChecks {
     }
 
     /// A Managed Claude lead fans out one helper and ends its turn; the helper
-    /// reports, which closes the task; the helper's turn goes on `tail` seconds
-    /// after the close, then ends and wakes the lead. Returns once both settled.
+    /// reports and its turn goes on `tail` seconds, then ends and wakes the
+    /// lead. The task closes when that wake ends. Returns once all settled.
     static func fanOutAndClose(_ b: Bench, _ lead: AgentID, _ root: URL, tail: TimeInterval) async throws -> (task: String, helper: AgentID) {
         let supervisor = b.supervisor
         try T.installClaudeDouble(b)
@@ -98,7 +101,6 @@ enum RunLedgerGapsChecks {
         let report = try await WorkspaceAgentReportChecks.call(b.configuration(for: helper), "array_report", [
             "summary": "SECRET-REPORT", "checks": [["what": "SECRET-CHECK", "result": "pass"]]])
         try expect(!report.isError, "helper report refused: \(report.reply)")
-        try await T.wait("the helper's report did not close the task") { supervisor.runLedger.drain(); return T.closures() > before }
         try await Task.sleep(nanoseconds: UInt64(tail * 1_000_000_000))
         let woken = inputs(root)
         for dir in Set([helperRoot.path, root.path]) {
@@ -107,7 +109,7 @@ enum RunLedgerGapsChecks {
         try await T.wait("helper did not end") { !supervisor.isRunning(helper) }
         try await T.wait("the helper's result did not wake the lead", timeout: 40) { inputs(root) > woken }
         try await T.wait("lead wake did not settle") { !supervisor.isRunning(lead) }
-        supervisor.runLedger.drain()
+        try await T.wait("the task did not close") { supervisor.runLedger.drain(); return T.closures() > before }
         return (try taskOpened(by: lead), helper)
     }
 
@@ -208,7 +210,10 @@ enum RunLedgerGapsChecks {
         let hg = try await delegate(b, from: hc, "hg", task: "HOLD-hg FRAMES-hg SECRET-BRIEF")
         let hgRoot = checkout(b, hg, else: root)
         try T.stage(try T.claudeRun("claude-2.1.291-opus-turn.jsonl"), "hg", in: hgRoot)
-        try Data().write(to: hgRoot.appendingPathComponent("release-hg"))
+        // hc's wake on hg's result quotes hg's brief, in hc's own checkout.
+        for dir in Set([hgRoot.path, checkout(b, hc, else: root).path, root.path]) {
+            for name in ["release-hg", "go-hg"] { try Data().write(to: URL(fileURLWithPath: dir).appendingPathComponent(name)) }
+        }
         try await T.wait("nested helper did not finish") {
             supervisor.runLedger.drain(); return !supervisor.isRunning(hg) && T.usage(hg).contains { $0["tokens"] != nil }
         }
@@ -218,7 +223,7 @@ enum RunLedgerGapsChecks {
         for dir in Set([checkout(b, hc, else: root).path, root.path]) {
             try Data().write(to: URL(fileURLWithPath: dir).appendingPathComponent("release-hc"))
         }
-        try await T.wait("task did not close") { supervisor.runLedger.drain(); return T.closures() > before }
+        try await T.wait("task did not close", timeout: 40) { supervisor.runLedger.drain(); return T.closures() > before }
         try await T.wait("everyone settled") { !supervisor.isRunning(hc) && !supervisor.isRunning(lead) }
         supervisor.runLedger.drain()
 
@@ -244,37 +249,52 @@ enum RunLedgerGapsChecks {
     // MARK: B8, active time stops at the close
 
     static func activeTime() async throws {
-        print("run-ledger-gaps: active time stops at the task's close (B8)")
+        print("run-ledger-gaps: the wake that reads results is the task's; active time stops at the close (B8)")
         let b = try ManagedModeChecks.bench("ledger-gaps-active")
         defer { b.tearDown() }
         let restoreCodex = ManagedCodexChecks.runEnvironment(b)
         defer { restoreCodex() }
         let (lead, root) = try HelperEvidenceChecks.prepare(b)
-        let (task, _) = try await fanOutAndClose(b, lead, root, tail: 1.5)
+        let tail = 1.5
+        let (task, _) = try await fanOutAndClose(b, lead, root, tail: tail)
         let all = rows()
         guard let close = all.firstIndex(where: { $0["kind"] as? String == "taskClosed" && $0["task"] as? String == task }) else {
             throw WorkspaceAgentReportChecks.Failure(description: "run-ledger-gaps: no close row")
         }
-        // The lead's wake after the close: its turn rows and its usage row.
-        let wakes = all[close...].filter { ["working", "usage"].contains($0["kind"] as? String ?? "") && $0["agent"] as? String == id(lead) }
-        let line = try line(task)
-        guard let answer = line.timeToAnswer, let active = line.activeTime else {
-            throw WorkspaceAgentReportChecks.Failure(description: "run-ledger-gaps: time to answer \(String(describing: line.timeToAnswer)), active \(String(describing: line.activeTime))")
+        let leadTurns = all.filter { $0["agent"] as? String == id(lead) && $0["task"] as? String == task }
+            .compactMap { row -> String? in ["working", "turnEnded"].contains(row["kind"] as? String ?? "") ? row["kind"] as? String : nil }
+        let lastLeadEnd = all.lastIndex { $0["kind"] as? String == "turnEnded" && $0["agent"] as? String == id(lead) && $0["task"] as? String == task }
+        let before = try line(task)
+        guard let answer = before.timeToAnswer, let active = before.activeTime else {
+            throw WorkspaceAgentReportChecks.Failure(description: "run-ledger-gaps: time to answer \(String(describing: before.timeToAnswer)), active \(String(describing: before.activeTime))")
         }
-        print(String(format: "  page: time to answer %.2f s, active %.2f s; lead wake rows after the close in the task: %d",
-                     answer, active, wakes.filter { $0["task"] as? String == task }.count))
-        try expect(!wakes.isEmpty, "the lead was never woken after the close: the scenario did not run")
-        try expect(active <= answer + 0.001,
-                   String(format: "active time %.2f s must not exceed time to answer %.2f s", active, answer))
-        try expect(wakes.allSatisfy { $0["task"] as? String != task },
-                   "the lead's wake after the close must not be in the closed task: \(wakes.filter { $0["task"] as? String == task }.count) rows were")
+        print(String(format: "  page: time to answer %.2f s, active %.2f s; lead turn rows in the task: %@", answer, active, leadTurns.joined(separator: ",")))
+        try expect(leadTurns == ["working", "turnEnded", "working", "turnEnded"],
+                   "the lead's first turn and its wake on the helper's result must both be in the task: \(leadTurns)")
+        try expect(lastLeadEnd.map { $0 < close } == true, "the task must close when the wake ends, not before")
+        try expect(answer >= tail && active <= answer + 0.001,
+                   String(format: "time to answer %.2f s must cover the helper's %.1f s and the wake; active %.2f s must not exceed it", answer, tail, active))
+
+        // A lead turn after the close that no helper result started: not the task's.
+        let thread = AgentSupervisor.threadId(for: lead), turn = "after-close-\(UUID().uuidString)"
+        b.supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: turn), to: lead)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        b.supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: turn, outcome: .completed, errorMessage: nil), to: lead)
+        b.supervisor.runLedger.drain()
+        let later = rows().filter { ($0["source"] as? String)?.contains(turn) == true || $0["turn"] as? String == turn }
+        try expect(!later.isEmpty && later.allSatisfy { $0["task"] as? String == noTask },
+                   "a lead turn after the close that is not a helper's wake must be in no task: \(later.map { "\($0["kind"] ?? "") \($0["task"] ?? "")" })")
+        let after = try line(task)
+        try expect(after.activeTime == before.activeTime && after.timeToAnswer == before.timeToAnswer && after.tokens == before.tokens,
+                   "the later turn changed the closed task's figures")
+        print("  a later non-wake turn: no task; the task's figures unchanged")
         try T.privacy(root: root)
     }
 
     // MARK: B9, agent-to-agent turn after the close
 
     static func afterClose() async throws {
-        print("run-ledger-gaps: an agent message after the task closed (B9)")
+        print("run-ledger-gaps: an agent message after the close, and the late helper's wake (B9)")
         let b = try ManagedModeChecks.bench("ledger-gaps-after-close")
         defer { b.tearDown() }
         let restoreCodex = ManagedCodexChecks.runEnvironment(b)
@@ -283,8 +303,10 @@ enum RunLedgerGapsChecks {
         let (task, helper) = try await fanOutAndClose(b, lead, root, tail: 0)
         let supervisor = b.supervisor
         let before = try line(task), beforeUsage = T.usage(helper).count, untaskedBefore = try page().untasked.known
+        let woken = inputs(root), closeRows = rows().count
         // The lead messages its helper; the helper's turn replays
-        // claude-2.1.291-opus-turn: 2 / 10,695 / 11,239 / 124 = 22,060.
+        // claude-2.1.291-opus-turn: 2 / 10,695 / 11,239 / 124 = 22,060. Its result
+        // then wakes the lead: a late helper result for the closed task.
         try T.stage(try T.claudeRun("claude-2.1.291-opus-turn.jsonl"), "hz", in: checkout(b, helper, else: root))
         let sent = try await WorkspaceAgentReportChecks.call(b.configuration(for: lead), "array_message_agent", [
             "agentId": id(helper), "text": "FRAMES-hz", "idempotencyKey": UUID().uuidString])
@@ -293,18 +315,56 @@ enum RunLedgerGapsChecks {
             supervisor.runLedger.drain()
             return !supervisor.isRunning(helper) && T.usage(helper).dropFirst(beforeUsage).contains { $0["tokens"] != nil }
         }
+        try await T.wait("the helper's result did not wake the lead", timeout: 40) { inputs(root) > woken }
         try await T.wait("lead settled") { !supervisor.isRunning(lead) }
         supervisor.runLedger.drain()
         let added = Array(T.usage(helper).dropFirst(beforeUsage)).filter { $0["tokens"] != nil }
         try expect(added.count == 1 && added[0]["task"] as? String == noTask,
                    "a turn an agent message started after the close must not be charged to the closed task: \(added.map { $0["task"] ?? "-" })")
         try T.expectRow(added.first, "message turn", model: "claude-opus-5-5", source: "cli", T.counts(2, 10_695, 11_239, 124), incomplete: ["noTask"])
+        let wake = rows().dropFirst(closeRows).filter { $0["kind"] as? String == "working" && $0["agent"] as? String == id(lead) }
+        try expect(wake.count == 1 && wake[0]["task"] as? String == task && wake[0]["flag"] as? String == "lateHelperWake",
+                   "the lead's wake on a late helper result must rejoin the task, flagged lateHelperWake: \(wake.map { "\($0["task"] ?? "-") \($0["flag"] ?? "-")" })")
         let after = try line(task)
-        try expect(after.tokens == before.tokens && after.helpers == before.helpers,
-                   "the closed task's numbers changed: helpers \(words(before, .helpers)) → \(words(after, .helpers)), all \(words(before, .all)) → \(words(after, .all))")
+        try expect(after.lateHelperWakes == 1 && words(after, .helpers) == words(before, .helpers),
+                   "page: late wakes \(after.lateHelperWakes); helpers \(words(before, .helpers)) → \(words(after, .helpers))")
         let untasked = try page().untasked.known - untaskedBefore
         try expect(untasked >= 22_060, "the page's \"not in any task\" line must hold the message turn: +\(untasked)")
-        print("  message turn: no task; the closed task still reads helpers \(words(after, .helpers)), all \(words(after, .all))")
+        print("  message turn: no task; late wake rejoined the task; helpers still \(words(after, .helpers))")
+        try T.privacy(root: root)
+    }
+
+    // MARK: Hook rows follow the open task
+
+    /// A hook during the lead's open task is that task's; one during a lead
+    /// turn after the close that no helper result started is in no task.
+    static func hooksAfterClose() async throws {
+        print("run-ledger-gaps: hook rows follow the task open at the time")
+        let b = try ManagedModeChecks.bench("ledger-gaps-hooks")
+        defer { b.tearDown() }
+        let restoreCodex = ManagedCodexChecks.runEnvironment(b)
+        defer { restoreCodex() }
+        let (lead, root) = try HelperEvidenceChecks.prepare(b)
+        try T.installClaudeDouble(b)
+        let supervisor = b.supervisor, before = T.closures()
+        try expect(await supervisor.accept(.sendPrompt(AgentPrompt("HOLD-hk SECRET-PROMPT")), for: lead) == .accepted, "submission refused")
+        try await T.wait("lead did not start") { supervisor.isRunning(lead) }
+        try await LeadCheckoutChecks.postHook(b, lead, ["hook_event_name": "UserPromptSubmit", "session_id": "s", "prompt": "SECRET-HOOK"])
+        try Data().write(to: root.appendingPathComponent("release-hk"))
+        try await T.wait("task did not close") { supervisor.runLedger.drain(); return !supervisor.isRunning(lead) && T.closures() > before }
+        let task = try taskOpened(by: lead)
+        let thread = AgentSupervisor.threadId(for: lead), turn = "hooks-after-\(UUID().uuidString)"
+        supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: turn), to: lead)
+        try await LeadCheckoutChecks.postHook(b, lead, ["hook_event_name": "PreToolUse", "session_id": "s", "tool_name": "Bash",
+                                                        "tool_input": ["command": "SECRET-HOOK"]])
+        supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: turn, outcome: .completed, errorMessage: nil), to: lead)
+        supervisor.runLedger.drain()
+        let hooks = rows("hook").filter { $0["agent"] as? String == id(lead) }
+        try expect(hooks.map { $0["hook"] as? String ?? "" } == ["UserPromptSubmit", "PreToolUse"], "hook rows: \(hooks)")
+        try expect(hooks[0]["task"] as? String == task, "a hook during the open task must be that task's: \(hooks[0]["task"] ?? "-")")
+        try expect(hooks[1]["task"] as? String == noTask,
+                   "a hook in a turn after the close must be in no task, not the agent's last task: \(hooks[1]["task"] ?? "-")")
+        print("  hook during the task: the task; hook after the close: no task")
         try T.privacy(root: root)
     }
 
