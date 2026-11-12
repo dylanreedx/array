@@ -141,6 +141,92 @@ final class ManagedRunLedger: @unchecked Sendable {
             append(Row(kind: "taskInterrupted", task: task, agent: agent, source: "interrupted/\(task)", openParts: pending))
         }
     }
+    // MARK: Delete
+
+    /// What the user may remove from this Mac. The writer owns this: the ledger
+    /// is its file, and the Usage page only reads it.
+    enum Deletion: Equatable {
+        /// Every row of one task.
+        case task(UUID)
+        /// Every row of every task, and usage no task owns.
+        case allUsage
+    }
+    struct DeleteResult: Equatable, Sendable {
+        var rowsRemoved = 0
+        var tasksRemoved = 0
+        /// Tasks left alone because work in them is still running.
+        var keptRunning = 0
+        var failed = false
+    }
+    /// Rewrites the file without the rows, then forgets them in memory so the
+    /// next fact starts clean. A task whose lead or helpers are still working
+    /// is never touched: its next row would land in a half-deleted task. A
+    /// helper row that arrives for a deleted task is dropped by `fact`.
+    /// `completion` runs on the ledger's queue.
+    func delete(_ what: Deletion, completion: (@Sendable (DeleteResult) -> Void)? = nil) {
+        queue.async { completion?(self.performDelete(what)) }
+    }
+    private struct Probe: Decodable { var task: UUID?; var source: String? }
+    private func performDelete(_ what: Deletion) -> DeleteResult {
+        // Running: the lead is mid-task, or turns still hold counters for it. A
+        // restart interrupts every older task, so those can always go.
+        var running = Set(active.values)
+        for open in openTurns.values { for key in open.buffers.keys { running.insert(key.task) } }
+        var result = DeleteResult()
+        if case let .task(id) = what, running.contains(id) { result.keptRunning = 1; return result }
+        guard let data = try? Data(contentsOf: url) else { return result }
+        let complete = data.lastIndex(of: 10).map { Data(data[...$0]) } ?? Data()
+        let tail = Data(data[complete.endIndex...])
+        let decoder = JSONDecoder()
+        var kept = Data()
+        var removedTasks = Set<UUID>(), removedSources = Set<String>(), runningSeen = Set<UUID>()
+        for line in complete.split(separator: 10) {
+            let probe = try? decoder.decode(Probe.self, from: Data(line))
+            let task = probe?.task
+            let drop: Bool
+            switch what {
+            case let .task(id): drop = task == id
+            case .allUsage:
+                drop = !(task.map(running.contains) ?? false)
+                if !drop, let task { runningSeen.insert(task) }
+            }
+            if drop {
+                result.rowsRemoved += 1
+                if let task, task != Self.noTask { removedTasks.insert(task) }
+                if let source = probe?.source { removedSources.insert(source) }
+            } else {
+                kept.append(contentsOf: line); kept.append(10)
+            }
+        }
+        // A torn final append survives a single-task delete untouched; "all" removes it.
+        let keepsTail: Bool
+        if case .task = what { keepsTail = true } else { keepsTail = false }
+        if keepsTail { kept.append(tail) }
+        result.tasksRemoved = removedTasks.count
+        result.keptRunning = runningSeen.count
+        do {
+            if kept.isEmpty {
+                if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+            } else {
+                try kept.write(to: url, options: .atomic)
+            }
+        } catch {
+            NSLog("Run ledger delete failed: %@", String(describing: error))
+            return DeleteResult(failed: true)
+        }
+        if !keepsTail { needsSeparator = false }
+        seen.subtract(removedSources)
+        for task in removedTasks {
+            owners[task] = nil; openByTask[task] = nil; delegationOrder[task] = nil; leadBoundary[task] = nil
+            delegatedTask = delegatedTask.filter { $0.value != task }
+            previous = previous.filter { $0.value != task }
+            sessionTasks = sessionTasks.filter { $0.value != task }
+            for part in Array(partTasks.keys) { partTasks[part]?.remove(task) }
+            for agent in Array(turnTasks.keys) { turnTasks[agent] = turnTasks[agent]?.filter { $0.task != task } }
+        }
+        return result
+    }
+
     func submission(agent: UUID, project: UUID?, mode: String? = nil) {
         queue.async {
             let task = self.active[agent] ?? UUID()

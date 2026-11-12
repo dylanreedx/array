@@ -6,7 +6,7 @@ recent tasks with their times, helpers, tokens, harness and model.
 
 ## A reader only
 
-The page records nothing. `RunLedgerUsageReader` (Core) reads a snapshot of
+The page records nothing, and deletes through the writer (below). `RunLedgerUsageReader` (Core) reads a snapshot of
 `run-ledger/ledger.jsonl` (see [managed-run-ledger.md](managed-run-ledger.md))
 and is the only file that knows the row shapes; its header lists the mapping.
 `UsageReport.make` is the one report function; a scorecard command should call
@@ -62,7 +62,41 @@ runs on a request or event path, and opening Settings starts no count.
 - Wall time to acceptance: acceptance is optional and not recorded.
 - Time in build and check commands (part 20).
 - Since when recording has been off: the switch keeps no date.
-- Delete: the ledger writer owns the one delete path (part 12), not built.
+
+Left out of this release, each on purpose:
+
+- The stage an answer named, integrated-to-verified time and build time need
+  new ledger rows (part 12 step 3, part 20). The page never shows a figure it
+  cannot read, so they stay absent until those rows exist.
+- Later slices (quality, context, one task opened): not this release's page.
+- Since when recording has been off: the switch keeps no date; adding one is a
+  settings change, not a usage-page change.
+
+## Delete
+
+`ManagedRunLedger.delete(.task(id))` and `.allUsage` are the one delete path.
+The page only asks; it never edits the file. On the ledger's queue the writer
+rewrites the file without the rows (atomically; the file itself is removed when
+nothing is left), then forgets them in memory so a later fact starts clean. A
+task whose lead is mid-task, or whose turns still hold counters, is refused
+(one) or kept and counted in the notice (all): its next row would land in a
+half-deleted task. A restart interrupts every older task, so those can always
+go. "Delete all" also removes usage no task owns and unreadable lines; a single
+task delete keeps a torn final append, as the writer does.
+
+The controls are Array's `ChoiceButton` holding one destructive command that
+names what goes and that it cannot be undone, so choosing it is the
+confirmation: "Delete usage records" under Recording, and "Delete this task…"
+inside an opened row (not offered for a task still open). A notice line says what
+happened, quiet outcomes included.
+
+## The row that opens
+
+Each task row is a button with a rotating chevron, the same disclosure anatomy the
+transcript's tool calls use, but Settings has no shared disclosure component,
+so this one is built in the pane. It is the one new pattern on the page: **needs
+the owner's look in the preview.** The alternative, SwiftUI's stock
+`DisclosureGroup`, is a default control the UI rules rule out.
 
 ## Witness
 
@@ -72,5 +106,9 @@ into a temporary directory, and asserts the rendered words: exact totals by
 kind, lead against helpers, unknown never zero, the period chooser through the
 real choice button, the recording switch, the empty ledger, export holding ids
 only, no count on the main thread or while another pane is shown, and both
-appearances (renders in `/tmp/usage-page/`). It prints timings for a
+appearances (renders in `/tmp/usage-page/`). Delete is witnessed through the
+page's own control and the production writer: one task's rows leave the disk
+and the page while every other line is byte-identical; a running task is
+refused; "delete all" keeps only the running task, then removes the file once it
+closes; the ledger records a new task afterwards and a restart finds nothing. It prints timings for a
 300,000-row ledger and asserts nothing about time.
