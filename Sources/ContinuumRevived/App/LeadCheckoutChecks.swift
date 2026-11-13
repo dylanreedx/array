@@ -192,6 +192,10 @@ enum LeadCheckoutChecks {
     /// back (and still records) for the next turn, and stops when the lead is
     /// archived mid-turn, with FSEvents' hold on the holder released.
     static func lifetime() async throws {
+        // A callback delivered after the old 100 ms cutoff, but before the
+        // settlement barrier, must still record the real write.
+        LeadCheckoutWatch.qaCallbackDelay.withLock { $0 = 0.15 }
+        defer { LeadCheckoutWatch.qaCallbackDelay.withLock { $0 = 0 } }
         let holdersBefore = LeadCheckoutWatch.qaLiveHolders
         let b = try ManagedModeChecks.bench("lead-lifetime")
         defer { b.tearDown() }

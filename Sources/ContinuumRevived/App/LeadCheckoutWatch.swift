@@ -50,8 +50,8 @@ final class LeadCheckoutWatch: @unchecked Sendable {
     static let startSlack: TimeInterval = 0.5
     /// FSEvents reaches this process a little after a write, and a flush can
     /// return before the delivery runs. A call's end is settled this long after
-    /// the host saw it (off every request path), counting events that arrived
-    /// by `endSlack` after it.
+    /// the host saw it (off every request path). The flush and delivery barrier
+    /// below bound the accepted events; callback arrival is not write time.
     static let settle: TimeInterval = 0.25
     static let endSlack: TimeInterval = 0.1
     static let maxPaths = 64
@@ -232,7 +232,6 @@ final class LeadCheckoutWatch: @unchecked Sendable {
     }
 
     func shellEnded(lead: UUID, call: String, busy: Bool) {
-        let end = Date()
         queue.async { self.settling += 1 }
         queue.asyncAfter(deadline: .now() + Self.settle) {
             self.settling -= 1
@@ -244,8 +243,11 @@ final class LeadCheckoutWatch: @unchecked Sendable {
             let ambiguous = opened.shared || busy || self.turnOpen.contains { $0 != lead && self.roots[$0] == checkout }
             let from = opened.start.addingTimeInterval(-Self.startSlack)
             var mine: [Event] = []
-            let to = end.addingTimeInterval(Self.endSlack)
-            for index in stream.events.indices where stream.events[index].at >= from && stream.events[index].at <= to && !stream.events[index].counted {
+            // FSEvents timestamps here are callback arrival times, not write
+            // times. A busy delivery queue can report a real in-call write
+            // after endSlack. Everything flushed and delivered above belongs
+            // to this settled window; do not discard it by arrival latency.
+            for index in stream.events.indices where stream.events[index].at >= from && !stream.events[index].counted {
                 stream.events[index].counted = true
                 mine.append(stream.events[index])
             }
@@ -311,11 +313,15 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         holder.stream = created
     }
 
+    /// Checks only: simulate a busy FSEvents delivery queue.
+    static let qaCallbackDelay = Locked<TimeInterval>(0)
     private static let callbackCount = Locked(0)
     static var qaCallbackCount: Int { callbackCount.withLock { $0 } }
 
     private static let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
         guard let info else { return }
+        let delay = qaCallbackDelay.withLock { $0 }
+        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         callbackCount.withLock { $0 += 1 }
         let list = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []
         Unmanaged<Stream>.fromOpaque(info).takeUnretainedValue().received(list, Array(UnsafeBufferPointer(start: flags, count: count)))
