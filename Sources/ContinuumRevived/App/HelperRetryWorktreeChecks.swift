@@ -96,6 +96,8 @@ enum HelperRetryWorktreeChecks {
         let reply = try await request(b, task: "HOLD isolated first helper")
         let first = try child(reply)
         let captured = try await capture(b, first)
+        try expect(b.supervisor.records[first]?.delegationContext?.createdWorktree == true,
+                   "first isolated helper did not record ownership of its worktree")
         let childRoot = URL(fileURLWithPath: captured["cwd"] as! String)
         try expect(WorktreeManager.resolved(childRoot) != WorktreeManager.resolved(root),
                    "first helper shares its Managed lead's writable checkout")
@@ -141,7 +143,6 @@ enum HelperRetryWorktreeChecks {
         try await finish(b, one)
         let countBeforeResume = try worktreeCount(root)
         let sid = AgentSupervisor.claudeRunnerConfig(for: b.supervisor.records[one]!).sessionId
-        try FileManager.default.removeItem(at: oneRoot.appendingPathComponent("managed-release-" + sid))
         try FileManager.default.removeItem(at: b.binDir.appendingPathComponent("capture-\(sid).json"))
         let resumed = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "array_message_agent", [
             "agentId": one.rawValue.uuidString, "text": "HOLD resumed isolated helper", "idempotencyKey": UUID().uuidString])

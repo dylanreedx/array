@@ -147,3 +147,22 @@ lead to Free with the preference still enabled to check shared Free placement.
 These additional assertions are also uncompiled/unrun: the latest preflight
 again refused four active builds (34% free memory, 59.3 GiB disk). No production
 policy changes were made in either lifecycle extension.
+
+The final witness explicitly asserts the first helper records
+`delegationContext.createdWorktree == true` before any sibling exists, in
+addition to its observed separate cwd and independent writes. This extension
+remains pending rebuild with the rest of the lifecycle coverage. Default
+sharing remains OPEN; no files from the dirty live checkout are copied.
+
+## Latest lifecycle build/run
+
+Build capacity cleared once: 2 existing builds, 45% free memory, 60.4 GiB
+free disk. Expanded app rebuilt successfully in 80.21 s. The expanded
+`--first-helper-isolation-check` then exited 1 at resume fixture cleanup:
+the fake Claude CLI consumes/unlinks `managed-release-<sid>`, and the witness
+redundantly tried to remove that already-consumed marker. This is a witness
+bug, not evidence of a production resume failure. Removed the redundant
+remove operation after the run ended. The corrected rebuild preflight refused
+4 active builds (35% memory, 60.8 GiB disk), so the corrected complete lifecycle
+witness remains unverified. Log: `/tmp/gaps-isolation-expanded.log`.
+No universal gap22 closure or full-lifecycle GREEN is claimed.
