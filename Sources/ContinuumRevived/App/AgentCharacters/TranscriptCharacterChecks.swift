@@ -125,9 +125,11 @@ enum TranscriptCharacterChecks {
             }?.layer
         }
         let appearance = AgentCharacterController.appearance(of: surface)
-        settle()
+        try expect(pump(until: {
+            settle()
+            return surface.qaChipRuns.flatMap(\.chips).count == 3
+        }), "the lead draws one chip per child: \(surface.qaChipRuns.flatMap(\.chips).count)")
         let chipRuns = surface.qaChipRuns
-        try expect(chipRuns.flatMap(\.chips).count == 3, "the lead draws one chip per child: \(chipRuns.flatMap(\.chips).count)")
 
         // 1. Each chip shows that child's own character in the pose of its state.
         let expected: [(AgentID, AgentCharacterStill, String)] = [

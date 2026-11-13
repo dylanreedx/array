@@ -255,9 +255,12 @@ final class AgentCharacterController {
     /// as given (they already include the host's manual picks and packs).
     private(set) var shippedAssignments: [UUID: AgentCharacterAssignment] = [:]
 
-    func setPacks(_ roles: [UUID: AgentCharacterPacks.Role]) {
-        guard roles != packs else { return }
+    private var automaticRootIndices: [UUID: Int] = [:]
+
+    func setPacks(_ roles: [UUID: AgentCharacterPacks.Role], automaticIndices: [UUID: Int] = [:]) {
+        guard roles != packs || automaticIndices != automaticRootIndices else { return }
         packs = roles
+        automaticRootIndices = automaticIndices
         if isEnabled { NotificationCenter.default.post(name: Self.didChangeNotification, object: self) }
     }
 
@@ -276,6 +279,15 @@ final class AgentCharacterController {
         if let shipped = shippedAssignments[agentID] {
             let count = shipped.kind == .lead ? (leadSet?.characters.count ?? 0) : theme.characters.count
             if shipped.index >= 0, shipped.index < count { return shipped }
+        }
+        let hasManualPick = name.flatMap { Self.index(of: $0, in: theme) } != nil
+        if !hasManualPick, let index = automaticRootIndices[agentID], !theme.characters.isEmpty {
+            return .init(kind: .helper, index: index % theme.characters.count)
+        }
+        if !theme.hasLead, !hasManualPick,
+           case let .helper(slot, lead, leadName)? = packs[agentID],
+           let leadAssignment = assignment(for: lead, name: leadName) {
+            return .init(kind: .helper, index: (leadAssignment.index + 1 + slot) % theme.characters.count)
         }
         return AgentCharacterAssignment.resolve(agentID: agentID, name: name, role: packs[agentID], theme: theme)
     }

@@ -150,7 +150,7 @@ enum DuckherdThemeChecks {
         }
         func sprite(_ id: AgentID) -> CharacterSpriteLayer? { inbox.cellForQA(id: id.rawValue)?.characterLayerForQA }
         func isLead(_ layer: CharacterSpriteLayer?) -> Bool {
-            layer?.sprite?.atlas.frameWidth == lead.width && layer?.sprite?.atlas.frameHeight == lead.height
+            layer?.sprite?.atlas.frameWidth == theme.frameWidth && layer?.sprite?.atlas.frameHeight == theme.frameHeight
         }
         func hasArt(_ layer: CharacterSpriteLayer?) -> Bool {
             guard let atlas = layer?.sprite?.atlas, layer?.contents != nil else { return false }
@@ -182,8 +182,8 @@ enum DuckherdThemeChecks {
             // scale-4 lead's 1x grid lands on device pixels at every size.
             let perOneX = CGFloat(size.devicePixelsPerArtPixel(backingScale: Double(backing)))
             guard let frame = sprite(leadID)?.frame else { throw Failure(description: "\(label): no lead sprite frame") }
-            let expected = NSSize(width: CGFloat(lead.width) / scale * perOneX / backing,
-                                  height: CGFloat(lead.height) / scale * perOneX / backing)
+            let expected = NSSize(width: CGFloat(theme.frameWidth) / scale * perOneX / backing,
+                                  height: CGFloat(theme.frameHeight) / scale * perOneX / backing)
             try expect(abs(frame.width - expected.width) < 0.01 && abs(frame.height - expected.height) < 0.01,
                        "\(label): the lead's sidebar sprite is \(expected), got \(frame.size)")
             for appearance in [NSAppearance.Name.aqua, .darkAqua] {

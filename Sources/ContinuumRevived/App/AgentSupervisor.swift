@@ -1147,12 +1147,42 @@ final class AgentSupervisor {
 
     /// Plan 110 › lead: tell the character controller who leads and who helps.
     /// The host computes this from its own records; a guest is shipped the result.
+    /// Allocate once from the least-used slots among live roots.
+    private func assignAutomaticCharacter(to record: inout AgentRecord) {
+        guard record.parentAgentID == nil, record.automaticCharacterIndex == nil,
+              let theme = AgentCharacterController.shared.selectedTheme, !theme.characters.isEmpty else { return }
+        let count = theme.characters.count
+        var usage = Array(repeating: 0, count: count)
+        for other in records.values where other.id != record.id && other.parentAgentID == nil && other.archivedAt == nil {
+            let manual = other.characterName.flatMap { AgentCharacterController.index(of: $0, in: theme) }
+            if let index = manual ?? other.automaticCharacterIndex {
+                usage[index % count] += 1
+            }
+        }
+        let leastUsed = usage.min()!
+        var index = AgentCharacterConfig.characterIndex(for: record.id.rawValue, count: count)
+        while usage[index] != leastUsed { index = (index + 1) % count }
+        record.automaticCharacterIndex = index
+    }
+
     func publishCharacterPacks() {
         characterPacksScheduled = false
+        // Legacy records receive a durable slot once, in restore-order-independent order.
+        for id in records.keys.sorted(by: { $0.rawValue.uuidString < $1.rawValue.uuidString }) {
+            guard var record = records[id], record.parentAgentID == nil,
+                  record.automaticCharacterIndex == nil else { continue }
+            assignAutomaticCharacter(to: &record)
+            records[id] = record
+            persist(record)
+        }
+        let indices = Dictionary(uniqueKeysWithValues: records.values.compactMap { record -> (UUID, Int)? in
+            guard record.parentAgentID == nil, let index = record.automaticCharacterIndex else { return nil }
+            return (record.id.rawValue, index)
+        })
         AgentCharacterController.shared.setPacks(AgentCharacterPacks.roles(records.values.map {
             AgentCharacterPacks.Member(id: $0.id.rawValue, parentID: $0.parentAgentID?.rawValue,
                                        ordinal: $0.parentRelativeOrdinal, characterName: $0.characterName)
-        }))
+        }), automaticIndices: indices)
     }
 
     /// CX-01 (`.plans/59`, §15): where a bound runner's host tool request goes.
@@ -2904,6 +2934,7 @@ final class AgentSupervisor {
         // The first flush reads each lead's journal once: staged and held rows
         // from the previous launch are rebuilt there.
         Task { @MainActor [weak self] in await self?.flushHelperCompletions() }
+        publishCharacterPacks()
         return report
     }
 
@@ -3244,9 +3275,11 @@ final class AgentSupervisor {
             }
             // CX-01 (§14.1): the Settings default seeds NEW agents only.
             record.workspaceToolsEnabled = WorkspaceToolsConfig.enabledForNewAgents(workspaceToolsPermission())
+            assignAutomaticCharacter(to: &record)
             records[id] = record
             persist(record)
         }
+        publishCharacterPacks()
         if let prompt, !prompt.isEmpty {
             if let parentAgentID {
                 _ = sendPrepared(PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: id), to: id,
@@ -12042,6 +12075,7 @@ final class AgentSupervisor {
                 // same store-level lock is held and never lower its high-water.
                 let durable = try store.load(id: record.id)
                 if let durable {
+                    candidate.automaticCharacterIndex = durable.automaticCharacterIndex ?? candidate.automaticCharacterIndex
                     candidate.nextChildOrdinal = max(
                         candidate.nextChildOrdinal,
                         durable.nextChildOrdinal
