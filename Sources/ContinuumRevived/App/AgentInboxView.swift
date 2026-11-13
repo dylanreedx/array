@@ -6063,8 +6063,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     override func mouseEntered(with event: NSEvent) {
         super.mouseEntered(with: event)
+        pointerCrossingCountForQA += 1
         pointerOverList = true
     }
+    /// Entered and exited events this list has taken.
+    private(set) var pointerCrossingCountForQA = 0
 
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
@@ -6076,6 +6079,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
+        pointerCrossingCountForQA += 1
         setHovered(agentId: nil)
         setHoveredFanout(parentId: nil)
         setSearchFieldHovered(false)
@@ -7910,6 +7914,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The agent the pointer is on, as the view believes it — so a check can
     /// assert hover CLEARED rather than infer it from a fill.
     var hoveredAgentIdForQA: UUID? { hoveredAgentId }
+    var trackingAreaForQA: NSTrackingArea? { trackingArea }
     /// The route-active agent under the name the ladder uses. `openAgentId` is
     /// the one owner of the fact (see its note); this reads it back so a check
     /// can name what it is asserting.
@@ -8628,6 +8633,14 @@ final class AgentInboxRemainderView: NSTableCellView {
             fill.frame = NSRect(x: left, y: -spacing / 2, width: max(0, bounds.width - gutter - 6 - left),
                                 height: InboxOwnershipChrome.subagentHeight + spacing)
             fill.underlayAlpha = groupBackground.alphaUnderCard
+            // Hover's pill around the words, as on the helper rows above it.
+            let inset = CGFloat(Metrics.cellTextInset), margin: CGFloat = 8
+            let words = convert(label.frame, to: fill)
+            let markHeight = InboxOwnershipChrome.subagentHeight
+            let start = max(0, words.minX + inset - margin)
+            fill.hoverMarkRect = NSRect(
+                x: start, y: ((fill.bounds.height - markHeight) / 2).rounded(),
+                width: max(0, min(fill.bounds.width, words.maxX - inset + margin) - start), height: markHeight)
             return
         }
         let metrics = AgentInbox96CellView.spineMetrics
@@ -8652,6 +8665,8 @@ final class AgentInboxRemainderView: NSTableCellView {
     var qaFillRole: SidebarSurfaceRole { fill.surfaceRole }
     var qaFillColor: CGColor? { fill.layer?.backgroundColor }
     var qaFillFrame: NSRect { fill.frame }
+    var qaHoverMarkOpacity: Float { fill.qaHoverMarkOpacity }
+    var qaHoverMarkFrame: CGRect? { fill.qaHoverMarkFrame.map { fill.convert($0, to: self) } }
     var qaLabelFrameInWindow: NSRect { label.convert(label.bounds, to: nil) }
     var qaLabelFrameForQA: NSRect { label.convert(label.bounds, to: self) }
     @discardableResult
@@ -10070,7 +10085,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
         didSet {
             guard isHovered != oldValue else { return }
             applyFill(fading: true)
-            guard indicatorStyle != "current", !isRouteActive, window != nil,
+            guard hoverMarkRect == nil, indicatorStyle != "current", !isRouteActive, window != nil,
                   !indicatorReducesMotion, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
                 layer?.removeAnimation(forKey: "indicator.hover-settle")
                 return
@@ -10119,6 +10134,74 @@ final class AgentInboxCardView: NSView, TokenThemed {
     /// The layer animation that carries an interaction fill change.
     static let fillFadeKey = "interaction-fill"
 
+    /// Helper rows and the "N more" line: where hover draws its pill, in this
+    /// view's coordinates. Set, it REPLACES the hover fill — those rows are
+    /// strips of the lead's card, and a full-width slab on an 18 pt strip read
+    /// as a box inside the box. Press, selection and the open agent still
+    /// paint the fill; hover only ever paints the pill.
+    var hoverMarkRect: CGRect? {
+        didSet {
+            guard hoverMarkRect != oldValue else { return }
+            placeHoverMark()
+            if (hoverMarkRect == nil) != (oldValue == nil) { applyFill(fading: false) }
+        }
+    }
+    /// `textPrimary` at the hover step's own strength, translucent so it reads
+    /// the same over the panel, a group's sheet and every style's tint. Over
+    /// the bare panel it composites to `SidebarSurfaceRole.hover` exactly.
+    static func hoverMarkColour(theme: TokenTheme) -> CGColor {
+        let ink = TextToken.textPrimary.color.cgColor(for: theme)
+        return ink.copy(alpha: CGFloat(SidebarSurfaceRole.hover.emphasisAlpha)) ?? ink
+    }
+    private let hoverMark = CALayer()
+    static let hoverMarkFadeKey = "hover-mark"
+    var qaHoverMarkOpacity: Float { hoverMark.superlayer == nil ? 0 : hoverMark.opacity }
+    var qaHoverMarkFrame: CGRect? { hoverMark.superlayer == nil ? nil : hoverMark.frame }
+    var qaStyleTruth: String {
+        "working=\(isIndicatorWorking) moves=\(indicatorMoves) open=\(isRouteActive) selected=\(isSelected) "
+            + "groupLight=\(sharesGroupLight) washHidden=\(indicatorWash.isHidden)"
+    }
+
+    private func placeHoverMark() {
+        guard let rect = hoverMarkRect, let layer else {
+            hoverMark.removeFromSuperlayer()
+            return
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if hoverMark.superlayer == nil {
+            hoverMark.opacity = 0
+            layer.insertSublayer(hoverMark, at: 0)
+        }
+        hoverMark.frame = rect
+        hoverMark.cornerRadius = rect.height / 2
+        CATransaction.commit()
+    }
+
+    /// Fade the pill in or out over the fill's own duration. Reduce Motion
+    /// drops the fade, never the pill.
+    private func applyHoverMark(fading: Bool) {
+        guard hoverMarkRect != nil, hoverMark.superlayer != nil else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        hoverMark.backgroundColor = Self.hoverMarkColour(theme: effectiveTokenTheme)
+        let target: Float = isHovered && !isPressed && !isRouteActive ? 1 : 0
+        let presented = hoverMark.presentation()?.opacity ?? hoverMark.opacity
+        hoverMark.opacity = target
+        guard fading, window != nil, presented != target,
+              !indicatorReducesMotion, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            hoverMark.removeAnimation(forKey: Self.hoverMarkFadeKey)
+            return
+        }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = presented
+        fade.toValue = target
+        fade.duration = Self.fillFadeDuration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        hoverMark.add(fade, forKey: Self.hoverMarkFadeKey)
+    }
+
     /// Which step of `SidebarSurfaceRole` this row is on, loudest input first.
     ///
     /// ROUTE-ACTIVE OUTRANKS HOVER OUTRANKS SELECTION, which is the ladder's own
@@ -10130,7 +10213,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
     var surfaceRole: SidebarSurfaceRole {
         if isPressed { return .selected }
         if isRouteActive { return .active }
-        if isHovered { return .hover }
+        if isHovered, hoverMarkRect == nil { return .hover }
         if isSelected { return .selected }
         return .resting
     }
@@ -10214,6 +10297,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
             for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: effectiveTokenTheme,
             underlay: underlayAlpha)
         applyIndicator()
+        applyHoverMark(fading: fading)
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
         layer.backgroundColor = sharesGroupLight && !isPressed ? nil : fill
         if sharesGroupLight { layer.removeAnimation(forKey: Self.fillFadeKey) }
