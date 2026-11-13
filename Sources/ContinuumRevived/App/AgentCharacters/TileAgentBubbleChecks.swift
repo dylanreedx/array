@@ -428,7 +428,7 @@ enum TileAgentBubbleChecks {
         }
         state.tiles[index].kind = .managedAgent
         state.tiles[index].metadata = TileMetadata(launchProfileId: "managed-agent", projectRelativeCwd: ".")
-        state.tiles[index].frame = TileFrame(x: 600, y: 520, width: 360, height: 260)
+        state.tiles[index].frame = TileFrame(x: 440, y: 720, width: 360, height: 260)
         try projectStore.saveCanvas(state)
         var agent: AgentID?
         let appSupport = fixture.appSupport
@@ -444,6 +444,9 @@ enum TileAgentBubbleChecks {
         let mounted = try fixture.requireMounted("tile bubble drag")
         let canvas = mounted.canvas
         TileInsertSlideChecks.pin(canvas, autoLayout: false)
+        // No magnet: the tile must follow the pointer exactly, so the witness can
+        // tell a move from a snap.
+        canvas.dragMagnetizeDefaults.set(false, forKey: DragMagnetizeConfig.enabledKey)
         canvas.setViewport(CanvasViewport(x: 300, y: 250, zoom: zoom))
         let window = KeyWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
@@ -488,7 +491,10 @@ enum TileAgentBubbleChecks {
             // The real hit-test answers the tile itself, not the bar or the body.
             if let host = canvas.superview {
                 let hit = canvas.hitTest(canvas.convert(canvas.convert(start, from: nil), to: host))
-                try expect(hit === view, "\(label) \(name): a press on the bubble hit \(String(describing: hit.map { type(of: $0) }))")
+                var chain: [String] = []
+                var cursor: NSView? = hit
+                while let current = cursor, chain.count < 8 { chain.append(String(describing: type(of: current))); cursor = current.superview }
+                try expect(hit === view, "\(label) \(name): a press on the bubble at \(start) hit \(chain.joined(separator: " < ")) (tile frame in window \(view.convert(view.bounds, to: nil)))")
             }
             try send(.leftMouseDown, start)
             try film("\(name)-0")

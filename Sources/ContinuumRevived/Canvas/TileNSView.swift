@@ -1187,6 +1187,10 @@ class TileNSView: NSView, TokenThemed {
             Self.hitTestPromotionTotal &+= 1
             promoteBodyToNative()
         }
+        // The agent's bubble is a grab handle drawn over everything on the tile:
+        // it moves the tile, though it sits in the corner's resize band and over
+        // the under-bar's and the body's corner.
+        if agentBubbleContains(local) { return self }
         // "Add to share" (mode B) sits over the body near the top: it wins its
         // own press, ahead of the low-zoom grab strip that would make it a drag.
         if let pill = subviews.last(where: { $0 is SharedPortalAddPill && !$0.isHidden }), pill.frame.contains(local) {
@@ -1198,9 +1202,6 @@ class TileNSView: NSView, TokenThemed {
         if let underBar, !underBar.isHidden, underBar.frame.contains(local), let hit = underBar.hitTest(local) {
             return hit
         }
-        // The agent's bubble is a grab handle: it moves the tile, though it sits
-        // in the corner's resize band and over the body's corner.
-        if agentBubbleContains(local) { return self }
         // Keep the visible close glyph usable when the enlarged corner target
         // overlaps it at low zoom. The outer resize edge still takes precedence.
         let edge = resizeMarginInLocalCoordinates
