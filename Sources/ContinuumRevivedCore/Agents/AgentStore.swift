@@ -130,7 +130,8 @@ public final class AgentStore: @unchecked Sendable {
         AtomicWriter(
             backupsDirectory: backups,
             retainedBackups: retainedBackups,
-            legacyBackupPolicy: .targetDedicated
+            legacyBackupPolicy: .targetDedicated,
+            preferBackupTimestampsForRetention: true
         )
     }
 

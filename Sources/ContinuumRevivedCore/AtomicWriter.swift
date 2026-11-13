@@ -119,6 +119,7 @@ public struct AtomicWriter: Sendable {
     public let fileOperations: AtomicWriterFileOperations
     public let backupDate: @Sendable () -> Date
     public let legacyBackupPolicy: AtomicWriterLegacyBackupPolicy
+    public let preferBackupTimestampsForRetention: Bool
 
     public init(
         backupsDirectory: URL? = nil,
@@ -127,7 +128,8 @@ public struct AtomicWriter: Sendable {
         descriptorOperations: AtomicWriterDescriptorOperations = .live,
         fileOperations: AtomicWriterFileOperations = .live,
         backupDate: @escaping @Sendable () -> Date = { Date() },
-        legacyBackupPolicy: AtomicWriterLegacyBackupPolicy = .disabled
+        legacyBackupPolicy: AtomicWriterLegacyBackupPolicy = .disabled,
+        preferBackupTimestampsForRetention: Bool = false
     ) {
         self.backupsDirectory = backupsDirectory
         self.retainedBackups = max(0, retainedBackups)
@@ -136,6 +138,7 @@ public struct AtomicWriter: Sendable {
         self.fileOperations = fileOperations
         self.backupDate = backupDate
         self.legacyBackupPolicy = legacyBackupPolicy
+        self.preferBackupTimestampsForRetention = preferBackupTimestampsForRetention
     }
 
     /// Write `value` as JSON to `url`. The previous file (if any) is copied to
@@ -172,7 +175,7 @@ public struct AtomicWriter: Sendable {
     /// to the newest valid backup. Throws if neither path yields a parseable
     /// value of `T`. Stores merging independently numbered backup histories can
     /// prefer their recorded wall-clock timestamps during recovery; ties use
-    /// generation order. Save retention always uses generations.
+    /// generation order. Retention can independently opt into the same policy.
     public func read<T: Codable>(at url: URL, beforeBackup: () -> Void = {}, preferBackupTimestamps: Bool = false) throws -> T {
         try read(at: url, decoder: JSONCodec.makeDecoder(), beforeBackup: beforeBackup, preferBackupTimestamps: preferBackupTimestamps)
     }
@@ -435,12 +438,12 @@ public struct AtomicWriter: Sendable {
         // Never remove or overwrite a collision. This should be unreachable
         // under the target lock, but copyItem's exclusive failure is fail-safe.
         try FileManager.default.copyItem(at: url, to: backupURL)
-        existing.append(BackupEntry(url: backupURL, generation: generation))
+        existing.append(BackupEntry(url: backupURL, generation: generation, timestamp: String(backupURL.lastPathComponent.suffix(24))))
         return existing
     }
 
     private func pruneOldBackups(_ backups: [BackupEntry]) {
-        let urls = newestFirst(backups)
+        let urls = newestFirst(backups, preferTimestamps: preferBackupTimestampsForRetention)
         guard urls.count > retainedBackups else { return }
         for stale in urls.dropFirst(retainedBackups) {
             try? FileManager.default.removeItem(at: stale)

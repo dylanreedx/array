@@ -710,5 +710,11 @@ private func runHeldMigrationRecoveryCheck(root: URL) throws {
     guard recovered == "newer-backup" else {
         throw AgentStoreCheckError("held migration: recovered \(String(describing: recovered)), expected newer-backup")
     }
-    print("  agent-store held migration: newest downgrade backup recovered")
+    // A subsequent save must retain the newer, independently numbered backup.
+    try store.upsert(record("replacement"))
+    try Data("corrupt".utf8).write(to: layout.agentFile(id: id))
+    guard try store.load(id: id)?.displayName == "newer-backup" else {
+        throw AgentStoreCheckError("held migration: newer downgrade backup was pruned by a save")
+    }
+    print("  agent-store held migration: newest downgrade backup recovered and retained")
 }
