@@ -1727,6 +1727,8 @@ run_app_check .build/debug/Array --sidebar-workspace-treatment-check
 run_app_check .build/debug/Array --sidebar-production-corpus-check
 run_app_check .build/debug/Array --sidebar-screenshot-check
 run_app_check .build/debug/Array --sidebar-indicator-settings-check
+# Helper-row hover: a pill on exactly the hovered row, through NSApp.sendEvent.
+run_app_check .build/debug/Array --sidebar-helper-hover-check
 run_app_check .build/debug/Array --workspace-sidebar-shell-check
 # .plans/86: the multi-workspace checklist driven through the real popover.
 run_app_check .build/debug/Array --workspace-filter-sheet-check

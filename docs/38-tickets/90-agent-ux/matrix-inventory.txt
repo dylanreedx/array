@@ -285,6 +285,7 @@ check --sidebar-agent-status-line-check
 check --sidebar-bulk-hide-check
 check --sidebar-character-check
 check --sidebar-fold-expand-check
+check --sidebar-helper-hover-check
 check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
 check --sidebar-indicator-settings-check
@@ -731,6 +732,7 @@ leg run_app_check .build/debug/Array --sidebar-agent-status-line-check
 leg run_app_check .build/debug/Array --sidebar-bulk-hide-check
 leg run_app_check .build/debug/Array --sidebar-character-check
 leg run_app_check .build/debug/Array --sidebar-fold-expand-check
+leg run_app_check .build/debug/Array --sidebar-helper-hover-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
 leg run_app_check .build/debug/Array --sidebar-indicator-settings-check
