@@ -1337,6 +1337,56 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
                "the chip for a codex MCP delegation must name its callId, got \(String(describing: codexChipSource))")
     client.close()
 
+    // MARK: Scale — one delegation with 2,000 agents on record (2026-11-12)
+    //
+    // Red before the fix: numbering the child decoded every record on disk, and
+    // the child's `git rev-parse` ran on the main thread. With Dylan's 2,228
+    // agents each delegation froze Array for about 1.5 s. Driven through
+    // `dispatchAsync`, the entry both transports use.
+    let scaleRoot = URL(fileURLWithPath: appSupportPath, isDirectory: true)
+        .appendingPathComponent("workspace-api-delegation-scale", isDirectory: true)
+    let scaleStore = AgentStore(applicationSupportDirectory: scaleRoot)
+    let scaleCreated = Date(timeIntervalSince1970: 1_800_000_000)
+    for index in 0..<2_000 {
+        try scaleStore.upsert(AgentRecord(
+            id: AgentID(rawValue: UUID()), displayName: "Neighbour \(index)", role: "implementer",
+            model: "fixture-model", thinking: "low", cwd: pbRoot.path, projectId: projectPb,
+            createdAt: scaleCreated, lastActivityAt: scaleCreated, tileId: nil))
+    }
+    let scaleSupervisor = AgentSupervisor(store: scaleStore,
+        submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: scaleRoot),
+        transcriptStore: AgentTranscriptStore(root: scaleRoot.appendingPathComponent("transcripts")))
+    defer { scaleSupervisor.stopAll() }
+    scaleSupervisor.workspaceToolsPermission = { .free }
+    _ = scaleSupervisor.restore()
+    try expect(scaleSupervisor.records.count >= 2_000, "the scale supervisor must hold the 2,000 seeded agents, got \(scaleSupervisor.records.count)")
+    let scaleParent = scaleSupervisor.spawn(
+        role: nil, prompt: nil, cwd: pbRoot, harness: .pi, model: "fixture-model", thinking: "low",
+        projectId: projectPb, projectRoot: pbRoot)
+    _ = scaleSupervisor.setWorkspaceToolsEnabled(agentID: scaleParent, true)
+    let scaleAPI = WorkspaceAPIService(runtime: { runtime }, canvas: { canvas }, focusBroker: { delegate.qaFocusBroker },
+        supervisor: scaleSupervisor, registryStore: { registryStore }, epoch: "scale-fixture",
+        approvalHandler: { _ in .allowForSession })
+    let decodedBefore = AgentStore.recordsDecodedForQA
+    let gitOnMainBefore = WorktreeManager.mainThreadGitRunsForQA
+    var scaleReply: WorkspaceAPIService.Reply?
+    let scaleStart = Date()
+    scaleAPI.dispatchAsync(agentId: scaleParent, requestId: "scale-req", op: "agent.delegate",
+                           payload: ["task": "SCALE-TASK", "idempotencyKey": "scale-k1",
+                                     "presentation": ["camera": "preserve"]]) { scaleReply = $0 }
+    let scaleMainHeld = Date().timeIntervalSince(scaleStart)
+    let scaleAnswered = await waitUntil(timeout: 30, pollInterval: 0.02) { scaleReply != nil }
+    let scaleDecoded = AgentStore.recordsDecodedForQA - decodedBefore
+    let scaleGitOnMain = WorktreeManager.mainThreadGitRunsForQA - gitOnMainBefore
+    print("delegation at scale (2,000 agents): \(scaleDecoded) records decoded, \(scaleGitOnMain) git runs on main, main held \(String(format: "%.1f", scaleMainHeld * 1000)) ms before dispatch returned")
+    try expect(scaleAnswered, "the delegation at scale must answer")
+    let scaleResult = try result(scaleReply!, "delegation at scale")
+    try expect(scaleResult["childAgentId"]?.string != nil, "the delegation at scale must create a child: \(scaleResult)")
+    try expect(scaleGitOnMain == 0,
+               "a delegation must run no git on the main thread; it ran \(scaleGitOnMain) (each blocks the UI for the whole process)")
+    try expect(scaleDecoded < 50,
+               "a delegation must not decode every agent record: it decoded \(scaleDecoded) with 2,000 on record")
+
     supervisor.stopAll()
 }
 

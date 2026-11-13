@@ -39,8 +39,30 @@ public struct AgentStoreLayout: Sendable {
     /// Backups live *inside* `agents/`, mirroring `ProjectStoreLayout`. `loadAll`
     /// enumerates one level and takes `.json` files only, so this directory is
     /// never read back as a record.
+    ///
+    /// Up to 0.7.47 every record's backups sat directly in this folder, and each
+    /// save listed all of it to number and prune its own three: 6,724 files for
+    /// 2,228 agents, 10-21% of the main thread (2026-11-12). Each record now owns
+    /// a subfolder, `backups(for:)`, so a save lists only its own backups. Files
+    /// still here are moved by `AgentStore.migrateSharedBackups` once.
     public var backupsDirectory: URL {
         agentsDirectory.appendingPathComponent("backups", isDirectory: true)
+    }
+
+    /// One record's backups. Named by the agent id, like its record file.
+    public func backupsDirectory(for id: AgentID) -> URL {
+        backupsDirectory.appendingPathComponent(id.rawValue.uuidString, isDirectory: true)
+    }
+
+    /// The deleted-agent tombstone's backups, apart from every record's.
+    public var deletedAgentTilesBackupsDirectory: URL {
+        backupsDirectory.appendingPathComponent("deleted-agent-tiles", isDirectory: true)
+    }
+
+    /// Present once every backup in the shared folder that belongs to a known
+    /// record or the tombstone has moved into its own folder.
+    public var perRecordBackupsMarker: URL {
+        backupsDirectory.appendingPathComponent(".per-record-backups-v1", isDirectory: false)
     }
 
     public func agentFile(id: AgentID) -> URL {
@@ -60,7 +82,7 @@ public struct AgentStoreLayout: Sendable {
 
 public final class AgentStore: @unchecked Sendable {
     public let layout: AgentStoreLayout
-    private let writer: AtomicWriter
+    private let retainedBackups: Int
     private let warn: (String) -> Void
 
     /// `applicationSupportDirectory == nil` resolves the root the way the app
@@ -79,12 +101,85 @@ public final class AgentStore: @unchecked Sendable {
             ?? AgentStore.resolveApplicationSupportDirectory(smokeTest: false)
             ?? RegistryStore.defaultApplicationSupportDirectory()
         self.layout = AgentStoreLayout(applicationSupportDirectory: baseDir)
-        self.writer = AtomicWriter(
-            backupsDirectory: layout.backupsDirectory,
+        self.retainedBackups = retainedBackups
+        self.warn = warn
+        migrateSharedBackups()
+    }
+
+    /// Each record's writer keeps its backups in that record's own folder, so
+    /// numbering and pruning a save list three files, not every agent's.
+    /// `.targetDedicated` stays: the folder holds one target's backups only.
+    private func writer(for id: AgentID) -> AtomicWriter {
+        writer(backups: layout.backupsDirectory(for: id))
+    }
+
+    private func writer(backups: URL) -> AtomicWriter {
+        AtomicWriter(
+            backupsDirectory: backups,
             retainedBackups: retainedBackups,
             legacyBackupPolicy: .targetDedicated
         )
-        self.warn = warn
+    }
+
+    /// Moves each backup 0.7.47 and earlier left in the shared folder into its
+    /// record's folder (or the tombstone's), so the restore reader finds it
+    /// where that record's writer now looks. Runs once: the marker skips it on
+    /// every later launch. A backup whose record no longer exists stays put; no
+    /// save lists the shared folder any more, so it costs nothing. An
+    /// interrupted run leaves no marker and resumes on the next launch.
+    private func migrateSharedBackups() {
+        let shared = layout.backupsDirectory
+        let fileManager = FileManager.default
+        guard !fileManager.fileExists(atPath: layout.perRecordBackupsMarker.path),
+              fileManager.fileExists(atPath: shared.path),
+              let names = try? fileManager.contentsOfDirectory(atPath: shared.path),
+              let recordFiles = try? fileManager.contentsOfDirectory(atPath: layout.agentsDirectory.path)
+        else { return }
+
+        // Owner of each name: v2 names by the target's identity hash, pre-v2
+        // names by the target's file stem.
+        var byV2Prefix: [String: URL] = [:]
+        var byLegacyStem: [String: URL] = [:]
+        func own(_ target: URL, into directory: URL) {
+            byV2Prefix[AtomicWriter.backupNamePrefix(
+                forCanonicalIdentityPath: AtomicWriter.canonicalIdentityPath(for: target))] = directory
+            byLegacyStem[target.deletingPathExtension().lastPathComponent + "."] = directory
+        }
+        for file in recordFiles where file.hasSuffix(".json") {
+            guard let uuid = UUID(uuidString: String(file.dropLast(".json".count))) else { continue }
+            let id = AgentID(rawValue: uuid)
+            own(layout.agentFile(id: id), into: layout.backupsDirectory(for: id))
+        }
+        own(layout.deletedAgentTilesFile, into: layout.deletedAgentTilesBackupsDirectory)
+
+        let v2Head = "array-backup-v2-"
+        let v2PrefixLength = v2Head.count + 64 + 1
+        var stranded = 0
+        for name in names {
+            let destination: URL?
+            if name.hasPrefix(v2Head) {
+                destination = name.count > v2PrefixLength ? byV2Prefix[String(name.prefix(v2PrefixLength))] : nil
+            } else if let dot = name.firstIndex(of: ".") {
+                destination = byLegacyStem[String(name[...dot])]
+            } else {
+                destination = nil
+            }
+            guard let destination else { continue }
+            do {
+                try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+                try fileManager.moveItem(
+                    at: shared.appendingPathComponent(name),
+                    to: destination.appendingPathComponent(name))
+            } catch {
+                // Another store in this process may have moved it first.
+                if fileManager.fileExists(atPath: shared.appendingPathComponent(name).path) {
+                    stranded += 1
+                    warn("AgentStore: could not move backup \(name) into its record's folder: \(error)")
+                }
+            }
+        }
+        guard stranded == 0 else { return }
+        fileManager.createFile(atPath: layout.perRecordBackupsMarker.path, contents: Data())
     }
 
     /// The pure half of `AppDelegate.resolveAppSupportDir(smokeTest:)`, in Core
@@ -130,13 +225,13 @@ public final class AgentStore: @unchecked Sendable {
     }
 
     public func upsert(_ record: AgentRecord) throws {
-        try writer.write(record, to: layout.agentFile(id: record.id))
+        try writer(for: record.id).write(record, to: layout.agentFile(id: record.id))
     }
 
     public func load(id: AgentID) throws -> AgentRecord? {
         let url = layout.agentFile(id: id)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try writer.read(at: url)
+        return try writer(for: id).read(at: url)
     }
 
     public func delete(id: AgentID) throws {
@@ -166,7 +261,7 @@ public final class AgentStore: @unchecked Sendable {
         let url = layout.deletedAgentTilesFile
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         do {
-            let ids: [UUID] = try writer.read(at: url)
+            let ids: [UUID] = try writer(backups: layout.deletedAgentTilesBackupsDirectory).read(at: url)
             return Set(ids)
         } catch {
             warn("AgentStore.loadDeletedAgentTiles: unreadable at \(url.path): \(error)")
@@ -177,7 +272,8 @@ public final class AgentStore: @unchecked Sendable {
     /// Sorted on write, so the file is stable between two runs that deleted the same
     /// agents in a different order.
     public func setDeletedAgentTiles(_ tiles: Set<UUID>) throws {
-        try writer.write(tiles.sorted { $0.uuidString < $1.uuidString }, to: layout.deletedAgentTilesFile)
+        try writer(backups: layout.deletedAgentTilesBackupsDirectory)
+            .write(tiles.sorted { $0.uuidString < $1.uuidString }, to: layout.deletedAgentTilesFile)
     }
 
     /// Every agent from every project. One unreadable file is skipped and named
@@ -188,6 +284,18 @@ public final class AgentStore: @unchecked Sendable {
     /// order of the locked decisions gets the same sequence on every load; the
     /// directory enumeration order is not stable and must never be relied on.
     public func loadAll() throws -> [AgentRecord] {
+        try loadAll(skipping: [])
+    }
+
+    /// Record files `loadAll` has decoded since launch, for the delegation-at-
+    /// scale witness: a spawn that re-read every record cost 15% of main.
+    public static var recordsDecodedForQA: Int { recordsDecoded.value }
+    private static let recordsDecoded = QACounter()
+
+    /// `loadAll` without decoding the records whose ids are in `known`: for a
+    /// caller that already holds those, it costs one directory listing plus the
+    /// records it does not have.
+    public func loadAll(skipping known: Set<AgentID>) throws -> [AgentRecord] {
         let dir = layout.agentsDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
         let entries = try FileManager.default.contentsOfDirectory(
@@ -198,7 +306,14 @@ public final class AgentStore: @unchecked Sendable {
         var records: [AgentRecord] = []
         for entry in entries where entry.pathExtension == "json" {
             do {
-                let record: AgentRecord = try writer.read(at: entry)
+                // A record file is always `<agent id>.json`; anything else keeps
+                // the shared folder its backups were written to.
+                let stem = entry.deletingPathExtension().lastPathComponent
+                let id = UUID(uuidString: stem).map(AgentID.init(rawValue:))
+                if let id, known.contains(id) { continue }
+                let reader = id.map { writer(for: $0) } ?? writer(backups: layout.backupsDirectory)
+                Self.recordsDecoded.increment()
+                let record: AgentRecord = try reader.read(at: entry)
                 records.append(record)
             } catch {
                 warn("AgentStore.loadAll: skipping unreadable record at \(entry.path): \(error)")

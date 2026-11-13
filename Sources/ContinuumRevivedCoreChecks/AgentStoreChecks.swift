@@ -25,7 +25,8 @@ func runAgentStoreChecks() {
         try runAgentStoreCorruptFileCheck(root: root)
         try runAgentStoreConcurrentUpsertCheck(root: root)
         try runAgentStoreBackupScanCheck(root: root)
-        print("AgentStore checks: app-support root, round-trip, cross-project deterministic order, corrupt-file skip, concurrent upsert, and one backup scan per save passed")
+        try runAgentStoreBackupScaleCheck(root: root)
+        print("AgentStore checks: app-support root, round-trip, cross-project deterministic order, corrupt-file skip, concurrent upsert, one backup scan per save, and save cost independent of agent count passed")
     } catch {
         fputs("FAIL: AgentStore checks failed: \(error)\n", stderr)
         Foundation.exit(1)
@@ -408,7 +409,6 @@ private func runAgentStoreBackupScanCheck(root: URL) throws {
         neighbour.displayName = "Neighbour \(index)"
         try store.upsert(neighbour)
     }
-    let backupsBefore = try FileManager.default.contentsOfDirectory(atPath: store.layout.backupsDirectory.path).count
 
     var record = makeAgentStoreFixture(id: agentId("7F"), createdAt: created)
     for revision in 0..<6 {
@@ -423,9 +423,143 @@ private func runAgentStoreBackupScanCheck(root: URL) throws {
     guard try store.load(id: record.id)?.displayName == "Revision 5" else {
         throw AgentStoreCheckError("the last save did not land")
     }
-    let names = try FileManager.default.contentsOfDirectory(atPath: store.layout.backupsDirectory.path)
-    let ownCount = names.count - backupsBefore
+    let ownCount = try FileManager.default.contentsOfDirectory(
+        atPath: store.layout.backupsDirectory(for: record.id).path).count
     guard ownCount == 3 else {
-        throw AgentStoreCheckError("this agent keeps \(ownCount) backups after 6 saves; retention is 3 and no neighbour's backup may go")
+        throw AgentStoreCheckError("this agent keeps \(ownCount) backups after 6 saves; retention is 3")
     }
+    for index in 0..<20 {
+        let neighbour = agentId(String(format: "%02X", 0x40 + index))
+        let kept = try FileManager.default.contentsOfDirectory(
+            atPath: store.layout.backupsDirectory(for: neighbour).path).count
+        guard kept == 1 else {
+            throw AgentStoreCheckError("neighbour \(index) keeps \(kept) backups after this agent's saves; it wrote 1")
+        }
+    }
+}
+
+// 7 · A save's cost does not depend on how many agents exist (2026-11-12,
+// .plans/110 "Live usage profile"). Dylan's 0.7.47 had 2,228 agents and 6,724
+// backups in ONE `agents/backups` folder, and every record save listed all of
+// it on the main thread: 10-21% of the main thread in every active sample.
+//
+// The store is seeded in the exact on-disk layout 0.7.47 wrote (v2 and legacy
+// names, all in the shared folder), then opened by the current store. Each save
+// must read the same number of directory entries with 20 neighbours as with
+// 2,000; retention stays 3; no neighbour backup is lost; and the restore reader
+// (`load` over a corrupt record) still finds migrated v2 and legacy backups.
+private func runAgentStoreBackupScaleCheck(root: URL) throws {
+    var perSave: [Int: [Int]] = [:]
+    for neighbours in [20, 2_000] {
+        perSave[neighbours] = try runAgentStoreBackupScale(
+            root: root.appendingPathComponent("backup-scale-\(neighbours)", isDirectory: true),
+            neighbours: neighbours)
+    }
+    let small = perSave[20]!, large = perSave[2_000]!
+    guard small == large else {
+        throw AgentStoreCheckError("directory entries read per save grow with the agent count: \(small) with 20 neighbours, \(large) with 2,000")
+    }
+}
+
+/// Returns the directory entries each of six saves read.
+private func runAgentStoreBackupScale(root: URL, neighbours: Int) throws -> [Int] {
+    let layout = AgentStoreLayout(applicationSupportDirectory: root)
+    let shared = layout.backupsDirectory
+    try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: true)
+    let encoder = JSONCodec.makeEncoder(prettyPrinted: true)
+    let created = Date(timeIntervalSinceReferenceDate: 806_100_000)
+    func prefix(_ id: AgentID) -> String {
+        AtomicWriter.backupNamePrefix(
+            forCanonicalIdentityPath: AtomicWriter.canonicalIdentityPath(for: layout.agentFile(id: id)))
+    }
+    func v2Name(_ id: AgentID, generation: Int) -> String {
+        prefix(id) + String(format: "%020d", generation) + "-2026-11-12T08-00-00.000Z"
+    }
+    func scaleId(_ index: Int) -> AgentID {
+        AgentID(rawValue: UUID(uuidString: String(format: "2A300000-0000-4000-8000-%012X", index))!)
+    }
+
+    // The 0.7.47 layout: every record's backups in the one shared folder.
+    for index in 0..<neighbours {
+        var record = makeAgentStoreFixture(id: scaleId(index), createdAt: created)
+        record.displayName = "Neighbour \(index)"
+        let data = try encoder.encode(record)
+        try data.write(to: layout.agentFile(id: record.id))
+        try data.write(to: shared.appendingPathComponent(v2Name(record.id, generation: 1)))
+    }
+    let target = makeAgentStoreFixture(id: scaleId(0xFFFF), createdAt: created)
+    try encoder.encode(target).write(to: layout.agentFile(id: target.id))
+    for generation in 1...3 {
+        var old = target
+        old.displayName = "Seeded \(generation)"
+        try encoder.encode(old).write(to: shared.appendingPathComponent(v2Name(target.id, generation: generation)))
+    }
+    // A record whose only backup carries the pre-v2 name, and a corrupt primary.
+    var legacy = makeAgentStoreFixture(id: scaleId(0xFFFE), createdAt: created)
+    legacy.displayName = "Legacy backup"
+    try encoder.encode(legacy).write(to: shared.appendingPathComponent(
+        "\(legacy.id.rawValue.uuidString).2026-08-20T10-00-00.000Z.000000.json"))
+    try Data("{".utf8).write(to: layout.agentFile(id: legacy.id))
+
+    let openStarted = Date()
+    let store = AgentStore(applicationSupportDirectory: root, retainedBackups: 3, warn: { _ in })
+    let openSeconds = Date().timeIntervalSince(openStarted)
+
+    var record = target
+    var entries: [Int] = []
+    let savesStarted = Date()
+    for revision in 0..<6 {
+        record.displayName = "Revision \(revision)"
+        let before = AtomicWriter.backupEntriesScannedForQA
+        try store.upsert(record)
+        entries.append(AtomicWriter.backupEntriesScannedForQA - before)
+    }
+    let perSaveMs = Date().timeIntervalSince(savesStarted) * 1000 / 6
+    let tilesBefore = AtomicWriter.backupEntriesScannedForQA
+    try store.setDeletedAgentTiles([UUID(uuidString: "2A300000-0000-4000-8000-00000000AAAA")!])
+    try store.setDeletedAgentTiles([UUID(uuidString: "2A300000-0000-4000-8000-00000000BBBB")!])
+    let tileEntries = AtomicWriter.backupEntriesScannedForQA - tilesBefore
+    print("  agent-store scale: \(neighbours) neighbours: open \(String(format: "%.1f", openSeconds * 1000)) ms, entries read per save \(entries), \(String(format: "%.2f", perSaveMs)) ms per save, tombstone saves read \(tileEntries)")
+
+    // Every backup file under agents/backups, wherever the store keeps it.
+    var backupNames: [String] = []
+    if let walker = FileManager.default.enumerator(atPath: shared.path) {
+        for case let path as String in walker where !path.hasSuffix("/") {
+            var isDirectory: ObjCBool = false
+            FileManager.default.fileExists(atPath: shared.appendingPathComponent(path).path, isDirectory: &isDirectory)
+            if !isDirectory.boolValue { backupNames.append((path as NSString).lastPathComponent) }
+        }
+    }
+    let own = backupNames.filter { $0.hasPrefix(prefix(target.id)) }.count
+    guard own == 3 else {
+        throw AgentStoreCheckError("\(neighbours) neighbours: the saved agent keeps \(own) backups; retention is 3")
+    }
+    let neighbourBackups = (0..<neighbours).filter { index in
+        backupNames.contains(v2Name(scaleId(index), generation: 1))
+    }.count
+    guard neighbourBackups == neighbours else {
+        throw AgentStoreCheckError("\(neighbours) neighbours: \(neighbours - neighbourBackups) neighbour backups are gone")
+    }
+
+    // The restore reader: a corrupt record falls back to its newest backup.
+    try Data("{".utf8).write(to: layout.agentFile(id: target.id))
+    guard try store.load(id: target.id)?.displayName == "Revision 4" else {
+        throw AgentStoreCheckError("\(neighbours) neighbours: a corrupt record did not restore from its newest backup")
+    }
+    let neighbourId = scaleId(neighbours / 2)
+    try Data("{".utf8).write(to: layout.agentFile(id: neighbourId))
+    guard try store.load(id: neighbourId)?.displayName == "Neighbour \(neighbours / 2)" else {
+        throw AgentStoreCheckError("\(neighbours) neighbours: a corrupt neighbour did not restore from the backup 0.7.47 wrote")
+    }
+    guard try store.load(id: legacy.id)?.displayName == "Legacy backup" else {
+        throw AgentStoreCheckError("\(neighbours) neighbours: a record whose only backup has the pre-v2 name did not restore")
+    }
+    guard store.loadDeletedAgentTiles() == [UUID(uuidString: "2A300000-0000-4000-8000-00000000BBBB")!] else {
+        throw AgentStoreCheckError("\(neighbours) neighbours: the deleted-agent tombstone did not round-trip")
+    }
+    let all = try store.loadAll()
+    guard all.count == neighbours + 2 else {
+        throw AgentStoreCheckError("\(neighbours) neighbours: loadAll returned \(all.count) records, expected \(neighbours + 2)")
+    }
+    return entries
 }

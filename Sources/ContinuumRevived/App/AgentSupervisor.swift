@@ -1067,6 +1067,11 @@ final class AgentSupervisor {
     /// injectable: the checks exercise the failure path with a real failure (a `cwd`
     /// that is not a repository), so a fake would test less than the real thing.
     private let worktrees = WorktreeManager()
+    /// `handleSpawnRequestAsync`: spawns waiting for the one in flight, and the
+    /// main-thread halves of git steps running off it.
+    private var queuedSpawns: [() -> Void] = []
+    private var spawnInFlight = false
+    private var pendingSpawnCommits: [UUID: (Result<SpawnCheckoutPlan.Checkout, any Error>) -> Void] = [:]
     /// P2C.4: the branch each agent's working directory is on. Cached because the
     /// tile header that renders it re-lays out on every streamed token, and a
     /// `git rev-parse` per render is a process launch per token.
@@ -3127,19 +3132,23 @@ final class AgentSupervisor {
         checkoutOverride: URL? = nil,
         managedIsolation: Bool = false,
         isolationTitle: String? = nil,
-        baseHead: String? = nil
+        baseHead: String? = nil,
+        id mintedID: AgentID? = nil,
+        preparedWorktree: WorktreeManager.Worktree? = nil
     ) throws -> AgentID {
         // The id is minted HERE, before anything is created, because the slug is
         // derived from it — `WorktreeManager.slug` id-suffixes so two agents given the
         // same role and prompt do not land on one directory and one branch.
-        let id = AgentID(rawValue: UUID())
+        // `handleSpawnRequest` mints it earlier and passes the worktree it made
+        // with that slug off the main thread.
+        let id = mintedID ?? AgentID(rawValue: UUID())
         let logicalProjectRoot = projectRoot ?? cwd
         var checkoutRoot = checkoutOverride ?? projectRoot ?? cwd
         var workingDirectory = cwd
         var branch: String?
         var worktreeId: String?
         if isolated {
-            let worktree = try worktrees.add(
+            let worktree = try preparedWorktree ?? worktrees.add(
                 repo: checkoutOverride ?? logicalProjectRoot,
                 slug: WorktreeManager.slug(role: role, prompt: managedIsolation ? (isolationTitle ?? prompt) : prompt, id: id),
                 containerRepo: managedIsolation ? try worktrees.list(repo: checkoutOverride ?? logicalProjectRoot).first?.path : nil,
@@ -3325,7 +3334,12 @@ final class AgentSupervisor {
                     warn("AgentSupervisor: cannot reserve a child ordinal; parent \(parentAgentID.rawValue.uuidString) is absent from AgentStore")
                     return nil
                 }
-                let durableChildren = try store.loadAll()
+                // Children this supervisor holds, plus any record on disk it
+                // does not (another restored supervisor's). Decoding every
+                // record here was 15% of the main thread per delegation with
+                // 2,228 agents (2026-11-12); a child's parent and ordinal never
+                // change after it is written, so the in-memory copy is current.
+                let durableChildren = try (Array(records.values) + store.loadAll(skipping: Set(records.keys)))
                     .filter { $0.parentAgentID == parentAgentID }
                     .compactMap(\.parentRelativeOrdinal)
                     .filter { $0 > 0 }
@@ -5842,44 +5856,137 @@ final class AgentSupervisor {
     /// Returns nil on a refusal, having said so in the parent's transcript.
     @discardableResult
     func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil) -> AgentID? {
+        var outcome = SpawnOutcome.refused
+        startSpawn(request, from: parentId, childSelection: childSelection, mode: mode, retryOf: retryOf,
+                   originalBrief: originalBrief, checkoutOffMain: false, gate: { nil }) { outcome = $0 }
+        if case let .spawned(id) = outcome { return id }
+        return nil
+    }
+
+    /// What became of a spawn that answers later.
+    enum SpawnOutcome: Equatable {
+        case spawned(AgentID)
+        /// Refused, said on the parent's stream; `spawnRefusal(for:)` has why.
+        case refused
+        /// The caller's gate closed before the child was created: nothing exists.
+        case gateClosed(String)
+    }
+
+    /// `handleSpawnRequest` with its git step (`rev-parse HEAD`, and `worktree
+    /// add` when the child is isolated) off the main thread. Delegating a helper
+    /// ran both there and blocked Array for about a second (2026-11-12 profile).
+    ///
+    /// Validation runs first, on main; the child is created back on main, after
+    /// `gate` (nil = go on) re-checks what the caller checked before the git step:
+    /// a cancelled or revoked request creates nothing. Spawns through here run one
+    /// at a time in arrival order, so each sees every earlier child, as the
+    /// synchronous path did. `completion` runs once, on main.
+    ///
+    /// `checkoutOffMain: false` runs the same steps inline and answers before
+    /// returning (the synchronous `WorkspaceAPIService.dispatch` used by checks).
+    func handleSpawnRequestAsync(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil, checkoutOffMain: Bool = true, gate: @escaping () -> String?, completion: @escaping (SpawnOutcome) -> Void) {
+        guard checkoutOffMain else {
+            return startSpawn(request, from: parentId, childSelection: childSelection, mode: mode, retryOf: retryOf,
+                              originalBrief: originalBrief, checkoutOffMain: false, gate: gate, completion: completion)
+        }
+        queuedSpawns.append { [weak self] in
+            guard let self else { return }
+            self.startSpawn(request, from: parentId, childSelection: childSelection, mode: mode, retryOf: retryOf,
+                            originalBrief: originalBrief, checkoutOffMain: true, gate: gate) { [weak self] outcome in
+                completion(outcome)
+                self?.spawnInFlight = false
+                self?.runNextQueuedSpawn()
+            }
+        }
+        runNextQueuedSpawn()
+    }
+
+    private func runNextQueuedSpawn() {
+        guard !spawnInFlight, !queuedSpawns.isEmpty else { return }
+        spawnInFlight = true
+        queuedSpawns.removeFirst()()
+    }
+
+    /// The git half of a spawn. Sendable and main-actor free, so it can run on
+    /// any queue; it reads nothing of the supervisor.
+    struct SpawnCheckoutPlan: Sendable {
+        let headRepo: URL
+        let requestIsolated: Bool
+        let overlapping: Bool
+        let worktreeRepo: URL
+        let slug: String
+
+        struct Checkout: Sendable {
+            var baseHead: String?
+            var isolate: Bool
+            var notice: String?
+            var worktree: WorktreeManager.Worktree?
+        }
+
+        func resolve(with worktrees: WorktreeManager) throws -> Checkout {
+            var checkout = Checkout(isolate: requestIsolated || overlapping)
+            do { checkout.baseHead = try worktrees.head(repo: headRepo) }
+            catch WorktreeManager.WorktreeError.invalidRepository {
+                if overlapping && !requestIsolated {
+                    checkout.isolate = false
+                    checkout.notice = "Shared checkout: not a git repository; concurrent helper isolation unavailable."
+                }
+            }
+            catch { if checkout.isolate { throw error } }
+            // A git repository with no HEAD or another git failure is not a
+            // non-git fallback. Creation must fail rather than silently share it.
+            if checkout.isolate {
+                checkout.worktree = try worktrees.add(
+                    repo: worktreeRepo, slug: slug,
+                    containerRepo: overlapping ? try worktrees.list(repo: worktreeRepo).first?.path : nil,
+                    baseRef: checkout.baseHead)
+            }
+            return checkout
+        }
+    }
+
+    private func startSpawn(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection?, mode: AgentMode, retryOf: AgentID?, originalBrief: String?, checkoutOffMain: Bool, gate: @escaping () -> String?, completion: @escaping (SpawnOutcome) -> Void) {
+        func answer(_ id: AgentID?) {
+            completion(id.map(SpawnOutcome.spawned) ?? .refused)
+        }
         guard let parent = records[parentId] else {
-            return refuseSpawn(.unknownParent, for: parentId)
+            return answer(refuseSpawn(.unknownParent, for: parentId))
         }
         // C7: an OBSERVED child is not a spawn at all. claude has already started
         // it inside itself by the time the `Agent` call reaches us, so there is
         // nothing to launch — only a record to mint so the child's own frames have
         // somewhere to land and the parent gets a chip.
         if request.observedOnly {
-            return adoptObservedChild(request, from: parentId, parent: parent)
+            return answer(adoptObservedChild(request, from: parentId, parent: parent))
         }
         // C12 — a mirrored subagent has no runner behind it at all: refuse before
         // even asking what harness it claims, since that field describes who
         // PRODUCED it, not something Array can spawn through.
         guard parent.capabilities != .observedReadOnly else {
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .observedParentCannotSpawn, for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         guard let parentHarness = parent.harness else {
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: parent harness ownership is unresolved")
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .roleUnresolved, for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         // A codex parent is no longer refused here (T4b): a non-observed request
         // from one is its `array_delegate` over MCP, a child Array runs itself.
         // Codex-RUN subagents arrive `observedOnly` and were adopted above.
         let depth = depth(of: parentId) + 1
         guard depth <= Self.maxSpawnDepth else {
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         let activeChildren = activeManagedChildren(of: parentId).count
         if let cap = maximumActiveManagedChildren(), activeChildren >= cap {
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .childCapped(children: activeChildren, cap: cap), for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         // The role resolves against the PROJECT's registry, not the parent's possibly
         // isolated checkout — and after the caps, so a request that was going to be
@@ -5891,10 +5998,10 @@ final class AgentSupervisor {
         // requested role is not defined" invites reading it as one. Checked before
         // `resolve`, because resolve cannot tell the two apart.
         if request.role != nil, registry.definesNoRoles {
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .projectDeclaresNoRoles(directory: RoleRegistry.directoryName(for: parentHarness)),
                 for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         do {
             resolvedRole = try registry.resolve(
@@ -5903,37 +6010,100 @@ final class AgentSupervisor {
             )
         } catch {
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .roleUnresolved, for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
-        do {
-            let managed = parent.mode == .managed
-            let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
-            let overlapping = managed && records.values.contains {
-                $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
-                    && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
-                    && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)
+        let managed = parent.mode == .managed
+        let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
+        let overlapping = managed && records.values.contains {
+            $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
+                && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
+                && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)
+        }
+        // The id is minted before the git step because the worktree slug is
+        // derived from it (see `spawn`).
+        let childID = AgentID(rawValue: UUID())
+        // The child's task is the parent's words, so it reaches the child as a
+        // message from the parent, never as the user's prompt.
+        let childPrompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? request.prompt : agentMessageText(request.prompt, from: parentId)
+        let isolationTitle = request.displayLabel ?? originalBrief ?? request.prompt
+        let plan = SpawnCheckoutPlan(
+            headRepo: managed ? checkout : projectRoot,
+            requestIsolated: request.isolated,
+            overlapping: overlapping,
+            worktreeRepo: managed ? checkout : projectRoot,
+            slug: WorktreeManager.slug(
+                role: request.role, prompt: overlapping ? isolationTitle : childPrompt, id: childID))
+
+        let commit: (Result<SpawnCheckoutPlan.Checkout, any Error>) -> Void = { [weak self] resolution in
+            guard let self else { return }
+            let checkoutResult: SpawnCheckoutPlan.Checkout
+            do { checkoutResult = try resolution.get() } catch {
+                // The isolated spawn refuses to fall back to the shared checkout (P2C.2),
+                // so a failed worktree is a failed spawn — reported, not downgraded.
+                self.warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
+                return answer(self.refuseSpawn(
+                    .worktreeFailed, for: parentId,
+                    handle: request.sourceItemID, requestedRole: request.role))
             }
-            var isolate = request.isolated || overlapping
-            var notice: String?
-            var baseHead: String?
-            do { baseHead = try worktrees.head(repo: managed ? checkout : projectRoot) }
-            catch WorktreeManager.WorktreeError.invalidRepository {
-                if overlapping && !request.isolated {
-                    isolate = false
-                    notice = "Shared checkout: not a git repository; concurrent helper isolation unavailable."
+            if let closed = gate() {
+                self.discard(checkoutResult.worktree, repo: plan.worktreeRepo)
+                return completion(.gateClosed(closed))
+            }
+            if checkoutOffMain {
+                // Main ran other work during the git step: the parent may be gone
+                // and a synchronous spawn may have taken the last child slot.
+                guard self.records[parentId] != nil else {
+                    self.discard(checkoutResult.worktree, repo: plan.worktreeRepo)
+                    return answer(self.refuseSpawn(.unknownParent, for: parentId))
+                }
+                let active = self.activeManagedChildren(of: parentId).count
+                if let cap = self.maximumActiveManagedChildren(), active >= cap {
+                    self.discard(checkoutResult.worktree, repo: plan.worktreeRepo)
+                    return answer(self.refuseSpawn(
+                        .childCapped(children: active, cap: cap), for: parentId,
+                        handle: request.sourceItemID, requestedRole: request.role))
                 }
             }
-            catch { if isolate { throw error } }
-            // A git repository with no HEAD or another git failure is not a
-            // non-git fallback. Creation must fail rather than silently share it.
+            answer(self.commitSpawn(
+                request, from: parentId, parent: parent, parentHarness: parentHarness,
+                childID: childID, childPrompt: childPrompt, childSelection: childSelection,
+                resolvedRole: resolvedRole, mode: mode, retryOf: retryOf, originalBrief: originalBrief,
+                managed: managed, checkout: checkout, projectRoot: projectRoot,
+                overlapping: overlapping, isolationTitle: isolationTitle, resolved: checkoutResult))
+        }
+        let worktrees = self.worktrees
+        guard checkoutOffMain else {
+            return commit(Result { try plan.resolve(with: worktrees) })
+        }
+        let token = UUID()
+        pendingSpawnCommits[token] = commit
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let resolution = Result { try plan.resolve(with: worktrees) }
+            DispatchQueue.main.async {
+                self?.pendingSpawnCommits.removeValue(forKey: token)?(resolution)
+            }
+        }
+    }
+
+    /// A worktree made for a child that was then not created. Its branch has no
+    /// commits, so removing both loses nothing. Off main, like its creation.
+    private func discard(_ worktree: WorktreeManager.Worktree?, repo: URL) {
+        guard let worktree else { return }
+        let worktrees = self.worktrees
+        DispatchQueue.global(qos: .utility).async {
+            try? worktrees.remove(repo: repo, path: worktree.path, force: true)
+            if let branch = worktree.branch { try? worktrees.deleteBranch(repo: repo, branch: branch) }
+        }
+    }
+
+    private func commitSpawn(_ request: SpawnRequest, from parentId: AgentID, parent: AgentRecord, parentHarness: AgentHarness, childID mintedID: AgentID, childPrompt: String, childSelection: AgentLaunchSelection?, resolvedRole: RoleRegistry.Resolution, mode: AgentMode, retryOf: AgentID?, originalBrief: String?, managed: Bool, checkout: URL, projectRoot: URL, overlapping: Bool, isolationTitle: String, resolved: SpawnCheckoutPlan.Checkout) -> AgentID? {
+        do {
             let childID = try spawn(
                 role: request.role,
-                // The child's task is the parent's words, so it reaches the
-                // child as a message from the parent, never as the user's prompt.
-                prompt: request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? request.prompt : agentMessageText(request.prompt, from: parentId),
+                prompt: childPrompt,
                 cwd: managed ? URL(fileURLWithPath: parent.cwd, isDirectory: true) : projectRoot,
                 harness: childSelection?.harness ?? parentHarness,
                 mode: mode,
@@ -5943,16 +6113,18 @@ final class AgentSupervisor {
                 projectRoot: projectRoot,
                 homeRelativePath: managed ? parent.homeRelativePath : nil,
                 parentAgentID: parentId,
-                isolated: isolate,
+                isolated: resolved.isolate,
                 checkoutOverride: managed ? checkout : nil,
                 managedIsolation: overlapping,
-                isolationTitle: request.displayLabel ?? originalBrief ?? request.prompt,
-                baseHead: isolate ? baseHead : nil
+                isolationTitle: isolationTitle,
+                baseHead: resolved.isolate ? resolved.baseHead : nil,
+                id: mintedID,
+                preparedWorktree: resolved.worktree
             )
             guard var spawned = records[childID] else { return nil }
             spawned.delegationContext = AgentDelegationContext(
-                brief: originalBrief ?? request.prompt, baseHead: baseHead, retryOf: retryOf,
-                createdWorktree: overlapping && isolate, checkoutNotice: notice)
+                brief: originalBrief ?? request.prompt, baseHead: resolved.baseHead, retryOf: retryOf,
+                createdWorktree: overlapping && resolved.isolate, checkoutNotice: resolved.notice)
             records[childID] = spawned
             persist(spawned)
             // The child record remembers the tool call that asked for it, so its

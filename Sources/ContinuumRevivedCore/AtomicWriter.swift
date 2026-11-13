@@ -100,12 +100,16 @@ public struct AtomicWriter: Sendable {
     /// Scans of a backups directory since launch. One write makes one.
     public static var backupScanCountForQA: Int { backupScans.value }
     private static let backupScans = ScanCounter()
+    /// Directory entries those scans read. A save's cost is this, not the scan
+    /// count: one scan of a folder shared by 2,228 agents read 6,724 names.
+    public static var backupEntriesScannedForQA: Int { backupEntriesScanned.value }
+    private static let backupEntriesScanned = ScanCounter()
 
     private final class ScanCounter: @unchecked Sendable {
         private let lock = NSLock()
         private var count = 0
         var value: Int { lock.lock(); defer { lock.unlock() }; return count }
-        func increment() { lock.lock(); count += 1; lock.unlock() }
+        func increment(by amount: Int = 1) { lock.lock(); count += amount; lock.unlock() }
     }
 
     public let backupsDirectory: URL?
@@ -275,8 +279,18 @@ public struct AtomicWriter: Sendable {
     }
 
     private func targetNamespace(for url: URL) -> String {
-        SHA256.hash(data: Data(canonicalTarget(for: url).path.utf8))
-            .map { String(format: "%02x", $0) }.joined()
+        Self.namespace(forCanonicalIdentityPath: canonicalTarget(for: url).path)
+    }
+
+    private static func namespace(forCanonicalIdentityPath path: String) -> String {
+        SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The prefix every v2 backup of the file at `canonicalIdentityPath` starts
+    /// with. Lets a store that moves its backups (AgentStore's per-agent folders)
+    /// sort a shared folder by owner without re-deriving the naming grammar.
+    public static func backupNamePrefix(forCanonicalIdentityPath path: String) -> String {
+        "array-backup-v2-\(namespace(forCanonicalIdentityPath: path))-"
     }
 
     /// Write `data` to `url` durably:
@@ -405,9 +419,9 @@ public struct AtomicWriter: Sendable {
         // generation is therefore durable, process-independent ordering truth;
         // wall clock is only human-readable metadata.
         Self.backupScans.increment()
-        var existing = backupEntries(
-            for: url, in: backupsDirectory,
-            names: try FileManager.default.contentsOfDirectory(atPath: backupsDirectory.path))
+        let names = try FileManager.default.contentsOfDirectory(atPath: backupsDirectory.path)
+        Self.backupEntriesScanned.increment(by: names.count)
+        var existing = backupEntries(for: url, in: backupsDirectory, names: names)
         guard targetExists else { return existing }
         let maximum = existing.compactMap(\.generation).max() ?? 0
         guard maximum < UInt64.max else { throw POSIXError(.EOVERFLOW) }
