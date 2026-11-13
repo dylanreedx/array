@@ -8,7 +8,9 @@ import ContinuumRevivedCore
 enum PiRoleHostTextChecks {
     typealias Harness = PersonalRulesChecks.Harness
     static func run(root: URL, instructions: HostLaunchInstructions, expected: [String], label: String) async throws -> [[String]] {
-        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: [Harness.model(.pi)]))
+        // Synthetic CLI capability, not a claim about the live Pi catalogue.
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready,
+            models: [Harness.model(.pi)], effortLevels: [Harness.model(.pi): ["low"]]))
         let h = try Harness(root: root, name: "pi-role-\(label)", instructions: instructions)
         defer { h.tearDown() }
         let role = "host-context-role"
