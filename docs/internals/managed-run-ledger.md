@@ -374,13 +374,13 @@ Past a bound, a timeout or a git failure, the row says `evidence.changes:
 unknown` with the reason, never a count.
 
 **Lead or the first helper.** The first helper shares the lead's checkout,
-with no worktree. Never two writers on one checkout: a new helper gets its own
-worktree when a helper there is still running or the lead changed the checkout
-in its open task (a `leadCheckoutChanged` row of that task; a row still on the
-watch's queue is not seen yet). A finished helper re-messaged while a sibling
-writes the same checkout is refused until that sibling finishes. Outside git,
-helpers share with a notice. Witnesses: `--helper-worktree-check`,
-`--lead-checkout-ledger-check` (section `writers`).
+with no worktree, so it sees the lead's uncommitted changes. A new helper gets
+its own worktree only when a helper there is still running. The lead's own
+changes (`leadCheckoutChanged` rows) are recorded and never decide placement:
+a worktree from HEAD would hide them from the helper. A finished helper
+re-messaged while a sibling writes the same checkout is refused until that
+sibling finishes. Outside git, helpers share with a notice. Witnesses:
+`--helper-worktree-check`, `--lead-checkout-ledger-check` (section `writers`).
 The supervisor passes, at the call's start and end, whether any other agent on
 the same checkout path is running. The watch also marks a call when another
 agent on that checkout ended a turn within 0.5 s before the call started, or

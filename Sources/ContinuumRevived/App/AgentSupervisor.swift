@@ -6056,16 +6056,15 @@ final class AgentSupervisor {
         do {
             let managed = parent.mode == .managed
             let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
-            // Never two writers on one checkout. The first helper shares it, as
-            // a lead that has not changed it this task is not writing; another
-            // writer there now (a helper still running, or the lead's own
-            // changes in its open task, from the run ledger) means a worktree.
-            let leadWrote = runLedger.leadChangedCheckoutInOpenTask(parentId.rawValue)
-            let overlapping = managed && (leadWrote || records.values.contains {
+            // The first helper shares the lead's checkout, uncommitted changes
+            // and all; only a helper still running there gives a new one a
+            // worktree. The run ledger records the lead's own changes and never
+            // decides placement: a worktree from HEAD would hide them.
+            let overlapping = managed && records.values.contains {
                 $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
                     && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
                     && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)
-            })
+            }
             var isolate = request.isolated || overlapping
             var notice: String?
             var baseHead: String?
@@ -6073,7 +6072,7 @@ final class AgentSupervisor {
             catch WorktreeManager.WorktreeError.invalidRepository {
                 if overlapping && !request.isolated {
                     isolate = false
-                    notice = "Shared checkout: not a git repository, so this helper writes the same checkout as its lead or another helper."
+                    notice = "Shared checkout: not a git repository; concurrent helper isolation unavailable."
                 }
             }
             catch { if isolate { throw error } }

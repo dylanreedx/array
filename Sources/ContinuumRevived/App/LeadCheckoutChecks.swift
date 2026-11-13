@@ -578,8 +578,10 @@ enum LeadCheckoutChecks {
         try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
-    /// Never two writers on one checkout: a lead that changed its checkout in
-    /// its open task (its ledger row) gives the next helper its own worktree.
+    /// A lead that changed its checkout in its open task still shares it with
+    /// its first helper, so the helper sees the lead's uncommitted change. The
+    /// ledger records the lead's write and never decides placement: a worktree
+    /// from HEAD would hide that change from the helper.
     static func writers() async throws {
         let b = try ManagedModeChecks.bench("lead-writers")
         defer { b.tearDown() }
@@ -604,13 +606,27 @@ enum LeadCheckoutChecks {
               let child = supervisor.records[AgentID(rawValue: uuid)] else {
             throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout: delegation failed: \(reply.reply)")
         }
-        let childRoot = URL(fileURLWithPath: child.checkoutRoot)
-        try expect(childRoot.resolvingSymlinksInPath() != root.resolvingSymlinksInPath()
-                   && childRoot.deletingLastPathComponent().lastPathComponent == ".worktrees",
-                   "a lead that changed its checkout this task shared it with its new helper")
+        // The lead's write is on record, so this is the case placement used to read.
+        let ledgerURL = AgentStore(smokeTest: false).layout.applicationSupportDirectory.appendingPathComponent("run-ledger/ledger.jsonl")
+        let written = ManagedRunLedgerChecks.rows(ledgerURL, "leadCheckoutChanged", agent: lead).flatMap { $0["paths"] as? [String] ?? [] }
+        try expect(written.contains("Sources/Eps.swift"), "the lead's write was not recorded before it delegated: \(written)")
+        let leadText = try String(contentsOf: root.appendingPathComponent("Sources/Eps.swift"), encoding: .utf8)
+        try expect(try HelperEvidenceChecks.gitOutput(["status", "--porcelain", "--", "Sources/Eps.swift"], root).isEmpty == false,
+                   "the lead's change is not uncommitted")
+        // The helper's own launch runs where its record says, in the lead's checkout.
+        try await AgentPresenceChecks.eventually("lead-checkout: the helper did not launch", timeout: 20) {
+            (try? ManagedModeChecks.argv(b, child.id)) != nil
+        }
+        let childRoot = URL(fileURLWithPath: supervisor.records[child.id]!.checkoutRoot)
+        try expect(childRoot.resolvingSymlinksInPath() == root.resolvingSymlinksInPath(),
+                   "a lead that changed its checkout gave its first helper a worktree at \(childRoot.path), hiding the lead's uncommitted change")
+        try expect(child.delegationContext?.createdWorktree != true, "the first helper's delegation created a worktree")
+        try expect(try HelperRetryWorktreeChecks.worktreeCount(root) == 1, "the first helper's delegation created a worktree")
+        try expect((try? String(contentsOf: childRoot.appendingPathComponent("Sources/Eps.swift"), encoding: .utf8)) == leadText,
+                   "the helper's checkout does not hold the lead's uncommitted change")
         try Data().write(to: root.appendingPathComponent("release-iso"))
         supervisor.stopAll()
-        print("Lead checkout writers passed: a lead that changed its checkout in its open task gives its next helper its own worktree")
+        print("Lead checkout writers passed: a lead that changed its checkout in its open task shares it with its first helper, uncommitted change and all, and no worktree is made")
     }
 
     static func seen() async throws {
