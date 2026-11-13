@@ -62,3 +62,42 @@ Lead should obtain sibling review (child review depth is blocked):
    sound, including a changed head and restart?
 4. Should the later integration owner supply an explicit head at its owned
    merge seam instead of using the report seam's host capture?
+
+## Independent review: REQUEST CHANGES
+
+71793931 is not integrated or approved. Scheduling stays OFF. The registered
+worker fixture bypasses AgentSupervisor.fileReport, actual child checkout
+selection and packaged resource lookup. Its missing-evaluator negative
+control does not establish a faithful baseline production runtime RED.
+
+The reviewer found a reproducible checkout-execution path in both evaluators:
+git log inherited local log.showSignature=true and gpg.program. A signed
+commit caused Git to invoke that program. check-prepass-signature-safety.py
+creates a signed commit object and malicious local config, proves invocation
+in a positive control, then checks the real evaluator. It FAILED against
+71793931 (program executed); adding --no-show-signature to both original and
+packaged evaluators makes it PASS for both. Both invocations are registered
+as matrix legs; no full matrix summary was run.
+
+The following P2 review requests remain OPEN and block integration:
+- Replace asynchronous HEAD selection with an explicitly owned immutable
+  candidate-ready boundary and prove it through the real supervisor report,
+  child checkout and bundled lookup production path.
+- Consume admission and completion through an observable host-owned review
+  workflow; fileReport currently discards both. reviewOutcome is not a
+  production consumer.
+- Helper-writable .array JSON is NOT authoritative host evidence. Move
+  durability to a channel-isolated host-owned store and bind exact candidate
+  and evaluator identity. The current equality check does not prevent forgery.
+- Parent timeout/output caps do not establish a process-tree or memory bound.
+  Prove descendant termination and enforce resource bounds before enabling.
+- Establish faithful production runtime RED/GREEN, then run full app/matrix,
+  sibling review, and representative timing. Do not describe this scaffold
+  as closure of automatic pre-pass gap 16.
+
+Signature-fix validation: original 71793931 evaluator and packaged 71793931
+evaluator both reproduced runtime RED (checkout-selected program executed).
+Both revised evaluators passed the same positive-control/malicious-config
+witness. Both existing evaluator suites passed 44/44 after the fix. No Swift
+build was needed for the Python behavior change; the outcome's pinned evaluator
+digest was refreshed. Full matrix remains unrun. These results close P1 only.

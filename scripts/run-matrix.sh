@@ -769,6 +769,8 @@ fi
 run_leg scripts/check-matrix-inventory.sh
 run_leg python3 scripts/check-gate-prepass.py
 run_leg scripts/check-candidate-prepass.sh
+run_leg python3 scripts/check-prepass-signature-safety.py
+run_leg python3 scripts/check-prepass-signature-safety.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
 if [[ "$BROWSER_SCHEDULING_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run_app_check .build/debug/Array --browser-background-scheduling-check

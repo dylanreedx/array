@@ -8,7 +8,7 @@ struct PrepassCandidate: Codable, Equatable {
 }
 
 struct CandidatePrepassOutcome: Codable {
-    var evaluatorVersion: String = "97e46b615be5d843478dbc4b0a729b892013283a6382715d6cba5cfef57f051b"
+    var evaluatorVersion: String = "eda302a28967ec2f2e4ad5587a93cae08e0187dd832c34c0b7399f8ddaed20f5"
     let candidate: PrepassCandidate?
     let state: String
     let report: String?

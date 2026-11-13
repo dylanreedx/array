@@ -817,7 +817,7 @@ def finding(rule, severity, message, **where):
 
 
 def check_commits(repo, base, head):
-    out = repo.text("log", "--reverse", "--format=%H%x00%B%x1e", "%s..%s" % (base, head))
+    out = repo.text("log", "--no-show-signature", "--reverse", "--format=%H%x00%B%x1e", "%s..%s" % (base, head))
     found = []
     commits = 0
     for record in out.split("\x1e"):
