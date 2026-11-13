@@ -363,7 +363,6 @@ check --throbber-timeline-check
 check --ticket-queue-tile-check
 check --tidy-camera-check
 check --tidy-offscreen-defer-check
-check --tidy-packer-check
 check --tidy-zone-neighbours-check
 check --tidy-zone-shortcut-check
 check --tile-action-check
@@ -987,7 +986,6 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --project-standards-index-ch
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
-leg run_leg .build/debug/ContinuumRevivedCoreChecks --tidy-packer-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
@@ -1019,6 +1017,7 @@ leg run_leg python3 benchmarks/replay/check.py --replay-containment-check
 leg run_leg python3 benchmarks/replay/check.py --replay-grader-check
 leg run_leg python3 benchmarks/replay/check.py --replay-isolation-check
 leg run_leg python3 benchmarks/replay/check.py --replay-scoring-check
+leg run_leg python3 benchmarks/replay/check_live_temp.py
 leg run_leg python3 scripts/check-collaboration-pair-features.py
 leg run_leg python3 scripts/check-collaboration-pair.py
 leg run_leg python3 scripts/check-gate-prepass.py
