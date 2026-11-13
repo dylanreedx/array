@@ -60,8 +60,25 @@ struct HelperProtectedPaths {
     static let gitInvocations = LeadCheckoutWatch.Locked(0)
     static func git(_ arguments: [String], _ root: URL) throws -> Data {
         gitInvocations.withLock { $0 += 1 }
-        return try HelperEvidence.git(["--no-optional-locks"] + arguments, root)
+        let process = Process(), output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["--no-optional-locks", "-C", root.path] + arguments
+        process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        try process.run()
+        let deadline = DispatchWorkItem {
+            if process.isRunning { process.terminate() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: deadline)
+        defer { deadline.cancel() }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw CocoaError(.fileReadUnknown) }
+        return data
     }
+    static let maximumRowsPerSweep = 128
     static let conventions = [
         "Sources/*Checks/**", "Sources/**/*Checks.swift", "Sources/**/*Check.swift",
         "scripts/check-*", "scripts/checks/**", "scripts/test-*", "scripts/tests/**", "checks/**",
@@ -95,7 +112,7 @@ struct HelperProtectedPaths {
             manifestCheckFiles = HelperEvidence.Manifest(json: data).entries.flatMap(\.checkFiles)
         }
         // updateValue: a subscript assignment of nil would drop a path absent at delegation.
-        for path in dirty { startedDirty.updateValue(fingerprint(path), forKey: path) }
+        for path in dirty where reason(path) != nil { startedDirty.updateValue(fingerprint(path), forKey: path) }
     }
 
     /// Paths that differ from `base` in the working tree, renames split into a
@@ -152,6 +169,8 @@ struct HelperProtectedPaths {
         }
         var found: [Change] = []
         for path in now.union(startedDirty.keys).sorted() {
+            guard found.count < Self.maximumRowsPerSweep else { break }
+            guard let reason = reason(path) else { continue }
             let change: String
             if let before = startedDirty[path] {
                 let after = fingerprint(path)
@@ -161,7 +180,6 @@ struct HelperProtectedPaths {
                 guard atBase.contains(path) else { continue }  // created by the helper
                 change = exists(path) ? "modified" : "deleted"
             }
-            guard let reason = reason(path) else { continue }
             let attribution = edited.contains(path) ? (shared ? "sharedObservedEdit" : "observedEdit") : (shared ? "unattributed" : "git")
             found += once(Change(path: path, change: change, reason: reason, attribution: attribution))
         }

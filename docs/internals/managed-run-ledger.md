@@ -494,3 +494,11 @@ retain the original request's ledger task attribution.
 Recording remains subject to the existing ledger switch and does not gate the
 chooser. Plan/lifecycle/policy witnesses use the production API and read the
 host-written ledger.
+
+Protected-path reporting shares the chooser opt-in (OFF by default). When enabled,
+`protectedPathChanged` records modified/deleted protected paths or an unknown
+Git outcome, with attribution and report/turn-end trigger. Sweeps run on a separate
+serial utility queue, use read-only Git with a two-second timeout per invocation,
+and record at most 128 rows per sweep. Deferred paths can be recorded by a later
+sweep; deduplication applies only to emitted rows. Protection state is released
+at helper turn end. Dirty non-protected files are not fingerprinted.

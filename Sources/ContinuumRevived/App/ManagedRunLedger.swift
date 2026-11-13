@@ -51,15 +51,25 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// `.plans/117` part 2 stage one: each live helper's protected check paths.
     private var protection: [UUID: HelperProtectedPaths] = [:]
     /// Records changes to protected paths since the last sweep. Runs on the queue.
+    private let protectionQueue = DispatchQueue(label: "dev.array.protected-paths", qos: .utility)
+    var qaProtectionCount: Int { protectionQueue.sync { protection.count } }
     private func sweepProtected(_ agent: UUID, at: Date, trigger: String) {
-        guard var protection = self.protection[agent], let task = delegatedTask[agent] else { return }
-        let changes = protection.sweep()
-        self.protection[agent] = protection
-        for row in Self.protectedPathRows(changes, task: task, agent: agent, part: parts[agent], at: at, trigger: trigger) { append(row) }
+        guard let task = delegatedTask[agent] else { return }
+        let part = parts[agent]
+        protectionQueue.async {
+            guard var detector = self.protection[agent] else { return }
+            let changes = detector.sweep()
+            self.protection[agent] = trigger == "turnEnded" ? nil : detector
+            let rows = Self.protectedPathRows(changes, task: task, agent: agent, part: part, at: at, trigger: trigger)
+            self.queue.async { for row in rows { self.append(row) } }
+        }
     }
     /// A helper's tool call, as its translator reported it. Folded on the queue.
     func observeTool(agent: UUID, _ sighting: HelperEvidence.Sighting) {
-        queue.async { self.evidence[agent]?.observe(sighting); self.protection[agent]?.observe(sighting) }
+        queue.async {
+            self.evidence[agent]?.observe(sighting)
+            self.protectionQueue.async { self.protection[agent]?.observe(sighting) }
+        }
     }
     /// One hand-off on the report path; git, the manifest and the fold run here.
     func helperEvidence(agent: UUID, at: Date) {
@@ -147,7 +157,7 @@ final class ManagedRunLedger: @unchecked Sendable {
         queue.async { self.recover() }
     }
     /// Waits for every fact handed off so far to reach disk. Checks only.
-    func drain() { queue.sync {} }
+    func drain() { queue.sync {}; protectionQueue.sync {}; queue.sync {} }
     /// The sole append path, including replay and restart facts. Callers supply
     /// stable source identities; duplicates never reach disk or the reducer.
     private func append(_ row: Row) {
@@ -328,7 +338,7 @@ final class ManagedRunLedger: @unchecked Sendable {
             self.sessionTasks[child] = task
             if let root, self.evidence[child] == nil {
                 self.evidence[child] = HelperEvidence(root: URL(fileURLWithPath: root), base: base, shared: shared)
-                if protectedPaths { self.protection[child] = HelperProtectedPaths(root: URL(fileURLWithPath: root), base: base, shared: shared, contract: contract) }
+                if protectedPaths { self.protectionQueue.async { self.protection[child] = HelperProtectedPaths(root: URL(fileURLWithPath: root), base: base, shared: shared, contract: contract) } }
             }
             var row = Row(kind: "delegated", task: task, agent: child, part: via == nil ? child : nil, source: "delegate/\(source)")
             if via != nil || self.owners[task] != parent { row.parent = parent }

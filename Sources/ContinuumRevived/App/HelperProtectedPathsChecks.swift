@@ -182,6 +182,7 @@ enum HelperProtectedPathsChecks {
         ledger.helperEvidence(agent: child, at: Date())
         ledger.ended(agent: child, turn: "off", outcome: .completed)
         ledger.drain()
+        try expect(ledger.qaProtectionCount == 0, "default-off protection allocated state")
         let rows = ManagedRunLedgerChecks.rows(root.appendingPathComponent("run-ledger/ledger.jsonl"))
         try expect(HelperProtectedPaths.gitInvocations.withLock { $0 } == before, "default-off protection invoked git")
         try expect(!rows.contains { $0["kind"] as? String == "protectedPathChanged" }, "default-off protection recorded rows")
@@ -309,6 +310,7 @@ enum HelperProtectedPathsChecks {
         let ledgerURL = AgentStore(smokeTest: false).layout.applicationSupportDirectory.appendingPathComponent("run-ledger/ledger.jsonl")
         let rows = ManagedRunLedgerChecks.rows(ledgerURL)
         let names = Dictionary(uniqueKeysWithValues: ids.map { ($0.value.rawValue.uuidString, $0.key) })
+        try expect(supervisor.runLedger.qaProtectionCount == 0, "finished helpers retained protection state")
         let protected = rows.filter { $0["kind"] as? String == "protectedPathChanged" }
         var got: [String] = []
         for row in protected {
