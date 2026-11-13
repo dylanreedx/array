@@ -7,6 +7,7 @@
       "invocation": ".build/debug/Array --helper-context-diet-check",
       "covers": [
         "Sources/ContinuumRevivedCore/Agents/HelperContextDiet.swift",
+        "Sources/ContinuumRevivedCore/Agents/AgentStore.swift",
         "Sources/ContinuumRevivedCore/Agents/AgentDelegationContext.swift",
         "Sources/ContinuumRevived/App/AgentSupervisor.swift",
         "Sources/ContinuumRevived/App/WorkspaceAPIService+Agents.swift",

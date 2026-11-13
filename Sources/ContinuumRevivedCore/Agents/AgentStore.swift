@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.2-agent-store.md
@@ -245,6 +246,20 @@ public final class AgentStore: @unchecked Sendable {
 
     public func upsert(_ record: AgentRecord) throws {
         try writer(for: record.id).write(record, to: layout.agentFile(id: record.id), retentionTimestamp: { $0.lastActivityAt })
+    }
+
+    /// Destructive cleanup must distinguish absence from inaccessible storage.
+    /// Existing files (including corrupt files/symlinks) are preserved without
+    /// decoding. Only an error-preserving POSIX ENOENT proves absence.
+    public enum OwnershipPresence: Equatable, Sendable {
+        case absent, present
+        case indeterminate(Int32)
+    }
+    public func ownershipPresence(id: AgentID) -> OwnershipPresence {
+        var info = stat()
+        if lstat(layout.agentFile(id: id).path, &info) == 0 { return .present }
+        let failure = errno
+        return failure == ENOENT ? .absent : .indeterminate(failure)
     }
 
     public func load(id: AgentID) throws -> AgentRecord? {

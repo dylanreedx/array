@@ -6442,15 +6442,21 @@ final class AgentSupervisor {
         }
     }
 
+    /// Barrier for deterministic cleanup outcome witnesses; never set in production.
+    var qaPreparedCheckoutCleanupFinished: (@Sendable () -> Void)?
+
     private func discardUnownedPreparedWorktree(_ worktree: WorktreeManager.Worktree?, repo: URL, child: AgentID) {
-        guard let worktree, records[child] == nil else { return }
+        guard let worktree else { return }
+        let finished = qaPreparedCheckoutCleanupFinished
+        guard records[child] == nil else { finished?(); return }
         let store = self.store
         let worktrees = self.worktrees
         DispatchQueue.global(qos: .utility).async {
+            defer { finished?() }
             do {
                 // Unknown ownership is preserved: a read error never authorizes
                 // deletion. Remove the branch only after removal succeeds.
-                guard try store.load(id: child) == nil else { return }
+                guard store.ownershipPresence(id: child) == .absent else { return }
                 try worktrees.remove(repo: repo, path: worktree.path, force: true)
                 if let branch = worktree.branch { try worktrees.deleteBranch(repo: repo, branch: branch) }
             } catch {

@@ -1,6 +1,13 @@
 import AppKit
 import ContinuumRevivedCore
 
+private final class DietCleanupBarrier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    func signal() { lock.withLock { finished = true } }
+    var done: Bool { lock.withLock { finished } }
+}
+
 /// Real delegation -> persisted child -> production Pi RPC process, offline.
 @MainActor
 enum HelperContextDietChecks {
@@ -100,7 +107,115 @@ enum HelperContextDietChecks {
         print("helper-context-diet MCP persistence refusal: actual MCP error, no child id, task, durable child or ordinal advance")
     }
 
+    static func ownershipPreservation(_ mode: String) async throws {
+        let barrier = DietCleanupBarrier()
+        var captured: AgentRecord?
+        var storage: AgentStore?
+        var blockedDirectory: URL?
+        var loopDirectory: URL?
+        var savedDirectory: URL?
+        let b = try WorkspaceAgentReportChecks.makeBench(label: "diet-owner-" + mode, configureDelegate: { delegate in
+            let store = AgentStore(smokeTest: false)
+            store.waitForBackupMigration()
+            storage = store
+            delegate.agentSupervisor = AgentSupervisor(store: store,
+                makeRunner: { _ in ScriptedAgentRunner(script: []) },
+                upsertRecord: { record in
+                    if record.parentAgentID == nil {
+                        if mode == "durable" && record.nextChildOrdinal > 1 {
+                            throw WorkspaceAgentReportChecks.Failure(description: "injected parent high-water refusal")
+                        }
+                        try store.upsert(record); return
+                    }
+                    captured = record
+                    let checkout = URL(fileURLWithPath: record.checkoutRoot)
+                    try Data("CHECKOUT-OWNERSHIP-SENTINEL".utf8).write(to: checkout.appendingPathComponent("preserve.txt"))
+                    if mode == "memory" { try store.upsert(record); return }
+                    if mode == "durable" { try store.upsert(record); return }
+                    if mode == "denied" || mode == "loop" || mode == "corrupt" { try store.upsert(record) }
+                    if mode == "denied" {
+                        blockedDirectory = store.layout.agentsDirectory
+                        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: store.layout.agentsDirectory.path)
+                    } else if mode == "loop" {
+                        let original = store.layout.agentsDirectory
+                        let saved = original.appendingPathExtension("saved")
+                        try FileManager.default.moveItem(at: original, to: saved)
+                        loopDirectory = original; savedDirectory = saved
+                        try FileManager.default.createSymbolicLink(atPath: original.path, withDestinationPath: original.lastPathComponent)
+                    } else if mode == "corrupt" {
+                        try Data("CORRUPT-OWNER-SENTINEL".utf8).write(to: store.layout.agentFile(id: record.id))
+                    } else if mode == "remove-failure" {
+                        blockedDirectory = checkout.deletingLastPathComponent()
+                        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: blockedDirectory!.path)
+                    }
+                    throw WorkspaceAgentReportChecks.Failure(description: "injected ownership state: " + mode)
+                })
+            delegate.agentSupervisor.qaPreparedCheckoutCleanupFinished = { barrier.signal() }
+        })
+        defer { b.tearDown() }
+        func restoreAccess() throws {
+            if let blocked = blockedDirectory {
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blocked.path)
+                blockedDirectory = nil
+            }
+            if let original = loopDirectory, let saved = savedDirectory {
+                try FileManager.default.removeItem(at: original)
+                try FileManager.default.moveItem(at: saved, to: original)
+                loopDirectory = nil; savedDirectory = nil
+            }
+        }
+        defer { try? restoreAccess() }
+        let repo = URL(fileURLWithPath: b.supervisor.records[b.f.agentId]!.checkoutRoot)
+        try HelperRetryWorktreeChecks.repository(repo)
+        let nested = repo.appendingPathComponent("unrelated-nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try HelperRetryWorktreeChecks.repository(nested)
+        let nestedHead = try HelperRetryWorktreeChecks.git(nested, ["rev-parse", "HEAD"])
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: [ManagedModeChecks.model]))
+        try WorkspaceAgentReportChecks.expect(b.supervisor.setProviderSettings(agentID: b.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "ownership lead harness")
+        try WorkspaceAgentReportChecks.expect(b.supervisor.setMode(.managed, for: b.f.agentId), "ownership lead mode")
+        b.settings.set(true, forKey: HelperContextDiet.enabledKey)
+        b.settings.set(true, forKey: "agents.managedMode.isolateEveryHelper")
+        let reply = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "array_delegate",
+            ["task": "OWNERSHIP-PRESERVATION", "title": "ownership", "harness": "Pi", "model": WorkspaceAgentReportChecks.model, "idempotencyKey": "owner-" + mode])
+        try await AgentPresenceChecks.eventually("ownership cleanup barrier " + mode, timeout: 15) { barrier.done }
+        guard let child = captured, let store = storage else { throw WorkspaceAgentReportChecks.Failure(description: "ownership fault not reached") }
+        if mode == "denied" {
+            try WorkspaceAgentReportChecks.expect(store.ownershipPresence(id: child.id) == .indeterminate(EACCES), "actual inaccessible store must report EACCES")
+        } else if mode == "loop" {
+            try WorkspaceAgentReportChecks.expect(store.ownershipPresence(id: child.id) == .indeterminate(ELOOP), "actual looping store must report ELOOP")
+        } else if mode == "corrupt" || mode == "durable" || mode == "memory" {
+            try WorkspaceAgentReportChecks.expect(store.ownershipPresence(id: child.id) == .present, "existing owner file must never count as absent")
+        } else {
+            try WorkspaceAgentReportChecks.expect(store.ownershipPresence(id: child.id) == .absent, "unwritten record must report ENOENT")
+        }
+        try restoreAccess()
+        let checkout = URL(fileURLWithPath: child.checkoutRoot)
+        let trees = try HelperRetryWorktreeChecks.git(repo, ["worktree", "list", "--porcelain"])
+        let branches = try HelperRetryWorktreeChecks.git(repo, ["for-each-ref", "--format=%(refname)", "refs/heads"])
+        if mode == "nested-absent" {
+            try WorkspaceAgentReportChecks.expect(!FileManager.default.fileExists(atPath: checkout.path) && !trees.contains(checkout.path), "definitive ENOENT must retire only the prepared checkout")
+            try WorkspaceAgentReportChecks.expect(!branches.contains(child.worktreeBranch ?? "UNEXPECTED"), "unowned branch must retire")
+        } else {
+            try WorkspaceAgentReportChecks.expect(FileManager.default.fileExists(atPath: checkout.appendingPathComponent("preserve.txt").path), "unknown or owned checkout must survive: " + mode)
+            try WorkspaceAgentReportChecks.expect(trees.contains(checkout.path) && branches.contains(child.worktreeBranch ?? "UNEXPECTED"), "preserved/failed-removal checkout must retain registration and branch: " + mode)
+        }
+        if mode == "corrupt" {
+            try WorkspaceAgentReportChecks.expect((try? Data(contentsOf: store.layout.agentFile(id: child.id))) == Data("CORRUPT-OWNER-SENTINEL".utf8), "corrupt owner bytes must remain unchanged")
+        }
+        let afterNestedHead = try HelperRetryWorktreeChecks.git(nested, ["rev-parse", "HEAD"])
+        try WorkspaceAgentReportChecks.expect(afterNestedHead == nestedHead && FileManager.default.fileExists(atPath: nested.appendingPathComponent("tracked.txt").path), "unrelated nested repository must survive")
+        try WorkspaceAgentReportChecks.expect(mode == "memory" ? !reply.isError : reply.isError, "ownership scenario must keep truthful MCP outcome: " + mode)
+        print("helper diet ownership preservation passed: " + mode)
+    }
+
     static func run() async throws {
+        if let mode = ProcessInfo.processInfo.environment["CONTINUUM_DIET_OWNERSHIP_CASE"] {
+            try await ownershipPreservation(mode); return
+        }
+        for mode in ["denied", "loop", "corrupt", "durable", "memory", "remove-failure", "nested-absent"] {
+            try await ownershipPreservation(mode)
+        }
         if ProcessInfo.processInfo.environment["CONTINUUM_DIET_MCP_ISOLATED_FAILURE_ONLY"] == "1" {
             try await mcpWriteFailure(isolated: true); return
         }
