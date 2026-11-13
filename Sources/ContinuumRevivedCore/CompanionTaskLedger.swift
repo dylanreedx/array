@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum CompanionTaskRunState: String, Codable, Sendable {
@@ -47,6 +48,13 @@ public enum CompanionAttentionOutcome: String, Sendable {
 /// Host-local metadata only. Caller must explicitly supply user/delegation/queue
 /// provenance; an agent's lifetime parent is never consulted. Commit precedes
 /// mutation of in-memory truth. Streaming content never enters this store.
+///
+/// A change commits as one appended, fsynced line in `ledger.journal` holding
+/// only the tasks, runs and pointers it touched; `ledger.json` is rewritten at
+/// launch and once the journal passes `compactionThreshold`. Every change used
+/// to rewrite the whole file on the main thread (encode, write, decode-verify),
+/// and the ledger only grows: 4.5 MB in Dylan's app by 2026-11-11, rewritten
+/// on every turn start and finish.
 public final class CompanionTaskLedger: @unchecked Sendable {
     private struct Task: Codable, Equatable {
         var root: UUID
@@ -86,8 +94,52 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         var current: [UUID: UUID] = [:]
         var observations: [String: UUID] = [:]
     }
+    /// One committed change: the new value of every key it touched, and the keys
+    /// it removed. Absolute values, so replay never depends on a skipped line.
+    private struct Delta: Codable {
+        var revision: UInt64
+        var publisherID: UUID
+        var tasks: [UUID: Task] = [:]
+        var removedTasks: [UUID] = []
+        var runs: [UUID: Run] = [:]
+        var removedRuns: [UUID] = []
+        var current: [UUID: UUID] = [:]
+        var removedCurrent: [UUID] = []
+        var observations: [String: UUID] = [:]
+        var removedObservations: [String] = []
+
+        init(from old: File, to new: File) {
+            revision = new.revision
+            publisherID = new.publisherID
+            (tasks, removedTasks) = Self.diff(old.tasks, new.tasks)
+            (runs, removedRuns) = Self.diff(old.runs, new.runs)
+            (current, removedCurrent) = Self.diff(old.current, new.current)
+            (observations, removedObservations) = Self.diff(old.observations, new.observations)
+        }
+
+        private static func diff<K: Hashable, V: Equatable>(_ old: [K: V], _ new: [K: V]) -> ([K: V], [K]) {
+            (new.filter { old[$0.key] != $0.value }, old.keys.filter { new[$0] == nil })
+        }
+
+        func apply(to file: inout File) {
+            file.revision = revision
+            for key in removedTasks { file.tasks.removeValue(forKey: key) }
+            file.tasks.merge(tasks) { $1 }
+            for key in removedRuns { file.runs.removeValue(forKey: key) }
+            file.runs.merge(runs) { $1 }
+            for key in removedCurrent { file.current.removeValue(forKey: key) }
+            file.current.merge(current) { $1 }
+            for key in removedObservations { file.observations.removeValue(forKey: key) }
+            file.observations.merge(observations) { $1 }
+        }
+    }
+    /// Journal bytes that trigger a full rewrite of `ledger.json`. A turn's
+    /// change is about 1 KB, so this is hundreds of changes per rewrite.
+    public static let compactionThreshold = 512 * 1024
     private let lock = NSLock()
     private let url: URL
+    private let journalURL: URL
+    private var journalBytes = 0
     private let writer: AtomicWriter
     private var file: File
     private let clock: @Sendable () -> Date
@@ -102,13 +154,16 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         let backups = directory.appendingPathComponent("backups", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         url = directory.appendingPathComponent("ledger.json")
+        journalURL = directory.appendingPathComponent("ledger.journal")
         writer = AtomicWriter(backupsDirectory: backups, retainedBackups: 3)
         let hasBackups = ((try? FileManager.default.contentsOfDirectory(atPath: backups.path)) ?? []).isEmpty == false
         if FileManager.default.fileExists(atPath: url.path) || hasBackups {
             file = try writer.read(at: url, decoder: JSONDecoder())
             guard file.version == 1 else { throw CompanionTaskLedgerError.unsupportedVersion }
+            Self.replayJournal(at: journalURL, onto: &file)
         } else {
             file = File()
+            try? FileManager.default.removeItem(at: journalURL)
             try writer.write(file, to: url)
         }
         // A persisted running/queued/attention fact is not a live observation.
@@ -127,6 +182,52 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         try change(touching: false) { next in
             for id in Array(next.tasks.keys) where next.tasks[id]!.touchedAt == nil { next.tasks[id]!.touchedAt = now }
         }
+        // Launch folds the last session's journal into the base, so the journal
+        // only ever holds this session's changes.
+        if (try? FileManager.default.attributesOfItem(atPath: journalURL.path)[.size] as? Int) ?? 0 > 0 {
+            try compact(file)
+        }
+    }
+
+    /// Lines whose revision is past the base, in order. An unreadable line is a
+    /// change that never committed (a torn append, or one whose fsync failed and
+    /// threw), so it is skipped; a line from another publisher is never applied.
+    private static func replayJournal(at url: URL, onto file: inout File) {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return }
+        let decoder = JSONDecoder()
+        for line in data.split(separator: UInt8(ascii: "\n")) {
+            guard let delta = try? decoder.decode(Delta.self, from: Data(line)),
+                  delta.publisherID == file.publisherID, delta.revision > file.revision else { continue }
+            delta.apply(to: &file)
+        }
+    }
+
+    /// Commit point for one change: the line is on stable storage. A failed
+    /// append trims the journal back so a torn line cannot precede the next one.
+    private func append(_ delta: Delta) throws {
+        var data = try JSONEncoder().encode(delta)
+        data.append(UInt8(ascii: "\n"))
+        let fd = Darwin.open(journalURL.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { Darwin.close(fd) }
+        let written = data.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+        guard written == data.count, Darwin.fsync(fd) == 0 else {
+            let code = POSIXErrorCode(rawValue: errno) ?? .EIO
+            _ = Darwin.ftruncate(fd, off_t(journalBytes))
+            throw POSIXError(code)
+        }
+        journalBytes += data.count
+    }
+
+    /// The base takes every change; only then is the journal emptied. A journal
+    /// that fails to empty is harmless: its lines are at or below the base's
+    /// revision, so replay skips them.
+    private func compact(_ next: File) throws {
+        try writer.write(next, to: url)
+        let fd = Darwin.open(journalURL.path, O_WRONLY | O_TRUNC | O_CREAT | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { return }
+        if Darwin.fsync(fd) == 0 { journalBytes = 0 }
+        Darwin.close(fd)
     }
 
     @discardableResult
@@ -138,7 +239,11 @@ public final class CompanionTaskLedger: @unchecked Sendable {
             if touching { Self.stamp(&next, against: file, at: clock().timeIntervalSince1970) }
             guard file.revision < UInt64.max else { throw CompanionTaskLedgerError.revisionExhausted }
             next.revision = max(next.revision, file.revision + 1)
-            try writer.write(next, to: url)
+            if journalBytes >= Self.compactionThreshold {
+                try compact(next)
+            } else {
+                try append(Delta(from: file, to: next))
+            }
             file = next
         }
         return result
