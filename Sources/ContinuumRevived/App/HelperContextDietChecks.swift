@@ -4,6 +4,12 @@ import ContinuumRevivedCore
 /// Real delegation -> persisted child -> production Pi RPC process, offline.
 @MainActor
 enum HelperContextDietChecks {
+    private struct FixtureHostRules: HostLaunchInstructionSource {
+        func resolveBlock() -> HostLaunchInstructionBlock? {
+            HostLaunchInstructionBlock(name: "diet-witness", label: "Synthetic host rules", text: "KEEP-HOST-RULES")
+        }
+    }
+
     static func writeFailures() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("diet-write-failure-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -75,6 +81,14 @@ enum HelperContextDietChecks {
         let on = try await args(child)
         try WorkspaceAgentReportChecks.expect(on.contains("--no-skills"), "enabled helper must disable Pi automatic skill discovery")
         try WorkspaceAgentReportChecks.expect(!on.contains("--no-context-files") && !on.contains("--no-extensions"), "keep project rules and host tools")
+        func hasWorkspaceExtension(_ args: [String]) -> Bool {
+            args.indices.contains { i in args[i] == "-e" && i + 1 < args.count && args[i + 1].hasSuffix("/continuum-workspace-tools.ts") }
+        }
+        try WorkspaceAgentReportChecks.expect(hasWorkspaceExtension(off) && hasWorkspaceExtension(on), "actual baseline and diet processes must load workspace extension")
+        let promptLog = URL(fileURLWithPath: b.supervisor.records[child]!.cwd).appendingPathComponent("prompts.log")
+        try await AgentPresenceChecks.eventually("contract did not reach the actual helper prompt", timeout: 15) {
+            (try? String(contentsOf: promptLog, encoding: .utf8))?.contains("KEEP-PROJECT-HAZARD") == true
+        }
         let r = b.supervisor.records[child]!
         let restored = try JSONDecoder().decode(AgentRecord.self, from: JSONEncoder().encode(r))
         b.settings.set(false, forKey: key)
@@ -110,7 +124,9 @@ enum HelperContextDietChecks {
         }
         try WorkspaceAgentReportChecks.expect(projection["contextDiet"]?.object?["personalMemoryExclusion"]?.string == "unknown", "inspection must expose unknown memory exclusion")
         b.supervisor.stopAll()
-        let runner = AgentSupervisor.productionRunner(for: AgentRunnerLaunch(record: restored, spawnDepth: 1))
+        try WorkspaceAgentReportChecks.expect(hasWorkspaceExtension(retryArgs), "retry process retains workspace extension")
+        let runner = AgentSupervisor.productionRunner(for: AgentRunnerLaunch(record: restored, spawnDepth: 1),
+            hostInstructions: HostLaunchInstructions(sources: [FixtureHostRules()]))
         defer { runner.stop() }
         try await Task.detached {
             try runner.run(prompt: AgentPrompt("restored-task"), onEvent: { _ in })
@@ -122,6 +138,7 @@ enum HelperContextDietChecks {
         }.value
         let resumed = try await args(child)
         try WorkspaceAgentReportChecks.expect(resumed.contains("--no-skills"), "actual restored process retains discovery policy after compaction")
+        try WorkspaceAgentReportChecks.expect(hasWorkspaceExtension(resumed) && resumed.contains { $0.contains("KEEP-HOST-RULES") }, "actual restored process retains workspace extension and host injection")
         print("helper-context-diet: real delegated Pi process; off/on, contract, project tools, restore/resume/compact/retry, unsupported scope and lead separation passed")
     }
 }
