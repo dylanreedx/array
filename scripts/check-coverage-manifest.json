@@ -96,36 +96,12 @@
       "reason": "Prints Managed lead and helper launch time, request to CLI start, and asserts nothing about time, so it guards no bug class."
     },
     {
-      "flag": "--auto-layout-tidy-latency-check",
-      "reason": "Targeted performance probe over an 89-tile AppKit fixture; run on a quiet display host to interpret latency."
-    },
-    {
-      "flag": "--tidy-camera-check",
-      "reason": "Targeted AppKit camera-animation and tidy performance probe; run with the tidy UI program on a quiet display host."
-    },
-    {
-      "flag": "--tidy-offscreen-defer-check",
-      "reason": "Targeted 89-tile AppKit parking and resize probe; run with the tidy UI program on a display host."
-    },
-    {
-      "flag": "--tidy-zone-shortcut-check",
-      "reason": "Targeted AppKit shortcut and latency probe sharing the 89-tile tidy fixture; run with the tidy UI program."
-    },
-    {
-      "flag": "--undo-toast-placement-check",
-      "reason": "Targeted production-window geometry and appearance probe; run on a display host when changing toolbar, rail or undo-toast geometry."
-    },
-    {
       "flag": "--browser-focus-free-real-key-check",
-      "reason": "Targeted real-key browser interaction probe requiring an interactive display session; never run unattended in the offline gate."
+      "reason": "Requires ARRAY_ALLOW_REAL_KEY_PROOF=1 and an external previous-frontmost PID; activates the check app and injects real keys, so run only with explicit approval in an interactive display session."
     },
     {
       "flag": "--browser-pointer-real-active-check",
-      "reason": "Targeted real-pointer browser interaction probe requiring an interactive display session; never run unattended in the offline gate."
-    },
-    {
-      "flag": "--tidy-packer-check",
-      "reason": "Targeted Core tidy-packing corpus with optional picture output; run when changing explicit tidy packing, without claiming nightly coverage."
+      "reason": "Retired experiment: dispatcher intentionally throws REFUSED without activation to keep historical commands from falling through to full app boot; this flag cannot pass a nightly gate."
     }
   ],
   "exceptions": []

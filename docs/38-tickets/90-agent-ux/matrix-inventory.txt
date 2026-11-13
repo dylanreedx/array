@@ -46,6 +46,7 @@ check --ambient-tile-frame-space-check
 check --app-support-channel-check
 check --attention-notification-check
 check --auto-layout-fanout-app-check
+check --auto-layout-tidy-latency-check
 check --bare-tile-check
 check --board-comments-check
 check --board-interaction-check
@@ -360,8 +361,14 @@ check --terminal-tmux-persistence-check
 check --terminal-tmux-unresponsive-check
 check --throbber-timeline-check
 check --ticket-queue-tile-check
+check --tidy-camera-check
+check --tidy-offscreen-defer-check
+check --tidy-packer-check
 check --tidy-zone-neighbours-check
+check --tidy-zone-shortcut-check
 check --tile-action-check
+check --tile-agent-bubble-check
+check --tile-agent-bubble-drag-check
 check --tile-character-check
 check --tile-chrome-canvas-check
 check --tile-chrome-scale-check
@@ -392,6 +399,7 @@ check --ui-pixel-check
 check --ui-probe-check
 check --ui-test-support-check
 check --ui-tour-check
+check --undo-toast-placement-check
 check --unified-model-boot-check
 check --update-channel-check
 check --uuid-string-order-check
@@ -460,6 +468,7 @@ check --zone-create-gesture-check
 check --zone-hydration-lifecycle-check
 check --zone-layer-move-check
 check --zone-lazy-resume-check
+check --zone-membership-repair-check
 check --zone-move-unified-check
 check --zone-presentation-check
 check --zone-project-session-naming-check
@@ -484,9 +493,6 @@ leg run swift build --configuration debug --product Array -j 2
 leg run swift build --configuration debug --product array-workspace-mcp -j 2
 leg run swift build --disable-sandbox --skip-update
 leg run swift build --disable-sandbox --skip-update --product Array
-leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
-leg run swift build --disable-sandbox --skip-update --product continuum-relay
-leg run swift build --disable-sandbox --skip-update --product continuum-relay-legacy
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
@@ -494,6 +500,9 @@ leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRe
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedSyncChecks
+leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
+leg run swift build --disable-sandbox --skip-update --product continuum-relay
+leg run swift build --disable-sandbox --skip-update --product continuum-relay-legacy
 leg run swift build --product Array
 leg run swift build --product ContinuumRevivedCoreChecks
 leg run_app_check .build/debug/Array --add-zone-check
@@ -539,6 +548,7 @@ leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --attention-notification-check
 leg run_app_check .build/debug/Array --auto-layout-fanout-app-check
+leg run_app_check .build/debug/Array --auto-layout-tidy-latency-check
 leg run_app_check .build/debug/Array --bare-tile-check
 leg run_app_check .build/debug/Array --board-comments-check
 leg run_app_check .build/debug/Array --board-interaction-check
@@ -833,8 +843,13 @@ leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
 leg run_app_check .build/debug/Array --terminal-tmux-unresponsive-check
 leg run_app_check .build/debug/Array --throbber-timeline-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
+leg run_app_check .build/debug/Array --tidy-camera-check
+leg run_app_check .build/debug/Array --tidy-offscreen-defer-check
 leg run_app_check .build/debug/Array --tidy-zone-neighbours-check
+leg run_app_check .build/debug/Array --tidy-zone-shortcut-check
 leg run_app_check .build/debug/Array --tile-action-check
+leg run_app_check .build/debug/Array --tile-agent-bubble-check
+leg run_app_check .build/debug/Array --tile-agent-bubble-drag-check
 leg run_app_check .build/debug/Array --tile-character-check
 leg run_app_check .build/debug/Array --tile-chrome-canvas-check
 leg run_app_check .build/debug/Array --tile-chrome-scale-check
@@ -864,6 +879,7 @@ leg run_app_check .build/debug/Array --ui-pixel-check
 leg run_app_check .build/debug/Array --ui-probe-check
 leg run_app_check .build/debug/Array --ui-test-support-check
 leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
+leg run_app_check .build/debug/Array --undo-toast-placement-check
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --update-channel-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
@@ -971,6 +987,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --project-standards-index-ch
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --tidy-packer-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --tile-selection-geometry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
@@ -978,6 +995,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-board-contra
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --zone-membership-repair-check
 leg run_leg .build/debug/ContinuumRevivedFileTreeChecks
 leg run_leg .build/debug/ContinuumRevivedPaletteChecks
 leg run_leg .build/debug/ContinuumRevivedPerfChecks
@@ -996,6 +1014,7 @@ leg run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 leg run_leg npm --prefix Tools/TaskEditor test
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
+leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg python3 benchmarks/replay/check.py --replay-containment-check
 leg run_leg python3 benchmarks/replay/check.py --replay-grader-check
 leg run_leg python3 benchmarks/replay/check.py --replay-isolation-check
@@ -1009,7 +1028,6 @@ leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode te
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --skip-build
 leg run_leg python3 scripts/check-notification-map.py --self-test
-leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg scripts/capture-cli-fixtures.sh check
 leg run_leg scripts/check-app-bundle.sh --configuration debug --bundle "$MATRIX_RESULTS/Array.app"
 leg run_leg scripts/check-color-hygiene.sh
@@ -1037,7 +1055,7 @@ count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 206
+count ContinuumRevivedCoreChecks 207
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

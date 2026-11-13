@@ -1683,6 +1683,14 @@ run_app_check .build/debug/Array --jelly-auto-layout-check
 run_app_check .build/debug/Array --drag-in-tidy-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
 run_app_check .build/debug/Array --auto-layout-fanout-app-check
+# Deterministic tidy corpus and synthetic/offscreen production behavior. Optional
+# PNG output is omitted; these checks require no real pointer or key injection.
+run_leg .build/debug/ContinuumRevivedCoreChecks --tidy-packer-check
+run_app_check .build/debug/Array --tidy-offscreen-defer-check
+run_app_check .build/debug/Array --tidy-zone-shortcut-check
+run_app_check .build/debug/Array --undo-toast-placement-check
+run_app_check .build/debug/Array --tidy-camera-check
+run_app_check .build/debug/Array --auto-layout-tidy-latency-check
 run_app_check .build/debug/Array --zone-adaptive-bounds-check
 run_app_check .build/debug/Array --agent-status-check
 run_app_check .build/debug/Array --tile-world-bounds-check

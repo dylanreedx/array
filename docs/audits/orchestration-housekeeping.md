@@ -192,3 +192,31 @@ preview app were made. Independent review is still pending at the lead level
 because both delegation attempts above were refused. The eight explicit
 register-or-declare decisions close that housekeeping classification only;
 they add **zero nightly behavioral coverage**.
+
+
+## Independent review revision
+
+Reviewer DB6D4A31 requested changes on `e8faf92a`; it was not integrated.
+The reviewer correctly identified that deterministic/offscreen behavior had
+been excluded without an unattended incompatibility. This revision supersedes
+the eight targeted-only decisions above:
+
+| Flag | Revised decision | Implementation evidence |
+|---|---|---|
+| `--tidy-packer-check` | Register Core gate leg | `Sources/ContinuumRevivedCoreChecks/TidyPackerChecks.swift`: seeded corpus through production solve; optional PNG output omitted. |
+| `--tidy-offscreen-defer-check` | Register app gate leg | `Sources/ContinuumRevived/App/TidyOffscreenDeferChecks.swift`: offscreen fixture, synthetic menu dispatch, parking/resize outcomes. |
+| `--tidy-zone-shortcut-check` | Register app gate leg | `Sources/ContinuumRevived/App/AutoLayoutTidyLatencyChecks.swift`, `runShortcut`: mounts 12 tiles, synthesizes chord, asserts dispatch/commit. Earlier 89-tile latency description was wrong. |
+| `--undo-toast-placement-check` | Register app gate leg | `Sources/ContinuumRevived/App/UndoToastPlacementChecks.swift`: offscreen production window, isolated defaults, geometry assertions; optional renders omitted. |
+| `--tidy-camera-check` | Register app gate leg | `Sources/ContinuumRevived/App/TidyCameraChecks.swift`: offscreen fixture and synthetic events, asserts camera/undo outcomes. No demonstrated unattended incompatibility. |
+| `--auto-layout-tidy-latency-check` | Register app gate leg | `AutoLayoutTidyLatencyChecks.run`: offscreen synthetic fixtures and behavioral/timing assertions, writes disposable qa-runs output. No demonstrated unattended incompatibility. |
+| `--browser-focus-free-real-key-check` | Targeted only | `Sources/ContinuumRevived/App/BrowserFocusRestorationChecks.swift`, `runBrowserFocusFreeRealKeyCheck`: explicitly requires `ARRAY_ALLOW_REAL_KEY_PROOF=1`, external prior foreground PID, activation and real input. Unattended gate must not opt into this. |
+| `--browser-pointer-real-active-check` | Targeted only, retired refusal | `Sources/ContinuumRevived/App/BrowserPointerRealActiveChecks.swift`: always throws REFUSED, preserving recognition to prevent an old command booting the full app. Earlier description as a current real-pointer experiment was wrong. |
+
+The six new literal invocations are in `scripts/run-matrix.sh` adjacent to the
+existing auto-layout fanout leg. Inventory is regenerated through
+`scripts/check-matrix-inventory.sh` with
+`CONTINUUM_UPDATE_MATRIX_INVENTORY=1`. These are existing behavioral witnesses;
+no source-string tests were added as behavior proof. Registration and inventory
+validation do not prove that the six app/Core outcomes pass. No full matrix
+summary showing these six executions is available from this bench. No new
+KNOWN-RED exclusions were added. Re-review requested through the lead.
