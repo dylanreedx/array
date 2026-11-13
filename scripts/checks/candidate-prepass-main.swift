@@ -86,4 +86,34 @@ let busy = waitResult { callback in
 require(busy.state == "unavailable:busy", "busy observable")
 require(Date().timeIntervalSince(heldStart) < 0.1, "held worker nonblocking")
 require(heldDone.wait(timeout: .now() + 35) == .success, "held completes")
+// An actual same-UID subprocess replaces the capture bytes after producer
+// exit and before host parsing/signing. The rendezvous only fixes timing.
+final class TamperPaths: @unchecked Sendable {
+    let lock = NSLock()
+    var paths: [URL] = []
+    func append(_ path: URL) { lock.lock(); paths.append(path); lock.unlock() }
+}
+let tamperPaths = TamperPaths()
+let tamperedWorker = CandidatePrepass(support: support, enabled: true, evaluator: evaluator, worker: workerScript)
+tamperedWorker.qaAfterProcessExit = { path, executable in
+    guard executable == "/usr/bin/python3" else { return }
+    tamperPaths.append(path)
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+    let forged = "{\"base\":\"" + base + "\",\"head\":\"" + head + "\",\"forgedEvidence\":true}"
+    p.arguments = ["-I", "-B", "-c", "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text(sys.argv[2])", path.path, forged]
+    p.standardInput = FileHandle.nullDevice
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    do { try p.run(); p.waitUntilExit(); require(p.terminationStatus == 0, "tamper helper ran") }
+    catch { require(false, "tamper helper launch") }
+}
+let tampered = waitResult { _ = tamperedWorker.candidateReady(candidate, completion: $0) }
+for path in tamperPaths.paths { try? FileManager.default.removeItem(at: path) }
+require(!tamperPaths.paths.isEmpty, "tamper rendezvous reached")
+require(["clean", "findings"].contains(tampered.state), "original evaluator output retained")
+require(tampered.report?.contains("forgedEvidence") == false, "same-UID output tamper must not be signed")
+let tamperedReview = waitResult { tamperedWorker.review(candidate, completion: $0) }
+require(tamperedReview.report?.contains("forgedEvidence") == false, "review must not authenticate tampered capture")
+print("PASS candidate-prepass: same-UID capture substitution ignored before host signing")
 print("PASS candidate-prepass: OFF, explicit identity, durable authenticated host store, review, restart, forgery, missing identity, persistence failure, nonblocking bounded admission")

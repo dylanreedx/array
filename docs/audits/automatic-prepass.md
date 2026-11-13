@@ -135,3 +135,33 @@ delivery report; registration alone is not execution evidence.
    establish the consumer fix, with the documented intermediate runtime RED?
 
 No pushes, integrations, provider calls, default tmux access or prod-app changes.
+
+## Output capture readback revision
+
+The ed530e44 review found that a named mkstemp capture was reopened by path
+before host signing. A same-UID helper could substitute matching clean JSON,
+and pathname size checking did not bound a later pathname read.
+
+The capture is now unlinked immediately after mkstemp. The original descriptor
+is retained for child stdout and host readback. After group retirement the host
+uses fstat on that descriptor, requires zero links and size within 1MiB, seeks
+the same handle to zero and reads at most 1MiB+1, rejecting any excess. It never
+reads capture bytes or size through the old pathname and never removes a
+helper's subsequently recreated pathname.
+
+The existing registered scripts/check-candidate-prepass.sh now compiles with
+ARRAY_CHECKS and includes a deterministic tamper rendezvous. An actual same-UID
+Python subprocess overwrites/recreates the old capture pathname with matching
+base/head JSON containing forgedEvidence after producer exit and before parsing.
+The retained named-path implementation reproduced runtime RED:
+FAIL: same-UID output tamper must not be signed.
+With unlinked descriptor readback, the same witness is GREEN; evaluation and
+authenticated review retain the original evaluator report, ignoring substitution.
+The rendezvous is QA-only and nil by default. All existing worker cases passed.
+Logs: /tmp/prepass-output-tamper-red.log and
+/tmp/prepass-output-tamper-green.log.
+
+This revision changes only output capture and its witness. No broader app/bundle
+rebuild or matrix run was performed for it; the lead's matrix holds the global
+lock and was not polled or bypassed. Scheduling remains OFF. The actual
+commit-ready emitter, automatic merge and independent re-review remain open.

@@ -30,6 +30,10 @@ final class CandidatePrepass: @unchecked Sendable {
     private let queue = DispatchQueue(label: "dev.array.candidate-prepass", qos: .utility)
     private let admission = NSLock()
     private var busy = false
+    #if ARRAY_CHECKS
+    // Deterministic same-UID tamper rendezvous, before output consumption.
+    var qaAfterProcessExit: (@Sendable (URL, String) -> Void)?
+    #endif
     private var outcomes: [UUID: CandidatePrepassOutcome] = [:] // queue-owned
     let enabled: Bool
     let support: URL
@@ -201,9 +205,10 @@ final class CandidatePrepass: @unchecked Sendable {
             .appendingPathComponent("array-prepass-output-XXXXXX").path.utf8CString)
         let descriptor = mkstemp(&template)
         guard descriptor >= 0 else { return nil }
-        let output = URL(fileURLWithPath: String(cString: template))
+        let outputName = String(cString: template)
+        guard unlink(outputName) == 0 else { close(descriptor); return nil }
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        defer { try? handle.close(); try? FileManager.default.removeItem(at: output) }
+        defer { try? handle.close() }
         process.standardOutput = handle
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { return nil }
@@ -217,9 +222,16 @@ final class CandidatePrepass: @unchecked Sendable {
         }
         // Also retire any descendant that outlived a successful controller.
         kill(-process.processIdentifier, SIGKILL)
+        #if ARRAY_CHECKS
+        qaAfterProcessExit?(URL(fileURLWithPath: outputName), executable)
+        #endif
+        var info = stat()
         guard process.terminationStatus == 0 || process.terminationStatus == 1,
-              let size = try? output.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-              size <= 1_048_576, let data = try? Data(contentsOf: output),
+              fstat(descriptor, &info) == 0, info.st_nlink == 0,
+              info.st_size >= 0, info.st_size <= 1_048_576 else { return nil }
+        do { try handle.seek(toOffset: 0) } catch { return nil }
+        guard let data = try? handle.read(upToCount: 1_048_577),
+              data.count <= 1_048_576,
               let text = String(data: data, encoding: .utf8) else { return nil }
         return (process.terminationStatus, text)
     }

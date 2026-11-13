@@ -14,7 +14,7 @@ fi
 scratch="$(mktemp -d /tmp/array-prepass.XXXXXX)"
 trap 'rm -rf "$scratch"' EXIT
 cp scripts/checks/candidate-prepass-main.swift "$scratch/main.swift"
-swiftc Sources/ContinuumRevived/App/CandidatePrepass.swift "$scratch/main.swift" -o "$scratch/check" </dev/null
+swiftc -DARRAY_CHECKS Sources/ContinuumRevived/App/CandidatePrepass.swift "$scratch/main.swift" -o "$scratch/check" </dev/null
 git init -q "$scratch/repo"
 mkdir -p "$scratch/repo/scripts" "$scratch/repo/docs/internals"
 echo '{"version":1,"mappedLegs":0,"checks":[],"exceptions":[],"targetedOnly":[]}' > "$scratch/repo/scripts/check-coverage-manifest.json"
