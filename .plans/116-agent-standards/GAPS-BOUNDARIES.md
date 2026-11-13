@@ -190,3 +190,31 @@ Log: `/tmp/gaps-isolation-final-matrix.log`. No lock bypass. Thus full lifecycle
 is direct GREEN, but **actual matrix reporting remains pending**. Production
 policy remains `04dbe334`, OFF, with default-sharing risk OPEN. Lead-arranged
 review must inspect this final corrected witness before integration.
+
+## Normal-lock targeted gate PASS
+
+Ran normal `scripts/run-matrix.sh --helper-isolation` on final witness source
+`97881d28`, with no lock override. Exit **0**. Final summary:
+
+```
+---- Helper isolation matrix (targeted): 7 leg(s) run ----
+Helper isolation matrix (targeted) passed.
+```
+
+The gate printed and executed `--first-helper-isolation-check`, whose complete
+lifecycle PASS appeared in the run. Other counted legs: replay grader,
+isolation, scoring and containment, matrix inventory, and gate-prepass
+(44 fixture tests passed). Inventory validation passed while reporting record
+growth. No baseline or KNOWN-RED changes.
+
+Both matrix builds passed resource checks before starting: Array saw 2 builds,
+42% free memory, 50.4 GiB disk; MCP helper saw 2 builds, 37% memory, 50.0 GiB
+disk. SDKROOT exported; managed crash marker preserved. Matrix used its own
+verified isolated tmux namespace and temporary project/app-support roots.
+No live provider test, full matrix, UI or release claim.
+
+Full log: `/tmp/gaps-isolation-latest-matrix.log`. Build logs retained as
+`/tmp/gaps-isolation-matrix-array-build.log` and
+`/tmp/gaps-isolation-matrix-mcp-build.log`. Lead reports final source approval
+of production `04dbe334` and corrected witness `97881d28`. Opt-in remains OFF;
+default-sharing risk remains OPEN. Candidate is ready for lead integration.
