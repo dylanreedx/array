@@ -183,3 +183,43 @@ then 0 / 67% / 49.2 GiB. The gate confirmed 146 real coding keys classified.
 All foreground builds/tests completed; code through `832b7556` remains frozen
 for final sibling review. Combined-branch verification and review approval
 remain separate; the feature is still OFF and unintegrated here.
+
+## Definitive absence and ownership preservation
+
+The `832b7556` ordinary-absence result did not prove safety under inaccessible
+storage. Its `AgentStore.load` check could return nil when Foundation could not
+establish existence. A real-MCP fixture wrote a durable child, made its agents
+directory mode 000, verified actual EACCES, and demonstrated RED when the owned
+checkout was deleted: `/tmp/gaps-helper-diet-ownership-denied-red.log`.
+
+`b458c012` adds the scoped `AgentStore.ownershipPresence` POSIX lstat probe.
+Only ENOENT is absent; an existing inode is present without decoding, and every
+other error is indeterminate. Cleanup accepts only absent. Existing `load`
+semantics are unchanged. A cleanup-completion barrier lets the witness inspect
+actual post-worker filesystem and git outcomes, not timing or source text.
+
+The preservation group then found that Git can exit zero after deregistering
+an inaccessible checkout whose directory remains. `3cb8dbb1` verifies the
+checkout path using error-preserving lstat after Git returns and permits branch
+deletion only on definitive ENOENT. Unknown/existing checkout paths retain the
+branch. The failed-removal witness asserts that branch and data survive; it
+cannot promise Git keeps a registration it already removed on partial success.
+That intermediate RED is `/tmp/gaps-helper-diet-ownership-remove-red.log`.
+
+Fresh full GREEN on `3cb8dbb1` covers actual inaccessible-store EACCES,
+parent-symlink ELOOP, corrupt existing record, durable-but-unpublished owner,
+in-memory owner, failed-removal branch retention, and definitive-absence cleanup
+with an unrelated nested repository preserved. The earlier transaction, real
+MCP refusal, isolated cleanup and launch/context cases also pass in the same arm.
+Logs: `/tmp/gaps-helper-diet-ownership-final-build.log` and
+`/tmp/gaps-helper-diet-ownership-final-green.log`.
+
+**Fresh normal-lock focused matrix: 9 legs run, passed**, on the exact corrected
+source. Log: `/tmp/gaps-helper-diet-ownership-matrix.log`. It reports all seven
+ownership cases and both MCP refusal cases, plus the 146-key exposure audit.
+This result is separate from the prior normal-absence-only `832b7556` gate.
+Source approval was reported by the lead for both absence gates in `3cb8dbb1`.
+All foreground runs finished with inputs frozen; about 53 GiB disk remained.
+Integration and combined-branch verification belong to the lead. Default OFF,
+unsupported harnesses, personal-memory uncertainty, and live-provider/paired
+quality and latency limits remain as documented above.
