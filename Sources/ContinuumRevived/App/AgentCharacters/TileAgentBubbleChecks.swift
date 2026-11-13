@@ -171,6 +171,8 @@ enum TileAgentBubbleChecks {
         _ = supervisor.setIdentityColor(agentID: agents[3], nil)
         try expect(pump(until: { views[3].qaAgentBubble?.tint == nil }), "clearing the colour reaches the bubble")
 
+        try expect(views[0].qaManagedBadgeFrameInTile != nil, "fixture: the Managed badge shows, so its clearance is tested")
+
         // 2. Geometry at every chrome scale bucket.
         var buckets: Set<Double> = []
         for zoom in [1.0, 0.75, 0.5, 0.35, 0.2, 1.6] {
@@ -217,6 +219,9 @@ enum TileAgentBubbleChecks {
                     try expect(!bar.convert(pill, to: view).intersects(frame), "\(label): the status pill never runs under the bubble")
                 }
                 try expect(view.bounds.contains(frame), "\(label): the bubble stays inside its tile, clear of its neighbours")
+                if let badge = view.qaManagedBadgeFrameInTile {
+                    try expect(!badge.intersects(frame), "\(label): the Managed badge \(badge) runs under the bubble \(frame)")
+                }
             }
         }
         try expect(buckets.count >= 3, "the sweep crossed several chrome scale buckets: \(buckets.sorted())")
@@ -339,6 +344,13 @@ enum TileAgentBubbleChecks {
                 let url = directory.appendingPathComponent("bubble-\(style.rawValue)-\(name)-closeup200.png")
                 try write(close, to: url)
                 written.append(url.path)
+                // Where four tiles meet: a bubble beside the tile above's bottom edge.
+                canvas.setViewport(CanvasViewport(x: 330, y: 250, zoom: 2))
+                pump(0.3)
+                let junction = try capture(canvas, window, rect: NSRect(x: 250, y: 60, width: 700, height: 500))
+                let junctionURL = directory.appendingPathComponent("bubble-\(style.rawValue)-\(name)-junction200.png")
+                try write(junction, to: junctionURL)
+                written.append(junctionURL.path)
             }
         }
         window.appearance = nil

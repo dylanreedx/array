@@ -821,6 +821,7 @@ class TileNSView: NSView, TokenThemed {
         bar.onBubbleChange = { [weak self] in
             guard let self else { return }
             window?.invalidateCursorRects(for: self)
+            layoutUnderBar()
         }
 
         installCornerOverlay()
@@ -1784,7 +1785,14 @@ class TileNSView: NSView, TokenThemed {
         // Preserve the chrome's natural screen role size, allowing width pressure
         // to compact the row using the accessory's actual minimum geometry.
         let scale = underBarScale
-        underBar.place(frame: NSRect(x: 0, y: bar, width: bounds.width, height: base * scale), unscaledHeight: base)
+        // The agent's bubble hangs into the row's trailing corner: the row's
+        // content ends before it rather than running under it.
+        var reserve: CGFloat = 0
+        if let bubble = titleBar?.bubbleRectInBar, bubble.maxY > bar {
+            reserve = bounds.width - bubble.minX + CGFloat(Space.xs) * zoomChromeScale
+        }
+        underBar.place(frame: NSRect(x: 0, y: bar, width: bounds.width, height: base * scale), unscaledHeight: base,
+                       trailingReserve: reserve)
     }
 
     func setOwnershipMark(_ mark: OwnershipMark?) {
@@ -2754,6 +2762,9 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     var qaCharacterRect: NSRect? { characterLayer.isHidden ? nil : characterRect }
     /// QA: the bubble in this bar's coordinates, while it shows.
     var qaBubbleRect: NSRect? { bubble.isHidden ? nil : bubbleRect }
+    /// Where the bubble goes in this bar whenever the tile has an icon, before
+    /// the bar has laid it out: the under-bar keeps clear of it.
+    var bubbleRectInBar: NSRect? { bubbleRect }
     var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
 
     func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String?,
@@ -3943,6 +3954,9 @@ final class TileUnderBarView: NSView {
     private var indicatorColour: NSColor = .systemOrange
     private(set) var trailing: NSView?
     private var trailingWidth: CGFloat = 0
+    /// Room kept clear at the row's trailing end (bounds units) for the agent's
+    /// bubble, which hangs over the tile's corner.
+    private(set) var trailingReserve: CGFloat = 0
     override var isFlipped: Bool { true }
 
     private(set) var accessoryIsResting = false
@@ -3995,11 +4009,16 @@ final class TileUnderBarView: NSView {
 
     /// `frame` is the scaled world rect in the tile; the bounds keep the row's
     /// unscaled height, so everything inside draws at the bar's chrome scale.
-    func place(frame next: NSRect, unscaledHeight: CGFloat) {
+    func place(frame next: NSRect, unscaledHeight: CGFloat, trailingReserve reserve: CGFloat = 0) {
         if frame != next { frame = next }
         let size = NSSize(width: next.width * unscaledHeight / max(next.height, 1), height: unscaledHeight)
         if abs(bounds.width - size.width) > 0.01 || abs(bounds.height - size.height) > 0.01 {
             setBoundsSize(size)
+            needsLayout = true; needsDisplay = true
+        }
+        let inBounds = reserve * size.width / max(next.width, 1)
+        if abs(inBounds - trailingReserve) > 0.01 {
+            trailingReserve = inBounds
             needsLayout = true; needsDisplay = true
         }
     }
@@ -4017,7 +4036,7 @@ final class TileUnderBarView: NSView {
     /// indicator's dot and the trailing control. The tile caps the row's
     /// scale at its width over this.
     var minimumContentWidth: CGFloat {
-        var width: CGFloat = 8
+        var width: CGFloat = 8 + trailingReserve
         if indicatorText != nil { width += Self.compactIndicatorWidth + 8 }
         if trailing != nil { width += trailingWidth + 8 }
         width += accessoryMinimumWidth
@@ -4028,7 +4047,7 @@ final class TileUnderBarView: NSView {
         let compact = (accessory as? TileUnderBarAccessory)?.minimumReadableWidth ?? accessoryMinimumWidth
         // Match layout's actual compact indicator gap (4, not the legacy 8).
         // Two existing border widths leave one at each edge for pixel snapping.
-        var width = compact + 2 * CGFloat(LineWidth.hairline)
+        var width = compact + 2 * CGFloat(LineWidth.hairline) + trailingReserve
         if indicatorText != nil { width += 8 + Self.compactIndicatorWidth + 4 }
         if trailing != nil { width += trailingWidth + 8 }
         return max(1, width)
@@ -4039,7 +4058,7 @@ final class TileUnderBarView: NSView {
     var indicatorRect: NSRect? {
         guard let text = indicatorText else { return nil }
         let textWidth = ceil((text as NSString).size(withAttributes: [.font: Self.indicatorFont]).width)
-        var cap = bounds.width - 16 - (trailing == nil ? 0 : trailingWidth + 8)
+        var cap = bounds.width - 16 - trailingReserve - (trailing == nil ? 0 : trailingWidth + 8)
         if let accessory, !accessory.isHidden {
             cap = min(cap, bounds.width * 0.45, bounds.width - accessoryMinimumWidth - 12)
         }
@@ -4052,10 +4071,10 @@ final class TileUnderBarView: NSView {
 
     override func layout() {
         super.layout()
-        var right = bounds.width
+        var right = bounds.width - trailingReserve
         if let trailing {
             let height = TileNSView.ownershipStripHeight - 2
-            let frame = NSRect(x: bounds.width - trailingWidth - 8, y: (bounds.height - height) / 2, width: trailingWidth, height: height)
+            let frame = NSRect(x: right - trailingWidth - 8, y: (bounds.height - height) / 2, width: trailingWidth, height: height)
             if trailing.frame != frame { trailing.frame = frame }
             right = frame.minX
         }

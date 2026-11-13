@@ -5359,6 +5359,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
     var qaUsesV2HeaderShell: Bool { agentHeader.superview != nil }
     var qaAgentHeaderName: String { agentHeader.qaName }
+    /// QA: the Managed badge in this tile's space, wherever the under-bar shows it.
+    var qaManagedBadgeFrameInTile: NSRect? {
+        agentHeader.qaManagedFrame.flatMap { qaUnderBarRect($0, in: agentHeader) }
+    }
     /// The Send button's own action, draft untouched — a board task dropped on
     /// the tile is sent with whatever the composer holds, as a click sends it.
     func qaPressSendForChecks() { performV2PrimaryAction() }
