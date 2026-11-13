@@ -456,6 +456,7 @@ check --workspace-sidebar-shell-check
 check --workspace-switch-check
 check --workspace-switch-confidence-check
 check --workspace-switch-polish-check
+check --workspace-tool-context-check
 check --workspace-top-bar-check
 check --zindex-relaunch-hit-test-check
 check --zone-adaptive-bounds-check
@@ -500,6 +501,7 @@ leg run swift build --disable-sandbox --skip-update --product Array -j 4
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
+leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks -j 4
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
@@ -1006,6 +1008,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-board-contra
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --zone-membership-repair-check
 leg run_leg .build/debug/ContinuumRevivedFileTreeChecks
 leg run_leg .build/debug/ContinuumRevivedPaletteChecks
@@ -1034,9 +1037,9 @@ leg run_leg python3 benchmarks/replay/check_live_temp.py
 leg run_leg python3 scripts/check-candidate-prepass-bundle.py
 leg run_leg python3 scripts/check-collaboration-pair-features.py
 leg run_leg python3 scripts/check-collaboration-pair.py
-leg run_leg python3 scripts/check-matrix-build-ordering.py
 leg run_leg python3 scripts/check-gate-prepass.py
 leg run_leg python3 scripts/check-interruptible-helper-waits.py
+leg run_leg python3 scripts/check-matrix-build-ordering.py
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --skip-build
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --only kinds --name ShareKinds --no-lock
@@ -1075,7 +1078,7 @@ count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 207
+count ContinuumRevivedCoreChecks 208
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
