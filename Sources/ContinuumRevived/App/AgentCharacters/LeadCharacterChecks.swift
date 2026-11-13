@@ -4,15 +4,9 @@ import ContinuumRevivedCore
 
 // Plan: .plans/110-agent-characters/README.md › "Lead" (0.7.40).
 //
-// `--lead-character-check`: one lead per pack. A real supervisor spawns a lead
-// and three helpers (real `parentAgentID` + delegation ordinals), one helper
-// delegates further, and a lone agent stands apart. Through the production tile
-// header and sidebar rows: the lead draws the set's lead art (28 x 16), the three
-// helpers draw three distinct characters in delegation order, a nested helper
-// never draws lead art, a fresh supervisor restoring the same store draws the
-// same characters, a manual pick wins (on a helper and on the lead), the lone
-// agent keeps its hashed pick, and a set with no lead art falls back: the lead
-// keeps a helper character and its helpers start just after it.
+// `--lead-character-check`: production sidebar/header assignments for two leads,
+// distinct before and after restoring the store, plus delegation order, manual
+// picks, nested helpers and a set without legacy lead art.
 @MainActor
 enum LeadCharacterChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -136,15 +130,12 @@ enum LeadCharacterChecks {
         inboxWindow.appearance = NSAppearance(named: .aqua)
 
         func assertPack(_ label: String) throws {
-            try expect(pump(until: { isLeadArt(atlas(lead)) }),
-                       "\(label): the lead's row draws the set's 28 x 16 lead art (got \(String(describing: atlas(lead)?.atlas.frameWidth)))")
+            let index = controller.characterIndex(for: lead.rawValue)!
+            try expect(pump(until: { rowShows(lead, index) }), "lead draws its own character")
             tileView.attach(agentID: lead, supervisor: supervisor)
             tileView.layoutSubtreeIfNeeded()
-            try expect(pump(until: { isLeadArt(tileView.qaCharacterLayer?.sprite) }),
-                       "\(label): the lead's tile header draws lead art")
-            if let rect = tileView.qaCharacterRect {
-                try expect(abs(rect.width / rect.height - 28.0 / 16.0) < 0.01, "\(label): the header slot keeps the lead's 28 x 16 shape, \(rect)")
-            }
+            try expect(pump(until: { tileView.qaCharacterLayer?.sprite?.image === helperImage(index) }),
+                       "lead header draws its own character")
             for (slot, helper) in helpers.enumerated() {
                 try expect(controller.characterIndex(for: helper.rawValue) == slot,
                            "\(label): helper \(slot + 1) takes character \(slot) in delegation order (got \(String(describing: controller.characterIndex(for: helper.rawValue))))")
@@ -152,10 +143,22 @@ enum LeadCharacterChecks {
             }
             try expect(!isLeadArt(atlas(helpers[0])) && !isLeadArt(atlas(nested)),
                        "\(label): one lead per pack: a helper that delegates, and its helper, never draw lead art")
-            let loneIndex = AgentCharacterConfig.characterIndex(for: lone.rawValue, count: count)
+            let loneIndex = supervisor.records[lone]!.automaticCharacterIndex! % count
             try expect(controller.characterIndex(for: lone.rawValue) == loneIndex && rowShows(lone, loneIndex),
-                       "\(label): an agent with no lead keeps its hashed pick")
+                       "\(label): a lone agent keeps its saved automatic pick")
         }
+        let secondLead = spawn("Lead another task")
+        for slot in 1...3 { _ = spawn("Another helper \(slot)", parent: secondLead) }
+        supervisor.publishCharacterPacks()
+        let original = controller.assignment(for: lead.rawValue)
+        try expect(original != controller.assignment(for: secondLead.rawValue), "two leads draw distinct icons")
+        let extra = spawn("A third lead")
+        _ = spawn("Third helper", parent: extra)
+        supervisor.publishCharacterPacks()
+        try expect(controller.assignment(for: lead.rawValue) == original, "adding a lead keeps the original icon")
+        try expect(supervisor.archive(extra).recordDeleted, "third lead is removed")
+        supervisor.publishCharacterPacks()
+        try expect(controller.assignment(for: lead.rawValue) == original, "removing a lead keeps the original icon")
         try assertPack("first run")
         try captureStills(ids: [lead] + helpers + [nested, lone], supervisor: supervisor, inbox: inbox, tileView: tileView)
 
@@ -164,6 +167,9 @@ enum LeadCharacterChecks {
         supervisor.stopAll()
         supervisor = makeSupervisor()
         _ = supervisor.restore()
+        supervisor.publishCharacterPacks()
+        try expect(controller.assignment(for: lead.rawValue) == original, "lead icon survives restore")
+        try expect(original != controller.assignment(for: secondLead.rawValue), "restored leads remain distinct")
         try assertPack("after a reload")
 
         // A manual pick wins, on a helper and on the lead.
@@ -176,7 +182,7 @@ enum LeadCharacterChecks {
         try expect(pump(until: { rowShows(lead, pick) }), "a lead's manual pick wins over lead art")
         _ = supervisor.setCharacterName(agentID: lead, nil)
         _ = supervisor.setCharacterName(agentID: helpers[1], nil)
-        try expect(pump(until: { isLeadArt(atlas(lead)) && rowShows(helpers[1], 1) }), "clearing the picks restores the pack")
+        try expect(pump(until: { rowShows(lead, controller.characterIndex(for: lead.rawValue)!) && rowShows(helpers[1], 1) }), "clearing the picks restores the pack")
 
         // A set with no lead art: the lead keeps a helper character; its helpers start after it.
         guard let url = AgentCharacterBundled.themeURL, var json = try JSONSerialization.jsonObject(
@@ -190,7 +196,7 @@ enum LeadCharacterChecks {
         defaults.set("no-lead-check", forKey: AgentCharacterConfig.themeKey)
         controller.reload()
         try expect(controller.theme?.id == "no-lead-check" && controller.theme?.hasLead == false, "the set with no lead art is shown")
-        let leadIndex = AgentCharacterConfig.characterIndex(for: lead.rawValue, count: count)
+        let leadIndex = controller.characterIndex(for: lead.rawValue)!
         try expect(pump(until: { rowShows(lead, leadIndex) }), "with no lead art the lead keeps its hashed helper character")
         let fallback = helpers.map { controller.characterIndex(for: $0.rawValue) }
         try expect(fallback == (1...3).map { (leadIndex + $0) % count },
@@ -202,6 +208,6 @@ enum LeadCharacterChecks {
 
         tileView.detach()
         supervisor.stopAll()
-        return "Lead character checks passed: the lead draws 28 x 16 lead art in its row and header, its 3 helpers draw characters 0, 1, 2 in delegation order, a helper that delegates and its helper never draw lead art, a restored store draws the same, a manual pick wins on a helper and on the lead, a lone agent keeps its hash, and a set with no lead art keeps the lead's helper character with its helpers after it"
+        return "Lead character checks passed: distinct lead icons survive store restore; legacy coverage: the lead draws its own character in its row and header, its 3 helpers draw characters 0, 1, 2 in delegation order, a helper that delegates and its helper never draw lead art, a restored store draws the same, a manual pick wins on a helper and on the lead, a lone agent keeps its hash, and a set with no lead art keeps the lead's helper character with its helpers after it"
     }
 }
