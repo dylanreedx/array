@@ -26,7 +26,8 @@ func runAgentStoreChecks() {
         try runAgentStoreConcurrentUpsertCheck(root: root)
         try runAgentStoreBackupScanCheck(root: root)
         try runAgentStoreBackupScaleCheck(root: root)
-        print("AgentStore checks: app-support root, round-trip, cross-project deterministic order, corrupt-file skip, concurrent upsert, one backup scan per save, and save cost independent of agent count passed")
+        try runAgentStoreDowngradeRoundTripCheck(root: root)
+        print("AgentStore checks: app-support root, round-trip, cross-project deterministic order, corrupt-file skip, concurrent upsert, one backup scan per save, save cost independent of agent count, and a 0.7.47 round trip healing passed")
     } catch {
         fputs("FAIL: AgentStore checks failed: \(error)\n", stderr)
         Foundation.exit(1)
@@ -504,6 +505,8 @@ private func runAgentStoreBackupScale(root: URL, neighbours: Int) throws -> [Int
     let openStarted = Date()
     let store = AgentStore(applicationSupportDirectory: root, retainedBackups: 3, warn: { _ in })
     let openSeconds = Date().timeIntervalSince(openStarted)
+    // The move runs off the caller's thread; measure saves once it is done.
+    store.waitForBackupMigration()
 
     var record = target
     var entries: [Int] = []
@@ -562,4 +565,116 @@ private func runAgentStoreBackupScale(root: URL, neighbours: Int) throws -> [Int
         throw AgentStoreCheckError("\(neighbours) neighbours: loadAll returned \(all.count) records, expected \(neighbours + 2)")
     }
     return entries
+}
+
+// 8 · A 0.7.47 round trip heals (2026-11-12). The move into per-record folders
+// runs on every launch, so backups 0.7.47 writes into the shared folder after a
+// downgrade reach their record's folder on the next upgrade. Nothing is lost, a
+// same-named file already there is kept beside the moved one, and a save still
+// reads only its own folder.
+private func runAgentStoreDowngradeRoundTripCheck(root: URL) throws {
+    let base = root.appendingPathComponent("downgrade-round-trip", isDirectory: true)
+    let layout = AgentStoreLayout(applicationSupportDirectory: base)
+    let shared = layout.backupsDirectory
+    let fileManager = FileManager.default
+    try fileManager.createDirectory(at: shared, withIntermediateDirectories: true)
+    let encoder = JSONCodec.makeEncoder(prettyPrinted: true)
+    let created = Date(timeIntervalSinceReferenceDate: 806_100_000)
+    func id(_ index: Int) -> AgentID {
+        AgentID(rawValue: UUID(uuidString: String(format: "2A400000-0000-4000-8000-%012X", index))!)
+    }
+    func v2Name(_ agent: AgentID, generation: Int) -> String {
+        AtomicWriter.backupNamePrefix(
+            forCanonicalIdentityPath: AtomicWriter.canonicalIdentityPath(for: layout.agentFile(id: agent)))
+            + String(format: "%020d", generation) + "-2026-11-12T08-00-00.000Z"
+    }
+    func record(_ agent: AgentID, _ name: String) throws -> Data {
+        var value = makeAgentStoreFixture(id: agent, createdAt: created)
+        value.displayName = name
+        return try encoder.encode(value)
+    }
+    func sharedFiles() throws -> [String] {
+        // Dot-files are bookkeeping (an earlier build's marker), not backups.
+        try fileManager.contentsOfDirectory(atPath: shared.path).filter { name in
+            guard !name.hasPrefix(".") else { return false }
+            var isDirectory: ObjCBool = false
+            fileManager.fileExists(atPath: shared.appendingPathComponent(name).path, isDirectory: &isDirectory)
+            return !isDirectory.boolValue
+        }
+    }
+    func allBackups() -> [String: Data] {
+        var files: [String: Data] = [:]
+        for case let path as String in fileManager.enumerator(atPath: shared.path) ?? NSEnumerator() {
+            let url = shared.appendingPathComponent(path)
+            guard !url.lastPathComponent.hasPrefix(".") else { continue }
+            var isDirectory: ObjCBool = false
+            fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            if !isDirectory.boolValue { files[path] = fileManager.contents(atPath: url.path) }
+        }
+        return files
+    }
+
+    // The 0.7.47 layout: 20 records, three backups each, all in the shared folder.
+    for index in 0..<20 {
+        try record(id(index), "Agent \(index)").write(to: layout.agentFile(id: id(index)))
+        for generation in 1...3 {
+            try record(id(index), "Agent \(index) g\(generation)")
+                .write(to: shared.appendingPathComponent(v2Name(id(index), generation: generation)))
+        }
+    }
+    let first = AgentStore(applicationSupportDirectory: base, retainedBackups: 3, warn: { _ in })
+    first.waitForBackupMigration()
+    guard try sharedFiles().isEmpty else {
+        throw AgentStoreCheckError("round trip: the first launch left \(try sharedFiles().count) backups in the shared folder")
+    }
+    let afterUpgrade = allBackups()
+    guard afterUpgrade.count == 60 else {
+        throw AgentStoreCheckError("round trip: \(afterUpgrade.count) backups after the first launch, expected 60")
+    }
+
+    // Downgraded to 0.7.47: it writes a newer backup of agent 0 into the shared
+    // folder, and one of agent 1 whose name is already taken in its own folder.
+    let a = id(0), b = id(1)
+    try record(a, "Agent 0 written by 0.7.47").write(to: shared.appendingPathComponent(v2Name(a, generation: 4)))
+    let collidingName = v2Name(b, generation: 1)
+    let collidingData = try record(b, "Agent 1 collision from 0.7.47")
+    try collidingData.write(to: shared.appendingPathComponent(collidingName))
+
+    // Upgraded again.
+    let second = AgentStore(applicationSupportDirectory: base, retainedBackups: 3, warn: { _ in })
+    second.waitForBackupMigration()
+    guard try sharedFiles().isEmpty else {
+        throw AgentStoreCheckError("round trip: backups 0.7.47 wrote stayed in the shared folder: \(try sharedFiles())")
+    }
+    let healed = allBackups()
+    guard healed.count == 62 else {
+        throw AgentStoreCheckError("round trip: \(healed.count) backups after the second launch, expected 62; something was lost or overwritten")
+    }
+    for (path, data) in afterUpgrade where healed[path] != data {
+        throw AgentStoreCheckError("round trip: the backup at \(path) changed; a move must never overwrite")
+    }
+    let aDir = a.rawValue.uuidString, bDir = b.rawValue.uuidString
+    guard healed["\(aDir)/\(v2Name(a, generation: 4))"] != nil else {
+        throw AgentStoreCheckError("round trip: the backup 0.7.47 wrote did not reach its record's folder")
+    }
+    guard healed["\(bDir)/\(collidingName).moved-1"] == collidingData else {
+        throw AgentStoreCheckError("round trip: a same-named backup was not kept beside the one already there")
+    }
+
+    // The restore reader finds the healed backup: agent 0's newest is 0.7.47's.
+    try Data("{".utf8).write(to: layout.agentFile(id: a))
+    guard try second.load(id: a)?.displayName == "Agent 0 written by 0.7.47" else {
+        throw AgentStoreCheckError("round trip: a corrupt record did not restore from the backup 0.7.47 wrote")
+    }
+
+    // And a save still reads only its own folder.
+    var saved = makeAgentStoreFixture(id: id(2), createdAt: created)
+    saved.displayName = "Saved after the round trip"
+    let before = AtomicWriter.backupEntriesScannedForQA
+    try second.upsert(saved)
+    let read = AtomicWriter.backupEntriesScannedForQA - before
+    guard read == 3 else {
+        throw AgentStoreCheckError("round trip: a save read \(read) directory entries, expected its own 3")
+    }
+    print("  agent-store round trip: 60 backups moved, 0.7.47's 2 later writes healed (1 kept beside a same-named file), save reads \(read) entries")
 }
