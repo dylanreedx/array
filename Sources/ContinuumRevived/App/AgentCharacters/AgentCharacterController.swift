@@ -58,6 +58,10 @@ final class AgentCharacterController {
     private(set) var isEnabled = false
     private(set) var motion = AgentCharacterConfig.defaultMotion
     private(set) var size = AgentCharacterConfig.defaultSize
+    /// How a tile draws its agent's icon bubble (Settings › Agent Icons › Tile bubble).
+    private(set) var bubbleStyle = AgentCharacterConfig.BubbleStyle.minimal
+    /// The sidebar's active style: a working bubble borrows its light.
+    private(set) var workingStyle = SidebarActiveIndicatorStyle.fallback
     /// How much a character's line grows: the size's factor while characters
     /// show, else 1 (off never makes a row or a bar taller).
     var layoutFactor: CGFloat { isEnabled ? CGFloat(size.factor) : 1 }
@@ -124,7 +128,7 @@ final class AgentCharacterController {
         self.defaults = defaults
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = [AgentCharacterConfig.enabledKey, AgentCharacterConfig.motionKey, AgentCharacterConfig.themeKey,
-                     AgentCharacterConfig.sizeKey].map { key in
+                     AgentCharacterConfig.sizeKey, AgentCharacterConfig.bubbleStyleKey, SidebarActiveIndicatorStyle.defaultsKey].map { key in
             NotificationCenter.default.addObserver(
                 forName: SettingChangeEvent.name(for: SettingID(rawValue: key)), object: nil, queue: .main
             ) { _ in MainActor.assumeIsolated { AgentCharacterController.shared.reload() } }
@@ -209,15 +213,20 @@ final class AgentCharacterController {
         let enabled = AgentCharacterConfig.isEnabled(defaults)
         let motion = AgentCharacterConfig.motion(defaults)
         let size = AgentCharacterConfig.size(defaults)
+        let bubbleStyle = AgentCharacterConfig.bubbleStyle(defaults)
+        let workingStyle = SidebarActiveIndicatorStyle.resolve(in: defaults)
         let selected = defaults.string(forKey: AgentCharacterConfig.themeKey)
         // Off means nothing resident: no theme, no atlases.
         let theme = enabled ? resolveTheme(id: selected) : nil
         // A set edited in place keeps its id: compare what it draws, not its name.
         let changed = force || enabled != isEnabled || motion != self.motion || size != self.size || theme != self.theme
+            || bubbleStyle != self.bubbleStyle || workingStyle != self.workingStyle
         if theme != self.theme || theme == nil { atlases.removeAll() }
         isEnabled = enabled
         self.motion = motion
         self.size = size
+        self.bubbleStyle = bubbleStyle
+        self.workingStyle = workingStyle
         if theme != self.theme { leadSet = theme?.leadSet }
         self.theme = theme
         if changed { NotificationCenter.default.post(name: Self.didChangeNotification, object: self) }

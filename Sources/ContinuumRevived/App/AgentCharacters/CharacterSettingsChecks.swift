@@ -165,6 +165,16 @@ enum CharacterSettingsChecks {
         _ = try awaitCards(count: 6, in: fixture)
         let page = settings.agentCharacters
         for id in AgentCharacterBundled.packIDs {
+            if let frame = settings.anchorFrames["ArrayAgentCharacterSet.\(id)"] {
+                let pane = try FoundCharacterThemesChecks.pane(fixture)
+                let clip = pane.contentView
+                let overflow = max(0, frame.maxY - settings.viewportSize.height)
+                if overflow > 0 {
+                    clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + overflow + 8))
+                    pane.reflectScrolledClipView(clip)
+                    fixture.settle(0.3)
+                }
+            }
             try FoundCharacterThemesChecks.click("ArrayAgentCharacterSet.\(id)", in: fixture)
             try expect(page.selectedID == id, "clicking the \(id) card selects it at once")
             try waitUntil(fixture, "choosing \(id) draws it (\(controller.theme?.id ?? "nil"))") { controller.theme?.id == id }

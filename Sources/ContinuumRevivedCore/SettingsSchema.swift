@@ -115,6 +115,11 @@ public enum SettingsSchema {
         SettingsSection(id: "agentCharacters", title: AgentCharacterCopy.feature, iconSystemName: "face.smiling",
                         keywords: ["icons", "icon packs", "characters", "sprites", "ducks", "mascot", "symbols"], groups: [
             SettingsGroup(id: "agentCharacters.display", title: nil, rows: [
+                SettingsRow(.choice(key: AgentCharacterConfig.bubbleStyleKey, label: "Tile bubble",
+                                    options: AgentCharacterConfig.BubbleStyle.allCases.map(\.rawValue),
+                                    default: AgentCharacterConfig.BubbleStyle.minimal.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.BubbleStyle.allCases.map { ($0.rawValue, $0.title) })),
+                            keywords: ["agent", "icon", "bubble", "orb"]),
                 SettingsRow(.toggle(key: AgentCharacterConfig.enabledKey, label: AgentCharacterCopy.show,
                                     default: AgentCharacterConfig.defaultEnabled),
                             help: "A small \(AgentCharacterCopy.one) beside each agent's provider mark acts out what the agent is doing.",

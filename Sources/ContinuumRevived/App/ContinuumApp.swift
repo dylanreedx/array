@@ -2995,6 +2995,31 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // The agent's icon in a bubble at its tile's top-right corner.
+        if CommandLine.arguments.contains("--tile-agent-bubble-check") {
+            _ = NSApplication.shared
+            do {
+                print(try TileAgentBubbleChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL tile agent bubble: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--tile-agent-bubble-drag-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await TileAgentBubbleChecks.runDrag())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL --tile-agent-bubble-drag-check: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+            return
+        }
         // Plan 110: other agents' characters in a lead's transcript (chips, cards, Task rows).
         if CommandLine.arguments.contains("--transcript-character-check") {
             _ = NSApplication.shared
