@@ -107,6 +107,7 @@ NOTIFICATIONS_LINUX_ONLY=0
 TOOL_CONTEXT_ONLY=0
 HELPER_ISOLATION_ONLY=0
 MANAGED_MODE_ONLY=0
+HELPER_CONTEXT_DIET_ONLY=0
 PERMISSION_UX_ONLY=0
 MATRIX_MODE=full
 FOCUS_SAFE_INPUT_ONLY=0
@@ -223,6 +224,10 @@ if [[ $# -gt 0 ]]; then
       HELPER_ISOLATION_ONLY=1
       shift
       ;;
+    --helper-context-diet)
+      HELPER_CONTEXT_DIET_ONLY=1
+      shift
+      ;;
     --managed-mode)
       MANAGED_MODE_ONLY=1
       shift
@@ -233,7 +238,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context]
+Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context | --helper-context-diet]
 
 
 --focus-safe-input runs only the browser input witnesses and their contract/catalog neighbors.
@@ -1082,6 +1087,29 @@ if [[ "$HELPER_ISOLATION_ONLY" -eq 1 ]]; then
   matrix_report 'Helper isolation matrix (targeted)'
   exit $?
 fi
+# The diet compatibility slice is offline and rebuilds its actual launch path.
+if [[ "$HELPER_CONTEXT_DIET_ONLY" -eq 1 ]]; then
+  diet_build_preflight() {
+    python3 - <<'DIET_RESOURCE_PY'
+import os, re, subprocess
+builds = sum(line.startswith('/Applications/Xcode.app/') and '/usr/bin/swift-build' in line
+             for line in subprocess.check_output(['ps', '-Ao', 'command'], text=True).splitlines())
+free = int(re.search(r'free percentage: (\d+)', subprocess.check_output(['memory_pressure'], text=True))[1])
+st = os.statvfs('.')
+gib = st.f_bavail * st.f_frsize / 2**30
+print(f'diet build preflight: {builds} builds, {free}% free memory, {gib:.1f} GiB available')
+if builds >= 4 or free < 25 or gib < 20:
+    raise SystemExit('Refusing build: requires <4 builds, >=25% memory and >=20 GiB disk')
+DIET_RESOURCE_PY
+  }
+  diet_build_preflight
+  run swift build --product Array -j 2
+  diet_build_preflight
+  run swift build --product array-workspace-mcp -j 2
+  run_app_check .build/debug/Array --helper-context-diet-check
+  matrix_report 'Helper context diet matrix (targeted)'
+  exit $?
+fi
 if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
@@ -1132,6 +1160,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --managed-codex-hooks-check
   run_app_check .build/debug/Array --first-helper-isolation-check
   run_app_check .build/debug/Array --helper-retry-check
+run_app_check .build/debug/Array --helper-context-diet-check
   run_app_check .build/debug/Array --orchestration-plan-check
   run_app_check .build/debug/Array --orchestration-request-lifecycle-check
   run_app_check .build/debug/Array --orchestration-request-policy-check
@@ -1438,6 +1467,7 @@ run_app_check .build/debug/Array --managed-codex-launch-check
 run_app_check .build/debug/Array --managed-codex-hooks-check
 run_app_check .build/debug/Array --first-helper-isolation-check
 run_app_check .build/debug/Array --helper-retry-check
+run_app_check .build/debug/Array --helper-context-diet-check
 run_app_check .build/debug/Array --orchestration-plan-check
 run_app_check .build/debug/Array --orchestration-request-lifecycle-check
 run_app_check .build/debug/Array --orchestration-request-policy-check

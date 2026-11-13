@@ -14,9 +14,12 @@ public struct AgentDelegationContext: Codable, Equatable, Sendable {
     /// Host-owned chooser recovery. Nil on every switch-off delegation.
     public var chooserWriteRequest: UUID?
     public var chooserWriteInProgress: Bool?
+    /// Snapshot before first prompt; absent on legacy/off helpers. Retry inherits.
+    public var contextDietRequested: Bool?
 
     public init(brief: String, baseHead: String?, retryOf: AgentID?, createdWorktree: Bool, checkoutNotice: String?, contract: AgentDelegationContract? = nil,
-                chooserWriteRequest: UUID? = nil, chooserWriteInProgress: Bool? = nil) {
+                chooserWriteRequest: UUID? = nil, chooserWriteInProgress: Bool? = nil, contextDietRequested: Bool? = nil) {
+        self.contextDietRequested = contextDietRequested
         self.brief = brief
         self.baseHead = baseHead
         self.retryOf = retryOf

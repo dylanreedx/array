@@ -179,6 +179,7 @@ extension WorkspaceAPIService {
             note: document == nil ? AgentInspectResponse.absentEvidenceNote : nil,
             observedAt: now)
         response.liveness = supervisor.helperLiveness[target.id]
+        response.contextDiet = HelperContextDiet.status(for: target)
         if let document {
             response.promptTitle = Self.promptTitle(from: document)
             let bounded = AgentInspectExcerpt.bound(

@@ -3849,6 +3849,15 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--helper-context-diet-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await HelperContextDietChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--helper-retry-check") {
             _ = NSApplication.shared
             Task { @MainActor in

@@ -2296,6 +2296,7 @@ final class AgentSupervisor {
             projectStandards: projectStandards
         )
         // Resolved per process launch, off the main thread (see codexRunnerConfig).
+        config.extraArgs += HelperContextDiet.arguments(for: record)
         config.launchArguments = { hostInstructions.piArguments($0) }
         return config
     }
@@ -3356,7 +3357,8 @@ final class AgentSupervisor {
         baseHead: String? = nil,
         id mintedID: AgentID? = nil,
         preparedWorktree: WorktreeManager.Worktree? = nil,
-        namingText: String? = nil
+        namingText: String? = nil,
+        contextDietRequested: Bool? = nil
     ) throws -> AgentID {
         // The id is minted HERE, before anything is created, because the slug is
         // derived from it — `WorktreeManager.slug` id-suffixes so two agents given the
@@ -3405,7 +3407,8 @@ final class AgentSupervisor {
             sourceItemId: sourceItemId,
             tileId: tileId,
             displayName: displayName,
-            namingText: namingText
+            namingText: namingText,
+            contextDietRequested: contextDietRequested
         )
     }
 
@@ -3428,7 +3431,8 @@ final class AgentSupervisor {
         sourceItemId: String? = nil,
         tileId: UUID?,
         displayName: String? = nil,
-        namingText: String? = nil
+        namingText: String? = nil,
+        contextDietRequested: Bool? = nil
     ) -> AgentID {
         // Retain the old internal argument for callers; Settings owns the policy.
         let mode = targetMode(harness: harness, parent: parentAgentID)
@@ -3512,10 +3516,21 @@ final class AgentSupervisor {
             records[id] = record
             persist(record)
         }
+        // Snapshot before first send; never reinterpret a restored child using
+        // today's default. A retry supplies its prior choice, including OFF.
+        if parentAgentID != nil,
+           contextDietRequested ?? HelperContextDiet.requested(defaults: managedModeDefaults),
+           var child = records[id] {
+            child.delegationContext = AgentDelegationContext(brief: namingText ?? prompt ?? "", baseHead: nil,
+                retryOf: nil, createdWorktree: worktreeId != nil, checkoutNotice: nil, contextDietRequested: true)
+            guard persist(child) else { return id }
+            records[id] = child
+        }
         if let request = chooserPendingChildRequests.removeValue(forKey: id), let parent = parentAgentID, var child = records[id] {
             child.delegationContext = AgentDelegationContext(brief: namingText ?? prompt ?? "", baseHead: nil,
                 retryOf: nil, createdWorktree: worktreeId != nil, checkoutNotice: nil,
-                chooserWriteRequest: request, chooserWriteInProgress: true)
+                chooserWriteRequest: request, chooserWriteInProgress: true,
+                contextDietRequested: child.delegationContext?.contextDietRequested)
             records[id] = child
             guard persist(child) else { return id } // do not start a writer without its recovery marker
             chooserChildRequests[id] = (parent, request)
@@ -6448,14 +6463,16 @@ final class AgentSupervisor {
                 baseHead: resolved.isolate ? resolved.baseHead : nil,
                 id: mintedID,
                 preparedWorktree: resolved.worktree,
-                namingText: originalBrief
+                namingText: originalBrief,
+                contextDietRequested: retryOf.map { records[$0]?.delegationContext?.contextDietRequested ?? false }
             )
             guard var spawned = records[childID] else { return nil }
             spawned.delegationContext = AgentDelegationContext(
                 brief: originalBrief ?? request.prompt, baseHead: resolved.baseHead, retryOf: retryOf,
                 createdWorktree: overlapping && resolved.isolate, checkoutNotice: resolved.notice, contract: contract,
                 chooserWriteRequest: spawned.delegationContext?.chooserWriteRequest,
-                chooserWriteInProgress: spawned.delegationContext?.chooserWriteInProgress)
+                chooserWriteInProgress: spawned.delegationContext?.chooserWriteInProgress,
+                contextDietRequested: spawned.delegationContext?.contextDietRequested)
             records[childID] = spawned
             persist(spawned)
             // The child record remembers the tool call that asked for it, so its

@@ -174,6 +174,7 @@ check --fresh-install-check
 check --gesture-telemetry-check
 check --helper-command-evidence-check
 check --helper-completion-check
+check --helper-context-diet-check
 check --helper-evidence-provider-check
 check --helper-liveness-check
 check --helper-message-result-check
@@ -508,7 +509,9 @@ leg run swift build --disable-sandbox --skip-update --product array-workspace-mc
 leg run swift build --disable-sandbox --skip-update --product continuum-relay
 leg run swift build --disable-sandbox --skip-update --product continuum-relay-legacy
 leg run swift build --product Array
+leg run swift build --product Array -j 2
 leg run swift build --product ContinuumRevivedCoreChecks
+leg run swift build --product array-workspace-mcp -j 2
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-account-manage-check
 leg run_app_check .build/debug/Array --agent-account-usage-check
@@ -671,6 +674,7 @@ leg run_app_check .build/debug/Array --fresh-install-check
 leg run_app_check .build/debug/Array --gesture-telemetry-check
 leg run_app_check .build/debug/Array --helper-command-evidence-check
 leg run_app_check .build/debug/Array --helper-completion-check
+leg run_app_check .build/debug/Array --helper-context-diet-check
 leg run_app_check .build/debug/Array --helper-evidence-provider-check
 leg run_app_check .build/debug/Array --helper-liveness-check
 leg run_app_check .build/debug/Array --helper-message-result-check

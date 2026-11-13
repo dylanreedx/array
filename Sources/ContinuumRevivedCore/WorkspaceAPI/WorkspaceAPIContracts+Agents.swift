@@ -316,6 +316,8 @@ public struct AgentInspectResponse: Codable, Equatable, Sendable {
     /// on a live child process, stalled, blocked, finished). Absent for an
     /// agent no one delegated to or messaged.
     public var liveness: HelperLivenessFact?
+    /// Stored launch policy and explicit unknown/unsupported scope.
+    public var contextDiet: HelperContextDietStatus?
 
     public init(
         agent: AgentProjectionIdentity, isCaller: Bool, lastActivityAt: Date, latestPromptAt: Date?,
