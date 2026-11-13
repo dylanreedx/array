@@ -17,6 +17,13 @@ public struct AgentDelegationContext: Codable, Equatable, Sendable {
     /// Snapshot before first prompt; absent on legacy/off helpers. Retry inherits.
     public var contextDietRequested: Bool?
 
+    /// Actual persisted keys; the workspace exposure census audits this nested
+    /// host-owned record as well as AgentRecord itself.
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case brief, baseHead, retryOf, createdWorktree, checkoutNotice, contract
+        case chooserWriteRequest, chooserWriteInProgress, contextDietRequested
+    }
+
     public init(brief: String, baseHead: String?, retryOf: AgentID?, createdWorktree: Bool, checkoutNotice: String?, contract: AgentDelegationContract? = nil,
                 chooserWriteRequest: UUID? = nil, chooserWriteInProgress: Bool? = nil, contextDietRequested: Bool? = nil) {
         self.contextDietRequested = contextDietRequested

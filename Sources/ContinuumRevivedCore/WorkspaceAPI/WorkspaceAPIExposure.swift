@@ -12,6 +12,7 @@ public enum WorkspaceAPIExposure {
 
     public static var fields: Set<String> {
         Set(AgentRecord.CodingKeys.allCases.map { "agent.\($0.rawValue)" }
+            + AgentDelegationContext.CodingKeys.allCases.map { "agent.delegationContext.\($0.rawValue)" }
             + Tile.CodingKeys.allCases.map { "tile.\($0.rawValue)" }
             + TileMetadata.CodingKeys.allCases.map { "tile.metadata.\($0.rawValue)" }
             + ZonePlacement.CodingKeys.allCases.map { "zone.\($0.rawValue)" }
@@ -53,6 +54,17 @@ public enum WorkspaceAPIExposure {
         "agent.sourceItemId": .internal,
         "agent.spawnResultHandle": .internal,
         "agent.delegationContext": .internal, // Original brief, the lead's contract (both set once by agent.delegate, never edited), retry lineage and checkout baseline; host-owned.
+        // These are creation/retry provenance and launch state, never mutable
+        // properties granted by agent.update. Audit each real nested wire key.
+        "agent.delegationContext.brief": .internal,
+        "agent.delegationContext.baseHead": .internal,
+        "agent.delegationContext.retryOf": .internal,
+        "agent.delegationContext.createdWorktree": .internal,
+        "agent.delegationContext.checkoutNotice": .internal,
+        "agent.delegationContext.contract": .internal,
+        "agent.delegationContext.chooserWriteRequest": .internal,
+        "agent.delegationContext.chooserWriteInProgress": .internal,
+        "agent.delegationContext.contextDietRequested": .internal,
         "agent.workspaceToolsEnabled": .notExposed("Only the user may grant workspace-tool access."),
         "agent.identityColor": .exposed(.agentUpdate),
         "agent.automaticCharacterIndex": .internal,
