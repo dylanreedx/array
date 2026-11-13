@@ -1,3 +1,4 @@
+import ObjectiveC
 import AppKit
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
@@ -41,6 +42,12 @@ enum AgentIdentityColorChecks {
 
     static func clickSwatch(list: ChoiceListView, id: String, name: String) -> Bool {
         guard let row = list.rowView(id: id), let window = row.window else { return false }
+        // A clamped child panel is made transparent/click-through by the QA
+        // focus guard. Park it offscreen before enabling synthetic pointer input.
+        window.setFrameOrigin(NSPoint(x: -60_000, y: -60_000))
+        guard !NSScreen.screens.contains(where: { $0.frame.intersects(window.frame) }) else { return false }
+        window.alphaValue = 1
+        window.ignoresMouseEvents = false
         window.contentView?.layoutSubtreeIfNeeded()
         // Hit the visible swatch, rather than invoking the row callback.
         let dot = row.subviews.first { $0 is ChoiceDotView && !$0.isHidden }
@@ -72,6 +79,11 @@ enum AgentIdentityColorChecks {
     }
 
     static func run() throws -> String {
+        // Exercise first-mouse delivery without activating the check app.
+        if let method = class_getInstanceMethod(NSView.self, #selector(NSView.acceptsFirstMouse(for:))) {
+            let always: @convention(block) (NSView, NSEvent?) -> Bool = { _, _ in true }
+            method_setImplementation(method, imp_implementationWithBlock(always))
+        }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("agent-identity-color-\(UUID().uuidString)", isDirectory: true)
         let project = root.appendingPathComponent("project", isDirectory: true)
@@ -135,6 +147,7 @@ enum AgentIdentityColorChecks {
                    "the Color submenu is None then the zone palette in its order, got \(menu.map(\.title))")
         try expect(menu.filter(\.isOn).map(\.title) == ["None"], "None is checked at rest, got \(menu.filter(\.isOn).map(\.title))")
 
+        let identityBeforeColour = tile.chromeSnapshot
         // 3. PICK PURPLE through the real menu item.
         try expect(tile.qaInvokeIdentityColorMenuItem("agentTile.identityColor.purple"), "the Purple item is invocable")
         try expect(supervisor.records[agentId]?.identityColor == "purple",
@@ -162,6 +175,9 @@ enum AgentIdentityColorChecks {
         }
         try expect(wash.frame.width == tile.bounds.width && wash.frame.height == TileNSView.titleBarHeight,
                    "the wash covers the whole title bar: \(wash.frame)")
+        try expect(tile.chromeSnapshot?.title == identityBeforeColour?.title
+                   && tile.chromeSnapshot?.providerModel == identityBeforeColour?.providerModel,
+                   "colour changes repaint independently of unchanged title/model identity")
         let mutedBar = purple.withAlphaComponent(ManagedAgentTileNSView.identityBarAlpha).cgColor
         try expect(same(wash.color, mutedBar),
                    "the title bar is purple at \(ManagedAgentTileNSView.identityBarAlpha) alpha, got \(describe(wash.color))")

@@ -669,6 +669,9 @@ enum TileChromeCanvasChecks {
         let window = KeyableFixtureWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: appearance)
         window.contentView = host
+        // Offscreen windows may retain the opening animation's 90% transform.
+        // Compare settled native-resolution pixels, not a scaled presentation.
+        window.animationBehavior = .none
         window.orderFrontOffscreenForChecks()
         window.makeKey()
         tile.layoutSubtreeIfNeeded()
@@ -768,6 +771,8 @@ enum TileChromeCanvasChecks {
             .null, .optionIncludingWindow, CGWindowID(window.windowNumber), [.boundsIgnoreFraming, .bestResolution]
         ) else { throw Failure(description: "the window server returned no image of the check's own window") }
         let scale = CGFloat(image.width) / host.bounds.width
+        try expect(abs(scale - window.backingScaleFactor) <= 1 / host.bounds.width,
+                   "window capture must use the native pixel grid, got \(scale)x instead of \(window.backingScaleFactor)x")
         // Image rows run top-down; the host is not flipped.
         let rect = tile.convert(tile.bounds, to: host)
         let crop = CGRect(x: rect.minX * scale, y: (host.bounds.height - rect.maxY) * scale,
