@@ -145,3 +145,41 @@ establish the bounded discovery semantics; full provider payload, real-provider
 compaction, obedience and paired latency/quality remain unproved. No personal
 or project files were replaced or deleted. No child review agent was spawned;
 exact commits and RED/GREEN evidence were sent to the lead for sibling review.
+
+## Real MCP refusal and isolated checkout cleanup
+
+`bfd68f35` adds a real `array-workspace-mcp` -> mounted host -> production
+writer fault. The original `dd39d279` supervisor blob was temporarily replayed
+only in this bench, with current test code frozen, to establish MCP-specific
+RED: `MCP must return an error for failed policy persistence, never successful
+delegation`. The faulty blob was not committed and the fixed committed source
+was restored before further work. Log:
+`/tmp/gaps-helper-diet-mcp-fault-red.log`.
+
+The isolated variant then reproduced a distinct RED on the fixed transaction:
+`isolated failed allocation leaked prepared worktree or branch`
+(`/tmp/gaps-helper-diet-isolated-red.log`). `832b7556` schedules cleanup of a
+prepared checkout only when no in-memory child owns it; a utility worker also
+requires the durable child to be absent. Existing durable ownership or a read
+error preserves the checkout. The branch is deleted only after checkout removal
+succeeds. No synchronous disk scan was added to the request path.
+
+The same real-MCP isolated failure witness is GREEN after rebuilding Array and
+MCP: error response, no child ID/task runner/durable allocation/ordinal advance,
+and the git worktree registration, branch and checkout directory disappear.
+Log: `/tmp/gaps-helper-diet-isolated-green.log`. The full arm then passes both
+MCP failure cases, the transaction fault, and all launch/context-retention cases
+(`/tmp/gaps-helper-diet-all-final.log`). This establishes host and RPC behavior,
+not live Pi compression, provider file loading or model obedience.
+
+**The pending reported-gate limitation above is now resolved for this bench.**
+Normal-lock `scripts/run-matrix.sh --helper-context-diet` passed with **9 legs
+run**, including the actual exposure and full helper-diet app legs. No lock was
+bypassed. Report:
+`qa-runs/matrix-20261113T225121Z-93891/` and
+`/tmp/gaps-helper-diet-cleanup-matrix.log`. Per-build preflights were
+1 existing build / 68% memory free / 49.3 GiB disk, then 0 / 66% / 49.2 GiB,
+then 0 / 67% / 49.2 GiB. The gate confirmed 146 real coding keys classified.
+All foreground builds/tests completed; code through `832b7556` remains frozen
+for final sibling review. Combined-branch verification and review approval
+remain separate; the feature is still OFF and unintegrated here.
