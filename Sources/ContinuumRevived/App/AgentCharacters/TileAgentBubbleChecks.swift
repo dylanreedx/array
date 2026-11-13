@@ -179,13 +179,12 @@ enum TileAgentBubbleChecks {
         let resumed = !views[0].qaAgentBubble!.qaAnimationKeys.isEmpty
         views[0].resetCursorRects()
         let disc = views[0].agentBubbleFrame!
-        let centre = NSPoint(x: disc.midX, y: disc.midY)
         let corner = NSPoint(x: disc.maxX - 0.1, y: disc.minY + 0.1)
-        let hand = views[0].qaAgentBubbleCursorRect!
         try expect(stopped && resumed && unchangedFrames == views.map { $0.agentBubbleFrame }
-                   && hand.contains(centre) && !hand.contains(corner)
                    && views[0].qaResizeEdge(at: corner) != nil,
-                   "live Reduce Motion stopped=\(stopped) resumed=\(resumed); cursor centre=\(hand.contains(centre)) corner=\(hand.contains(corner)) (corner must resize)")
+                   "live Reduce Motion stopped=\(stopped) resumed=\(resumed); outside-circle corner must resize")
+        // Real cursor output from both tracking handlers, at caps and corners.
+        try checkCursor(view: views[0], window: window)
         _ = supervisor.setIdentityColor(agentID: agents[3], "mint")
         try expect(pump(until: { views[3].qaAgentBubble?.tint == ZoneChromeNSView.color(named: "mint") }),
                    "a new identity colour reaches the bubble")
@@ -204,6 +203,9 @@ enum TileAgentBubbleChecks {
                 let label = "zoom \(zoom) tile \(index)"
                 guard let frame = view.agentBubbleFrame, let bubble = view.qaAgentBubble,
                       let bar = view.qaTitleBarView else { throw Failure(description: "\(label): no bubble") }
+                if index == 0 && (zoom == 1 || zoom == 0.5) {
+                    try checkCursor(view: view, window: window)
+                }
                 let chrome = view.zoomChromeScale
                 buckets.insert(Double(chrome))
                 let side = TileNSView.agentBubbleSide * max(chrome, view.titleBarScale)
@@ -409,6 +411,47 @@ enum TileAgentBubbleChecks {
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
         pump(0.2)
         return ["wrote \(written) working frames to \(directory.path)"]
+    }
+
+    private static func checkCursor(view: ManagedAgentTileNSView, window: NSWindow) throws {
+        view.resetCursorRects()
+        view.updateTrackingAreas()
+        let disc = view.agentBubbleFrame!
+        try expect(view.trackingAreas.contains { $0.rect.contains(disc) && $0.options.contains(.mouseMoved)
+            && $0.options.contains(.cursorUpdate) }, "bubble has pointer and cursor tracking")
+        let points: [(String, NSPoint, NSCursor)] = [
+            ("right cap", NSPoint(x: disc.maxX - 0.1, y: disc.midY), .openHand),
+            ("top cap", NSPoint(x: disc.midX, y: disc.minY + 0.1), .openHand),
+            ("left cap", NSPoint(x: disc.minX + 0.1, y: disc.midY), .openHand),
+            ("bottom cap", NSPoint(x: disc.midX, y: disc.maxY - 0.1), .openHand),
+            ("centre", NSPoint(x: disc.midX, y: disc.midY), .openHand),
+            ("square corner", NSPoint(x: disc.maxX - 0.1, y: disc.minY + 0.1), .resizeUpDown),
+        ]
+        let savedCursor = NSCursor.current
+        defer { savedCursor.set() }
+        for (label, point, expected) in points {
+            let event = NSEvent.mouseEvent(with: .mouseMoved, location: view.convert(point, to: nil),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+            try expect(view.agentBubbleContains(point) == (expected == NSCursor.openHand),
+                       "\(label): cursor and circular grab agree")
+            NSCursor.arrow.set()
+            view.mouseMoved(with: event)
+            try expect(NSCursor.current == expected, "\(label): pointer movement selects \(expected)")
+            NSCursor.arrow.set()
+            view.cursorUpdate(with: event)
+            try expect(NSCursor.current == expected, "\(label): cursor entry selects \(expected)")
+        }
+        for point in [NSPoint(x: disc.maxX, y: disc.midY), NSPoint(x: disc.midX, y: disc.maxY)] {
+            let event = NSEvent.mouseEvent(with: .mouseMoved, location: view.convert(point, to: nil),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
+            NSCursor.arrow.set()
+            view.mouseMoved(with: event)
+            let receivedPoint = view.convert(event.locationInWindow, from: nil)
+            try expect((NSCursor.current == NSCursor.openHand) == view.agentBubbleContains(receivedPoint),
+                       "circumference: cursor and circular hit-test agree at the received window point \(receivedPoint)")
+        }
     }
 
     // MARK: Drag from the bubble, on the production mount

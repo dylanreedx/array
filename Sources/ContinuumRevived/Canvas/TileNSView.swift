@@ -454,13 +454,24 @@ class TileNSView: NSView, TokenThemed {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas where area.owner === self { removeTrackingArea(area) }
+        for area in trackingAreas where area.owner === self && area !== bubbleCursorTrackingArea { removeTrackingArea(area) }
         addTrackingArea(NSTrackingArea(
             rect: .zero,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
             owner: self,
             userInfo: nil
         ))
+        updateBubbleCursorTracking()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        if let cursor = bubbleCursor(at: convert(event.locationInWindow, from: nil)) { cursor.set() }
+        else { super.mouseMoved(with: event) }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if let cursor = bubbleCursor(at: convert(event.locationInWindow, from: nil)) { cursor.set() }
+        else { super.cursorUpdate(with: event) }
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -1532,10 +1543,34 @@ class TileNSView: NSView, TokenThemed {
     /// Make the resize ring discoverable: tracking-area-driven cursor rects
     /// for each edge zone, plus a drag-handle cursor over the title bar so the
     /// user reads it as draggable instead of a thin gray strip.
-    private(set) var qaAgentBubbleCursorRect: NSRect?
+    private var bubbleCursorTrackingArea: NSTrackingArea?
+
+    private func updateBubbleCursorTracking() {
+        // Include the circle's maximum edges too: NSRect excludes them, while
+        // the circular hit-test includes its circumference.
+        let rect = agentBubbleFrame?.insetBy(dx: -1, dy: -1)
+        guard bubbleCursorTrackingArea?.rect != rect else { return }
+        if let area = bubbleCursorTrackingArea { removeTrackingArea(area) }
+        bubbleCursorTrackingArea = nil
+        guard let rect else { return }
+        let area = NSTrackingArea(rect: rect, options: [.mouseMoved, .cursorUpdate, .activeInActiveApp],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        bubbleCursorTrackingArea = area
+    }
+
+    private func bubbleCursor(at point: NSPoint) -> NSCursor? {
+        guard agentBubbleFrame?.insetBy(dx: -1, dy: -1).contains(point) == true else { return nil }
+        // Exactly the same circle takes precedence over resize in mouseDown.
+        if agentBubbleContains(point) { return .openHand }
+        if let edge = resizeEdge(at: point) {
+            return edge == .left || edge == .right ? .resizeLeftRight : .resizeUpDown
+        }
+        return point.y < grabHeightInLocalCoordinates ? .openHand : .arrow
+    }
 
     override func resetCursorRects() {
-        qaAgentBubbleCursorRect = nil
+        updateBubbleCursorTracking()
         super.resetCursorRects()
         let m = resizeMarginInLocalCoordinates
         // Floor the open-hand cursor band to the grab strip (not the drawn 24-px
@@ -1560,16 +1595,9 @@ class TileNSView: NSView, TokenThemed {
         if titleDragHeight > 0 {
             addCursorRect(NSRect(x: m, y: m, width: w - 2 * m, height: titleDragHeight), cursor: .openHand)
         }
-        // The agent's bubble is a grab handle, corner band or not. Added last so
-        // it wins where it overlaps the edge bands.
-        if let bubble = agentBubbleFrame {
-            // Cursor rectangles cannot describe a circle. Inscribe the hand
-            // region so its corners never override the surrounding resize band.
-            let inset = bubble.width * (1 - 1 / sqrt(2)) / 2
-            let grab = bubble.insetBy(dx: inset, dy: inset)
-            qaAgentBubbleCursorRect = grab
-            addCursorRect(grab, cursor: .openHand)
-        }
+        // The bubble's tracking area classifies its circle on cursor entry and
+        // pointer movement, rather than overriding resize with a square rect.
+
     }
 
     var resizeMarginInLocalCoordinates: CGFloat {
