@@ -1106,6 +1106,9 @@ DIET_RESOURCE_PY
   run swift build --product Array -j 2
   diet_build_preflight
   run swift build --product array-workspace-mcp -j 2
+  diet_build_preflight
+  run swift build --product ContinuumRevivedCoreChecks -j 2
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
   run_app_check .build/debug/Array --helper-context-diet-check
   matrix_report 'Helper context diet matrix (targeted)'
   exit $?

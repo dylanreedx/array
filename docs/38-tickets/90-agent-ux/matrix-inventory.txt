@@ -511,6 +511,7 @@ leg run swift build --disable-sandbox --skip-update --product continuum-relay-le
 leg run swift build --product Array
 leg run swift build --product Array -j 2
 leg run swift build --product ContinuumRevivedCoreChecks
+leg run swift build --product ContinuumRevivedCoreChecks -j 2
 leg run swift build --product array-workspace-mcp -j 2
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-account-manage-check

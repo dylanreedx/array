@@ -122,7 +122,7 @@
       "invocation": ".build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check",
       "covers": [
         "Sources/ContinuumRevivedCore/WorkspaceAPI/WorkspaceAPIExposure.swift",
-        "Sources/ContinuumRevivedCore/Agents/AgentRecord.swift",
+        "Sources/ContinuumRevivedCore/Agents/AgentRecord.swift", "Sources/ContinuumRevivedCore/Agents/AgentDelegationContext.swift",
         "Sources/ContinuumRevivedCore/CanvasState.swift"
       ],
       "checkFiles": [
