@@ -11,6 +11,7 @@ final class InboxExpandedGroupLight: NSView {
         let style: String
         let dark: Bool
         let reduced: Bool
+        let cornerStyle: CornerStyle
     }
     private var drawingState: DrawingState?
     private var focus: CAGradientLayer?
@@ -44,7 +45,7 @@ final class InboxExpandedGroupLight: NSView {
         }
         let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let reduced = reducesMotionForChecks || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let key = DrawingState(slice: slice, card: card, style: style, dark: dark, reduced: reduced)
+        let key = DrawingState(slice: slice, card: card, style: style, dark: dark, reduced: reduced, cornerStyle: CornerStyle.current)
         guard drawingState != key else { return }
         drawingState = key
         last = (slice, card, style)

@@ -228,7 +228,7 @@ final class TileAgentBubbleLayer: CALayer {
         case .orb:
             // A glass sphere in a thin bezel: deep at the rim, an inner glow
             // low in the body, a gloss across the top.
-            let base = tint.map(srgb) ?? srgb(dark ? NSColor(white: 0.5, alpha: 1) : NSColor(white: 0.44, alpha: 1))
+            let base = tint.map(srgb) ?? srgb(palette.textSecondary)
             let deep = mix(base, .black, dark ? 0.6 : 0.5)
             let core = mix(base, .white, working ? 0.45 : 0.22)
             let bezelTop = dark ? mix(chrome, .white, 0.22) : mix(chrome, .white, 0.85)
