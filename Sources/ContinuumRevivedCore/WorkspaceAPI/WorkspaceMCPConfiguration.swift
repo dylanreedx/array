@@ -43,6 +43,7 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     /// Code sends their schemas up front instead of deferring them behind
     /// tool search. Empty for everyone but a Claude Managed lead
     /// (`docs/internals/managed-lead-tool-loading.md`).
+    public private(set) var chooser = false
     public private(set) var alwaysLoadedTools: [String] = []
     public static let alwaysLoadedToolsEnvironmentKey = "ARRAY_WORKSPACE_ALWAYS_LOADED_TOOLS"
 
@@ -87,6 +88,11 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     /// This configuration with `tools` always loaded. Writes nothing: the
     /// Claude runner materializes its configuration before every launch, so a
     /// write here only added file I/O to the launch path.
+    public func choosingTasks() -> WorkspaceMCPConfiguration {
+        var copy = self; copy.chooser = true
+        return copy
+    }
+
     public func alwaysLoading(_ tools: [String]) -> WorkspaceMCPConfiguration {
         var copy = self
         copy.alwaysLoadedTools = tools
@@ -132,6 +138,7 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
         if !alwaysLoadedTools.isEmpty {
             environment[Self.alwaysLoadedToolsEnvironmentKey] = alwaysLoadedTools.joined(separator: ",")
         }
+        if chooser { environment[ManagedChooser.serverEnvironmentKey] = "1" }
         return environment
     }
 

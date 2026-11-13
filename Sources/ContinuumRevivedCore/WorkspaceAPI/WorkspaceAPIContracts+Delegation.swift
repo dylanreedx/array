@@ -61,6 +61,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     /// Legacy input accepted for compatibility, ignored: helpers always run free.
     public var mode: AgentMode?
     /// The child's task. Model-authored text: local only.
+    public var readOnly: Bool?
     public var task: String
     public var title: String?
     /// Legacy alias for harness. Conflicting selectors are invalid.
@@ -82,6 +83,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
 
     public init(
         task: String,
+        readOnly: Bool? = nil,
         mode: AgentMode? = nil,
         retryOf: AgentID? = nil,
         title: String? = nil,
@@ -98,6 +100,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         self.mode = mode
         self.harness = harness
         self.task = task
+        self.readOnly = readOnly
         self.title = title
         self.provider = provider
         self.effort = effort
@@ -109,7 +112,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case effort, contract, task, mode, retryOf, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
+        case effort, contract, task, readOnly, mode, retryOf, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
     }
 
     /// Tolerant of the model-facing shape (`presentation`, short names, any
@@ -122,6 +125,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         retryOf = try c.decodeIfPresent(AgentID.self, forKey: .retryOf)
         mode = try c.decodeIfPresent(AgentMode.self, forKey: .mode)
         task = try c.decode(String.self, forKey: .task)
+        readOnly = try c.decodeIfPresent(Bool.self, forKey: .readOnly)
         title = try c.decodeIfPresent(String.self, forKey: .title)
         provider = try c.decodeIfPresent(String.self, forKey: .provider)
         model = try c.decodeIfPresent(String.self, forKey: .model)
@@ -139,6 +143,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         try c.encodeIfPresent(retryOf, forKey: .retryOf)
         try c.encodeIfPresent(mode, forKey: .mode)
         try c.encode(task, forKey: .task)
+        try c.encodeIfPresent(readOnly, forKey: .readOnly)
         try c.encodeIfPresent(title, forKey: .title)
         try c.encodeIfPresent(provider, forKey: .provider)
         try c.encodeIfPresent(model, forKey: .model)

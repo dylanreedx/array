@@ -52,16 +52,19 @@ extension WorkspaceAPIService {
     /// `.plans/102`: managed lead decisions, then the opt-in report policy.
     /// Free agents with short reports off retain the empty P1 reply.
     func hookReply(for record: AgentRecord, payload: [String: Any]) -> [String: Any] {
+        var reply: [String: Any] = [:]
         if let output = supervisor.managedHookReply(for: record, payload: payload) {
-            return [WorkspaceAgentHook.hookOutputKey: output]
+            reply[WorkspaceAgentHook.hookOutputKey] = output
+        } else if shortReportsEnabled(),
+                  let output = WorkspaceAgentHook.reportPushBack(payload: payload, callerHasParent: record.parentAgentID != nil) {
+            if record.harness != .codex || supervisor.claimCodexHookPushBack(for: record.id, payload: payload) {
+                reply[WorkspaceAgentHook.hookOutputKey] = output
+            }
         }
-        guard shortReportsEnabled(),
-              let output = WorkspaceAgentHook.reportPushBack(payload: payload, callerHasParent: record.parentAgentID != nil) else {
-            return [:]
-        }
-        if record.harness == .codex,
-           !supervisor.claimCodexHookPushBack(for: record.id, payload: payload) { return [:] }
-        return [WorkspaceAgentHook.hookOutputKey: output]
+        // An opted-in hook needs proof the host still owns this launch's policy.
+        // A restarted host cannot acknowledge an orphaned running process.
+        if let policy = supervisor.chooserHookPolicy(for: record) { reply["chooserPolicy"] = policy }
+        return reply
     }
 
     /// `operation.get`'s child result. Off, exactly the courier plus any

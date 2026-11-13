@@ -126,3 +126,13 @@ walk that keeps only what the pass reads brought it back to origin's level.
   programme, with uncommitted work still in their benches.
 - Strict mode for Codex leads: its sandbox profile cannot be pinned on resume,
   so it is not shipped (`ManagedStrictLead.swift`).
+
+Plan 117 adds an off-by-default Claude Managed task chooser
+(`agents.managedMode.chooser`, launch override `ARRAY_MANAGED_CHOOSER`). It
+restores solo editing and adds structured `array_plan`, host status rendering,
+recorded choices, advisory contracts, and a delegation-scoped hook latch. See
+[tool loading](managed-lead-tool-loading.md#experimental-task-chooser-plan-117)
+for its enforcement limits. In particular the dynamic strict-sandbox backstop
+and background jobs started before delegation remain unproven; Codex and Pi do
+not opt in. Offline witnesses establish host behavior only. No live pilot or
+quota-consuming provider run is authorized by this implementation.

@@ -11,14 +11,20 @@ public struct AgentDelegationContext: Codable, Equatable, Sendable {
     /// The lead's stated contract, kept beside the brief. Absent for a helper
     /// delegated without one.
     public var contract: AgentDelegationContract?
+    /// Host-owned chooser recovery. Nil on every switch-off delegation.
+    public var chooserWriteRequest: UUID?
+    public var chooserWriteInProgress: Bool?
 
-    public init(brief: String, baseHead: String?, retryOf: AgentID?, createdWorktree: Bool, checkoutNotice: String?, contract: AgentDelegationContract? = nil) {
+    public init(brief: String, baseHead: String?, retryOf: AgentID?, createdWorktree: Bool, checkoutNotice: String?, contract: AgentDelegationContract? = nil,
+                chooserWriteRequest: UUID? = nil, chooserWriteInProgress: Bool? = nil) {
         self.brief = brief
         self.baseHead = baseHead
         self.retryOf = retryOf
         self.createdWorktree = createdWorktree
         self.checkoutNotice = checkoutNotice
         self.contract = contract
+        self.chooserWriteRequest = chooserWriteRequest
+        self.chooserWriteInProgress = chooserWriteInProgress
     }
 
     /// At most 300 whitespace-delimited words / 4,800 characters of additional

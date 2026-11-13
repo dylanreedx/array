@@ -48,9 +48,18 @@ final class ManagedRunLedger: @unchecked Sendable {
     // Live only: a helper delegated before this process started has no entry,
     // and its report records that instead of pretending to have watched it.
     private var evidence: [UUID: HelperEvidence] = [:]
+    /// `.plans/117` part 2 stage one: each live helper's protected check paths.
+    private var protection: [UUID: HelperProtectedPaths] = [:]
+    /// Records changes to protected paths since the last sweep. Runs on the queue.
+    private func sweepProtected(_ agent: UUID, at: Date, trigger: String) {
+        guard var protection = self.protection[agent], let task = delegatedTask[agent] else { return }
+        let changes = protection.sweep()
+        self.protection[agent] = protection
+        for row in Self.protectedPathRows(changes, task: task, agent: agent, part: parts[agent], at: at, trigger: trigger) { append(row) }
+    }
     /// A helper's tool call, as its translator reported it. Folded on the queue.
     func observeTool(agent: UUID, _ sighting: HelperEvidence.Sighting) {
-        queue.async { self.evidence[agent]?.observe(sighting) }
+        queue.async { self.evidence[agent]?.observe(sighting); self.protection[agent]?.observe(sighting) }
     }
     /// One hand-off on the report path; git, the manifest and the fold run here.
     func helperEvidence(agent: UUID, at: Date) {
@@ -64,6 +73,7 @@ final class ManagedRunLedger: @unchecked Sendable {
                 row.evidence = ["observed": "notSinceDelegation"]
             }
             self.append(row)
+            self.sweepProtected(agent, at: at, trigger: "report")
         }
     }
     private let queue = DispatchQueue(label: "dev.array.run-ledger", qos: .utility)
@@ -294,17 +304,31 @@ final class ManagedRunLedger: @unchecked Sendable {
             self.append(Row(kind: "submission", task: task, agent: agent, source: UUID().uuidString))
         }
     }
+    private var chooserTasks: [UUID: UUID] = [:]
+    func chooserFact(agent: UUID, request: UUID, kind: String, source: String, choice: String? = nil, parts: Int? = nil) {
+        queue.async {
+            guard let task = self.chooserTasks[request] ?? self.currentTask(agent) else { return }
+            self.chooserTasks[request] = task
+            var row = Row(kind: kind, task: task, agent: agent, source: "chooser/\(kind)/\(request)/\(source)")
+            row.evidence = ["request": request.uuidString]
+            if let choice { row.evidence?["choice"] = choice }
+            if let parts { row.evidence?["parts"] = String(parts) }
+            self.append(row)
+        }
+    }
+
     /// `root`, `base` and `shared` describe the child's checkout for its evidence.
     /// The parent is a lead or, at any depth, a helper in an open task. `via`
     /// `harness`: the CLI started the child itself; it is attributed to its
     /// parent and holds no part, so it never keeps the task open.
     func delegated(parent: UUID, child: UUID, source: String, root: String? = nil, base: String? = nil, shared: Bool = true,
-                   via: String? = nil) {
+                   via: String? = nil, contract: AgentDelegationContract? = nil) {
         queue.async {
             guard let task = self.active[parent] ?? self.openTask(parent) else { return }
             self.sessionTasks[child] = task
             if let root, self.evidence[child] == nil {
                 self.evidence[child] = HelperEvidence(root: URL(fileURLWithPath: root), base: base, shared: shared)
+                self.protection[child] = HelperProtectedPaths(root: URL(fileURLWithPath: root), base: base, shared: shared, contract: contract)
             }
             var row = Row(kind: "delegated", task: task, agent: child, part: via == nil ? child : nil, source: "delegate/\(source)")
             if via != nil || self.owners[task] != parent { row.parent = parent }
@@ -331,9 +355,12 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// parent Array cannot wake; its end is the host's explicit close.
     func ended(agent: UUID, turn: String, outcome: TurnOutcome, resultsWaiting: Bool = false, noWake: Bool = false) {
         leadWatch.turnEnded(agent: agent)
+        let at = Date()
         queue.async {
             self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", turn: turn, outcome: outcome.rawValue,
                       resultsWaiting: resultsWaiting, noWake: noWake)
+            // A helper that never reports is still swept; no entry, no work.
+            self.sweepProtected(agent, at: at, trigger: "turnEnded")
         }
     }
 

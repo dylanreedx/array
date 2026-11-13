@@ -575,6 +575,19 @@ final class WorkspaceAPIService {
                 return .result(["schedules": AnyHashableJSON(any: jobs.compactMap { Self.jsonObject($0).map(Self.plain) })])
             } catch let error as WorkspaceAPIError { return .error(error) }
             catch { return .error(.init(code: .durabilityFailed, message: "The schedule change could not be saved. Retry with the same key.")) }
+        case .agentPlan:
+            guard case .allowed = WorkspaceToolGrantEvaluator.evaluate(agentId: agentId, op: .agentPlan, checkout: ownHandle,
+                requested: .preserveAll, grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) else {
+                return .error(.init(code: .permissionDenied, message: "This agent may not declare a plan."))
+            }
+            do {
+                let plan = try JSONDecoder().decode(AgentTaskPlan.self, from: JSONSerialization.data(withJSONObject: payload)).prepared(checkoutRoot: record.checkoutRoot)
+                switch supervisor.choosePlan(plan, for: agentId) {
+                case let .failure(error): return .error(error)
+                case let .success(result): return .result(result.mapValues(AnyHashableJSON.init(any:)))
+                }
+            } catch let error as WorkspaceAPIError { return .error(error) }
+            catch { return .error(.init(code: .invalidRequest, message: "Use choice, reason and titled contracts in parts.")) }
         case .agentStatus:
             return declareStatus(agentId: agentId, ownHandle: ownHandle, payload: payload)
         }
@@ -605,7 +618,7 @@ final class WorkspaceAPIService {
         // `standards.read` exactly when this agent's LAUNCH offered the tool:
         // the tool list is fixed when its process starts.
         let offeredStandards = supervisor.standardsOfferedAtLaunch[agentId] ?? false
-        let offered = Set(WorkspaceMCPToolCatalog.tools(projectStandards: offeredStandards).map(\.operation))
+        let offered = Set(WorkspaceMCPToolCatalog.tools(projectStandards: offeredStandards, chooser: supervisor.chooserHookPolicy(for: record) != nil).map(\.operation))
         let exposed = WorkspaceAPIOp.allCases.filter(offered.contains)
         // Under Agent permissions `free` a gated op inside the project needs no
         // prompt, so it is callable now and must not read as approval-required.

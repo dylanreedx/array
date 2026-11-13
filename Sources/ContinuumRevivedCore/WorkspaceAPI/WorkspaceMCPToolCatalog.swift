@@ -102,13 +102,37 @@ public enum WorkspaceMCPToolCatalog {
         }
     }
 
+    private static let chooserTools: [Tool] = {
+        guard let url = PiExtensionInstaller.bundledExtensionURL(fileName: "array-chooser-tools.json"),
+              let data = try? Data(contentsOf: url) else { return [] }
+        return (try? decode(data)) ?? []
+    }()
+
     public static func tool(named name: String) -> Tool? { tools.first { $0.name == name } }
 
     /// The tools one agent is offered: `array_standards` only when its launch
     /// found standards (`docs/internals/project-standards-on-demand.md`). Pi's
     /// extension applies the same rule to the same op.
-    public static func tools(projectStandards: Bool) -> [Tool] {
-        tools.filter { projectStandards || $0.operation != .standardsRead }
+    public static func tools(projectStandards: Bool, chooser: Bool = false) -> [Tool] {
+        var offered = tools.filter { projectStandards || $0.operation != .standardsRead }
+        if chooser {
+            offered = offered.map { tool in
+                guard tool.operation == .agentDelegate else { return tool }
+                var schema = tool.inputSchema
+                if case var .object(properties)? = schema["properties"] {
+                    properties["readOnly"] = .object(["type": .string("boolean"), "description": .string("Investigation or review only; does not close the lead edit latch. Defaults to implementation.")])
+                    schema["properties"] = .object(properties)
+                }
+                // This launch is already a Managed task. Replace its generic
+                // delegation-intent guideline; workspace grants still decide
+                // whether the host permits the actual operation.
+                let guidelines = [ManagedChooser.delegationIntent] + Array(tool.promptGuidelines.dropFirst())
+                return Tool(name: tool.name, label: tool.label, description: tool.description, promptSnippet: tool.promptSnippet,
+                    promptGuidelines: guidelines, operation: tool.operation, inputSchema: schema)
+            }
+            offered += chooserTools
+        }
+        return offered
     }
 
     /// The operations a caller can reach through a tool. `workspace.context`

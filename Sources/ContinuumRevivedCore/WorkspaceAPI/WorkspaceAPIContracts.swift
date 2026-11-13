@@ -76,6 +76,8 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     // `WorkspaceAPIContracts+Standards.swift`: the caller's own checkout's
     // written standards. Self-checkout read only. Appended last.
     case standardsRead = "standards.read"
+    // Experimental Claude Managed task choice; opt-in tool surface. Appended last.
+    case agentPlan = "agent.plan"
 }
 
 // MARK: - Identity

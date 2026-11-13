@@ -327,7 +327,11 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         let hostInstructions = [hostInstructions, sandbox == nil ? nil : ManagedStrictLead.leadLine]
             .compactMap { $0 }.joined(separator: "\n\n").nilIfEmptyText
         if mode == .managed {
-            args += ["--disallowed-tools", "Edit,Write,MultiEdit,NotebookEdit" + (workspaceMCP == nil ? "" : ",ListAgents")]
+            if workspaceMCP?.chooser == true && hookSurfaceAvailable {
+                args += ["--disallowed-tools", "Agent,Task,ListAgents"]
+            } else {
+                args += ["--disallowed-tools", "Edit,Write,MultiEdit,NotebookEdit" + (workspaceMCP == nil ? "" : ",ListAgents")]
+            }
             if workspaceMCP == nil || !hookSurfaceAvailable {
                 args += ["--settings", WorkspaceAgentHook.claudeSettingsJSON(command: nil, pluginConfigs: pluginConfigs, sandbox: sandbox)]
             }
@@ -923,6 +927,10 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             }
         }
         let command = Self.liveResolvedCommand()
+        let hookSurfaceAvailable = config.workspaceMCP != nil && AgentHookSurfaceCatalog.shared.claudeAvailable(command: command)
+        if config.workspaceMCP?.chooser == true && !hookSurfaceAvailable {
+            throw RunError.launchFailed("The experimental task chooser requires Claude's enforced hook surface. Turn the chooser off or restore that CLI capability.")
+        }
         let arguments = command.prefixArgs + Self.processArguments(
             model: config.model,
             effort: config.effort,
@@ -931,7 +939,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
             extraArgs: config.extraArgs,
             workspaceMCP: config.workspaceMCP,
             mode: config.mode,
-            hookSurfaceAvailable: config.workspaceMCP != nil && AgentHookSurfaceCatalog.shared.claudeAvailable(command: command),
+            hookSurfaceAvailable: hookSurfaceAvailable,
             duckherdPluginKeys: config.mode == .managed
                 ? ClaudeDuckherd.installedPluginKeys(configDirectory: ClaudeDuckherd.configDirectory(config.configDirectory)) : [],
             hostInstructions: config.hostInstructions?(),

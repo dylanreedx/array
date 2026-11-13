@@ -49,6 +49,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case browserSelect = "array_browser_select"
     case notify = "array_notify"
     case report = "array_report"
+    case plan = "array_plan"
     case status = "array_status"
     case schedule = "array_schedule_agent"
     case standards = "array_standards"
@@ -69,7 +70,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     public var kind: AgentToolKind {
         switch self {
         case .workspaceContext, .openDocument, .canvasQuery, .inspectAgent, .getOperation, .boardQuery, .deviceList, .deviceObserve, .standards: return .read
-        case .canvasApply, .boardApply, .boardManage, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun, .report, .status, .schedule: return .edit
+        case .canvasApply, .boardApply, .boardManage, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun, .report, .status, .plan, .schedule: return .edit
         case .findAgent: return .search
         case .delegate: return .delegate
         case .revealAgent, .messageAgent, .browserOpen, .browserNavigate, .browserSnapshot,
@@ -96,6 +97,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
              .browserPressKey, .browserScroll, .browserWaitFor, .browserScreenshot, .browserEvaluate, .browserConsole, .browserSelect: return "globe"
         case .notify: return "bell"
         case .report: return "doc.text"
+        case .plan: return "point.3.connected.trianglepath.dotted"
         case .status: return "text.bubble"
         case .schedule: return "clock"
         case .standards: return "book"
@@ -147,6 +149,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .notify: return "Notified you"
         case .report: return "Filed a report"
         case .schedule: return "Updated its schedule"
+        case .plan: return "Chose how to do the task"
         case .status: return "Posted its status"
         case .standards: return "Read the project standards"
         }

@@ -24,7 +24,7 @@ public struct ManagedLeadHookState {
 
     public init() {}
 
-    public mutating func reply(payload: [String: Any], harness: AgentHarness = .claudeCode) -> [String: Any]? {
+    public mutating func reply(payload: [String: Any], harness: AgentHarness = .claudeCode, chooser: Bool = false) -> [String: Any]? {
         // Native children share the lead's token/session id. Their reads must
         // neither consume the lead's budget nor inherit its lead instructions.
         guard payload["agent_id"] == nil,
@@ -36,7 +36,7 @@ public struct ManagedLeadHookState {
                   let session = payload["session_id"] as? String, !session.isEmpty,
                   (source == "compact" || source == "clear" || !briefedSessions.contains(session)) else { return nil }
             briefedSessions.insert(session)
-            return ["hookSpecificOutput": ["hookEventName": event, "additionalContext": Self.brief]]
+            return ["hookSpecificOutput": ["hookEventName": event, "additionalContext": chooser ? ManagedChooser.brief : Self.brief]]
         case "UserPromptSubmit":
             return nil
         case "PreToolUse":

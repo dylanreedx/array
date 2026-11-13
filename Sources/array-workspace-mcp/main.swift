@@ -71,6 +71,7 @@ struct ArrayWorkspaceMCP {
         let delivery: WorkspaceResultDelivery
         /// The host found standards in this agent's checkout at launch.
         let projectStandards: Bool
+        let chooser: Bool
         /// Listed with `_meta["anthropic/alwaysLoad"]`: a Claude Managed lead's
         /// first tools, loaded up front rather than through tool search.
         let alwaysLoadedTools: Set<String>
@@ -93,6 +94,7 @@ struct ArrayWorkspaceMCP {
             self.endpoint = endpoint; self.agentID = agentID; self.token = token
             self.delivery = WorkspaceResultDelivery(environmentValue: environment[WorkspaceResultDelivery.environmentKey])
             self.projectStandards = environment[ProjectStandards.environmentKey] == "1"
+            self.chooser = environment[ManagedChooser.serverEnvironmentKey] == "1"
             self.alwaysLoadedTools = Set((environment[WorkspaceMCPConfiguration.alwaysLoadedToolsEnvironmentKey] ?? "")
                 .split(separator: ",").map(String.init))
             // URLSession's default request timeout is 60 s. The host answers a
@@ -148,7 +150,7 @@ struct ArrayWorkspaceMCP {
                     "instructions": .string(WorkspaceMCPToolCatalog.serverInstructions(for: delivery))
                 ])]))
             case "tools/list":
-                var tools = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards).map { tool in
+                var tools = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards, chooser: chooser).map { tool in
                     var listed: [String: WorkspaceMCPJSON] = [
                         "name": .string(tool.name),
                         "description": .string(WorkspaceMCPToolCatalog.mcpDescription(tool, for: delivery)),
@@ -186,7 +188,7 @@ struct ArrayWorkspaceMCP {
             let reply: WorkspaceMCPJSON
             if name == WorkspaceMCPToolCatalog.waitAgentsName, delivery == .collect {
                 reply = await waitAgents(arguments)
-            } else if let tool = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards).first(where: { $0.name == name }) {
+            } else if let tool = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards, chooser: chooser).first(where: { $0.name == name }) {
                 do {
                     let lookupID = Self.providerCallID(params) ?? UUID().uuidString
                     let raw = tool.operation == .operationGet
@@ -407,12 +409,32 @@ struct ArrayWorkspaceMCP {
 ///
 /// It prints only what the app returns as `result.hookOutput` (P2a's report
 /// push-back, opt-in); otherwise nothing, because Claude reads stdout as a
-/// decision. The caller always exits 0. It fails open: no marker, bad
-/// arguments, an unreadable token, an app that is down or slow all print
-/// nothing and end within `postTimeoutSeconds`.
+/// decision. Legacy hooks fail open. Experimental chooser hooks pass
+/// --fail-closed: PreToolUse requires an explicit host policy acknowledgement,
+/// refuses transport failures, and exits 2 if its hard deadline fires. Other
+/// hook events retain the empty failure reply.
 private enum HookMode {
     static func run(arguments: [String]) async {
-        // Inert outside Array: Array sets the marker on every managed agent.
+        // Only opted-in chooser hooks fail closed. Legacy hooks retain their
+        // fail-open transport and byte-identical command/configuration.
+        let failClosed = arguments.contains("--fail-closed")
+        if !failClosed && ProcessInfo.processInfo.environment[PiAgentRunner.arrayHostedEnvironmentKey] != "1" { return }
+        let input = FileHandle.standardInput.readDataToEndOfFile()
+        let decoded = try? JSONSerialization.jsonObject(with: input) as? [String: Any]
+        // Only PreToolUse is an enforcement boundary. Brief/report hook failures
+        // must not print a tool-decision object on another event's protocol.
+        let enforcing = failClosed && (decoded == nil || decoded?["hook_event_name"] as? String == "PreToolUse")
+        var acknowledged = false
+        defer {
+            if enforcing && !acknowledged,
+               let denial = try? JSONSerialization.data(withJSONObject: ManagedChooser.deny(ManagedChooser.unavailable)) {
+                FileHandle.standardOutput.write(denial + Data("\n".utf8))
+            }
+        }
+        // A hung stdin/read/network operation must also refuse the tool.
+        DispatchQueue.global().asyncAfter(deadline: .now() + WorkspaceAgentHook.postTimeoutSeconds + 0.5) {
+            Foundation.exit(enforcing ? 2 : 0)
+        }
         guard ProcessInfo.processInfo.environment[PiAgentRunner.arrayHostedEnvironmentKey] == "1" else { return }
         var options: [String: String] = [:]
         var index = arguments.startIndex
@@ -425,12 +447,7 @@ private enum HookMode {
               let tokenPath = options["--token-file"],
               let tokenData = FileManager.default.contents(atPath: tokenPath),
               case let token = String(decoding: tokenData, as: UTF8.self), !token.isEmpty else { return }
-        // A hard stop besides the request timeout: nothing here may outlive it.
-        DispatchQueue.global().asyncAfter(deadline: .now() + WorkspaceAgentHook.postTimeoutSeconds + 0.5) {
-            Foundation.exit(0)
-        }
-        let input = FileHandle.standardInput.readDataToEndOfFile()
-        guard var payload = try? JSONSerialization.jsonObject(with: input) as? [String: Any] else { return }
+        guard var payload = decoded else { return }
         if input.count > WorkspaceAgentHook.maxPostedPayloadBytes {
             if let message = payload["last_assistant_message"] as? String {
                 payload[WorkspaceAgentHook.trimmedWordCountKey] = AgentReport.wordCount(message)
@@ -439,13 +456,8 @@ private enum HookMode {
             payload["array_trimmed"] = true
         }
         let body: [String: Any] = [
-            "schema": WorkspaceAPISchema.v1,
-            "kind": "request",
-            "requestId": UUID().uuidString,
-            "agentId": agentID,
-            "token": token,
-            "op": WorkspaceAgentHook.op,
-            "payload": payload,
+            "schema": WorkspaceAPISchema.v1, "kind": "request", "requestId": UUID().uuidString,
+            "agentId": agentID, "token": token, "op": WorkspaceAgentHook.op, "payload": payload,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
         let configuration = URLSessionConfiguration.ephemeral
@@ -457,9 +469,14 @@ private enum HookMode {
         request.httpBody = data
         guard let (reply, _) = try? await URLSession(configuration: configuration).data(for: request),
               let object = try? JSONSerialization.jsonObject(with: reply) as? [String: Any],
-              object["status"] as? String == "ok",
-              let output = (object["result"] as? [String: Any])?[WorkspaceAgentHook.hookOutputKey] as? [String: Any],
-              let decision = try? JSONSerialization.data(withJSONObject: output) else { return }
-        FileHandle.standardOutput.write(decision + Data("\n".utf8))
+              object["status"] as? String == "ok", let result = object["result"] as? [String: Any] else { return }
+        if enforcing {
+            guard let policy = result["chooserPolicy"] as? String, ["open", "latched"].contains(policy) else { return }
+        }
+        acknowledged = true
+        if let output = result[WorkspaceAgentHook.hookOutputKey] as? [String: Any],
+           let decision = try? JSONSerialization.data(withJSONObject: output) {
+            FileHandle.standardOutput.write(decision + Data("\n".utf8))
+        }
     }
 }

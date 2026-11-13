@@ -153,7 +153,7 @@ extension WorkspaceMCPConfiguration {
     /// FILE as its MCP server. The token never enters argv.
     public var claudeHookCommand: String {
         WorkspaceAgentHook.command(executable: serverExecutable, endpoint: endpoint,
-                                   agentID: agentID, tokenFilePath: tokenFilePath)
+                                   agentID: agentID, tokenFilePath: tokenFilePath) + (chooser ? " --fail-closed 1" : "")
     }
 
     public var claudeHookSettingsJSON: String {

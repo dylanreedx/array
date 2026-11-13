@@ -225,11 +225,15 @@ extension WorkspaceAPIService {
         // unless this call states its own.
         let contract = prepared?.contract ?? retryContract
         if let contract { prompt += "\n\n" + contract.promptText }
+        if request.readOnly == true && supervisor.chooserEnabled(for: agentId) {
+            prompt += "\n\nRead-only helper: investigate or review; do not edit checkout files."
+        }
         // A Managed lead's helper reports through array_report (.plans/102).
         if supervisor.effectiveMode(for: agentId) == .managed {
             prompt += "\n\n" + ManagedLeadHookState.helperReportLine
         }
 
+        let chooserPending = supervisor.chooserWillDelegate(agentId, source: requestId, readOnly: request.readOnly == true)
         // 6. Creation, through the supervisor's one child-creation path. The
         //    request id doubles as the spawn-result handle, so `wait_agents` can
         //    collect this child exactly like a `spawn_agent` one.
@@ -237,13 +241,15 @@ extension WorkspaceAPIService {
             role: nil, prompt: prompt, isolated: false, sourceItemID: requestId,
             displayLabel: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
         func created(_ childId: AgentID) -> Reply {
+            let chooserAdvice = supervisor.chooserDelegated(agentId, source: requestId, pending: chooserPending, child: childId)
             if supervisor.qaRunLedgerRecording, let child = supervisor.records[childId] {
                 // `.plans/116` part 8: shadow evidence of the child's own tool calls,
                 // through the supervisor's observer seam; nothing reads it back.
                 supervisor.runLedger.delegated(parent: agentId.rawValue, child: childId.rawValue, source: requestId,
                     root: child.checkoutRoot, base: child.delegationContext?.baseHead,
                     shared: WorktreeManager.resolved(URL(fileURLWithPath: child.checkoutRoot))
-                        == WorktreeManager.resolved(URL(fileURLWithPath: record.checkoutRoot)))
+                        == WorktreeManager.resolved(URL(fileURLWithPath: record.checkoutRoot)),
+                    contract: child.delegationContext?.contract)
                 let ledger = supervisor.runLedger
                 _ = supervisor.addRuntimeObservationObserver(for: childId) { [weak supervisor] observation in
                     guard supervisor?.qaRunLedgerRecording == true, let sighting = HelperEvidence.Sighting(observation) else { return }
@@ -284,6 +290,7 @@ extension WorkspaceAPIService {
             // where comparing could cost the main actor about a millisecond, the
             // result says so instead of comparing.
             var notes = prepared?.notes ?? []
+            if let chooserAdvice { notes.append(chooserAdvice) }
             if let contract, !(contract.owns.isEmpty && contract.shared.isEmpty) {
                 let siblings = supervisor.children(of: agentId).compactMap { sibling -> (AgentID, AgentRecord, AgentDelegationContract)? in
                     guard sibling != childId, supervisor.isRunning(sibling) || supervisor.turnPresence(for: sibling)?.phase.isLive == true,
@@ -403,11 +410,14 @@ extension WorkspaceAPIService {
             case let .spawned(childId):
                 completion(created(childId))
             case .refused:
+                _ = self.supervisor.chooserDelegated(agentId, source: requestId, pending: chooserPending, child: nil)
                 let reason = self.supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
                 completion(fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true))
             case .gateClosed("retryIneligible"):
+                _ = self.supervisor.chooserDelegated(agentId, source: requestId, pending: chooserPending, child: nil)
                 completion(fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn."))
             case .gateClosed:
+                _ = self.supervisor.chooserDelegated(agentId, source: requestId, pending: chooserPending, child: nil)
                 completion(fail(.permissionDenied, "Access was revoked before the child was created.", approvalRequestId: approvalRequestId))
             }
         }

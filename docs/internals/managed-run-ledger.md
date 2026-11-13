@@ -472,3 +472,25 @@ turn overrides them, and the app-server's sandbox policies cannot name a
 profile. Nothing can pin the profile on `thread/resume` or `turn/start`, and
 whether a thread first run with full access keeps it when resumed is unproven,
 so a Codex strict mode that might not hold is not shipped.
+
+## Experimental chooser facts
+
+With the plan-117 chooser enabled, `plan` records the declared `solo`/`split`
+choice and number of parts in `evidence`, together with the host request UUID.
+No reason, title, contract prose, or prompt enters the ledger. The request UUID
+is distinct from the ledger task UUID: it binds hook policy and late runtime
+events, while the ledger retains its existing task attribution.
+
+`implementationDelegated` and `delegationFailed` carry the same request
+identity. `oneHelperHandoff` is written at request closure, only when exactly
+one implementation part actually started. A split declaring two parts
+but starting only one is counted; two unplanned parts are not. A `retryOf` chain
+counts as the original logical part, while every attempt retains its own
+`implementationDelegated` row for rework accounting. This final
+metric is separate from the immediate delegate-result advisory, which is advice
+about a possible hand-off while only one child has started. Late final facts
+retain the original request's ledger task attribution.
+
+Recording remains subject to the existing ledger switch and does not gate the
+chooser. Plan/lifecycle/policy witnesses use the production API and read the
+host-written ledger.

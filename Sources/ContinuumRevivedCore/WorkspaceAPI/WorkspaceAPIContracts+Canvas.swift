@@ -22,7 +22,7 @@ public extension WorkspaceAPIOp {
         .canvasQuery, .agentReveal, .operationGet, .boardQuery, .boardApply, .agentUpdate,
         .browserSnapshot, .browserScreenshot, .browserConsole,
         .agentNotify,
-        .agentReport, .agentStatus, .agentSchedule,
+        .agentReport, .agentStatus, .agentPlan, .agentSchedule,
         .standardsRead,
     ]
 

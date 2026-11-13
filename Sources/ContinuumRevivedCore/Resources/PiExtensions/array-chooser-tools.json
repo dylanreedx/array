@@ -1,0 +1,54 @@
+{
+  "tools": [
+    {
+      "name": "array_plan",
+      "label": "Choose solo or split",
+      "op": "agent.plan",
+      "description": "Declare one task choice. Solo keeps implementation with you. Split declares two or more independent parts, each with a contract, then start every part immediately with array_delegate. The host replies with ownership overlap, partial registered coverage and unowned check files; it posts a visible line and records the choice. A one-part split is accepted with advice; no plan refuses delegation. Available only to experimental Claude Managed leads.",
+      "promptSnippet": "Choose solo or split once per task.",
+      "promptGuidelines": [],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "choice": {
+            "type": "string",
+            "enum": [
+              "solo",
+              "split"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400
+          },
+          "parts": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "contract": {
+                  "type": "object",
+                  "description": "owns, shared, mustNotTouch, checks, decisions: string lists; costLimit, report: strings. Paths checkout-relative. Overlap with live siblings is advice in the result."
+                }
+              },
+              "required": [
+                "title",
+                "contract"
+              ]
+            }
+          }
+        },
+        "required": [
+          "choice",
+          "reason"
+        ]
+      }
+    }
+  ]
+}

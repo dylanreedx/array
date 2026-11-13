@@ -1224,7 +1224,12 @@ final class AgentSupervisor {
         var workspaceMCP = workspaceMCPConfigurationProvider?(id, record.harness ?? .pi, standards)
         // Only Claude reads the always-load pin; a helper is Free and parented.
         if record.mode == .managed, record.parentAgentID == nil, record.harness == .claudeCode {
-            workspaceMCP = workspaceMCP?.alwaysLoading(ManagedLeadHookState.alwaysLoadedTools)
+            if chooserEnabled(for: id) {
+                workspaceMCP = workspaceMCP?.choosingTasks().alwaysLoading(ManagedLeadHookState.alwaysLoadedTools + ["array_plan"])
+                ManagedChooserCoverage.shared.prepare(root: record.checkoutRoot)
+            } else {
+                workspaceMCP = workspaceMCP?.alwaysLoading(ManagedLeadHookState.alwaysLoadedTools)
+            }
         }
         return AgentRunnerLaunch(record: record, spawnDepth: depth(of: id),
                                  workspaceMCP: workspaceMCP,
@@ -1441,7 +1446,7 @@ final class AgentSupervisor {
         var preferredRunner = preferredRunner
         // A mode switch applies at the next launch, as in `send`: the idle
         // process still carries the old mode's tools and hooks.
-        if pendingModeRestarts.contains(id), let idle = idleSessionRunners[id],
+        if pendingModeRestarts.contains(id) || chooserAtLaunch.contains(id) != chooserEnabled(for: id), let idle = idleSessionRunners[id],
            preferredRunner == nil || preferredRunner === idle {
             idleSessionRunners[id] = nil
             idle.stop()
@@ -2627,6 +2632,24 @@ final class AgentSupervisor {
         runnerAccounts[id] = active
         var signed = launch
         signed.accountConfigDirectory = active.configDirectory
+        let choosing = launch.workspaceMCP?.chooser == true
+        if choosing != chooserAtLaunch.contains(id) {
+            // A policy switch needs its matching brief even on the same CLI session.
+            managedHookStates[id] = nil
+            if var current = records[id] {
+                current.managedBriefedSessions = []
+                records[id] = current
+                _ = persist(current)
+            }
+        }
+        if choosing {
+            for child in records.values where child.parentAgentID == id && child.delegationContext?.chooserWriteInProgress == true {
+                let request = child.delegationContext?.chooserWriteRequest ?? UUID()
+                chooserChildRequests[child.id] = (id, request)
+                chooserWriteFences[id, default: []].insert(child.id.rawValue)
+            }
+            chooserAtLaunch.insert(id)
+        } else { chooserAtLaunch.remove(id) }
         signed.strictLead = strictDecision(for: launch.record)
         launchedStrict[id] = signed.strictLead
         return signed
@@ -2636,6 +2659,7 @@ final class AgentSupervisor {
     private var launchedStrict: [AgentID: Bool] = [:]
     private func strictDecision(for record: AgentRecord) -> Bool {
         record.harness == .claudeCode && record.parentAgentID == nil && record.mode == .managed
+            && !chooserEnabled(for: record.id)
             && ManagedStrictLead.isEnabled(defaults: managedModeDefaults)
     }
 
@@ -3427,6 +3451,14 @@ final class AgentSupervisor {
             records[id] = record
             persist(record)
         }
+        if let request = chooserPendingChildRequests.removeValue(forKey: id), let parent = parentAgentID, var child = records[id] {
+            child.delegationContext = AgentDelegationContext(brief: namingText ?? prompt ?? "", baseHead: nil,
+                retryOf: nil, createdWorktree: worktreeId != nil, checkoutNotice: nil,
+                chooserWriteRequest: request, chooserWriteInProgress: true)
+            records[id] = child
+            guard persist(child) else { return id } // do not start a writer without its recovery marker
+            chooserChildRequests[id] = (parent, request)
+        }
         publishCharacterPacks()
         if let root = records[id]?.checkoutRoot {
             ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
@@ -3870,6 +3902,7 @@ final class AgentSupervisor {
             // A strict-lead toggle since this runner launched restarts it, so
             // the switch applies at the next turn, never "at some later launch".
             if idle.canAcceptAnotherTurn && !pendingModeRestarts.contains(id)
+                && chooserAtLaunch.contains(id) == chooserEnabled(for: id)
                 && launchedStrict[id, default: false] == strictDecision(for: record) {
                 runner = idle
             } else {
@@ -3882,6 +3915,19 @@ final class AgentSupervisor {
         }
         pendingModeRestarts.remove(id)
         runningModes[id] = record.mode
+        if chooserAtLaunch.contains(id) {
+            let item = queuedItemID ?? prepared.companionQueuedItemID
+            let wake = item.map { helperWakeSenders[$0]?.isEmpty == false } ?? false
+            if !wake {
+                if let previous = chooserRequests[id] { chooserRequestEnded(id, request: previous.id) }
+                var next = ManagedChooserRequest()
+                // A new plan cannot cancel writes already running in this checkout.
+                next.implementationChildren = chooserWriteFences[id] ?? []
+                chooserRequests[id] = next
+                chooserTurnRequests[id] = [:]
+            }
+            beginChooserRequest(id)
+        }
         // T5 — steers still marked delivering belong to an earlier turn of a
         // session that has gone idle since; a new turn means they were taken.
         settleStaleDeliveringSteers(for: id)
@@ -3890,6 +3936,7 @@ final class AgentSupervisor {
         // Before the turn starts, so a projection carries the prompt ahead of
         // the turn it began. Every send of every origin passes here once.
         publishPrompt(prompt, author: author, sharedText: sharedInputPermit?.requester == nil ? nil : sharedInputPermit?.namingText, for: id)
+        chooserChildStarting(id)
         startTurn(on: runner, for: id) { onEvent in try runner.run(prompt: prompt, onEvent: onEvent) }
         // Title from the prompt NOW, not after the first turn: a long first turn
         // showed the raw prompt as its name for as long as it ran. The titler is
@@ -4746,6 +4793,11 @@ final class AgentSupervisor {
         }
         runners[id]?.stop()
         runners[id] = nil
+        chooserChildFinished(id)
+        if let task = chooserRequests[id] {
+            chooserRequestEnded(id, request: task.id)
+            chooserRequests[id] = nil
+        }
         // Normally Stop is offered only for an active turn. Keeping teardown
         // complete here also makes programmatic stop/archive paths safe if an
         // idle persistent session exists.
@@ -6308,6 +6360,8 @@ final class AgentSupervisor {
 
     private func commitSpawn(_ request: SpawnRequest, from parentId: AgentID, parent: AgentRecord, parentHarness: AgentHarness, childID mintedID: AgentID, childPrompt: String, childSelection: AgentLaunchSelection?, resolvedRole: RoleRegistry.Resolution, mode: AgentMode, retryOf: AgentID?, originalBrief: String?, contract: AgentDelegationContract?, managed: Bool, checkout: URL, projectRoot: URL, overlapping: Bool, isolationTitle: String, resolved: SpawnCheckoutPlan.Checkout) -> AgentID? {
         do {
+            chooserPendingChildRequests[mintedID] = request.sourceItemID.flatMap { chooserSourceRequests["\(parentId.rawValue)/\($0)"] }
+            defer { chooserPendingChildRequests[mintedID] = nil }
             let childID = try spawn(
                 role: request.role,
                 prompt: childPrompt,
@@ -6332,7 +6386,9 @@ final class AgentSupervisor {
             guard var spawned = records[childID] else { return nil }
             spawned.delegationContext = AgentDelegationContext(
                 brief: originalBrief ?? request.prompt, baseHead: resolved.baseHead, retryOf: retryOf,
-                createdWorktree: overlapping && resolved.isolate, checkoutNotice: resolved.notice, contract: contract)
+                createdWorktree: overlapping && resolved.isolate, checkoutNotice: resolved.notice, contract: contract,
+                chooserWriteRequest: spawned.delegationContext?.chooserWriteRequest,
+                chooserWriteInProgress: spawned.delegationContext?.chooserWriteInProgress)
             records[childID] = spawned
             persist(spawned)
             // The child record remembers the tool call that asked for it, so its
@@ -7356,6 +7412,12 @@ final class AgentSupervisor {
         }
         helperCompletionBatches[id] = nil
 
+        chooserChildFinished(id)
+        chooserChildRequests[id] = nil
+        chooserChildTurns[id] = nil
+        chooserAtLaunch.remove(id)
+        chooserRequests[id] = nil
+        chooserWriteFences[id] = nil
         records.removeValue(forKey: id)
         pendingModeRestarts.remove(id)
         runningModes.removeValue(forKey: id)
@@ -9021,6 +9083,211 @@ final class AgentSupervisor {
     var leadPlanObservers: [UUID: (AgentID, () -> Void)] = [:]
     private var managedHookStates: [AgentID: ManagedLeadHookState] = [:]
 
+    // Claude chooser is launch-scoped. Changing the preference never weakens
+    // a running request; the following request reads the preference anew.
+    private(set) var chooserRequests: [AgentID: ManagedChooserRequest] = [:]
+    private var chooserAtLaunch = Set<AgentID>()
+    private var chooserTurnRequests: [AgentID: [String: UUID]] = [:]
+    private var chooserChildRequests: [AgentID: (parent: AgentID, request: UUID)] = [:]
+    private var chooserChildTurns: [AgentID: String] = [:]
+    private var chooserWriteFences: [AgentID: Set<UUID>] = [:]
+    private var chooserPendingRequests: [UUID: UUID] = [:]
+    private var chooserSourceRequests: [String: UUID] = [:]
+    private var chooserPendingChildRequests: [AgentID: UUID] = [:]
+    private var chooserActualDelegations: [UUID: Set<String>] = [:]
+    private var chooserEndedRequests: [UUID: AgentID] = [:]
+    private var chooserFinalizedRequests = Set<UUID>()
+
+    func chooserEnabled(for id: AgentID) -> Bool {
+        guard let record = records[id], record.harness == .claudeCode,
+              record.parentAgentID == nil, effectiveMode(for: id) == .managed else { return false }
+        if isRunning(id) { return chooserAtLaunch.contains(id) }
+        return ManagedChooser.isEnabled(defaults: managedModeDefaults)
+    }
+    func chooserHookPolicy(for record: AgentRecord) -> String? {
+        guard record.harness == .claudeCode, record.parentAgentID == nil,
+              chooserAtLaunch.contains(record.id),
+              (runningModes[record.id] ?? record.mode) == .managed else { return nil }
+        return chooserWriteFences[record.id]?.isEmpty == false ? "latched" : "open"
+    }
+    private func beginChooserRequest(_ id: AgentID) {
+        guard chooserEnabled(for: id) else { return }
+        if chooserRequests[id] == nil {
+            var task = ManagedChooserRequest()
+            task.implementationChildren = chooserWriteFences[id] ?? []
+            chooserRequests[id] = task
+        }
+    }
+    private func chooserRequestEnded(_ agent: AgentID, request: UUID) {
+        chooserEndedRequests[request] = agent
+        chooserFinalizeHandoff(request)
+    }
+    private func chooserFinalizeHandoff(_ request: UUID) {
+        guard let agent = chooserEndedRequests[request], !chooserFinalizedRequests.contains(request),
+              !chooserPendingRequests.values.contains(request) else { return }
+        chooserFinalizedRequests.insert(request)
+        // Actual successful implementation delegations, regardless of what a
+        // plan promised. The immediate result advisory is intentionally separate.
+        if chooserActualDelegations[request]?.count == 1, qaRunLedgerRecording {
+            runLedger.chooserFact(agent: agent.rawValue, request: request, kind: "oneHelperHandoff", source: "closed", parts: 1)
+        }
+    }
+    /// The pending reservation fences writes before an off-main checkout step.
+    func chooserWillDelegate(_ id: AgentID, source: String, readOnly: Bool) -> UUID? {
+        guard chooserEnabled(for: id), !readOnly else { return nil }
+        beginChooserRequest(id)
+        guard var task = chooserRequests[id] else { return nil }
+        let pending = UUID()
+        task.implementationChildren.insert(pending)
+        chooserWriteFences[id, default: []].insert(pending)
+        chooserPendingRequests[pending] = task.id
+        chooserSourceRequests["\(id.rawValue)/\(source)"] = task.id
+        chooserRequests[id] = task
+        return pending
+    }
+    func chooserDelegated(_ parent: AgentID, source: String, pending: UUID?, child: AgentID?) -> String? {
+        guard let pending, let request = chooserPendingRequests.removeValue(forKey: pending) else { return nil }
+        chooserSourceRequests["\(parent.rawValue)/\(source)"] = nil
+        chooserWriteFences[parent]?.remove(pending)
+        var task = chooserRequests[parent]
+        task?.implementationChildren.remove(pending)
+        if let child {
+            var logicalPart = child
+            var visited = Set<AgentID>()
+            while visited.insert(logicalPart).inserted, let previous = records[logicalPart]?.delegationContext?.retryOf { logicalPart = previous }
+            chooserActualDelegations[request, default: []].insert(logicalPart.rawValue.uuidString)
+            chooserChildRequests[child] = (parent, request)
+            if isRunning(child) {
+                chooserWriteFences[parent, default: []].insert(child.rawValue)
+                task?.implementationChildren.insert(child.rawValue)
+                task?.finishedChildren.remove(child.rawValue)
+            }
+            if task?.id == request { task?.delegationSources.insert(source) }
+        }
+        chooserRequests[parent] = task
+        if qaRunLedgerRecording {
+            runLedger.chooserFact(agent: parent.rawValue, request: request,
+                kind: child == nil ? "delegationFailed" : "implementationDelegated", source: source)
+        }
+        chooserFinalizeHandoff(request)
+        guard child != nil else { return nil }
+        let onlySoFar = chooserActualDelegations[request]?.count == 1
+        let declaredSplit = task?.id == request && task?.plan?.choice == .split && (task?.plan?.parts?.count ?? 0) >= 2
+        return onlySoFar && !declaredSplit ? ManagedChooser.handoffAdvice : nil
+    }
+    private func chooserChildStarting(_ id: AgentID) {
+        guard let binding = chooserChildRequests[id] else { return }
+        chooserChildTurns[id] = nil // an old terminal cannot finish this new turn
+        if var record = records[id], record.delegationContext != nil {
+            record.delegationContext?.chooserWriteInProgress = true
+            records[id] = record
+            _ = persist(record)
+        }
+        chooserWriteFences[binding.parent, default: []].insert(id.rawValue)
+        if var task = chooserRequests[binding.parent] {
+            task.implementationChildren.insert(id.rawValue)
+            task.finishedChildren.remove(id.rawValue)
+            chooserRequests[binding.parent] = task
+        }
+    }
+    private func chooserChildFinished(_ id: AgentID) {
+        guard let binding = chooserChildRequests[id] else { return }
+        if var record = records[id], record.delegationContext?.chooserWriteInProgress == true {
+            record.delegationContext?.chooserWriteInProgress = false
+            records[id] = record
+            _ = persist(record)
+        }
+        chooserWriteFences[binding.parent]?.remove(id.rawValue)
+        chooserChildTurns[id] = nil
+        if var task = chooserRequests[binding.parent] {
+            task.finishedChildren.insert(id.rawValue)
+            chooserRequests[binding.parent] = task
+            if task.leadEnded && !task.latched && !wakesForHelperCompletion(binding.parent) {
+                chooserRequestEnded(binding.parent, request: task.id)
+            }
+        }
+    }
+    private func chooserObserved(_ event: AgentRuntimeEvent, for id: AgentID) {
+        switch event {
+        case let .turnStarted(_, turn):
+            if records[id]?.parentAgentID != nil {
+                chooserChildTurns[id] = turn
+                if let binding = chooserChildRequests[id] {
+                    chooserWriteFences[binding.parent, default: []].insert(id.rawValue)
+                    if var task = chooserRequests[binding.parent] {
+                        task.implementationChildren.insert(id.rawValue); task.finishedChildren.remove(id.rawValue)
+                        chooserRequests[binding.parent] = task
+                    }
+                }
+            }
+            guard chooserEnabled(for: id) else { return }
+            beginChooserRequest(id)
+            guard var task = chooserRequests[id] else { return }
+            task.turnIDs.insert(turn); task.leadEnded = false
+            chooserTurnRequests[id, default: [:]][turn] = task.id
+            chooserRequests[id] = task
+        case let .turnCompleted(_, turn, outcome, _):
+            if chooserChildTurns[id] == turn { chooserChildFinished(id) }
+            guard var task = chooserRequests[id], chooserTurnRequests[id]?[turn] == task.id else { return }
+            task.leadEnded = true
+            if !task.latched || outcome != .completed {
+                chooserRequestEnded(id, request: task.id)
+                chooserRequests[id] = nil
+            } else { chooserRequests[id] = task }
+        default: break
+        }
+    }
+    func choosePlan(_ plan: AgentTaskPlan, for id: AgentID) -> Result<[String: Any], WorkspaceAPIError> {
+        guard chooserEnabled(for: id), var task = chooserRequests[id], let record = records[id] else {
+            return .failure(.init(code: .unsupported, message: "array_plan is available only during an experimental Claude Managed lead request."))
+        }
+        if let existing = task.plan, existing != plan {
+            return .failure(.init(code: .invalidRequest, message: "This request already declared a choice. Delegate any additional work with its contract."))
+        }
+        let parts = plan.parts ?? []
+        var overlaps: [[String: Any]] = []
+        for i in parts.indices {
+            for j in parts.indices where j > i {
+                // Only owns determine independence. Shared registries are
+                // deliberately excluded from the ownership verdict.
+                let a = AgentDelegationContract(owns: parts[i].contract.owns)
+                let b = AgentDelegationContract(owns: parts[j].contract.owns)
+                let paths = a.claimOverlap(with: b)
+                if !paths.isEmpty { overlaps.append(["first": i, "second": j, "paths": paths]) }
+            }
+        }
+        let first = task.plan == nil
+        if first {
+            task.plan = plan; chooserRequests[id] = task
+            let previous = record.declaredStatus
+            guard declareStatus(.init(now: plan.line, next: previous?.next, needsYou: previous?.needsYou, plan: previous?.plan, declaredAt: Date()), for: id) else {
+                task.plan = nil; chooserRequests[id] = task
+                return .failure(.init(code: .durabilityFailed, message: "The visible choice could not be saved."))
+            }
+            appendLocalNotice(id: id, key: "array-plan-\(task.id)", title: "Task choice", body: plan.line)
+            if qaRunLedgerRecording {
+                runLedger.chooserFact(agent: id.rawValue, request: task.id, kind: "plan", source: task.id.uuidString,
+                    choice: plan.choice.rawValue, parts: parts.count)
+            }
+        }
+        ManagedChooserCoverage.shared.prepare(root: record.checkoutRoot)
+        let unowned = ManagedChooserCoverage.shared.unowned(root: record.checkoutRoot, contracts: parts.map(\.contract))
+        var result: [String: Any] = ["requestId": task.id.uuidString, "line": plan.line,
+            "ownsDisjoint": overlaps.isEmpty, "ownershipOverlaps": overlaps,
+            "parts": parts.enumerated().map { index, part -> [String: Any] in
+                let checks = ManagedChooserCoverage.shared.checks(root: record.checkoutRoot, owns: part.contract.owns)
+                return ["index": index, "title": part.title,
+                    "registeredChecks": Array(checks.prefix(ManagedChooserCoverage.maximumChecksPerPart)).map { String($0.prefix(512)) },
+                    "registeredCheckCount": checks.count]
+            }, "unownedCheckFiles": Array(unowned.prefix(ManagedChooserCoverage.maximumUnownedFiles)).map { String($0.prefix(512)) },
+            "unownedCheckFileCount": unowned.count,
+            "coverageStatus": ManagedChooserCoverage.shared.status(root: record.checkoutRoot)]
+        if let at = ManagedChooserCoverage.shared.observedAt(root: record.checkoutRoot) { result["coverageObservedAt"] = at }
+        if plan.choice == .split && parts.count < 2 { result["advisory"] = ManagedChooser.handoffAdvice }
+        return .success(result)
+    }
+
+
     /// Read before offering a switch. A changed lead policy starts a cold
     /// prompt cache on the next turn. No warning UI is built in this slice.
     func modeSwitchStartsColdCache(for id: AgentID, to mode: AgentMode) -> Bool {
@@ -9061,7 +9328,9 @@ final class AgentSupervisor {
               (runningModes[record.id] ?? record.mode) == .managed else { return nil }
         var state = managedHookStates[record.id] ?? ManagedLeadHookState()
         state.briefedSessions = records[record.id]?.managedBriefedSessions ?? []
-        let reply = state.reply(payload: payload, harness: harness)
+        let choosing = chooserAtLaunch.contains(record.id)
+        if choosing, let output = ManagedChooser.toolReply(payload, latched: chooserWriteFences[record.id]?.isEmpty == false) { return output }
+        let reply = state.reply(payload: payload, harness: harness, chooser: choosing)
         if var current = records[record.id], current.managedBriefedSessions != state.briefedSessions {
             current.managedBriefedSessions = state.briefedSessions
             records[record.id] = current
@@ -12078,6 +12347,15 @@ final class AgentSupervisor {
         if runners[id] !== runner {
             guard runners[id] == nil, event.isRunnerTerminal else { return }
         }
+        if case let .turnCompleted(_, turn, _, _) = event {
+            // This callback passed the runner-generation gate above. It also
+            // covers supervisor-minted failed:/no-result: terminal identities.
+            chooserChildFinished(id)
+            if let task = chooserRequests[id], chooserTurnRequests[id]?[turn] != task.id {
+                chooserRequestEnded(id, request: task.id)
+                chooserRequests[id] = nil
+            }
+        }
         deliver(event, to: id, now: now)
         // T5 — the bound runner's own stream says where the tool boundaries are.
         switch event {
@@ -12499,6 +12777,7 @@ final class AgentSupervisor {
     }
 
     private func updateTurnFacts(with event: AgentRuntimeEvent, for id: AgentID, now: Date = Date()) {
+        chooserObserved(event, for: id)
         var facts = turnFacts[id] ?? TurnFacts()
         // The presence owner reduces EVERY event first; the record stamps below
         // are side effects of the same transitions, never a second state.

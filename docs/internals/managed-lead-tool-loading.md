@@ -222,3 +222,64 @@ characters of description and schema, about 0.41 tokens per character.
 - The server instructions repeat much of the guidance line. Removing roughly
   half of their 282 words (about 900 characters) would save every Claude and
   Codex agent about 370 tokens on every request.
+
+## Experimental task chooser (plan 117)
+
+`agents.managedMode.chooser` is off by default. `ARRAY_MANAGED_CHOOSER=1`
+selects it for a launch; `0` overrides the preference. Only root Claude Managed
+leads participate. The launch adds `array_plan` to the three pinned tools and
+loads its schema from a separate optional resource. Free agents, helpers, Codex,
+Pi, and switch-off servers retain their existing tool catalog and pins.
+
+The chooser brief and its scoped delegate guideline clarify that a Managed task
+already permits choosing justified helpers without another delegation request.
+Requests to work alone and Array's Agent permissions still apply. This changes
+no host grants; the default delegate guideline and shared Pi resource stay intact.
+
+The short chooser brief asks for solo work unless two or more different-file
+parts justify the repeated reading. `array_plan` carries `choice`, `reason`,
+and titled contracts in `parts`. The host stores the status and posts one local transcript notice,
+returns an ownership verdict and partial pre-pass coverage, and records the
+choice in the ledger without its prose. The visible reason stays in the local
+status/transcript, like existing local notices. Coverage refreshes asynchronously at launch and plan
+calls; the reply labels partial/absent/loading coverage and includes its snapshot
+time. Replies cap registered checks at eight per part and unowned check paths at
+32, with total counts so omissions are explicit. Repeating the same choice is idempotent; another
+choice in that request is refused. One-part splits and ownership overlaps are
+advised, and never refuse a delegation. A declaration alone does not latch.
+
+The first implementation delegation closes the request's tool latch before
+child creation begins. `readOnly: true` labels investigation/review and does
+not latch. While latched, authenticated Array coordination and native reads
+remain available; all command execution, editing and unknown MCP/plugin tools
+are refused. The last implementation helper's terminal result reopens editing
+for integration. The next dispatched user request starts with a new identity and declaration.
+Unfinished implementation writes from an older task remain fenced until those
+helpers finish. A follow-up to a completed implementation helper re-fences the
+lead while the helper works again; stop/archive releases that fence. Queued
+helper-result wakes keep their task identity.
+
+Chooser PreToolUse hooks fail closed on a missing token, malformed input,
+unavailable host, missing host policy acknowledgement, or timeout, including
+trimmed large edits. This also temporarily refuses solo editing and reads when
+the host cannot establish its policy. Other hook events never print a tool
+decision on failure. An app restart cannot silently acknowledge an orphaned CLI;
+the refusal tells the lead to resume/relaunch in Array, rather than repeatedly
+retry the orphaned process. Implementation-writer markers are saved in the
+helper's host-owned delegation context before its first send, set again on
+follow-ups, and cleared on known terminal/explicit stop. A resumed lead restores
+unresolved markers as write fences, even if its in-memory request was lost. Native Agent/Task tools are
+excluded from chooser launches. The legacy hook transport remains fail open.
+
+This is an experimental tool-boundary policy, **not a proven write sandbox**.
+Claude's strict sandbox is fixed at process launch and cannot yet close at a
+mid-turn delegation while permitting solo writes beforehand. The chooser
+currently takes precedence over the separate strict-lead setting. A background
+job launched during solo work can outlive the transition; read-only is the
+lead's declaration, not a helper filesystem capability. These gaps keep the
+chooser off. No live-provider effectiveness, speed, token saving, or default-on
+claim follows from the offline witnesses.
+
+Behavioral witnesses: `--orchestration-plan-check`,
+`--orchestration-request-lifecycle-check`, and
+`--orchestration-request-policy-check`, registered in the matrix.
