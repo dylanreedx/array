@@ -301,12 +301,7 @@ final class LeadCheckoutWatch: @unchecked Sendable {
                                                Unmanaged<Stream>.fromOpaque(info).release()
                                            },
                                            copyDescription: nil)
-        let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
-            guard let info else { return }
-            let list = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []
-            Unmanaged<Stream>.fromOpaque(info).takeUnretainedValue().received(list, Array(UnsafeBufferPointer(start: flags, count: count)))
-        }
-        let created = FSEventStreamCreate(nil, callback, &context, [root] as CFArray,
+        let created = FSEventStreamCreate(nil, Self.callback, &context, [root] as CFArray,
                                           FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.05,
                                           FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer
                                                                    | kFSEventStreamCreateFlagUseCFTypes))
@@ -314,6 +309,79 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         FSEventStreamSetDispatchQueue(created, deliveries)
         guard FSEventStreamStart(created) else { FSEventStreamInvalidate(created); FSEventStreamRelease(created); return }
         holder.stream = created
+    }
+
+    private static let callbackCount = Locked(0)
+    static var qaCallbackCount: Int { callbackCount.withLock { $0 } }
+
+    private static let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
+        guard let info else { return }
+        callbackCount.withLock { $0 += 1 }
+        let list = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []
+        Unmanaged<Stream>.fromOpaque(info).takeUnretainedValue().received(list, Array(UnsafeBufferPointer(start: flags, count: count)))
+    }
+
+    /// Deterministic ownership witness: keep the native stream alive after
+    /// removing the watch's ownership, then exercise its actual callback.
+    /// A weak check reports the historical defect without dereferencing freed memory.
+    static func qaCallbackLifetime(root: String) -> Bool {
+        let watch = LeadCheckoutWatch()
+        watch.queue.sync { watch.ensureStream(root) }
+        weak var holder = watch.streams[root]
+        guard let ref = holder?.stream else { return false }
+        FSEventStreamRetain(ref)
+        let info = Unmanaged.passUnretained(holder!).toOpaque()
+        watch.queue.sync {
+            watch.stop(watch.streams[root]!)
+            watch.streams.removeAll()
+        }
+        defer { FSEventStreamRelease(ref) }
+        guard holder != nil else { return false }
+        watch.deliveries.sync {
+            let paths = [root + "/direct"] as CFArray
+            var flag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile)
+            var id: FSEventStreamEventId = 0
+            withUnsafeMutablePointer(to: &flag) { flags in
+                withUnsafeMutablePointer(to: &id) { ids in
+                    Self.callback(ref, info, 1, Unmanaged.passUnretained(paths).toOpaque(), flags, ids)
+                }
+            }
+        }
+        return holder?.pending.count == 1
+    }
+
+    /// Arrange a delivery before releasing the final watch reference on main.
+    /// Its queue is deliberately blocked until a worker releases it; that
+    /// worker never needs main. The watchdog turns a deadlock into a failure.
+    static func qaMainTeardown(root: String) -> Bool {
+        precondition(Thread.isMainThread)
+        var watch: LeadCheckoutWatch? = LeadCheckoutWatch()
+        watch!.queue.sync { watch!.ensureStream(root) }
+        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        let done = DispatchSemaphore(value: 0)
+        let holder = Unmanaged.passUnretained(watch!.streams[root]!).toOpaque()
+        let ref = watch!.streams[root]!.stream!
+        watch!.deliveries.async {
+            entered.signal()
+            resume.wait()
+            let paths = [root + "/inflight"] as CFArray
+            var flag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile)
+            var id: FSEventStreamEventId = 0
+            Self.callback(ref, holder, 1, Unmanaged.passUnretained(paths).toOpaque(), &flag, &id)
+        }
+        guard entered.wait(timeout: .now() + 2) == .success else { return false }
+        DispatchQueue.global().async {
+            usleep(50_000)
+            resume.signal()
+            if done.wait(timeout: .now() + 2) != .success {
+                fputs("FAIL: main-thread checkout teardown deadlocked\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        let start = Date()
+        watch = nil
+        done.signal()
+        return Date().timeIntervalSince(start) < 2
     }
 
     private func stop(_ stream: Stream) {

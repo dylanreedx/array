@@ -82,6 +82,16 @@ enum LeadCheckoutChecks {
         let dir = fm.temporaryDirectory.appendingPathComponent("lead-watch-teardown-\(UUID().uuidString)", isDirectory: true)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: dir) }
+        try HelperEvidenceChecks.git(["init", "-q"], dir)
+        let baseline = LeadCheckoutWatch.qaLiveHolders
+        for _ in 0..<64 {
+            try expect(LeadCheckoutWatch.qaCallbackLifetime(root: dir.path), "FSEvents callback holder freed before stream release")
+            try expect(LeadCheckoutWatch.qaMainTeardown(root: dir.path), "main teardown exceeded 2 seconds")
+        }
+        let released = Date().addingTimeInterval(5)
+        while LeadCheckoutWatch.qaLiveHolders != baseline, Date() < released { usleep(20_000) }
+        try expect(LeadCheckoutWatch.qaLiveHolders == baseline, "direct callback holders leaked")
+        print("lead checkout callback: 64 native ownership and in-flight main teardown arms passed (<2 s each)")
         final class Flag: @unchecked Sendable { let lock = NSLock(); var raised = false }
         let stop = Flag()
         let writer = Thread {
@@ -94,6 +104,7 @@ enum LeadCheckoutChecks {
         writer.start()
         defer { stop.lock.withLock { stop.raised = true } }
         let holdersBefore = LeadCheckoutWatch.qaLiveHolders
+        let callbacksBefore = LeadCheckoutWatch.qaCallbackCount
         let watches = 1_200
         for _ in 0..<watches {
             var watch: LeadCheckoutWatch? = LeadCheckoutWatch()
@@ -109,6 +120,8 @@ enum LeadCheckoutChecks {
         while LeadCheckoutWatch.qaLiveHolders != holdersBefore, Date() < deadline { usleep(20_000) }
         try expect(LeadCheckoutWatch.qaLiveHolders == holdersBefore,
                    "\(LeadCheckoutWatch.qaLiveHolders - holdersBefore) stream holders leaked after \(watches) watches were torn down")
+        try expect(LeadCheckoutWatch.qaCallbackCount > callbacksBefore, "stress loop received no real FSEvents callbacks")
+        print("lead checkout real callbacks: \(LeadCheckoutWatch.qaCallbackCount - callbacksBefore)")
         print("lead checkout teardown: \(watches) watches torn down while their checkout changed, no crash, no holder alive")
     }
 
