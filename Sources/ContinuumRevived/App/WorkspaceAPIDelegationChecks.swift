@@ -1120,6 +1120,9 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false) async throws {
         payload: retryPayload), "restart replay")
     try expect(replayAfterRestart["operationId"]?.string == "restart-op" && replayAfterRestart["queuePosition"]?.int == retryAdmission["queuePosition"]?.int, "restart reuses durable key and original position rather than adding another message")
     try expect(restarted.queuedMessages(for: childId).filter { $0.text.contains("AFTER-RESTART") }.count == 1, "one item after restart retry")
+    let pausedInspection = try result(restartAPI.dispatch(agentId: parentId, requestId: "paused-inspection", op: "agent.inspect",
+        payload: ["agentId": childId.rawValue.uuidString]), "paused inspection")
+    try expect(pausedInspection["agent"]?.object?["status"]?.string == "paused", "restored held queue must be reported paused rather than ready")
     restarted.resumeQueue(for: childId)
     let restartedDelivered = await waitUntil(timeout: 20, pollInterval: 0.02) {
         occurrences("AFTER-RESTART", in: childPromptLog()) == 1 && !restarted.isRunning(childId)

@@ -6076,7 +6076,7 @@ final class AgentSupervisor {
             let status = presenceRowStatus(for: id)
             guard status == .working || status == .needsAttention else {
                 helperProgress[id] = nil
-                pendingHelperAlerts[id] = nil
+                withdrawQueuedHelperAlert(id)
                 if records[id]?.helperWatchdogNeedsYou != nil {
                     records[id]?.helperWatchdogNeedsYou = nil
                     notifyLeadPlanChanged(id)

@@ -88,7 +88,11 @@ supervisor send/composer queue. They add no direct Mac banner, sound, badge,
 phone push, widget or Live Activity sender. The per-lead setting that once disabled
 this path is removed in 0.7.44 (one channel per recipient, below). A refused
 lead send remains pending for another flush rather than creating a user alert.
-The no-progress watchdog remains independent. Under **SRC-01**, the stored
+The no-progress watchdog remains independent. Under **SRC-01**, a sweep
+withdraws pending and queued watchdog alerts when a helper is no longer working
+or waiting for action, including failed and completed turns. Withdrawal is
+witnessed by `--helper-watchdog-check`; a lead receives no stale queued warning.
+Under **SRC-01**, the stored
 helper-wake message uses plain lines: helper status, summary, findings, nonpassing
 checks and unobserved/failed/stale command evidence, next step and details path.
 Passing checks and observed command evidence stay out of the wake; the structured
