@@ -170,9 +170,11 @@ public struct AtomicWriter: Sendable {
 
     /// Read JSON from `url`. If the main file is missing or corrupt, fall back
     /// to the newest valid backup. Throws if neither path yields a parseable
-    /// value of `T`.
-    public func read<T: Codable>(at url: URL, beforeBackup: () -> Void = {}) throws -> T {
-        try read(at: url, decoder: JSONCodec.makeDecoder(), beforeBackup: beforeBackup)
+    /// value of `T`. Stores merging independently numbered backup histories can
+    /// prefer their recorded wall-clock timestamps during recovery; ties use
+    /// generation order. Save retention always uses generations.
+    public func read<T: Codable>(at url: URL, beforeBackup: () -> Void = {}, preferBackupTimestamps: Bool = false) throws -> T {
+        try read(at: url, decoder: JSONCodec.makeDecoder(), beforeBackup: beforeBackup, preferBackupTimestamps: preferBackupTimestamps)
     }
 
     /// Every store read through any writer, process-wide. Instrumentation only:
@@ -184,7 +186,7 @@ public struct AtomicWriter: Sendable {
     private static let readCountLock = NSLock()
     nonisolated(unsafe) private static var readCountValue = 0
 
-    public func read<T: Codable>(at url: URL, decoder: JSONDecoder, beforeBackup: () -> Void = {}) throws -> T {
+    public func read<T: Codable>(at url: URL, decoder: JSONDecoder, beforeBackup: () -> Void = {}, preferBackupTimestamps: Bool = false) throws -> T {
         Self.readCountLock.lock(); Self.readCountValue += 1; Self.readCountLock.unlock()
         if let data = try? Data(contentsOf: url),
            let value = try? decoder.decode(T.self, from: data) {
@@ -193,7 +195,7 @@ public struct AtomicWriter: Sendable {
 
         beforeBackup()
         // Try backups from newest to oldest.
-        for backupURL in try backupURLsNewestFirst(for: url) {
+        for backupURL in try backupURLsNewestFirst(for: url, preferTimestamps: preferBackupTimestamps) {
             if let data = try? Data(contentsOf: backupURL),
                let value = try? decoder.decode(T.self, from: data) {
                 return value
@@ -445,17 +447,18 @@ public struct AtomicWriter: Sendable {
         }
     }
 
-    private func backupURLsNewestFirst(for url: URL) throws -> [URL] {
+    private func backupURLsNewestFirst(for url: URL, preferTimestamps: Bool) throws -> [URL] {
         guard
             let backupsDirectory,
             FileManager.default.fileExists(atPath: backupsDirectory.path)
         else { return [] }
 
-        return newestFirst(try backupEntries(for: url))
+        return newestFirst(try backupEntries(for: url), preferTimestamps: preferTimestamps)
     }
 
-    private func newestFirst(_ entries: [BackupEntry]) -> [URL] {
+    private func newestFirst(_ entries: [BackupEntry], preferTimestamps: Bool = false) -> [URL] {
         entries.sorted { lhs, rhs in
+            if preferTimestamps, let l = lhs.timestamp, let r = rhs.timestamp, l != r { return l > r }
             switch (lhs.generation, rhs.generation) {
             case let (l?, r?): return l == r ? lhs.url.lastPathComponent > rhs.url.lastPathComponent : l > r
             case (_?, nil): return true       // every new generation follows legacy history
@@ -468,6 +471,7 @@ public struct AtomicWriter: Sendable {
     private struct BackupEntry {
         let url: URL
         let generation: UInt64?
+        var timestamp: String? = nil
     }
 
     private func backupEntries(for url: URL) throws -> [BackupEntry] {
@@ -499,7 +503,7 @@ public struct AtomicWriter: Sendable {
         return names.compactMap { name in
             if name.hasPrefix(newPrefix) {
                 guard let generation = v2Generation(in: name, identity: identity) else { return nil }
-                return BackupEntry(url: makeURL(name), generation: generation)
+                return BackupEntry(url: makeURL(name), generation: generation, timestamp: String(name.suffix(24)))
             }
             // Legacy: exact stem/extension plus a parseable ISO-8601 timestamp
             // and the historical 6- or 12-digit suffix. This rejects similarly
@@ -520,7 +524,7 @@ public struct AtomicWriter: Sendable {
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             guard (suffix.count == 6 || suffix.count == 12), suffix.allSatisfy(\.isNumber),
                   formatter.date(from: timestamp) != nil else { return nil }
-            return BackupEntry(url: makeURL(name), generation: nil)
+            return BackupEntry(url: makeURL(name), generation: nil, timestamp: String(body.prefix(24)))
         }
     }
 

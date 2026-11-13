@@ -690,8 +690,10 @@ private func runHeldMigrationRecoveryCheck(root: URL) throws {
     func record(_ name: String) -> AgentRecord {
         makeAgentStoreFixture(id: id, displayName: name, createdAt: date)
     }
-    let dedicated = AtomicWriter(backupsDirectory: layout.backupsDirectory(for: id), legacyBackupPolicy: .targetDedicated)
-    let shared = AtomicWriter(backupsDirectory: layout.backupsDirectory, legacyBackupPolicy: .targetDedicated)
+    let dedicated = AtomicWriter(backupsDirectory: layout.backupsDirectory(for: id), backupDate: { date }, legacyBackupPolicy: .targetDedicated)
+    let shared = AtomicWriter(backupsDirectory: layout.backupsDirectory, backupDate: { date.addingTimeInterval(60) }, legacyBackupPolicy: .targetDedicated)
+    try dedicated.write(record("old-backup"), to: layout.agentFile(id: id))
+    try dedicated.write(record("old-backup"), to: layout.agentFile(id: id))
     try dedicated.write(record("old-backup"), to: layout.agentFile(id: id))
     try dedicated.write(record("newer-backup"), to: layout.agentFile(id: id))
     try shared.write(record("primary"), to: layout.agentFile(id: id))
