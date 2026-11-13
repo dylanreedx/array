@@ -13,8 +13,11 @@ No main checkout, production app, defaults domain, or default tmux state changed
 - **6 — CLI subagents: partial existing implementation.**
   `ClaudeAgentRunner.arguments` excludes `Agent,Task,ListAgents` for a hooked
   chooser lead. Ordinary Managed leads still permit native children. Array
-  mirrors provider children, but usage is parent-inclusive, as documented in
-  `UsageReport`; this does not establish independent delegation cost attribution.
+  mirrors provider children. `RunLedgerGapsChecks.builtinClaude` and
+  `builtinCodex` assert delegated rows with `via: harness` and parent/task
+  identity. Claude usage explicitly says `reportedByParent`; the Codex fixture
+  reports independent child tokens. Observed rows, accurate per-harness cost
+  attribution, and prevention are separate properties; rows are implemented.
   No unproven native-child attribution or universal CLI policy is enabled here.
 - **20 — lead choices: experiment exists, proof remains open.**
   `ManagedChooser` supplies solo/split plans and command-tool latching; its
@@ -96,3 +99,43 @@ The isolation option remains OFF. Default sharing risk remains OPEN. Gaps 5,
 production-loading witness passed. Final independent review is lead-arranged
 and pending; this candidate is not an integration approval. Bench retained
 for that review; the lead must return it after integration/disposition.
+
+## Follow-up: lifecycle coverage and B6 correction
+
+At the lead's request, the isolation witness now also sends two simultaneous
+production MCP delegation requests, compares all checkout roots, advances an
+isolated nested lead's HEAD and asserts a sibling checkout at that HEAD, then
+resumes a dirty isolated helper through `array_message_agent` while siblings
+run. It asserts the original checkout and private file survive without a new
+worktree. This is test-only coverage; production policy remains `04dbe334`.
+
+The first expanded build found a test typo (`resolved` returns `String`, not
+`URL`); corrected after the build ended. The next preflight refused with
+**4 swift-build processes**, 47% free memory, 64.4 GiB disk. No build was
+started after that failed preflight. Expanded lifecycle coverage is therefore
+**not yet compiled or run**; earlier four GREEN legs refer to the narrower
+witness in `04dbe334`, not this extension.
+
+B6 source correction was separately verified using the last successful
+`04dbe334` app binary (these production/test sources were unchanged):
+
+- `CONTINUUM_LEDGER_GAPS_CASE=builtin ... --run-ledger-gaps-check`: exit 0,
+  observed delegated row via harness with parent=lead; one helper, included
+  in parent, all 79,536 fixture tokens.
+- `CONTINUUM_LEDGER_GAPS_CASE=builtin-codex ... --run-ledger-gaps-check`: exit 0,
+  observed delegated row via harness with parent=lead; one helper, 32,707
+  fixture tokens.
+
+Both runs used separate temporary app-support roots, stdin `/dev/null`,
+`TERM=xterm-256color`, UI baselines skipped, ARRAY_AGENT_ID/TMUX/TMUX_PANE
+unset, terminal tmux disabled, and managed crash marker preserved.
+Log: `/tmp/gaps-builtin-verified.log`. These establish observed ledger rows;
+they do not establish universal native-child prevention or independent Claude
+child accounting. Ordinary Managed, opt-in Claude Strict and Codex remain
+distinct as described above.
+
+Documented dependency bootstrap: `README.md:24`,
+`GHOSTTY_SRC=/path/to/ghostty scripts/prepare-ghosttykit.sh`. It links an
+already-built `<GHOSTTY_SRC>/macos/GhosttyKit.xcframework`; it does not copy
+`.build` or build Ghostty. Ran that script successfully in this bench using
+its default local Ghostty source checkout.

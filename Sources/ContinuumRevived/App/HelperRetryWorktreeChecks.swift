@@ -107,6 +107,50 @@ enum HelperRetryWorktreeChecks {
         let leadText = try String(contentsOf: root.appendingPathComponent("tracked.txt"), encoding: .utf8)
         try expect(leadText == "lead draft",
                    "helper write reached the lead checkout")
+        // Two simultaneous API requests must each own another checkout.
+        final class Replies { var values: [String: WorkspaceAgentReportChecks.ToolReply] = [:] }
+        let replies = Replies()
+        let calls = ["one", "two"].map { name in
+            Task { @MainActor in replies.values[name] = try? await request(b, task: "HOLD isolated concurrent \(name)") }
+        }
+        for call in calls { await call.value }
+        guard let oneReply = replies.values["one"], let twoReply = replies.values["two"] else {
+            throw WorkspaceAgentReportChecks.Failure(description: "isolation concurrent API request failed")
+        }
+        let one = try child(oneReply), two = try child(twoReply)
+        let oneCapture = try await capture(b, one), twoCapture = try await capture(b, two)
+        let oneRoot = URL(fileURLWithPath: oneCapture["cwd"] as! String)
+        let twoRoot = URL(fileURLWithPath: twoCapture["cwd"] as! String)
+        try expect(Set([root, childRoot, oneRoot, twoRoot].map { WorktreeManager.resolved($0) }).count == 4,
+                   "simultaneous helpers shared a writable checkout")
+        // Nested delegation starts at the nested lead's own advanced HEAD,
+        // beside the lead's worktree, rather than inside it or at main HEAD.
+        try git(childRoot, ["add", "tracked.txt"])
+        try git(childRoot, ["commit", "-qm", "test: advance isolated helper head"])
+        let nestedHead = try git(childRoot, ["rev-parse", "HEAD"])
+        try expect(b.supervisor.setMode(.managed, for: first), "nested lead mode refused")
+        let nested = try child(await request(b, parent: first, task: "HOLD isolated nested helper"))
+        let nestedCapture = try await capture(b, nested)
+        let nestedRoot = URL(fileURLWithPath: nestedCapture["cwd"] as! String)
+        try expect(nestedRoot != childRoot && nestedRoot.deletingLastPathComponent() == childRoot.deletingLastPathComponent(),
+                   "nested helper did not get a sibling checkout")
+        let actualNestedHead = try git(nestedRoot, ["rev-parse", "HEAD"])
+        try expect(actualNestedHead == nestedHead, "nested helper ignored its lead's HEAD")
+        // A resumed helper retains its own dirty checkout while siblings work.
+        try "private".write(to: oneRoot.appendingPathComponent("resume-private.txt"), atomically: true, encoding: .utf8)
+        try await finish(b, one)
+        let countBeforeResume = try worktreeCount(root)
+        let sid = AgentSupervisor.claudeRunnerConfig(for: b.supervisor.records[one]!).sessionId
+        try FileManager.default.removeItem(at: oneRoot.appendingPathComponent("managed-release-" + sid))
+        try FileManager.default.removeItem(at: b.binDir.appendingPathComponent("capture-\(sid).json"))
+        let resumed = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "array_message_agent", [
+            "agentId": one.rawValue.uuidString, "text": "HOLD resumed isolated helper", "idempotencyKey": UUID().uuidString])
+        try expect(!resumed.isError, "isolated helper resume refused while siblings work")
+        let resumedCapture = try await capture(b, one)
+        try expect(resumedCapture["cwd"] as? String == oneRoot.path, "resumed helper changed checkout")
+        let countAfterResume = try worktreeCount(root)
+        let retained = try String(contentsOf: oneRoot.appendingPathComponent("resume-private.txt"), encoding: .utf8)
+        try expect(countAfterResume == countBeforeResume && retained == "private", "resume minted a checkout or lost dirty helper files")
         let n = try bench("first-helper-nongit"); defer { n.tearDown() }
         try expect(n.supervisor.setProviderSettings(agentID: n.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "non-git harness refused")
         try expect(n.supervisor.setMode(.managed, for: n.f.agentId), "non-git mode refused")
@@ -116,7 +160,7 @@ enum HelperRetryWorktreeChecks {
         let refused = try await request(n, task: "non-git must refuse")
         try expect(WorkspaceAgentReportChecks.errorCode(refused) == "unsupported" && n.supervisor.records.count == count,
                    "non-git isolation silently shared or created a child")
-        print("PASS first helper isolation: production MCP runner cwd and independent file contents")
+        print("PASS first helper isolation: production MCP cwd, dirty HEAD disclosure, concurrent/nested/resumed ownership and non-git refusal")
     }
 
     static func retry() async throws {
