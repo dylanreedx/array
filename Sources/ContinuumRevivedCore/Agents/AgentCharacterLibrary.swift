@@ -176,6 +176,14 @@ public enum AgentCharacterCopy {
 
 /// Settings › Agent Icons. Off by default.
 public enum AgentCharacterConfig {
+    public static let bubbleStyleKey = "agentCharacters.bubbleStyle"
+    public enum BubbleStyle: String, CaseIterable, Sendable {
+        case minimal, orb
+        public var title: String { self == .minimal ? "Minimal" : "Orb" }
+    }
+    public static func bubbleStyle(_ defaults: UserDefaults) -> BubbleStyle {
+        defaults.string(forKey: bubbleStyleKey).flatMap(BubbleStyle.init(rawValue:)) ?? .minimal
+    }
     public static let enabledKey = "agentCharacters.enabled"
     public static let defaultEnabled = false
     public static let motionKey = "agentCharacters.motion"

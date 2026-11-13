@@ -120,11 +120,18 @@ enum TileCharacterChecks {
             let scale = rect.height / 12
             buckets.append(Double(scale))
             try expect(abs(rect.width - 20 * scale) < 0.01, "zoom \(zoom): 20 x 12 art at chrome scale \(scale)")
-            try expect(abs(rect.minX - (mark.maxX + 4 * scale)) < 0.01, "zoom \(zoom): 4 pt (scaled) right of the mark")
-            try expect(abs(rect.midY - mark.midY) < 0.51, "zoom \(zoom): centred with the mark")
+            // The character lives in its bubble at the tile's top-right corner.
+            guard let bubble = view.agentBubbleFrame, let bar = view.qaTitleBarView else {
+                throw Failure(description: "zoom \(zoom): the character has no bubble")
+            }
+            let inTile = bar.convert(rect, to: view)
+            try expect(abs(inTile.midX - bubble.midX) < 0.51 && abs(inTile.midY - bubble.midY) < 0.51,
+                       "zoom \(zoom): centred in its bubble (\(inTile) in \(bubble))")
             if title.width > 0 {
-                try expect(title.minX >= rect.maxX + CGFloat(Space.s) * scale - 0.01,
-                           "zoom \(zoom): the title starts after the character (\(title.minX) vs \(rect.maxX))")
+                try expect(title.minX >= mark.maxX + CGFloat(Space.s) * scale - 0.01,
+                           "zoom \(zoom): the title starts after the mark (\(title.minX) vs \(mark.maxX))")
+                try expect(bar.convert(title, to: view).maxX <= bubble.minX,
+                           "zoom \(zoom): the title stops before the bubble")
             }
             if let pill = view.qaStatusPillRectInBar(), title.width > 0 {
                 try expect(!title.intersects(pill), "zoom \(zoom): the title never runs under the status pill")

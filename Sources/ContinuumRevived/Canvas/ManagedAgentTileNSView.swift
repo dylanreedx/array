@@ -1861,6 +1861,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             layer?.borderColor = AgentLineRole.decorativeHairline.color.cgColor(for: theme)
         }
         setTitleBarTint(style == .topBar ? identityColor?.withAlphaComponent(Self.identityBarAlpha) : nil)
+        // The icon bubble wears the agent's colour whichever style the tile uses.
+        setAgentBubbleTint(identityColor)
     }
 
     /// "Rename" — the title's inline editor, for when a double-click is not what

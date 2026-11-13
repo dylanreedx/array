@@ -187,6 +187,28 @@ class TileNSView: NSView, TokenThemed {
         titleBar?.setCharacter(agentID: agentID, snapshot: snapshot, characterName: characterName, shared: shared, now: now)
     }
     var qaCharacterLayer: CharacterSpriteLayer? { titleBar?.characterLayer }
+
+    /// The bubble's side and corner inset at chrome scale 1.
+    static var agentBubbleSide: CGFloat { TitleBarView.bubbleSide }
+    static var agentBubbleInset: CGFloat { TitleBarView.bubbleInset }
+
+    /// The agent's identity colour on its bubble; nil for none.
+    func setAgentBubbleTint(_ tint: NSColor?) { titleBar?.bubbleTint = tint }
+    var qaAgentBubble: TileAgentBubbleLayer? { titleBar?.bubble }
+
+    /// The bubble in this tile's coordinates, while it shows.
+    var agentBubbleFrame: NSRect? {
+        guard let titleBar, let rect = titleBar.qaBubbleRect else { return nil }
+        return titleBar.convert(rect, to: self)
+    }
+
+    /// Whether `local` (tile coordinates) is on the bubble: inside its circle.
+    /// A press there moves the tile, ahead of the corner's resize band.
+    func agentBubbleContains(_ local: NSPoint) -> Bool {
+        guard let frame = agentBubbleFrame else { return false }
+        let dx = local.x - frame.midX, dy = local.y - frame.midY, radius = frame.width / 2
+        return dx * dx + dy * dy <= radius * radius
+    }
     var qaCharacterRect: NSRect? { titleBar?.qaCharacterRect }
     var qaProviderMarkRect: NSRect? { titleBar?.qaProviderMarkRect }
     func qaTitleRectInBar() -> NSRect? { titleBar?.qaTitleRect() }
@@ -793,6 +815,13 @@ class TileNSView: NSView, TokenThemed {
         }
         addSubview(bar)
         self.titleBar = bar
+        // The agent's bubble floats over the bar and the body's corner, so it
+        // lives on the tile's own layer (hidden until there is an icon).
+        layer?.addSublayer(bar.bubble)
+        bar.onBubbleChange = { [weak self] in
+            guard let self else { return }
+            window?.invalidateCursorRects(for: self)
+        }
 
         installCornerOverlay()
     }
@@ -1168,6 +1197,9 @@ class TileNSView: NSView, TokenThemed {
         if let underBar, !underBar.isHidden, underBar.frame.contains(local), let hit = underBar.hitTest(local) {
             return hit
         }
+        // The agent's bubble is a grab handle: it moves the tile, though it sits
+        // in the corner's resize band and over the body's corner.
+        if agentBubbleContains(local) { return self }
         // Keep the visible close glyph usable when the enlarged corner target
         // overlaps it at low zoom. The outer resize edge still takes precedence.
         let edge = resizeMarginInLocalCoordinates
@@ -1230,6 +1262,10 @@ class TileNSView: NSView, TokenThemed {
             return
         }
         let local = convert(event.locationInWindow, from: nil)
+        // The agent's bubble is a grab handle: never a resize, always the header.
+        let onBubble = agentBubbleContains(local)
+        let edgeAtPress = onBubble ? nil : resizeEdge(at: local)
+        let onHeader = onBubble || local.y < grabHeightInLocalCoordinates
         // A double-click on the title renames what the tile shows, before the
         // selection or a drag can claim the press. Anything else on the bar
         // (and every tile with nothing to rename) keeps the old behaviour.
@@ -1241,27 +1277,27 @@ class TileNSView: NSView, TokenThemed {
         // A tile lent to a shared area belongs to no project layer: its header
         // drag moves it in the area and its edges resize it there, and the area
         // shares the result.
-        if let edge = resizeEdge(at: local), canvas?.beginLentTileDrag(tile.id) == true {
+        if let edge = edgeAtPress, canvas?.beginLentTileDrag(tile.id) == true {
             dragKind = .sharedAreaResize(edge)
             return
         }
-        if local.y < grabHeightInLocalCoordinates, canvas?.beginLentTileDrag(tile.id) == true {
+        if onHeader, canvas?.beginLentTileDrag(tile.id) == true {
             dragKind = .sharedAreaMove
             return
         }
         if canvas?.tileSelection.mouseDown(on: self, event: event,
-                                          isHeader: local.y < grabHeightInLocalCoordinates,
-                                          isResize: resizeEdge(at: local) != nil) == true {
+                                          isHeader: onHeader,
+                                          isResize: edgeAtPress != nil) == true {
             dragKind = .none
             return
         }
-        if let edge = resizeEdge(at: local) {
+        if let edge = edgeAtPress {
             dragKind = .resize(edge)
             canvas?.beginGeometryEdit(.resizeTile, tileIds: [tile.id], includeAllZones: true)
             canvas?.beginAutoLayoutGesture()
             return
         }
-        if local.y < grabHeightInLocalCoordinates {
+        if onHeader {
             dragKind = .move
             canvas?.beginGeometryEdit(.moveTile, tileIds: [tile.id], includeAllZones: true)
             canvas?.beginAutoLayoutGesture()
@@ -1515,6 +1551,9 @@ class TileNSView: NSView, TokenThemed {
         if titleDragHeight > 0 {
             addCursorRect(NSRect(x: m, y: m, width: w - 2 * m, height: titleDragHeight), cursor: .openHand)
         }
+        // The agent's bubble is a grab handle, corner band or not. Added last so
+        // it wins where it overlaps the edge bands.
+        if let bubble = agentBubbleFrame { addCursorRect(bubble, cursor: .openHand) }
     }
 
     var resizeMarginInLocalCoordinates: CGFloat {
@@ -1876,6 +1915,7 @@ class TileNSView: NSView, TokenThemed {
     /// the same precedence as `mouseDown` (resize ring wins, then the floored
     /// move-grab strip, else body). Drives `--tile-drag-grab-check`.
     func qaDragKindIsMove(at point: CGPoint) -> Bool {
+        if agentBubbleContains(point) { return true }
         if resizeEdge(at: point) != nil { return false }
         return point.y < grabHeightInLocalCoordinates
     }
@@ -2274,6 +2314,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             guard agentStatus != oldValue else { return }
             semanticStatusLabel = nil
             invalidateChrome()
+            applyBubbleWorking()
             // The pill's width is part of the switch's budget.
             if faceSwitchState != nil || shareControl != nil { needsLayout = true }
         }
@@ -2311,10 +2352,18 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         return host.surface.width * host.surface.height * 4
     }
     private let providerMarkView = NSImageView(frame: .zero)
-    /// Plan 110: the agent's character, between the provider mark and the title.
-    /// A sublayer of the bar, never drawn in `draw(_:)`: a sprite frame never
+    /// Plan 110: the agent's character, in its bubble at the tile's top-right
+    /// corner. A layer, never drawn in `draw(_:)`: a sprite frame never
     /// invalidates the chrome, and it survives the controls being drawn inline.
     let characterLayer = CharacterSpriteLayer()
+    /// The bubble that holds the character: a grab handle in the agent's colour.
+    /// A sublayer of the TILE's layer (the tile adds it), so it can float over
+    /// the body as well as the bar; framed by this bar's `layout()`.
+    lazy var bubble = TileAgentBubbleLayer(sprite: characterLayer)
+    /// The agent's identity colour for the bubble; nil for none.
+    var bubbleTint: NSColor? {
+        didSet { if bubbleTint != oldValue { bubble.setTint(bubbleTint) } }
+    }
     private var characterInput: (id: UUID, snapshot: AgentCharacterSnapshot, name: String?)?
     /// A shared agent's host set and character (agent-chrome): drawn from the
     /// host's set, not this Mac's selected one.
@@ -2647,28 +2696,50 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             at: NSPoint(x: rect.minX + side + CGFloat(Space.xs) * chromeScale, y: rect.minY), withAttributes: attributes)
     }
 
-    /// Where the title starts: past the character, else past the provider mark.
+    /// Where the title starts: past the provider mark. The character lives in
+    /// the bubble at the other end of the bar.
     private var titleLeadingX: CGFloat {
         let scale = chromeScale
-        if let character = characterRect { return character.maxX + CGFloat(Space.s) * scale }
         return providerMarkView.isHidden
             ? CGFloat(Space.m) * scale
             : providerMarkView.frame.maxX + CGFloat(Space.s) * scale
     }
 
-    /// The character's slot: 4 pt (scaled) right of the mark, centred, scaled with
-    /// the chrome so it holds its size on screen as the title does.
-    private var characterRect: NSRect? {
+    /// The bubble's side at chrome scale 1: room for the widest art (a lead's
+    /// 28 pt) with a 2 pt margin, so every agent's bubble is the same size.
+    static let bubbleSide: CGFloat = 32
+    /// The bubble's inset from the tile's top and right edges at scale 1.
+    static let bubbleInset: CGFloat = 2
+
+    /// The bubble, in this bar's coordinates: tucked into the tile's top-right
+    /// corner, a little taller than the bar so it floats over the body's corner.
+    /// Scales with the icon's size and the zoom floor, as the character always has.
+    private var bubbleRect: NSRect? {
         guard let size = characterSize else { return nil }
-        let scale = chromeScale
-        let x = providerMarkView.isHidden
-            ? CGFloat(Space.m) * scale
-            : providerMarkView.frame.maxX + 4 * scale
+        let scale = sizeScale
+        let side = max(Self.bubbleSide, size.width + 4) * scale
+        let inset = Self.bubbleInset * scale
+        let backing = backingScaleForCharacter
+        func snap(_ value: CGFloat) -> CGFloat { (value * backing).rounded() / backing }
+        return NSRect(x: snap(bounds.width - inset - side), y: snap(inset), width: side, height: side)
+    }
+
+    /// Where the band's controls stop on the right: before the bubble when the
+    /// tile shows one, else today's inset.
+    private var trailingInset: CGFloat {
+        guard let bubble = bubbleRect else { return Self.closeButtonTrailingInset }
+        return bounds.width - bubble.minX + CGFloat(Space.xs) * chromeScale
+    }
+
+    /// The character's slot: centred in the bubble, scaled with the chrome so it
+    /// holds its size on screen as the title does.
+    private var characterRect: NSRect? {
+        guard let size = characterSize, let bubble = bubbleRect else { return nil }
         guard headerScale > chromeScale else {
             // Small, or any size once the zoom floor is the larger: the original
             // geometry, the art scaled with the chrome.
-            let height = size.height * sizeScale
-            return NSRect(x: x, y: (bounds.height - height) / 2, width: size.width * sizeScale, height: height)
+            let width = size.width * sizeScale, height = size.height * sizeScale
+            return NSRect(x: bubble.midX - width / 2, y: bubble.midY - height / 2, width: width, height: height)
         }
         // Medium and Large at their own scale: the sidebar's rule, a whole number
         // of device pixels per art pixel (`Size.devicePixelsPerArtPixel`), from a
@@ -2678,9 +2749,11 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let perArt = max(1, (headerScale * backing).rounded(.toNearestOrAwayFromZero)) / backing
         let width = size.width * perArt, height = size.height * perArt
         func snap(_ value: CGFloat) -> CGFloat { (value * backing).rounded() / backing }
-        return NSRect(x: snap(x), y: snap((bounds.height - height) / 2), width: width, height: height)
+        return NSRect(x: snap(bubble.midX - width / 2), y: snap(bubble.midY - height / 2), width: width, height: height)
     }
     var qaCharacterRect: NSRect? { characterLayer.isHidden ? nil : characterRect }
+    /// QA: the bubble in this bar's coordinates, while it shows.
+    var qaBubbleRect: NSRect? { bubble.isHidden ? nil : bubbleRect }
     var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
 
     func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String?,
@@ -2702,8 +2775,10 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
                 characterSize = nil
                 characterLayer.clear()
                 characterLayer.isHidden = true
+                bubble.setShown(false)
                 needsLayout = true
                 invalidateChrome()
+                onBubbleChange?()
             }
             setHeaderScale(1)
             return
@@ -2717,9 +2792,26 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             characterSize = size
             needsLayout = true
             invalidateChrome()
+            onBubbleChange?()
         }
+        bubble.setStyle(controller.bubbleStyle)
+        applyBubbleWorking()
         setHeaderScale(controller.layoutFactor)
         reconcileCharacterVisibility()
+    }
+
+    /// Told when the bubble appears, goes or moves: the tile's cursor rects follow.
+    var onBubbleChange: (() -> Void)?
+
+    /// The sidebar's working light on the bubble: shown while the agent works,
+    /// in the sidebar's chosen style, on the agent's own phase of the shared clock.
+    private func applyBubbleWorking() {
+        guard let input = characterInput else { return }
+        let working = agentStatus == .working || agentStatus == .configuring
+        // Reduce Motion as the characters read it (injectable for checks).
+        bubble.reduceMotion = AgentCharacterController.shared.reduceMotion
+        bubble.setWorking(working, style: AgentCharacterController.shared.workingStyle.rawValue,
+                          phase: InboxOwnershipClock.phase(for: input.id))
     }
 
     private var backingScaleForCharacter: CGFloat {
@@ -2757,6 +2849,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     func reconcileCharacterVisibility() {
         let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
         characterLayer.setPaused(characterHeld || !visible || isHiddenOrHasHiddenAncestor)
+        bubble.setPaused(characterHeld || !visible || isHiddenOrHasHiddenAncestor)
     }
 
     override func viewDidMoveToWindow() {
@@ -2878,7 +2971,6 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         wantsLayer = true
         characterLayer.isHidden = true
         characterLayer.hostIsFlipped = isFlipped
-        layer?.addSublayer(characterLayer)
         NotificationCenter.default.addObserver(
             self, selector: #selector(agentCharactersDidChange),
             name: AgentCharacterController.didChangeNotification, object: nil)
@@ -2914,6 +3006,13 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(in: self)
         closeButton.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
         providerMarkView.contentTintColor = BrandMark96.foreground(in: self)
+        let theme = effectiveTokenTheme
+        bubble.apply(TileAgentBubbleLayer.Palette(
+            dark: theme != .light,
+            tileChrome: SurfaceToken.tileChrome.color.nsColor(for: theme),
+            tileBody: SurfaceToken.tileBody.color.nsColor(for: theme),
+            textPrimary: TextToken.textPrimary.color.nsColor(for: theme),
+            textSecondary: TextToken.textSecondary.color.nsColor(for: theme)))
         if let titleEditor { styleTitleEditor(titleEditor) }
         needsDisplay = true
     }
@@ -2959,7 +3058,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         // world size. Manual framing so the size is exactly what we set.
         let size = closeButtonWorldSize
         closeButton.frame = NSRect(
-            x: bounds.width - Self.closeButtonTrailingInset - size,
+            x: bounds.width - trailingInset - size,
             y: (bounds.height - size) / 2,
             width: size,
             height: size
@@ -2971,14 +3070,19 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             width: markSize,
             height: markSize
         )
-        // The character's frame, only when it moved (a zoom step can move it; a
-        // sprite frame never does).
-        if let rect = characterRect {
+        // The bubble's and the character's frames, only when they moved (a zoom
+        // step can move them; a sprite frame never does). The bubble lives on the
+        // tile's layer, so its frame is the bar's rect in that layer's space.
+        if let rect = bubbleRect, let sprite = characterRect, let host = superview {
+            let inHost = host.convertToLayer(convert(rect, to: host))
+            let local = sprite.offsetBy(dx: -rect.minX, dy: -rect.minY)
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            if characterLayer.frame != rect { characterLayer.frame = rect }
+            if bubble.frame != inHost { bubble.frame = inHost; onBubbleChange?() }
+            if characterLayer.frame != local { characterLayer.frame = local }
             if characterLayer.isHidden { characterLayer.isHidden = false }
             CATransaction.commit()
+            bubble.setShown(true)
             characterLayer.refreshOrientation()
         }
         var trailingEdge = closeButton.frame.minX
@@ -3391,7 +3495,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let radius: CGFloat = Self.dragDotRadius * scale
         let spacing: CGFloat = Self.dragDotSpacing * scale
         let cy = bounds.midY
-        var cx = bounds.width - Self.closeButtonTrailingInset - closeButtonWorldSize - Self.dragDotGap * scale
+        var cx = bounds.width - trailingInset - closeButtonWorldSize - Self.dragDotGap * scale
         TextToken.textSecondary.color.nsColor(for: theme).setFill()
         for _ in 0..<(actionsButton == nil ? Self.dragDotCount : 0) {
             let rect = NSRect(x: cx - radius, y: cy - radius, width: radius * 2, height: radius * 2)
@@ -3455,7 +3559,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// and the close button carries its own zoom-floored world size, so a static
     /// 58 slid the pill under the dots at low zoom. Both live terms are read here.
     private var statusPillTrailingInset: CGFloat {
-        Self.closeButtonTrailingInset + closeButtonWorldSize
+        trailingInset + closeButtonWorldSize
             + Self.dragHandleWidth * chromeScale + CGFloat(Space.m)
     }
 
@@ -3541,7 +3645,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// QA: the world x of the leftmost drag dot's outer edge — the thing the pill
     /// must not cross.
     var qaDragHandleLeadingX: CGFloat {
-        bounds.width - Self.closeButtonTrailingInset - closeButtonWorldSize - Self.dragHandleWidth * chromeScale
+        bounds.width - trailingInset - closeButtonWorldSize - Self.dragHandleWidth * chromeScale
     }
 
     // P1.8 deleted this bar's private label/colour maps outright — see
