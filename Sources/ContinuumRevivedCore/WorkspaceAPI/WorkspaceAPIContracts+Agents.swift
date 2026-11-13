@@ -26,7 +26,7 @@ import Foundation
 
 /// The host's observed operational state for one agent, coarse on purpose.
 public enum AgentObservedStatus: String, Codable, Sendable, CaseIterable {
-    case ready, starting, working, compacting, queued, needsAction, failed, restored, unknown
+    case ready, starting, working, compacting, queued, needsAction, failed, restored, paused, unknown
 }
 
 /// Identity fields every candidate and every inspection carries. Never a raw

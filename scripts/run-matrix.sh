@@ -910,6 +910,8 @@ if [[ "$CROSS_HARNESS_DELEGATION_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --strict-agent-harness-check
   run_app_check .build/debug/Array --inbox-parent-fold-check
   run_app_check .build/debug/Array --agent-tile-reference-check
+  run_app_check .build/debug/Array --helper-watchdog-check
+  run_app_check .build/debug/Array --agent-message-bus-check
   matrix_report 'Cross-harness delegation matrix (targeted)'
   exit $?
 fi
