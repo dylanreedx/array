@@ -322,13 +322,13 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// `harness`: the CLI started the child itself; it is attributed to its
     /// parent and holds no part, so it never keeps the task open.
     func delegated(parent: UUID, child: UUID, source: String, root: String? = nil, base: String? = nil, shared: Bool = true,
-                   via: String? = nil, contract: AgentDelegationContract? = nil) {
+                   via: String? = nil, contract: AgentDelegationContract? = nil, protectedPaths: Bool = false) {
         queue.async {
             guard let task = self.active[parent] ?? self.openTask(parent) else { return }
             self.sessionTasks[child] = task
             if let root, self.evidence[child] == nil {
                 self.evidence[child] = HelperEvidence(root: URL(fileURLWithPath: root), base: base, shared: shared)
-                self.protection[child] = HelperProtectedPaths(root: URL(fileURLWithPath: root), base: base, shared: shared, contract: contract)
+                if protectedPaths { self.protection[child] = HelperProtectedPaths(root: URL(fileURLWithPath: root), base: base, shared: shared, contract: contract) }
             }
             var row = Row(kind: "delegated", task: task, agent: child, part: via == nil ? child : nil, source: "delegate/\(source)")
             if via != nil || self.owners[task] != parent { row.parent = parent }

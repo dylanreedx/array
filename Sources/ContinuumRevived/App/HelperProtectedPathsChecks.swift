@@ -149,9 +149,32 @@ enum HelperProtectedPathsChecks {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    static func defaultOff() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("a", "checks/Existing.swift", in: root)
+        for args in [["init", "-q"], ["add", "."], ["commit", "-qm", "fixture"]] { try HelperEvidenceChecks.git(args, root) }
+        let base = try HelperEvidenceChecks.gitOutput(["rev-parse", "HEAD"], root).trimmingCharacters(in: .whitespacesAndNewlines)
+        let ledger = ManagedRunLedger(support: root)
+        let lead = UUID(), child = UUID()
+        let before = HelperProtectedPaths.gitInvocations.withLock { $0 }
+        ledger.submission(agent: lead, project: nil, mode: "managed")
+        ledger.delegated(parent: lead, child: child, source: "off", root: root.path, base: base)
+        ledger.drain()
+        try write("changed", "checks/Existing.swift", in: root)
+        ledger.helperEvidence(agent: child, at: Date())
+        ledger.ended(agent: child, turn: "off", outcome: .completed)
+        ledger.drain()
+        let rows = ManagedRunLedgerChecks.rows(root.appendingPathComponent("run-ledger/ledger.jsonl"))
+        try expect(HelperProtectedPaths.gitInvocations.withLock { $0 } == before, "default-off protection invoked git")
+        try expect(!rows.contains { $0["kind"] as? String == "protectedPathChanged" }, "default-off protection recorded rows")
+    }
     static func run() async throws {
+        try defaultOff()
         let b = try ManagedModeChecks.bench("helper-protected-paths")
         defer { b.tearDown() }
+        b.settings.set(true, forKey: ManagedChooser.enabledKey)
         let cli = b.binDir.appendingPathComponent("claude")
         try claude().write(to: cli, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)

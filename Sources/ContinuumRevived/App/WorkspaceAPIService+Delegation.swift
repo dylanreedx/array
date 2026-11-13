@@ -249,7 +249,7 @@ extension WorkspaceAPIService {
                     root: child.checkoutRoot, base: child.delegationContext?.baseHead,
                     shared: WorktreeManager.resolved(URL(fileURLWithPath: child.checkoutRoot))
                         == WorktreeManager.resolved(URL(fileURLWithPath: record.checkoutRoot)),
-                    contract: child.delegationContext?.contract)
+                    contract: child.delegationContext?.contract, protectedPaths: supervisor.chooserEnabled(for: agentId))
                 let ledger = supervisor.runLedger
                 _ = supervisor.addRuntimeObservationObserver(for: childId) { [weak supervisor] observation in
                     guard supervisor?.qaRunLedgerRecording == true, let sighting = HelperEvidence.Sighting(observation) else { return }

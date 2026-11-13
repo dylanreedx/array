@@ -57,6 +57,11 @@ struct HelperProtectedPaths {
         var attribution: String?
     }
 
+    static let gitInvocations = LeadCheckoutWatch.Locked(0)
+    static func git(_ arguments: [String], _ root: URL) throws -> Data {
+        gitInvocations.withLock { $0 += 1 }
+        return try HelperEvidence.git(arguments, root)
+    }
     static let conventions = [
         "Sources/*Checks/**", "Sources/**/*Checks.swift", "Sources/**/*Check.swift",
         "scripts/check-*", "scripts/checks/**", "scripts/test-*", "scripts/tests/**", "checks/**",
@@ -81,12 +86,12 @@ struct HelperProtectedPaths {
     init(root: URL, base: String?, shared: Bool, contract: AgentDelegationContract?) {
         self.root = root; self.base = base; self.shared = shared; self.contract = contract
         guard let base else { problem = "noBaseline"; return }
-        guard let tree = try? HelperEvidence.git(["ls-tree", "-r", "-z", "--name-only", base], root),
+        guard let tree = try? Self.git(["ls-tree", "-r", "-z", "--name-only", base], root),
               let dirty = Self.changed(root: root, base: base) else {
             problem = "baselineUnreadable"; return
         }
         atBase = Set(tree.split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
-        if let data = try? HelperEvidence.git(["show", "\(base):\(HelperEvidence.Manifest.relativePath)"], root) {
+        if let data = try? Self.git(["show", "\(base):\(HelperEvidence.Manifest.relativePath)"], root) {
             manifestCheckFiles = HelperEvidence.Manifest(json: data).entries.flatMap(\.checkFiles)
         }
         // updateValue: a subscript assignment of nil would drop a path absent at delegation.
@@ -97,8 +102,8 @@ struct HelperProtectedPaths {
     /// deletion and an addition, plus untracked files. Nil when git fails.
     static func changed(root: URL, base: String) -> Set<String>? {
         let scope = ["--", ".", ":(exclude).array", ":(exclude).worktrees"]
-        guard let diff = try? HelperEvidence.git(["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base] + scope, root),
-              let others = try? HelperEvidence.git(["ls-files", "--others", "--exclude-standard", "-z"] + scope, root) else { return nil }
+        guard let diff = try? Self.git(["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base] + scope, root),
+              let others = try? Self.git(["ls-files", "--others", "--exclude-standard", "-z"] + scope, root) else { return nil }
         return Set((diff + others).split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
     }
 
