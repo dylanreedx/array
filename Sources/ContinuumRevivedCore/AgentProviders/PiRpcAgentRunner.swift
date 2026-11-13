@@ -647,7 +647,9 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
     public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], extensionPaths: [String] = []) -> [String] {
         let sessionArgs = sessionId.map { ["--session-id", $0] } ?? ["--no-session"]
         let extensionArgs = extensionPaths.flatMap { ["-e", $0] }
-        return ["--mode", "rpc", "--model", model, "--thinking", thinking]
+        let effortArgs = AgentModelConfig.supportedEffort(thinking, model: model, harness: .pi).map { ["--thinking", $0] } ?? []
+        return ["--mode", "rpc", "--model", model]
+            + effortArgs
             + sessionArgs
             + extensionArgs
             + extraArgs

@@ -165,6 +165,9 @@ final class SettingsModel {
 
     func value(of field: SettingsField) -> SettingsValue? {
         _ = revision
+        if field.key == AgentModelConfig.thinkingKey {
+            return .string(defaults.string(forKey: AgentModelConfig.thinkingKey) ?? AgentModelConfig.defaultThinking)
+        }
         return field.currentValue(in: defaults)
     }
 
@@ -176,6 +179,10 @@ final class SettingsModel {
             // a harness switch `setValue` would store the Claude seed instead.
             guard case let .string(id) = value, modelPickerItems().contains(where: { $0.id == id && $0.offered }) else { return }
             defaults.set(id, forKey: AgentModelConfig.modelKey)
+        } else if field.key == AgentModelConfig.thinkingKey {
+            guard case let .string(effort) = value,
+                  AgentModelConfig.supportedEffort(effort, model: storedModel, harness: currentHarness) != nil else { return }
+            defaults.set(effort, forKey: AgentModelConfig.thinkingKey)
         } else {
             field.setValue(value, in: defaults)
         }

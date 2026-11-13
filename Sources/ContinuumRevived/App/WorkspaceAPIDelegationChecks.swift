@@ -521,19 +521,27 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
             let accepted = AgentModelCatalog.shared.efforts(for: model, harness: target) ?? []
             check(accepted.contains("high"), "\(pair): the fixture catalogue must list high for \(model)")
 
+            // An effort unknown to this app must survive the actual delegation,
+            // resumed turn and compaction when the selected model advertises it.
+            let fixture = target == .claudeCode ? AgentCatalogQAFixture.claude : AgentCatalogQAFixture.codex
+            var futureEfforts = fixture.effortLevels
+            futureEfforts[model, default: []].append("future-effort")
+            AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: target, readiness: .ready,
+                models: fixture.models, displayNames: fixture.displayNames,
+                effortLevels: futureEfforts, defaultModel: fixture.defaultModel))
             // Listed: the first turn, a resumed turn, the compaction, the turn after it.
-            if let child = childId(delegateEffort(lead, with(["effort": "high"])), "\(pair) listed effort") {
-                check(supervisor.records[child]?.thinking == "high", "\(pair): the helper record must hold the delegated effort")
-                expectEffort(await settle(child, launch: 1, "\(pair) first turn"), "high", resumed: false, "\(pair) first turn")
+            if let child = childId(delegateEffort(lead, with(["effort": "future-effort"])), "\(pair) listed effort") {
+                check(supervisor.records[child]?.thinking == "future-effort", "\(pair): the helper record must hold the delegated effort")
+                expectEffort(await settle(child, launch: 1, "\(pair) first turn"), "future-effort", resumed: false, "\(pair) first turn")
                 message(lead, child, "effort follow up")
-                expectEffort(await settle(child, launch: 2, "\(pair) resumed turn"), "high", resumed: true, "\(pair) resumed turn")
+                expectEffort(await settle(child, launch: 2, "\(pair) resumed turn"), "future-effort", resumed: true, "\(pair) resumed turn")
                 let compactionsBefore = effortCompactions.count
                 let compacted = await supervisor.accept(.compact(AgentCompactionRequest()), for: child)
                 check(compacted == .accepted, "\(pair): compaction must be accepted, got \(compacted)")
-                expectEffort(await settle(child, launch: 3, "\(pair) compaction"), "high", resumed: true, "\(pair) compaction launch")
+                expectEffort(await settle(child, launch: 3, "\(pair) compaction"), "future-effort", resumed: true, "\(pair) compaction launch")
                 check(effortCompactions.count == compactionsBefore + 1, "\(pair): the provider must have been asked to compact")
                 message(lead, child, "after compaction")
-                expectEffort(await settle(child, launch: 4, "\(pair) after compaction"), "high", resumed: true, "\(pair) turn after compaction")
+                expectEffort(await settle(child, launch: 4, "\(pair) after compaction"), "future-effort", resumed: true, "\(pair) turn after compaction")
             }
 
             // retryOf continues the same work: the retry inherits the failed
@@ -562,7 +570,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                 let expected = source == target ? supervisor.records[lead]!.thinking : AgentModelConfig.defaultThinking
                 check(supervisor.records[child]?.thinking == expected, "\(pair): omitted effort must keep \(expected), got \(String(describing: supervisor.records[child]?.thinking))")
                 if let launch = await settle(child, launch: 1, "\(pair) omitted effort") {
-                    let legacy = target == .codex ? CodexCLIBackend.effortArgument(forThinking: expected) : ClaudeCLIBackend.effortArgument(forThinking: expected)
+                    let legacy = target == .codex ? CodexCLIBackend.effortArgument(forThinking: expected, model: model) : ClaudeCLIBackend.effortArgument(forThinking: expected, model: model)
                     let today = launch.argv(effort: legacy), now = launch.argv(effort: launch.effort)
                     check(launch.effort == legacy && today.count == now.count && zip(today, now).allSatisfy { $0 == $1 },
                           "\(pair): omitted effort argv must equal today's element by element; differing \(zip(today, now).filter { $0 != $1 }), lengths \(today.count)/\(now.count)")

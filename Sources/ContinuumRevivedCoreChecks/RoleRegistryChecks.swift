@@ -21,6 +21,10 @@ import Foundation
 // Negative tests observed red at exit 1 with the final code are quoted at each
 // assertion.
 func runRoleRegistryChecks() throws {
+    let models = AgentModelConfig.modelOptions(for: .pi)
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready, models: models,
+        effortLevels: Dictionary(uniqueKeysWithValues: models.map { ($0, ["high"]) })))
+    defer { AgentModelCatalog.shared.resetForQA() }
     let repoRoot = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()          // ContinuumRevivedCoreChecks
         .deletingLastPathComponent()          // Sources

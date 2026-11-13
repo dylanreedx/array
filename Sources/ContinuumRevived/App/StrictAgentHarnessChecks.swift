@@ -33,7 +33,7 @@ func runStrictAgentHarnessChecks() throws {
     let piArgs = PiRpcAgentRunner.processArguments(
         model: piConfig.model, thinking: piConfig.thinking,
         sessionId: piConfig.sessionId, extraArgs: piConfig.extraArgs)
-    try expect(piArgs == ["--mode", "rpc", "--model", "openai-codex/gpt-5.6-sol", "--thinking", "high", "--session-id", AgentSupervisor.sessionId(for: piRecord.id)],
+    try expect(piArgs == ["--mode", "rpc", "--model", "openai-codex/gpt-5.6-sol", "--session-id", AgentSupervisor.sessionId(for: piRecord.id)],
                "strict Pi argv changed: \(piArgs)")
 
     // C8: pi subagent spawning had four independent blockers; this is #3 —
@@ -50,7 +50,7 @@ func runStrictAgentHarnessChecks() throws {
     let piArgsWithExtension = PiAgentRunner.processArguments(
         model: piConfig.model, thinking: piConfig.thinking, sessionId: piConfig.sessionId,
         extraArgs: piConfig.extraArgs, prompt: "PROMPT", extensionPaths: [fixtureExtensionPath])
-    try expect(piArgsWithExtension == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6-sol", "--thinking", "high",
+    try expect(piArgsWithExtension == ["-p", "--mode", "json", "--model", "openai-codex/gpt-5.6-sol",
                                        "--session-id", AgentSupervisor.sessionId(for: piRecord.id),
                                        "-e", fixtureExtensionPath, "PROMPT"],
                "strict Pi argv's -e must sit right after the session flag, ahead of extras and the prompt, got \(piArgsWithExtension)")

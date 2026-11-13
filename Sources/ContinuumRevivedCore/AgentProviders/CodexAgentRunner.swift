@@ -38,9 +38,9 @@ public enum CodexCLIBackend {
     /// Only exact levels accepted by current Codex releases pass through;
     /// `off` remains Pi-only and omits the config so Codex takes its default.
     /// Same exact-match-or-omit rule as `ClaudeCLIBackend`.
-    public static let effortLevels: Set<String> = ["minimal", "low", "medium", "high", "xhigh", "max"]
-    public static func effortArgument(forThinking thinking: String) -> String? {
-        effortLevels.contains(thinking) ? thinking : nil
+    public static func effortArgument(forThinking thinking: String, model: String? = nil) -> String? {
+        guard let model else { return nil }
+        return AgentModelConfig.supportedEffort(thinking, model: model, harness: .codex)
     }
 
     /// `codex login status` → is a ChatGPT subscription login present. There is

@@ -6883,12 +6883,9 @@ enum UIProbeGeometry {
     }
 
     private static func checkProviderFooterEffortSizing(_ tile: ManagedAgentTileNSView, width: CGFloat, label: String) throws {
-        let effortValues = ["minimal", "medium", "high", "xhigh"].filter {
-            AgentModelConfig.thinkingOptions.contains($0)
-        }
-        guard effortValues.count == 4 else {
-            throw fail("\(label): catalogue no longer contains the required effort geometry values; got \(AgentModelConfig.thinkingOptions)")
-        }
+        // Persisted legacy captions still owe correct sizing even when the
+        // current model does not offer them as new choices.
+        let effortValues = ["minimal", "medium", "high", "xhigh"]
         let stressModel = AgentModelConfig.modelOptions.last ?? AgentModelConfig.defaultModel
         for effort in effortValues {
             tile.applyProviderSettings(.init(model: stressModel, thinking: effort))

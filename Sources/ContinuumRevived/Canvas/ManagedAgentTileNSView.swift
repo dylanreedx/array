@@ -4668,7 +4668,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     private func writeLaunchSelection(harness: AgentHarness, model: String, thinking: String) -> Bool {
         guard let agentID = attachedAgentID, let agentSource else { return false }
-        guard agentSource.setProviderSettings(agentID: agentID, harness: harness, model: model, thinking: thinking) else {
+        guard agentSource.setProviderSettings(agentID: agentID, harness: harness, model: model,
+                                             thinking: thinking == agentSource.launchSelection(for: agentID)?.thinking ? nil : thinking) else {
             if let actual = agentSource.launchSelection(for: agentID) { applyLaunchSelection(actual) }
             return false
         }

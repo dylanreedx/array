@@ -215,7 +215,7 @@ public struct RoleRegistry: Sendable {
         }
         var thinking = fallback.thinking
         if let declared = role.reasoning {
-            guard AgentModelConfig.thinkingOptions.contains(declared) else {
+            guard AgentModelConfig.supportedEffort(declared, model: model, harness: .pi) != nil else {
                 throw Failure.unknownReasoning(role: roleId, reasoning: declared)
             }
             thinking = declared

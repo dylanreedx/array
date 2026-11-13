@@ -144,6 +144,7 @@ check --drag-magnetize-check
 check --duckherd-theme-check
 check --editor-navigation-check
 check --editor-web-bridge-check
+check --effort-catalog-check
 check --empty-workspace-creation-check
 check --external-session-move-check
 check --external-session-watch-check
@@ -640,6 +641,7 @@ leg run_app_check .build/debug/Array --drag-magnetize-check
 leg run_app_check .build/debug/Array --duckherd-theme-check
 leg run_app_check .build/debug/Array --editor-navigation-check
 leg run_app_check .build/debug/Array --editor-web-bridge-check
+leg run_app_check .build/debug/Array --effort-catalog-check
 leg run_app_check .build/debug/Array --empty-workspace-creation-check
 leg run_app_check .build/debug/Array --external-session-move-check
 leg run_app_check .build/debug/Array --external-session-watch-check

@@ -115,13 +115,10 @@ func runAgentModelConfigChecks() {
     expect(AgentModelConfig.defaultModel != retired, "the ambiguous \(retired) must not be the default")
 
     // 4. Thinking levels are exactly the ones `pi --thinking` documents.
-    let piThinkingLevels: Set<String> = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
-    expect(Set(AgentModelConfig.thinkingOptions).isSubset(of: piThinkingLevels),
-           "thinkingOptions must be a subset of pi's levels, got \(AgentModelConfig.thinkingOptions)")
-    expect(AgentModelConfig.thinkingOptions.contains(AgentModelConfig.defaultThinking),
-           "defaultThinking must be one of thinkingOptions, got \(AgentModelConfig.defaultThinking)")
-    expect(Set(AgentModelConfig.thinkingOptions).count == AgentModelConfig.thinkingOptions.count,
-           "thinkingOptions must not repeat a level")
+    let selectedHarness = AgentHarnessConfig.resolved()
+    let selectedModel = AgentModelConfig.defaultModel(for: selectedHarness) ?? ""
+    expect(AgentModelConfig.thinkingOptions == (AgentModelCatalog.shared.efforts(for: selectedModel, harness: selectedHarness) ?? []),
+           "offered efforts must be the selected model catalogue's capabilities")
 
     // 5. Resolution: empty defaults yield the defaults; a valid override wins;
     //    an unrecognized stored value falls back rather than reaching Pi (a typo
@@ -158,8 +155,8 @@ func runAgentModelConfigChecks() {
     defaults.set(retired, forKey: AgentModelConfig.modelKey)
     defaults.set("ludicrous", forKey: AgentModelConfig.thinkingKey)
     let rejected = AgentModelConfig.resolvedFromDefaults(harness: .claudeCode, defaults: defaults)
-    expect(rejected == .init(model: AgentModelConfig.defaultModel, thinking: AgentModelConfig.defaultThinking),
-           "an unrecognized stored value must fall back to the default, got \(rejected)")
+    expect(rejected == .init(model: AgentModelConfig.defaultModel, thinking: "ludicrous"),
+           "an unrecognized stored effort must remain intact, got \(rejected)")
 
     // 6. Settings ▸ Agents surfaces both pickers, bound to the exact keys the
     //    resolver reads (so the picker actually drives the next spawn).
@@ -185,7 +182,7 @@ func runAgentModelConfigChecks() {
         model: config.model, thinking: config.thinking, sessionId: nil, extraArgs: [], prompt: "hi")
     expect(argv.firstIndex(of: "--model").map { argv[$0 + 1] } == resolved.model,
            "the resolved model must reach Pi's argv, got \(argv)")
-    expect(argv.firstIndex(of: "--thinking").map { argv[$0 + 1] } == resolved.thinking,
+    expect(argv.firstIndex(of: "--thinking").map { argv[$0 + 1] } == AgentModelConfig.supportedEffort(resolved.thinking, model: resolved.model, harness: .pi),
            "the resolved thinking level must reach Pi's argv (an inert picker is the bug), got \(argv)")
     #endif
 

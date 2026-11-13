@@ -403,6 +403,7 @@ public final class AgentModelCatalog: @unchecked Sendable {
                 advertisedEfforts[.codex] = snapshot.effortLevels
                 codexBackendModels = snapshot.models; codexBackendDisplayNames = snapshot.displayNames; codexBackendContextWindows = snapshot.contextWindows; codexBackendDefault = snapshot.defaultModel
             case .pi:
+                advertisedEfforts[.pi] = snapshot.effortLevels
                 liveOptions = snapshot.models; liveDisplayNames = snapshot.displayNames; liveContextWindows = snapshot.contextWindows
             }
         }

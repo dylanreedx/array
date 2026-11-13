@@ -436,7 +436,7 @@ private func runCodexRunnerArgvChecks() {
     // A level that is still pi-only is asserted separately below.
     let resume = CodexCLIBackend.processArguments(
         model: "gpt-5.6-sol",
-        effort: CodexCLIBackend.effortArgument(forThinking: "xhigh"),
+        effort: CodexCLIBackend.effortArgument(forThinking: "xhigh", model: AgentCatalogQAFixture.codex.models[0]),
         sessionMode: .resume,
         threadId: codexTID,
         cwdPath: "/tmp/work",
@@ -517,17 +517,17 @@ private func runCodexBackendPolicyChecks() {
            "CodexCLIBackend: a bare slug passes through")
 
     // Effort: exact pass-through for codex's set, omission for pi-only levels.
-    expect(CodexCLIBackend.effortArgument(forThinking: "medium") == "medium",
+    expect(CodexCLIBackend.effortArgument(forThinking: "medium", model: AgentCatalogQAFixture.codex.models[0]) == "medium",
            "CodexCLIBackend: matching thinking levels pass through as effort")
-    expect(CodexCLIBackend.effortArgument(forThinking: "minimal") == "minimal",
+    expect(CodexCLIBackend.effortArgument(forThinking: "minimal", model: AgentCatalogQAFixture.codex.models[0]) == nil,
            "CodexCLIBackend: minimal is in codex's set")
-    expect(CodexCLIBackend.effortArgument(forThinking: "off") == nil,
+    expect(CodexCLIBackend.effortArgument(forThinking: "off", model: AgentCatalogQAFixture.codex.models[0]) == nil,
            "CodexCLIBackend: pi-only 'off' omits the config")
     // `xhigh` and `max` stopped being pi-only in `c9f7bc89`; `off` is the level
     // that is still Pi's alone.
-    expect(CodexCLIBackend.effortArgument(forThinking: "xhigh") == "xhigh",
+    expect(CodexCLIBackend.effortArgument(forThinking: "xhigh", model: AgentCatalogQAFixture.codex.models[0]) == "xhigh",
            "CodexCLIBackend: 'xhigh' is in codex's set and must pass through")
-    expect(CodexCLIBackend.effortArgument(forThinking: "max") == "max",
+    expect(CodexCLIBackend.effortArgument(forThinking: "max", model: AgentCatalogQAFixture.codex.models[0]) == nil,
            "CodexCLIBackend: 'max' is in codex's set and must pass through")
 
     // Auth: exit 0 + "Logged in" (text-based, there is no --json).

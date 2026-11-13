@@ -110,7 +110,9 @@ public final class PiAgentRunner: @unchecked Sendable {
     public static func processArguments(model: String, thinking: String, sessionId: String?, extraArgs: [String], prompt: AgentPrompt, extensionPaths: [String] = []) -> [String] {
         let sessionArgs = sessionId.map { ["--session-id", $0] } ?? ["--no-session"]
         let extensionArgs = extensionPaths.flatMap { ["-e", $0] }
-        return ["-p", "--mode", "json", "--model", model, "--thinking", thinking]
+        let effortArgs = AgentModelConfig.supportedEffort(thinking, model: model, harness: .pi).map { ["--thinking", $0] } ?? []
+        return ["-p", "--mode", "json", "--model", model]
+            + effortArgs
             + sessionArgs
             + extensionArgs
             + extraArgs

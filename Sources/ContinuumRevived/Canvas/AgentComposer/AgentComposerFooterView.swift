@@ -293,10 +293,9 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
             ChoiceItem(id: model, title: snapshot.displayNames[model] ?? model, icon: .provider(model))
         }
         modelButton.selectedTitleOverride = overrides.model
-        var efforts = AgentModelConfig.thinkingOptions
-        if !efforts.contains(settings.thinking) { efforts.append(settings.thinking) }
+        let efforts = AgentModelConfig.thinkingOptions(for: settings.model, harness: selectedHarness)
         effortButton.items = efforts.map { effort in ChoiceItem(id: effort, title: effort.capitalized) }
-        effortButton.selectedTitleOverride = overrides.effort
+        effortButton.selectedTitleOverride = overrides.effort ?? (efforts.contains(settings.thinking) ? nil : settings.thinking.capitalized)
         modelButton.selectedIcon = selectedHarness == recordHarness ? .provider(settings.model) : harnessButton.selectedIcon
         modelButton.selectedID = selectedHarness == recordHarness ? settings.model : nil
         effortButton.selectedID = settings.thinking

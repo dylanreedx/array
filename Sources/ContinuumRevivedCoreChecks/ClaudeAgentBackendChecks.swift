@@ -578,13 +578,13 @@ private func runClaudeBackendPolicyChecks() {
     }
 
     // Effort: exact pass-through or omission — never an invented mapping.
-    expect(ClaudeCLIBackend.effortArgument(forThinking: "high") == "high",
+    expect(ClaudeCLIBackend.effortArgument(forThinking: "high", model: AgentCatalogQAFixture.claude.models[0]) == "high",
            "ClaudeCLIBackend: matching thinking levels pass through as effort")
-    expect(ClaudeCLIBackend.effortArgument(forThinking: "xhigh") == "xhigh",
+    expect(ClaudeCLIBackend.effortArgument(forThinking: "xhigh", model: AgentCatalogQAFixture.claude.models[0]) == "xhigh",
            "ClaudeCLIBackend: xhigh passes through")
-    expect(ClaudeCLIBackend.effortArgument(forThinking: "off") == nil,
+    expect(ClaudeCLIBackend.effortArgument(forThinking: "off", model: AgentCatalogQAFixture.claude.models[0]) == nil,
            "ClaudeCLIBackend: pi-only levels omit the flag")
-    expect(ClaudeCLIBackend.effortArgument(forThinking: "minimal") == nil,
+    expect(ClaudeCLIBackend.effortArgument(forThinking: "minimal", model: AgentCatalogQAFixture.claude.models[0]) == nil,
            "ClaudeCLIBackend: minimal omits the flag")
 
     print("ClaudeCLIBackend policy checks passed: routing, model-argument stripping, and effort pass-through pinned")

@@ -61,7 +61,20 @@ public enum AgentModelConfig {
         AgentModelCatalog.shared.models(for: harness)
     }
 
-    public static let thinkingOptions = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+    /// Offered capabilities belong to the exact model and harness, never a global ceiling.
+    public static func thinkingOptions(for model: String, harness: AgentHarness) -> [String] {
+        AgentModelCatalog.shared.efforts(for: model, harness: harness) ?? []
+    }
+
+    public static var thinkingOptions: [String] {
+        let harness = AgentHarnessConfig.resolved()
+        let model = UserDefaults.standard.string(forKey: modelKey) ?? defaultModel(for: harness) ?? ""
+        return thinkingOptions(for: model, harness: harness)
+    }
+
+    public static func supportedEffort(_ thinking: String, model: String, harness: AgentHarness) -> String? {
+        thinkingOptions(for: model, harness: harness).contains(thinking) ? thinking : nil
+    }
 
     public struct Resolution: Equatable, Sendable {
         public let model: String
@@ -88,7 +101,7 @@ public enum AgentModelConfig {
         let stored = defaults.string(forKey: modelKey)
         return Resolution(
             model: oneOf(stored, options, harnessDefault),
-            thinking: oneOf(defaults.string(forKey: thinkingKey), thinkingOptions, defaultThinking)
+            thinking: defaults.string(forKey: thinkingKey) ?? defaultThinking
         )
     }
 
@@ -105,7 +118,7 @@ public enum AgentModelConfig {
         let thinking = explicitThinking ?? defaults.string(forKey: thinkingKey) ?? defaultThinking
         guard modelOptions(for: harness).contains(model),
               AgentHarnessConfig.isProviderCompatible(model: model, harness: harness),
-              thinkingOptions.contains(thinking) else { return nil }
+              (explicitThinking == nil || supportedEffort(thinking, model: model, harness: harness) != nil) else { return nil }
         return AgentLaunchSelection(harness: harness, model: model, thinking: thinking)
     }
 
@@ -122,7 +135,6 @@ public enum AgentModelConfig {
         return (!requireReady || snapshot.readiness.canRun)
             && snapshot.models.contains(selection.model)
             && AgentHarnessConfig.isProviderCompatible(model: selection.model, harness: selection.harness)
-            && thinkingOptions.contains(selection.thinking)
     }
 
     private static func oneOf(_ value: String?, _ options: [String], _ fallback: String) -> String {

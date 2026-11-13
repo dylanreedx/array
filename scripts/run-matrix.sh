@@ -81,6 +81,7 @@ if [[ -n "$MATRIX_TMUX_BIN" ]]; then
 fi
 
 COMPOSER_SEND_ONLY=0
+EFFORT_CATALOG_ONLY=0
 CROSS_HARNESS_DELEGATION_ONLY=0
 SIDEBAR_REFINEMENTS_ONLY=0
 FAST=0
@@ -112,6 +113,7 @@ BROWSER_SCHEDULING_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --effort-catalog) EFFORT_CATALOG_ONLY=1; shift ;;
     --awake-only) MATRIX_MODE=awake-only; shift ;;
     --skip-awake) MATRIX_MODE=skip-awake; shift ;;
     --browser-scheduling) BROWSER_SCHEDULING_ONLY=1; shift ;;
@@ -952,6 +954,12 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   # never hold every other gate behind it.
   MATRIX_NOTES+=("Linux relay leg not run here; run scripts/run-matrix.sh --notifications-linux separately, outside the build lock.")
   matrix_report 'Collaboration matrix (targeted)'
+  exit $?
+fi
+# This focused leg consumes the freshly built app; no provider or tmux work.
+if [[ "$EFFORT_CATALOG_ONLY" -eq 1 ]]; then
+  run_app_check .build/debug/Array --effort-catalog-check
+  matrix_report 'Effort catalogue matrix (targeted)'
   exit $?
 fi
 if [[ "$CROSS_HARNESS_DELEGATION_ONLY" -eq 1 ]]; then
@@ -2066,6 +2074,7 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # cancellation reporting the child truthfully.
 # Busy messages: position/replay, sender/hops, two callers with turn-specific
 # results, caller-scoped restart replay, paused recovery and storage refusal.
+run_app_check .build/debug/Array --effort-catalog-check
 run_app_check .build/debug/Array --workspace-api-delegation-check
 run_app_check .build/debug/Array --replay-driver-check
 run_app_check .build/debug/Array --helper-wait-input-check

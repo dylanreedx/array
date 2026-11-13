@@ -89,13 +89,13 @@ func runPiSessionArgsChecks() {
     // default `-e` injection, which PiExtensionLoadArgsChecks covers on its own.
     let withSession = Runner.processArguments(
         model: model, thinking: thinking, sessionId: "continuum-TILE", extraArgs: [], prompt: "hi", extensionPaths: [])
-    expect(withSession == ["-p", "--mode", "json", "--model", model, "--thinking", thinking,
+    expect(withSession == ["-p", "--mode", "json", "--model", model,
                            "--session-id", "continuum-TILE", "hi"],
            "processArguments(session): must pass --model/--thinking then --session-id for continuity, got \(withSession)")
 
     let ephemeral = Runner.processArguments(
         model: model, thinking: thinking, sessionId: nil, extraArgs: [], prompt: "hi", extensionPaths: [])
-    expect(ephemeral == ["-p", "--mode", "json", "--model", model, "--thinking", thinking,
+    expect(ephemeral == ["-p", "--mode", "json", "--model", model,
                          "--no-session", "hi"],
            "processArguments(nil): must be ephemeral --no-session, got \(ephemeral)")
 

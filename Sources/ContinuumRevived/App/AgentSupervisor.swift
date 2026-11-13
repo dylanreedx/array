@@ -372,7 +372,7 @@ enum AgentNameOneShot {
             return ["-p", "--no-session-persistence",
                     "--output-format", "json", "--json-schema", nameSchema,
                     "--model", titler.model]
-                + (ClaudeCLIBackend.effortArgument(forThinking: "low").map { ["--effort", $0] } ?? [])
+                + (ClaudeCLIBackend.effortArgument(forThinking: "low", model: titler.model).map { ["--effort", $0] } ?? [])
                 + ["--tools", "", "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands",
                    "--settings", #"{"disableAllHooks":true}"#,
                    "--system-prompt", titleRules]
@@ -387,10 +387,10 @@ enum AgentNameOneShot {
                     "-c", "web_search=disabled",
                     "--output-schema", schemaFile.path, "-o", lastMessageFile.path,
                     "-m", titler.model]
-                + (CodexCLIBackend.effortArgument(forThinking: "low").map { ["-c", "model_reasoning_effort=\($0)"] } ?? [])
+                + (CodexCLIBackend.effortArgument(forThinking: "low", model: titler.model).map { ["-c", "model_reasoning_effort=\($0)"] } ?? [])
         case .pi:
             return ["--no-session", "--print", "--mode", "text",
-                    "--model", titler.model, "--thinking", "low",
+                    "--model", titler.model,
                     "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-approve",
                     "--system-prompt", titleRules]
         }
@@ -2170,24 +2170,10 @@ final class AgentSupervisor {
         (record.lastObservedWhere, record.providerSessionId ?? claudeSessionId(for: record.id))
     }
 
-    /// The effort a Claude or Codex launch passes. When the CLI's live catalogue
-    /// lists efforts for the record's model, only a listed one is passed; a stored
-    /// value it does not list (stale since delegation, or never offered) is left
-    /// off so the CLI runs at its own default instead of refusing the turn, and
-    /// the drop is logged. With no catalogue data, the exact-match rule
-    /// (`legacy`) applies unchanged.
-    nonisolated static func launchEffort(
-        for record: AgentRecord, harness: AgentHarness, legacy: (String) -> String?
-    ) -> String? {
-        guard let listed = AgentModelCatalog.shared.efforts(for: record.model, harness: harness), !listed.isEmpty else {
-            return legacy(record.thinking)
-        }
-        if listed.contains(record.thinking) { return record.thinking }
-        if legacy(record.thinking) != nil {
-            Logger(subsystem: "continuum.agents", category: "effort").notice(
-                "agent \(record.id.rawValue.uuidString, privacy: .public): effort \(record.thinking, privacy: .public) is not listed for \(record.model, privacy: .public); launching at the CLI default")
-        }
-        return nil
+    /// Pass only the selected model's advertised effort. Missing metadata and
+    /// stale stored values omit the flag, leaving the CLI's default in charge.
+    nonisolated static func launchEffort(for record: AgentRecord, harness: AgentHarness) -> String? {
+        AgentModelConfig.supportedEffort(record.thinking, model: record.model, harness: harness)
     }
 
     nonisolated static func claudeRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> ClaudeAgentRunner.Config {
@@ -2201,7 +2187,7 @@ final class AgentSupervisor {
             return ClaudeAgentRunner.Config(
                 model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
                 mode: record.mode,
-                effort: launchEffort(for: record, harness: .claudeCode, legacy: ClaudeCLIBackend.effortArgument(forThinking:)),
+                effort: launchEffort(for: record, harness: .claudeCode),
                 cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
                 sessionId: forkFrom,
                 forkSession: true,
@@ -2213,7 +2199,7 @@ final class AgentSupervisor {
         return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             mode: record.mode,
-            effort: launchEffort(for: record, harness: .claudeCode, legacy: ClaudeCLIBackend.effortArgument(forThinking:)),
+            effort: launchEffort(for: record, harness: .claudeCode),
             cwd: URL(fileURLWithPath: location.cwd, isDirectory: true),
             sessionId: location.sessionId,
             // An agent that has never had a turn cannot have a conversation to
@@ -2245,7 +2231,7 @@ final class AgentSupervisor {
     nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, hostInstructions: HostLaunchInstructions = .shared) -> CodexAgentRunner.Config {
         var config = CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
-            effort: launchEffort(for: record, harness: .codex, legacy: CodexCLIBackend.effortArgument(forThinking:)),
+            effort: launchEffort(for: record, harness: .codex),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             threadId: record.codexThreadId,
             workspaceMCP: workspaceMCP,
@@ -9482,7 +9468,7 @@ final class AgentSupervisor {
                 return false
             }
         }
-        if let thinking, !AgentModelConfig.thinkingOptions.contains(thinking) { return false }
+        if let thinking, AgentModelConfig.supportedEffort(thinking, model: effectiveModel, harness: effectiveHarness) == nil { return false }
         var changed = false
         if record.harness != effectiveHarness { record.harness = effectiveHarness; changed = true }
         if record.model != effectiveModel { record.model = effectiveModel; changed = true }
@@ -24534,6 +24520,13 @@ private func checkPerAgentProviderSettings(
         .appendingPathComponent("continuum-provider-settings-check-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
     let store = AgentStore(applicationSupportDirectory: root)
+
+    // Capability fixture for these explicit Pi picks, independent of the CLI.
+    let piFixtureModels = AgentModelCatalog.shared.models(for: .pi)
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready,
+        models: piFixtureModels, effortLevels: Dictionary(uniqueKeysWithValues:
+            piFixtureModels.map { ($0, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) })))
+    defer { AgentModelCatalog.shared.resetForQA() }
 
     // This section exercises Pi-only contracts (`--model`, `--thinking`, role
     // tools, and Pi's full catalogue). Scope the ambient defaults used by the

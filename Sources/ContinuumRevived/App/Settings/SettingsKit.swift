@@ -170,7 +170,9 @@ struct PickerRow: View {
     var segmented = false
 
     var body: some View {
-        if case let .choice(_, label, options, _, _) = row.field {
+        if case let .choice(key, label, schemaOptions, _, _) = row.field {
+            let options = key == AgentModelConfig.thinkingKey
+                ? AgentModelConfig.thinkingOptions(for: model.storedModel, harness: model.currentHarness) : schemaOptions
             let binding = model.binding(for: row.field)
             let picker = Picker(selection: Binding(get: { binding.string }, set: { binding.set(.string($0)) })) {
                 ForEach(options, id: \.self) { option in

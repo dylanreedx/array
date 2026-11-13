@@ -96,7 +96,7 @@ public enum HarnessRoleRunBuilder {
             "--no-session"
         ]
         if let model = role.model { piArguments += ["--model", model] }
-        if let reasoning = role.reasoning { piArguments += ["--thinking", reasoning] }
+        if let reasoning = role.reasoning, let model = role.model, AgentModelConfig.supportedEffort(reasoning, model: model, harness: .pi) != nil { piArguments += ["--thinking", reasoning] }
         if let tools = role.tools { piArguments += ["--tools", tools] }
         piArguments += ["--system-prompt", role.promptPath, prompt]
         let controlScript = processGroupControlScript(runId: runId)
