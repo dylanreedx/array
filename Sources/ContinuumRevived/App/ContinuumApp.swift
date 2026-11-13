@@ -4571,6 +4571,36 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // Helper-row hover: the pill, driven through NSApp.sendEvent.
+        if CommandLine.arguments.contains("--sidebar-helper-hover-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarHelperHoverChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: sidebar-helper-hover: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-helper-hover-capture") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    let next = CommandLine.arguments.index(after: index)
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("-")
+                        ? URL(fileURLWithPath: CommandLine.arguments[next])
+                        : URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                            .appendingPathComponent("qa-runs/hover-redesign")
+                    print(try SidebarHelperHoverChecks.runCapture(outputDirectory: dir))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-screenshot-check") {
             _ = NSApplication.shared
             Task { @MainActor in

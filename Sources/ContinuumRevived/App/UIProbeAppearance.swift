@@ -1351,6 +1351,8 @@ enum UIProbeAppearance {
                 }
             }
         }
+        // A helper row's hover pill: `textPrimary` at the hover step's strength.
+        values.insert(hex(AgentInboxCardView.hoverMarkColour(theme: theme)))
         return values
     }
 

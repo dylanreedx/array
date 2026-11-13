@@ -2058,6 +2058,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         } else {
             card.frame = NSRect(x: gutter, y: gap / 2, width: max(0, bounds.width - gutter * 2),
                                 height: Self.leadCardHeight(for: proposal))
+            card.hoverMarkRect = nil
         }
         decorations.frame = card.bounds
         card.underlayAlpha = groupBackground.alphaUnderCard
@@ -2348,6 +2349,19 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             tailLabel.isHidden = !fits
             if fits { place(tailLabel, x: titleX + titleNatural - CGFloat(Metrics.cellTextInset), centre: mid, width: need) }
         }
+        // Hover's pill hugs what the row SAYS — its working dots or fold glyph,
+        // its title and any status after it — with one even margin, never the
+        // clock or the controls. A full-width capsule is the system's source-list
+        // selection; a pill around the words cannot be read as one.
+        let inset = CGFloat(Metrics.cellTextInset)
+        let margin: CGFloat = 8
+        let leadsWithMark = !pulseDots.isHidden || !disclosureButton.isHidden
+        let start = leadsWithMark ? x0 - margin : titleLabel.frame.minX + inset - margin
+        let words = (tailLabel.isHidden ? titleLabel.frame.maxX : tailLabel.frame.maxX) - inset
+        let markHeight = InboxOwnershipChrome.subagentHeight
+        card.hoverMarkRect = NSRect(
+            x: max(0, start), y: snapped(mid - markHeight / 2),
+            width: max(0, min(card.bounds.width, words + margin) - max(0, start)), height: markHeight)
     }
 
     static let pillFont = NSFont.monospacedDigitSystemFont(
@@ -3319,6 +3333,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// — both read off the laid-out views, so a witness measures the render.
     var qaSpineSegmentsForQA: [InboxSpineSegment] { spine.qaSegmentsForQA }
     var qaCardFrameForQA: NSRect { card.convert(card.bounds, to: self) }
+    /// Hover's pill: its target opacity and its frame.
+    var qaHoverMarkOpacity: Float { card.qaHoverMarkOpacity }
+    var qaHoverMarkFrame: CGRect? { card.qaHoverMarkFrame.map { card.convert($0, to: self) } }
+    var qaCardFill: CGColor? { card.layer?.backgroundColor }
+    var qaCardSurfaceRole: SidebarSurfaceRole { card.surfaceRole }
+    /// Everything selection and the style decide on this card, hover excluded.
+    var qaStyleTruth: String { card.qaStyleTruth }
     var qaDisclosureFrameForQA: NSRect? {
         disclosureButton.isHidden
             ? nil : disclosureButton.convert(disclosureButton.bounds, to: self)
