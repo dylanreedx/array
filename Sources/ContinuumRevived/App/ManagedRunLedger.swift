@@ -32,6 +32,9 @@ final class ManagedRunLedger: @unchecked Sendable {
         var turn: String?
         var late: Bool?
         var mode: String?
+        var commandCall: String?
+        var commandCategory: String?
+        var commandDuration: Double?
         /// `leadCheckoutChanged`: counts by `modified`, `added`, `deleted`.
         var changed: [String: Int]?
         /// Checkout-relative paths, at most `LeadCheckoutWatch.maxPaths`.
@@ -84,6 +87,36 @@ final class ManagedRunLedger: @unchecked Sendable {
             }
             self.append(row)
             self.sweepProtected(agent, at: at, trigger: "report")
+        }
+    }
+    // Live-only correlation: a restart never pairs an old start with a new end.
+    private struct CommandStart { var task: UUID; var at: Date; var category: String }
+    private var commands: [UUID: [String: CommandStart]] = [:]
+    func command(agent: UUID, call: String, detail: AgentToolDetailObservation) {
+        queue.async {
+            if detail.phase == .started {
+                guard AgentToolKind.resolve(toolName: detail.toolName) == .shell,
+                      self.commands[agent]?[call] == nil,
+                      !self.seen.contains("command/start/\(agent)/\(call)"),
+                      let task = self.currentTask(agent) else { return }
+                let text = detail.fields.first { $0.key == AgentToolDetailObservation.shellCommandKey }?.value
+                let words = text.map(HelperEvidence.words) ?? []
+                let simple = text.map { !HelperEvidence.isCompound($0) && !HelperEvidence.startsBackgroundJob($0) } ?? false
+                let category = simple && words.starts(with: ["swift", "build"]) ? "build"
+                    : simple && words.starts(with: ["swift", "test"]) ? "check" : "unknown"
+                self.commands[agent, default: [:]][call] = CommandStart(task: task, at: detail.observedAt, category: category)
+                var row = Row(kind: "commandStarted", task: task, agent: agent, source: "command/start/\(agent)/\(call)")
+                row.at = detail.observedAt; row.commandCall = call; row.commandCategory = category
+                self.append(row)
+            } else if detail.phase == .ended, let start = self.commands[agent]?.removeValue(forKey: call), self.owners[start.task] != nil {
+                var row = Row(kind: "commandEnded", task: start.task, agent: agent, source: "command/end/\(agent)/\(call)")
+                row.at = detail.observedAt; row.commandCall = call; row.commandCategory = start.category
+                let elapsed = detail.observedAt.timeIntervalSince(start.at)
+                if [.succeeded, .failed].contains(detail.shellOutcome), elapsed.isFinite, elapsed >= 0 {
+                    row.commandDuration = elapsed
+                }
+                self.append(row)
+            }
         }
     }
     private let queue = DispatchQueue(label: "dev.array.run-ledger", qos: .utility)
@@ -370,6 +403,7 @@ final class ManagedRunLedger: @unchecked Sendable {
             self.fact(kind: "turnEnded", agent: agent, source: "ended/\(agent)/\(turn)", turn: turn, outcome: outcome.rawValue,
                       resultsWaiting: resultsWaiting, noWake: noWake)
             // A helper that never reports is still swept; no entry, no work.
+            self.commands[agent] = nil
             self.sweepProtected(agent, at: at, trigger: "turnEnded")
         }
     }

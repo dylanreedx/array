@@ -531,7 +531,18 @@ enum UsageWords {
         }
         let mode = line.mode == "free" ? ["Free"] : line.mode == "managed" ? ["Managed"] : []
         let opened = line.state == .closed ? [] : ["Opened \(line.opened.map { when($0) } ?? "unknown")"]
-        return (mode + opened + ["Active \(duration(line.activeTime))"] + (models.isEmpty ? ["harness and model unknown"] : models)).joined(separator: " · ")
+        return (mode + opened + ["Active \(duration(line.activeTime))", commandTime(line)] + (models.isEmpty ? ["harness and model unknown"] : models)).joined(separator: " · ")
+    }
+
+    static func commandTime(_ line: UsageReport.TaskLine) -> String {
+        guard !line.commands.isEmpty else { return "Command time unknown (not recorded)" }
+        return "Host-observed command time: " + ["build", "check", "unknown"].compactMap { category -> String? in
+            let rows = line.commands.filter { $0.category == category }
+            guard !rows.isEmpty else { return nil }
+            let known = rows.compactMap(\.duration)
+            let total = known.isEmpty ? "unknown" : duration(known.reduce(0, +))
+            return "\(category) \(total) (\(known.count)/\(rows.count) ended)"
+        }.joined(separator: "; ")
     }
 
     static func modes(_ report: UsageReport) -> String {

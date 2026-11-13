@@ -113,6 +113,7 @@ public struct UsageReport: Equatable, Encodable, Sendable {
         /// The union of every agent's turns, up to the close. Nil unless closed
         /// with every turn ended.
         public var activeTime: TimeInterval?
+        public var commands: [RunLedgerUsageReader.Command] = []
         /// `managed` or `free`; nil when not recorded.
         public var mode: String?
         /// Lead wakes on a helper result that arrived after the close: they
@@ -248,6 +249,7 @@ public struct UsageReport: Equatable, Encodable, Sendable {
         var line = TaskLine(task: task.id, state: task.state, opened: task.opened, ended: task.ended,
                             timeToAnswer: timeToAnswer, activeTime: active, mode: task.mode, helpers: helpers.count,
                             tokens: tokens, fullyCounted: fully, models: models)
+        line.commands = task.commands
         line.lateHelperWakes = task.turns.values.flatMap { $0 }.filter(\.lateHelperWake).count
         return line
     }

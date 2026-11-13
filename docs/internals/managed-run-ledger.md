@@ -509,3 +509,15 @@ serial utility queue, use read-only Git with a two-second timeout per invocation
 and record at most 128 rows per sweep. Deferred paths can be recorded by a later
 sweep; deduplication applies only to emitted rows. Protection state is released
 at helper turn end. Dirty non-protected files are not fingerprinted.
+
+### Command observation facts (collection OFF by default)
+
+`commandStarted` and `commandEnded` use optional `commandCall`,
+`commandCategory` (`build`, `check`, `unknown`), and `commandDuration`
+(seconds) fields. `at` is the tool detail's host observation time. Duration
+is present only for a correlated complete succeeded/failed end with a
+nonnegative finite interval. A start without such an end remains unknown;
+a restart does not rebuild live command correlation. No command text or
+output is persisted. The Usage reader and task detail consume these facts.
+See `docs/audits/usage-command.md` for narrow classification, buffering
+limitations, witnesses and production enablement gates.

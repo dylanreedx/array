@@ -61,6 +61,12 @@ public enum RunLedgerUsageReader {
 
     public enum State: String, Codable, Sendable { case open, closed, interrupted }
 
+    public struct Command: Equatable, Codable, Sendable {
+        public var agent: UUID
+        public var call: String
+        public var category: String
+        public var duration: Double?
+    }
     public struct Task: Equatable, Sendable {
         public var id: UUID
         public var lead: UUID?
@@ -73,6 +79,7 @@ public enum RunLedgerUsageReader {
         public var helpers: [UUID] = []
         public var turns: [UUID: [Turn]] = [:]
         public var usage: [Usage] = []
+        public var commands: [Command] = []
     }
 
     /// The row fields this reader uses; everything else in a row is ignored.
@@ -92,6 +99,9 @@ public enum RunLedgerUsageReader {
         var modelSource: String?
         var tokens: TokenUsageSnapshot.TypedCounts?
         var incomplete: [String]?
+        var commandCall: String?
+        var commandCategory: String?
+        var commandDuration: Double?
     }
 
     public static func ledgerURL(applicationSupport: URL) -> URL {
@@ -124,6 +134,15 @@ public enum RunLedgerUsageReader {
             if tasks[row.task] == nil { tasks[row.task] = Task(id: row.task); order.append(row.task) }
             var task = tasks[row.task]!
             switch row.kind {
+            case "commandStarted":
+                if let call = row.commandCall {
+                    task.commands.append(Command(agent: row.agent, call: call, category: row.commandCategory ?? "unknown"))
+                }
+            case "commandEnded":
+                if let call = row.commandCall, let index = task.commands.lastIndex(where: { $0.agent == row.agent && $0.call == call }),
+                   let duration = row.commandDuration, duration.isFinite, duration >= 0 {
+                    task.commands[index].duration = duration
+                }
             case "taskOpened":
                 task.lead = row.agent
                 task.mode = row.mode

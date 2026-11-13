@@ -15,6 +15,7 @@ enum SettingsUsageChecks {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("settings-usage-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        try commandTiming(root.appendingPathComponent("commands"))
         let now = Date()
         let ledger = RunLedgerUsageReader.ledgerURL(applicationSupport: root)
         try write(fixture(now: now), to: ledger)
@@ -94,7 +95,7 @@ enum SettingsUsageChecks {
             for (id, value) in exact.sorted(by: { $0.key < $1.key }) {
                 try expect(opened[id] == value, "\(id) rendered \(opened[id] ?? "nil"), expected \(value)")
             }
-            try expect(opened["usage.task.4.detail"] == "Managed · Active 11 min · Lead Claude Code (claude-x) · Helper Claude Code (claude-x)",
+            try expect(opened["usage.task.4.detail"] == "Managed · Active 11 min · Command time unknown (not recorded) · Lead Claude Code (claude-x) · Helper Claude Code (claude-x)",
                        "opened detail: \(opened["usage.task.4.detail"] ?? "nil")")
             try expect(opened["usage.task.5.detail"]?.contains("Helper Codex (gpt-x)") == true, "opened detail names every model")
             try expect(model.renderedTexts["usage.recordingOff"] == nil, "recording is on, but the page says it is off")
@@ -194,7 +195,7 @@ enum SettingsUsageChecks {
             for index in [0, 1, 3] { model.usage.toggle(report.tasks[index].task) }
             fixture.settle(0.2)
             let opened = model.renderedTexts
-            try expect(opened["usage.task.0.detail"] == "Free · Active 1 min · Lead Claude Code (claude-x, from its settings)",
+            try expect(opened["usage.task.0.detail"] == "Free · Active 1 min · Command time unknown (not recorded) · Lead Claude Code (claude-x, from its settings)",
                        "later rows: free detail \(opened["usage.task.0.detail"] ?? "nil")")
             try expect(opened["usage.task.1.tokens.total.helpers"] == "20" && opened["usage.task.1.tokens.total.lead"] == "4",
                        "a helper's helper is a helper, and a subagent the lead's result reports adds nothing: \(opened["usage.task.1.tokens.total.helpers"] ?? "nil")")
@@ -344,6 +345,51 @@ enum SettingsUsageChecks {
         ledger.delete(what) { result = $0; done.signal() }
         done.wait()
         return result
+    }
+
+    private static func commandTiming(_ support: URL) throws {
+        let writer = ManagedRunLedger(support: support)
+        let agent = UUID()
+        writer.submission(agent: agent, project: nil)
+        let start = Date().addingTimeInterval(-60)
+        func detail(_ phase: AgentToolDetailObservation.Phase, _ command: String? = nil,
+                    at: Date) -> AgentToolDetailObservation {
+            AgentToolDetailObservation(phase: phase, toolName: "bash",
+                fields: command.map { [(AgentToolDetailObservation.shellCommandKey, $0)] } ?? [],
+                shellOutcome: phase == .ended ? .succeeded : nil, observedAt: at)
+        }
+        writer.command(agent: agent, call: "build", detail: detail(.started, "swift build", at: start))
+        writer.command(agent: agent, call: "build", detail: detail(.ended, at: start.addingTimeInterval(12)))
+        writer.command(agent: agent, call: "check", detail: detail(.started, "swift test", at: start))
+        writer.command(agent: agent, call: "compound", detail: detail(.started, "swift build && swift test", at: start))
+        writer.drain()
+        let url = RunLedgerUsageReader.ledgerURL(applicationSupport: support)
+        let data = try Data(contentsOf: url)
+        let first = RunLedgerUsageReader.read(data)
+        try expect(first.tasks.first?.commands.count == 3, "command starts not read")
+        try expect(first.tasks.first?.commands.first?.duration == 12, "observed command duration lost")
+        try expect(first.tasks.first?.commands.last?.category == "unknown", "compound command misclassified")
+        try expect(first.tasks.first?.commands.dropFirst().allSatisfy { $0.duration == nil } == true,
+                   "missing ends became zero")
+        let restarted = ManagedRunLedger(support: support)
+        restarted.drain()
+        let after = RunLedgerUsageReader.read(try Data(contentsOf: url))
+        try expect(after.tasks.first?.commands == first.tasks.first?.commands, "restart changed command facts")
+        try withPane(ledger: url) { fixture, _ in
+            try expect(fixture.model.usage.qaRuns.isEmpty, "hidden pane read commands")
+            fixture.select("usage")
+            try waitReady(fixture)
+            guard case let .ready(report, _) = fixture.model.usage.phase, let task = report.tasks.first else {
+                throw Failure("missing command task")
+            }
+            fixture.model.usage.toggle(task.task)
+            fixture.settle(0.2)
+            try expect(fixture.model.renderedTexts["usage.task.0.detail"]?.contains(
+                "Host-observed command time: build 12 s (1/1 ended); check unknown (0/1 ended); unknown unknown (0/1 ended)") == true,
+                "command facts did not reach rendered Settings words")
+            try render(fixture, name: "commands-light", appearance: .aqua)
+            try render(fixture, name: "commands-dark", appearance: .darkAqua)
+        }
     }
 
     private static func waitUntil(_ fixture: SettingsFixtureWindow, _ what: String, timeout: TimeInterval = 30, _ condition: () -> Bool) throws {

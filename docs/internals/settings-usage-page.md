@@ -123,3 +123,19 @@ and the page while every other line is byte-identical; a running task is
 refused; "delete all" keeps only the running task, then removes the file once it
 closes; the ledger records a new task afterwards and a restart finds nothing. It prints timings for a
 300,000-row ledger and asserts nothing about time.
+
+### Host-observed command time (collection OFF)
+
+The task detail can read `commandStarted` / `commandEnded` facts from the ledger.
+It displays the sum of host observation intervals by build/check/unknown
+category and the count with an observed complete end. This is elapsed time
+between received start/end observations, not CPU time or provider execution
+time; buffered provider frames can shorten it. Only simple `swift build` and
+`swift test` commands are classified; wrapped and compound commands remain
+unknown. No command text or output is stored. Missing or incomplete ends stay
+unknown across restart. Old ledgers say command time was not recorded.
+
+The supervisor's `qaCommandTimingEnabled` defaults to false. The writer/reader
+and Settings witness can exercise the slice, but enabling production collection
+still requires independent review, live-provider timing validation and the
+combined matrix. Collection also requires the existing token recording consent.

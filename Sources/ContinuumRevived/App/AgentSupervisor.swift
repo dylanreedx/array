@@ -1048,6 +1048,8 @@ final class AgentSupervisor {
     /// The ledger file the Settings usage page reads (never the writer's queue).
     var runLedgerURL: URL { RunLedgerUsageReader.ledgerURL(applicationSupport: store.layout.applicationSupportDirectory) }
     var qaRunLedgerRecording = true
+    /// OFF until live provider timing and the combined gate are reviewed.
+    var qaCommandTimingEnabled = false
     private var wakeupScheduler: AgentWakeupScheduler?
     private var scheduledQueueAdmissions: Set<UUID> = []
     var qaAfterScheduledQueueWrite: (() async -> Void)?
@@ -2413,6 +2415,10 @@ final class AgentSupervisor {
             } else if detail.phase == .ended {
                 runLedger.leadShellEnded(agent: id.rawValue, call: call, busy: sharedCheckoutBusy(besides: record))
             }
+        }
+        if qaRunLedgerRecording, qaCommandTimingEnabled, AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults),
+           case let .toolDetail(call, detail) = observation {
+            runLedger.command(agent: id.rawValue, call: call, detail: detail)
         }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
