@@ -102,6 +102,7 @@ public enum RunLedgerUsageReader {
         var commandCall: String?
         var commandCategory: String?
         var commandDuration: Double?
+        var commandTimingSource: String?
     }
 
     public static func ledgerURL(applicationSupport: URL) -> URL {
@@ -140,6 +141,7 @@ public enum RunLedgerUsageReader {
                 }
             case "commandEnded":
                 if let call = row.commandCall, let index = task.commands.lastIndex(where: { $0.agent == row.agent && $0.call == call }),
+                   row.commandTimingSource == "supervisorReceipt",
                    let duration = row.commandDuration, duration.isFinite, duration >= 0 {
                     task.commands[index].duration = duration
                 }

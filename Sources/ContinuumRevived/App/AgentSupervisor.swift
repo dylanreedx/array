@@ -1050,6 +1050,8 @@ final class AgentSupervisor {
     var qaRunLedgerRecording = true
     /// OFF until live provider timing and the combined gate are reviewed.
     var qaCommandTimingEnabled = false
+    /// Receipt clock injection for deterministic production-seam witnesses.
+    var qaCommandReceiptTime: () -> Date = Date.init
     private var wakeupScheduler: AgentWakeupScheduler?
     private var scheduledQueueAdmissions: Set<UUID> = []
     var qaAfterScheduledQueueWrite: (() async -> Void)?
@@ -2334,6 +2336,7 @@ final class AgentSupervisor {
         for id: AgentID
     ) {
         guard let record = records[id] else { return }
+        let commandReceivedAt = qaCommandReceiptTime()
         // A captured codex thread id is host-local persistence state, not a Home
         // / Where / What fact: persist it and stop. The guard on inequality
         // makes this a no-op when `thread.started` re-fires the same id on
@@ -2416,9 +2419,11 @@ final class AgentSupervisor {
                 runLedger.leadShellEnded(agent: id.rawValue, call: call, busy: sharedCheckoutBusy(besides: record))
             }
         }
-        if qaRunLedgerRecording, qaCommandTimingEnabled, AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults),
-           case let .toolDetail(call, detail) = observation {
-            runLedger.command(agent: id.rawValue, call: call, detail: detail)
+        if case let .toolDetail(call, detail) = observation {
+            if qaRunLedgerRecording, qaCommandTimingEnabled, AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults) {
+                runLedger.command(agent: id.rawValue, call: call, detail: detail,
+                                  receivedAt: commandReceivedAt, harness: record.harness?.rawValue)
+            } else { runLedger.invalidateCommandSpans() }
         }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
@@ -9042,11 +9047,20 @@ final class AgentSupervisor {
 
     private var managedModeDefaults: UserDefaults = .standard
     private var managedModeObserver: NSObjectProtocol?
+    private var commandConsentObserver: NSObjectProtocol?
     static let managedModeDidChange = Notification.Name("array.agent.managedModeDidChange")
 
     /// Wired by the real boot mount; uses the same suite as Settings.
     func configureManagedMode(defaults: UserDefaults) {
+        runLedger.invalidateCommandSpans()
         managedModeDefaults = defaults
+        if let commandConsentObserver { NotificationCenter.default.removeObserver(commandConsentObserver) }
+        commandConsentObserver = NotificationCenter.default.addObserver(
+            forName: SettingChangeEvent.name(for: SettingID(rawValue: AgentTokenTelemetryConfig.enabledKey)),
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.runLedger.invalidateCommandSpans() }
+        }
         if let managedModeObserver { NotificationCenter.default.removeObserver(managedModeObserver) }
         managedModeObserver = NotificationCenter.default.addObserver(
             forName: SettingChangeEvent.name(for: SettingID(rawValue: AgentManagedModeConfig.enabledKey)),
@@ -9058,6 +9072,7 @@ final class AgentSupervisor {
     }
 
     isolated deinit {
+        if let commandConsentObserver { NotificationCenter.default.removeObserver(commandConsentObserver) }
         if let managedModeObserver { NotificationCenter.default.removeObserver(managedModeObserver) }
     }
 

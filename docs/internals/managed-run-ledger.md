@@ -512,12 +512,25 @@ at helper turn end. Dirty non-protected files are not fingerprinted.
 
 ### Command observation facts (collection OFF by default)
 
-`commandStarted` and `commandEnded` use optional `commandCall`,
-`commandCategory` (`build`, `check`, `unknown`), and `commandDuration`
-(seconds) fields. `at` is the tool detail's host observation time. Duration
-is present only for a correlated complete succeeded/failed end with a
-nonnegative finite interval. A start without such an end remains unknown;
-a restart does not rebuild live command correlation. No command text or
-output is persisted. The Usage reader and task detail consume these facts.
-See `docs/audits/usage-command.md` for narrow classification, buffering
-limitations, witnesses and production enablement gates.
+`commandStarted` and `commandEnded` store optional `commandCall` (a host-minted
+span UUID), `commandProviderCall` (provider call id, starts only),
+`commandCategory` (`build`, `check`, `unknown`), `commandDuration` (seconds),
+`commandTimingSource` (`supervisorReceipt`), and `harness` fields. `at` is the
+receipt clock sampled at entry to supervisor observation ingestion, before the
+ledger queue. Provider timestamps and reported execution durations are not used.
+
+An observed `.ended` bounds this receipt interval independently of exit status;
+Codex emits exit codes without a shell outcome, and Pi/Claude may omit both on
+normal ends. No success or quality is inferred. Missing ends and explicit
+backgrounded/interrupted/timed-out outcomes stay unknown. Duration also requires
+a finite nonnegative interval and a live, unambiguous start. Recording changes
+invalidate all live spans through the production Settings change event, even if
+no provider event arrives while recording is off. Turn end and restart also
+invalidate correlation. Reused provider ids get a new unknown span and cannot
+attach late ends to the original span; prior ids are rebuilt from durable rows.
+The reader treats older timing rows without receipt provenance as unknown.
+
+No command text/output is persisted. The Usage detail shows sums of measured
+receipt intervals and measured coverage, not a count of observed ends or a
+quality rate. See `docs/audits/usage-command-review.md` for provider fixture
+provenance, behavioral evidence and remaining production enablement gates.

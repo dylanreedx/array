@@ -35,6 +35,8 @@ final class ManagedRunLedger: @unchecked Sendable {
         var commandCall: String?
         var commandCategory: String?
         var commandDuration: Double?
+        var commandTimingSource: String?
+        var commandProviderCall: String?
         /// `leadCheckoutChanged`: counts by `modified`, `added`, `deleted`.
         var changed: [String: Int]?
         /// Checkout-relative paths, at most `LeadCheckoutWatch.maxPaths`.
@@ -89,32 +91,42 @@ final class ManagedRunLedger: @unchecked Sendable {
             self.sweepProtected(agent, at: at, trigger: "report")
         }
     }
-    // Live-only correlation: a restart never pairs an old start with a new end.
-    private struct CommandStart { var task: UUID; var at: Date; var category: String }
+    // Correlation never survives consent changes, turn ends or process restarts.
+    private struct CommandStart { var task: UUID; var at: Date; var category: String; var span: String; var harness: String? }
     private var commands: [UUID: [String: CommandStart]] = [:]
-    func command(agent: UUID, call: String, detail: AgentToolDetailObservation) {
+    // Rebuilt from rows: a reused provider id is ambiguous even after restart.
+    // Its next span is recorded, but cannot acquire a measured duration.
+    private var commandProviderCalls: [UUID: Set<String>] = [:]
+    func invalidateCommandSpans() { queue.async { self.commands.removeAll() } }
+    func command(agent: UUID, call: String, detail: AgentToolDetailObservation,
+                 receivedAt: Date, harness: String? = nil) {
         queue.async {
             if detail.phase == .started {
                 guard AgentToolKind.resolve(toolName: detail.toolName) == .shell,
                       self.commands[agent]?[call] == nil,
-                      !self.seen.contains("command/start/\(agent)/\(call)"),
                       let task = self.currentTask(agent) else { return }
                 let text = detail.fields.first { $0.key == AgentToolDetailObservation.shellCommandKey }?.value
                 let words = text.map(HelperEvidence.words) ?? []
                 let simple = text.map { !HelperEvidence.isCompound($0) && !HelperEvidence.startsBackgroundJob($0) } ?? false
                 let category = simple && words.starts(with: ["swift", "build"]) ? "build"
                     : simple && words.starts(with: ["swift", "test"]) ? "check" : "unknown"
-                self.commands[agent, default: [:]][call] = CommandStart(task: task, at: detail.observedAt, category: category)
-                var row = Row(kind: "commandStarted", task: task, agent: agent, source: "command/start/\(agent)/\(call)")
-                row.at = detail.observedAt; row.commandCall = call; row.commandCategory = category
+                let span = UUID().uuidString
+                if self.commandProviderCalls[agent]?.contains(call) != true {
+                    self.commands[agent, default: [:]][call] = CommandStart(task: task, at: receivedAt, category: category, span: span, harness: harness)
+                }
+                var row = Row(kind: "commandStarted", task: task, agent: agent, source: "command/start/\(agent)/\(span)")
+                row.at = receivedAt; row.commandCall = span; row.commandCategory = category
+                row.commandProviderCall = call; row.commandTimingSource = "supervisorReceipt"; row.harness = harness
                 self.append(row)
             } else if detail.phase == .ended, let start = self.commands[agent]?.removeValue(forKey: call), self.owners[start.task] != nil {
-                var row = Row(kind: "commandEnded", task: start.task, agent: agent, source: "command/end/\(agent)/\(call)")
-                row.at = detail.observedAt; row.commandCall = call; row.commandCategory = start.category
-                let elapsed = detail.observedAt.timeIntervalSince(start.at)
-                if [.succeeded, .failed].contains(detail.shellOutcome), elapsed.isFinite, elapsed >= 0 {
-                    row.commandDuration = elapsed
-                }
+                var row = Row(kind: "commandEnded", task: start.task, agent: agent, source: "command/end/\(agent)/\(start.span)")
+                row.at = receivedAt; row.commandCall = start.span; row.commandCategory = start.category
+                row.commandTimingSource = "supervisorReceipt"; row.harness = start.harness
+                let elapsed = receivedAt.timeIntervalSince(start.at)
+                // The ended observation bounds receipt time, independently of exit
+                // status. Explicit incomplete outcomes keep the interval unknown.
+                let completed = detail.shellOutcome.map { [.succeeded, .failed].contains($0) } ?? true
+                if completed, elapsed.isFinite, elapsed >= 0 { row.commandDuration = elapsed }
                 self.append(row)
             }
         }
@@ -211,6 +223,8 @@ final class ManagedRunLedger: @unchecked Sendable {
     /// The one reducer, for live appends and for the load-time rebuild.
     private func reduce(_ row: Row) {
         switch row.kind {
+        case "commandStarted":
+            if let call = row.commandProviderCall ?? row.commandCall { commandProviderCalls[row.agent, default: []].insert(call) }
         case "taskOpened":
             active[row.agent] = row.task; previous[row.agent] = row.task; owners[row.task] = row.agent
             taskOrder[row.task] = taskOrder.count

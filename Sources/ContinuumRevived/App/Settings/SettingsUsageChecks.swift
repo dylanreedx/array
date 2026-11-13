@@ -15,6 +15,7 @@ enum SettingsUsageChecks {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("settings-usage-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        try commandProviderTiming(root.appendingPathComponent("providers"))
         try commandTiming(root.appendingPathComponent("commands"))
         let now = Date()
         let ledger = RunLedgerUsageReader.ledgerURL(applicationSupport: root)
@@ -155,7 +156,7 @@ enum SettingsUsageChecks {
             fixture.settle()
             try expect(defaults.object(forKey: AgentTokenTelemetryConfig.enabledKey) as? Bool == false,
                        "the switch must write \(AgentTokenTelemetryConfig.enabledKey)")
-            try expect(model.renderedTexts["usage.recordingOff"]?.hasPrefix("Token recording is off.") == true
+            try expect(model.renderedTexts["usage.recordingOff"]?.hasPrefix("Recording is off.") == true
                        && model.renderedTexts["usage.closed"] == "7",
                        "recording off must say so and keep showing what is on disk")
 
@@ -358,10 +359,10 @@ enum SettingsUsageChecks {
                 fields: command.map { [(AgentToolDetailObservation.shellCommandKey, $0)] } ?? [],
                 shellOutcome: phase == .ended ? .succeeded : nil, observedAt: at)
         }
-        writer.command(agent: agent, call: "build", detail: detail(.started, "swift build", at: start))
-        writer.command(agent: agent, call: "build", detail: detail(.ended, at: start.addingTimeInterval(12)))
-        writer.command(agent: agent, call: "check", detail: detail(.started, "swift test", at: start))
-        writer.command(agent: agent, call: "compound", detail: detail(.started, "swift build && swift test", at: start))
+        writer.command(agent: agent, call: "build", detail: detail(.started, "swift build", at: start), receivedAt: start)
+        writer.command(agent: agent, call: "build", detail: detail(.ended, at: start.addingTimeInterval(12)), receivedAt: start.addingTimeInterval(12))
+        writer.command(agent: agent, call: "check", detail: detail(.started, "swift test", at: start), receivedAt: start)
+        writer.command(agent: agent, call: "compound", detail: detail(.started, "swift build && swift test", at: start), receivedAt: start)
         writer.drain()
         let url = RunLedgerUsageReader.ledgerURL(applicationSupport: support)
         let data = try Data(contentsOf: url)
@@ -385,7 +386,7 @@ enum SettingsUsageChecks {
             fixture.model.usage.toggle(task.task)
             fixture.settle(0.2)
             try expect(fixture.model.renderedTexts["usage.task.0.detail"]?.contains(
-                "Host-observed command time: build 12 s (1/1 ended); check unknown (0/1 ended); unknown unknown (0/1 ended)") == true,
+                "Host-observed command time: build 12 s (1/1 measured); check unknown (0/1 measured); unknown unknown (0/1 measured)") == true,
                 "command facts did not reach rendered Settings words")
             try render(fixture, name: "commands-light", appearance: .aqua)
             try render(fixture, name: "commands-dark", appearance: .darkAqua)

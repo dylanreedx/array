@@ -167,7 +167,7 @@ struct SettingsUsageSections: View {
             .onDisappear { usage.disappear() }
             InfoRow(text: "\(AppChannel.liveApplicationSupportDirectoryName) on this Mac only, read from its own run ledger. Nothing here is uploaded.")
             if !AgentTokenTelemetryConfig.enabled(defaults: settings.defaults) {
-                let text = "Token recording is off. Tasks closed while it is off show tokens as unknown. What is already on this Mac is still shown."
+                let text = "Recording is off. New task tokens and command timing are not recorded. What is already on this Mac is still shown."
                 Label(text, systemImage: "pause.circle")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -541,7 +541,7 @@ enum UsageWords {
             guard !rows.isEmpty else { return nil }
             let known = rows.compactMap(\.duration)
             let total = known.isEmpty ? "unknown" : duration(known.reduce(0, +))
-            return "\(category) \(total) (\(known.count)/\(rows.count) ended)"
+            return "\(category) \(total) (\(known.count)/\(rows.count) measured)"
         }.joined(separator: "; ")
     }
 

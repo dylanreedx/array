@@ -1,5 +1,8 @@
 # Command timing slice
 
+Historical evidence for 64e4e6d9. The current review revision and corrected
+clock/status/consent/coverage claims are in [usage-command-review.md](usage-command-review.md).
+
 Bench: gaps-usage-command, baseline 83993fa5.
 
 Feasibility: production AgentToolDetailObservation has observedAt on starts
