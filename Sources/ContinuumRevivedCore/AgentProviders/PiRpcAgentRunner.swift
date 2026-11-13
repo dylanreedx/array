@@ -525,14 +525,14 @@ public final class PiRpcAgentRunner: @unchecked Sendable {
             model: config.model,
             thinking: config.thinking,
             sessionId: config.sessionId,
-            extraArgs: config.extraArgs,
+            extraArgs: config.resolvedExtraArgs(),
             extensionPaths: config.extensionPaths
         )
         do {
             try transport.start(
                 executable: command.executable,
                 arguments: arguments,
-                environment: PiAgentRunner.childEnvironment(processOwner: config.processOwner),
+                environment: PiAgentRunner.childEnvironment(processOwner: config.processOwner, projectStandards: config.projectStandards),
                 currentDirectory: config.cwd
             )
         } catch {

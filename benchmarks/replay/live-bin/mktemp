@@ -1,0 +1,25 @@
+#!/bin/bash
+# mktemp for live replay runs. macOS mktemp prefers the per-user system temp
+# folder (_CS_DARWIN_USER_TEMP_DIR) over TMPDIR, even with -t, so in a run's
+# sandbox `mktemp -d` fails outside the run. This puts a default or -t
+# temp name in $TMPDIR (the run's own tmp) and leaves every other call alone.
+dir="${TMPDIR:-/tmp}"
+dir="${dir%/}"
+args=()
+prefix=""
+named=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -p|-p*|--tmpdir|--tmpdir=*|--) exec /usr/bin/mktemp "${args[@]}" "$@" ;;
+        -t) prefix="$2"; shift 2 ;;
+        -t*) prefix="${1#-t}"; shift ;;
+        -*) args+=("$1"); shift ;;
+        *) args+=("$1"); named=1; shift ;;
+    esac
+done
+if [ -n "$prefix" ]; then
+    exec /usr/bin/mktemp "${args[@]}" "$dir/$prefix.XXXXXXXXXX"
+elif [ "$named" = 0 ]; then
+    exec /usr/bin/mktemp "${args[@]}" "$dir/tmp.XXXXXXXXXX"
+fi
+exec /usr/bin/mktemp "${args[@]}"

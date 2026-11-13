@@ -392,6 +392,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     /// index, so it survives a set being edited; a name the set no longer has
     /// falls back to the hash. nil — the default — is the hashed pick.
     public var characterName: String? = nil
+    /// Host-assigned once; survives pack changes and restarts.
+    public var automaticCharacterIndex: Int? = nil
     public var createdAt: Date
     /// Metadata activity: the store hears this for every runtime event. It is
     /// intentionally not an auto-settle input.
@@ -557,6 +559,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     public var lastReport: AgentFiledReport? = nil
     public var declaredStatus: AgentDeclaredStatus? = nil
     /// Host-only disclosure preference; absent in older records means expanded.
+    public var managedBriefedSessions: Set<String> = []
     public var leadPlanCollapsed: Bool = false
     /// Host observation, transient: never encoded, never conflated with the
     /// agent's declared status. A relaunched watchdog starts a fresh interval.
@@ -1031,7 +1034,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, mode, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
         case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
-        case delegationContext, spawnResultHandle, workspaceToolsEnabled, identityColor, characterName
+        case delegationContext, spawnResultHandle, workspaceToolsEnabled, identityColor, characterName, automaticCharacterIndex
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
         case latestPromptAtReferenceInterval, latestTurnAtReferenceInterval
@@ -1060,7 +1063,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // Confidence pass: the close intent, encoded like every lifecycle date.
         case closeRequestedAtReferenceInterval
         // `.plans/102` P2a: self-filed report and declared status.
-        case lastReport, declaredStatus, leadPlanCollapsed
+        case lastReport, declaredStatus, leadPlanCollapsed, managedBriefedSessions
     }
 
     public init(from decoder: Decoder) throws {
@@ -1109,6 +1112,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         spawnResultHandle = (try? container.decodeIfPresent(String.self, forKey: .spawnResultHandle)) ?? nil
         workspaceToolsEnabled = (try? container.decodeIfPresent(Bool.self, forKey: .workspaceToolsEnabled)) ?? false
         identityColor = (try? container.decodeIfPresent(String.self, forKey: .identityColor)) ?? nil
+        automaticCharacterIndex = (try? container.decodeIfPresent(Int.self, forKey: .automaticCharacterIndex)) ?? nil
+        if let index = automaticCharacterIndex, index < 0 { automaticCharacterIndex = nil }
         characterName = (try? container.decodeIfPresent(String.self, forKey: .characterName)) ?? nil
         parentRelativeOrdinal = try container.decodeIfPresent(Int.self, forKey: .parentRelativeOrdinal)
         nextChildOrdinal = max(1, try container.decodeIfPresent(Int.self, forKey: .nextChildOrdinal) ?? 1)
@@ -1187,6 +1192,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
             Double.self, forKey: .closeRequestedAtReferenceInterval)) ?? nil)
             .map(Date.init(timeIntervalSinceReferenceDate:))
         lastReport = (try? container.decodeIfPresent(AgentFiledReport.self, forKey: .lastReport)) ?? nil
+        managedBriefedSessions = (try? container.decodeIfPresent(Set<String>.self, forKey: .managedBriefedSessions)) ?? []
         leadPlanCollapsed = (try? container.decodeIfPresent(Bool.self, forKey: .leadPlanCollapsed)) ?? false
         declaredStatus = ((try? container.decodeIfPresent(
             AgentDeclaredStatus.Stored.self, forKey: .declaredStatus)) ?? nil)?.status
@@ -1221,6 +1227,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(spawnResultHandle, forKey: .spawnResultHandle)
         if workspaceToolsEnabled { try container.encode(true, forKey: .workspaceToolsEnabled) }
         try container.encodeIfPresent(identityColor, forKey: .identityColor)
+        try container.encodeIfPresent(automaticCharacterIndex, forKey: .automaticCharacterIndex)
         try container.encodeIfPresent(characterName, forKey: .characterName)
         try container.encodeIfPresent(parentRelativeOrdinal, forKey: .parentRelativeOrdinal)
         if nextChildOrdinal != 1 {
@@ -1274,6 +1281,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(closeRequestedAt?.timeIntervalSinceReferenceDate,
                                       forKey: .closeRequestedAtReferenceInterval)
         try container.encodeIfPresent(lastReport, forKey: .lastReport)
+        try container.encode(managedBriefedSessions, forKey: .managedBriefedSessions)
         try container.encode(leadPlanCollapsed, forKey: .leadPlanCollapsed)
         try container.encodeIfPresent(declaredStatus.map(AgentDeclaredStatus.Stored.init), forKey: .declaredStatus)
     }

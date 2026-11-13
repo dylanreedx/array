@@ -360,8 +360,8 @@ public struct AgentCharacterAssignment: Codable, Equatable, Hashable, Sendable {
         self.index = index
     }
 
-    /// The precedence: a manual pick the set has, then lead art for a lead (when
-    /// the set has some), then the helper's place in its lead's pack, then the hash.
+    /// The precedence: a manual pick, then a helper's delegation slot, then
+    /// the stable agent hash. The host controller avoids collisions among leads.
     ///
     /// Helpers take the set's characters in delegation order and wrap only once
     /// they run out. In a set with no lead art the lead keeps a helper character,
@@ -377,10 +377,8 @@ public struct AgentCharacterAssignment: Codable, Equatable, Hashable, Sendable {
         }
         if let index = named(name) { return .init(kind: .helper, index: index) }
         switch role {
-        case let .lead(helpers)?:
-            if let levels = theme.leadSet?.characters.count, helpers > 0 {
-                return .init(kind: .lead, index: min(helpers, levels) - 1)
-            }
+        case .lead?:
+            break
         case let .helper(slot, lead, leadName)?:
             if theme.hasLead { return .init(kind: .helper, index: slot % count) }
             let leadIndex = named(leadName) ?? AgentCharacterConfig.characterIndex(for: lead, count: count)

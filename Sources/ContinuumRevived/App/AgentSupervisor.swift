@@ -7,6 +7,7 @@ import ContinuumRevivedCollaborationProtocol
 import ContinuumRevivedSync
 import Foundation
 import ImageIO
+import os
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.3-agent-supervisor.md
 //
@@ -1043,6 +1044,10 @@ final class AgentSupervisor {
     static let replayCap = 500
 
     private let store: AgentStore
+    private(set) var runLedger: ManagedRunLedger
+    /// The ledger file the Settings usage page reads (never the writer's queue).
+    var runLedgerURL: URL { RunLedgerUsageReader.ledgerURL(applicationSupport: store.layout.applicationSupportDirectory) }
+    var qaRunLedgerRecording = true
     private var wakeupScheduler: AgentWakeupScheduler?
     private var scheduledQueueAdmissions: Set<UUID> = []
     var qaAfterScheduledQueueWrite: (() async -> Void)?
@@ -1067,6 +1072,11 @@ final class AgentSupervisor {
     /// injectable: the checks exercise the failure path with a real failure (a `cwd`
     /// that is not a repository), so a fake would test less than the real thing.
     private let worktrees = WorktreeManager()
+    /// `handleSpawnRequestAsync`: spawns waiting for the one in flight, and the
+    /// main-thread halves of git steps running off it.
+    private var queuedSpawns: [() -> Void] = []
+    private var spawnInFlight = false
+    private var pendingSpawnCommits: [UUID: (Result<SpawnCheckoutPlan.Checkout, any Error>) -> Void] = [:]
     /// P2C.4: the branch each agent's working directory is on. Cached because the
     /// tile header that renders it re-lays out on every streamed token, and a
     /// `git rev-parse` per render is a process launch per token.
@@ -1147,12 +1157,42 @@ final class AgentSupervisor {
 
     /// Plan 110 › lead: tell the character controller who leads and who helps.
     /// The host computes this from its own records; a guest is shipped the result.
+    /// Allocate once from the least-used slots among live roots.
+    private func assignAutomaticCharacter(to record: inout AgentRecord) {
+        guard record.parentAgentID == nil, record.automaticCharacterIndex == nil,
+              let theme = AgentCharacterController.shared.selectedTheme, !theme.characters.isEmpty else { return }
+        let count = theme.characters.count
+        var usage = Array(repeating: 0, count: count)
+        for other in records.values where other.id != record.id && other.parentAgentID == nil && other.archivedAt == nil {
+            let manual = other.characterName.flatMap { AgentCharacterController.index(of: $0, in: theme) }
+            if let index = manual ?? other.automaticCharacterIndex {
+                usage[index % count] += 1
+            }
+        }
+        let leastUsed = usage.min()!
+        var index = AgentCharacterConfig.characterIndex(for: record.id.rawValue, count: count)
+        while usage[index] != leastUsed { index = (index + 1) % count }
+        record.automaticCharacterIndex = index
+    }
+
     func publishCharacterPacks() {
         characterPacksScheduled = false
+        // Legacy records receive a durable slot once, in restore-order-independent order.
+        for id in records.keys.sorted(by: { $0.rawValue.uuidString < $1.rawValue.uuidString }) {
+            guard var record = records[id], record.parentAgentID == nil,
+                  record.automaticCharacterIndex == nil else { continue }
+            assignAutomaticCharacter(to: &record)
+            records[id] = record
+            persist(record)
+        }
+        let indices = Dictionary(uniqueKeysWithValues: records.values.compactMap { record -> (UUID, Int)? in
+            guard record.parentAgentID == nil, let index = record.automaticCharacterIndex else { return nil }
+            return (record.id.rawValue, index)
+        })
         AgentCharacterController.shared.setPacks(AgentCharacterPacks.roles(records.values.map {
             AgentCharacterPacks.Member(id: $0.id.rawValue, parentID: $0.parentAgentID?.rawValue,
                                        ordinal: $0.parentRelativeOrdinal, characterName: $0.characterName)
-        }))
+        }), automaticIndices: indices)
     }
 
     /// CX-01 (`.plans/59`, §15): where a bound runner's host tool request goes.
@@ -1164,7 +1204,29 @@ final class AgentSupervisor {
 
     /// Native Claude/Codex MCP launch material. The app wires this to its
     /// per-agent host listener; nil keeps checks and unmanaged runners inert.
-    var workspaceMCPConfigurationProvider: ((AgentID, AgentHarness) -> WorkspaceMCPConfiguration?)?
+    var workspaceMCPConfigurationProvider: ((AgentID, AgentHarness, _ projectStandards: Bool) -> WorkspaceMCPConfiguration?)?
+    /// Whether each agent's latest launch was offered `array_standards`.
+    /// `workspace.context` reads this rather than the folder, so it agrees
+    /// with the tool list the process actually has.
+    private(set) var standardsOfferedAtLaunch: [AgentID: Bool] = [:]
+
+    /// What a turn's runner is built from. Decides standards presence ONCE
+    /// and hands that one answer to the MCP configuration, Pi's argv and
+    /// environment, and `workspace.context`. The answer was listed off the
+    /// main thread after the last turn or when the agent was made; the
+    /// launch only checks it still holds (`ProjectStandardsPresence`).
+    func runnerLaunch(for id: AgentID, record: AgentRecord) -> AgentRunnerLaunch {
+        let standards = ProjectStandardsPresence.shared.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
+        standardsOfferedAtLaunch[id] = standards
+        var workspaceMCP = workspaceMCPConfigurationProvider?(id, record.harness ?? .pi, standards)
+        // Only Claude reads the always-load pin; a helper is Free and parented.
+        if record.mode == .managed, record.parentAgentID == nil, record.harness == .claudeCode {
+            workspaceMCP = workspaceMCP?.alwaysLoading(ManagedLeadHookState.alwaysLoadedTools)
+        }
+        return AgentRunnerLaunch(record: record, spawnDepth: depth(of: id),
+                                 workspaceMCP: workspaceMCP,
+                                 projectStandards: standards)
+    }
 
     /// CX-01 (§14.1): fired after `setWorkspaceToolsEnabled` persists a change, so
     /// the host grant table can revoke (or start honouring) the agent's policy.
@@ -1373,12 +1435,24 @@ final class AgentSupervisor {
     ) -> Bool {
         if sharedAgentControlGates[id]?.isEmpty == false, sharedInputPermit?.agentID != id { return false }
         guard var record = records[id], runners[id] == nil else { return false }
+        var preferredRunner = preferredRunner
+        // A mode switch applies at the next launch, as in `send`: the idle
+        // process still carries the old mode's tools and hooks.
+        if pendingModeRestarts.contains(id), let idle = idleSessionRunners[id],
+           preferredRunner == nil || preferredRunner === idle {
+            idleSessionRunners[id] = nil
+            idle.stop()
+            interruptWorkingClaudeMirroredChildren(of: id)
+            preferredRunner = nil
+        }
         let runner = preferredRunner
             ?? idleSessionRunners[id]
-            ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id))))
+            ?? makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
         guard let compacting = runner as? AgentCompactionRunning,
               compacting.compactionCapabilities.supportsManual else { return false }
         if idleSessionRunners[id] === runner { idleSessionRunners[id] = nil }
+        pendingModeRestarts.remove(id)
+        runningModes[id] = record.mode
 
         let now = Date()
         let providerName = record.harness?.rawValue ?? "agent"
@@ -1700,7 +1774,19 @@ final class AgentSupervisor {
     /// synchronous UI reads (pending chips). The store is the source of truth;
     /// this cache is refreshed after every mutation this supervisor performs
     /// and hydrated lazily on first read for an agent restored across launch.
-    private var queuedWorkItemsCache: [AgentID: [AgentComposerQueuedWorkItem]] = [:]
+    private var queuedWorkItemsCache: [AgentID: [AgentComposerQueuedWorkItem]] = [:] {
+        // A refresh from the store can land before a cancel's durable removal
+        // does; it must not bring the cancelled item back (`pendingQueueRemovals`).
+        didSet {
+            guard !pendingQueueRemovals.isEmpty else { return }
+            for (id, gone) in pendingQueueRemovals where queuedWorkItemsCache[id]?.contains(where: { gone.contains($0.id) }) == true {
+                queuedWorkItemsCache[id]?.removeAll { gone.contains($0.id) }
+            }
+        }
+    }
+    /// Items removed from memory whose removal from the store has not landed.
+    /// Memory is written first, so a cancel shows at once.
+    private var pendingQueueRemovals: [AgentID: Set<UUID>] = [:]
     private var activeCompactionOperations: Set<AgentID> = []
     private var compactingAgents: Set<AgentID> = []
     private var seenCompactionBoundaryIDs: [AgentID: Set<String>] = [:]
@@ -1825,6 +1911,7 @@ final class AgentSupervisor {
     ) {
         self.idleRunnerTimeout = idleRunnerTimeout
         self.store = store
+        self.runLedger = ManagedRunLedger(support: store.layout.applicationSupportDirectory)
         self.makeRunner = makeRunner
         self.warn = warn
         do { self.companionTaskLedger = try CompanionTaskLedger(applicationSupportDirectory: store.layout.applicationSupportDirectory) }
@@ -1911,15 +1998,23 @@ final class AgentSupervisor {
     /// backend preference and the availability reads are live. The DEFAULT
     /// backend (`.pi`) preserves the shipped native-preferring behaviour exactly.
     nonisolated static func productionRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
+        productionRunner(for: launch, hostInstructions: .shared)
+    }
+
+    /// `productionRunner(for:)` with the host instruction sources injected (checks).
+    nonisolated static func productionRunner(
+        for launch: AgentRunnerLaunch, hostInstructions: HostLaunchInstructions
+    ) -> AgentRunning {
         let record = launch.record
         switch record.harness {
         case .claudeCode:
             return claudeRunner(for: record, workspaceMCP: launch.workspaceMCP,
-                                configDirectory: launch.accountConfigDirectory)
+                                configDirectory: launch.accountConfigDirectory, hostInstructions: hostInstructions,
+                                strictLead: launch.strictLead)
         case .codex:
             return codexRunner(for: record, workspaceMCP: launch.workspaceMCP,
-                               codexHome: launch.accountConfigDirectory)
-        case .pi: return piRunner(for: launch)
+                               codexHome: launch.accountConfigDirectory, hostInstructions: hostInstructions)
+        case .pi: return piRunner(for: launch, hostInstructions: hostInstructions)
         case nil: return RefusingAgentRunner(reason: "This agent has unresolved harness ownership. Choose Claude Code, Codex, or Pi in the agent composer. Help → Environment Setup…")
         }
     }
@@ -1930,8 +2025,11 @@ final class AgentSupervisor {
     /// avoids paying process, resource, extension, and session-resume startup on
     /// every prompt. The one-shot JSON runner remains as an explicit diagnostic
     /// escape hatch (`CONTINUUM_PI_TRANSPORT=oneshot`) and parity baseline.
-    nonisolated static func piRunner(for launch: AgentRunnerLaunch) -> AgentRunning {
-        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth)
+    nonisolated static func piRunner(
+        for launch: AgentRunnerLaunch, hostInstructions: HostLaunchInstructions = .shared
+    ) -> AgentRunning {
+        let config = runnerConfig(for: launch.record, spawnDepth: launch.spawnDepth, hostInstructions: hostInstructions,
+                                  projectStandards: launch.projectStandards)
         guard piSessionTransportEnabled() else {
             return PiAgentRunner(config: config)
         }
@@ -1956,10 +2054,14 @@ final class AgentSupervisor {
     /// The only `ClaudeAgentRunner(` construction in the app, mirroring
     /// `piRunner(for:)` so the same ownership scan can hold for both.
     nonisolated static func claudeRunner(
-        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, configDirectory: String? = nil
+        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, configDirectory: String? = nil,
+        hostInstructions: HostLaunchInstructions = .shared, strictLead: Bool = false
     ) -> AgentRunning {
         var config = claudeRunnerConfig(for: record, workspaceMCP: workspaceMCP)
         config.configDirectory = configDirectory
+        config.strictWriteRoot = strictLead ? record.checkoutRoot : nil
+        // Resolved per process launch, off the main thread (see codexRunnerConfig).
+        config.hostInstructions = { hostInstructions.claudeText() }
         return ClaudeAgentRunner(config: config)
     }
 
@@ -1992,6 +2094,26 @@ final class AgentSupervisor {
         (record.lastObservedWhere, record.providerSessionId ?? claudeSessionId(for: record.id))
     }
 
+    /// The effort a Claude or Codex launch passes. When the CLI's live catalogue
+    /// lists efforts for the record's model, only a listed one is passed; a stored
+    /// value it does not list (stale since delegation, or never offered) is left
+    /// off so the CLI runs at its own default instead of refusing the turn, and
+    /// the drop is logged. With no catalogue data, the exact-match rule
+    /// (`legacy`) applies unchanged.
+    nonisolated static func launchEffort(
+        for record: AgentRecord, harness: AgentHarness, legacy: (String) -> String?
+    ) -> String? {
+        guard let listed = AgentModelCatalog.shared.efforts(for: record.model, harness: harness), !listed.isEmpty else {
+            return legacy(record.thinking)
+        }
+        if listed.contains(record.thinking) { return record.thinking }
+        if legacy(record.thinking) != nil {
+            Logger(subsystem: "continuum.agents", category: "effort").notice(
+                "agent \(record.id.rawValue.uuidString, privacy: .public): effort \(record.thinking, privacy: .public) is not listed for \(record.model, privacy: .public); launching at the CLI default")
+        }
+        return nil
+    }
+
     nonisolated static func claudeRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> ClaudeAgentRunner.Config {
         // B7.2 — a pending `/clear` rotation overrides the normal sessionId
         // choice entirely: this ONE launch resumes-and-forks the OLD session
@@ -2003,7 +2125,7 @@ final class AgentSupervisor {
             return ClaudeAgentRunner.Config(
                 model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
                 mode: record.mode,
-                effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+                effort: launchEffort(for: record, harness: .claudeCode, legacy: ClaudeCLIBackend.effortArgument(forThinking:)),
                 cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
                 sessionId: forkFrom,
                 forkSession: true,
@@ -2015,7 +2137,7 @@ final class AgentSupervisor {
         return ClaudeAgentRunner.Config(
             model: ClaudeCLIBackend.modelArgument(forCatalogId: record.model),
             mode: record.mode,
-            effort: ClaudeCLIBackend.effortArgument(forThinking: record.thinking),
+            effort: launchEffort(for: record, harness: .claudeCode, legacy: ClaudeCLIBackend.effortArgument(forThinking:)),
             cwd: URL(fileURLWithPath: location.cwd, isDirectory: true),
             sessionId: location.sessionId,
             // An agent that has never had a turn cannot have a conversation to
@@ -2031,9 +2153,10 @@ final class AgentSupervisor {
     /// The only `CodexAgentRunner(` construction in the app, mirroring
     /// `claudeRunner(for:)` so the same ownership scan holds for all three.
     nonisolated static func codexRunner(
-        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, codexHome: String? = nil
+        for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, codexHome: String? = nil,
+        hostInstructions: HostLaunchInstructions = .shared
     ) -> AgentRunning {
-        var config = codexRunnerConfig(for: record, workspaceMCP: workspaceMCP)
+        var config = codexRunnerConfig(for: record, workspaceMCP: workspaceMCP, hostInstructions: hostInstructions)
         config.codexHome = codexHome
         return CodexAgentRunner(config: config)
     }
@@ -2043,15 +2166,19 @@ final class AgentSupervisor {
     /// `model_reasoning_effort` only on exact match, and — the one difference
     /// from claude — continuity is STORED: `record.codexThreadId` (nil ⇒ fresh)
     /// is read back so a later turn resumes the same codex thread.
-    nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> CodexAgentRunner.Config {
-        CodexAgentRunner.Config(
+    nonisolated static func codexRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil, hostInstructions: HostLaunchInstructions = .shared) -> CodexAgentRunner.Config {
+        var config = CodexAgentRunner.Config(
             model: CodexCLIBackend.modelArgument(forCatalogId: record.model),
-            effort: CodexCLIBackend.effortArgument(forThinking: record.thinking),
+            effort: launchEffort(for: record, harness: .codex, legacy: CodexCLIBackend.effortArgument(forThinking:)),
             cwd: URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true),
             threadId: record.codexThreadId,
             workspaceMCP: workspaceMCP,
             processOwner: AgentProcessAttribution.ownerTag(for: record.id)
         )
+        // Resolved per process launch, off the main thread: the rules file and
+        // the user's Codex setting are read then, never when the runner is built.
+        config.launchArguments = { hostInstructions.codexArguments($0) }
+        return config
     }
 
     /// What the production runner is built with. Split out of `piRunner(for:)` so the
@@ -2069,7 +2196,8 @@ final class AgentSupervisor {
     /// defaulted parameter is exactly how that happened once; it does not get a
     /// second chance.
     nonisolated static func runnerConfig(
-        for record: AgentRecord, spawnDepth: Int
+        for record: AgentRecord, spawnDepth: Int, hostInstructions: HostLaunchInstructions = .shared,
+        projectStandards: Bool = false
     ) -> PiAgentRunner.Config {
         let cwd = URL(fileURLWithPath: record.lastObservedWhere, isDirectory: true)
         // `model`/`thinking` come from the RECORD: the role already decided them at
@@ -2078,7 +2206,7 @@ final class AgentSupervisor {
         // read live, and via `toolsArguments` rather than `resolve` (cross-review):
         // resolving would also validate the role's model/reasoning, so a typo in a
         // field this call ignores would silently drop the agent's `--tools`.
-        return PiAgentRunner.Config(
+        var config = PiAgentRunner.Config(
             model: record.model,
             thinking: record.thinking,
             cwd: cwd,
@@ -2099,10 +2227,15 @@ final class AgentSupervisor {
             // refusing after the fact: it never proposes what it cannot have.
             extraArgs: record.role.map {
                 RoleRegistry(projectRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
-                    .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth)
+                    .toolsArguments(roleId: $0, allowingSpawn: spawnDepth < Self.maxSpawnDepth,
+                                    projectStandards: projectStandards)
             } ?? [],
-            processOwner: AgentProcessAttribution.ownerTag(for: record.id)
+            processOwner: AgentProcessAttribution.ownerTag(for: record.id),
+            projectStandards: projectStandards
         )
+        // Resolved per process launch, off the main thread (see codexRunnerConfig).
+        config.launchArguments = { hostInstructions.piArguments($0) }
+        return config
     }
 
     // MARK: - Host-local Home / Where / What (Queue 91 P2)
@@ -2261,6 +2394,18 @@ final class AgentSupervisor {
             runtimeObservationObservers[id]?.values.forEach { $0(observation) }
             return
         }
+        // `.plans/116` gap 20: a Managed lead's OWN shell call, seen on its
+        // own side channel. One enqueue; git runs on the ledger's queue.
+        // An end names the call, not always the tool; the ledger ignores ends
+        // of calls it never saw start.
+        if qaRunLedgerRecording, case let .toolDetail(call, detail) = observation, effectiveMode(for: id) == .managed {
+            if detail.phase == .started, AgentToolKind.resolve(toolName: detail.toolName) == .shell {
+                runLedger.leadShellStarted(agent: id.rawValue, call: call, root: record.checkoutRoot,
+                                           busy: sharedCheckoutBusy(besides: record))
+            } else if detail.phase == .ended {
+                runLedger.leadShellEnded(agent: id.rawValue, call: call, busy: sharedCheckoutBusy(besides: record))
+            }
+        }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -2268,6 +2413,17 @@ final class AgentSupervisor {
         // immutable agent ID; no raw runtime payload or path enters the event log.
         sharedTranscriptDetails[id]?.captureRuntimeObservation(observation)
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
+    }
+
+    /// Whether another agent on this record's checkout is running now. Path
+    /// text only, no filesystem access: a shared checkout is handed out as the
+    /// lead's own path.
+    private func sharedCheckoutBusy(besides record: AgentRecord) -> Bool {
+        let root = URL(fileURLWithPath: record.checkoutRoot).standardizedFileURL.path
+        return records.values.contains { other in
+            other.id != record.id && isRunning(other.id)
+                && URL(fileURLWithPath: other.checkoutRoot).standardizedFileURL.path == root
+        }
     }
 
     /// The account quota for the account this agent is spending, or nil when
@@ -2468,7 +2624,16 @@ final class AgentSupervisor {
         runnerAccounts[id] = active
         var signed = launch
         signed.accountConfigDirectory = active.configDirectory
+        signed.strictLead = strictDecision(for: launch.record)
+        launchedStrict[id] = signed.strictLead
         return signed
+    }
+
+    /// What a launch of this record would decide now (`ManagedStrictLead`).
+    private var launchedStrict: [AgentID: Bool] = [:]
+    private func strictDecision(for record: AgentRecord) -> Bool {
+        record.harness == .claudeCode && record.parentAgentID == nil && record.mode == .managed
+            && ManagedStrictLead.isEnabled(defaults: managedModeDefaults)
     }
 
     private func folder(of account: AgentAccount) -> URL {
@@ -2901,9 +3066,13 @@ final class AgentSupervisor {
         reconcileManagedMode()
         restoreHelperMessageSubscriptions()
         settleHelpersCutOffByRestart()
+        for root in Set(records.values.map(\.checkoutRoot)) {
+            ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
+        }
         // The first flush reads each lead's journal once: staged and held rows
         // from the previous launch are rebuilt there.
         Task { @MainActor [weak self] in await self?.flushHelperCompletions() }
+        publishCharacterPacks()
         return report
     }
 
@@ -3096,19 +3265,24 @@ final class AgentSupervisor {
         checkoutOverride: URL? = nil,
         managedIsolation: Bool = false,
         isolationTitle: String? = nil,
-        baseHead: String? = nil
+        baseHead: String? = nil,
+        id mintedID: AgentID? = nil,
+        preparedWorktree: WorktreeManager.Worktree? = nil,
+        namingText: String? = nil
     ) throws -> AgentID {
         // The id is minted HERE, before anything is created, because the slug is
         // derived from it — `WorktreeManager.slug` id-suffixes so two agents given the
         // same role and prompt do not land on one directory and one branch.
-        let id = AgentID(rawValue: UUID())
+        // `handleSpawnRequest` mints it earlier and passes the worktree it made
+        // with that slug off the main thread.
+        let id = mintedID ?? AgentID(rawValue: UUID())
         let logicalProjectRoot = projectRoot ?? cwd
         var checkoutRoot = checkoutOverride ?? projectRoot ?? cwd
         var workingDirectory = cwd
         var branch: String?
         var worktreeId: String?
         if isolated {
-            let worktree = try worktrees.add(
+            let worktree = try preparedWorktree ?? worktrees.add(
                 repo: checkoutOverride ?? logicalProjectRoot,
                 slug: WorktreeManager.slug(role: role, prompt: managedIsolation ? (isolationTitle ?? prompt) : prompt, id: id),
                 containerRepo: managedIsolation ? try worktrees.list(repo: checkoutOverride ?? logicalProjectRoot).first?.path : nil,
@@ -3142,7 +3316,8 @@ final class AgentSupervisor {
             parentAgentID: parentAgentID,
             sourceItemId: sourceItemId,
             tileId: tileId,
-            displayName: displayName
+            displayName: displayName,
+            namingText: namingText
         )
     }
 
@@ -3164,7 +3339,8 @@ final class AgentSupervisor {
         parentAgentID: AgentID? = nil,
         sourceItemId: String? = nil,
         tileId: UUID?,
-        displayName: String? = nil
+        displayName: String? = nil,
+        namingText: String? = nil
     ) -> AgentID {
         // Retain the old internal argument for callers; Settings owns the policy.
         let mode = targetMode(harness: harness, parent: parentAgentID)
@@ -3244,13 +3420,21 @@ final class AgentSupervisor {
             }
             // CX-01 (§14.1): the Settings default seeds NEW agents only.
             record.workspaceToolsEnabled = WorkspaceToolsConfig.enabledForNewAgents(workspaceToolsPermission())
+            assignAutomaticCharacter(to: &record)
             records[id] = record
             persist(record)
         }
+        publishCharacterPacks()
+        if let root = records[id]?.checkoutRoot {
+            ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
+        }
         if let prompt, !prompt.isEmpty {
             if let parentAgentID {
+                // A delegated child is named by its task, never by what Array
+                // appends to it (a contract, a retry handoff, the report line).
                 _ = sendPrepared(PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: id), to: id,
-                                 taskParent: companionParentRun(for: parentAgentID))
+                                 taskParent: companionParentRun(for: parentAgentID),
+                                 sharedInputPermit: namingText.map { .init(agentID: id, namingText: $0) })
             } else { send(prompt, to: id) }
         } else {
             applyDerivedNameIfNeeded(to: id, firstPrompt: nil)
@@ -3292,7 +3476,12 @@ final class AgentSupervisor {
                     warn("AgentSupervisor: cannot reserve a child ordinal; parent \(parentAgentID.rawValue.uuidString) is absent from AgentStore")
                     return nil
                 }
-                let durableChildren = try store.loadAll()
+                // Children this supervisor holds, plus any record on disk it
+                // does not (another restored supervisor's). Decoding every
+                // record here was 15% of the main thread per delegation with
+                // 2,228 agents (2026-11-12); a child's parent and ordinal never
+                // change after it is written, so the in-memory copy is current.
+                let durableChildren = try (Array(records.values) + store.loadAll(skipping: Set(records.keys)))
                     .filter { $0.parentAgentID == parentAgentID }
                     .compactMap(\.parentRelativeOrdinal)
                     .filter { $0 > 0 }
@@ -3675,15 +3864,18 @@ final class AgentSupervisor {
         // once per turn — not on any per-delta path.
         let runner: AgentRunning
         if let idle = idleSessionRunners.removeValue(forKey: id) {
-            if idle.canAcceptAnotherTurn && !pendingModeRestarts.contains(id) {
+            // A strict-lead toggle since this runner launched restarts it, so
+            // the switch applies at the next turn, never "at some later launch".
+            if idle.canAcceptAnotherTurn && !pendingModeRestarts.contains(id)
+                && launchedStrict[id, default: false] == strictDecision(for: record) {
                 runner = idle
             } else {
                 idle.stop()
                 interruptWorkingClaudeMirroredChildren(of: id)
-                runner = makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
+                runner = makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
             }
         } else {
-            runner = makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: id), workspaceMCP: workspaceMCPConfigurationProvider?(id, record.harness ?? .pi))))
+            runner = makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
         }
         pendingModeRestarts.remove(id)
         runningModes[id] = record.mode
@@ -3857,6 +4049,18 @@ final class AgentSupervisor {
                           self.runnerGenerationTokens[id] == runnerGeneration,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner else { return }
                     self.handleProviderSubagentActivity(activity, rootAgentID: id)
+                }
+            }
+        }
+        // `.plans/116` gap 9: usage a provider reports after its turn ended and
+        // the run returned. It names its turn, so the ledger charges that
+        // turn's task; no generation gate, and it reaches nothing but the ledger.
+        if let reporting = runner as? TrailingUsageReporting {
+            reporting.observeTrailingUsage { [weak self] snapshot in
+                DispatchQueue.main.async {
+                    guard let self, self.qaRunLedgerRecording, let record = self.records[id] else { return }
+                    self.runLedger.usage(agent: id.rawValue, Self.usageIdentity(record), snapshot,
+                                         record: AgentTokenTelemetryConfig.enabled(defaults: self.managedModeDefaults))
                 }
             }
         }
@@ -4118,7 +4322,23 @@ final class AgentSupervisor {
         if waitsForSessionDiscovery(record) {
             return "Checking whether another app has this session open first."
         }
+        if let writer = otherHelperWriting(checkoutOf: record) {
+            return "\(writer) is writing this checkout now. Send again once it finishes, or delegate a new helper, which gets its own worktree."
+        }
         return Self.sendRefusal(record: record)
+    }
+
+    /// A Managed lead's helper sharing a checkout with a sibling helper that
+    /// is running: a new turn here would make two writers. Its name, or nil.
+    /// Only a helper that has finished a turn: a first turn is the delegation's
+    /// to place. Outside git the helpers were told they share: allowed.
+    private func otherHelperWriting(checkoutOf record: AgentRecord) -> String? {
+        guard let parent = record.parentAgentID, records[parent]?.mode == .managed, runners[record.id] == nil,
+              record.latestTerminalEvent != nil, record.delegationContext?.checkoutNotice == nil else { return nil }
+        return records.values.first {
+            $0.id != record.id && $0.parentAgentID == parent && $0.capabilities != .observedReadOnly
+                && $0.checkoutRoot == record.checkoutRoot && $0.delegationContext?.checkoutNotice == nil && isRunning($0.id)
+        }?.humanDisplayName
     }
 
     /// The rule itself, over a record and a catalogue — pure enough to pin every
@@ -4589,7 +4809,13 @@ final class AgentSupervisor {
         var processOwner: String
         /// `sessionId` is a pending fork's source: the face forks it.
         var forkSession: Bool
+        /// Array's host text, as the managed runner's launch carries it. Read
+        /// at each flip, so a changed switch reaches the next one.
+        var hostText: String?
     }
+
+    /// The Terminal face's host text. Injected by the checks.
+    var terminalFaceHostText: @Sendable () -> String? = { HostLaunchInstructions.shared.claudeText() }
 
     func isInTerminalFace(_ id: AgentID) -> Bool { terminalFaceAgents.contains(id) }
 
@@ -4673,7 +4899,8 @@ final class AgentSupervisor {
             effort: config.effort,
             conversationExists: config.conversationMayExist,
             processOwner: AgentProcessAttribution.ownerTag(for: id),
-            forkSession: config.forkSession)
+            forkSession: config.forkSession,
+            hostText: terminalFaceHostText())
     }
 
     /// The Terminal face let go. What it learned comes back to the record: the
@@ -5779,6 +6006,13 @@ final class AgentSupervisor {
         records[childID] = child
         persist(child)
         bindCompanionObservedChild(childID, parentID: parentId, sourceID: toolUseID)
+        // `.plans/116` gap 6: the harness started this child, so Array never saw
+        // a delegation. Recorded once, at minting, under its parent's open task,
+        // before its own turn events replay below.
+        if qaRunLedgerRecording {
+            runLedger.delegated(parent: parentId.rawValue, child: childID.rawValue,
+                                source: "harness/\(childID.rawValue)", via: "harness")
+        }
         // Anything that arrived before the record existed replays now, in order.
         flushPendingSubagentEvents(for: childID)
         deliver(.childAgentSpawned(
@@ -5808,45 +6042,138 @@ final class AgentSupervisor {
     ///
     /// Returns nil on a refusal, having said so in the parent's transcript.
     @discardableResult
-    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil) -> AgentID? {
+    func handleSpawnRequest(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil, contract: AgentDelegationContract? = nil) -> AgentID? {
+        var outcome = SpawnOutcome.refused
+        startSpawn(request, from: parentId, childSelection: childSelection, mode: mode, retryOf: retryOf,
+                   originalBrief: originalBrief, contract: contract, checkoutOffMain: false, gate: { nil }) { outcome = $0 }
+        if case let .spawned(id) = outcome { return id }
+        return nil
+    }
+
+    /// What became of a spawn that answers later.
+    enum SpawnOutcome: Equatable {
+        case spawned(AgentID)
+        /// Refused, said on the parent's stream; `spawnRefusal(for:)` has why.
+        case refused
+        /// The caller's gate closed before the child was created: nothing exists.
+        case gateClosed(String)
+    }
+
+    /// `handleSpawnRequest` with its git step (`rev-parse HEAD`, and `worktree
+    /// add` when the child is isolated) off the main thread. Delegating a helper
+    /// ran both there and blocked Array for about a second (2026-11-12 profile).
+    ///
+    /// Validation runs first, on main; the child is created back on main, after
+    /// `gate` (nil = go on) re-checks what the caller checked before the git step:
+    /// a cancelled or revoked request creates nothing. Spawns through here run one
+    /// at a time in arrival order, so each sees every earlier child, as the
+    /// synchronous path did. `completion` runs once, on main.
+    ///
+    /// `checkoutOffMain: false` runs the same steps inline and answers before
+    /// returning (the synchronous `WorkspaceAPIService.dispatch` used by checks).
+    func handleSpawnRequestAsync(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection? = nil, mode: AgentMode = .free, retryOf: AgentID? = nil, originalBrief: String? = nil, contract: AgentDelegationContract? = nil, checkoutOffMain: Bool = true, gate: @escaping () -> String?, completion: @escaping (SpawnOutcome) -> Void) {
+        guard checkoutOffMain else {
+            return startSpawn(request, from: parentId, childSelection: childSelection, mode: mode, retryOf: retryOf,
+                              originalBrief: originalBrief, contract: contract, checkoutOffMain: false, gate: gate, completion: completion)
+        }
+        queuedSpawns.append { [weak self] in
+            guard let self else { return }
+            self.startSpawn(request, from: parentId, childSelection: childSelection, mode: mode, retryOf: retryOf,
+                            originalBrief: originalBrief, contract: contract, checkoutOffMain: true, gate: gate) { [weak self] outcome in
+                completion(outcome)
+                self?.spawnInFlight = false
+                self?.runNextQueuedSpawn()
+            }
+        }
+        runNextQueuedSpawn()
+    }
+
+    private func runNextQueuedSpawn() {
+        guard !spawnInFlight, !queuedSpawns.isEmpty else { return }
+        spawnInFlight = true
+        queuedSpawns.removeFirst()()
+    }
+
+    /// The git half of a spawn. Sendable and main-actor free, so it can run on
+    /// any queue; it reads nothing of the supervisor.
+    struct SpawnCheckoutPlan: Sendable {
+        let headRepo: URL
+        let requestIsolated: Bool
+        let overlapping: Bool
+        let worktreeRepo: URL
+        let slug: String
+
+        struct Checkout: Sendable {
+            var baseHead: String?
+            var isolate: Bool
+            var notice: String?
+            var worktree: WorktreeManager.Worktree?
+        }
+
+        func resolve(with worktrees: WorktreeManager) throws -> Checkout {
+            var checkout = Checkout(isolate: requestIsolated || overlapping)
+            do { checkout.baseHead = try worktrees.head(repo: headRepo) }
+            catch WorktreeManager.WorktreeError.invalidRepository {
+                if overlapping && !requestIsolated {
+                    checkout.isolate = false
+                    checkout.notice = "Shared checkout: not a git repository; concurrent helper isolation unavailable."
+                }
+            }
+            catch { if checkout.isolate { throw error } }
+            // A git repository with no HEAD or another git failure is not a
+            // non-git fallback. Creation must fail rather than silently share it.
+            if checkout.isolate {
+                checkout.worktree = try worktrees.add(
+                    repo: worktreeRepo, slug: slug,
+                    containerRepo: overlapping ? try worktrees.list(repo: worktreeRepo).first?.path : nil,
+                    baseRef: checkout.baseHead)
+            }
+            return checkout
+        }
+    }
+
+    private func startSpawn(_ request: SpawnRequest, from parentId: AgentID, childSelection: AgentLaunchSelection?, mode: AgentMode, retryOf: AgentID?, originalBrief: String?, contract: AgentDelegationContract?, checkoutOffMain: Bool, gate: @escaping () -> String?, completion: @escaping (SpawnOutcome) -> Void) {
+        func answer(_ id: AgentID?) {
+            completion(id.map(SpawnOutcome.spawned) ?? .refused)
+        }
         guard let parent = records[parentId] else {
-            return refuseSpawn(.unknownParent, for: parentId)
+            return answer(refuseSpawn(.unknownParent, for: parentId))
         }
         // C7: an OBSERVED child is not a spawn at all. claude has already started
         // it inside itself by the time the `Agent` call reaches us, so there is
         // nothing to launch — only a record to mint so the child's own frames have
         // somewhere to land and the parent gets a chip.
         if request.observedOnly {
-            return adoptObservedChild(request, from: parentId, parent: parent)
+            return answer(adoptObservedChild(request, from: parentId, parent: parent))
         }
         // C12 — a mirrored subagent has no runner behind it at all: refuse before
         // even asking what harness it claims, since that field describes who
         // PRODUCED it, not something Array can spawn through.
         guard parent.capabilities != .observedReadOnly else {
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .observedParentCannotSpawn, for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         guard let parentHarness = parent.harness else {
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: parent harness ownership is unresolved")
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .roleUnresolved, for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         // A codex parent is no longer refused here (T4b): a non-observed request
         // from one is its `array_delegate` over MCP, a child Array runs itself.
         // Codex-RUN subagents arrive `observedOnly` and were adopted above.
         let depth = depth(of: parentId) + 1
         guard depth <= Self.maxSpawnDepth else {
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .depthCapped(depth: depth, cap: Self.maxSpawnDepth), for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         let activeChildren = activeManagedChildren(of: parentId).count
         if let cap = maximumActiveManagedChildren(), activeChildren >= cap {
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .childCapped(children: activeChildren, cap: cap), for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         // The role resolves against the PROJECT's registry, not the parent's possibly
         // isolated checkout — and after the caps, so a request that was going to be
@@ -5858,10 +6185,10 @@ final class AgentSupervisor {
         // requested role is not defined" invites reading it as one. Checked before
         // `resolve`, because resolve cannot tell the two apart.
         if request.role != nil, registry.definesNoRoles {
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .projectDeclaresNoRoles(directory: RoleRegistry.directoryName(for: parentHarness)),
                 for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
         do {
             resolvedRole = try registry.resolve(
@@ -5870,37 +6197,100 @@ final class AgentSupervisor {
             )
         } catch {
             warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
-            return refuseSpawn(
+            return answer(refuseSpawn(
                 .roleUnresolved, for: parentId,
-                handle: request.sourceItemID, requestedRole: request.role)
+                handle: request.sourceItemID, requestedRole: request.role))
         }
-        do {
-            let managed = parent.mode == .managed
-            let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
-            let overlapping = managed && records.values.contains {
-                $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
-                    && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
-                    && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)
+        let managed = parent.mode == .managed
+        let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
+        let overlapping = managed && records.values.contains {
+            $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
+                && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
+                && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)
+        }
+        // The id is minted before the git step because the worktree slug is
+        // derived from it (see `spawn`).
+        let childID = AgentID(rawValue: UUID())
+        // The child's task is the parent's words, so it reaches the child as a
+        // message from the parent, never as the user's prompt.
+        let childPrompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? request.prompt : agentMessageText(request.prompt, from: parentId)
+        let isolationTitle = request.displayLabel ?? originalBrief ?? request.prompt
+        let plan = SpawnCheckoutPlan(
+            headRepo: managed ? checkout : projectRoot,
+            requestIsolated: request.isolated,
+            overlapping: overlapping,
+            worktreeRepo: managed ? checkout : projectRoot,
+            slug: WorktreeManager.slug(
+                role: request.role, prompt: overlapping ? isolationTitle : childPrompt, id: childID))
+
+        let commit: (Result<SpawnCheckoutPlan.Checkout, any Error>) -> Void = { [weak self] resolution in
+            guard let self else { return }
+            let checkoutResult: SpawnCheckoutPlan.Checkout
+            do { checkoutResult = try resolution.get() } catch {
+                // The isolated spawn refuses to fall back to the shared checkout (P2C.2),
+                // so a failed worktree is a failed spawn — reported, not downgraded.
+                self.warn("AgentSupervisor.handleSpawnRequest: child of \(parentId.rawValue.uuidString) not spawned: \(error)")
+                return answer(self.refuseSpawn(
+                    .worktreeFailed, for: parentId,
+                    handle: request.sourceItemID, requestedRole: request.role))
             }
-            var isolate = request.isolated || overlapping
-            var notice: String?
-            var baseHead: String?
-            do { baseHead = try worktrees.head(repo: managed ? checkout : projectRoot) }
-            catch WorktreeManager.WorktreeError.invalidRepository {
-                if overlapping && !request.isolated {
-                    isolate = false
-                    notice = "Shared checkout: not a git repository; concurrent helper isolation unavailable."
+            if let closed = gate() {
+                self.discard(checkoutResult.worktree, repo: plan.worktreeRepo)
+                return completion(.gateClosed(closed))
+            }
+            if checkoutOffMain {
+                // Main ran other work during the git step: the parent may be gone
+                // and a synchronous spawn may have taken the last child slot.
+                guard self.records[parentId] != nil else {
+                    self.discard(checkoutResult.worktree, repo: plan.worktreeRepo)
+                    return answer(self.refuseSpawn(.unknownParent, for: parentId))
+                }
+                let active = self.activeManagedChildren(of: parentId).count
+                if let cap = self.maximumActiveManagedChildren(), active >= cap {
+                    self.discard(checkoutResult.worktree, repo: plan.worktreeRepo)
+                    return answer(self.refuseSpawn(
+                        .childCapped(children: active, cap: cap), for: parentId,
+                        handle: request.sourceItemID, requestedRole: request.role))
                 }
             }
-            catch { if isolate { throw error } }
-            // A git repository with no HEAD or another git failure is not a
-            // non-git fallback. Creation must fail rather than silently share it.
+            answer(self.commitSpawn(
+                request, from: parentId, parent: parent, parentHarness: parentHarness,
+                childID: childID, childPrompt: childPrompt, childSelection: childSelection,
+                resolvedRole: resolvedRole, mode: mode, retryOf: retryOf, originalBrief: originalBrief, contract: contract,
+                managed: managed, checkout: checkout, projectRoot: projectRoot,
+                overlapping: overlapping, isolationTitle: isolationTitle, resolved: checkoutResult))
+        }
+        let worktrees = self.worktrees
+        guard checkoutOffMain else {
+            return commit(Result { try plan.resolve(with: worktrees) })
+        }
+        let token = UUID()
+        pendingSpawnCommits[token] = commit
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let resolution = Result { try plan.resolve(with: worktrees) }
+            DispatchQueue.main.async {
+                self?.pendingSpawnCommits.removeValue(forKey: token)?(resolution)
+            }
+        }
+    }
+
+    /// A worktree made for a child that was then not created. Its branch has no
+    /// commits, so removing both loses nothing. Off main, like its creation.
+    private func discard(_ worktree: WorktreeManager.Worktree?, repo: URL) {
+        guard let worktree else { return }
+        let worktrees = self.worktrees
+        DispatchQueue.global(qos: .utility).async {
+            try? worktrees.remove(repo: repo, path: worktree.path, force: true)
+            if let branch = worktree.branch { try? worktrees.deleteBranch(repo: repo, branch: branch) }
+        }
+    }
+
+    private func commitSpawn(_ request: SpawnRequest, from parentId: AgentID, parent: AgentRecord, parentHarness: AgentHarness, childID mintedID: AgentID, childPrompt: String, childSelection: AgentLaunchSelection?, resolvedRole: RoleRegistry.Resolution, mode: AgentMode, retryOf: AgentID?, originalBrief: String?, contract: AgentDelegationContract?, managed: Bool, checkout: URL, projectRoot: URL, overlapping: Bool, isolationTitle: String, resolved: SpawnCheckoutPlan.Checkout) -> AgentID? {
+        do {
             let childID = try spawn(
                 role: request.role,
-                // The child's task is the parent's words, so it reaches the
-                // child as a message from the parent, never as the user's prompt.
-                prompt: request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? request.prompt : agentMessageText(request.prompt, from: parentId),
+                prompt: childPrompt,
                 cwd: managed ? URL(fileURLWithPath: parent.cwd, isDirectory: true) : projectRoot,
                 harness: childSelection?.harness ?? parentHarness,
                 mode: mode,
@@ -5910,16 +6300,19 @@ final class AgentSupervisor {
                 projectRoot: projectRoot,
                 homeRelativePath: managed ? parent.homeRelativePath : nil,
                 parentAgentID: parentId,
-                isolated: isolate,
+                isolated: resolved.isolate,
                 checkoutOverride: managed ? checkout : nil,
                 managedIsolation: overlapping,
-                isolationTitle: request.displayLabel ?? originalBrief ?? request.prompt,
-                baseHead: isolate ? baseHead : nil
+                isolationTitle: isolationTitle,
+                baseHead: resolved.isolate ? resolved.baseHead : nil,
+                id: mintedID,
+                preparedWorktree: resolved.worktree,
+                namingText: originalBrief
             )
             guard var spawned = records[childID] else { return nil }
             spawned.delegationContext = AgentDelegationContext(
-                brief: originalBrief ?? request.prompt, baseHead: baseHead, retryOf: retryOf,
-                createdWorktree: overlapping && isolate, checkoutNotice: notice)
+                brief: originalBrief ?? request.prompt, baseHead: resolved.baseHead, retryOf: retryOf,
+                createdWorktree: overlapping && resolved.isolate, checkoutNotice: resolved.notice, contract: contract)
             records[childID] = spawned
             persist(spawned)
             // The child record remembers the tool call that asked for it, so its
@@ -6040,9 +6433,74 @@ final class AgentSupervisor {
     /// A "no progress" alert waiting in its lead's queue. Stopping the helper
     /// withdraws it, so the lead never spends a turn on news already stale.
     private var queuedHelperAlerts: [AgentID: (parent: AgentID, messageID: UUID)] = [:]
+    /// Alerts being queued right now. A withdraw in that moment removes the
+    /// helper here, and the alert is cancelled the moment it lands.
+    private var helperAlertsInFlight: Set<AgentID> = []
+    /// Each helper's liveness as of the last sweep (or the progress that ended
+    /// a quiet spell). In memory; `agent.inspect` reports it.
+    private(set) var helperLiveness: [AgentID: HelperLivenessFact] = [:]
+    /// Quiet this long, with nothing running, reads as stalled. Classifies only.
+    var helperLivenessQuietAfter = HelperLiveness.defaultQuietAfter
+    /// With `AgentManagedModeConfig.stallAlertsKey` on, a lead hears once its
+    /// stalled helper has gone this long without progress. Informs only.
+    static let defaultHelperStallAlertAfter: TimeInterval = 3 * 60
+    var helperStallAlertAfter = AgentSupervisor.defaultHelperStallAlertAfter
+    /// With the switch on, waiting on a process or tool call is not a stall,
+    /// but waiting this long without progress is worth one message. Informs only.
+    static let defaultHelperWaitCeiling: TimeInterval = 30 * 60
+    var helperWaitCeiling = AgentSupervisor.defaultHelperWaitCeiling
+    private static let stallClock: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+    static func stallClockText(_ date: Date) -> String { stallClock.string(from: date) }
+
+    /// The one place a helper's liveness is written. A run ledger would append
+    /// a transition here, when `state` differs from the stored one.
+    private func recordHelperLiveness(_ id: AgentID, _ state: HelperLiveness, lastProgressAt: Date,
+                                      liveChildren: Int, openToolCalls: Int, subHelpers: Int = 0,
+                                      detail: String? = nil, now: Date) {
+        let since = helperLiveness[id].flatMap { $0.state == state ? $0.since : nil } ?? now
+        helperLiveness[id] = HelperLivenessFact(state: state, since: since, lastProgressAt: lastProgressAt,
+                                                liveChildren: liveChildren, openToolCalls: openToolCalls,
+                                                subHelpers: subHelpers, detail: detail)
+    }
+
+    /// In a turn or not, and what keeps a helper busy without a tool: one
+    /// turn snapshot, the same owner `presenceRowStatus` reads.
+    private func helperTurnState(_ id: AgentID) -> (status: AgentStatus?, busy: String?) {
+        let state = turnSnapshot(for: id)?.state
+        let status: AgentStatus?
+        var busy: String?
+        switch state {
+        case .starting?: status = .working; busy = "starting"
+        case .compacting?: status = .working; busy = "compacting"
+        case .queued?: status = .working; busy = "queued"
+        case .working?: status = .working
+        case .needsAction?: status = .needsAttention
+        case .ready?, .failed?, .restored?, nil: status = nil
+        }
+        if status == .working, turnFacts[id]?.presence.retry != nil { busy = "retrying" }
+        return (status, busy)
+    }
+
+    /// One word for a process: its command's first word, never its arguments.
+    private static func firstWord(_ text: String?) -> String? {
+        guard let word = text?.split(whereSeparator: \.isWhitespace).first else { return nil }
+        let name = URL(fileURLWithPath: String(word)).lastPathComponent
+        return name.isEmpty ? nil : String(name.prefix(40))
+    }
+
+    /// The parent a helper reports to: its delegator, else whoever messaged it.
+    private func helperParent(_ id: AgentID) -> AgentID? {
+        records[id]?.parentAgentID ?? helperMessageSubscriptions[id]?.first?.parent
+    }
 
     private func withdrawQueuedHelperAlert(_ id: AgentID) {
         pendingHelperAlerts[id] = nil
+        helperAlertsInFlight.remove(id)
         guard let queued = queuedHelperAlerts.removeValue(forKey: id),
               queuedMessages(for: queued.parent).contains(where: { $0.id == queued.messageID }) else { return }
         cancelQueuedMessage(queued.messageID, for: queued.parent)
@@ -6057,8 +6515,24 @@ final class AgentSupervisor {
 
     private func noteHelperProgress(_ id: AgentID, last: String) {
         guard !helperParents(id).isEmpty else { return }
-        helperProgress[id] = HelperProgress(at: helperWatchdogNow(), last: last, status: presenceRowStatus(for: id))
+        let now = helperWatchdogNow()
+        let turn = helperTurnState(id)
+        helperProgress[id] = HelperProgress(at: now, last: last, status: turn.status)
         pendingHelperAlerts[id] = nil
+        // With the switch on, news already stale leaves the lead's queue.
+        if queuedHelperAlerts[id] != nil || helperAlertsInFlight.contains(id),
+           AgentManagedModeConfig.stallAlerts(defaults: managedModeDefaults) {
+            withdrawQueuedHelperAlert(id)
+        }
+        // Progress means quiet is zero: in a turn it is working, busy or
+        // blocked; otherwise finished. Counts carry until the next sweep.
+        let fact = helperLiveness[id]
+        let state = HelperLiveness.classify(
+            inTurn: turn.status == .working || turn.status == .needsAttention, blocked: turn.status == .needsAttention,
+            busy: turn.busy != nil, lastProgressAt: now, liveChildren: 0, openToolCalls: 0, now: now, quietAfter: .infinity)
+        recordHelperLiveness(id, state, lastProgressAt: now, liveChildren: fact?.liveChildren ?? 0,
+                             openToolCalls: fact?.openToolCalls ?? 0, subHelpers: fact?.subHelpers ?? 0,
+                             detail: state == .busy ? turn.busy : nil, now: now)
         if records[id]?.helperWatchdogNeedsYou != nil {
             records[id]?.helperWatchdogNeedsYou = nil
             notifyLeadPlanChanged(id)
@@ -6066,17 +6540,51 @@ final class AgentSupervisor {
         }
     }
 
+    private enum HelperAlertKind { case noProgress, stalled, stillWaiting }
+
     /// Runs on the same actor as hook and transcript ingestion. The clock is
     /// injected by the witness; the production timer samples every 30 seconds.
     func sweepHelperWatchdog() async {
         let now = helperWatchdogNow()
-        for id in Array(records.keys) {
-            // Delegated or messaged: a stuck helper alerts whoever waits on it.
-            guard let record = records[id], let parent = record.parentAgentID ?? helperMessageSubscriptions[id]?.first?.parent else { continue }
-            let status = presenceRowStatus(for: id)
+        let stallAlerts = AgentManagedModeConfig.stallAlerts(defaults: managedModeDefaults)
+        // Delegated or messaged: a stuck helper alerts whoever waits on it.
+        // One walk of the records, keeping what the pass reads: in a
+        // long-lived store they are thousands, and an `AgentRecord` copy is
+        // not cheap. A helper in a turn reads its full record below.
+        var helpers: [(id: AgentID, parent: AgentID, needsYou: Bool, status: AgentStatus?)] = []
+        // Only helpers in a turn, which are few.
+        var turns: [AgentID: (status: AgentStatus?, busy: String?)] = [:]
+        for (id, record) in records {
+            guard let parent = record.parentAgentID ?? helperMessageSubscriptions[id]?.first?.parent else { continue }
+            let turn = helperTurnState(id)
+            if turn.status == .working || turn.status == .needsAttention { turns[id] = turn }
+            helpers.append((id, parent, record.helperWatchdogNeedsYou != nil, turn.status))
+        }
+        func inTurn(_ id: AgentID) -> Bool { turns[id] != nil }
+        // Who waits on whom: a helper in a turn holds each of its parents.
+        var subHelpers: [AgentID: Int] = [:]
+        for id in turns.keys {
+            for parent in helperParents(id) { subHelpers[parent, default: 0] += 1 }
+        }
+
+        // 1. Classify every helper first, so routing below reads this sweep.
+        var candidates: [(id: AgentID, parent: AgentID, record: AgentRecord)] = []
+        for (id, parent, needsYou, status) in helpers {
             guard status == .working || status == .needsAttention else {
+                // Waiting out Array's own provider retry is busy, not finished.
+                let retrying = helperProviderRetryErrors[id] != nil
+                // Already recorded finished and nothing to clear: this pass
+                // would write back what is there. Most helpers in a long-lived
+                // store are like this, so the sweep's cost follows live ones.
+                if !retrying, helperLiveness[id]?.state == .finished, helperProgress[id] == nil,
+                   pendingHelperAlerts[id] == nil, queuedHelperAlerts[id] == nil, !helperAlertsInFlight.contains(id),
+                   !needsYou { continue }
+                recordHelperLiveness(id, retrying ? .busy : .finished,
+                                     lastProgressAt: helperProgress[id]?.at ?? helperLiveness[id]?.lastProgressAt ?? now,
+                                     liveChildren: 0, openToolCalls: 0, detail: retrying ? "retrying" : nil, now: now)
                 helperProgress[id] = nil
                 pendingHelperAlerts[id] = nil
+                if stallAlerts, queuedHelperAlerts[id] != nil || helperAlertsInFlight.contains(id) { withdrawQueuedHelperAlert(id) }
                 if records[id]?.helperWatchdogNeedsYou != nil {
                     records[id]?.helperWatchdogNeedsYou = nil
                     notifyLeadPlanChanged(id)
@@ -6084,21 +6592,99 @@ final class AgentSupervisor {
                 }
                 continue
             }
+            // In a turn: few, so the full record is read here.
+            guard let record = records[id] else { continue }
             if helperProgress[id] == nil || helperProgress[id]?.status != status {
                 noteHelperProgress(id, last: status == .needsAttention ? "needs you" : "working")
             }
-            guard var progress = helperProgress[id], !progress.escalated,
-                  now.timeIntervalSince(progress.at) >= helperWatchdogThreshold else { continue }
+            if let at = helperProgress[id]?.at {
+                // The tracker's last published list, the runner's open tool
+                // items and the records: no process inspection here. A process
+                // from an earlier turn (a forgotten dev server) holds nothing.
+                let turnStart = turnFacts[id]?.presence.startedAt ?? record.latestTurnAt
+                let jobs = (processTracker?.jobs(for: id) ?? []).filter { job in
+                    turnStart.map { job.startedAt >= $0.addingTimeInterval(-1) } ?? true
+                }
+                let open = openToolItems[id] ?? []
+                let tools = (openToolDetails[id] ?? [:]).filter { open.contains($0.key) }
+                openToolDetails[id] = tools.isEmpty ? nil : tools
+                let subagentItems = tools.values.filter { $0.kind == .subagent }.count
+                let toolCalls = open.count - subagentItems
+                let helpers = (subHelpers[id] ?? 0) + subagentItems
+                let modelSilent = runners[id] != nil && !HelperLiveness.reasoningStreams(for: record.harness ?? .pi)
+                let state = HelperLiveness.classify(
+                    inTurn: true, blocked: status == .needsAttention, busy: turns[id]?.busy != nil, lastProgressAt: at,
+                    subHelpers: helpers, liveChildren: jobs.count, openToolCalls: toolCalls, modelSilent: modelSilent,
+                    now: now, quietAfter: helperLivenessQuietAfter)
+                let detail: String?
+                switch state {
+                case .busy: detail = turns[id]?.busy
+                case .waitingOnChild: detail = Self.firstWord(jobs.first?.label)
+                case .waitingOnToolCall: detail = tools.values.first(where: { $0.kind != .subagent })?.name
+                default: detail = nil
+                }
+                recordHelperLiveness(id, state, lastProgressAt: at, liveChildren: jobs.count, openToolCalls: toolCalls,
+                                     subHelpers: helpers, detail: detail, now: now)
+            }
+            candidates.append((id, parent, record))
+        }
+
+        // 2. Decide alerts. Quiet is measured from the last real progress.
+        for (id, parent, record) in candidates {
+            guard var progress = helperProgress[id], !progress.escalated else { continue }
+            let quiet = now.timeIntervalSince(progress.at)
+            // Switch off: ten minutes without progress, whatever the helper is
+            // doing. On: by what it is doing.
+            let fact = stallAlerts ? helperLiveness[id] : nil
+            let kind: HelperAlertKind?
+            switch fact?.state {
+            case .waitingOnHelper?, .working?, .finished?: kind = nil
+            case .waitingOnChild?, .waitingOnToolCall?: kind = quiet >= helperWaitCeiling ? .stillWaiting : nil
+            case .stalled?: kind = quiet >= helperStallAlertAfter ? .stalled : nil
+            case .busy?, .waitingOnModel?, .blocked?, nil: kind = quiet >= helperWatchdogThreshold ? .noProgress : nil
+            }
+            guard let kind else { continue }
             progress.escalated = true
             helperProgress[id] = progress
             let minutes = max(1, Int(helperWatchdogThreshold / 60))
-            records[id]?.helperWatchdogNeedsYou = "no progress for \(minutes) min"
+            let quietMinutes = max(1, Int(quiet / 60))
+            let since = Self.stallClockText(progress.at)
+            let process = fact?.state == .waitingOnChild
+            let waitedOn = (process ? "a process it started" : "a tool call") + (fact?.detail.map { " (\($0))" } ?? "")
+            switch kind {
+            case .noProgress: records[id]?.helperWatchdogNeedsYou = "no progress for \(minutes) min"
+            case .stalled: records[id]?.helperWatchdogNeedsYou = "stalled, no progress for \(quietMinutes) min"
+            case .stillWaiting:
+                records[id]?.helperWatchdogNeedsYou = "still waiting on \(process ? "a process" : "a tool call") for \(quietMinutes) min"
+            }
             notifyLeadPlanChanged(id)
             onSelfReportChanged?(id)
+            // With the switch on, the alert goes past every ancestor already in
+            // a turn waiting on this chain, so the chain alerts once, at the
+            // first ancestor free to read it (in practice the top lead).
+            var target = parent
+            if stallAlerts {
+                var seen: Set<AgentID> = [id]
+                while helperLiveness[target]?.state == .waitingOnHelper, inTurn(target),
+                      let up = helperParent(target), records[up] != nil, seen.insert(target).inserted {
+                    target = up
+                }
+            }
             // A gone parent gets no message. The child's sidebar still speaks.
-            if records[parent] != nil {
-                let name = String(record.humanDisplayName.split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40))
-                pendingHelperAlerts[id] = (parent, "Helper \(name) has shown no progress for \(minutes) min (last: \(progress.last)). Check it, message it, or stop it.")
+            guard records[target] != nil else { continue }
+            let name = String(record.humanDisplayName.split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40))
+            var label = "Helper \(name)"
+            if target != parent, let parentRecord = records[parent] {
+                let parentName = String(parentRecord.humanDisplayName.split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40))
+                label += " (a helper of \(parentName))"
+            }
+            switch kind {
+            case .noProgress:
+                pendingHelperAlerts[id] = (target, "\(label) has shown no progress for \(minutes) min (last: \(progress.last)). Check it, message it, or stop it.")
+            case .stalled:
+                pendingHelperAlerts[id] = (target, "\(label) is stalled: no progress since \(since) (\(quietMinutes) min), nothing it started is running and no tool call is open (last: \(progress.last)). Check it, message it, or stop it.")
+            case .stillWaiting:
+                pendingHelperAlerts[id] = (target, "\(label) is still waiting on \(waitedOn) for \(quietMinutes) min, with no progress since \(since) (last: \(progress.last)). Check it, message it, or stop it.")
             }
         }
         for (child, alert) in pendingHelperAlerts {
@@ -6110,18 +6696,23 @@ final class AgentSupervisor {
             // cannot send twice. Use exactly the agent-message envelope/path.
             pendingHelperAlerts[child] = nil
             let accepted: Bool
+            var withdrawn = false
             if isRunning(alert.parent) {
                 let prompt = AgentPrompt(agentMessageText(alert.text, from: child))
                 let before = Set(queuedMessages(for: alert.parent).map(\.id))
+                helperAlertsInFlight.insert(child)
                 let result = await accept(.queue(prompt), for: alert.parent)
+                withdrawn = helperAlertsInFlight.remove(child) == nil
                 if case .accepted = result { accepted = true } else { accepted = false }
                 if accepted, let queued = queuedMessages(for: alert.parent).last(where: { !before.contains($0.id) }) {
-                    queuedHelperAlerts[child] = (alert.parent, queued.id)
+                    // Withdrawn while it was being queued: news already stale.
+                    if withdrawn { cancelQueuedMessage(queued.id, for: alert.parent) }
+                    else { queuedHelperAlerts[child] = (alert.parent, queued.id) }
                 }
             } else {
                 accepted = sendAgentMessage(alert.text, from: child, to: alert.parent)
             }
-            if !accepted, helperProgress[child]?.escalated == true {
+            if !accepted, !withdrawn, helperProgress[child]?.escalated == true {
                 pendingHelperAlerts[child] = alert
             }
         }
@@ -6150,6 +6741,24 @@ final class AgentSupervisor {
         if ring.count > AgentHookReceipt.ringCapacity { ring.removeFirst(ring.count - AgentHookReceipt.ringCapacity) }
         hookReceipts[id] = ring
         noteHelperProgress(id, last: String((receipt.toolName ?? receipt.event).split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ").prefix(40)))
+    }
+
+    /// `.plans/116` gap 21: a Managed lead's hook receipt reaches the run
+    /// ledger as a compact row: which hook and what Array answered.
+    func recordLeadHook(_ receipt: AgentHookReceipt, reply: [String: Any], for id: AgentID) {
+        guard qaRunLedgerRecording, effectiveMode(for: id) == .managed else { return }
+        runLedger.hook(agent: id.rawValue, event: receipt.event, outcome: Self.hookOutcome(reply),
+                       harness: records[id]?.harness?.rawValue)
+    }
+
+    /// What Array's hook reply did: `none`, `denied`, `blocked`, `context` or `other`.
+    static func hookOutcome(_ reply: [String: Any]) -> String {
+        guard let output = reply[WorkspaceAgentHook.hookOutputKey] as? [String: Any] else { return "none" }
+        let specific = output["hookSpecificOutput"] as? [String: Any]
+        if specific?["permissionDecision"] as? String == "deny" { return "denied" }
+        if output["decision"] as? String == "block" { return "blocked" }
+        if specific?["additionalContext"] != nil { return "context" }
+        return "other"
     }
 
     /// `.plans/102` P2a: each agent's latest `array_report`, with when it was
@@ -6185,6 +6794,12 @@ final class AgentSupervisor {
         helperFoldEligibleSince[id] = nil
         record.lastReport = AgentFiledReport(report: report, filedAt: date)
         guard persist(record) else { return false }
+        if qaRunLedgerRecording {
+            runLedger.reported(agent: id.rawValue, at: date, checks: report.checks, findings: report.findings)
+            if record.parentAgentID != nil {
+                runLedger.helperEvidence(agent: id.rawValue, at: date)
+            }
+        }
         onSelfReportChanged?(id)
         // A report filed between turns is a result: it releases a turn held
         // as progress, or follows a result already delivered as a note.
@@ -6680,6 +7295,8 @@ final class AgentSupervisor {
             report.wasRunning = true
             stop(id)
         }
+        // Its checkout watch goes with it, even mid-turn.
+        runLedger.retired(agent: id.rawValue)
         // `stop(id)` above only reaches `stopObservedRuns(for: id)` when `id` had
         // a live runner. An archived PARENT whose runner had already exited (its
         // observed children may still be tailing — B's liveness sweep had not
@@ -6725,6 +7342,7 @@ final class AgentSupervisor {
         hookReceipts.removeValue(forKey: id)
         codexHookPushBacks.removeValue(forKey: id)
         helperProgress[id] = nil
+        helperLiveness[id] = nil
         pendingHelperAlerts[id] = nil
         helperFoldEligibleSince[id] = nil
         pendingHelperFolds.remove(id)
@@ -7722,6 +8340,22 @@ final class AgentSupervisor {
     /// A lead that is itself a helper waits on its OWN Array helpers just as on
     /// a shell job: any still running or held, or a result of theirs not yet in
     /// its hands (batched, queued, or in custody), will start its next turn.
+    /// A helper result batched, being staged or queued for `id`, or held: the
+    /// turn that reads it is still to come. Items already handed to a turn are
+    /// that turn's. Run-ledger closure only (`.plans/116` gap 8).
+    private func helperResultsWaiting(_ id: AgentID) -> Bool {
+        if helperCompletionBatches[id]?.updates.isEmpty == false || helperWakesStaging.contains(id) { return true }
+        if (queuedWorkItemsCache[id] ?? []).contains(where: { item in
+            if case .prompt(let message) = item { return message.helperCompletion && !message.helperNote }
+            return false
+        }) { return true }
+        return heldHelperCompletions.keys.contains { records[$0]?.parentAgentID == id }
+    }
+    /// Leads whose helper results are between their batch and their queue.
+    private var helperWakesStaging: Set<AgentID> = []
+    /// The helpers whose results each staged wake carries, until it starts.
+    private var helperWakeSenders: [UUID: [UUID]] = [:]
+
     private func hasPendingArrayHelpers(_ id: AgentID) -> Bool {
         if helperCompletionBatches[id]?.updates.isEmpty == false { return true }
         if !(deliveringSteers[id] ?? []).filter({ $0.message.helperCompletion && !$0.message.helperNote }).isEmpty { return true }
@@ -8186,6 +8820,8 @@ final class AgentSupervisor {
                   helperCompletionDeliveryDate(batch, parent: parent, now: helperCompletionNow()) <= helperCompletionNow(),
                   let cwd = records[parent]?.cwd, wakesForHelperCompletion(parent) else { continue }
             helperCompletionBatches[parent] = nil
+            helperWakesStaging.insert(parent)
+            defer { helperWakesStaging.remove(parent) }
             var states: [SpawnResultFile.Delivery] = []
             var deferred: [(AgentID, String, String)] = []
             do {
@@ -8234,6 +8870,7 @@ final class AgentSupervisor {
                             state.text.map { ($0, senderID: state.helper,
                                 senderName: records[AgentID(rawValue: state.helper)]?.humanDisplayName ?? "Agent") }
                         })
+                        helperWakeSenders[queueID] = group.map(\.helper)
                         try qaBeforeHelperWakeAdmission?()
                         // Always a helper item, idle lead or busy: it queues after
                         // user input and drains with every other pending result.
@@ -8275,6 +8912,9 @@ final class AgentSupervisor {
     }
 
     func qaForgetHelperCompletionBatches() { helperCompletionBatches = [:] }
+    /// Replay driver: a lead's run is over only once no helper result is still
+    /// on its way to it (batched, queued, in custody or from a running helper).
+    func qaHasPendingHelperResults(for id: AgentID) -> Bool { hasPendingArrayHelpers(id) }
 
     /// The durable half of `trackHelperMessage`, read back at restore.
     private func restoreHelperMessageSubscriptions() {
@@ -8381,6 +9021,8 @@ final class AgentSupervisor {
         guard var record = records[id], record.capabilities.locallyManaged else { return false }
         guard record.mode != mode else { return true }
         record.mode = mode
+        record.managedBriefedSessions = []
+        managedHookStates.removeValue(forKey: id)
         guard persist(record) else { return false }
         records[id] = record
         if record.harness == .claudeCode || record.harness == .codex { pendingModeRestarts.insert(id) }
@@ -8396,7 +9038,16 @@ final class AgentSupervisor {
         guard record.parentAgentID == nil,
               let harness = record.harness, harness == .claudeCode || harness == .codex,
               (runningModes[record.id] ?? record.mode) == .managed else { return nil }
-        return managedHookStates[record.id, default: ManagedLeadHookState()].reply(payload: payload, harness: harness)
+        var state = managedHookStates[record.id] ?? ManagedLeadHookState()
+        state.briefedSessions = records[record.id]?.managedBriefedSessions ?? []
+        let reply = state.reply(payload: payload, harness: harness)
+        if var current = records[record.id], current.managedBriefedSessions != state.briefedSessions {
+            current.managedBriefedSessions = state.briefedSessions
+            records[record.id] = current
+            _ = persist(current)
+        }
+        managedHookStates[record.id] = state
+        return reply
     }
 
     // MARK: - Model and thinking level (P6.1)
@@ -8798,7 +9449,17 @@ final class AgentSupervisor {
     /// same main-actor turn, so an accepted send/stop cannot be refused by a second
     /// capability check hidden in the view.
     func accept(_ intent: AgentComposerIntent, for agentID: AgentID) async -> IntentAcceptance {
-        await accept(intent.neutralizingTypedEnvelopes, for: agentID, sharedAdmission: nil)
+        let result = await accept(intent.neutralizingTypedEnvelopes, for: agentID, sharedAdmission: nil)
+        // `.plans/116` part 14: a human submission to any top-level agent opens
+        // or joins its task, with its mode, so solo and fanned-out work separate.
+        if qaRunLedgerRecording, result == .accepted, let record = records[agentID], record.parentAgentID == nil {
+            switch intent {
+            case .send, .sendPrompt, .queue:
+                runLedger.submission(agent: agentID.rawValue, project: record.projectId, mode: effectiveMode(for: agentID).rawValue)
+            default: break
+            }
+        }
+        return result
     }
 
     /// Whether a teammate's send-now prompt would start at once. When it would
@@ -9020,7 +9681,7 @@ final class AgentSupervisor {
             else { return .refused(.turnNotReady) }
 
             let candidate = (runners[agentID] ?? idleSessionRunners[agentID]
-                ?? makeRunner(accountLaunch(AgentRunnerLaunch(record: record, spawnDepth: depth(of: agentID)))))
+                ?? makeRunner(accountLaunch(runnerLaunch(for: agentID, record: record))))
             guard let compacting = candidate as? AgentCompactionRunning,
                   compacting.compactionCapabilities.supportsManual else {
                 return .refused(.unsupported)
@@ -9600,6 +10261,7 @@ final class AgentSupervisor {
         record.archivedAt = now
         records[id] = record
         persist(record)
+        runLedger.retired(agent: id.rawValue)
         return true
     }
 
@@ -9627,6 +10289,7 @@ final class AgentSupervisor {
         if record.closeRequestedAt == nil { record.closeRequestedAt = now }
         if !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) {
             record.archivedAt = now
+            runLedger.retired(agent: id.rawValue)
         }
         records[id] = record
         persist(record)
@@ -9691,8 +10354,29 @@ final class AgentSupervisor {
     /// is precisely what this ticket adds. The production caller it defends is Phase 5's
     /// persistent session: an rpc session comes alive, or an approval opens, without
     /// this app having just sent a prompt.
+    /// Checks only: what a relaunch does to the run ledger, a new instance over
+    /// the same file with no live baselines or attribution.
+    func qaReopenRunLedger() {
+        runLedger.drain()
+        runLedger = ManagedRunLedger(support: store.layout.applicationSupportDirectory)
+    }
+
     func qaDeliver(_ event: AgentRuntimeEvent, to id: AgentID, now: Date = Date()) {
         deliver(event, to: id, now: now)
+    }
+
+    /// Waits for `id`'s serialized queue writes, so a reader counts what is stored.
+    func qaQueueWritesSettled(for id: AgentID) async {
+        await queueOpTasks[id]?.value
+    }
+
+    /// One event as the bound runner's own stream delivers it, through the same
+    /// generation-checked path (tool boundaries included). False with no runner.
+    @discardableResult
+    func qaDeliverFromBoundRunner(_ event: AgentRuntimeEvent, to id: AgentID) -> Bool {
+        guard let runner = runners[id], let generation = runnerGenerationTokens[id] else { return false }
+        deliver(event, from: runner, generation: generation, to: id)
+        return true
     }
 
     #if ARRAY_FILM
@@ -10410,9 +11094,20 @@ final class AgentSupervisor {
         if let item = queuedWorkItemsCache[id]?.first(where: { $0.id == messageID }),
            case .prompt(let message) = item, !cancelAgentMessage(message, for: id) { return }
         updateCompanionTasks { try $0.cancelQueued(messageID) }
+        pendingQueueRemovals[id, default: []].insert(messageID)
         queuedWorkItemsCache[id]?.removeAll { $0.id == messageID }
         notifyTurnCapabilitiesChanged(id)
-        runQueueOp(for: id) { await store.removeQueuedMessage(id: messageID, for: id) }
+        let beforeRemoval = qaBeforeQueueRemoval
+        runQueueOp(for: id) { [weak self] in
+            await beforeRemoval?()
+            _ = await store.removeQueuedMessage(id: messageID, for: id)
+            await self?.queueRemovalLanded([messageID], for: id)
+        }
+    }
+
+    private func queueRemovalLanded(_ ids: [UUID], for id: AgentID) {
+        pendingQueueRemovals[id]?.subtract(ids)
+        if pendingQueueRemovals[id]?.isEmpty == true { pendingQueueRemovals[id] = nil }
     }
 
     /// "Clear" — every queued follow-up at once, still without touching the turn
@@ -10427,10 +11122,12 @@ final class AgentSupervisor {
             return true
         }.map(\.id)
         updateCompanionTasks { ledger in for itemID in followUps { try ledger.cancelQueued(itemID) } }
+        pendingQueueRemovals[id, default: []].formUnion(followUps)
         queuedWorkItemsCache[id]?.removeAll { followUps.contains($0.id) }
         notifyTurnCapabilitiesChanged(id)
-        runQueueOp(for: id) {
+        runQueueOp(for: id) { [weak self] in
             for itemID in followUps { _ = await store.removeQueuedMessage(id: itemID, for: id) }
+            await self?.queueRemovalLanded(followUps, for: id)
         }
     }
 
@@ -10596,8 +11293,20 @@ final class AgentSupervisor {
                 }
                 self.mergedHelperFallbackIDs[id, default: []].formUnion(merged.map(\.id))
             }
+            // `.plans/116` gap 8: this turn reads helper results, so it belongs to
+            // their task, even one that has closed. Marked before the turn starts.
+            var wakeMarked = false
+            if message.helperCompletion {
+                let members = [message] + merged
+                let helpers = members.map { self.helperWakeSenders[$0.id] ?? [] }.joined()
+                if self.qaRunLedgerRecording, members.contains(where: { !$0.helperNote }) {
+                    self.runLedger.helperWake(agent: id.rawValue, helpers: Array(helpers))
+                    wakeMarked = true
+                }
+            }
             guard self.sendPrepared(PreparedAgentPrompt(prompt: turnPrompt, expectedAgentID: id, queuedSource: message), to: id, queuedItemID: message.id,
                                     sharedInputPermit: sharedPermit) else {
+                if wakeMarked { self.runLedger.helperWake(agent: id.rawValue, helpers: nil) }
                 // The runner became busy again in the same beat (a fresh
                 // interactive send won the race) — put the message back rather
                 // than lose it.
@@ -10612,6 +11321,7 @@ final class AgentSupervisor {
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
+            for member in [message] + merged { self.helperWakeSenders[member.id] = nil }
             // Helper fallback remains in durable custody until the runner starts
             // its next turn. Other queue entries keep their existing echo path.
             if !message.helperCompletion { self.echoPrompt(prompt, for: id) }
@@ -10687,12 +11397,18 @@ final class AgentSupervisor {
     /// before the store write, so a check can end the turn in that gap.
     var qaAfterQueueAdmission: (@MainActor () async -> Void)?
     var qaBeforeQueueDrain: (@MainActor () async -> Void)?
+    /// Holds a cancel's durable removal, so a check can queue beside it.
+    var qaBeforeQueueRemoval: (@Sendable () async -> Void)?
     /// How long an acknowledged interrupt may take to end the turn before
     /// Stop falls back to killing the process. Shortened by the checks.
     var interruptGrace: TimeInterval = 5
     /// Tool items open in the bound runner's turn — the boundary a held steer
     /// waits for.
     private var openToolItems: [AgentID: Set<String>] = [:]
+    /// What each open tool item is, for the liveness sweep: its kind and one
+    /// word naming it. Read only through `openToolItems`, which owns closing.
+    private struct OpenToolDetail { let kind: ItemKind; let name: String }
+    private var openToolDetails: [AgentID: [String: OpenToolDetail]] = [:]
     // A provider acceptance receipt (notably Codex turn/steer) can precede
     // sampling the input. Keep the wake signal until the blocking tools finish.
     private var helperWaitSteerTools: [AgentID: Set<String>] = [:]
@@ -11344,8 +12060,11 @@ final class AgentSupervisor {
         deliver(event, to: id, now: now)
         // T5 — the bound runner's own stream says where the tool boundaries are.
         switch event {
-        case let .itemStarted(_, itemID, kind, _) where kind.isToolBoundary:
+        case let .itemStarted(_, itemID, kind, title) where kind.isToolBoundary:
             openToolItems[id, default: []].insert(itemID)
+            let name = title?.split(whereSeparator: \.isWhitespace).first.map { String($0.prefix(40)) }
+            openToolDetails[id, default: [:]][itemID] = OpenToolDetail(
+                kind: kind, name: name ?? AgentTurnPresence.Tool(itemID: itemID, kind: kind, title: nil).name)
             handOverHeldSteers(for: id)
         case let .itemCompleted(_, itemID, _, _):
             openToolItems[id]?.remove(itemID)
@@ -11752,11 +12471,50 @@ final class AgentSupervisor {
         )
     }
 
+    static func usageIdentity(_ record: AgentRecord) -> ManagedRunLedger.UsageIdentity {
+        .init(harness: record.harness?.rawValue, model: record.model,
+              effort: record.thinking.isEmpty ? nil : record.thinking, parent: record.parentAgentID?.rawValue,
+              reportedByParent: record.capabilities == .observedReadOnly && record.harness == .claudeCode)
+    }
+
     private func updateTurnFacts(with event: AgentRuntimeEvent, for id: AgentID, now: Date = Date()) {
         var facts = turnFacts[id] ?? TurnFacts()
         // The presence owner reduces EVERY event first; the record stamps below
         // are side effects of the same transitions, never a second state.
         facts.presence.reduce(event, at: now)
+        switch event {
+        case let .turnStarted(_, turnID):
+            if qaRunLedgerRecording {
+                runLedger.usageTurnStarted(agent: id.rawValue, turn: turnID)
+                runLedger.working(agent: id.rawValue, turn: turnID, root: records[id]?.checkoutRoot,
+                                  lead: effectiveMode(for: id) == .managed)
+            }
+        case let .turnCompleted(_, turnID, outcome, _):
+            // The next launch then finds standards presence already listed.
+            if let root = records[id]?.checkoutRoot {
+                ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
+            }
+            if qaRunLedgerRecording, let record = records[id] {
+                runLedger.usageTurnEnded(agent: id.rawValue, turn: turnID, Self.usageIdentity(record),
+                                         record: AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults))
+            }
+            if qaRunLedgerRecording {
+                // `.plans/116` gap 8: a lead's turn ending while a helper result
+                // is on its way does not close the task; the wake that reads it does.
+                let record = records[id]
+                let noWake = record.map { $0.capabilities.locallyManaged && $0.parentAgentID.map { !wakesForHelperCompletion($0) } == true } ?? false
+                runLedger.ended(agent: id.rawValue, turn: turnID, outcome: outcome,
+                                resultsWaiting: helperResultsWaiting(id), noWake: noWake)
+            }
+        case let .tokenUsageUpdated(_, snapshot):
+            // `.plans/116` part 14: every agent's usage is its own row, its
+            // parent named on it; a provider-run child is never folded in.
+            if qaRunLedgerRecording, let record = records[id] {
+                runLedger.usage(agent: id.rawValue, Self.usageIdentity(record), snapshot,
+                                record: AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults))
+            }
+        default: break
+        }
         switch event {
         case .turnStarted:
             // P3.3: THE elapsed anchor is stamped by the presence owner at the one
@@ -12042,6 +12800,7 @@ final class AgentSupervisor {
                 // same store-level lock is held and never lower its high-water.
                 let durable = try store.load(id: record.id)
                 if let durable {
+                    candidate.automaticCharacterIndex = durable.automaticCharacterIndex ?? candidate.automaticCharacterIndex
                     candidate.nextChildOrdinal = max(
                         candidate.nextChildOrdinal,
                         durable.nextChildOrdinal
@@ -20933,7 +21692,7 @@ private func checkSpawnFromToolCall(
     let childRunnerArgs = AgentSupervisor.runnerConfig(for: child, spawnDepth: childDepth).extraArgs
     // CX-01: Array's host bridge tools follow every roled pi agent, at any depth.
     let expectedChildTools = "\(scoutTools), "
-        + (RoleRegistry.spawnToolNames(for: .pi) + RoleRegistry.hostToolNames(for: .pi)).joined(separator: ", ")
+        + (RoleRegistry.spawnToolNames(for: .pi) + RoleRegistry.hostToolNames(for: .pi, projectStandards: false)).joined(separator: ", ")
     guard childRunnerArgs == ["--tools", expectedChildTools] else {
         throw fail("the child's runner would not pass its role's tools plus the spawn verbs it is under the cap for: \(childRunnerArgs)")
     }

@@ -178,6 +178,7 @@ extension WorkspaceAPIService {
             evidenceSource: document == nil ? "record" : "supervisor.transcriptProjection",
             note: document == nil ? AgentInspectResponse.absentEvidenceNote : nil,
             observedAt: now)
+        response.liveness = supervisor.helperLiveness[target.id]
         if let document {
             response.promptTitle = Self.promptTitle(from: document)
             let bounded = AgentInspectExcerpt.bound(
@@ -237,6 +238,9 @@ extension WorkspaceAPIService {
     }
 
     private func observedStatus(for id: AgentID) -> AgentObservedStatus {
+        // A held follow-up queue waits for explicit user resume, even when
+        // the preceding turn succeeded. Do not advertise it as send-ready.
+        if !supervisor.isRunning(id), supervisor.isQueuePaused(for: id) { return .paused }
         guard let snapshot = supervisor.turnSnapshot(for: id) else { return .unknown }
         switch snapshot.state {
         case .ready: return .ready

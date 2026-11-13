@@ -19,25 +19,31 @@ extension WorkspaceAPIService {
 
     // MARK: - agent.delegate (§10)
 
+    ///
+    /// Answers through `completion`, once, on main. With `checkoutOffMain` the
+    /// supervisor runs the child's git step (`rev-parse`, `worktree add`) on a
+    /// background queue and the answer comes later; without it, before return.
     func delegate(
         agentId: AgentID, record: AgentRecord, ownHandle: CheckoutHandle, requestId: String,
         payload: [String: Any], runtime: WorkspaceRuntime, canvas: CanvasNSView,
-        isCancelled: () -> Bool
-    ) -> Reply {
+        checkoutOffMain: Bool, isCancelled: @escaping () -> Bool, completion: @escaping (Reply) -> Void
+    ) {
         // 1. Schema.
         let request: AgentDelegateRequest
         do {
             let data = try JSONSerialization.data(withJSONObject: payload)
             request = try JSONDecoder().decode(AgentDelegateRequest.self, from: data)
         } catch {
-            return .error(WorkspaceAPIError(code: .invalidRequest, message: "The delegate request could not be decoded: \(error.localizedDescription)"))
+            return completion(.error(WorkspaceAPIError(code: .invalidRequest, message: "The delegate request could not be decoded: \(error.localizedDescription)")))
         }
         guard !request.task.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return .error(WorkspaceAPIError(code: .invalidRequest, message: "task is required."))
+            return completion(.error(WorkspaceAPIError(code: .invalidRequest, message: "task is required.")))
         }
         guard let idempotencyKey = request.idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines), !idempotencyKey.isEmpty else {
-            return .error(WorkspaceAPIError(code: .invalidRequest, message: "idempotencyKey is required for agent.delegate: a spawn without one cannot be retried safely."))
+            return completion(.error(WorkspaceAPIError(code: .invalidRequest, message: "idempotencyKey is required for agent.delegate: a spawn without one cannot be retried safely.")))
         }
+        // Never refused: entries Array cannot use are left out and named.
+        let prepared = request.contract?.prepared(checkoutRoot: record.checkoutRoot)
         let generationAtDispatch = runtime.interactionGeneration
 
         // 2. Reserve the operation BEFORE any effect (§10.2). Same key + same
@@ -49,13 +55,13 @@ extension WorkspaceAPIService {
             payloadHash: payloadHash, operationId: requestId)
         switch reservation {
         case let .replay(existing):
-            if let cached = delegateReplayResults[existing.operationId] { return .result(cached) }
-            return .result(Self.jsonObject(Self.replayResult(from: existing, running: existing.childAgentId.map(supervisor.isRunning))) ?? [:])
+            if let cached = delegateReplayResults[existing.operationId] { return completion(.result(cached)) }
+            return completion(.result(Self.jsonObject(Self.replayResult(from: existing, running: existing.childAgentId.map(supervisor.isRunning))) ?? [:]))
         case .conflict:
-            return .error(WorkspaceAPIError(code: .idempotencyConflict, message: "This idempotencyKey was already used for a different delegation. New intent needs a new key."))
+            return completion(.error(WorkspaceAPIError(code: .idempotencyConflict, message: "This idempotencyKey was already used for a different delegation. New intent needs a new key.")))
         case let .expired(tombstone):
             let child = tombstone.childAgentId.map { " Its child was \($0.rawValue.uuidString)." } ?? ""
-            return .error(WorkspaceAPIError(code: .outcomeUnknown, message: "This idempotencyKey belongs to an expired operation (\(tombstone.operationId)); Array no longer holds its outcome and will not repeat it.\(child) Call operation.get, or use a new key for new intent."))
+            return completion(.error(WorkspaceAPIError(code: .outcomeUnknown, message: "This idempotencyKey belongs to an expired operation (\(tombstone.operationId)); Array no longer holds its outcome and will not repeat it.\(child) Call operation.get, or use a new key for new intent.")))
         case .reserved:
             break
         }
@@ -74,12 +80,12 @@ extension WorkspaceAPIService {
         }
 
         if let retryOf = request.retryOf, !supervisor.mayRetry(retryOf, from: agentId) {
-            return fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn.")
+            return completion(fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn."))
         }
 
         // Resolve exclusively against the selected CLI's live catalogue.
         guard let parentHarness = record.harness else {
-            return fail(.unsupported, "This agent's harness is unresolved, so a child cannot inherit it.")
+            return completion(fail(.unsupported, "This agent's harness is unresolved, so a child cannot inherit it."))
         }
         func resolveHarness(_ raw: String) -> AgentHarness? {
             AgentHarness.allCases.first { Self.namesHarness(raw, $0) }
@@ -87,20 +93,20 @@ extension WorkspaceAPIService {
         let childHarness: AgentHarness
         if let selector = request.harness ?? request.provider {
             guard let selected = resolveHarness(selector) else {
-                return fail(.invalidRequest, "Unknown child harness '\(selector)'. Choose Claude Code, Codex or Pi.")
+                return completion(fail(.invalidRequest, "Unknown child harness '\(selector)'. Choose Claude Code, Codex or Pi."))
             }
             childHarness = selected
         } else {
             childHarness = parentHarness
         }
         if let provider = request.provider, resolveHarness(provider) != childHarness {
-            return fail(.invalidRequest, "harness and provider must name the same CLI.")
+            return completion(fail(.invalidRequest, "harness and provider must name the same CLI."))
         }
         if let reason = AgentSupervisor.readinessRefusal(for: childHarness, retry: "delegate again") {
-            return fail(.unsupported, reason)
+            return completion(fail(.unsupported, reason))
         }
         if let reason = supervisor.delegationQuotaRefusal(for: childHarness) {
-            return fail(.unsupported, reason)
+            return completion(fail(.unsupported, reason))
         }
         let catalog = AgentModelCatalog.shared.snapshot(for: childHarness)
         guard let childModel = request.model ?? (childHarness == parentHarness ? record.model : catalog.seedModel),
@@ -109,8 +115,17 @@ extension WorkspaceAPIService {
             // Name the offered ids verbatim: the caller cannot see the catalogue
             // otherwise, and a guessed bare id ("claude-haiku-5-5") never matches.
             let offered = catalog.models.prefix(24).joined(separator: ", ")
-            return fail(.unsupported, "\(childHarness.rawValue) does not offer the requested child model. Use an exact fully qualified id from its live catalogue: \(offered.isEmpty ? "none offered" : offered). No other CLI was tried.")
+            return completion(fail(.unsupported, "\(childHarness.rawValue) does not offer the requested child model. Use an exact fully qualified id from its live catalogue: \(offered.isEmpty ? "none offered" : offered). No other CLI was tried."))
         }
+
+        func effortRefusal() -> String? {
+            guard let effort = request.effort else { return nil }
+            guard let accepted = AgentModelCatalog.shared.efforts(for: childModel, harness: childHarness), !accepted.isEmpty else {
+                return "The live catalogue has no effort data for \(childModel); explicit effort is unavailable. Omit effort to use the CLI default."
+            }
+            return accepted.contains(effort) ? nil : "Unsupported effort '\(effort)' for \(childModel). Accepted values: \(accepted.joined(separator: ", "))."
+        }
+        if let reason = effortRefusal() { return completion(fail(.unsupported, reason)) }
 
         // 4. Grant (§14.1). Delegation is outside the Phase 1 preset: the first
         //    request per agent session goes through the trusted approval UI.
@@ -134,14 +149,14 @@ extension WorkspaceAPIService {
             if isCancelled() {
                 operations.release(operationId: requestId)
                 remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentDelegate, outcome: "cancelledBeforeEffect"))
-                return .cancelled(result: nil)
+                return completion(.cancelled(result: nil))
             }
             guard supervisor.records[agentId]?.workspaceToolsEnabled == true else {
-                return fail(.permissionDenied, "Workspace tools were disabled for this agent.", approvalRequestId: promptId)
+                return completion(fail(.permissionDenied, "Workspace tools were disabled for this agent.", approvalRequestId: promptId))
             }
             switch decision {
             case .deny:
-                return fail(.permissionDenied, "The user declined to let this agent delegate.", approvalRequestId: promptId)
+                return completion(fail(.permissionDenied, "The user declined to let this agent delegate.", approvalRequestId: promptId))
             case .allowOnce:
                 mint(WorkspaceToolGrant(
                     agentId: agentId, checkoutHandles: [ownHandle], operations: [.agentDelegate],
@@ -159,7 +174,7 @@ extension WorkspaceAPIService {
                 agentId: agentId, op: .agentDelegate, checkout: ownHandle,
                 requested: request.presentationPolicy, grants: grants[agentId] ?? [],
                 currentGeneration: revocationGeneration(for: agentId)) else {
-                return fail(.permissionDenied, "Approval did not take.", approvalRequestId: promptId)
+                return completion(fail(.permissionDenied, "Approval did not take.", approvalRequestId: promptId))
             }
             effectivePolicy = policy
         }
@@ -169,34 +184,47 @@ extension WorkspaceAPIService {
         // 5. Recheck immediately before the effect; cancellation before it means
         //    nothing happens and the key stays free.
         guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration(for: agentId) == generationAtGrant else {
-            return fail(.permissionDenied, "Access was revoked before the child was created.", approvalRequestId: approvalRequestId)
+            return completion(fail(.permissionDenied, "Access was revoked before the child was created.", approvalRequestId: approvalRequestId))
         }
         if isCancelled() {
             operations.release(operationId: requestId)
             remember(agentId: agentId, WorkspaceRecentOperation(requestId: requestId, op: .agentDelegate, outcome: "cancelledBeforeEffect"))
-            return .cancelled(result: nil)
+            return completion(.cancelled(result: nil))
         }
         _beforeCommitHook?()
 
         // Approval can run a nested event loop; validate again at the effect seam.
         if let reason = AgentSupervisor.readinessRefusal(for: childHarness, retry: "delegate again") {
-            return fail(.unsupported, reason)
+            return completion(fail(.unsupported, reason))
         }
-        if let reason = supervisor.delegationQuotaRefusal(for: childHarness) { return fail(.unsupported, reason) }
+        if let reason = supervisor.delegationQuotaRefusal(for: childHarness) { return completion(fail(.unsupported, reason)) }
         guard AgentModelCatalog.shared.models(for: childHarness).contains(childModel) else {
-            return fail(.unsupported, "The selected child model is no longer offered by \(childHarness.rawValue). Delegate again with an exact catalogue id.")
+            return completion(fail(.unsupported, "The selected child model is no longer offered by \(childHarness.rawValue). Delegate again with an exact catalogue id."))
         }
+
+        if let reason = effortRefusal() { return completion(fail(.unsupported, reason)) }
 
         // Approval may have let the old helper resume or disappear.
         var prompt = request.task
+        // A retry continues the same work: it keeps the failed helper's stored
+        // effort unless this call names its own. The inherited value is not
+        // refused here; launch leaves it off if the catalogue no longer lists it.
+        var retryEffort: String?
+        var retryContract: AgentDelegationContract?
         if let retryOf = request.retryOf {
             guard supervisor.mayRetry(retryOf, from: agentId), let old = supervisor.records[retryOf] else {
-                return fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn.")
+                return completion(fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn."))
             }
+            retryEffort = old.thinking
+            retryContract = old.delegationContext?.contract
             let files = try? WorktreeManager().changedFiles(
                 repo: URL(fileURLWithPath: old.checkoutRoot), since: old.delegationContext?.baseHead)
             prompt += "\n\n" + AgentDelegationContext.handoff(from: old, changedFiles: files)
         }
+        // Told once, after the task; a retry keeps the failed helper's contract
+        // unless this call states its own.
+        let contract = prepared?.contract ?? retryContract
+        if let contract { prompt += "\n\n" + contract.promptText }
         // A Managed lead's helper reports through array_report (.plans/102).
         if supervisor.effectiveMode(for: agentId) == .managed {
             prompt += "\n\n" + ManagedLeadHookState.helperReportLine
@@ -208,119 +236,176 @@ extension WorkspaceAPIService {
         let spawnRequest = SpawnRequest(
             role: nil, prompt: prompt, isolated: false, sourceItemID: requestId,
             displayLabel: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
-        guard let childId = supervisor.handleSpawnRequest(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking), mode: .free, retryOf: request.retryOf, originalBrief: request.task) else {
-            let reason = supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
-            return fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true)
-        }
-        operations.update(operationId: requestId) { op in
-            op.steps.creation = .succeeded
-            op.childAgentId = childId
-        }
-        // The child's first turn is agent-started too: it continues the chain.
-        recordMessageChain(target: childId, hops: messageChainHops(for: agentId) + 1)
-        let child = supervisor.records[childId]
-        var result = AgentDelegateResult(
-            operationId: requestId,
-            status: .partial,
-            childAgentId: childId,
-            parentAgentId: agentId,
-            tileId: nil,
-            provider: (child?.harness ?? parentHarness).rawValue,
-            model: child?.model ?? record.model,
-            steps: WorkspaceOperationSteps(creation: .succeeded),
-            presentation: .unavailable,
-            presentationEffects: .allPreserved,
-            actualWorldRect: nil,
-            actualZoneId: nil,
-            childRunning: supervisor.isRunning(childId),
-            partial: false)
-
-        result.coordinationNote = supervisor.resultDelivery(for: agentId) == .push
-            ? "Continue independent work or end this turn. Array delivers this helper's result to you by itself; do not poll, wait or message it to check."
-            : "Array does not run this agent, so it delivers no helper results to it. Continue independent work, then collect the result with a short wait_agents when needed; do not poll."
-        result.checkoutRoot = child?.checkoutRoot
-        result.worktreeBranch = child?.worktreeBranch
-        result.checkoutNotice = child?.delegationContext?.checkoutNotice
-
-        // 7. Attachment: a tile in the PARENT's zone, framed against that zone
-        //    (hazard 9), through the existing managed-agent tile route.
-        if record.mode == .managed {
-            // A full Array runner and courier, with presentation deliberately absent.
-            result.steps.attachment = .skipped
-            result.steps.durability = .succeeded
-            result.steps.presentation = .skipped
-        } else {
-            let attachment = attachTile(
-                for: childId, parent: record, placement: request.placement, runtime: runtime, canvas: canvas)
-            switch attachment {
-            case let .attached(tileId, zoneId):
-                result.tileId = tileId
-                result.actualZoneId = zoneId
-                if let snapshot = canvas.navigationTileSnapshot(for: tileId) {
-                    result.actualWorldRect = CanvasWorldRect(snapshot.worldFrame)
+        func created(_ childId: AgentID) -> Reply {
+            if supervisor.qaRunLedgerRecording, let child = supervisor.records[childId] {
+                // `.plans/116` part 8: shadow evidence of the child's own tool calls,
+                // through the supervisor's observer seam; nothing reads it back.
+                supervisor.runLedger.delegated(parent: agentId.rawValue, child: childId.rawValue, source: requestId,
+                    root: child.checkoutRoot, base: child.delegationContext?.baseHead,
+                    shared: WorktreeManager.resolved(URL(fileURLWithPath: child.checkoutRoot))
+                        == WorktreeManager.resolved(URL(fileURLWithPath: record.checkoutRoot)))
+                let ledger = supervisor.runLedger
+                _ = supervisor.addRuntimeObservationObserver(for: childId) { [weak supervisor] observation in
+                    guard supervisor?.qaRunLedgerRecording == true, let sighting = HelperEvidence.Sighting(observation) else { return }
+                    ledger.observeTool(agent: childId.rawValue, sighting)
                 }
-                result.steps.attachment = .succeeded
-                // `spawnManagedAgent` persisted the canvas and the managed-session
-                // record before returning `.spawned`; `attach` persisted the child's
-                // record. Durable state crossed its barrier inside those owners.
-                result.steps.durability = .succeeded
-            case let .failed(message):
-                result.steps.attachment = .failed
-                result.steps.durability = .skipped
-                result.steps.presentation = .skipped
-                result.partial = true
-                result.failureMessage = message
             }
-        }
-        operations.update(operationId: requestId) { op in
-            op.steps = result.steps
-            op.tileId = result.tileId
-            op.failureMessage = result.failureMessage
-            op.failureCode = result.partial ? "attachment_failed" : nil
-        }
+            operations.update(operationId: requestId) { op in
+                op.steps.creation = .succeeded
+                op.childAgentId = childId
+            }
+            // The child's first turn is agent-started too: it continues the chain.
+            recordMessageChain(target: childId, hops: messageChainHops(for: agentId) + 1)
+            let child = supervisor.records[childId]
+            var result = AgentDelegateResult(
+                operationId: requestId,
+                status: .partial,
+                childAgentId: childId,
+                parentAgentId: agentId,
+                tileId: nil,
+                provider: (child?.harness ?? parentHarness).rawValue,
+                model: child?.model ?? record.model,
+                steps: WorkspaceOperationSteps(creation: .succeeded),
+                presentation: .unavailable,
+                presentationEffects: .allPreserved,
+                actualWorldRect: nil,
+                actualZoneId: nil,
+                childRunning: supervisor.isRunning(childId),
+                partial: false)
 
-        // 8. Cancellation after creation: report the child truthfully — it keeps
-        //    running — and present nothing.
-        if isCancelled() {
-            result.presentation = .deferred
-            result.steps.presentation = .skipped
+            result.coordinationNote = supervisor.resultDelivery(for: agentId) == .push
+                ? "Continue independent work or end this turn. Array delivers this helper's result to you by itself; do not poll, wait or message it to check."
+                : "Array does not run this agent, so it delivers no helper results to it. Continue independent work, then collect the result with a short wait_agents when needed; do not poll."
+            result.checkoutRoot = child?.checkoutRoot
+            result.worktreeBranch = child?.worktreeBranch
+            result.checkoutNotice = child?.delegationContext?.checkoutNotice
+            // Advice, never a refusal: paths a live sibling's contract also claims.
+            // Records are already in memory; nothing waits on disk. Past the size
+            // where comparing could cost the main actor about a millisecond, the
+            // result says so instead of comparing.
+            var notes = prepared?.notes ?? []
+            if let contract, !(contract.owns.isEmpty && contract.shared.isEmpty) {
+                let siblings = supervisor.children(of: agentId).compactMap { sibling -> (AgentID, AgentRecord, AgentDelegationContract)? in
+                    guard sibling != childId, supervisor.isRunning(sibling) || supervisor.turnPresence(for: sibling)?.phase.isLive == true,
+                          let record = supervisor.records[sibling], let theirs = record.delegationContext?.contract else { return nil }
+                    return (sibling, record, theirs)
+                }
+                let claims = siblings.reduce(contract.owns.count + contract.shared.count) { $0 + $1.2.owns.count + $1.2.shared.count }
+                if claims > Self.overlapClaimBudget {
+                    notes.append("ownership overlap not computed: \(claims) claimed paths across live siblings")
+                } else {
+                    let overlaps = siblings.compactMap { sibling, record, theirs -> AgentDelegateResult.OwnershipOverlap? in
+                        let paths = contract.claimOverlap(with: theirs)
+                        return paths.isEmpty ? nil : .init(agentId: sibling, title: record.humanDisplayName, paths: paths)
+                    }
+                    if !overlaps.isEmpty { result.ownershipOverlaps = overlaps }
+                }
+            }
+            if !notes.isEmpty { result.contractNotes = notes }
+
+
+            // 7. Attachment: a tile in the PARENT's zone, framed against that zone
+            //    (hazard 9), through the existing managed-agent tile route.
+            if record.mode == .managed {
+                // A full Array runner and courier, with presentation deliberately absent.
+                result.steps.attachment = .skipped
+                result.steps.durability = .succeeded
+                result.steps.presentation = .skipped
+            } else {
+                let attachment = attachTile(
+                    for: childId, parent: record, placement: request.placement, runtime: runtime, canvas: canvas)
+                switch attachment {
+                case let .attached(tileId, zoneId):
+                    result.tileId = tileId
+                    result.actualZoneId = zoneId
+                    if let snapshot = canvas.navigationTileSnapshot(for: tileId) {
+                        result.actualWorldRect = CanvasWorldRect(snapshot.worldFrame)
+                    }
+                    result.steps.attachment = .succeeded
+                    // `spawnManagedAgent` persisted the canvas and the managed-session
+                    // record before returning `.spawned`; `attach` persisted the child's
+                    // record. Durable state crossed its barrier inside those owners.
+                    result.steps.durability = .succeeded
+                case let .failed(message):
+                    result.steps.attachment = .failed
+                    result.steps.durability = .skipped
+                    result.steps.presentation = .skipped
+                    result.partial = true
+                    result.failureMessage = message
+                }
+            }
+            operations.update(operationId: requestId) { op in
+                op.steps = result.steps
+                op.tileId = result.tileId
+                op.failureMessage = result.failureMessage
+                op.failureCode = result.partial ? "attachment_failed" : nil
+            }
+
+            // 8. Cancellation after creation: report the child truthfully — it keeps
+            //    running — and present nothing.
+            if isCancelled() {
+                result.presentation = .deferred
+                result.steps.presentation = .skipped
+                result.status = result.partial ? .partial : .committed
+                result.childRunning = supervisor.isRunning(childId)
+                finish(agentId: agentId, requestId: requestId, result: result, outcome: "committedAfterCancel")
+                return .cancelled(result: Self.jsonObject(result))
+            }
+
+            // 9. Presentation: only what the policy permits, only while authorized.
+            //    A failure here is a repairable step — `agent.reveal(childId)`.
+            if let tileId = result.tileId {
+                _beforePresentationHook?()
+                let stillAllowed = supervisor.records[agentId]?.workspaceToolsEnabled == true
+                    && revocationGeneration(for: agentId) == generationAtGrant
+                if !stillAllowed {
+                    result.presentation = .unavailable
+                    result.steps.presentation = .skipped
+                } else if let injected = _injectPresentationFailure?(tileId) {
+                    result.presentation = .unavailable
+                    result.steps.presentation = .failed
+                    result.partial = true
+                    result.retryOp = .agentReveal
+                    result.failureMessage = injected
+                } else {
+                    let (presentation, effects) = present(
+                        tileId: tileId, policy: effectivePolicy, generationAtDispatch: generationAtDispatch,
+                        runtime: runtime, canvas: canvas)
+                    result.presentation = presentation
+                    result.presentationEffects = effects
+                    result.steps.presentation = .succeeded
+                }
+            }
             result.status = result.partial ? .partial : .committed
             result.childRunning = supervisor.isRunning(childId)
-            finish(agentId: agentId, requestId: requestId, result: result, outcome: "committedAfterCancel")
-            return .cancelled(result: Self.jsonObject(result))
+            finish(agentId: agentId, requestId: requestId, result: result, outcome: result.partial ? "partial" : "ok")
+            guard let object = Self.jsonObject(result) else {
+                return .error(WorkspaceAPIError(code: .unsupported, message: "Result could not be encoded."))
+            }
+            return .result(object)
         }
-
-        // 9. Presentation: only what the policy permits, only while authorized.
-        //    A failure here is a repairable step — `agent.reveal(childId)`.
-        if let tileId = result.tileId {
-            _beforePresentationHook?()
-            let stillAllowed = supervisor.records[agentId]?.workspaceToolsEnabled == true
-                && revocationGeneration(for: agentId) == generationAtGrant
-            if !stillAllowed {
-                result.presentation = .unavailable
-                result.steps.presentation = .skipped
-            } else if let injected = _injectPresentationFailure?(tileId) {
-                result.presentation = .unavailable
-                result.steps.presentation = .failed
-                result.partial = true
-                result.retryOp = .agentReveal
-                result.failureMessage = injected
-            } else {
-                let (presentation, effects) = present(
-                    tileId: tileId, policy: effectivePolicy, generationAtDispatch: generationAtDispatch,
-                    runtime: runtime, canvas: canvas)
-                result.presentation = presentation
-                result.presentationEffects = effects
-                result.steps.presentation = .succeeded
+        // The gate repeats step 5's authorization at the moment of creation: the
+        // git step ran in between, and access revoked during it creates nothing.
+        // Cancellation is not re-checked: past the commit boundary the child is
+        // committed, and step 8 reports it truthfully.
+        let gate: () -> String? = { [weak self] in
+            guard let self else { return "revoked" }
+            guard self.supervisor.records[agentId]?.workspaceToolsEnabled == true,
+                  self.revocationGeneration(for: agentId) == generationAtGrant else { return "revoked" }
+            return nil
+        }
+        supervisor.handleSpawnRequestAsync(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? retryEffort ?? (childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)), mode: .free, retryOf: request.retryOf, originalBrief: request.task, contract: contract, checkoutOffMain: checkoutOffMain, gate: gate) { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case let .spawned(childId):
+                completion(created(childId))
+            case .refused:
+                let reason = self.supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
+                completion(fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true))
+            case .gateClosed:
+                completion(fail(.permissionDenied, "Access was revoked before the child was created.", approvalRequestId: approvalRequestId))
             }
         }
-        result.status = result.partial ? .partial : .committed
-        result.childRunning = supervisor.isRunning(childId)
-        finish(agentId: agentId, requestId: requestId, result: result, outcome: result.partial ? "partial" : "ok")
-        guard let object = Self.jsonObject(result) else {
-            return .error(WorkspaceAPIError(code: .unsupported, message: "Result could not be encoded."))
-        }
-        return .result(object)
     }
 
     private enum Attachment {
@@ -941,6 +1026,11 @@ extension WorkspaceAPIService {
         guard let data = try? encoder.encode(normalized) else { return UUID().uuidString }
         return String(decoding: data, as: UTF8.self)
     }
+
+    /// Claimed paths (the new contract's plus its live siblings') above which
+    /// the overlap comparison is skipped and the result says so; measured to
+    /// stay near a millisecond on the main actor (about 0.35 µs a path, optimized).
+    static let overlapClaimBudget = 3_000
 
     private static func payloadHash(_ request: AgentDelegateRequest) -> String {
         var normalized = request

@@ -95,6 +95,15 @@ public struct CodexAppServerEventTranslator {
     /// `thread.forkedFromId` per thread, so its cumulative totals say what
     /// they inherited (collaboration accounting).
     private var forkedFromByThread: [String: String] = [:]
+    /// Threads this process saw start, so their first cumulative total counts
+    /// from zero; a resumed thread's first total carries its history.
+    private var startedThreads = Set<String>()
+    /// The model id `thread/started` named per thread, when it did.
+    private var modelByThread: [String: String] = [:]
+    /// Set by `CodexAgentRunner` on the `thread/started` it synthesizes after a
+    /// `thread/resume`: that thread did not start here, and its first total
+    /// carries history this process never watched.
+    public static let resumedMarker = "arrayResumed"
     private var recountedCompactionTokensByThread: [String: Int] = [:]
     private var workingDirectory: URL?
     private let now: @Sendable () -> Date
@@ -218,6 +227,8 @@ public struct CodexAppServerEventTranslator {
               let id = thread["id"] as? String, !id.isEmpty
         else { return [] }
         if let parent = thread["forkedFromId"] as? String, !parent.isEmpty, parent != id { forkedFromByThread[id] = parent }
+        if (params[Self.resumedMarker] as? Bool) != true { startedThreads.insert(id) }
+        if let model = thread["model"] as? String, !model.trimmingCharacters(in: .whitespaces).isEmpty { modelByThread[id] = model }
         // Fire session-ready/running once, on the first thread/started this
         // translator ever sees (the primary thread). A measured caveat: no
         // captured session ever delivered a SECOND thread/started for a child,
@@ -300,6 +311,7 @@ public struct CodexAppServerEventTranslator {
             let label = (item["agentPath"] as? String)
                 .map { URL(fileURLWithPath: $0).lastPathComponent }
                 .flatMap { $0.isEmpty ? nil : $0.replacingOccurrences(of: "_", with: " ") }
+            startedThreads.insert(childThreadID)
             onSubagentAnnouncement?(threadId, childThreadID, itemId, label)
             return []
 
@@ -358,7 +370,10 @@ public struct CodexAppServerEventTranslator {
                         targetPath: target,
                         startedAt: now(),
                         updatedAt: now(),
-                        evidenceSource: .toolEvent)))
+                        evidenceSource: .toolEvent,
+                        otherTargets: otherChangePaths(item).compactMap {
+                            Self.resolvedTarget($0, workingDirectory: workingDirectory)
+                        })))
             }
             if let onRuntimeObservation {
                 onRuntimeObservation(.toolDetail(itemId: itemId, detail: AgentToolDetailObservation(
@@ -660,11 +675,21 @@ public struct CodexAppServerEventTranslator {
             let input = Self.intValue(total["inputTokens"])
             let output = Self.intValue(total["outputTokens"])
             if (input ?? 0) + (output ?? 0) > 0 {
-                events.append(.tokenUsageUpdated(
-                    threadId: threadId,
-                    snapshot: TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil,
-                        observedAt: (emittedAtMs as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) },
-                        accountingForkedFrom: forkedFromByThread[threadId])))
+                var snapshot = TokenUsageSnapshot(inputTokens: input ?? 0, outputTokens: output ?? 0, totalCostUsd: nil,
+                    observedAt: (emittedAtMs as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue / 1000) },
+                    accountingForkedFrom: forkedFromByThread[threadId])
+                // `cachedInputTokens` is a subset of `inputTokens`. Every capture
+                // reports `cacheWriteInputTokens` as 0 while its cached reads
+                // grow, so it is not a measurement: unknown.
+                let cached = Self.intValue(total["cachedInputTokens"])
+                snapshot.typedCounts = .init(
+                    uncachedInput: input.flatMap { input in cached.flatMap { input >= $0 ? input - $0 : nil } },
+                    cacheRead: cached, cacheWrite: nil, output: output)
+                snapshot.accountingSession = threadId
+                snapshot.accountingSessionStarted = startedThreads.contains(threadId)
+                snapshot.accountingTurn = (params["turnId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                snapshot.accountingModel = modelByThread[threadId]
+                events.append(.tokenUsageUpdated(threadId: threadId, snapshot: snapshot))
             }
         }
         if let last = usage["last"] as? [String: Any],
@@ -735,6 +760,11 @@ public struct CodexAppServerEventTranslator {
     private func firstChangePath(_ item: [String: Any]) -> String? {
         guard let changes = item["changes"] as? [[String: Any]] else { return nil }
         return changes.lazy.compactMap { $0["path"] as? String }.first
+    }
+
+    private func otherChangePaths(_ item: [String: Any]) -> [String] {
+        guard let changes = item["changes"] as? [[String: Any]] else { return [] }
+        return Array(changes.compactMap { $0["path"] as? String }.dropFirst())
     }
 
     private func changeBasenames(_ item: [String: Any]) -> [String] {

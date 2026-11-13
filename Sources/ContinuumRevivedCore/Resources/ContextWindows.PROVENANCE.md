@@ -21,8 +21,15 @@ and exact model. The window each harness's own CLI publishes (Codex's
 `models_cache.json`, pi's `models-store.json`) also supersedes it: this file
 is a dated copy of those, so a model the CLI ships later must not read as
 unknown. No prefix, fuzzy match, inferred model-family value or guessed
-capacity is used. Missing entries remain visibly unknown and fail the offered
-model gate.
+capacity is used. Missing entries remain visibly unknown.
+
+Do not add a Claude model here just because the CLI started offering it. The
+claude `initialize` handshake publishes no window (checked against 2.1.321), so
+a new Claude model reads as unknown until its first turn, whose result states
+the window; that value is remembered app-wide from then on. The live witness
+`--context-meter-live-check` runs the first such model and asserts exactly
+that. Codex and pi publish windows in their catalogues, so every model they
+offer must resolve before any turn.
 
 Current installed CLI captures (2026-10-13):
 

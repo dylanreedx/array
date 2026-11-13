@@ -355,6 +355,42 @@ public struct TokenUsageSnapshot: Codable, Equatable, Sendable {
     /// (codex `forkedFromId`). Its total already contains the parent's.
     public var accountingForkedFrom: String?
 
+    /// Counters by type, for local token telemetry (`.plans/116` part 14). A nil
+    /// field is a type the provider did not report: unknown, never zero.
+    /// `uncachedInput + cacheRead + cacheWrite` is the whole prompt.
+    public struct TypedCounts: Codable, Equatable, Sendable {
+        public var uncachedInput: Int?
+        public var cacheRead: Int?
+        public var cacheWrite: Int?
+        public var output: Int?
+        public init(uncachedInput: Int?, cacheRead: Int?, cacheWrite: Int?, output: Int?) {
+            self.uncachedInput = uncachedInput; self.cacheRead = cacheRead
+            self.cacheWrite = cacheWrite; self.output = output
+        }
+    }
+    /// Same scope as the accounting figures above: Claude's result share
+    /// (subagents included), or Codex's cumulative total for `accountingSession`.
+    public var typedCounts: TypedCounts?
+    /// Claude only: `typedCounts` split by the exact model id `modelUsage` names.
+    public var typedCountsByModel: [String: TypedCounts]?
+    /// Codex only: the provider thread whose cumulative total this is, and
+    /// whether this process saw that thread start (its baseline is zero).
+    public var accountingSession: String?
+    public var accountingSessionStarted: Bool?
+    /// Claude only: the run's per-message usage, de-duplicated by message id,
+    /// equals the result's own `usage`. False means they disagree.
+    public var accountingReconciled: Bool?
+    /// The provider turn this usage belongs to (Claude's turn id, Codex's
+    /// `turnId`), so a report that arrives after its turn ended is never
+    /// charged to another turn.
+    public var accountingTurn: String?
+    /// Codex only: the model id the CLI named for this thread, when it did.
+    public var accountingModel: String?
+    /// A marker, not a report: this turn's usage is known to be partial, and
+    /// why (`trailingFramesCut`: Codex frames after the turn were still unread
+    /// when the runner's drain bound ended). Carries no counters.
+    public var accountingIncomplete: String?
+
     public init(inputTokens: Int, outputTokens: Int, totalCostUsd: Double?, accountingObservationID: String? = nil,
                 accountingInputTokens: Int? = nil, observedAt: Date? = nil, accountingOutputTokens: Int? = nil,
                 accountingForkedFrom: String? = nil) {

@@ -27,6 +27,11 @@ public struct WorktreeManager: Sendable {
     /// Prefix of every branch this manager creates.
     public static let branchPrefix = "agent/"
 
+    /// git processes run on the main thread since launch. Each blocks the UI
+    /// for its whole run; the delegation witness requires none.
+    public static var mainThreadGitRunsForQA: Int { mainThreadGitRuns.value }
+    private static let mainThreadGitRuns = QACounter()
+
     /// One entry of `git worktree list`.
     ///
     /// `branch` is optional and `isMain` exists even though the packet sketched
@@ -464,6 +469,7 @@ public struct WorktreeManager: Sendable {
     @discardableResult
     private func runGit(_ arguments: [String], repo: URL) throws -> String {
         #if os(macOS)
+        if Thread.isMainThread { Self.mainThreadGitRuns.increment() }
         let process = Process()
         process.executableURL = gitExecutableURL
         process.arguments = arguments
@@ -598,3 +604,11 @@ private final class WorktreeProcessOutput: @unchecked Sendable {
     }
 }
 #endif
+
+/// A launch-wide count read by QA witnesses; safe from any thread.
+final class QACounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+}

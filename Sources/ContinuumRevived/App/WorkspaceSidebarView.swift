@@ -262,7 +262,6 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     private let scrollView: NSScrollView
     private let outlineView: NSOutlineView
     private let column: NSTableColumn
-    private let titleLabel: NSTextField
     private let managementMessageLabel: NSTextField
     private var resizeController: WorkspaceSidebarResizeController?
 
@@ -286,9 +285,6 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         // which is where the workspace being acted on is named. The header keeps the
         // management MESSAGE — a rejected rename or a preserved workspace has to be
         // readable somewhere, and a menu that has already closed is not that place.
-        titleLabel = NSTextField(labelWithString: "Agents")
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
         managementMessageLabel = NSTextField(labelWithString: "")
         managementMessageLabel.font = .systemFont(ofSize: 11, weight: .medium)
@@ -329,7 +325,6 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         setAccessibilityIdentifier("ContinuumWorkspaceSidebarRoot")
         managementMessageLabel.setAccessibilityIdentifier("ContinuumWorkspaceSidebarManagementMessage")
 
-        addSubview(titleLabel)
         addSubview(managementMessageLabel)
         addSubview(scrollView)
         addSubview(inboxView)
@@ -345,13 +340,9 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         outlineView.action = #selector(outlineRowClicked(_:))
 
         NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-
             managementMessageLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             managementMessageLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            managementMessageLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            managementMessageLabel.topAnchor.constraint(equalTo: topAnchor, constant: 4),
 
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -360,7 +351,7 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
 
             inboxView.leadingAnchor.constraint(equalTo: leadingAnchor),
             inboxView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            inboxView.topAnchor.constraint(equalTo: managementMessageLabel.bottomAnchor, constant: 8),
+            inboxView.topAnchor.constraint(equalTo: topAnchor),
             inboxView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
@@ -443,7 +434,6 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     /// `reloadData()`, which is why the outline is reloaded too.
     func applyTokens() {
         layer?.backgroundColor = SurfaceToken.panel.color.cgColor(in: self)
-        titleLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         managementMessageLabel.textColor = AccentToken.accentApproval.color.nsColor(in: self)
         if outlineView.numberOfRows > 0 { outlineView.reloadData() }
     }

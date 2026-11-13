@@ -150,6 +150,10 @@ enum HelperWatchdogChecks {
         now.addTimeInterval(601)
         await supervisor.sweepHelperWatchdog()
         try HelperGuardChecks.expect(stoppedAlerts() == 1, "stopped-helper control did not queue its alert")
+        supervisor.qaDeliver(.turnCompleted(threadId: "watchdog", turnId: "turn", outcome: .failed, errorMessage: "fixture failure"), to: stopped)
+        await supervisor.sweepHelperWatchdog()
+        let failedWithdrawn = await waitUntil(timeout: 5, pollInterval: 0.02) { stoppedAlerts() == 0 }
+        try HelperGuardChecks.expect(failedWithdrawn, "an alert about a failed helper stayed queued for its lead")
         supervisor.stop(stopped)
         let withdrawn = await waitUntil(timeout: 5, pollInterval: 0.02) { stoppedAlerts() == 0 }
         try HelperGuardChecks.expect(withdrawn, "an alert about a stopped helper stayed queued for its lead")

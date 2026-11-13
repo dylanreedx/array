@@ -908,6 +908,24 @@ enum ContinuumApp {
                 }
             }
         }
+        // Selection-parity A/B: one PNG per step, style and appearance.
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-parity-capture-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    let next = CommandLine.arguments.index(after: index)
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("-")
+                        ? URL(fileURLWithPath: CommandLine.arguments[next])
+                        : URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                            .appendingPathComponent("qa-runs/sidebar-parity-capture")
+                    print(try SidebarParityCapture.run(outputDirectory: dir))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // .plans/106: who owns whom — subagents in their lead's card.
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-ownership-check") {
             _ = NSApplication.shared
@@ -2338,6 +2356,19 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // `.plans/116` part 16: standards.read and its advertising, through the
+        // production launch configuration of all three harnesses.
+        if CommandLine.arguments.contains("--standards-resolution-check") {
+            do {
+                _ = NSApplication.shared
+                try StandardsResolutionChecks.run()
+                print("ContinuumRevivedStandardsResolutionChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--workspace-api-agent-colour-check") {
             do {
                 _ = NSApplication.shared
@@ -2380,6 +2411,112 @@ enum ContinuumApp {
             Task { @MainActor in
                 do {
                     try await ManagedLeadPlanChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // `.plans/116` part 12 step 1: the host-kept run ledger, through the
+        // composer's accept, the real MCP binary and a restart.
+        if CommandLine.arguments.contains("--managed-run-ledger-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedRunLedgerChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // `.plans/116` part 8 step 1: shadow evidence of the checks a helper ran
+        // after its edits, for Claude and Codex, recording on and off.
+        if CommandLine.arguments.contains("--helper-evidence-provider-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperEvidenceChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // `.plans/116` gaps 20 and 21: a Managed lead's own checkout changes,
+        // its hook receipts in the run ledger, and the strict lead switch.
+        if CommandLine.arguments.contains("--lead-checkout-ledger-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await LeadCheckoutChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // `.plans/116` part 14 step 1: tokens by type per task, lead and helpers,
+        // Claude and Codex, through production delegation and recorded frames.
+        if CommandLine.arguments.contains("--request-telemetry-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await RequestTelemetryChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // Targeted only, never a matrix leg: prints Managed lead and helper launch
+        // time, request to CLI start, and asserts nothing about time.
+        if CommandLine.arguments.contains("--managed-launch-timing-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedLaunchTimingChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // `.plans/116` section 4 B, items 6 to 9: a CLI's own subagents and a
+        // helper's own helper in the ledger, active time and usage after a
+        // task closed, and Codex frames after its main turn.
+        if CommandLine.arguments.contains("--run-ledger-gaps-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await RunLedgerGapsChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // Targeted only, never a matrix leg: prints what the run ledger adds to
+        // the request path and asserts nothing about time.
+        if CommandLine.arguments.contains("--managed-run-ledger-timing-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedRunLedgerTimingChecks.run()
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -2450,6 +2587,20 @@ enum ContinuumApp {
                 do {
                     try await HelperWatchdogChecks.run()
                     print("HelperWatchdogChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        if CommandLine.arguments.contains("--helper-liveness-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperLivenessChecks.run()
+                    print("HelperLivenessChecks passed")
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -2706,6 +2857,60 @@ enum ContinuumApp {
                 fputs("FAIL: \(error)\n", stderr)
                 Foundation.exit(1)
             }
+        }
+
+        // Markdown rows attached only where the clip shows them: pixels,
+        // scrolling, selection/copy and accessibility against the switch-off
+        // document, off-screen.
+        if CommandLine.arguments.contains("--markdown-visible-rows-check") {
+            do {
+                _ = NSApplication.shared
+                NSApp.setActivationPolicy(.accessory)
+                try MarkdownVisibleRowsChecks.run()
+                print("ContinuumRevivedMarkdownVisibleRowsChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        // Unattached visible-rows Markdown text views must not observe every
+        // view's frame changes: the motion scene, off-screen.
+        if CommandLine.arguments.contains("--markdown-frame-observer-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                do {
+                    try await MarkdownFrameObserverChecks.run()
+                    print("ContinuumRevivedMarkdownFrameObserverChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
+
+        // Zoom cost with the visible-rows switch on and off, interleaved pairs
+        // in the motion workload's real scene, off-screen.
+        if CommandLine.arguments.contains("--markdown-visible-rows-zoom-cost-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.accessory)
+            Task { @MainActor in
+                do {
+                    try await CanvasZoomStepCostChecks.runVisibleRowsComparison()
+                    print("ContinuumRevivedMarkdownVisibleRowsZoomCostChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
         }
 
         if CommandLine.arguments.contains("--file-markdown-perf-check") {
@@ -3291,10 +3496,42 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // A live replay pilot run (benchmarks/replay/run_pilot.py), not a check:
+        // it spends real provider usage and is never run by the matrix.
+        if CommandLine.arguments.contains("--replay-live-run") {
+            _ = NSApplication.shared
+            // Headless: never a Dock icon, never the user's focus.
+            NSApp.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                do {
+                    try await runReplayLive(CommandLine.arguments)
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         // CX-01 Phase 2b (`.plans/59`, §10): visible delegation with safe retry
         // through the production mount and dispatch — create-once under retry,
         // idempotency conflict, child tile in the parent's zone, presentation
         // failure repaired by agent.reveal, operation.get, cancellation truth.
+        if CommandLine.arguments.contains("--replay-driver-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runReplayDriverChecks()
+                    print("ReplayDriverChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--workspace-api-delegation-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -3598,6 +3835,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--part-contract-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await PartContractChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--helper-worktree-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -3682,11 +3933,81 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--managed-lead-tool-loading-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedModeChecks.leadToolLoading()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--managed-mode-hooks-check") {
             _ = NSApplication.shared
             Task { @MainActor in
                 do {
                     try await ManagedModeChecks.hooks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--managed-compaction-tools-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runManagedCompactionToolsChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--reply-rules-launch-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ReplyRulesChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--personal-rules-delegation-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await PersonalRulesChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--managed-lead-context-transition-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedLeadTransitionChecks.run()
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -3800,6 +4121,16 @@ enum ContinuumApp {
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL --auto-layout-fanout-app-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--bare-tile-check") {
+            do {
+                _ = NSApplication.shared
+                try BareTileChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --bare-tile-check: \(error)\n", stderr)
                 Foundation.exit(1)
             }
         }
@@ -4189,6 +4520,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--sidebar-event-cost-check") {
+            do {
+                _ = NSApplication.shared
+                print(try AppDelegate.runSidebarEventCostChecks())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-incremental-refresh-check") {
             do {
                 _ = NSApplication.shared
@@ -4218,6 +4560,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 try SettingsSelfChecks.runPanelCheck()
                 print("ContinuumRevivedSettingsPanelChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--settings-usage-check") {
+            do {
+                _ = NSApplication.shared
+                try SettingsUsageChecks.run()
+                print("ContinuumRevivedSettingsUsageChecks passed")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -4501,6 +4855,36 @@ enum ContinuumApp {
             } catch {
                 fputs("FAIL: sidebar-indicator-settings: \(error)\n", stderr)
                 Foundation.exit(1)
+            }
+        }
+        // Helper-row hover: the pill, driven through NSApp.sendEvent.
+        if CommandLine.arguments.contains("--sidebar-helper-hover-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarHelperHoverChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: sidebar-helper-hover: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-helper-hover-capture") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    let next = CommandLine.arguments.index(after: index)
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("-")
+                        ? URL(fileURLWithPath: CommandLine.arguments[next])
+                        : URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                            .appendingPathComponent("qa-runs/hover-redesign")
+                    print(try SidebarHelperHoverChecks.runCapture(outputDirectory: dir))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
             }
         }
         if CommandLine.arguments.contains("--sidebar-screenshot-check") {
@@ -7816,7 +8200,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Coalesces surface pushes on the runner event path. `recordManagedActivity` is
     /// called per streamed token, and a push reloads the sidebar and sweeps the
     /// canvas — debounced exactly like `scheduleCompanionSyncPublish`.
-    private lazy var agentSurfacePush = CoalescedPush { [weak self] in self?.pushAgentSurfaces() }
+    private lazy var agentSurfacePush = CoalescedPush { [weak self] in self?.pushScheduledAgentSurfaces() }
+    /// What asked for the pending coalesced push: agents whose only events were
+    /// tool chatter, and whether anything else (a state change, a report, a
+    /// tile-less turn) did. Chatter alone patches rows; anything else builds them.
+    private var pendingChatterAgents: Set<UUID> = []
+    private var pendingPushBuildsRows = false
+    /// The inbox rows the last full build produced, with chatter patches applied
+    /// since, and the uptime of that build. Every writer of the inbox goes through
+    /// `sidebarInboxRows`, so this is what the sidebar holds.
+    private var lastInboxRows: (rows: [AgentInboxRow], builtAt: TimeInterval)?
+    /// How long chatter may patch rows before a full build runs anyway. Bounds how
+    /// late a time-driven field (auto-settle, closing grace) can be while agents
+    /// stream; those move on a scale of minutes, and chatter used to refresh them
+    /// every 0.5 s only incidentally.
+    static let chatterPatchMaxAge: TimeInterval = 5
+    /// Full inbox row builds (`buildAgentInboxRows`), for the push-cost witness.
+    private(set) var qaInboxRowBuildCount = 0
     private var sidebarTurnObserverToken: UUID?
     /// Every STRUCTURAL sidebar reload (the ones that read disk) — the workspace-
     /// switch witness reads the delta across one switch.
@@ -8459,6 +8859,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         guard !projectRoot.contains("/Documents/personal") else {
             report("FAIL: refusing to run against \(projectRoot)")
             Foundation.exit(2)
+        }
+        if ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_APPROVED_CAPTURE"] == "1" {
+            Task { @MainActor in
+                do {
+                    try await Task.sleep(for: .seconds(2))
+                    guard let inbox = self.workspaceSidebarView?.agentInbox else {
+                        throw NSError(domain: "SidebarLiveCapture", code: 2)
+                    }
+                    try await SidebarApprovedLiveCaptureChecks.run(window: window, inbox: inbox, directory: directory)
+                    report("Approved sidebar live captures complete")
+                } catch {
+                    report("FAIL: \(error)")
+                    try? String(describing: error).write(to: directory.appendingPathComponent("capture-error.txt"), atomically: true, encoding: .utf8)
+                }
+            }
+            return
         }
         let requestedWidth = WorkspaceSidebarConfig.resolveWidth(defaults: .standard)
 
@@ -9405,16 +9821,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// window-level click monitor reports every click inside an already-focused
     /// transcript/composer; reloading the whole sidebar for each one would turn a
     /// read-watermark fix into an interaction performance regression.
+    ///
+    /// A focus move alone changes one thing in the sidebar: which row is open.
+    /// That is `setInboxOpenAgent`, which redraws the two rows involved. Only a
+    /// visit that changed the agent's read state (attention, or an unread turn
+    /// result acknowledged) changes row values, and only that builds every row.
+    /// The live-usage profile (2026-11-11) caught each click into a tile
+    /// rebuilding the whole sidebar synchronously.
     private func synchronizeAgentFocus(to tileId: UUID?, deliberate: Bool = true) {
         let previousAgent = agentSupervisor.focusedAgentID
         let nextAgent = tileId.flatMap { agentSupervisor.agent(forTile: $0) }
         let previousAttention = nextAgent.map { agentSupervisor.attention(for: $0) }
+        let previousUnread = nextAgent.map(terminalResultIsUnread)
         agentSupervisor.focusTile(tileId, deliberate: deliberate)
-        let attentionChanged = nextAgent.map {
-            previousAttention != agentSupervisor.attention(for: $0)
+        let readStateChanged = nextAgent.map {
+            previousAttention != agentSupervisor.attention(for: $0) || previousUnread != terminalResultIsUnread($0)
         } ?? false
-        guard previousAgent != agentSupervisor.focusedAgentID || attentionChanged else { return }
-        reloadWorkspaceSidebar(rebuildAgentActivity: false)
+        if readStateChanged {
+            reloadWorkspaceSidebar(rebuildAgentActivity: false)
+        } else if previousAgent != agentSupervisor.focusedAgentID {
+            workspaceSidebarView?.setInboxOpenAgent(focusedInboxAgentId())
+        }
+    }
+
+    /// `AgentInboxRow.terminalIsUnread`, by the builder's formula.
+    private func terminalResultIsUnread(_ id: AgentID) -> Bool {
+        agentSupervisor.records[id].map {
+            ($0.latestTerminalEvent?.sequence ?? 0) > $0.acknowledgedTerminalSequence
+        } ?? false
     }
 
     /// One deliberate-visit transaction for the two independently-owned truths:
@@ -10800,14 +11234,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `reloadsTopBar`: only a structural refresh can have changed what the top
     /// bar shows (it re-reads the registry and the workspace file); an agent's own
     /// event cannot, so the event path leaves it alone and opens no file.
-    private func pushAgentSurfaces(notify: Bool = true, reloadsTopBar: Bool = false) {
+    /// `chatterOnly`: the push answers tool chatter from these agents and nothing
+    /// else, so their rows are patched instead of every row being built.
+    private func pushAgentSurfaces(notify: Bool = true, reloadsTopBar: Bool = false, chatterOnly: Set<UUID>? = nil) {
         agentActivity.lastChange = AgentsBoardProjection.changeSet(
             from: agentActivityChangeBase, to: agentActivity.snapshot
         )
         agentActivityChangeBase = agentActivity.snapshot
         applyAgentStatusesToCanvas()
         updateAgentAttentionSurface(notify: notify)
-        reloadWorkspaceSidebar(rebuildAgentActivity: false, reloadsTopBar: reloadsTopBar)
+        reloadWorkspaceSidebar(rebuildAgentActivity: false, reloadsTopBar: reloadsTopBar, chatterOnly: chatterOnly)
+    }
+
+    /// The coalesced push firing: chatter-only when nothing else asked.
+    private func pushScheduledAgentSurfaces() {
+        let chatter = pendingPushBuildsRows || pendingChatterAgents.isEmpty ? nil : pendingChatterAgents
+        pendingChatterAgents = []
+        pendingPushBuildsRows = false
+        pushAgentSurfaces(chatterOnly: chatter)
+    }
+
+    /// The cached rows with each chattering agent's row re-derived
+    /// (`AgentInboxRowBuilder.refreshingChatter`), or nil when a full build is
+    /// owed: no cache, a cache older than `chatterPatchMaxAge`, or a row whose
+    /// chatter could have moved more than those fields.
+    private func chatterPatchedInboxRows(for agents: Set<UUID>) -> [AgentInboxRow]? {
+        guard let cache = lastInboxRows,
+              ProcessInfo.processInfo.systemUptime - cache.builtAt < Self.chatterPatchMaxAge else { return nil }
+        let now = AgentElapsedClock.now()
+        var rows = cache.rows
+        for agent in agents {
+            let id = AgentID(rawValue: agent)
+            guard let index = rows.firstIndex(where: { $0.id == agent }),
+                  let record = agentSupervisor.records[id],
+                  let snapshot = agentSupervisor.turnSnapshot(for: id),
+                  let updatedAt = agentActivity.snapshot.byAgent[agent]?.updatedAt,
+                  let patched = AgentInboxRowBuilder.refreshingChatter(
+                    rows[index], turnSnapshot: snapshot, record: record, boardUpdatedAt: updatedAt,
+                    lastActivity: agentSupervisor.lastActivity(for: id), now: now)
+            else { return nil }
+            rows[index] = patched
+        }
+        lastInboxRows = (rows, cache.builtAt)
+        return rows
     }
 
     /// P2B.7: an agent's own event folds straight into the snapshot the desktop is
@@ -10843,7 +11312,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// plus a canvas sweep per streamed token is the jumpiness this ticket removes.
     /// It pushes; it does NOT rebuild — the snapshot was already advanced
     /// incrementally by the time this fires.
-    private func scheduleAgentSurfacePush(debounce: TimeInterval) {
+    /// `chatterFrom`: the request is tool chatter from this agent (see
+    /// `pushScheduledAgentSurfaces`).
+    private func scheduleAgentSurfacePush(debounce: TimeInterval, chatterFrom agent: AgentID? = nil) {
+        if let agent { pendingChatterAgents.insert(agent.rawValue) } else { pendingPushBuildsRows = true }
         agentSurfacePush.request(within: debounce)
     }
 
@@ -14902,6 +15374,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             },
         ]
         model.canvasBackground = makeCanvasBackgroundEditor()
+        model.usage.ledgerURL = agentSupervisor.runLedgerURL
+        model.usage.deleteHandler = { [weak self] what, done in self?.agentSupervisor.runLedger.delete(what, completion: done) }
         if let checkForUpdates = ContinuumApp.checkForUpdatesAction {
             model.actionHandlers["checkForUpdates"] = checkForUpdates
         }
@@ -15605,6 +16079,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private func buildAgentInboxRows(
         now: Date = AgentElapsedClock.now(), inputs: SidebarModelInputs? = nil
     ) -> [AgentInboxRow] {
+        qaInboxRowBuildCount += 1
         // In memory (R5): the inputs the last structural rebuild read, with the
         // live canvas over them. An agent event never opens a file.
         let inputs = inputs ?? currentSidebarModelInputs()
@@ -15703,7 +16178,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return agentSupervisor.agent(forTile: tileId)?.rawValue ?? tileId
     }
 
-    private func reloadWorkspaceSidebar(rebuildAgentActivity: Bool = true, reloadsTopBar: Bool? = nil) {
+    private func reloadWorkspaceSidebar(
+        rebuildAgentActivity: Bool = true, reloadsTopBar: Bool? = nil, chatterOnly: Set<UUID>? = nil
+    ) {
         if rebuildAgentActivity {
             WorkspaceSwitchCounters.sidebarReloads += 1
             qaStructuralSidebarReloadCount += 1
@@ -15742,7 +16219,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // and is populated only after readiness". `applyInbox([])` here would be the
         // "no agents" lie with a rendered empty state behind it.
         if agentActivity.isReconciled {
-            sidebar.applyInbox(rows: sidebarInboxRows(inputs: inputs), changed: agentActivity.lastChange)
+            let rows = chatterOnly.flatMap(chatterPatchedInboxRows(for:)) ?? sidebarInboxRows(inputs: inputs)
+            sidebar.applyInbox(rows: rows, changed: agentActivity.lastChange)
         }
         // The workspace tree is never shown (`isWorkspaceTreeVisibleForQA`) and an
         // agent event cannot change its shape — only a structural reload rebuilds it.
@@ -16914,7 +17392,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `buildAgentInboxRows`, which never holds someone else's agent.
     func sidebarInboxRows(now: Date = AgentElapsedClock.now(), inputs: SidebarModelInputs? = nil) -> [AgentInboxRow] {
         let inputs = inputs ?? currentSidebarModelInputs()
-        return buildAgentInboxRows(now: now, inputs: inputs) + sharedAgentSidebarRows(inputs: inputs, now: now)
+        let rows = buildAgentInboxRows(now: now, inputs: inputs) + sharedAgentSidebarRows(inputs: inputs, now: now)
+        lastInboxRows = (rows, ProcessInfo.processInfo.systemUptime)
+        return rows
     }
 
     /// One lead row per `.sharedAgent` tile in any project's canvas, whether or
@@ -21172,7 +21652,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ingestAgentActivityIncrementally(draft: draft)
         // Plan 87: a STATE change (turn start/end, approval, input, failure, spawn)
         // reaches the sidebar within a frame or three; only tool chatter waits.
-        scheduleAgentSurfacePush(debounce: Self.isSidebarStateChange(event) ? 0.05 : 0.5)
+        let isStateChange = Self.isSidebarStateChange(event)
+        scheduleAgentSurfacePush(debounce: isStateChange ? 0.05 : 0.5, chatterFrom: isStateChange ? nil : agentId)
     }
 
     static func isSidebarStateChange(_ event: AgentRuntimeEvent) -> Bool {
@@ -22136,6 +22617,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                    let projectId = document.zones.first(where: { $0.zoneId == zoneId })?.projectId,
                    projectZones[projectId] != nil {
                     ownerProjectIds.insert(projectId)
+                } else if let projectId = canvasView?.projectId(ofBareTile: tileId), projectZones[projectId] != nil {
+                    // A bare tile lives in no zone; its project still owns it.
+                    ownerProjectIds.insert(projectId)
                 }
             }
             var projectWrites: [(projectId: UUID, store: ProjectStore, original: CanvasState, updated: CanvasState)] = []
@@ -22165,6 +22649,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     if let zoneId = transaction.tileZoneIds[updated.tiles[index].id],
                        document.zones.contains(where: { $0.zoneId == zoneId && $0.projectId == projectId }) {
                         updated.tiles[index].zoneId = zoneId
+                        updated.tiles[index].isBare = false
+                    } else if transaction.bareTileIds.contains(updated.tiles[index].id) {
+                        updated.tiles[index].zoneId = nil
+                        updated.tiles[index].isBare = true
                     }
                     changed = true
                 }
@@ -23933,11 +24421,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The MCP server config a runner launches with. Its result channel is
     /// the supervisor's, by capability, so the server and the host agree on
     /// whether `wait_agents` exists for this agent.
-    func workspaceMCPConfiguration(for agentID: AgentID, harness: AgentHarness) -> WorkspaceMCPConfiguration? {
+    func workspaceMCPConfiguration(for agentID: AgentID, harness: AgentHarness, projectStandards: Bool) -> WorkspaceMCPConfiguration? {
         guard harness == .claudeCode || harness == .codex,
               let executable = Self.workspaceMCPExecutablePath() else { return nil }
         return workspaceMCPHost.configuration(for: agentID, serverExecutable: executable,
-                                              resultDelivery: agentSupervisor.resultDelivery(for: agentID))
+                                              resultDelivery: agentSupervisor.resultDelivery(for: agentID),
+                                              projectStandards: projectStandards)
     }
 
     func qaInstallWorkspaceSidebar(_ sidebar: WorkspaceSidebarView) {
@@ -24104,8 +24593,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             self.workspaceAPI.handleMCPRequest(request, completion: reply)
         }
-        agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness in
-            self?.workspaceMCPConfiguration(for: agentID, harness: harness)
+        agentSupervisor.workspaceMCPConfigurationProvider = { [weak self] agentID, harness, projectStandards in
+            self?.workspaceMCPConfiguration(for: agentID, harness: harness, projectStandards: projectStandards)
         }
         agentSupervisor.onWorkspaceToolsChanged = { [weak self] agentId, enabled in
             self?.workspaceAPI.policyChanged(agentId: agentId, enabled: enabled)
@@ -39283,8 +39772,12 @@ extension AppDelegate {
     inbox.layoutForQA()
     try expect(inbox.rowCountForQA == withoutOne.count,
                "an agent that went away must leave the list — got \(inbox.rowCountForQA) of \(withoutOne.count)")
+    // As in 0.7.47, a push that changes the set under the newest-first sort drops
+    // the selection (the order it named is gone) and rebuilds each row once.
+    try expect(inbox.selectedRowIdsForQA.isEmpty,
+               "a push that removed another agent drops the selection, as 0.7.47 did — got \(inbox.selectedRowIdsForQA)")
     try expect(inbox.cellBuildCountForQA - buildsBeforeRemoval == withoutOne.count,
-               "a list whose agents changed is rebuilt whole — a partial reload against a shifted array repaints a row with its neighbour's agent")
+               "a list whose agents changed is rebuilt whole — a partial reload against a shifted array repaints a row with its neighbour's agent — \(inbox.cellBuildCountForQA - buildsBeforeRemoval) built for \(withoutOne.count) rows")
 
     // MARK: A3 · P3.8 · the scope filters the list, and flipping it clears selection
 
@@ -40030,6 +40523,8 @@ extension AppDelegate {
                "folding a group hides its children and moves nothing else — got \(nested.titlesForQA)")
     try expect(nested.disclosureGlyphsForQA[parentIndex] == "▸",
                "a folded parent keeps the triangle you unfold it with, pointing the other way — got '\(nested.disclosureGlyphsForQA[parentIndex])'")
+    // As in 0.7.47, the selection goes with the rows that went, so no bulk action
+    // can reach a row you cannot see.
     try expect(nested.selectedRowCountForQA == 0,
                "…and the selection goes with the rows that went — \(nested.selectedRowCountForQA) rows still selected")
     // The fold is VIEW state: nothing was taken out of the model, so an unfold
@@ -44808,6 +45303,219 @@ extension AppDelegate {
             throw Failure(description: "SidebarLiveness RED:\n  " + failures.joined(separator: "\n  "))
         }
         return "SidebarLiveness: " + report.joined(separator: "; ")
+    }
+}
+
+// Live-usage profile (2026-11-11), the two sidebar costs. Gated on
+// `--sidebar-event-cost-check`. Driven through production: tool events through
+// `AgentSupervisor.qaDeliver` (the runner's delivery seam) and its 0.5 s
+// coalesced push, focus through `FocusBroker.requestFocus` with the canvas
+// wiring `AppDelegate` installs, and the real
+// `AgentInboxView` in an off-screen window. `qaInboxRowBuildCount` counts
+// `buildAgentInboxRows`, the whole-sidebar build both fixes remove.
+extension AppDelegate {
+    static func runSidebarEventCostChecks() throws -> String {
+        struct Failure: Error, CustomStringConvertible { let description: String }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            if !condition() { throw Failure(description: message()) }
+        }
+        var failures: [String] = []
+        func witness(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) {
+            if !condition() { failures.append(message()) }
+        }
+        @discardableResult
+        func spin(timeout: TimeInterval, until done: () -> Bool) -> TimeInterval? {
+            let start = Date()
+            while Date().timeIntervalSince(start) < timeout {
+                if done() { return Date().timeIntervalSince(start) }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+            return done() ? Date().timeIntervalSince(start) : nil
+        }
+        func settle() { spin(timeout: 0.7) { false } }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory
+            .appendingPathComponent("continuum-sidebar-event-cost-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+        for dir in [appSupport, agentsSupport, projectRoot] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let now = Date()
+        let workspaceId = UUID()
+        let projectId = UUID()
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Cost", projectIds: [projectId], createdAt: now, updatedAt: now)]
+        registry.projects = [ProjectEntry(id: projectId, name: "Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+        let supervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: agentsSupport),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        app.agentSupervisor = supervisor
+
+        // The focus wiring `AppDelegate` installs on its canvas: the broker marks
+        // the tile active, then the app's accepted-focus hook runs.
+        final class AgentTileAdapter: FocusSurfaceAdapter {
+            let focusSurfaceID: FocusSurfaceID
+            let focusSurfaceKind: FocusSurfaceKind = .managedAgent
+            init(_ id: UUID) { focusSurfaceID = .tile(id) }
+            func acquireFocus(reason: FocusRequest) -> Bool { true }
+            func releaseFocus(reason: FocusRequest) {}
+            func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool { false }
+        }
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        canvas.delegate = app
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] tileId in canvas?.markActive(tileId: tileId) }
+        app.installAcceptedTileFocusHook()
+        func focus(_ tile: Tile) {
+            _ = app.focusBroker.requestFocus(.tile(tile.id), reason: .userClick)
+        }
+        var adapters: [AgentTileAdapter] = []
+        func agentTile(_ index: Int) -> Tile {
+            let tile = Tile(
+                id: UUID(), kind: .managedAgent, title: "Agent · \(index)",
+                frame: TileFrame(x: Double(index) * 320, y: 0, width: 300, height: 200),
+                zPosition: .fromLegacyRank(index + 1), runtimeRef: nil, metadata: TileMetadata())
+            canvas.install(tileView: TileNSView(tile: tile), for: tile)
+            adapters.append(AgentTileAdapter(tile.id))
+            app.focusBroker.register(adapters[adapters.count - 1])
+            return tile
+        }
+        func spawn(_ name: String, tile: UUID? = nil) -> AgentID {
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                projectId: projectId, parentAgentID: nil, tileId: tile)
+            _ = supervisor.rename(agentID: id, to: name)
+            return id
+        }
+        let tiles = (0..<3).map(agentTile)
+        let tiled = tiles.enumerated().map { spawn("Tiled \($0.offset)", tile: $0.element.id) }
+        let loose = (0..<40).map { spawn("Agent \($0)") }
+
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 4000))
+        let window = NSWindow(contentRect: sidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = sidebar
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
+        app.workspaceSidebarView = sidebar
+        let restoreShelves = WorkspaceSidebarConfig.qaIsolateShelves()
+        defer { restoreShelves() }
+        app.configureWorkspaceSidebar(sidebar)
+        sidebar.configureInboxScope(.all) { _ in }
+        sidebar.agentInbox.setSortMode(.newest)
+        app.refreshAgentSurfaces(notify: false)
+        sidebar.layoutSubtreeIfNeeded()
+        let inbox = sidebar.inboxForQA
+        settle()
+
+        var report: [String] = []
+        func thread(_ id: AgentID) -> String { AgentSupervisor.threadId(for: id) }
+        func action(_ id: AgentID) -> AgentCharacterLoop? { inbox.pushedRowForQA(id: id.rawValue)?.characterActivity?.action }
+
+        // 1 · Tool chatter moves the character with no whole-sidebar build.
+        let streaming = Array(loose.prefix(6))
+        for agent in streaming {
+            supervisor.qaDeliver(.turnStarted(threadId: thread(agent), turnId: "t"), to: agent)
+        }
+        settle()
+        // A working agent keeps talking; its first step confirms the row.
+        for agent in streaming {
+            supervisor.qaDeliver(.itemStarted(threadId: thread(agent), itemId: "warm", kind: .commandExecution, title: "cat README.md"), to: agent)
+        }
+        settle()
+        try expect(streaming.allSatisfy { inbox.pushedRowForQA(id: $0.rawValue)?.state == .working },
+                   "1: fixture: six working rows")
+        try expect(streaming.allSatisfy { action($0) == .read }, "1: fixture: a cat step acts out read — \(streaming.map { String(describing: inbox.pushedRowForQA(id: $0.rawValue)?.characterActivity) })")
+        let buildsBefore = app.qaInboxRowBuildCount
+        let mover = streaming[0]
+        supervisor.qaDeliver(.itemStarted(threadId: thread(mover), itemId: "edit", kind: .fileChange, title: "Edit"), to: mover)
+        let typed = spin(timeout: 1.5) { action(mover) == .type }
+        witness(typed != nil, "1: an edit step never reached the row's character — action \(String(describing: action(mover)))")
+        // A burst like a real stream: every working agent steps twice a second.
+        for round in 0..<3 {
+            for agent in streaming {
+                supervisor.qaDeliver(.itemCompleted(threadId: thread(agent), itemId: "s\(round)", kind: .commandExecution, status: .completed), to: agent)
+                supervisor.qaDeliver(.itemStarted(threadId: thread(agent), itemId: "s\(round)", kind: .commandExecution, title: "rg needle"), to: agent)
+            }
+            spin(timeout: 0.3) { false }
+        }
+        let searched = spin(timeout: 1.5) { streaming.allSatisfy { action($0) == .dabble } }
+        settle()  // the push holding the burst's last round lands
+        witness(searched != nil, "1: a search step never reached every streaming row — \(streaming.map { String(describing: action($0)) })")
+        let chatterBuilds = app.qaInboxRowBuildCount - buildsBefore
+        witness(chatterBuilds == 0, "1: tool chatter from 6 agents built every sidebar row \(chatterBuilds) times")
+        // Oracle: the patched rows are what a full build would have produced.
+        let pushed = streaming.compactMap { inbox.pushedRowForQA(id: $0.rawValue) }
+        let full = app.sidebarInboxRows()
+        func comparable(_ row: AgentInboxRow) -> AgentInboxRow {
+            row.refreshingActivity(lastActiveAt: row.lastActiveAt, characterActivity: row.characterActivity, elapsed: nil)
+        }
+        func fields(_ row: AgentInboxRow) -> [String] {
+            Mirror(reflecting: comparable(row)).children.map { "\($0.label ?? ""): \(String(describing: $0.value))" }
+        }
+        func fieldDiff(_ row: AgentInboxRow) -> String {
+            let fresh = full.first { $0.id == row.id }.map(fields) ?? []
+            let other = full.first { $0.id == row.id }
+            // Dates print to the second; the stamps that move per event, exactly.
+            let stamps = "lastActiveAt \(row.lastActiveAt?.timeIntervalSinceReferenceDate ?? 0) vs \(other?.lastActiveAt?.timeIntervalSinceReferenceDate ?? 0), output \(row.characterActivity?.lastOutputAt?.timeIntervalSinceReferenceDate ?? 0) vs \(other?.characterActivity?.lastOutputAt?.timeIntervalSinceReferenceDate ?? 0) "
+            return row.title + " " + stamps + zip(fields(row), fresh).filter { $0 != $1 }.map { "\($0) ≠ \($1)" }.joined(separator: "; ")
+        }
+        let diverged = pushed.filter { row in full.first { $0.id == row.id }.map(comparable) != comparable(row) }
+        witness(pushed.count == streaming.count && diverged.isEmpty,
+                "1: \(diverged.count) patched rows differ from a full build: \(diverged.map(fieldDiff))")
+        // Positive control: a state change still builds, so the counter counts.
+        let controlBefore = app.qaInboxRowBuildCount
+        supervisor.qaDeliver(.turnCompleted(threadId: thread(mover), turnId: "t", outcome: .completed, errorMessage: nil), to: mover)
+        let ended = spin(timeout: 1.0) { inbox.pushedRowForQA(id: mover.rawValue)?.state != .working }
+        witness(ended != nil && app.qaInboxRowBuildCount > controlBefore,
+                "1: control: a turn end did not build rows (\(app.qaInboxRowBuildCount - controlBefore)) or reach the row")
+        report.append("chatter: \(chatterBuilds) row builds, character moved, rows match a full build")
+
+        // 2 · Moving focus between agent tiles builds no rows; the open row moves.
+        focus(tiles[0])
+        settle()
+        try expect(inbox.openAgentId == tiled[0].rawValue,
+                   "2: fixture: focusing tile 0 did not open its row (open \(String(describing: inbox.openAgentId)))")
+        let focusBefore = app.qaInboxRowBuildCount
+        var opened: [Bool] = []
+        for index in [1, 0, 1] {
+            focus(tiles[index])
+            opened.append(inbox.openAgentId == tiled[index].rawValue)
+        }
+        settle()
+        let focusBuilds = app.qaInboxRowBuildCount - focusBefore
+        witness(opened.allSatisfy { $0 }, "2: a focus move did not move the open row: \(opened)")
+        witness(focusBuilds == 0, "2: three focus moves between read agents built every sidebar row \(focusBuilds) times")
+        // Positive control: visiting an agent with an unread result clears it.
+        let unread = tiled[2]
+        supervisor.qaDeliver(.turnStarted(threadId: thread(unread), turnId: "u"), to: unread)
+        supervisor.qaDeliver(.turnCompleted(threadId: thread(unread), turnId: "u", outcome: .completed, errorMessage: nil), to: unread)
+        settle()
+        try expect(inbox.pushedRowForQA(id: unread.rawValue)?.terminalIsUnread == true,
+                   "2: fixture: the finished agent's result must be unread")
+        let visitBefore = app.qaInboxRowBuildCount
+        focus(tiles[2])
+        let read = spin(timeout: 1.0) { inbox.pushedRowForQA(id: unread.rawValue)?.terminalIsUnread == false }
+        witness(read != nil && app.qaInboxRowBuildCount > visitBefore,
+                "2: control: visiting an unread result did not rebuild rows (\(app.qaInboxRowBuildCount - visitBefore)) or clear it")
+        report.append("focus: \(focusBuilds) row builds over 3 moves, unread visit still rebuilds")
+
+        if !failures.isEmpty {
+            throw Failure(description: "SidebarEventCost RED:\n  " + failures.joined(separator: "\n  "))
+        }
+        return "SidebarEventCost: " + report.joined(separator: "; ")
     }
 }
 

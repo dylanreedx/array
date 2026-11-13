@@ -74,6 +74,19 @@ enum HelperRetryWorktreeChecks {
         }
     }
 
+    static func worktreeCount(_ root: URL) throws -> Int {
+        try git(root, ["worktree", "list", "--porcelain"]).split(separator: "\n").filter { $0.hasPrefix("worktree ") }.count
+    }
+
+    /// A Claude Managed lead on a fresh disposable repository.
+    static func managedRepository(_ b: Bench) throws -> URL {
+        let root = URL(fileURLWithPath: b.supervisor.records[b.f.agentId]!.checkoutRoot)
+        try repository(root)
+        try expect(b.supervisor.setProviderSettings(agentID: b.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "lead harness refused")
+        try expect(b.supervisor.setMode(.managed, for: b.f.agentId), "lead mode refused")
+        return root
+    }
+
     static func retry() async throws {
         let b = try bench("helper-retry"); defer { b.tearDown() }
         let root = URL(fileURLWithPath: b.supervisor.records[b.f.agentId]!.checkoutRoot)
@@ -145,7 +158,11 @@ enum HelperRetryWorktreeChecks {
         func firstPrompt(_ c: [String: Any]) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: c["prompt"]!), as: UTF8.self) }
         let managedPrompt = try firstPrompt(firstCapture)
         try expect(managedPrompt.contains(ManagedLeadHookState.helperReportLine), "managed helper's first prompt lacks the report line")
+        // The common case stays fast: the first helper shares the lead's
+        // checkout and no worktree is made, so it never starts a cold build.
         try expect(WorktreeManager.resolved(URL(fileURLWithPath: firstCapture["cwd"] as! String)) == WorktreeManager.resolved(root), "first helper left shared checkout")
+        let worktreesAfterFirst = try worktreeCount(root)
+        try expect(worktreesAfterFirst == 1, "the first helper's delegation created a worktree")
         let head = try git(root, ["rev-parse", "HEAD"])
         let secondReply = try await request(b, task: "HOLD second helper", title: "Fix ledger totals")
         let second = try child(secondReply), secondCapture = try await capture(b, second)
@@ -188,8 +205,55 @@ enum HelperRetryWorktreeChecks {
         let freePrompt = try firstPrompt(freeCapture)
         try expect(!freePrompt.contains(ManagedLeadHookState.helperReportLine), "free lead's helper got the managed report line")
         try expect(WorktreeManager.resolved(URL(fileURLWithPath: freeCapture["cwd"] as! String)) == WorktreeManager.resolved(root), "free delegation changed checkout")
-        print("Helper worktree checks passed: real runner cwd, first shared, concurrent distinct/title slugs, nested lead HEAD, dirty retention and free unchanged")
+        print("Helper worktree checks passed: real runner cwd, first shared with no worktree, concurrent distinct/title slugs, nested lead HEAD, dirty retention and free unchanged")
         b.supervisor.stopAll()
+
+        // Two delegations in one moment: one checkout each.
+        let c = try bench("helper-concurrent"); defer { c.tearDown() }
+        let cRoot = try managedRepository(c)
+        final class Replies { var byTask: [String: WorkspaceAgentReportChecks.ToolReply] = [:] }
+        let replies = Replies()
+        let calls = ["one", "two"].map { name in
+            Task { @MainActor in replies.byTask[name] = try? await request(c, task: "HOLD concurrent \(name)") }
+        }
+        for call in calls { await call.value }
+        guard let oneReply = replies.byTask["one"], let twoReply = replies.byTask["two"] else {
+            throw WorkspaceAgentReportChecks.Failure(description: "helper-retry-worktree: a concurrent delegation failed")
+        }
+        let oneCwd = try await capture(c, child(oneReply))["cwd"] as? String
+        let twoCwd = try await capture(c, child(twoReply))["cwd"] as? String
+        try expect(oneCwd != nil && oneCwd.map { WorktreeManager.resolved(URL(fileURLWithPath: $0)) }
+                   != twoCwd.map { WorktreeManager.resolved(URL(fileURLWithPath: $0)) },
+                   "two delegations in one moment shared a writable checkout: \(String(describing: oneCwd))")
+        _ = cRoot
+        c.supervisor.stopAll()
+
+        // A finished helper re-messaged while a newer helper writes the same
+        // checkout: the message is refused, so only one of them writes.
+        let r = try bench("helper-remessage"); defer { r.tearDown() }
+        let rRoot = try managedRepository(r)
+        let earlier = try child(await request(r, task: "HOLD earlier helper"))
+        _ = try await capture(r, earlier)
+        try await finish(r, earlier)
+        let later = try child(await request(r, task: "HOLD later helper"))
+        let laterCapture = try await capture(r, later)
+        try expect(WorktreeManager.resolved(URL(fileURLWithPath: laterCapture["cwd"] as! String)) == WorktreeManager.resolved(rRoot)
+                   && WorktreeManager.resolved(URL(fileURLWithPath: r.supervisor.records[earlier]!.checkoutRoot)) == WorktreeManager.resolved(rRoot),
+                   "a helper after a finished one did not share the checkout, as today")
+        func message(_ text: String) async throws -> WorkspaceAgentReportChecks.ToolReply {
+            try await WorkspaceAgentReportChecks.call(r.configuration(for: r.f.agentId), "array_message_agent", [
+                "agentId": earlier.rawValue.uuidString, "text": text, "idempotencyKey": UUID().uuidString])
+        }
+        let refused = try await message("PLAIN pick the work up again")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        try expect(refused.isError && !r.supervisor.isRunning(earlier) && r.supervisor.isRunning(later),
+                   "a re-messaged helper started writing the checkout another helper is writing: \(refused.reply)")
+        try expect(String(describing: refused.reply).contains("is writing this checkout"), "the refusal did not say why: \(refused.reply)")
+        try await finish(r, later)
+        let accepted = try await message("PLAIN pick the work up again")
+        try expect(!accepted.isError, "a re-message after the other helper finished was refused: \(accepted.reply)")
+        r.supervisor.stopAll()
+        print("Helper checkout writers passed: the first helper shares with no worktree made; two delegations in one moment get one checkout each; a finished helper re-messaged while another writes the checkout is refused, then accepted once it finishes")
 
         let n = try bench("helper-nongit"); defer { n.tearDown() }
         try expect(n.supervisor.setMode(.managed, for: n.f.agentId), "non-git lead mode refused")

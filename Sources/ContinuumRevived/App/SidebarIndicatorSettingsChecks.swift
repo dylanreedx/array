@@ -32,6 +32,11 @@ enum SidebarIndicatorSettingsChecks {
     }
 
     static func run() throws {
+        try SidebarFoldStyleChecks.run()
+        try SidebarIndicatorTruthTableChecks.run()
+        try SidebarSelectionParityChecks.run()
+        try SidebarPressFeedbackChecks.run()
+        try SidebarSelectionGeometryChecks.run()
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             let suite = "array.sidebar-indicator-check.\(UUID().uuidString)"
             let defaults = QAIsolatedDefaults(isolatedSuiteName: suite)!
@@ -57,6 +62,24 @@ enum SidebarIndicatorSettingsChecks {
                 button.presentsOffscreenForQA = true
                 return button
             }
+            guard let background = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Header background" }) else {
+                throw Failure(description: "Appearance is missing Header background")
+            }
+            background.presentsOffscreenForQA = true
+            try expect(background.selectedID == "none", "Header background must default to None")
+            for style in SidebarHeaderBackground.allCases {
+                background.scrollToVisible(background.bounds.insetBy(dx: 0, dy: -80))
+                fixture.settle()
+                try click(background)
+                fixture.settle()
+                guard let row = background.qaPresentedList?.rowView(id: style.rawValue) else {
+                    throw Failure(description: "Header background choice missing \(style.title)")
+                }
+                background.qaPresentedPanel?.makeKey()
+                try click(row)
+                fixture.settle()
+                try expect(SidebarHeaderBackground.resolve(in: defaults) == style, "Header background did not persist")
+            }
             let initialButton = try control()
             try expect(initialButton.selectedID == "duplex", "Settings must show Duplex by default")
             let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 360, height: 1000), indicatorDefaults: defaults)
@@ -68,6 +91,7 @@ enum SidebarIndicatorSettingsChecks {
             defer { window.orderOut(nil) }
             let id = UUID()
             inbox.openAgentId = id
+            try expect(SidebarActiveIndicatorScope.resolve(in: defaults) == .working, "an unset scope must read as All working agents")
             let lead = AgentInboxRow(id: id, title: "Active indicator witness", state: .working, createdAt: Date(), identityColor: "teal")
             let helpers = (0..<24).map { index in
                 AgentInboxRow(id: UUID(), title: "Helper \(index)", state: .working,
@@ -76,6 +100,7 @@ enum SidebarIndicatorSettingsChecks {
             inbox.reload(rows: [lead] + helpers)
             inbox.layoutForQA()
             inbox.rebuildRowsForQA()
+            _ = inbox.selectRowForQA(id: id)
             fixture.settle()
             guard let card = descendants(inbox, AgentInboxCardView.self).first(where: { $0.isRouteActive }) else {
                 throw Failure(description: "sidebar did not render its real active card")
@@ -84,10 +109,22 @@ enum SidebarIndicatorSettingsChecks {
                 throw Failure(description: "sidebar did not render the real N-more-helpers tail")
             }
             try expect(!tail.isSweepingForQA, "default Duplex left a Classic border slice on the helper tail")
-            let builds = inbox.cellBuildCountForQA
             var renders: [Data] = []
             // Deliberately visit Gradient before Sheen: stale colour-stop counts
             // from a three-stop wash must not survive in a two-colour surface.
+            inbox.openAgentId = nil
+            inbox.clearSelectionForQA()
+            defaults.set("working", forKey: SidebarActiveIndicatorScope.defaultsKey)
+            NotificationCenter.default.post(name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey)), object: nil)
+            fixture.settle()
+            try expect(descendants(inbox, AgentInboxCardView.self).contains { $0.isIndicatorWorking }, "working scope did not reach cards")
+            defaults.set("selected", forKey: SidebarActiveIndicatorScope.defaultsKey)
+            NotificationCenter.default.post(name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey)), object: nil)
+            inbox.openAgentId = id
+            _ = inbox.selectRowForQA(id: id)
+            fixture.settle()
+            try expect(descendants(inbox, AgentInboxCardView.self).contains { $0.isIndicatorWorking }, "selected scope lost working indicators")
+            let builds = inbox.cellBuildCountForQA
             for style in [SidebarActiveIndicatorStyle.classic, .gradient, .sheen, .duplex] {
                 let button = try control()
                 // Bring the label/help and control into the Form's viewport.
@@ -128,11 +165,23 @@ enum SidebarIndicatorSettingsChecks {
                 case .duplex:
                     try expect(gradients.filter { $0.type == .radial }.count == 2, "Duplex must paint two shared light fields")
                     try expect(gradients.contains { $0.animation(forKey: "group.focus") != nil } == !reduced, "shared Duplex breath policy wrong")
+                    let right = gradients.first { $0.type == .radial && $0.startPoint.x == 0.88 }!
+                    let travel = right.animation(forKey: "group.travel.startPoint") as? CAKeyframeAnimation
+                    try expect((travel != nil) == !reduced, "Duplex travel ignored reduced motion")
+                    if let travel, let values = travel.values as? [NSValue] {
+                        let delta = (values[1].pointValue.y - values[0].pointValue.y) * right.bounds.height
+                        try expect(travel.duration == 4 && abs(delta - 6) < 0.01,
+                            "Duplex right light must travel six points over four seconds")
+                        try expect(values.allSatisfy { $0.pointValue.x == 0.88 }, "Duplex drifted horizontally")
+                    }
+                    try expect(gradients.first?.startPoint == CGPoint(x: 0.1, y: 0.08), "Duplex upper-left anchor changed")
+
                 case .gradient:
                     try expect(gradients.contains { $0.colors?.count == 3 && $0.mask is CAGradientLayer }, "Gradient lost its shared cascading wash")
                     try expect(gradients.contains { $0.animation(forKey: "group.orbit.startPoint")?.duration == 60 } == !reduced, "shared Gradient loop policy wrong")
                 case .sheen:
-                    try expect(painted.contains { $0 is CAShapeLayer }, "Sheen lost the even satin rim")
+                    // 0.7.47's one faint identity rim, and nothing on top of it.
+                    try expect(painted.filter { ($0 as? CAShapeLayer)?.strokeColor != nil }.count <= 1, "Sheen added a second group outline")
                     try expect(painted.contains { $0.animation(forKey: "group.sheen") != nil } == !reduced, "shared Sheen sweep policy wrong")
                 }
                 guard let rep = SettingsFixtureWindow.capture(card.superview ?? card), let png = rep.representation(using: .png, properties: [:]) else {
@@ -149,11 +198,13 @@ enum SidebarIndicatorSettingsChecks {
             }
             try expect(Set(renders).count == 4, "the four choices did not produce four rendered surfaces")
             inbox.openAgentId = nil
+            inbox.clearSelectionForQA()
             inbox.layoutForQA()
             fixture.settle()
             try expect(descendants(inbox, InboxExpandedGroupLight.self).allSatisfy { $0.isHidden },
                        "closing the active agent retained its shared group light")
             inbox.openAgentId = id
+            _ = inbox.selectRowForQA(id: id)
             inbox.layoutForQA()
             fixture.settle()
             try expect(descendants(inbox, InboxExpandedGroupLight.self).contains { !$0.isHidden },
@@ -185,11 +236,21 @@ enum SidebarIndicatorSettingsChecks {
 
 /// Immutable input for existing witnesses that specifically exercise Classic's
 /// sweep/shimmer/fade. No preference writes and no fallback to an app domain.
+/// `scope` stands in for "Show style on"; nil reads as unset, so the shipped
+/// default (All working agents) applies. A check may change it and post the setting.
 final class ClassicSidebarDefaultsForChecks: UserDefaults, @unchecked Sendable {
-    static func make() -> ClassicSidebarDefaultsForChecks {
-        ClassicSidebarDefaultsForChecks(suiteName: "array.sidebar.classic-check.\(UUID().uuidString)")!
+    var scope: SidebarActiveIndicatorScope?
+    static func make(scope: SidebarActiveIndicatorScope? = nil) -> ClassicSidebarDefaultsForChecks {
+        let defaults = ClassicSidebarDefaultsForChecks(suiteName: "array.sidebar.classic-check.\(UUID().uuidString)")!
+        defaults.scope = scope
+        return defaults
     }
     override func object(forKey key: String) -> Any? {
-        key == SidebarActiveIndicatorStyle.defaultsKey ? SidebarActiveIndicatorStyle.classic.rawValue : nil
+        switch key {
+        case SidebarActiveIndicatorStyle.defaultsKey: return SidebarActiveIndicatorStyle.classic.rawValue
+        case SidebarActiveIndicatorScope.defaultsKey: return scope?.rawValue
+        default: return nil
+        }
     }
+    override func string(forKey key: String) -> String? { object(forKey: key) as? String }
 }

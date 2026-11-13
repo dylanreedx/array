@@ -26,7 +26,7 @@ import Foundation
 
 /// The host's observed operational state for one agent, coarse on purpose.
 public enum AgentObservedStatus: String, Codable, Sendable, CaseIterable {
-    case ready, starting, working, compacting, queued, needsAction, failed, restored, unknown
+    case ready, starting, working, compacting, queued, needsAction, failed, restored, paused, unknown
 }
 
 /// Identity fields every candidate and every inspection carries. Never a raw
@@ -312,6 +312,10 @@ public struct AgentInspectResponse: Codable, Equatable, Sendable {
     /// Set when evidence is absent: absence is not proof of inactivity.
     public var note: String?
     public var observedAt: Date
+    /// A helper's liveness as the host last classified it (working, waiting
+    /// on a live child process, stalled, blocked, finished). Absent for an
+    /// agent no one delegated to or messaged.
+    public var liveness: HelperLivenessFact?
 
     public init(
         agent: AgentProjectionIdentity, isCaller: Bool, lastActivityAt: Date, latestPromptAt: Date?,

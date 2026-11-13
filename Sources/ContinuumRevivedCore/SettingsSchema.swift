@@ -15,7 +15,7 @@ public enum SettingsSchema {
         [
             general(), appearance(), agentCharacters(), canvas(),
             agents(), editor(), terminal(), browser(),
-            notificationsAndSounds(), keyboard(), iPhone(), advanced(),
+            notificationsAndSounds(), keyboard(), iPhone(), usage(), advanced(),
         ]
     }
 
@@ -63,6 +63,16 @@ public enum SettingsSchema {
                             keywords: ["neutral", "palette", "grey", "gray", "black", "white"]),
             ]),
             SettingsGroup(id: "appearance.sidebar", title: "Sidebar", rows: [
+                SettingsRow(.choice(key: SidebarHeaderBackground.defaultsKey, label: "Header background",
+                                    options: SidebarHeaderBackground.allCases.map(\.rawValue),
+                                    default: SidebarHeaderBackground.fallback.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: SidebarHeaderBackground.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "A subtle static pattern behind the sidebar controls."),
+                SettingsRow(.choice(key: SidebarActiveIndicatorScope.defaultsKey, label: "Apply active style to",
+                                    options: SidebarActiveIndicatorScope.allCases.map(\.rawValue),
+                                    default: SidebarActiveIndicatorScope.fallback.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorScope.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Highlight every working agent and its lead, or only the agent you have open."),
                 SettingsRow(.choice(key: SidebarActiveIndicatorStyle.defaultsKey, label: "Active agent",
                                     options: SidebarActiveIndicatorStyle.allCases.map(\.rawValue),
                                     default: SidebarActiveIndicatorStyle.fallback.rawValue,
@@ -232,6 +242,20 @@ public enum SettingsSchema {
                             help: "Looks for newer versions at most once an hour. Updates only run when you click Update.",
                             keywords: ["update", "upgrade", "version", "cli", "npm", "homebrew"]),
             ]),
+            SettingsGroup(id: "agents.replyRules", title: "Reply rules", rows: [
+                SettingsRow(.toggle(key: ReplyStandard.enabledKey, label: "Give every agent Array's reply rules", default: false),
+                            help: "Each time Array starts a Claude Code, Codex or Pi agent, it adds Array's \(ReplyStandard.wordCount)-word rules for replies, before your personal rules. It applies to agents from their next launch; running agents keep what they started with.",
+                            keywords: ["reply", "replies", "rules", "report", "answer", "instructions", "codex", "pi", "claude"]),
+            ]),
+            SettingsGroup(id: "agents.personalRules", title: "Personal rules",
+                          footer: "Claude Code agents already read your own Claude instructions, so they are left as they are. Array only reads the file; it never changes it.", rows: [
+                SettingsRow(.toggle(key: PersonalRulesConfig.enabledKey, label: "Give Codex and Pi agents my rules", default: false),
+                            help: "Each time Array starts a Codex or Pi agent, it adds the text of the file below to that agent's instructions.",
+                            keywords: ["rules", "instructions", "preferences", "commit", "codex", "pi", "agents.md", "claude.md"]),
+                SettingsRow(.text(key: PersonalRulesConfig.pathKey, label: "Rules file", default: ""),
+                            help: "The full path to a short text file you keep.",
+                            keywords: ["rules", "instructions", "file", "path"]),
+            ]),
             SettingsGroup(id: "agents.identity", title: "Agent colour", rows: [
                 SettingsRow(.choice(key: AgentIdentityColorConfig.styleKey, label: "Agent colour shows as",
                                     options: AgentIdentityColorStyle.allCases.map(\.rawValue),
@@ -274,6 +298,16 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: AgentManagedModeConfig.showIndicatorKey, label: "Show Managed indicator", default: true),
                             help: "Shows Managed beside the branch in agent tiles.",
                             keywords: ["managed", "badge", "indicator", "header"]),
+                SettingsRow(.toggle(key: AgentManagedModeConfig.stallAlertsKey, label: "Tell the lead only when a helper is stuck", default: false),
+                            help: "Off: the lead hears after 10 minutes without progress, even during a long build. On: the lead hears once a helper has gone 3 minutes without progress with nothing running, and once if it has waited 30 minutes on a build or tool call. Busy helpers and silent model turns keep the 10 minutes.",
+                            keywords: ["stalled", "stuck", "watchdog", "helper", "alert", "no progress"]),
+            ]),
+            SettingsGroup(id: "agents.tokenTelemetry", title: "Token usage",
+                          footer: "Kept on this Mac only. Never uploaded or synced.", rows: [
+                SettingsRow(.toggle(key: AgentTokenTelemetryConfig.enabledKey, label: "Record token usage",
+                                    default: AgentTokenTelemetryConfig.defaultEnabled),
+                            help: "Counts the tokens each Managed task used, by agent, model and type. Turning it off stops new records and deletes nothing.",
+                            keywords: ["usage", "tokens", "telemetry", "cost", "cache", "privacy"]),
             ]),
             SettingsGroup(id: "agents.lifecycle", title: "Finished agents", rows: [
                 SettingsRow(.choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Settle finished agents", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption,
@@ -418,6 +452,18 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: PersistedPushCategoryPreferences.key(for: category), label: title, default: category.defaultEnabled),
                             keywords: ["push", "notify", "alert"])
             }),
+        ])
+    }
+
+    /// `.plans/116` part 21: how Array did the work on this Mac, read from the
+    /// run ledger. One bespoke group; the page records nothing.
+    private static func usage() -> SettingsSection {
+        SettingsSection(id: "usage", title: "Usage", iconSystemName: "chart.bar",
+                        keywords: ["usage", "tokens", "metrics", "tasks", "helpers", "time"], groups: [
+            SettingsGroup(id: "usage.report", title: nil, rows: [
+                SettingsRow(.custom(id: "usage", label: "Usage on this Mac"),
+                            keywords: ["tokens", "cache", "tasks", "helpers", "time", "metrics"]),
+            ]),
         ])
     }
 

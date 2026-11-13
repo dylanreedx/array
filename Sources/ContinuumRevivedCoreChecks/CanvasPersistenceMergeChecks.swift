@@ -94,5 +94,24 @@ func runCanvasPersistenceMergeChecks() {
     expect(firstSave.map(\.id) == [a1.id, a2.id],
            "a first save must persist the installed set, got \(firstSave.count) tiles")
 
+    // 8. Bare tiles installed (`bareCovered`, `.plans/auto-layout-night`): a
+    //    deleted bare tile stays deleted, a live one is replaced by its installed
+    //    copy, and an uncovered zone's tiles still survive.
+    var bareGone = unzoned
+    bareGone.isBare = true
+    var bareKept = tile("0006", zone: nil)
+    bareKept.isBare = true
+    let legacyUnzoned = tile("0007", zone: nil)
+    let bareMerge = CanvasEngine.mergeProjectTilesForPersistence(
+        persisted: [a1, bareGone, bareKept, legacyUnzoned, b1], installed: [a1, bareKept],
+        coveredZoneIds: [zoneA], bareCovered: true)
+    expect(bareMerge.map(\.id) == [a1.id, bareKept.id, legacyUnzoned.id, b1.id],
+           "with bare tiles covered, an absent bare tile is deleted; an unmarked nil tile and the rest survive, got \(bareMerge.map(\.title))")
+    var bareMoved = bareGone
+    bareMoved.frame.x = -900
+    let bareReplaced = CanvasEngine.mergeProjectTilesForPersistence(
+        persisted: [bareGone], installed: [bareMoved], coveredZoneIds: [], bareCovered: true)
+    expect(bareReplaced.first?.frame.x == -900, "a live bare tile's installed copy replaces the persisted one")
+
     print("CanvasPersistenceMergeChecks passed: un-installed zones survive, covered deletions stick")
 }

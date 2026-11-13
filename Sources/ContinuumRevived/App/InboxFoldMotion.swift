@@ -109,6 +109,7 @@ final class InboxFoldMotion: NSObject {
         !liveTracks.isEmpty && link == nil
             && liveTracks.allSatisfy { $0.layer.animation(forKey: Self.liveAnimationKey) != nil }
     }
+    var ghostKeysForQA: Set<String> { Set(liveTracks.filter(\.isGhost).map(\.key)) }
     var overlayPassesHitTestingForQA: Bool { overlay?.hitTest(.zero) == nil }
     var poses: [String: Pose] {
         if !liveTracks.isEmpty {
@@ -442,6 +443,12 @@ final class InboxFoldMotion: NSObject {
             track.view.alphaValue = track.from.opacity + (track.to.opacity - track.from.opacity) * fade
             track.view.blend(fade)
         }
+    }
+
+    /// Keep the live render-server pose available for a window capture.
+    func holdForCaptureForQA() {
+        retirement?.cancel()
+        retirement = nil
     }
 
     func cancel() {

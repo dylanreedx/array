@@ -151,10 +151,8 @@ public enum CodexCLIBackend {
     /// `processArguments` (`approval_policy=never`, `sandbox_mode`). Thread and
     /// turn requests also pin these policies so resumed conversations cannot
     /// restore restrictive permissions from an older rollout.
-    /// `extraArgs` is always `[]` in production today (`codexRunnerConfig`
-    /// never sets it — that field only carries pi's role `--tools` args) but
-    /// is threaded through for the same reason `processArguments` threads it:
-    /// a slot for a future per-agent override, not a currently-used one.
+    /// `extraArgs` carries host instruction arguments resolved at launch
+    /// (`Config.resolvedExtraArgs()`), when the personal rules setting is on.
     public static func appServerArguments(extraArgs: [String], workspaceMCP: WorkspaceMCPConfiguration? = nil, hookOverrides: [String] = []) -> [String] {
         var args = [
             "-c", "approval_policy=never",
@@ -212,6 +210,12 @@ public final class CodexAgentRunner: @unchecked Sendable {
         /// .plans/101 — the account's home, passed as `CODEX_HOME`. nil keeps
         /// the CLI's own (inherited) home.
         public var codexHome: String?
+        /// Host arguments resolved at EACH process launch (never at runner
+        /// construction), on the thread that spawns the process. Given this
+        /// config, returns the full extra-argument list. nil uses `extraArgs`.
+        public var launchArguments: (@Sendable (Config) -> [String])?
+        /// What every spawn passes as its extra arguments.
+        public func resolvedExtraArgs() -> [String] { launchArguments?(self) ?? extraArgs }
         public init(
             model: String,
             effort: String? = nil,
@@ -356,6 +360,13 @@ public final class CodexAgentRunner: @unchecked Sendable {
     private var appServerChildTurns: [String: String] = [:]
     private var steerReceipts = CodexSteerReceiptTracker()
     private var steerDispositionHandler: (@Sendable (UUID, AgentSteerDisposition) -> Void)?
+    /// Queue-confined. Usage the primary thread reports after its turn ended
+    /// and `run` returned (`.plans/116` gap 9).
+    private var trailingUsageHandler: (@Sendable (TokenUsageSnapshot) -> Void)?
+
+    /// How long a finished turn's app-server may keep sending frames after
+    /// its main `turn/completed`, off every request path.
+    public static let trailingFrameBound: TimeInterval = 2
 
     public init(config: Config) {
         self.config = config
@@ -435,7 +446,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
 
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.resolvedExtraArgs(), workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
         let spawned: ProcessGroupChild
         do {
             spawned = try ProcessGroupChild.spawn(
@@ -628,8 +639,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
     ) throws {
         let command = Self.liveResolvedCommand()
-        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.extraArgs, workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
+        let arguments = command.prefixArgs + CodexCLIBackend.appServerArguments(extraArgs: config.resolvedExtraArgs(), workspaceMCP: config.workspaceMCP, hookOverrides: hookOverrides(command: command))
 
+        let drain = TrailingFrameDrain()
         queue.sync {
             appServerTranslator = CodexAppServerEventTranslator(workingDirectory: config.cwd)
             appServerTranslator.onRuntimeObservation = runtimeObservationHandler
@@ -674,6 +686,13 @@ public final class CodexAgentRunner: @unchecked Sendable {
             guard let self else { return }
             self.queue.sync {
                 let providerThreadID = Self.appServerThreadID(in: line)
+                // The turn is over and `run` has returned: only the primary
+                // thread's usage still has a reader.
+                if let events = drain.translate(line) {
+                    guard providerThreadID == drain.thread else { return }
+                    for case let .tokenUsageUpdated(_, snapshot) in events { self.trailingUsageHandler?(snapshot) }
+                    return
+                }
                 if let id = self.steerReceipts.applied(line: line) {
                     self.steerDispositionHandler?(id, .consumed)
                 }
@@ -729,10 +748,19 @@ public final class CodexAgentRunner: @unchecked Sendable {
             }
         }
 
+        // Set once the turn ended normally: its app-server is then allowed to
+        // finish on its own, off the return path, so frames it sends after
+        // `turn/completed` are still read.
+        var finished: (thread: String, turn: String)?
         defer {
-            transport.shutdown()
-            spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.harness)
-            spawned.standardError.readabilityHandler = nil
+            if let finished {
+                queue.sync { drain.begin(appServerTranslator, thread: finished.thread) }
+                finishAfterTurn(transport: transport, spawned: spawned, drain: drain, turn: finished)
+            } else {
+                transport.shutdown()
+                spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.harness)
+                spawned.standardError.readabilityHandler = nil
+            }
             queue.sync {
                 // Every descendant lives inside this one app-server process, so
                 // none outlives it: a child still open here was cut off by Stop
@@ -814,7 +842,9 @@ public final class CodexAgentRunner: @unchecked Sendable {
             // time (`CodexEventTranslator.swift:77-88`). Synthesizing the
             // notification here reuses the translator's own parsing rather
             // than duplicating its session-start logic.
-            let synthetic = "{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"\(id)\"}}}"
+            // It carries `resumedMarker`, so usage accounting never mistakes a
+            // resumed thread's history for work done in this run.
+            let synthetic = "{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"\(id)\"},\"\(CodexAppServerEventTranslator.resumedMarker)\":true}}"
             queue.sync {
                 for event in appServerTranslator.translate(line: synthetic) { onEvent(event) }
             }
@@ -882,6 +912,32 @@ public final class CodexAgentRunner: @unchecked Sendable {
         }
         if turnOutcome == .failed {
             throw RunError.appServerFailed(errorMessage ?? "turn failed")
+        }
+        finished = (resolvedThreadId, turnId)
+    }
+
+    /// The finished turn's app-server: stdin is closed, which makes it exit,
+    /// and its stdout is read to the end on a utility thread, so nothing waits
+    /// on it. Past `trailingFrameBound` it is stopped and the turn's usage is
+    /// marked incomplete (`trailingFramesCut`), never silently short.
+    private func finishAfterTurn(transport: CodexAppServerTransport, spawned: ProcessGroupChild,
+                                 drain: TrailingFrameDrain, turn: (thread: String, turn: String)) {
+        let ended = DispatchSemaphore(value: 0)
+        transport.closeInput { ended.signal() }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let cut = ended.wait(timeout: .now() + Self.trailingFrameBound) == .timedOut
+            transport.shutdown()
+            spawned.terminateGroup(graceSeconds: ProcessGroupChild.Grace.harness)
+            spawned.standardError.readabilityHandler = nil
+            guard let self else { return }
+            self.queue.sync {
+                drain.end()
+                guard cut else { return }
+                var marker = TokenUsageSnapshot(inputTokens: 0, outputTokens: 0, totalCostUsd: nil)
+                (marker.accountingTurn, marker.accountingSession) = (turn.turn, turn.thread)
+                marker.accountingIncomplete = "trailingFramesCut"
+                self.trailingUsageHandler?(marker)
+            }
         }
     }
 
@@ -995,6 +1051,10 @@ public final class CodexAgentRunner: @unchecked Sendable {
     /// Array-owned `spawn_agent` request occurred.
     public func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
 
+    public func observeTrailingUsage(_ handler: @escaping @Sendable (TokenUsageSnapshot) -> Void) {
+        queue.sync { trailingUsageHandler = handler }
+    }
+
     public func observeProviderSubagentActivity(
         _ handler: @escaping @Sendable (ProviderSubagentActivity) -> Void
     ) {
@@ -1047,7 +1107,7 @@ public final class CodexAgentRunner: @unchecked Sendable {
             sessionMode: mode,
             threadId: threadId,
             cwdPath: config.cwd.path,
-            extraArgs: config.extraArgs,
+            extraArgs: config.resolvedExtraArgs(),
             prompt: prompt,
             workspaceMCP: config.workspaceMCP,
             hookOverrides: hookOverrides(command: command)
@@ -1215,3 +1275,35 @@ public final class CodexAgentRunner: @unchecked Sendable {
 extension CodexAgentRunner: ProviderSubagentActivityObserving {}
 
 #endif  // os(macOS)
+
+/// A runner whose provider can report usage after its turn ended and `run`
+/// returned: Codex frames read while its app-server finishes.
+public protocol TrailingUsageReporting: AnyObject {
+    func observeTrailingUsage(_ handler: @escaping @Sendable (TokenUsageSnapshot) -> Void)
+}
+
+#if os(macOS)
+extension CodexAgentRunner: TrailingUsageReporting {}
+#endif
+
+/// The finished turn's own translator, so a later turn's never sees its
+/// frames. Confined to the runner's queue.
+final class TrailingFrameDrain: @unchecked Sendable {
+    private var translator: CodexAppServerEventTranslator?
+    private(set) var thread: String?
+    func begin(_ translator: CodexAppServerEventTranslator, thread: String) {
+        var copy = translator
+        // Its hooks write the runner's live state, which belongs to the next turn now.
+        copy.onRuntimeObservation = nil
+        copy.onSubagentAnnouncement = nil
+        (self.translator, self.thread) = (copy, thread)
+    }
+    /// Nil until the turn is over.
+    func translate(_ line: String) -> [AgentRuntimeEvent]? {
+        guard var current = translator else { return nil }
+        let events = current.translate(line: line)
+        translator = current
+        return events
+    }
+    func end() { translator = nil }
+}

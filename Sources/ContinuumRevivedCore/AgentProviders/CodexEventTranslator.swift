@@ -159,7 +159,10 @@ public struct CodexEventTranslator {
                         targetPath: target,
                         startedAt: now(),
                         updatedAt: now(),
-                        evidenceSource: .toolEvent)))
+                        evidenceSource: .toolEvent,
+                        otherTargets: otherChangePaths(item).compactMap {
+                            Self.resolvedTarget($0, workingDirectory: workingDirectory)
+                        })))
             }
             // `.plans/45` S2 — ALL changed basenames, not just changes[0]
             // (C1's codex row). Basenames only; full paths stay on the
@@ -377,6 +380,11 @@ public struct CodexEventTranslator {
     private func firstChangePath(_ item: [String: Any]) -> String? {
         guard let changes = item["changes"] as? [[String: Any]] else { return nil }
         return changes.lazy.compactMap { $0["path"] as? String }.first
+    }
+
+    private func otherChangePaths(_ item: [String: Any]) -> [String] {
+        guard let changes = item["changes"] as? [[String: Any]] else { return [] }
+        return Array(changes.compactMap { $0["path"] as? String }.dropFirst())
     }
 
     /// `.plans/45` S2 — every changed file's basename, for the detail fields.

@@ -1,0 +1,9 @@
+{
+  "about": "Live pilot settings read by run_pilot.py. strictLeadSwitch.env is the environment variable that turns on Managed mode's strict lead (the lead's shell cannot write its checkout); while it is null the managed-strict arm is defined but not runnable.",
+  "model": "anthropic/claude-sonnet-5-5",
+  "effort": "medium",
+  "deadlineSeconds": 1200,
+  "allowedHosts": ["api.anthropic.com"],
+  "arms": ["solo", "managed", "managed-strict"],
+  "strictLeadSwitch": {"env": null, "value": "1"}
+}

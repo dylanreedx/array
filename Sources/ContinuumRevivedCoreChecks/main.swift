@@ -24,6 +24,11 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--zone-membership-repair-check") {
+    runZoneMembershipRepairChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--browser-profile-registry-check") {
     try runBrowserProfileRegistryChecks()
     print("BrowserProfileRegistryChecks passed")
@@ -219,6 +224,11 @@ if CommandLine.arguments.contains("--agent-steering-runner-check") {
 }
 if CommandLine.arguments.contains("--workspace-mcp-check") {
     runWorkspaceMCPChecks()
+    Foundation.exit(0)
+}
+// `.plans/116` part 16: the project standards parser and standards.read answer.
+if CommandLine.arguments.contains("--project-standards-index-check") {
+    runProjectStandardsIndexChecks()
     Foundation.exit(0)
 }
 // `.plans/102` P2a: report and status bounds, the push-back decision, the

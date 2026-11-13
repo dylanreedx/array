@@ -923,7 +923,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// computed from a start timestamp against the caller's `now` every time the
     /// row is built (`AgentInboxRowBuilder`). Nothing stores it — a stored elapsed
     /// is stale the instant after it is written.
-    public let elapsed: TimeInterval?
+    public internal(set) var elapsed: TimeInterval?
     /// The authoritative start of that same live turn. The view uses it only to
     /// advance a materialized working row between owner pushes; nil for every
     /// non-working state and for compatibility rows whose source has no stamped
@@ -934,7 +934,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// `createdAt`, while a capped parent's visible survivors can keep the most
     /// recently active children in view. A missing stamp falls back to creation
     /// order in `InboxSort`, which is deterministic for legacy/fixture rows.
-    public let lastActiveAt: Date?
+    public internal(set) var lastActiveAt: Date?
     // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
     /// How far this row is drawn in: 0 for a top-level agent, 1 for a child of one,
     /// capped at `AgentInboxRow.maxDepth`.
@@ -1323,6 +1323,21 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             hasTile: hasTile, isPinned: isPinned, characterActivity: characterActivity,
             characterName: characterName)
             .carryingSharedAgent(sharedAgent)
+    }
+
+    /// The same row with the three fields tool chatter moves inside a turn
+    /// (`AgentInboxRowBuilder.refreshingChatter`). A copy of `self`, so no other
+    /// field can be dropped on the way.
+    public func refreshingActivity(
+        lastActiveAt: Date?,
+        characterActivity: AgentCharacterActivity?,
+        elapsed: TimeInterval?
+    ) -> AgentInboxRow {
+        var row = self
+        row.lastActiveAt = lastActiveAt
+        row.characterActivity = characterActivity
+        row.elapsed = elapsed
+        return row
     }
 
     /// Equal but for `elapsed`, when both rows carry the same live turn start: the

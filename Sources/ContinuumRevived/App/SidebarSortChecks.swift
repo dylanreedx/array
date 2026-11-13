@@ -60,10 +60,10 @@ enum SidebarSortChecks {
     }
 
     static func build(dark: Bool, rows: [AgentInboxRow] = fixture(), width: CGFloat = 340, height: CGFloat = 460,
-                      leadOpen: Bool = true) -> (AgentInboxView, NSWindow)
+                      leadOpen: Bool = true, scope: SidebarActiveIndicatorScope? = nil) -> (AgentInboxView, NSWindow)
     {
         let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: width, height: height),
-                                   indicatorDefaults: ClassicSidebarDefaultsForChecks.make())
+                                   indicatorDefaults: ClassicSidebarDefaultsForChecks.make(scope: scope))
         inbox.clock = { now }
         inbox.prefersReducedMotion = { false }
         inbox.hoverCardEnabled = false
@@ -132,9 +132,7 @@ enum SidebarSortChecks {
             throw Failure(description: "VoiceOver cannot reach the sort button")
         }
 
-        // 1b. The header keeps its three controls and their widths: the sort
-        //     button sits inside the search field's trailing slot, and typing
-        //     swaps it for the clear button. At the sidebar's default and minimum.
+        // Search and compose occupy the first row, with persistent filters below.
         for width in [CGFloat(WorkspaceSidebarConfig.defaultWidth), CGFloat(WorkspaceSidebarConfig.minWidth)] {
             let (header, headerWindow) = build(dark: false, width: width, height: 200)
             defer { headerWindow.orderOut(nil) }
@@ -142,16 +140,15 @@ enum SidebarSortChecks {
             let field = header.searchFieldViewForQA.frame
             let scope = header.scopeControlFrameForQA
             let sort = header.sortButtonForQA.frame
-            guard field.width > scope.width, field.maxX <= scope.minX,
-                  !header.sortButtonForQA.isHidden, field.contains(sort),
-                  abs((field.maxX - sort.maxX) - (sort.minY - field.minY)) <= 1,
-                  abs(sort.midY - field.midY) <= 1 else {
+            guard field.width > scope.width, scope.maxY < field.minY,
+                  !header.sortButtonForQA.isHidden, sort.maxX <= scope.minX,
+                  abs(sort.midY - scope.midY) <= 1 else {
                 throw Failure(description: "at \(width)pt the header squeezes: field \(field), scope \(scope), sort \(sort)")
             }
             header.setSearchForQA("alp")
             header.layoutForQA()
-            guard header.sortButtonForQA.isHidden, header.searchClearShownForQA else {
-                throw Failure(description: "at \(width)pt typing left the sort button up or the clear button down")
+            guard !header.sortButtonForQA.isHidden, header.searchClearShownForQA else {
+                throw Failure(description: "at \(width)pt typing hid sort or failed to show clear")
             }
             header.setSearchForQA("")
             header.layoutForQA()
@@ -367,43 +364,62 @@ enum SidebarSortChecks {
         }
         report.append("persistence: first launch Most active, a pick stored and restored by the host, junk reads Most active")
 
-        // 8. The working glyph on a lead whose helper works, open or folded, beside
-        //    the outline it shares a fact with; gone once the helper finishes.
+        // 8. The working glyph on a lead whose helper works, open or folded. The
+        //    glyph is the working fact and always shows; the outline is the active
+        //    style, which shows iff the group works AND (scope = all working OR the
+        //    group holds the open agent). The table's selection alone never counts.
+        //    Both go once the helper finishes.
         for open in [true, false] {
-            let shape = open ? "open" : "folded"
-            let (leads, leadWindow) = build(dark: false, leadOpen: open)
-            defer { leadWindow.orderOut(nil) }
-            leads.setSortMode(.mostActive)
-            leads.layoutForQA()
-            func lead(_ n: Int) throws -> AgentInbox96CellView {
-                guard let cell = leads.ownershipCellForQA(id: uuid(n)) else {
-                    throw Failure(description: "\(shape): no row for \(String(n, radix: 16))")
+            for (scope, pick) in [(SidebarActiveIndicatorScope.working, "none"), (.selected, "none"),
+                                  (.selected, "table"), (.selected, "open")] {
+                let selectLead = pick == "open"
+                let shape = "\(open ? "open" : "folded")/\(scope.rawValue)/lead \(pick)"
+                let (leads, leadWindow) = build(dark: false, leadOpen: open, scope: scope)
+                defer { leadWindow.orderOut(nil) }
+                leads.setSortMode(.mostActive)
+                leads.layoutForQA()
+                if pick == "table" {
+                    guard leads.selectRowForQA(id: uuid(epsilon)) else {
+                        throw Failure(description: "\(shape): could not select the Epsilon lead")
+                    }
+                    leads.layoutForQA()
                 }
-                cell.layoutSubtreeIfNeeded()
-                return cell
-            }
-            guard open == leads.drawnSequenceForQA.contains("Epsilon helper") else {
-                throw Failure(description: "\(shape): the helper's fold is wrong: \(leads.drawnSequenceForQA)")
-            }
-            let busyLead = try lead(epsilon)
-            guard busyLead.showsWorkingGlyphForQA, busyLead.isSweepingForQA else {
-                throw Failure(description: "\(shape): an idle lead with a working helper draws glyph "
-                    + "\(busyLead.showsWorkingGlyphForQA), outline \(busyLead.isSweepingForQA)")
-            }
-            guard try lead(beta).showsWorkingGlyphForQA, try !lead(alpha).showsWorkingGlyphForQA else {
-                throw Failure(description: "\(shape): a working lead must show the glyph and an idle one must not")
-            }
-            var finished = fixture()
-            if let index = finished.firstIndex(where: { $0.id == uuid(helper) }) {
-                finished[index] = row(helper, "Epsilon helper", project: "Film", activeMinutesAgo: 0.1,
-                                      createdMinutesAgo: 15, parent: epsilon)
-            }
-            leads.apply(rows: finished, changed: .init(added: [], updated: [uuid(helper)], removed: []))
-            leads.layoutForQA()
-            let restingLead = try lead(epsilon)
-            guard !restingLead.showsWorkingGlyphForQA, !restingLead.isSweepingForQA else {
-                throw Failure(description: "\(shape): the lead kept glyph \(restingLead.showsWorkingGlyphForQA), "
-                    + "outline \(restingLead.isSweepingForQA) after its last helper finished")
+                if pick == "open" {
+                    leads.openAgentId = uuid(epsilon)
+                    leads.layoutForQA()
+                }
+                func lead(_ n: Int) throws -> AgentInbox96CellView {
+                    guard let cell = leads.ownershipCellForQA(id: uuid(n)) else {
+                        throw Failure(description: "\(shape): no row for \(String(n, radix: 16))")
+                    }
+                    cell.layoutSubtreeIfNeeded()
+                    return cell
+                }
+                guard open == leads.drawnSequenceForQA.contains("Epsilon helper") else {
+                    throw Failure(description: "\(shape): the helper's fold is wrong: \(leads.drawnSequenceForQA)")
+                }
+                let expectsOutline = scope == .working || selectLead
+                let busyLead = try lead(epsilon)
+                guard busyLead.showsWorkingGlyphForQA, busyLead.isSweepingForQA == expectsOutline else {
+                    throw Failure(description: "\(shape): an idle lead with a working helper draws glyph "
+                        + "\(busyLead.showsWorkingGlyphForQA), outline \(busyLead.isSweepingForQA); expected glyph true, "
+                        + "outline \(expectsOutline)")
+                }
+                guard try lead(beta).showsWorkingGlyphForQA, try !lead(alpha).showsWorkingGlyphForQA else {
+                    throw Failure(description: "\(shape): a working lead must show the glyph and an idle one must not")
+                }
+                var finished = fixture()
+                if let index = finished.firstIndex(where: { $0.id == uuid(helper) }) {
+                    finished[index] = row(helper, "Epsilon helper", project: "Film", activeMinutesAgo: 0.1,
+                                          createdMinutesAgo: 15, parent: epsilon)
+                }
+                leads.apply(rows: finished, changed: .init(added: [], updated: [uuid(helper)], removed: []))
+                leads.layoutForQA()
+                let restingLead = try lead(epsilon)
+                guard !restingLead.showsWorkingGlyphForQA, !restingLead.isSweepingForQA else {
+                    throw Failure(description: "\(shape): the lead kept glyph \(restingLead.showsWorkingGlyphForQA), "
+                        + "outline \(restingLead.isSweepingForQA) after its last helper finished")
+                }
             }
         }
         // The character reads the same fact: a lead with a working helper poses as working.
@@ -413,8 +429,8 @@ enum SidebarSortChecks {
               !AgentInbox96CellView.showsWorkingGlyph(idleLead, rollup: ChildRollup(children: 1, working: 0, needsYou: 0, failed: 0)) else {
             throw Failure(description: "the lead's working fact does not follow its helpers")
         }
-        report.append("header: search wider than scope with the sort button inside it at 280 and 220 pt; typing swaps it for clear")
-        report.append("lead glyph: on with a working helper (open and folded) beside the outline, off when it finishes")
+        report.append("header: search and compose above trailing-aligned sort and scope at 280 and 220 pt; sort remains available while typing")
+        report.append("lead glyph: on with a working helper (open and folded); outline under All working, or Selected with the lead open, absent under Selected when only selected or not open; both off when it finishes")
 
         // 9. Stills.
         if let outputDirectory {
