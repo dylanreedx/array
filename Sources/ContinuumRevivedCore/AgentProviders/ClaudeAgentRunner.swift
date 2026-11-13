@@ -48,9 +48,9 @@ public enum ClaudeCLIBackend {
         return String(id[id.index(after: slash)...])
     }
 
-    /// pi `--thinking` level → claude `--effort` level. Only exact matches
-    /// pass through; anything else (off/minimal/unknown) omits the flag and
-    /// takes the CLI's own default rather than inventing a mapping.
+    /// Pass through only an exact effort advertised for this Claude model.
+    /// Missing model or capability metadata omits the flag, leaving the CLI
+    /// default intact without a global effort list or invented mapping.
     public static func effortArgument(forThinking thinking: String, model: String? = nil) -> String? {
         guard let model else { return nil }
         return AgentModelConfig.supportedEffort(thinking, model: model, harness: .claudeCode)

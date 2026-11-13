@@ -114,7 +114,7 @@ func runAgentModelConfigChecks() {
     }
     expect(AgentModelConfig.defaultModel != retired, "the ambiguous \(retired) must not be the default")
 
-    // 4. Thinking levels are exactly the ones `pi --thinking` documents.
+    // 4. Effort choices come from the selected model catalogue.
     let selectedHarness = AgentHarnessConfig.resolved()
     let selectedModel = AgentModelConfig.defaultModel(for: selectedHarness) ?? ""
     expect(AgentModelConfig.thinkingOptions == (AgentModelCatalog.shared.efforts(for: selectedModel, harness: selectedHarness) ?? []),
@@ -186,7 +186,7 @@ func runAgentModelConfigChecks() {
            "the resolved thinking level must reach Pi's argv (an inert picker is the bug), got \(argv)")
     #endif
 
-    print("AgentModelConfig checks passed: default is an exact catalogue id, no ambiguous prefix offered, thinking levels valid, unrecognized values fall back, Settings binds both keys, Config defaults from the resolver and both values reach Pi's argv")
+    print("AgentModelConfig checks passed: default is an exact catalogue id, no ambiguous prefix offered, effort choices follow the selected model, stored values are preserved, Settings binds both keys, Config defaults from the resolver and only supported effort reaches Pi's argv")
 }
 
 // Live catalogue (AgentModelCatalog): the frozen list above became the

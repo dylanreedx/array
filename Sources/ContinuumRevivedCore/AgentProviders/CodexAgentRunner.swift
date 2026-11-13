@@ -34,10 +34,9 @@ public enum CodexCLIBackend {
         return String(id[id.index(after: slash)...])
     }
 
-    /// pi `--thinking` level → codex `model_reasoning_effort`. Codex's set is
-    /// Only exact levels accepted by current Codex releases pass through;
-    /// `off` remains Pi-only and omits the config so Codex takes its default.
-    /// Same exact-match-or-omit rule as `ClaudeCLIBackend`.
+    /// Pass through only an exact effort advertised for this Codex model.
+    /// Missing model or capability metadata omits the config so the CLI takes
+    /// its default, following the same rule as `ClaudeCLIBackend`.
     public static func effortArgument(forThinking thinking: String, model: String? = nil) -> String? {
         guard let model else { return nil }
         return AgentModelConfig.supportedEffort(thinking, model: model, harness: .codex)
