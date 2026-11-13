@@ -284,6 +284,18 @@ public final class AgentStore: @unchecked Sendable {
     /// order of the locked decisions gets the same sequence on every load; the
     /// directory enumeration order is not stable and must never be relied on.
     public func loadAll() throws -> [AgentRecord] {
+        try loadAll(skipping: [])
+    }
+
+    /// Record files `loadAll` has decoded since launch, for the delegation-at-
+    /// scale witness: a spawn that re-read every record cost 15% of main.
+    public static var recordsDecodedForQA: Int { recordsDecoded.value }
+    private static let recordsDecoded = QACounter()
+
+    /// `loadAll` without decoding the records whose ids are in `known`: for a
+    /// caller that already holds those, it costs one directory listing plus the
+    /// records it does not have.
+    public func loadAll(skipping known: Set<AgentID>) throws -> [AgentRecord] {
         let dir = layout.agentsDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
         let entries = try FileManager.default.contentsOfDirectory(
@@ -297,8 +309,10 @@ public final class AgentStore: @unchecked Sendable {
                 // A record file is always `<agent id>.json`; anything else keeps
                 // the shared folder its backups were written to.
                 let stem = entry.deletingPathExtension().lastPathComponent
-                let reader = UUID(uuidString: stem).map { writer(for: AgentID(rawValue: $0)) }
-                    ?? writer(backups: layout.backupsDirectory)
+                let id = UUID(uuidString: stem).map(AgentID.init(rawValue:))
+                if let id, known.contains(id) { continue }
+                let reader = id.map { writer(for: $0) } ?? writer(backups: layout.backupsDirectory)
+                Self.recordsDecoded.increment()
                 let record: AgentRecord = try reader.read(at: entry)
                 records.append(record)
             } catch {

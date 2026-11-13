@@ -440,7 +440,44 @@ final class WorkspaceAPIService {
                                   isCancelled: isCancelled, completion: completion)
             return
         }
+        if WorkspaceAPIOp(rawValue: op) == .agentDelegate {
+            // A child's `git rev-parse` / `git worktree add` blocked the main
+            // thread for about a second per delegation (2026-11-12 profile).
+            switch resolveCaller(agentId) {
+            case let .refused(reply):
+                completion(reply)
+            case let .ready(record, runtime, canvas, ownHandle):
+                delegate(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
+                         payload: payload, runtime: runtime, canvas: canvas,
+                         checkoutOffMain: true, isCancelled: isCancelled, completion: completion)
+            }
+            return
+        }
         completion(dispatch(agentId: agentId, requestId: requestId, op: op, payload: payload, isCancelled: isCancelled))
+    }
+
+    private enum Caller {
+        case ready(AgentRecord, WorkspaceRuntime, CanvasNSView, CheckoutHandle)
+        case refused(Reply)
+    }
+
+    private func resolveCaller(_ agentId: AgentID) -> Caller {
+        // Principal: the supervisor's record for the bound runner. Nothing in
+        // `payload` is consulted for identity or permission.
+        guard let record = supervisor.records[agentId].map(resolvedRecord) else {
+            return .refused(.error(WorkspaceAPIError(code: .permissionDenied, message: "Unknown caller.")))
+        }
+        guard record.workspaceToolsEnabled else {
+            // Deliberately names no path, zone or tile (§14.4 permission_denied).
+            return .refused(.error(WorkspaceAPIError(code: .permissionDenied, message: "Workspace tools are not enabled for this agent. The user can enable them from the agent's menu in Array.")))
+        }
+        guard let runtime = runtimeProvider(), let canvas = canvasProvider() else {
+            return .refused(.error(WorkspaceAPIError(code: .unsupported, message: "No workspace is mounted.")))
+        }
+        let ownHandle = Self.ownCheckoutHandle(record)
+        seedGrantsIfNeeded(agentId: agentId, checkout: ownHandle)
+        dropPolicyGrantsUnlessFree(agentId: agentId)
+        return .ready(record, runtime, canvas, ownHandle)
     }
 
     /// THE host entry point. `isCancelled` is polled at the commit boundary and
@@ -455,21 +492,11 @@ final class WorkspaceAPIService {
         guard let op = WorkspaceAPIOp(rawValue: opName) else {
             return .error(WorkspaceAPIError(code: .unsupported, message: "Unknown operation \(opName). Supported: \(WorkspaceAPIOp.allCases.map(\.rawValue).joined(separator: ", "))."))
         }
-        // Principal: the supervisor's record for the bound runner. Nothing in
-        // `payload` is consulted for identity or permission.
-        guard let record = supervisor.records[agentId].map(resolvedRecord) else {
-            return .error(WorkspaceAPIError(code: .permissionDenied, message: "Unknown caller."))
+        let record: AgentRecord, runtime: WorkspaceRuntime, canvas: CanvasNSView, ownHandle: CheckoutHandle
+        switch resolveCaller(agentId) {
+        case let .refused(reply): return reply
+        case let .ready(r, rt, c, h): (record, runtime, canvas, ownHandle) = (r, rt, c, h)
         }
-        guard record.workspaceToolsEnabled else {
-            // Deliberately names no path, zone or tile (§14.4 permission_denied).
-            return .error(WorkspaceAPIError(code: .permissionDenied, message: "Workspace tools are not enabled for this agent. The user can enable them from the agent's menu in Array."))
-        }
-        guard let runtime = runtimeProvider(), let canvas = canvasProvider() else {
-            return .error(WorkspaceAPIError(code: .unsupported, message: "No workspace is mounted."))
-        }
-        let ownHandle = Self.ownCheckoutHandle(record)
-        seedGrantsIfNeeded(agentId: agentId, checkout: ownHandle)
-        dropPolicyGrantsUnlessFree(agentId: agentId)
 
         switch op {
         case .deviceList, .deviceOpen, .deviceObserve, .deviceAct, .deviceClose, .deviceBuildRun:
@@ -494,8 +521,15 @@ final class WorkspaceAPIService {
             return canvasApply(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
                                payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
         case .agentDelegate:
-            return delegate(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
-                            payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+            // Inline: the child's git step runs before this returns. The
+            // transports use `dispatchAsync`, which runs it off main.
+            var reply = Reply.error(WorkspaceAPIError(code: .outcomeUnknown, message: "Array has not answered this request yet"))
+            withoutActuallyEscaping(isCancelled) { isCancelled in
+                delegate(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
+                         payload: payload, runtime: runtime, canvas: canvas,
+                         checkoutOffMain: false, isCancelled: isCancelled) { reply = $0 }
+            }
+            return reply
         case .agentReveal:
             return reveal(agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
                           payload: payload, runtime: runtime, canvas: canvas)
