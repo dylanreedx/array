@@ -1444,6 +1444,7 @@ run_app_check .build/debug/Array --canvas-pointer-path-check
 # A tile dragged out of its zone stays bare through auto layout, a zone move,
 # undo and a remount, through NSApp.sendEvent (.plans/auto-layout-night).
 run_app_check .build/debug/Array --bare-tile-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --zone-membership-repair-check
 run_app_check .build/debug/Array --agent-compaction-ui-check
 # The compact status row skips an identical apply and repaints any change it
 # shows: presentation, last prompt, background jobs or a quarter-point width.

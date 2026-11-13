@@ -124,15 +124,9 @@ enum BareTileChecks {
             check(false, "\(mode) precondition: zone A1 is not live")
         }
 
-        // 4. Remount: quit and mount again, as a relaunch does.
-        host.close()
-        try fixture.remount(crash: false)
-        host = try Host(fixture: fixture, autoLayout: autoLayout, label: mode)
-        host.expectBare(tile, at: expected, "\(mode) after a remount")
-
-        // 5. Dropping it inside a zone adopts it: into zone A1, wherever it now is.
+        // 4. Dropping it inside a zone adopts it.
         guard let zone = host.canvas.qaLiveZonePlacement(Fixture.zoneA1) else {
-            check(false, "\(mode): zone A1 vanished after the remount"); return
+            check(false, "\(mode): zone A1 vanished before the drag in"); return
         }
         guard let bare = host.world(tile) else { check(false, "\(mode): the tile vanished after the remount"); return }
         // Its centre into the zone's lower-left quarter, clear of the seeded notes.
@@ -152,6 +146,39 @@ enum BareTileChecks {
                   && frame.y + frame.height <= rect.y + rect.height + 0.5,
                   "\(mode) drag back in: world frame \(frame) is not inside zone A1 \(rect)")
         }
+        guard let adopted = host.world(tile) else { throw Failure(message: "adopted tile vanished") }
+        try host.dragHeader(of: tile, byWorld: CGSize(width: expected.x - adopted.x, height: expected.y - adopted.y))
+        host.expectBare(tile, at: expected, "\(mode) after second drag out")
+
+        // Move the zone over the bare tile without dropping the tile into it.
+        host.setAutoLayout(false)
+        if let zone = host.canvas.qaLiveZonePlacement(Fixture.zoneA1) {
+            let delta = CGSize(width: expected.x + expected.width / 2 - (zone.origin.x + zone.size.width / 2),
+                               height: expected.y + expected.height / 2 - (zone.origin.y + zone.size.height / 2))
+            try host.dragZoneHeader(Fixture.zoneA1, byWorld: delta)
+            if let moved = host.canvas.qaLiveZonePlacement(Fixture.zoneA1) {
+                let rect = CanvasEngine.zoneWorldFrame(moved)
+                check(expected.x + expected.width / 2 >= rect.x && expected.x + expected.width / 2 <= rect.x + rect.width
+                      && expected.y + expected.height / 2 >= rect.y && expected.y + expected.height / 2 <= rect.y + rect.height,
+                      "\(mode): zone did not cover bare tile before remount")
+            }
+            host.expectBare(tile, at: expected, "\(mode) covered before remount")
+        } else {
+            throw Failure(message: "\(mode): zone A1 vanished before overlap")
+        }
+
+        // 5. Remount: quit and mount again, as a relaunch does.
+        host.close()
+        try fixture.remount(crash: false)
+        host = try Host(fixture: fixture, autoLayout: autoLayout, label: mode)
+        host.expectBare(tile, at: expected, "\(mode) after a remount")
+
+        host.setAutoLayout(false)
+        try host.dragZoneHeader(Fixture.zoneA1, byWorld: CGSize(width: 40, height: 0))
+        host.expectBare(tile, at: expected, "\(mode) after covered zone moved")
+        host.canvas.tidyAutoLayout(zoneId: Fixture.zoneA1)
+        fixture.drain(0.5)
+        host.expectBare(tile, at: expected, "\(mode) after covered zone tidy")
     }
 
     // MARK: - A mounted canvas in an offscreen window

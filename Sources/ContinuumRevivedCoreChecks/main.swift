@@ -24,6 +24,11 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
     }
 }
 
+if CommandLine.arguments.contains("--zone-membership-repair-check") {
+    runZoneMembershipRepairChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--browser-profile-registry-check") {
     try runBrowserProfileRegistryChecks()
     print("BrowserProfileRegistryChecks passed")
