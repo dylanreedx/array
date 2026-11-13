@@ -1532,7 +1532,10 @@ class TileNSView: NSView, TokenThemed {
     /// Make the resize ring discoverable: tracking-area-driven cursor rects
     /// for each edge zone, plus a drag-handle cursor over the title bar so the
     /// user reads it as draggable instead of a thin gray strip.
+    private(set) var qaAgentBubbleCursorRect: NSRect?
+
     override func resetCursorRects() {
+        qaAgentBubbleCursorRect = nil
         super.resetCursorRects()
         let m = resizeMarginInLocalCoordinates
         // Floor the open-hand cursor band to the grab strip (not the drawn 24-px
@@ -1559,7 +1562,14 @@ class TileNSView: NSView, TokenThemed {
         }
         // The agent's bubble is a grab handle, corner band or not. Added last so
         // it wins where it overlaps the edge bands.
-        if let bubble = agentBubbleFrame { addCursorRect(bubble, cursor: .openHand) }
+        if let bubble = agentBubbleFrame {
+            // Cursor rectangles cannot describe a circle. Inscribe the hand
+            // region so its corners never override the surrounding resize band.
+            let inset = bubble.width * (1 - 1 / sqrt(2)) / 2
+            let grab = bubble.insetBy(dx: inset, dy: inset)
+            qaAgentBubbleCursorRect = grab
+            addCursorRect(grab, cursor: .openHand)
+        }
     }
 
     var resizeMarginInLocalCoordinates: CGFloat {
@@ -3139,9 +3149,16 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         closeButton.toolTip = close
     }
 
+    private var identityProviderModel: String?
+    private var hasIdentity = false
+
     func setIdentity(title: String?, providerModel: String?) {
         let normalized = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        displayTitleOverride = normalized.flatMap { $0.isEmpty ? nil : $0 }
+        let title = normalized.flatMap { $0.isEmpty ? nil : $0 }
+        guard !hasIdentity || title != displayTitleOverride || providerModel != identityProviderModel else { return }
+        hasIdentity = true
+        identityProviderModel = providerModel
+        displayTitleOverride = title
         if let providerModel, let source = BrandMark96.mark(forModel: providerModel),
            let image = source.copy() as? NSImage {
             image.isTemplate = true

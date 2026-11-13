@@ -146,6 +146,28 @@ enum CharacterPerfChecks {
             $0.rowForQA?.state == .working || ($0.rowForQA?.state == .ready && $0.rowForQA?.terminalEvent != nil)
         }.count
 
+        // At a fixed semantic time the elapsed clock must not reflow a row.
+        let clockCells = inbox.visibleCharacterCellsForQA
+        for cell in clockCells { cell.updateElapsedClock(now: now); cell.layoutSubtreeIfNeeded() }
+        let clockLayouts = AgentInbox96CellView.qaLayoutPassCount
+        for _ in 0..<3 {
+            for cell in clockCells { cell.updateElapsedClock(now: now); cell.layoutSubtreeIfNeeded() }
+        }
+        let unchangedClock = AgentInbox96CellView.qaLayoutPassCount == clockLayouts
+        let identityView = TileNSView(tile: Tile(id: UUID(), kind: .managedAgent, title: "Identity", frame: TileFrame(x: 0, y: 0, width: 360, height: 260), zPosition: .fromLegacyRank(1), zoneId: nil, runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+        identityView.setTitleBarIdentity(title: "Identity", providerModel: "claude-opus-5-5")
+        identityView.layoutSubtreeIfNeeded()
+        let identityDraws = identityView.qaTitleBarRedrawCount
+        let identityLayouts = identityView.qaTitleBarLayoutPasses
+        for _ in 0..<3 {
+            identityView.setTitleBarIdentity(title: "Identity", providerModel: "claude-opus-5-5")
+            identityView.layoutSubtreeIfNeeded()
+        }
+        let unchangedIdentity = identityView.qaTitleBarRedrawCount == identityDraws
+            && identityView.qaTitleBarLayoutPasses == identityLayouts
+        guard unchangedClock && unchangedIdentity else {
+            throw Failure(description: "unchanged elapsed clock quiet=\(unchangedClock); unchanged title identity quiet=\(unchangedIdentity)")
+        }
         func counters() -> (Int, Int, Int, Int) {
             (views.reduce(0) { $0 + $1.qaTitleBarLayoutPasses }, views.reduce(0) { $0 + $1.qaTitleBarDrawCount },
              AgentInbox96CellView.qaLayoutPassCount, CharacterSpriteLayer.installCount)

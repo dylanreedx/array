@@ -325,7 +325,9 @@ final class TileAgentBubbleLayer: CALayer {
     nonisolated(unsafe) static var motionInstallCount = 0
 
     /// Set by the host from the characters' own Reduce Motion reading.
-    var reduceMotion: () -> Bool = { false }
+    var reduceMotion: () -> Bool = { false } {
+        didSet { reconcileMotion(force: false) }
+    }
 
     /// `InboxOwnershipClock.beginTime`, on this layer's clock: every layer given
     /// the same phase shows the same pose at the same instant, so a tile's light
