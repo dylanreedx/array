@@ -541,11 +541,12 @@ enum TileAgentBubbleChecks {
                 pressure: type == .leftMouseUp ? 0 : 1) else { throw Failure(description: "could not synthesize \(type)") }
             NSApp.sendEvent(event)
         }
+        var filmed = 0
+        #if ARRAY_FILM
         let filmDirectory = ProcessInfo.processInfo.environment["TILE_AGENT_BUBBLE_FILM_DIR"].flatMap {
             $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true)
         }
         if let filmDirectory { try FileManager.default.createDirectory(at: filmDirectory, withIntermediateDirectories: true) }
-        var filmed = 0
         func film(_ name: String) throws {
             guard let filmDirectory, zoom == 1, !snapping else { return }
             let around = view.frame.insetBy(dx: -80, dy: -80)
@@ -553,6 +554,8 @@ enum TileAgentBubbleChecks {
             try write(image, to: filmDirectory.appendingPathComponent("drag-\(name).png"))
             filmed += 1
         }
+
+        #endif
 
         /// Drag from `local` (tile coordinates) by `delta` screen points in three steps.
         func drag(from local: NSPoint, by delta: CGSize, name: String) throws -> (before: TileFrame, after: TileFrame) {
@@ -569,15 +572,21 @@ enum TileAgentBubbleChecks {
                 try expect(hit === view, "\(label) \(name): a press on the bubble at \(start) hit \(chain.joined(separator: " < ")) (tile frame in window \(view.convert(view.bounds, to: nil)))")
             }
             try send(.leftMouseDown, start)
+            #if ARRAY_FILM
             try film("\(name)-0")
+            #endif
             for (step, t) in [0.33, 0.66, 1.0].enumerated() {
                 try send(.leftMouseDragged, NSPoint(x: start.x + delta.width * t, y: start.y - delta.height * t))
                 canvas.layoutSubtreeIfNeeded()
+            #if ARRAY_FILM
                 try film("\(name)-\(step + 1)")
+            #endif
             }
             try send(.leftMouseUp, NSPoint(x: start.x + delta.width, y: start.y - delta.height))
             canvas.layoutSubtreeIfNeeded()
+            #if ARRAY_FILM
             try film("\(name)-4")
+            #endif
             guard let after = world() else { throw Failure(description: "\(label): no world frame after the drag") }
             return (before, after)
         }
