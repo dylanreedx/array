@@ -159,6 +159,7 @@ check --file-open-active-context-check
 check --file-tree-boot-persistence-check
 check --file-tree-hardening-check
 check --file-tree-snapshot-coalescing-check
+check --first-helper-isolation-check
 check --flat-spawn-migration-check
 check --floating-toolbar-agent-spawn-check
 check --floating-toolbar-check
@@ -492,6 +493,7 @@ leg run swift build --configuration debug --product Array -j 2
 leg run swift build --configuration debug --product array-workspace-mcp -j 2
 leg run swift build --disable-sandbox --skip-update
 leg run swift build --disable-sandbox --skip-update --product Array
+leg run swift build --disable-sandbox --skip-update --product Array -j 4
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
@@ -500,6 +502,7 @@ leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRe
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedSyncChecks
 leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
+leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp -j 4
 leg run swift build --disable-sandbox --skip-update --product continuum-relay
 leg run swift build --disable-sandbox --skip-update --product continuum-relay-legacy
 leg run swift build --product Array
@@ -651,6 +654,7 @@ leg run_app_check .build/debug/Array --file-open-active-context-check
 leg run_app_check .build/debug/Array --file-tree-boot-persistence-check
 leg run_app_check .build/debug/Array --file-tree-hardening-check
 leg run_app_check .build/debug/Array --file-tree-snapshot-coalescing-check
+leg run_app_check .build/debug/Array --first-helper-isolation-check
 leg run_app_check .build/debug/Array --flat-spawn-migration-check
 leg run_app_check .build/debug/Array --floating-toolbar-agent-spawn-check
 leg run_app_check .build/debug/Array --floating-toolbar-check
