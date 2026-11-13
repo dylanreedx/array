@@ -3460,6 +3460,8 @@ final class AgentSupervisor {
                 sourceItemId: sourceItemId,
                 tileId: tileId,
                 displayName: displayName,
+                contextDietRequested: contextDietRequested ?? HelperContextDiet.requested(defaults: managedModeDefaults),
+                initialBrief: namingText ?? prompt ?? "",
                 createdAt: now
             ) else {
                 warn("AgentSupervisor.makeAgent: child \(id.rawValue.uuidString) was not persisted; no ordinal was committed")
@@ -3516,16 +3518,6 @@ final class AgentSupervisor {
             records[id] = record
             persist(record)
         }
-        // Snapshot before first send; never reinterpret a restored child using
-        // today's default. A retry supplies its prior choice, including OFF.
-        if parentAgentID != nil,
-           contextDietRequested ?? HelperContextDiet.requested(defaults: managedModeDefaults),
-           var child = records[id] {
-            child.delegationContext = AgentDelegationContext(brief: namingText ?? prompt ?? "", baseHead: nil,
-                retryOf: nil, createdWorktree: worktreeId != nil, checkoutNotice: nil, contextDietRequested: true)
-            guard persist(child) else { return id }
-            records[id] = child
-        }
         if let request = chooserPendingChildRequests.removeValue(forKey: id), let parent = parentAgentID, var child = records[id] {
             child.delegationContext = AgentDelegationContext(brief: namingText ?? prompt ?? "", baseHead: nil,
                 retryOf: nil, createdWorktree: worktreeId != nil, checkoutNotice: nil,
@@ -3577,6 +3569,8 @@ final class AgentSupervisor {
         sourceItemId: String?,
         tileId: UUID?,
         displayName: String?,
+        contextDietRequested: Bool,
+        initialBrief: String,
         createdAt: Date
     ) -> AgentRecord? {
         do {
@@ -3632,6 +3626,12 @@ final class AgentSupervisor {
                     lastActivityAt: createdAt,
                     tileId: tileId
                 )
+                // The policy and task are part of the first child claim. A
+                // failed write cannot publish a child or advance its ordinal.
+                if contextDietRequested {
+                    child.delegationContext = AgentDelegationContext(brief: initialBrief, baseHead: nil,
+                        retryOf: nil, createdWorktree: worktreeId != nil, checkoutNotice: nil, contextDietRequested: true)
+                }
                 // Only the explicit rung may land before the first prompt. The
                 // common send/headless funnel applies the remaining rungs below.
                 if let proposal = AgentRecord.resolveDerivedDisplayName(
@@ -3668,7 +3668,9 @@ final class AgentSupervisor {
                         return nil
                     }
                     guard durableChild.parentAgentID == parentAgentID,
-                          durableChild.parentRelativeOrdinal == ordinal else {
+                          durableChild.parentRelativeOrdinal == ordinal,
+                          durableChild.delegationContext?.contextDietRequested == child.delegationContext?.contextDietRequested,
+                          durableChild.delegationContext?.brief == child.delegationContext?.brief else {
                         warn("AgentSupervisor: child \(id.rawValue.uuidString) changed unexpectedly after its write threw; refusing unrelated durable state")
                         return nil
                     }

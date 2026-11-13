@@ -4,7 +4,42 @@ import ContinuumRevivedCore
 /// Real delegation -> persisted child -> production Pi RPC process, offline.
 @MainActor
 enum HelperContextDietChecks {
+    static func writeFailures() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("diet-write-failure-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = QAIsolatedDefaults(isolatedSuiteName: "diet-write-failure." + UUID().uuidString)!
+        defer { defaults.removePersistentDomain(forName: defaults.suiteDomainName) }
+        defaults.set(true, forKey: HelperContextDiet.enabledKey)
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready,
+            models: [WorkspaceAgentReportChecks.model]))
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        var runnerStarts = 0, rejected = 0
+        let supervisor = AgentSupervisor(store: store,
+            makeRunner: { _ in runnerStarts += 1; return ScriptedAgentRunner(script: []) },
+            upsertRecord: { record in
+                if record.parentAgentID != nil && record.delegationContext?.contextDietRequested == true {
+                    rejected += 1
+                    throw WorkspaceAgentReportChecks.Failure(description: "injected policy write failure")
+                }
+                try store.upsert(record)
+            })
+        defer { supervisor.stopAll() }
+        supervisor.configureManagedMode(defaults: defaults)
+        let parent = supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: .pi,
+            model: WorkspaceAgentReportChecks.model, thinking: "high")
+        let child = supervisor.handleSpawnRequest(SpawnRequest(role: nil, prompt: "NEVER-RUN-POLICY", isolated: false), from: parent)
+        try WorkspaceAgentReportChecks.expect(rejected == 1, "failure injection must reach actual policy persistence")
+        try WorkspaceAgentReportChecks.expect(child == nil, "failed policy write must refuse delegation, never report a child")
+        try WorkspaceAgentReportChecks.expect(runnerStarts == 0 && supervisor.records.count == 1, "refused allocation must launch and publish nothing")
+        let durable = try store.loadAll()
+        let durableParent = try store.load(id: parent)
+        try WorkspaceAgentReportChecks.expect(durable.count == 1 && durableParent?.nextChildOrdinal == 1, "failed atomic claim must retain only parent and its ordinal")
+    }
+
     static func run() async throws {
+        try writeFailures()
+        if ProcessInfo.processInfo.environment["CONTINUUM_DIET_WRITE_FAILURE_ONLY"] == "1" { return }
         let b = try WorkspaceAgentReportChecks.makeBench(label: "helper-diet")
         defer { b.tearDown() }
         let key = "agents.helpers.contextDiet"
