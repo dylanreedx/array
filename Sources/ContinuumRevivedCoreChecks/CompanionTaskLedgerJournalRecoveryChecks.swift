@@ -26,6 +26,7 @@ func runCompanionTaskLedgerJournalRecoveryChecks() throws -> String {
     outcomes.append(try recoveryArm(name: "base plus journal", compactFirst: true))
     outcomes.append(try inSessionArm())
     outcomes.append(try damagedLineArm())
+    outcomes.append(try unreadableJournalArm())
     return "CompanionTaskLedgerJournalRecoveryChecks passed: " + outcomes.joined(separator: "; ")
 }
 
@@ -150,6 +151,39 @@ private func damagedLineArm() throws -> String {
     try recoveryExpect(afterTear[d.runID] == .succeeded && afterTear[a.runID] == .succeeded, "torn tail: a committed change did not survive")
     try recoveryExpect(try setAside().count == 1, "torn tail: a crash mid-append must not be set aside as damage")
     return "damaged middle line — replay stopped before it, journal set aside; torn tail dropped quietly"
+}
+
+/// Review of de478381: replay read the journal with `try?`, so a journal it could
+/// not read looked empty, and launch then folded nothing into the base and
+/// emptied the file. Only a missing journal is empty; any other read failure
+/// must stop launch with the journal untouched.
+private func unreadableJournalArm() throws -> String {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-task-ledger-recovery-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let journal = root.appendingPathComponent("companion-tasks/ledger.journal")
+    // A missing journal is the ordinary empty case: a ledger reopened before
+    // its first change has none.
+    _ = try CompanionTaskLedger(applicationSupportDirectory: root)
+    try recoveryExpect(!FileManager.default.fileExists(atPath: journal.path), "unreadable journal: the arm expects no journal before the first change")
+    let ledger = try CompanionTaskLedger(applicationSupportDirectory: root)
+    try settle(ledger, count: 3, tag: "unread")
+    let committed = Set(try ledger.snapshot().tasks.flatMap(\.members).map(\.runID))
+    let journalBefore = try Data(contentsOf: journal)
+
+    try FileManager.default.setAttributes([.posixPermissions: 0o200], ofItemAtPath: journal.path)
+    let readDenied = (try? Data(contentsOf: journal)) == nil
+    var threw = false
+    if readDenied {
+        do { _ = try CompanionTaskLedger(applicationSupportDirectory: root) } catch { threw = true }
+    }
+    try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: journal.path)
+    try recoveryExpect(readDenied, "unreadable journal: chmod 0200 did not deny the read, so the arm proves nothing")
+    try recoveryExpect(try Data(contentsOf: journal) == journalBefore,
+        "unreadable journal: launch changed a journal it could not read (\(journalBefore.count) bytes → \((try? Data(contentsOf: journal).count) ?? -1))")
+    try recoveryExpect(threw, "unreadable journal: launch went on without reading the journal")
+    let restored = Set(try CompanionTaskLedger(applicationSupportDirectory: root).snapshot().tasks.flatMap(\.members).map(\.runID))
+    try recoveryExpect(committed.isSubset(of: restored), "unreadable journal: committed runs missing once the journal was readable again")
+    return "unreadable journal — launch threw, journal untouched, \(committed.count) runs restored once readable; missing journal opens clean"
 }
 
 private func settle(_ ledger: CompanionTaskLedger, count: Int, tag: String) throws {

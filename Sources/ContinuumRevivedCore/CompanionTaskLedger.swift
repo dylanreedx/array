@@ -163,7 +163,7 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         if FileManager.default.fileExists(atPath: url.path) || hasBackups {
             file = try writer.read(at: url, decoder: JSONDecoder())
             guard file.version == 1 else { throw CompanionTaskLedgerError.unsupportedVersion }
-            if Self.replayJournal(at: journalURL, onto: &file) == .damaged {
+            if try Self.replayJournal(at: journalURL, onto: &file) == .damaged {
                 // Keep the damaged journal, never delete it; launch goes on from
                 // the base plus every line before the damage.
                 let aside = directory.appendingPathComponent("ledger.journal.damaged-\(UUID().uuidString)")
@@ -205,8 +205,14 @@ public final class CompanionTaskLedger: @unchecked Sendable {
     /// unreadable or foreign line with lines after it is damage: a line holds
     /// only the keys it changed, so applying the later ones over the gap would
     /// rebuild runs and tasks half-way. Replay stops there instead.
-    private static func replayJournal(at url: URL, onto file: inout File) -> Replay {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return .clean }
+    ///
+    /// Only a missing journal reads as empty. Any other read failure throws:
+    /// launch would otherwise fold an unread journal into the base and empty it.
+    private static func replayJournal(at url: URL, onto file: inout File) throws -> Replay {
+        let data: Data
+        do { data = try Data(contentsOf: url) }
+        catch let error as CocoaError where error.code == .fileReadNoSuchFile { return .clean }
+        guard !data.isEmpty else { return .clean }
         let decoder = JSONDecoder()
         let lines = data.split(separator: UInt8(ascii: "\n"))
         for (index, line) in lines.enumerated() {
