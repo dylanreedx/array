@@ -112,3 +112,36 @@ because another matrix held `/tmp/array-matrix.lock`; no lock was bypassed.
 OPEN until the lead runs it on the combined candidate. Direct passes above do
 not substitute for that report. Full matrix, live payload, paired task quality,
 real provider compaction and no-added-latency proof were not run here.
+
+## Explicit nested exposure and retained-context follow-up
+
+`2187be8e` adds the real `AgentDelegationContext.CodingKeys` census and nine
+explicit internal decisions. The policy key is
+`agent.delegationContext.contextDietRequested`: host-owned state, not a writable
+API property. RED before the census: rebuilt `--workspace-api-exposure-check`
+failed `exposure census must include the real persisted helper diet key`.
+GREEN after: the same rebuilt arm reports **146 real coding keys classified**.
+It round-trips the actual Codable snapshot, checks its actual encoded policy
+key, and proves that removing the policy decision makes the real audit fail.
+Logs: `/tmp/gaps-helper-diet-exposure-red.log` and
+`/tmp/gaps-helper-diet-exposure-green.log`.
+
+`3ccd77e2` strengthens the runtime witness with positive captured-process
+assertions: first, retry and restored Pi launches carry `-e` for the workspace
+extension, the contract marker reaches the helper prompt, and synthetic supplied
+host rules survive actual restored-process injection. App and MCP were rebuilt
+and the full arm exits 0 on this source, including the atomic write-failure case.
+Preflights: Array 0 existing builds / 65% memory free / 50.2 GiB disk; MCP
+0 / 59% / 50.2 GiB. Log:
+`/tmp/gaps-helper-diet-exposure-app-green.log`; process witness output:
+`/tmp/gaps-helper-diet-context-preserved-green.log`.
+
+`6df8773c` adds a separately resource-gated CoreChecks build and the exposure
+arm to the focused diet matrix, and maps delegation-context changes to that
+exposure arm. The normal-lock attempt remained refused by another holder;
+there is still no successful reported matrix leg in this bench. Integration
+must preserve that pending gate status. CLI help and the installed-loader probe
+establish the bounded discovery semantics; full provider payload, real-provider
+compaction, obedience and paired latency/quality remain unproved. No personal
+or project files were replaced or deleted. No child review agent was spawned;
+exact commits and RED/GREEN evidence were sent to the lead for sibling review.
