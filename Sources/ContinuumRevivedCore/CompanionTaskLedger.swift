@@ -140,6 +140,9 @@ public final class CompanionTaskLedger: @unchecked Sendable {
     private let url: URL
     private let journalURL: URL
     private var journalBytes = 0
+    /// A failed append or an unemptied journal: the next change rewrites the
+    /// base instead of appending, so no committed line ever follows a torn one.
+    private var journalNeedsReset = false
     private let writer: AtomicWriter
     private var file: File
     private let clock: @Sendable () -> Date
@@ -160,7 +163,12 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         if FileManager.default.fileExists(atPath: url.path) || hasBackups {
             file = try writer.read(at: url, decoder: JSONDecoder())
             guard file.version == 1 else { throw CompanionTaskLedgerError.unsupportedVersion }
-            Self.replayJournal(at: journalURL, onto: &file)
+            if Self.replayJournal(at: journalURL, onto: &file) == .damaged {
+                // Keep the damaged journal, never delete it; launch goes on from
+                // the base plus every line before the damage.
+                let aside = directory.appendingPathComponent("ledger.journal.damaged-\(UUID().uuidString)")
+                try FileManager.default.copyItem(at: journalURL, to: aside)
+            }
             // The base does not hold the last session's journal yet. Fold it in
             // before this launch writes anything, so no failed startup write can
             // trim a committed line; if this throws, the journal is untouched.
@@ -178,7 +186,7 @@ public final class CompanionTaskLedger: @unchecked Sendable {
             // fact, not lost work, so it survives a restart as it was.
             for id in Array(next.runs.keys) where !next.runs[id]!.member.state.terminal && next.runs[id]!.awaitingAnswer != true {
                 next.runs[id]!.member.state = .unknown
-                next.tasks[next.runs[id]!.task]!.complete = false
+                next.tasks[next.runs[id]!.task]?.complete = false
             }
         }
         // Tasks from before `touchedAt` count from now, so none leaves the
@@ -189,29 +197,36 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         }
     }
 
-    /// Lines whose revision is past the base, in order. An unreadable line is a
-    /// change that never committed (a torn append, or one whose fsync failed and
-    /// threw), so it is skipped; a line from another publisher is never applied.
-    private static func replayJournal(at url: URL, onto file: inout File) {
-        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return }
+    private enum Replay { case clean, damaged }
+
+    /// Lines whose revision is past the base, in order. An unreadable last line
+    /// is an append that never committed (a crash mid-write) and is dropped. An
+    /// unreadable or foreign line with lines after it is damage: a line holds
+    /// only the keys it changed, so applying the later ones over the gap would
+    /// rebuild runs and tasks half-way. Replay stops there instead.
+    private static func replayJournal(at url: URL, onto file: inout File) -> Replay {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return .clean }
         let decoder = JSONDecoder()
-        for line in data.split(separator: UInt8(ascii: "\n")) {
-            guard let delta = try? decoder.decode(Delta.self, from: Data(line)),
-                  delta.publisherID == file.publisherID, delta.revision > file.revision else { continue }
-            delta.apply(to: &file)
+        let lines = data.split(separator: UInt8(ascii: "\n"))
+        for (index, line) in lines.enumerated() {
+            guard let delta = try? decoder.decode(Delta.self, from: Data(line)), delta.publisherID == file.publisherID else {
+                return index == lines.count - 1 ? .clean : .damaged
+            }
+            // At or below the base: already folded in by a compaction that could
+            // not empty the journal.
+            if delta.revision > file.revision { delta.apply(to: &file) }
         }
+        return .clean
     }
 
     /// Commit point for one change: the line is on stable storage. A failed
     /// append trims the journal back so a torn line cannot precede the next one.
     /// It trims to the length the file had before this write, never to a count
     /// kept in memory: a count that disagrees with the file would cut committed
-    /// lines, or pad with zeros that swallow the next one. Each line also starts
-    /// on a fresh line, so a tail whose trim failed is skipped on its own instead
-    /// of gluing itself to the next committed change.
+    /// lines, or pad with zeros that swallow the next one. Whether or not the
+    /// trim takes, the next change rewrites the base rather than append after it.
     private func append(_ delta: Delta) throws {
-        var data = Data([UInt8(ascii: "\n")])
-        data.append(try JSONEncoder().encode(delta))
+        var data = try JSONEncoder().encode(delta)
         data.append(UInt8(ascii: "\n"))
         let fd = Darwin.open(journalURL.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -223,6 +238,7 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         guard written == data.count, Darwin.fsync(fd) == 0 else {
             let code = POSIXErrorCode(rawValue: errno) ?? .EIO
             _ = Darwin.ftruncate(fd, committed)
+            journalNeedsReset = true
             throw POSIXError(code)
         }
         journalBytes = Int(committed) + data.count
@@ -233,9 +249,10 @@ public final class CompanionTaskLedger: @unchecked Sendable {
     /// revision, so replay skips them.
     private func compact(_ next: File) throws {
         try writer.write(next, to: url)
+        journalNeedsReset = true
         let fd = Darwin.open(journalURL.path, O_WRONLY | O_TRUNC | O_CREAT | O_CLOEXEC, 0o644)
         guard fd >= 0 else { return }
-        if Darwin.fsync(fd) == 0 { journalBytes = 0 }
+        if Darwin.fsync(fd) == 0 { journalBytes = 0; journalNeedsReset = false }
         Darwin.close(fd)
     }
 
@@ -248,7 +265,7 @@ public final class CompanionTaskLedger: @unchecked Sendable {
             if touching { Self.stamp(&next, against: file, at: clock().timeIntervalSince1970) }
             guard file.revision < UInt64.max else { throw CompanionTaskLedgerError.revisionExhausted }
             next.revision = max(next.revision, file.revision + 1)
-            if journalBytes >= Self.compactionThreshold {
+            if journalNeedsReset || journalBytes >= Self.compactionThreshold {
                 try compact(next)
             } else {
                 try append(Delta(from: file, to: next))

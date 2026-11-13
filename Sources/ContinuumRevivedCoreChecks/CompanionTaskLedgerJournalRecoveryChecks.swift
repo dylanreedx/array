@@ -25,6 +25,7 @@ func runCompanionTaskLedgerJournalRecoveryChecks() throws -> String {
     // Arm 2: a compacted base plus a small journal.
     outcomes.append(try recoveryArm(name: "base plus journal", compactFirst: true))
     outcomes.append(try inSessionArm())
+    outcomes.append(try damagedLineArm())
     return "CompanionTaskLedgerJournalRecoveryChecks passed: " + outcomes.joined(separator: "; ")
 }
 
@@ -91,6 +92,64 @@ private func inSessionArm() throws -> String {
     let reopened = try CompanionTaskLedger(applicationSupportDirectory: root).snapshot()
     try recoveryExpect(reopened == live, "in-session: the change after a failed append did not survive a reopen")
     return "in-session short append — committed bytes kept, next change restored"
+}
+
+/// Review of the fix: a line holds only the keys it changed, so replaying past a
+/// damaged line rebuilds runs and tasks half-way over the gap. A damaged line in
+/// the middle stops replay there and the journal is set aside, never deleted; a
+/// torn last line (a crash mid-append) is dropped quietly.
+private func damagedLineArm() throws -> String {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-task-ledger-recovery-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let directory = root.appendingPathComponent("companion-tasks")
+    let journal = directory.appendingPathComponent("ledger.journal")
+    func setAside() throws -> [Data] {
+        try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .filter { $0.hasPrefix("ledger.journal.damaged-") }
+            .map { try Data(contentsOf: directory.appendingPathComponent($0)) }
+    }
+    func runIDs(_ batch: CompanionTaskSnapshotBatch) -> [UUID: CompanionTaskRunState] {
+        Dictionary(batch.tasks.flatMap(\.members).map { ($0.runID, $0.state) }, uniquingKeysWith: { $1 })
+    }
+
+    let ledger = try CompanionTaskLedger(applicationSupportDirectory: root)
+    let a = try ledger.begin(agentID: UUID())
+    try ledger.observe(.turnStarted(threadId: "t", turnId: "a"), run: a)
+    try ledger.observe(.turnCompleted(threadId: "t", turnId: "a", outcome: .completed, errorMessage: nil), run: a)
+    let damagedIndex = try Data(contentsOf: journal).split(separator: UInt8(ascii: "\n")).count
+    let b = try ledger.begin(agentID: UUID())
+    try ledger.observe(.turnStarted(threadId: "t", turnId: "b"), run: b)
+    try ledger.observe(.turnCompleted(threadId: "t", turnId: "b", outcome: .completed, errorMessage: nil), run: b)
+    let c = try ledger.begin(agentID: UUID())
+    try ledger.observe(.turnStarted(threadId: "t", turnId: "c"), run: c)
+    var lines = try Data(contentsOf: journal).split(separator: UInt8(ascii: "\n")).map { Data($0) }
+    try recoveryExpect(lines.count > damagedIndex + 2, "damaged line: the arm needs lines after the one it damages")
+    lines[damagedIndex] = Data("{\"revision\":".utf8)
+    var damaged = Data(lines.joined(separator: [UInt8(ascii: "\n")]))
+    damaged.append(UInt8(ascii: "\n"))
+    try damaged.write(to: journal)
+
+    let reopened: CompanionTaskLedger
+    do { reopened = try CompanionTaskLedger(applicationSupportDirectory: root) }
+    catch { throw LedgerJournalRecoveryFailure(description: "damaged line: launch must go on past a damaged journal, but threw \(error)") }
+    let runs = runIDs(try reopened.snapshot())
+    try recoveryExpect(runs[a.runID] == .succeeded, "damaged line: a change before the damage did not survive")
+    try recoveryExpect(runs[b.runID] == nil && runs[c.runID] == nil,
+        "damaged line: replay applied changes over the damaged line (rebuilt \([b.runID, c.runID].filter { runs[$0] != nil }.count) of 2 runs past the gap)")
+    try recoveryExpect(try setAside() == [damaged], "damaged line: the damaged journal was not set aside byte for byte")
+
+    // A torn last line is the normal crash shape: dropped quietly, nothing set aside.
+    let d = try reopened.begin(agentID: UUID())
+    try reopened.observe(.turnStarted(threadId: "t", turnId: "d"), run: d)
+    try reopened.observe(.turnCompleted(threadId: "t", turnId: "d", outcome: .completed, errorMessage: nil), run: d)
+    let handle = try FileHandle(forWritingTo: journal)
+    try handle.seekToEnd()
+    try handle.write(contentsOf: Data("{\"revision\":".utf8))
+    try handle.close()
+    let afterTear = runIDs(try CompanionTaskLedger(applicationSupportDirectory: root).snapshot())
+    try recoveryExpect(afterTear[d.runID] == .succeeded && afterTear[a.runID] == .succeeded, "torn tail: a committed change did not survive")
+    try recoveryExpect(try setAside().count == 1, "torn tail: a crash mid-append must not be set aside as damage")
+    return "damaged middle line — replay stopped before it, journal set aside; torn tail dropped quietly"
 }
 
 private func settle(_ ledger: CompanionTaskLedger, count: Int, tag: String) throws {
