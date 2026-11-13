@@ -152,13 +152,22 @@ enum LeadCharacterChecks {
         supervisor.publishCharacterPacks()
         let original = controller.assignment(for: lead.rawValue)
         try expect(original != controller.assignment(for: secondLead.rawValue), "two leads draw distinct icons")
+        let secondOriginal = controller.assignment(for: secondLead.rawValue)
+        var usage = Array(repeating: 0, count: count)
+        for record in supervisor.records.values where record.parentAgentID == nil && record.archivedAt == nil {
+            if let index = record.automaticCharacterIndex { usage[index % count] += 1 }
+        }
         let extra = spawn("A third lead")
+        let extraIndex = supervisor.records[extra]!.automaticCharacterIndex! % count
+        try expect(usage[extraIndex] == usage.min()!, "new lead takes a least-used live icon")
         _ = spawn("Third helper", parent: extra)
         supervisor.publishCharacterPacks()
         try expect(controller.assignment(for: lead.rawValue) == original, "adding a lead keeps the original icon")
         try expect(supervisor.archive(extra).recordDeleted, "third lead is removed")
         supervisor.publishCharacterPacks()
         try expect(controller.assignment(for: lead.rawValue) == original, "removing a lead keeps the original icon")
+        try expect(controller.assignment(for: secondLead.rawValue) == secondOriginal,
+                   "adding and removing a lead keeps the second lead's icon")
         try assertPack("first run")
         try captureStills(ids: [lead] + helpers + [nested, lone], supervisor: supervisor, inbox: inbox, tileView: tileView)
 

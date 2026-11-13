@@ -1147,17 +1147,21 @@ final class AgentSupervisor {
 
     /// Plan 110 › lead: tell the character controller who leads and who helps.
     /// The host computes this from its own records; a guest is shipped the result.
-    /// Allocate once, avoiding other roots' slots while the selected set has room.
+    /// Allocate once from the least-used slots among live roots.
     private func assignAutomaticCharacter(to record: inout AgentRecord) {
         guard record.parentAgentID == nil, record.automaticCharacterIndex == nil,
-              let count = AgentCharacterController.shared.selectedTheme?.characters.count, count > 0 else { return }
-        let used = Set(records.values.filter { $0.parentAgentID == nil }.compactMap {
-            $0.automaticCharacterIndex.map { $0 % count }
-        })
-        var index = AgentCharacterConfig.characterIndex(for: record.id.rawValue, count: count)
-        if used.count < count {
-            while used.contains(index) { index = (index + 1) % count }
+              let theme = AgentCharacterController.shared.selectedTheme, !theme.characters.isEmpty else { return }
+        let count = theme.characters.count
+        var usage = Array(repeating: 0, count: count)
+        for other in records.values where other.id != record.id && other.parentAgentID == nil && other.archivedAt == nil {
+            let manual = other.characterName.flatMap { AgentCharacterController.index(of: $0, in: theme) }
+            if let index = manual ?? other.automaticCharacterIndex {
+                usage[index % count] += 1
+            }
         }
+        let leastUsed = usage.min()!
+        var index = AgentCharacterConfig.characterIndex(for: record.id.rawValue, count: count)
+        while usage[index] != leastUsed { index = (index + 1) % count }
         record.automaticCharacterIndex = index
     }
 
@@ -2930,6 +2934,7 @@ final class AgentSupervisor {
         // The first flush reads each lead's journal once: staged and held rows
         // from the previous launch are rebuilt there.
         Task { @MainActor [weak self] in await self?.flushHelperCompletions() }
+        publishCharacterPacks()
         return report
     }
 
@@ -3274,6 +3279,7 @@ final class AgentSupervisor {
             records[id] = record
             persist(record)
         }
+        publishCharacterPacks()
         if let prompt, !prompt.isEmpty {
             if let parentAgentID {
                 _ = sendPrepared(PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: id), to: id,
