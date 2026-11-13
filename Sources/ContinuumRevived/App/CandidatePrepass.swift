@@ -1,160 +1,226 @@
 import Foundation
+import CryptoKit
 
-/// Host-owned immutable range. Never constructed from an AgentReport.
-struct PrepassCandidate: Codable, Equatable {
+/// Minted only at the host's explicit candidate-ready seam. No HEAD inference.
+struct PrepassCandidate: Codable, Equatable, Sendable {
+    let id: UUID
+    let task: UUID
     let checkout: String
     let base: String
     let head: String
+
+    static func isOID(_ value: String) -> Bool {
+        (value.count == 40 || value.count == 64) && value.allSatisfy { "0123456789abcdef".contains($0) }
+    }
 }
 
-struct CandidatePrepassOutcome: Codable {
-    var evaluatorVersion: String = "eda302a28967ec2f2e4ad5587a93cae08e0187dd832c34c0b7399f8ddaed20f5"
+struct CandidatePrepassOutcome: Codable, Sendable {
+    var evaluatorVersion: String = "404058c3c514839413999334e2d2743f0eca3a144c8b6d4c3197dfd31ccd3934"
     let candidate: PrepassCandidate?
     let state: String
     let report: String?
 }
 
-/// Separate from the ledger and runner queues. One pending job bounds admission;
-/// excess requests remain unavailable rather than delaying a report.
-final class CandidatePrepass {
-    static let shared = CandidatePrepass()
+/// Host channel store; checkout files are never read as evidence. A per-host
+/// secret authenticates durable bytes. Restart deliberately requires rerunning:
+/// an earlier process's file cannot authorize review in a new process.
+final class CandidatePrepass: @unchecked Sendable {
+    private struct Envelope: Codable { let bytes: Data; let mac: Data }
+    private let key = SymmetricKey(size: .bits256)
     private let queue = DispatchQueue(label: "dev.array.candidate-prepass", qos: .utility)
     private let admission = NSLock()
     private var busy = false
+    private var outcomes: [UUID: CandidatePrepassOutcome] = [:] // queue-owned
     let enabled: Bool
-    private let evaluator: URL?
+    let support: URL
+    private let evaluatorOverride: URL?
+    private let workerOverride: URL?
+    private let useBundledResources: Bool
+    private var evaluator: URL? { evaluatorOverride ?? (useBundledResources ? Self.bundledEvaluator() : nil) }
+    private var worker: URL? { workerOverride ?? (useBundledResources ? Self.bundledResource("worker.py") : nil) }
 
-    init(enabled: Bool = false, evaluator: URL? = CandidatePrepass.bundledEvaluator()) {
+    init(support: URL, enabled: Bool = false, evaluator: URL? = nil,
+         worker: URL? = nil, useBundledResources: Bool = true) {
+        self.support = support.appendingPathComponent("candidate-prepass", isDirectory: true)
         self.enabled = enabled
-        self.evaluator = evaluator
+        self.evaluatorOverride = evaluator
+        self.workerOverride = worker
+        self.useBundledResources = useBundledResources
     }
 
-    static func bundledEvaluator() -> URL? {
+    static func bundledResource(_ name: String) -> URL? {
         for root in [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()].compactMap({ $0 }) {
-            let path = root.appendingPathComponent("continuum-revived_ContinuumRevived.bundle/GatePrepass/evaluator.py")
+            let path = root.appendingPathComponent("continuum-revived_ContinuumRevived.bundle/GatePrepass/" + name)
             if FileManager.default.fileExists(atPath: path.path) { return path }
         }
         return nil
     }
+    static func bundledEvaluator() -> URL? { bundledResource("evaluator.py") }
 
-    /// Caller supplies only host checkout and host-captured delegation base.
-    /// HEAD is captured here, asynchronously, never from report prose.
+    func outcomeURL(_ candidate: PrepassCandidate) -> URL {
+        support.appendingPathComponent(candidate.id.uuidString + ".json")
+    }
+
+    /// Admission never executes Git, touches disk, or waits for a running job.
+    /// Every refusal is an observable outcome; callers must consume completion.
     @discardableResult
-    func candidateReady(checkout: String, hostBase: String?, destination: URL,
-                        completion: @escaping (CandidatePrepassOutcome) -> Void = { _ in }) -> Bool {
-        guard enabled else { return false }
+    func candidateReady(_ candidate: PrepassCandidate?,
+                        completion: @escaping @Sendable (CandidatePrepassOutcome) -> Void) -> Bool {
+        guard enabled else {
+            completion(.init(candidate: candidate, state: "disabled", report: nil)); return false
+        }
         admission.lock()
-        guard !busy else { admission.unlock(); return false }
+        guard !busy else {
+            admission.unlock()
+            completion(.init(candidate: candidate, state: "unavailable:busy", report: nil)); return false
+        }
         busy = true
         admission.unlock()
         queue.async { [self] in
-            let outcome = evaluate(checkout: checkout, base: hostBase)
+            var result = evaluate(candidate)
             do {
-                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try JSONEncoder().encode(outcome).write(to: destination, options: .atomic)
-                admission.lock(); busy = false; admission.unlock()
-                completion(outcome)
+                try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+                let bytes = try JSONEncoder().encode(result)
+                let mac = Data(HMAC<SHA256>.authenticationCode(for: bytes, using: key))
+                let destination = candidate.map(outcomeURL) ?? support.appendingPathComponent("unidentified-" + UUID().uuidString + ".json")
+                try JSONEncoder().encode(Envelope(bytes: bytes, mac: mac)).write(to: destination, options: .atomic)
             } catch {
-                admission.lock(); busy = false; admission.unlock()
-                completion(.init(candidate: outcome.candidate, state: "unavailable:persistence", report: nil))
+                // Memory overrides old durable bytes, including a failed
+                // replacement for the same candidate id.
+                result = .init(candidate: candidate, state: "unavailable:persistence", report: nil)
             }
+            if let candidate { outcomes[candidate.id] = result }
+            admission.lock(); busy = false; admission.unlock()
+            completion(result)
         }
         return true
     }
 
-    /// Review must present its exact immutable identity; disk presence alone
-    /// never establishes readiness after restart or a changed head.
-    static func reviewOutcome(at url: URL, matching candidate: PrepassCandidate) -> CandidatePrepassOutcome? {
-        guard let data = try? Data(contentsOf: url),
-              let result = try? JSONDecoder().decode(CandidatePrepassOutcome.self, from: data),
-              result.evaluatorVersion == CandidatePrepassOutcome(candidate: nil, state: "", report: nil).evaluatorVersion,
-              result.candidate == candidate else { return nil }
-        return result
+    /// Observable production review consumer. Requires the exact host candidate,
+    /// authentic bytes AND live HEAD revalidation immediately before readiness.
+    /// This grants no merge permission; a later merge must revalidate again.
+    func review(_ candidate: PrepassCandidate, completion: @escaping @Sendable (CandidatePrepassOutcome) -> Void) {
+        queue.async { [self] in
+            func unknown(_ reason: String) {
+                completion(.init(candidate: candidate, state: "unavailable:" + reason, report: nil))
+            }
+            guard enabled else { unknown("disabled"); return }
+            if outcomes[candidate.id]?.state == "unavailable:persistence" { unknown("persistence"); return }
+            guard let data = boundedEvidence(at: outcomeURL(candidate)),
+                  let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
+                  HMAC<SHA256>.isValidAuthenticationCode(envelope.mac, authenticating: envelope.bytes, using: key),
+                  let result = try? JSONDecoder().decode(CandidatePrepassOutcome.self, from: envelope.bytes),
+                  result.candidate == candidate,
+                  result.evaluatorVersion == CandidatePrepassOutcome(candidate: nil, state: "", report: nil).evaluatorVersion else {
+                unknown("evidence"); return
+            }
+            guard matchesHead(candidate) else { unknown("changed-head"); return }
+            completion(result)
+        }
     }
 
-    private func evaluate(checkout: String, base: String?) -> CandidatePrepassOutcome {
-        func unknown(_ reason: String) -> CandidatePrepassOutcome {
-            .init(candidate: nil, state: "unavailable:" + reason, report: nil)
+    private func boundedEvidence(at url: URL) -> Data? {
+        let descriptor = open(url.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW)
+        guard descriptor >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_size <= 2_100_000,
+              let bytes = try? handle.read(upToCount: 2_100_001), bytes.count <= 2_100_000 else { return nil }
+        return bytes
+    }
+
+    private func verifiedBundledVersion() -> Bool {
+        var bytes = Data()
+        for name in ["evaluator.py", "check-notification-map.py", "worker.py"] {
+            guard let url = Self.bundledResource(name),
+                  let part = boundedEvidence(at: url) else { return false }
+            bytes.append(part)
         }
-        guard let base, isOID(base), let evaluator else { return unknown("identity-or-evaluator") }
-        let root = URL(fileURLWithPath: checkout).resolvingSymlinksInPath().path
-        guard let headResult = run("/usr/bin/git", ["-C", root, "rev-parse", "--verify", "HEAD^{commit}"]),
-              headResult.0 == 0 else { return unknown("head") }
-        let head = headResult.1.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isOID(head),
-              let baseResult = run("/usr/bin/git", ["-C", root, "rev-parse", "--verify", base + "^{commit}"]),
-              baseResult.0 == 0, baseResult.1.trimmingCharacters(in: .whitespacesAndNewlines) == base else { return unknown("base") }
-        let candidate = PrepassCandidate(checkout: root, base: base, head: head)
-        guard let result = run("/usr/bin/python3", ["-I", "-B", evaluator.path, base, head, "--repo", root, "--json"]),
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        return digest == CandidatePrepassOutcome(candidate: nil, state: "", report: nil).evaluatorVersion
+    }
+
+    private func matchesHead(_ candidate: PrepassCandidate) -> Bool {
+        guard let result = run("/usr/bin/git", ["-C", candidate.checkout, "rev-parse", "--verify", "HEAD^{commit}"]),
+              result.0 == 0 else { return false }
+        return result.1.trimmingCharacters(in: .whitespacesAndNewlines) == candidate.head
+    }
+
+    private func evaluate(_ candidate: PrepassCandidate?) -> CandidatePrepassOutcome {
+        func unknown(_ reason: String) -> CandidatePrepassOutcome {
+            .init(candidate: candidate, state: "unavailable:" + reason, report: nil)
+        }
+        guard let candidate, PrepassCandidate.isOID(candidate.base), PrepassCandidate.isOID(candidate.head) else { return unknown("identity") }
+        guard let evaluator, worker != nil else { return unknown("resources") }
+        if evaluatorOverride == nil && workerOverride == nil && !verifiedBundledVersion() {
+            return unknown("resource-version")
+        }
+        guard matchesHead(candidate) else { return unknown("changed-head") }
+        for revision in [candidate.base, candidate.head] {
+            guard let result = run("/usr/bin/git", ["-C", candidate.checkout, "rev-parse", "--verify", revision + "^{commit}"]),
+                  result.0 == 0, result.1.trimmingCharacters(in: .whitespacesAndNewlines) == revision else { return unknown("identity") }
+        }
+        guard let result = run("/usr/bin/python3", ["-I", "-B", evaluator.path, candidate.base, candidate.head,
+                                                   "--repo", candidate.checkout, "--json"]),
               result.0 == 0 || result.0 == 1,
               let data = result.1.data(using: .utf8),
               let report = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              report["base"] as? String == base, report["head"] as? String == head else {
-            return .init(candidate: candidate, state: "unavailable:evaluator", report: nil)
-        }
+              report["base"] as? String == candidate.base, report["head"] as? String == candidate.head else { return unknown("evaluator") }
+        guard matchesHead(candidate) else { return unknown("changed-head") }
         return .init(candidate: candidate, state: result.0 == 0 ? "clean" : "findings", report: result.1)
     }
 
-    private func isOID(_ value: String) -> Bool {
-        (value.count == 40 || value.count == 64) && value.allSatisfy { "0123456789abcdef".contains($0) }
-    }
-
-    /// Bounded output and runtime; inherited managed-crash marker is preserved.
-    /// No shell, checkout executable, hooks, builds, or tmux.
+    /// The trusted Python controller owns the entire process group, enforces
+    /// inherited CPU/file limits and a group resident-memory watchdog, drains both streams incrementally and
+    /// kills its group on timeout/output overflow. Swift adds a 12s fallback.
+    /// File output avoids a racing readability handler/tail drain.
     private func run(_ executable: String, _ arguments: [String]) -> (Int32, String)? {
+        guard let worker else { return nil }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-I", "-B", worker.path, executable] + arguments
         var env = ProcessInfo.processInfo.environment
-        for key in Array(env.keys) where key.hasPrefix("GIT_") || ["ARRAY_AGENT_ID", "TMUX", "TMUX_PANE", "PYTHONPATH", "PYTHONHOME"].contains(key) { env.removeValue(forKey: key) }
+        for name in Array(env.keys) where name.hasPrefix("GIT_") || name.hasPrefix("ARRAY_PREPASS_")
+            || ["ARRAY_AGENT_ID", "TMUX", "TMUX_PANE", "PYTHONPATH", "PYTHONHOME"].contains(name) { env.removeValue(forKey: name) }
         env["PATH"] = "/usr/bin:/bin"
         env["GIT_NO_LAZY_FETCH"] = "1"
         env["GIT_NO_REPLACE_OBJECTS"] = "1"
-        env["GIT_CONFIG_COUNT"] = "2"
-        env["GIT_CONFIG_KEY_0"] = "core.fsmonitor"
-        env["GIT_CONFIG_VALUE_0"] = "false"
-        env["GIT_CONFIG_KEY_1"] = "diff.external"
-        env["GIT_CONFIG_VALUE_1"] = ""
+        env["GIT_CONFIG_COUNT"] = "3"
+        for (index, pair) in [("core.fsmonitor", "false"), ("diff.external", ""), ("log.showSignature", "false")].enumerated() {
+            env["GIT_CONFIG_KEY_\(index)"] = pair.0
+            env["GIT_CONFIG_VALUE_\(index)"] = pair.1
+        }
         env["GIT_CONFIG_GLOBAL"] = "/dev/null"
         env["GIT_CONFIG_NOSYSTEM"] = "1"
         env["GIT_TERMINAL_PROMPT"] = "0"
-        process.environment = env
+        process.environment = env // preserves managed crash marker
         process.standardInput = FileHandle.nullDevice
-        let pipe = Pipe()
-        process.standardOutput = pipe
+        var template = Array(FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-prepass-output-XXXXXX").path.utf8CString)
+        let descriptor = mkstemp(&template)
+        guard descriptor >= 0 else { return nil }
+        let output = URL(fileURLWithPath: String(cString: template))
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close(); try? FileManager.default.removeItem(at: output) }
+        process.standardOutput = handle
         process.standardError = FileHandle.nullDevice
-        let lock = NSLock()
-        var output = Data()
-        var overflow = false
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            lock.lock()
-            if output.count + data.count <= 1_048_576 { output.append(data) }
-            else { overflow = true }
-            lock.unlock()
-        }
-        defer { pipe.fileHandleForReading.readabilityHandler = nil }
         do { try process.run() } catch { return nil }
-        let deadline = Date().addingTimeInterval(10)
-        while process.isRunning && Date() < deadline {
-            lock.lock(); let exceeded = overflow; lock.unlock()
-            if exceeded { break }
-            Thread.sleep(forTimeInterval: 0.01)
-        }
+        let deadline = Date().addingTimeInterval(12)
+        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
         if process.isRunning {
+            kill(-process.processIdentifier, SIGKILL)
             kill(process.processIdentifier, SIGKILL)
             process.waitUntilExit()
             return nil
         }
-        // Drain the tail after removing the reader.
-        pipe.fileHandleForReading.readabilityHandler = nil
-        let tail = pipe.fileHandleForReading.readDataToEndOfFile()
-        lock.lock()
-        output.append(tail)
-        let valid = !overflow && output.count <= 1_048_576
-        let text = String(data: output, encoding: .utf8)
-        lock.unlock()
-        guard valid, let text else { return nil }
+        // Also retire any descendant that outlived a successful controller.
+        kill(-process.processIdentifier, SIGKILL)
+        guard process.terminationStatus == 0 || process.terminationStatus == 1,
+              let size = try? output.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size <= 1_048_576, let data = try? Data(contentsOf: output),
+              let text = String(data: data, encoding: .utf8) else { return nil }
         return (process.terminationStatus, text)
     }
 }

@@ -88,6 +88,7 @@ check --browser-unrelated-input-check
 check --browser-url-focus-check
 check --browser-writer-transfer-check
 check --camera-chrome-redraw-check
+check --candidate-prepass-check
 check --canvas-background-render-check
 check --canvas-background-settings-check
 check --canvas-camera-coalesce-check
@@ -591,6 +592,7 @@ leg run_app_check .build/debug/Array --browser-unrelated-input-check
 leg run_app_check .build/debug/Array --browser-url-focus-check
 leg run_app_check .build/debug/Array --browser-writer-transfer-check
 leg run_app_check .build/debug/Array --camera-chrome-redraw-check
+leg run_app_check .build/debug/Array --candidate-prepass-check
 leg run_app_check .build/debug/Array --canvas-background-render-check
 leg run_app_check .build/debug/Array --canvas-background-settings-check
 leg run_app_check .build/debug/Array --canvas-camera-coalesce-check
@@ -1024,6 +1026,13 @@ leg run_leg python3 benchmarks/replay/check.py --replay-scoring-check
 leg run_leg python3 benchmarks/replay/check_live_temp.py
 leg run_leg python3 scripts/check-collaboration-pair-features.py
 leg run_leg python3 scripts/check-collaboration-pair.py
+leg run_leg python3 scripts/check-candidate-prepass-bundle.py
+leg run_leg python3 scripts/check-prepass-process-bounds.py
+leg run_leg python3 scripts/check-prepass-signature-safety.py
+leg run_leg python3 scripts/check-prepass-signature-safety.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
+leg run_leg scripts/check-candidate-prepass.sh
+leg run_leg python3 scripts/check-prepass-source-patterns.py
+leg run_leg python3 scripts/check-prepass-source-patterns.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
 leg run_leg python3 scripts/check-gate-prepass.py
 leg run_leg python3 scripts/check-interruptible-helper-waits.py
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock

@@ -741,6 +741,22 @@ run_ios_build() {
   return 0
 }
 
+# Already-built targeted gate: production app plus packaged-resource witness.
+# Builds are deliberately external so callers can enforce resource admission.
+if [[ "${CONTINUUM_PREPASS_ONLY:-0}" == "1" ]]; then
+  run_leg scripts/check-candidate-prepass.sh
+  run_leg python3 scripts/check-prepass-process-bounds.py
+  run_leg python3 scripts/check-prepass-source-patterns.py
+  run_leg python3 scripts/check-prepass-source-patterns.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
+  run_leg python3 scripts/check-prepass-signature-safety.py
+  run_leg python3 scripts/check-prepass-signature-safety.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
+  run_app_check .build/debug/Array --candidate-prepass-check
+  run_leg python3 scripts/check-candidate-prepass-bundle.py
+  matrix_finish_jobs
+  matrix_report "Candidate pre-pass matrix (targeted; already built)"
+  exit $?
+fi
+
 # Offline replay checks never start the app or a provider. This subset permits
 # managed agents to verify them without entering the bare CoreChecks suite.
 run_leg python3 benchmarks/replay/check.py --replay-grader-check
@@ -769,6 +785,11 @@ fi
 run_leg scripts/check-matrix-inventory.sh
 run_leg python3 scripts/check-gate-prepass.py
 run_leg scripts/check-candidate-prepass.sh
+run_leg python3 scripts/check-prepass-process-bounds.py
+run_leg python3 scripts/check-prepass-source-patterns.py
+run_leg python3 scripts/check-prepass-source-patterns.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
+run_app_check .build/debug/Array --candidate-prepass-check
+run_leg python3 scripts/check-candidate-prepass-bundle.py
 run_leg python3 scripts/check-prepass-signature-safety.py
 run_leg python3 scripts/check-prepass-signature-safety.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
 if [[ "$BROWSER_SCHEDULING_ONLY" -eq 1 ]]; then

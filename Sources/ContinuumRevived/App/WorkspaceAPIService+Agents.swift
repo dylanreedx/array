@@ -86,7 +86,7 @@ extension WorkspaceAPIService {
         guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration(for: agentId) == generationAtGrant else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "Access was revoked before the candidates were returned."))
         }
-        guard let object = Self.jsonObject(response) else {
+        guard var object = Self.jsonObject(response) else {
             return .error(WorkspaceAPIError(code: .unsupported, message: "Candidates could not be encoded."))
         }
         return .result(object)
@@ -191,7 +191,8 @@ extension WorkspaceAPIService {
         }
         // Whole-response ceiling: shed the oldest evidence first, then file names;
         // identity and status are never cut.
-        while let data = try? Self.encoder.encode(response), data.count > AgentInspectResponse.encodedByteCeiling {
+        let prepassReserve = supervisor.candidatePrepassOutcomes[target.id] == nil ? 0 : 8192
+        while let data = try? Self.encoder.encode(response), data.count > AgentInspectResponse.encodedByteCeiling - prepassReserve {
             if !response.recentEvents.isEmpty {
                 response.recentEvents.removeFirst()
                 response.recentEventsTruncated = true
@@ -205,8 +206,25 @@ extension WorkspaceAPIService {
         guard supervisor.records[agentId]?.workspaceToolsEnabled == true, revocationGeneration(for: agentId) == generationAtGrant else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "Access was revoked before the evidence was returned.", approvalRequestId: approvalRequestId))
         }
-        guard let object = Self.jsonObject(response) else {
+        guard var object = Self.jsonObject(response) else {
             return .error(WorkspaceAPIError(code: .unsupported, message: "Evidence could not be encoded.", approvalRequestId: approvalRequestId))
+        }
+        if let prepass = supervisor.candidatePrepassOutcomes[target.id] {
+            var evidence: [String: Any] = [
+                "state": prepass.state,
+                "evaluatorVersion": prepass.evaluatorVersion,
+                "authority": "host-advisory; review action requires HEAD revalidation"]
+            if let candidate = prepass.candidate {
+                evidence["base"] = candidate.base
+                evidence["head"] = candidate.head
+                evidence["candidateId"] = candidate.id.uuidString
+                evidence["taskId"] = candidate.task.uuidString
+            }
+            if let report = prepass.report {
+                evidence["report"] = String(report.prefix(1024))
+                evidence["truncated"] = report.count > 1024
+            }
+            object["candidatePrepass"] = AnyHashableJSON(any: evidence)
         }
         return .result(object)
     }

@@ -1046,6 +1046,70 @@ final class AgentSupervisor {
     private let store: AgentStore
     private(set) var runLedger: ManagedRunLedger
     /// The ledger file the Settings usage page reads (never the writer's queue).
+    var candidatePrepassSupportURL: URL { store.layout.applicationSupportDirectory }
+    private lazy var ownedCandidatePrepass = CandidatePrepass(support: candidatePrepassSupportURL)
+    var qaCandidatePrepass: CandidatePrepass?
+    private var candidatePrepassWorker: CandidatePrepass {
+        #if ARRAY_CHECKS
+        if let qaCandidatePrepass { return qaCandidatePrepass }
+        #endif
+        return ownedCandidatePrepass
+    }
+    private var hostPrepassCandidates: [AgentID: PrepassCandidate] = [:]
+    private var prepassReportGenerations: [AgentID: UUID] = [:]
+    private(set) var candidatePrepassOutcomes: [AgentID: CandidatePrepassOutcome] = [:]
+    var onCandidatePrepassChanged: ((AgentID) -> Void)?
+
+    /// Host-only integration seam; no agent API accepts these revision fields.
+    /// The owner must supply a full immutable range captured at its commit seam.
+    @discardableResult
+    func candidateReady(for id: AgentID, task: UUID, base: String, head: String) -> PrepassCandidate? {
+        guard let record = records[id], record.parentAgentID != nil,
+              record.delegationContext?.baseHead == base,
+              PrepassCandidate.isOID(base), PrepassCandidate.isOID(head) else { return nil }
+        let candidate = PrepassCandidate(id: UUID(), task: task, checkout: record.checkoutRoot, base: base, head: head)
+        hostPrepassCandidates[id] = candidate
+        candidatePrepassOutcomes[id] = .init(candidate: candidate, state: "candidate-ready", report: nil)
+        return candidate
+    }
+
+    /// Host review action consumes authenticated durable evidence and revalidates
+    /// live HEAD. Inspection alone never grants review/merge readiness.
+    func reviewCandidate(for id: AgentID, candidate: PrepassCandidate,
+                         completion: @escaping @MainActor @Sendable (CandidatePrepassOutcome) -> Void) {
+        guard hostPrepassCandidates[id] == candidate,
+              records[id]?.checkoutRoot == candidate.checkout else {
+            completion(.init(candidate: candidate, state: "unavailable:identity", report: nil)); return
+        }
+        candidatePrepassWorker.review(candidate) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, self.hostPrepassCandidates[id] == candidate,
+                      self.records[id]?.checkoutRoot == candidate.checkout else {
+                    completion(.init(candidate: candidate, state: "unavailable:superseded", report: nil)); return
+                }
+                self.candidatePrepassOutcomes[id] = result
+                self.onCandidatePrepassChanged?(id)
+                completion(result)
+            }
+        }
+    }
+
+    private func prepassForFiledReport(_ id: AgentID) {
+        let candidate = hostPrepassCandidates[id]
+        let generation = UUID()
+        prepassReportGenerations[id] = generation
+        candidatePrepassOutcomes[id] = .init(candidate: candidate, state: "pending", report: nil)
+        candidatePrepassWorker.candidateReady(candidate) { [weak self] outcome in
+            DispatchQueue.main.async {
+                guard let self, self.prepassReportGenerations[id] == generation,
+                      self.hostPrepassCandidates[id] == candidate,
+                      self.records[id] != nil else { return }
+                self.candidatePrepassOutcomes[id] = outcome
+                self.onCandidatePrepassChanged?(id)
+            }
+        }
+    }
+
     var runLedgerURL: URL { RunLedgerUsageReader.ledgerURL(applicationSupport: store.layout.applicationSupportDirectory) }
     var qaRunLedgerRecording = true
     /// OFF until live provider timing and the combined gate are reviewed.
@@ -6894,14 +6958,7 @@ final class AgentSupervisor {
                 runLedger.helperEvidence(agent: id.rawValue, at: date)
             }
         }
-        // Scheduling remains OFF until representative timing and review proof.
-        // This seam consumes host-owned record identity, never report check prose.
-        if record.parentAgentID != nil {
-            CandidatePrepass.shared.candidateReady(
-                checkout: record.checkoutRoot, hostBase: record.delegationContext?.baseHead,
-                destination: URL(fileURLWithPath: record.checkoutRoot)
-                    .appendingPathComponent(".array/prepass/\(id.rawValue.uuidString).json"))
-        }
+        if record.parentAgentID != nil { prepassForFiledReport(id) }
         onSelfReportChanged?(id)
         // A report filed between turns is a result: it releases a turn held
         // as progress, or follows a result already delivered as a note.

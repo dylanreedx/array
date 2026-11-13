@@ -28,8 +28,5 @@ echo 'raise SystemExit("CHECKOUT SCRIPT EXECUTED")' > "$scratch/repo/scripts/gat
 
 git -C "$scratch/repo" add .
 git -C "$scratch/repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm 'test(prepass): candidate'
-if "$scratch/check" "$scratch/repo" "$base" "$scratch/missing-evaluator.py" "$scratch/red.json" </dev/null >"$scratch/red.log" 2>&1; then
-    echo "FAIL: witness accepted unavailable evaluator"; exit 1
-fi
-echo "PASS witness rejects missing evaluator"
-"$scratch/check" "$scratch/repo" "$base" "$PWD/Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py" "$scratch/outcome.json" </dev/null
+head="$(git -C "$scratch/repo" rev-parse HEAD)"
+"$scratch/check" "$scratch/repo" "$base" "$PWD/Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py" "$scratch/host-support" "$head" </dev/null

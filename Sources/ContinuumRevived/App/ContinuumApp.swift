@@ -2497,6 +2497,14 @@ enum ContinuumApp {
         // `.plans/116` section 4 B, items 6 to 9: a CLI's own subagents and a
         // helper's own helper in the ledger, active time and usage after a
         // task closed, and Codex frames after its main turn.
+        if CommandLine.arguments.contains("--candidate-prepass-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await CandidatePrepassChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--run-ledger-gaps-check") {
             _ = NSApplication.shared
             Task { @MainActor in

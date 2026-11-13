@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "mappedLegs": 11,
-  "about": "Coverage is partial: this file maps 11 of the matrix's roughly 450 full-run legs (gate-prepass.py prints the live count). A changed path no entry covers is reported as coverage-unmapped, never as nothing to rerun; mappedLegs must equal the number of checks. Exact matrix invocation -> the source paths it covers and the files that implement the check. Read by scripts/gate-prepass.py (owner of this file). A change to a covered path recommends the check; listing never proves the check ran. Globs: ** spans directories, * and ? stay inside one. Every invocation must be a literal run-matrix.sh leg (args after run/run_leg/run_app_check) that the static reader does not find dead, and every glob must match a file, or the pre-pass reports the entry stale. Targeted-only declarations live in targetedOnly as {flag, reason}; reason must be one non-empty line. They declare intentional targeted checks without adding nightly coverage. Exceptions are line-specific (rule + path + exact trimmed line) and need a reason and an owner.",
+  "mappedLegs": 13,
+  "about": "Coverage is partial: this file maps 13 of the matrix's roughly 450 full-run legs (gate-prepass.py prints the live count). A changed path no entry covers is reported as coverage-unmapped, never as nothing to rerun; mappedLegs must equal the number of checks. Exact matrix invocation -> the source paths it covers and the files that implement the check. Read by scripts/gate-prepass.py (owner of this file). A change to a covered path recommends the check; listing never proves the check ran. Globs: ** spans directories, * and ? stay inside one. Every invocation must be a literal run-matrix.sh leg (args after run/run_leg/run_app_check) that the static reader does not find dead, and every glob must match a file, or the pre-pass reports the entry stale. Targeted-only declarations live in targetedOnly as {flag, reason}; reason must be one non-empty line. They declare intentional targeted checks without adding nightly coverage. Exceptions are line-specific (rule + path + exact trimmed line) and need a reason and an owner.",
   "checks": [
     {
       "invocation": ".build/debug/Array --helper-protected-paths-check",
@@ -145,6 +145,43 @@
       ],
       "owner": "gate",
       "reason": "fixture histories prove every pre-pass rule red and green"
+    },
+    {
+      "invocation": "scripts/check-candidate-prepass.sh",
+      "covers": [
+        "Sources/ContinuumRevived/App/CandidatePrepass.swift",
+        "Sources/ContinuumRevived/Resources/GatePrepass/**",
+        "scripts/check-candidate-prepass.sh",
+        "scripts/checks/candidate-prepass-main.swift",
+        "scripts/check-prepass-process-bounds.py",
+        "scripts/check-prepass-signature-safety.py",
+        "scripts/check-prepass-source-patterns.py"
+      ],
+      "checkFiles": [
+        "scripts/check-candidate-prepass.sh",
+        "scripts/checks/candidate-prepass-main.swift",
+        "scripts/check-prepass-process-bounds.py",
+        "scripts/check-prepass-signature-safety.py",
+        "scripts/check-prepass-source-patterns.py"
+      ],
+      "owner": "orchestration",
+      "reason": "bounded authenticated explicit-range candidate evaluator outcomes"
+    },
+    {
+      "invocation": ".build/debug/Array --candidate-prepass-check",
+      "covers": [
+        "Sources/ContinuumRevived/App/CandidatePrepass.swift",
+        "Sources/ContinuumRevived/App/AgentSupervisor.swift",
+        "Sources/ContinuumRevived/App/WorkspaceAPIService+Agents.swift",
+        "Sources/ContinuumRevived/Resources/GatePrepass/**",
+        "scripts/check-candidate-prepass-bundle.py"
+      ],
+      "checkFiles": [
+        "Sources/ContinuumRevived/App/CandidatePrepassChecks.swift",
+        "scripts/check-candidate-prepass-bundle.py"
+      ],
+      "owner": "orchestration",
+      "reason": "production fileReport, child checkout, bundled lookup, host outcome inspection and review"
     }
   ],
   "targetedOnly": [

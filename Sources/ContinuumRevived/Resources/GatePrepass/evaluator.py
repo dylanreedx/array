@@ -57,9 +57,13 @@ Registration never proves execution, and listing a check never proves it ran.
 """
 import argparse
 import bisect
-import importlib.util
+import ast
 import json
 import re
+import os
+import selectors
+import signal
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -155,6 +159,47 @@ class PrepassError(Exception):
     pass
 
 
+
+def bounded_git(argv):
+    # Standalone runs own one Git process group. Packaged runs share the
+    # trusted worker group so a parent timeout also kills all Git descendants.
+    owned = os.environ.get("ARRAY_PREPASS_OWNED_GROUP") == str(os.getpgrp())
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=not owned)
+    selector = selectors.DefaultSelector()
+    for stream in (process.stdout, process.stderr):
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ)
+    out, err = bytearray(), bytearray()
+    deadline = time.monotonic() + 6
+    def abort():
+        os.killpg(os.getpgrp() if owned else process.pid, signal.SIGKILL)
+        process.wait()
+        raise PrepassError("git runtime or output limit exceeded")
+    try:
+        while selector.get_map():
+            if time.monotonic() >= deadline:
+                abort()
+            for key, _ in selector.select(0.02):
+                data = os.read(key.fd, 16384)
+                if not data:
+                    selector.unregister(key.fileobj)
+                    continue
+                target = out if key.fileobj is process.stdout else err
+                if len(out) + len(err) + len(data) > 4 * 1024 * 1024:
+                    abort()
+                target.extend(data)
+        process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(argv, process.returncode, bytes(out), bytes(err))
+    except BaseException:
+        if process.poll() is None:
+            abort()
+        raise
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+
 # ---------------------------------------------------------------- git access
 class Repo:
     def __init__(self, path, manifest_path=None):
@@ -163,8 +208,7 @@ class Repo:
         self._blobs = {}
 
     def run(self, *args, ok=(0,)):
-        proc = subprocess.run(["/usr/bin/git", "-C", self.path, "-c", "core.quotePath=false", *args],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+        proc = bounded_git(["/usr/bin/git", "-C", self.path, "-c", "core.quotePath=false", *args])
         if proc.returncode not in ok:
             raise PrepassError("git %s failed: %s" % (" ".join(args[:3]), proc.stderr.decode(errors="replace").strip()))
         return proc
@@ -175,8 +219,7 @@ class Repo:
     def resolve(self, rev):
         if not rev or rev.startswith("-"):
             raise PrepassError("invalid revision %r" % rev)
-        proc = subprocess.run(["/usr/bin/git", "-C", self.path, "rev-parse", "--verify", rev + "^{commit}"],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+        proc = bounded_git(["/usr/bin/git", "-C", self.path, "rev-parse", "--verify", rev + "^{commit}"])
         err = proc.stderr.decode(errors="replace")
         if "ambiguous" in err:
             raise PrepassError("ambiguous revision %r: %s" % (rev, err.strip()))
@@ -1139,10 +1182,18 @@ def notification_patterns():
     sys.dont_write_bytecode = True
     path = Path(__file__).resolve().with_name("check-notification-map.py")
     try:
-        spec = importlib.util.spec_from_file_location("check_notification_map", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return list(module.PATTERNS.values())
+        # Read source literals only. Do not execute a neighbouring module or
+        # accept a bytecode cache that was not covered by the host package hash.
+        tree = ast.parse(path.read_text())
+        for statement in tree.body:
+            if isinstance(statement, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == "PATTERNS"
+                    for target in statement.targets):
+                patterns = ast.literal_eval(statement.value)
+                if not isinstance(patterns, dict) or not all(isinstance(value, str) for value in patterns.values()):
+                    raise ValueError("PATTERNS must be a string dictionary")
+                return list(patterns.values())
+        raise ValueError("PATTERNS source literal missing")
     except Exception as error:
         raise PrepassError("cannot load the sender patterns from %s: %s" % (path.name, error))
 
