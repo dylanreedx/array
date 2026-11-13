@@ -1,0 +1,11 @@
+{
+  "cli": "codex",
+  "version": "0.167.0",
+  "model": "gpt-5.6-sol",
+  "models": [
+    "gpt-5.6-sol"
+  ],
+  "captured_at_utc": "2026-11-13T11:55:21.051117+00:00",
+  "turn": "tool-free tiny prompt",
+  "scrubbed": true
+}
