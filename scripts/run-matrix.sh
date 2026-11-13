@@ -753,6 +753,15 @@ run_ios_build() {
   return 0
 }
 
+# Already-built host instruction gate; caller admits each build separately.
+if [[ "${CONTINUUM_PI_ROLE_CONTEXT_ONLY:-0}" == "1" ]]; then
+  run_leg scripts/check-matrix-inventory.sh
+  run_app_check .build/debug/Array --reply-rules-launch-check
+  matrix_finish_jobs
+  matrix_report "Pi role host context matrix (targeted; already built)"
+  exit $?
+fi
+
 # Already-built targeted gate: production app plus packaged-resource witness.
 # Builds are deliberately external so callers can enforce resource admission.
 if [[ "${CONTINUUM_PREPASS_ONLY:-0}" == "1" ]]; then

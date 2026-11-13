@@ -203,6 +203,21 @@ enum ReplyRulesChecks {
             }
         }
 
+        await scenario("Pi role host context") {
+            let personalOnly = instructions(try suite(reply: false, personal: true))
+            let cases: [(String, HostLaunchInstructions, [String])] = [
+                ("both", both, [ReplyStandard.block + "\n\nPersonal working rules:\n" + personalText]),
+                ("reply", replyOnly, [ReplyStandard.block]),
+                ("personal", personalOnly, ["Personal working rules:\n" + personalText]),
+                ("base", base, []), ("off", off, [])]
+            var captured: [String: [[String]]] = [:]
+            for (label, source, expected) in cases {
+                captured[label] = try await PiRoleHostTextChecks.run(root: root, instructions: source, expected: expected, label: label)
+            }
+            try expect(captured["off"] == captured["base"], "Pi role OFF argv differs from the unchanged base lifecycle")
+            try expect(try String(contentsOf: rules, encoding: .utf8) == personalText, "Pi role lifecycle wrote personal rules")
+        }
+
         // 5. The switch is read at launch: the session process exits on its
         //    own (EXITIDLE), the switch is turned off, and the next launch (a
         //    new runner, since the supervisor keeps a Claude runner only while
@@ -288,7 +303,7 @@ enum ReplyRulesChecks {
         }
 
         if !failures.isEmpty { throw Failure(description: failures.joined(separator: "\n")) }
-        print("Reply rules checks passed (\(ReplyStandard.wordCount) words): default off beside personal rules; once per launch on Claude with and without workspace tools, Codex and Pi, for solo (first, idle reuse, resumed, compaction), lead, helper and retryOf; joined in one option, Array's block before the personal one and after the user's own Codex text; read at each launch, including Claude's resume self-heal; both off equals the base argv")
+        print("Reply rules checks passed (\(ReplyStandard.wordCount) words): default off beside personal rules; once per launch on Claude with and without workspace tools, Codex and Pi, for solo (first, idle reuse, resumed, compaction), lead, helper and retryOf; joined in one option, Array's block before the personal one and after the user's own Codex text; read at each launch, including Claude's resume self-heal; both off equals the base argv; role-bearing Pi first, restored, RPC compact, post-compact restore and retry preserve host policies, task, cwd, role and tools with exact OFF parity")
     }
 
     // MARK: - Helpers

@@ -336,7 +336,7 @@ enum PersonalRulesChecks {
             try patch("    json.dump(sys.argv[1:], f)\n", """
                     json.dump(sys.argv[1:], f)
                 with open(os.path.join(HERE, "launches.jsonl"), "a") as f:
-                    f.write(json.dumps({"cli": os.path.basename(__file__), "owner": os.environ.get(\(String(reflecting: AgentProcessAttribution.ownerEnvironmentKey)), ""), "argv": sys.argv[1:]}) + "\\n")
+                    f.write(json.dumps({"cli": os.path.basename(__file__), "owner": os.environ.get(\(String(reflecting: AgentProcessAttribution.ownerEnvironmentKey)), ""), "argv": sys.argv[1:], "cwd": os.getcwd()}) + "\\n")
                 def record(line):
                     with open(os.path.join(HERE, "stdin.jsonl"), "a") as f:
                         f.write(json.dumps({"owner": os.environ.get(\(String(reflecting: AgentProcessAttribution.ownerEnvironmentKey)), ""), "frame": json.loads(line)}) + "\\n")
