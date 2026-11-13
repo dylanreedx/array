@@ -244,6 +244,9 @@ enum ManagedRunLedgerChecks {
         try expect(opened.count == 1 && opened[0]["agent"] as? String == lead.rawValue.uuidString
                    && opened[0]["previousTask"] == nil, "expected one task for the lead: \(opened)")
         let t1 = opened[0]["task"] as! String
+        // The writer appends taskOpened and submission separately. Seeing the
+        // first row does not mean its next append has reached disk yet.
+        try await wait("first submission not recorded under its task") { !rows(ledger, "submission", task: t1).isEmpty }
         try expect(rows(ledger, "submission", task: t1).count == 1, "first submission not recorded under its task")
         try await wait("lead did not start") { supervisor.isRunning(lead) }
 
