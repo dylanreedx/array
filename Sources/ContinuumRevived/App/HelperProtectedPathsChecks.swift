@@ -149,6 +149,22 @@ enum HelperProtectedPathsChecks {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    static func readOnlyIndex() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write("a", "checks/Existing.swift", in: root)
+        for args in [["init", "-q"], ["add", "."], ["commit", "-qm", "fixture"]] { try HelperEvidenceChecks.git(args, root) }
+        let base = try HelperEvidenceChecks.gitOutput(["rev-parse", "HEAD"], root).trimmingCharacters(in: .whitespacesAndNewlines)
+        var detector = HelperProtectedPaths(root: root, base: base, shared: false, contract: nil)
+        try write("changed", "checks/Existing.swift", in: root)
+        let index = root.appendingPathComponent(".git/index").path
+        let before = try FileManager.default.attributesOfItem(atPath: index)
+        let changes = detector.sweep()
+        let after = try FileManager.default.attributesOfItem(atPath: index)
+        try expect(changes.contains { $0.path == "checks/Existing.swift" }, "read-only sweep missed edit")
+        try expect(before[.modificationDate] as? Date == after[.modificationDate] as? Date && before[.systemFileNumber] as? UInt64 == after[.systemFileNumber] as? UInt64, "sweep replaced or refreshed git index")
+    }
     static func defaultOff() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -172,6 +188,7 @@ enum HelperProtectedPathsChecks {
     }
     static func run() async throws {
         try defaultOff()
+        try readOnlyIndex()
         let b = try ManagedModeChecks.bench("helper-protected-paths")
         defer { b.tearDown() }
         b.settings.set(true, forKey: ManagedChooser.enabledKey)

@@ -60,7 +60,7 @@ struct HelperProtectedPaths {
     static let gitInvocations = LeadCheckoutWatch.Locked(0)
     static func git(_ arguments: [String], _ root: URL) throws -> Data {
         gitInvocations.withLock { $0 += 1 }
-        return try HelperEvidence.git(arguments, root)
+        return try HelperEvidence.git(["--no-optional-locks"] + arguments, root)
     }
     static let conventions = [
         "Sources/*Checks/**", "Sources/**/*Checks.swift", "Sources/**/*Check.swift",
@@ -102,7 +102,7 @@ struct HelperProtectedPaths {
     /// deletion and an addition, plus untracked files. Nil when git fails.
     static func changed(root: URL, base: String) -> Set<String>? {
         let scope = ["--", ".", ":(exclude).array", ":(exclude).worktrees"]
-        guard let diff = try? Self.git(["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base] + scope, root),
+        guard let diff = try? Self.git(["diff-index", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base] + scope, root),
               let others = try? Self.git(["ls-files", "--others", "--exclude-standard", "-z"] + scope, root) else { return nil }
         return Set((diff + others).split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
     }
