@@ -55,7 +55,7 @@ from plan documents.
 |---|---|
 | Run ledger | Recording only, nothing shown. The calling thread does one queue hand-off: 5 µs median per submission, 3 µs per delegation or report. A whole submission with recording on against off: +0.75 µs median (95% CI −34 to +38 µs). Encoding and file I/O happen on a utility queue. No setting gates it. |
 | Host evidence, shadow | Recording only, nothing shown, nothing acts on it. Main thread: one hop per helper tool event and two `realpath` calls per delegation; git runs on the ledger's queue. |
-| Lead checkout watch | Recording only, nothing shown. One FSEvents stream per lead checkout, delivered on its own queue; classification and git run on the watch's queue. |
+| Lead checkout watch | Recording only, nothing shown, and nothing decides where a helper works from it. One FSEvents stream per lead checkout while a lead turn or call there is open, delivered on its own queue; classification and git run on the watch's queue. The stream stops when the turn ends and when the lead is closed or archived. |
 | Token telemetry (`agents.tokenTelemetry.enabled`) | Recording only, local, never uploaded. Turning it off stops new records and deletes nothing. |
 | Helper liveness | A field in `agent.inspect`; nothing shown to the user. With the stall alert off, the lead is told what it was told before. Main thread: classification runs inside the existing 30-second watchdog sweep, which walks the records once and passes over helpers already recorded finished. Over 2,000 finished helpers one sweep takes 5.0 to 5.2 ms, against 5.2 to 5.6 ms on origin/array/integration. |
 | Settings ▸ Usage | **User-visible**: a new Settings section. It reads the ledger only when opened, on a background queue. |

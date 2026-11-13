@@ -347,7 +347,11 @@ channel, so a call seen here is the lead's. The supervisor hands one enqueue to
 only appends the finished row.
 
 **Which files count.** FSEvents, file by file, for each lead checkout, from
-the lead's first turn. An event counts for a call when it arrives between
+the start of each lead turn. The stream lives while a lead turn or lead shell
+call on that checkout is open: once the last ends and its calls have settled,
+it is stopped and released, and a lead that is closed or archived lets go of
+it the same way, even mid-turn (`--lead-checkout-ledger-check`, sections
+`lifetime` and `release`). An event counts for a call when it arrives between
 0.5 s before the host saw the call start and the host's flush of pending events
 at its end (settled 0.25 s later, off every request path). So a call that wrote
 nothing costs one flush and starts no process; a folder removed whole counts

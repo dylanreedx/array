@@ -385,8 +385,15 @@ final class ManagedRunLedger: @unchecked Sendable {
     func leadShellEnded(agent: UUID, call: String, busy: Bool) {
         leadWatch.shellEnded(lead: agent, call: call, busy: busy)
     }
+    /// The agent was closed or archived: the lead watch lets go of it, and of
+    /// its checkout's stream if nothing else needs it.
+    func retired(agent: UUID) {
+        leadWatch.forget(agent: agent)
+    }
     /// Waits for the watch and then the ledger. Checks only.
     func drainLeadWatch() { leadWatch.drain(); drain() }
+    /// Checks only: the lead checkout streams open now.
+    var qaLeadWatchStreams: Int { leadWatch.qaStreamCount }
 
     private func leadCheckout(_ agent: UUID, _ call: String, _ outcome: LeadCheckoutWatch.Outcome) {
         queue.async {

@@ -7087,6 +7087,8 @@ final class AgentSupervisor {
             report.wasRunning = true
             stop(id)
         }
+        // Its checkout watch goes with it, even mid-turn.
+        runLedger.retired(agent: id.rawValue)
         // `stop(id)` above only reaches `stopObservedRuns(for: id)` when `id` had
         // a live runner. An archived PARENT whose runner had already exited (its
         // observed children may still be tailing — B's liveness sweep had not
@@ -10051,6 +10053,7 @@ final class AgentSupervisor {
         record.archivedAt = now
         records[id] = record
         persist(record)
+        runLedger.retired(agent: id.rawValue)
         return true
     }
 
@@ -10078,6 +10081,7 @@ final class AgentSupervisor {
         if record.closeRequestedAt == nil { record.closeRequestedAt = now }
         if !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) {
             record.archivedAt = now
+            runLedger.retired(agent: id.rawValue)
         }
         records[id] = record
         persist(record)

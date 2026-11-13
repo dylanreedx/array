@@ -58,6 +58,8 @@ enum LeadCheckoutChecks {
     static func run() async throws {
         let section = ProcessInfo.processInfo.environment["CONTINUUM_LEAD_CHECKOUT_CASE"]
         if section == nil || section == "teardown" { try teardown() }
+        if section == nil || section == "release" { try releaseUnderLoad() }
+        if section == nil || section == "lifetime" { try await lifetime() }
         if section == nil || section == "seen" { try await seen() }
         if section == nil || section == "hooks" { try await hooks() }
         if section == nil || section == "writers" { try await writers() }
@@ -91,6 +93,7 @@ enum LeadCheckoutChecks {
         }
         writer.start()
         defer { stop.lock.withLock { stop.raised = true } }
+        let holdersBefore = LeadCheckoutWatch.qaLiveHolders
         let watches = 1_200
         for _ in 0..<watches {
             var watch: LeadCheckoutWatch? = LeadCheckoutWatch()
@@ -99,7 +102,142 @@ enum LeadCheckoutChecks {
             usleep(2_000)
             watch = nil
         }
-        print("lead checkout teardown: \(watches) watches torn down while their checkout changed, no crash")
+        // FSEvents lets go of each holder shortly after its stream is
+        // released. Wait for that here, so no later section counts holders
+        // from this one in its own baseline.
+        let deadline = Date().addingTimeInterval(15)
+        while LeadCheckoutWatch.qaLiveHolders != holdersBefore, Date() < deadline { usleep(20_000) }
+        try expect(LeadCheckoutWatch.qaLiveHolders == holdersBefore,
+                   "\(LeadCheckoutWatch.qaLiveHolders - holdersBefore) stream holders leaked after \(watches) watches were torn down")
+        print("lead checkout teardown: \(watches) watches torn down while their checkout changed, no crash, no holder alive")
+    }
+
+    /// Review finding 1: a lead checkout's stream must not outlive the lead
+    /// that needed it. Leads on twelve checkouts run turns in parallel, each
+    /// with a shell call, while every checkout keeps changing; half also
+    /// retire mid-turn. Once each turn ends, every stream is stopped and
+    /// FSEvents has let go of every holder: before, all twelve streams stayed
+    /// for the watch's whole life, one per checkout ever visited.
+    static func releaseUnderLoad() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("lead-watch-release-\(UUID().uuidString)", isDirectory: true)
+        let dirs = (0..<12).map { base.appendingPathComponent("c\($0)", isDirectory: true) }
+        for dir in dirs { try fm.createDirectory(at: dir, withIntermediateDirectories: true) }
+        defer { try? fm.removeItem(at: base) }
+        final class Flag: @unchecked Sendable { let lock = NSLock(); var raised = false }
+        let stop = Flag()
+        let writers = dirs.map { dir in
+            Thread {
+                var n = 0
+                while !(stop.lock.withLock { stop.raised }) {
+                    fm.createFile(atPath: dir.appendingPathComponent("f\(n % 16)").path, contents: Data("\(n)".utf8))
+                    n += 1; usleep(200)
+                }
+            }
+        }
+        writers.forEach { $0.start() }
+        defer { stop.lock.withLock { stop.raised = true } }
+        let holdersBefore = LeadCheckoutWatch.qaLiveHolders
+        var watch: LeadCheckoutWatch? = LeadCheckoutWatch()
+        let rounds = 6
+        for round in 0..<rounds {
+            let current = watch!
+            DispatchQueue.concurrentPerform(iterations: dirs.count) { index in
+                let lead = UUID(), call = "call-\(round)-\(index)"
+                current.turnStarted(agent: lead, root: dirs[index].path, lead: true)
+                current.shellStarted(lead: lead, call: call, root: dirs[index].path, busy: false)
+                usleep(UInt32.random(in: 0...3_000))
+                current.shellEnded(lead: lead, call: call, busy: false)
+                current.turnEnded(agent: lead)
+            }
+            current.drain()
+            let open = current.qaStreamCount
+            try expect(open == 0, "round \(round): \(open) checkout streams outlived their leads' turns")
+        }
+        // The last round's streams are still opening when the watch goes.
+        do {
+            let last = watch!
+            DispatchQueue.concurrentPerform(iterations: dirs.count) { index in
+                last.turnStarted(agent: UUID(), root: dirs[index].path, lead: true)
+            }
+        }
+        // Work still queued on the watch holds it, and opens those last
+        // streams after this line: wait for the watch itself to go first, or
+        // the count can match before they exist.
+        weak var gone = watch
+        watch = nil
+        let deadline = Date().addingTimeInterval(10)
+        while gone != nil || LeadCheckoutWatch.qaLiveHolders != holdersBefore, Date() < deadline { usleep(20_000) }
+        try expect(gone == nil, "the watch was still alive 10 s after its last reference went")
+        try expect(LeadCheckoutWatch.qaLiveHolders == holdersBefore,
+                   "\(LeadCheckoutWatch.qaLiveHolders - holdersBefore) stream holders leaked after the watch went")
+        print("lead checkout release: \(rounds) rounds of \(dirs.count) parallel lead turns on changing checkouts left no stream open and no holder alive")
+    }
+
+    /// Review finding 1, through the supervisor: a Managed lead's checkout is
+    /// watched while its turn runs, the stream stops when the turn ends, comes
+    /// back (and still records) for the next turn, and stops when the lead is
+    /// archived mid-turn, with FSEvents' hold on the holder released.
+    static func lifetime() async throws {
+        let holdersBefore = LeadCheckoutWatch.qaLiveHolders
+        let b = try ManagedModeChecks.bench("lead-lifetime")
+        defer { b.tearDown() }
+        let (lead, root) = try HelperEvidenceChecks.prepare(b)
+        try claude.write(to: b.binDir.appendingPathComponent("claude"), atomically: true, encoding: .utf8)
+        let supervisor = b.supervisor
+        var ended = Set<String>()
+        _ = supervisor.addRuntimeObservationObserver(for: lead) { observation in
+            if case let .toolDetail(call, detail) = observation, detail.phase == .ended { ended.insert(call) }
+        }
+        func marker(_ name: String) throws { try Data().write(to: root.appendingPathComponent(name)) }
+        func streams(_ expected: Int, _ message: String) async throws {
+            do {
+                try await AgentPresenceChecks.eventually("lead-checkout: " + message, timeout: 5) {
+                    supervisor.runLedger.drainLeadWatch()
+                    return supervisor.runLedger.qaLeadWatchStreams == expected
+                }
+            } catch {
+                throw WorkspaceAgentReportChecks.Failure(description: "\(error) (streams open: \(supervisor.runLedger.qaLeadWatchStreams))")
+            }
+        }
+        let ledgerURL = AgentStore(smokeTest: false).layout.applicationSupportDirectory.appendingPathComponent("run-ledger/ledger.jsonl")
+        func recorded(_ call: String) -> Bool {
+            ManagedRunLedgerChecks.rows(ledgerURL, "leadCheckoutChanged", agent: lead).contains { ($0["source"] as? String)?.hasSuffix("/" + call) == true }
+        }
+
+        try frames([.shellWrite("l1", "python3 -c SECRET-CMD", "Sources/Eps.swift")], root: root)
+            .write(to: root.appendingPathComponent("frames-one.jsonl"), atomically: true, encoding: .utf8)
+        try marker("go-one")
+        try expect(await supervisor.accept(.sendPrompt(AgentPrompt("FRAMES-one HOLD-one")), for: lead) == .accepted, "lead submission refused")
+        try await AgentPresenceChecks.eventually("lead-checkout: l1 not observed", timeout: 20) { ended.contains("toolu_l1") }
+        try await streams(1, "the lead's checkout was not watched during its turn")
+        try await AgentPresenceChecks.eventually("lead-checkout: the lead's first write was not recorded", timeout: 10) {
+            supervisor.runLedger.drainLeadWatch()
+            return recorded("toolu_l1")
+        }
+        try marker("release-one")
+        try await AgentPresenceChecks.eventually("lead-checkout: first turn did not end", timeout: 20) { !supervisor.isRunning(lead) }
+        try await streams(0, "a lead checkout stream outlived the lead's turn")
+
+        try frames([.shellWrite("l2", "python3 -c SECRET-CMD", "Sources/Theta.swift")], root: root)
+            .write(to: root.appendingPathComponent("frames-two.jsonl"), atomically: true, encoding: .utf8)
+        try marker("go-two")
+        try expect(await supervisor.accept(.sendPrompt(AgentPrompt("FRAMES-two HOLD-two")), for: lead) == .accepted, "second submission refused")
+        try await AgentPresenceChecks.eventually("lead-checkout: l2 not observed", timeout: 20) { ended.contains("toolu_l2") }
+        try await streams(1, "the stream did not come back for the lead's next turn")
+        try await AgentPresenceChecks.eventually("lead-checkout: the lead's write in its next turn was not recorded", timeout: 10) {
+            supervisor.runLedger.drainLeadWatch()
+            return recorded("toolu_l2")
+        }
+        // Archived mid-turn: the runner is stopped and the record goes.
+        _ = supervisor.archive(lead)
+        try await streams(0, "a lead checkout stream outlived its archived lead")
+        let deadline = Date().addingTimeInterval(5)
+        while LeadCheckoutWatch.qaLiveHolders != holdersBefore, Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        try expect(LeadCheckoutWatch.qaLiveHolders == holdersBefore,
+                   "\(LeadCheckoutWatch.qaLiveHolders - holdersBefore) stream holders still alive after the lead was archived")
+        supervisor.stopAll()
+        print("Lead checkout lifetime passed: watched during a turn, stopped at its end, back and recording for the next, stopped when the lead was archived mid-turn, holder released")
     }
 
     /// How the switch is set for one bench.

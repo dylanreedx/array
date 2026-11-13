@@ -30,6 +30,12 @@ import Foundation
 /// Bounds: at most `maxEvents` events kept per checkout and `maxCandidates`
 /// paths per call; git gets `gitTimeout` and `maxGitOutput`. Past any bound
 /// the row says `changes: unknown` with the reason, never a count.
+///
+/// Lifetime: a checkout's stream lives while a lead turn or a lead shell call
+/// on it is open. Once the last one ends, and after its calls are settled, the
+/// stream is stopped and released; the lead's next turn opens a new one before
+/// its first call. A lead that is closed or archived is forgotten the same
+/// way, so a turn its stopped process never ended holds nothing.
 final class LeadCheckoutWatch: @unchecked Sendable {
     struct Change: Equatable {
         var modified = 0, added = 0, deleted = 0
@@ -71,7 +77,11 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         var keepFrom: Date?                // lock: earliest open call's start less the slack
         var overflowAt: Date?              // lock: when events were last lost
         var events: [Event] = []           // watch queue only
-        init(root: String) { self.root = root }
+        init(root: String) {
+            self.root = root
+            LeadCheckoutWatch.liveHolders.withLock { $0 += 1 }
+        }
+        deinit { LeadCheckoutWatch.liveHolders.withLock { $0 -= 1 } }
 
         /// On `deliveries`.
         func received(_ paths: [String], _ flags: [FSEventStreamEventFlags]) {
@@ -108,6 +118,8 @@ final class LeadCheckoutWatch: @unchecked Sendable {
     private var streams: [String: Stream] = [:]
     private var open: [UUID: [String: Call]] = [:]
     private var turnOpen = Set<UUID>()
+    /// Agents whose open turn is a Managed lead's: their checkout stays watched.
+    private var leadTurns = Set<UUID>()
     private var turnEndedAt: [UUID: Date] = [:]
     private var roots: [UUID: String] = [:]
     private var resolved: [String: String] = [:]
@@ -121,6 +133,17 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         // before the holders go.
         if !streams.isEmpty { deliveries.sync {} }
     }
+
+    /// Stream holders alive in this process: FSEvents and a watch each own one.
+    private static let liveHolders = Locked(0)
+    final class Locked<Value>: @unchecked Sendable {
+        private let lock = NSLock(); private var value: Value
+        init(_ value: Value) { self.value = value }
+        func withLock<T>(_ body: (inout Value) -> T) -> T { lock.lock(); defer { lock.unlock() }; return body(&value) }
+    }
+    /// Checks only: streams this watch has open, and holders alive anywhere.
+    var qaStreamCount: Int { queue.sync { streams.count } }
+    static var qaLiveHolders: Int { liveHolders.withLock { $0 } }
 
     private var settling = 0
     /// Waits for every hand-off so far, settled ends included. Checks only.
@@ -136,6 +159,7 @@ final class LeadCheckoutWatch: @unchecked Sendable {
                 self.roots[agent] = self.resolve(root)
                 if lead { self.ensureStream(self.roots[agent]!) }
             }
+            if lead && root != nil { self.leadTurns.insert(agent) } else { self.leadTurns.remove(agent) }
             self.turnOpen.insert(agent)
             self.markShared(by: agent)
         }
@@ -148,6 +172,49 @@ final class LeadCheckoutWatch: @unchecked Sendable {
             self.turnEndedAt[agent] = at
             self.markShared(by: agent)
         }
+        releaseAfterSettling()
+    }
+
+    /// The agent was closed or archived: whatever it still holds goes, after
+    /// any call end already handed in has settled.
+    func forget(agent: UUID) {
+        queue.async { self.settling += 1 }
+        queue.asyncAfter(deadline: .now() + Self.settle + Self.endSlack) {
+            self.settling -= 1
+            self.turnOpen.remove(agent)
+            self.open[agent] = nil
+            self.roots[agent] = nil
+            self.turnEndedAt[agent] = nil
+            self.leadTurns.remove(agent)
+            self.releaseUnused()
+        }
+    }
+
+    /// After every call end handed in so far has settled, stops each stream
+    /// no open lead turn or open call needs.
+    private func releaseAfterSettling() {
+        queue.async { self.settling += 1 }
+        queue.asyncAfter(deadline: .now() + Self.settle + Self.endSlack) {
+            self.settling -= 1
+            self.releaseUnused()
+        }
+    }
+
+    private func releaseUnused() {
+        // Ends older than the start slack no longer mark anything shared.
+        let cutoff = Date().addingTimeInterval(-Self.startSlack)
+        turnEndedAt = turnEndedAt.filter { $0.value >= cutoff }
+        let needed = Set(turnOpen.filter { leadTurns.contains($0) }.compactMap { roots[$0] })
+            .union(open.filter { !$0.value.isEmpty }.compactMap { roots[$0.key] })
+        let unused = streams.filter { !needed.contains($0.key) }
+        guard !unused.isEmpty else { return }
+        for (root, stream) in unused {
+            stop(stream)
+            streams[root] = nil
+        }
+        // A delivery already running on `deliveries` may still be inside a
+        // holder; FSEvents' own hold keeps it alive until that returns.
+        deliveries.sync {}
     }
 
     /// `busy`: another agent on this checkout was running as the call started.
@@ -341,10 +408,15 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         let done = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in done.signal() }
         guard (try? process.run()) != nil else { return .failure(.gitFailed) }
+        // git may exit before reading its input (outside a repository it
+        // exits at once): the write then fails with EPIPE, never a SIGPIPE
+        // that would end the app, and never FileHandle's raising write.
+        let writer = input.fileHandleForWriting
+        _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
         let feed = DispatchQueue(label: "dev.array.lead-checkout.feed")
         feed.async {
-            if !paths.isEmpty { input.fileHandleForWriting.write(Data(paths.joined(separator: "\0").utf8 + [0])) }
-            try? input.fileHandleForWriting.close()
+            if !paths.isEmpty { try? writer.write(contentsOf: Data(paths.joined(separator: "\0").utf8 + [0])) }
+            try? writer.close()
         }
         var data = Data(), tooLarge = false
         let reader = DispatchQueue(label: "dev.array.lead-checkout.read")
