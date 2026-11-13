@@ -176,8 +176,11 @@ public struct AtomicWriter: Sendable {
     /// value of `T`. Stores merging independently numbered backup histories can
     /// prefer their recorded wall-clock timestamps during recovery; ties use
     /// generation order. Retention can independently opt into the same policy.
-    public func read<T: Codable>(at url: URL, beforeBackup: () -> Void = {}, preferBackupTimestamps: Bool = false) throws -> T {
-        try read(at: url, decoder: JSONCodec.makeDecoder(), beforeBackup: beforeBackup, preferBackupTimestamps: preferBackupTimestamps)
+    /// `recoveryTimestamp` instead decodes every valid backup and chooses the
+    /// newest content time, falling back to file modification time. This extra
+    /// work runs only after the primary fails to decode.
+    public func read<T: Codable>(at url: URL, beforeBackup: () -> Void = {}, preferBackupTimestamps: Bool = false, recoveryTimestamp: ((T) -> Date?)? = nil) throws -> T {
+        try read(at: url, decoder: JSONCodec.makeDecoder(), beforeBackup: beforeBackup, preferBackupTimestamps: preferBackupTimestamps, recoveryTimestamp: recoveryTimestamp)
     }
 
     /// Every store read through any writer, process-wide. Instrumentation only:
@@ -189,7 +192,7 @@ public struct AtomicWriter: Sendable {
     private static let readCountLock = NSLock()
     nonisolated(unsafe) private static var readCountValue = 0
 
-    public func read<T: Codable>(at url: URL, decoder: JSONDecoder, beforeBackup: () -> Void = {}, preferBackupTimestamps: Bool = false) throws -> T {
+    public func read<T: Codable>(at url: URL, decoder: JSONDecoder, beforeBackup: () -> Void = {}, preferBackupTimestamps: Bool = false, recoveryTimestamp: ((T) -> Date?)? = nil) throws -> T {
         Self.readCountLock.lock(); Self.readCountValue += 1; Self.readCountLock.unlock()
         if let data = try? Data(contentsOf: url),
            let value = try? decoder.decode(T.self, from: data) {
@@ -197,6 +200,32 @@ public struct AtomicWriter: Sendable {
         }
 
         beforeBackup()
+        if let recoveryTimestamp {
+            // Histories merged from different folders can reuse generation
+            // numbers; do not rank ties by those unrelated counters.
+            let backups: [URL]
+            if let directory = backupsDirectory, FileManager.default.fileExists(atPath: directory.path) {
+                backups = try recoveryBackupEntries(for: url, in: directory).map(\.url)
+            } else {
+                backups = []
+            }
+            var best: (value: T, time: Date, modification: Date)?
+            for backupURL in backups {
+                guard let data = try? Data(contentsOf: backupURL),
+                      let value = try? decoder.decode(T.self, from: data) else { continue }
+                let modification = (try? backupURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let time = recoveryTimestamp(value) ?? modification
+                if let current = best {
+                    if time > current.time || (time == current.time && modification > current.modification) {
+                        best = (value, time, modification)
+                    }
+                } else {
+                    best = (value, time, modification)
+                }
+            }
+            if let best { return best.value }
+            throw AtomicWriterError.noValidBackup(path: url.path)
+        }
         // Try backups from newest to oldest.
         for backupURL in try backupURLsNewestFirst(for: url, preferTimestamps: preferBackupTimestamps) {
             if let data = try? Data(contentsOf: backupURL),
@@ -475,6 +504,23 @@ public struct AtomicWriter: Sendable {
         let url: URL
         let generation: UInt64?
         var timestamp: String? = nil
+    }
+
+    /// AgentStore preserves a same-named shared backup as `.moved-N`.
+    /// Inspect those copies only during recovery, leaving save scans unchanged.
+    private func recoveryBackupEntries(for url: URL, in directory: URL) throws -> [BackupEntry] {
+        let files = try fileOperations.listDirectory(directory)
+        var entries = backupEntries(for: url, entries: files)
+        for file in files {
+            let name = file.lastPathComponent
+            guard let marker = name.range(of: ".moved-", options: .backwards) else { continue }
+            let suffix = name[marker.upperBound...]
+            guard !suffix.isEmpty, suffix.allSatisfy({ $0 >= "0" && $0 <= "9" }) else { continue }
+            let original = directory.appendingPathComponent(String(name[..<marker.lowerBound]))
+            guard let match = backupEntries(for: url, entries: [original]).first else { continue }
+            entries.append(BackupEntry(url: file, generation: match.generation, timestamp: match.timestamp))
+        }
+        return entries
     }
 
     private func backupEntries(for url: URL) throws -> [BackupEntry] {

@@ -28,6 +28,7 @@ func runAgentStoreChecks() {
         try runAgentStoreBackupScaleCheck(root: root)
         try runAgentStoreDowngradeRoundTripCheck(root: root)
         try runHeldMigrationRecoveryCheck(root: root)
+        try runRecoveryOrderingCheck(root: root)
         print("AgentStore checks: app-support root, round-trip, cross-project deterministic order, corrupt-file skip, concurrent upsert, one backup scan per save, save cost independent of agent count, and a 0.7.47 round trip healing passed")
     } catch {
         fputs("FAIL: AgentStore checks failed: \(error)\n", stderr)
@@ -688,7 +689,9 @@ private func runHeldMigrationRecoveryCheck(root: URL) throws {
     let id = AgentID(rawValue: UUID())
     let date = Date(timeIntervalSinceReferenceDate: 806_100_000)
     func record(_ name: String) -> AgentRecord {
-        makeAgentStoreFixture(id: id, displayName: name, createdAt: date)
+        var value = makeAgentStoreFixture(id: id, displayName: name, createdAt: date)
+        if name == "newer-backup" { value.lastActivityAt = date.addingTimeInterval(60) }
+        return value
     }
     let dedicated = AtomicWriter(backupsDirectory: layout.backupsDirectory(for: id), backupDate: { date }, legacyBackupPolicy: .targetDedicated)
     let shared = AtomicWriter(backupsDirectory: layout.backupsDirectory, backupDate: { date.addingTimeInterval(60) }, legacyBackupPolicy: .targetDedicated)
@@ -717,4 +720,88 @@ private func runHeldMigrationRecoveryCheck(root: URL) throws {
         throw AgentStoreCheckError("held migration: newer downgrade backup was pruned by a save")
     }
     print("  agent-store held migration: newest downgrade backup recovered and retained")
+}
+
+// Downgrade restarts generations and filenames carry backup wall-clock time,
+// neither of which establishes which decoded agent state is newer.
+private func runRecoveryOrderingCheck(root: URL) throws {
+    let base = root.appendingPathComponent("recovery-ordering")
+    let layout = AgentStoreLayout(applicationSupportDirectory: base)
+    let id = AgentID(rawValue: UUID())
+    let baseDate = Date(timeIntervalSinceReferenceDate: 806_100_000)
+    func record(_ name: String, activity: TimeInterval) -> AgentRecord {
+        var value = makeAgentStoreFixture(id: id, displayName: name, createdAt: baseDate)
+        value.lastActivityAt = baseDate.addingTimeInterval(activity)
+        return value
+    }
+    let dedicated = AtomicWriter(backupsDirectory: layout.backupsDirectory(for: id), backupDate: { baseDate.addingTimeInterval(100) }, legacyBackupPolicy: .targetDedicated)
+    let shared = AtomicWriter(backupsDirectory: layout.backupsDirectory, backupDate: { baseDate }, legacyBackupPolicy: .targetDedicated)
+    let target = layout.agentFile(id: id)
+    try dedicated.write(record("older", activity: 10), to: target)
+    try dedicated.write(record("newer", activity: 20), to: target)
+    try shared.write(record("primary", activity: 30), to: target)
+    let fm = FileManager.default
+    let olderBackup = try fm.contentsOfDirectory(at: layout.backupsDirectory(for: id), includingPropertiesForKeys: nil).first!
+    let newerBackup = try fm.contentsOfDirectory(at: layout.backupsDirectory, includingPropertiesForKeys: nil).first { $0.lastPathComponent.hasPrefix("array-backup-v2-") }!
+    try fm.setAttributes([.modificationDate: baseDate.addingTimeInterval(120)], ofItemAtPath: olderBackup.path)
+    try fm.setAttributes([.modificationDate: baseDate], ofItemAtPath: newerBackup.path)
+    let prefix = AtomicWriter.backupNamePrefix(forCanonicalIdentityPath: AtomicWriter.canonicalIdentityPath(for: target))
+    let invalidBackup = layout.backupsDirectory(for: id).appendingPathComponent(prefix + "00000000000000000999-2030-01-01T00-00-00.000Z")
+    try Data("corrupt".utf8).write(to: invalidBackup)
+    try fm.setAttributes([.modificationDate: baseDate.addingTimeInterval(180)], ofItemAtPath: invalidBackup.path)
+    try Data("corrupt".utf8).write(to: target)
+    let store = AgentStore(applicationSupportDirectory: base)
+    store.waitForBackupMigration()
+    let recovered = try store.load(id: id)?.displayName
+    guard recovered == "newer" else {
+        throw AgentStoreCheckError("content ordering: recovered \(String(describing: recovered)), expected newer activity")
+    }
+    guard try store.loadAll().first?.displayName == "newer" else {
+        throw AgentStoreCheckError("content ordering: loadAll did not recover the newest activity")
+    }
+
+    // Tombstones have no content timestamp. Invert filename and file mtime so
+    // recovery has to choose the actual modification time instead.
+    let tombRoot = root.appendingPathComponent("recovery-tombstone")
+    let tombLayout = AgentStoreLayout(applicationSupportDirectory: tombRoot)
+    let oldID = UUID(), newID = UUID()
+    let oldWriter = AtomicWriter(backupsDirectory: tombLayout.deletedAgentTilesBackupsDirectory, backupDate: { baseDate.addingTimeInterval(100) }, legacyBackupPolicy: .targetDedicated)
+    let newWriter = AtomicWriter(backupsDirectory: tombLayout.backupsDirectory, backupDate: { baseDate }, legacyBackupPolicy: .targetDedicated)
+    let tomb = tombLayout.deletedAgentTilesFile
+    try oldWriter.write([oldID], to: tomb)
+    try oldWriter.write([newID], to: tomb)
+    try newWriter.write([UUID()], to: tomb)
+    let oldName = try fm.contentsOfDirectory(at: tombLayout.deletedAgentTilesBackupsDirectory, includingPropertiesForKeys: nil).first!
+    let newName = try fm.contentsOfDirectory(at: tombLayout.backupsDirectory, includingPropertiesForKeys: nil).first { $0.lastPathComponent.hasPrefix("array-backup-v2-") }!
+    try fm.setAttributes([.modificationDate: baseDate], ofItemAtPath: oldName.path)
+    try fm.setAttributes([.modificationDate: baseDate.addingTimeInterval(60)], ofItemAtPath: newName.path)
+    try Data("corrupt".utf8).write(to: tomb)
+    let tombStore = AgentStore(applicationSupportDirectory: tombRoot)
+    tombStore.waitForBackupMigration()
+    guard tombStore.loadDeletedAgentTiles() == [newID] else {
+        throw AgentStoreCheckError("tombstone ordering: did not recover the newest modification time")
+    }
+    // Identical filenames can collide when a downgraded writer restarts its
+    // generation and clock. The migrated copy remains a valid candidate.
+    let collisionRoot = root.appendingPathComponent("recovery-collision")
+    let collisionLayout = AgentStoreLayout(applicationSupportDirectory: collisionRoot)
+    let collisionID = AgentID(rawValue: UUID())
+    let collisionTarget = collisionLayout.agentFile(id: collisionID)
+    func collisionRecord(_ name: String, activity: TimeInterval) -> AgentRecord {
+        var value = makeAgentStoreFixture(id: collisionID, displayName: name, createdAt: baseDate)
+        value.lastActivityAt = baseDate.addingTimeInterval(activity)
+        return value
+    }
+    let collisionOld = AtomicWriter(backupsDirectory: collisionLayout.backupsDirectory(for: collisionID), backupDate: { baseDate }, legacyBackupPolicy: .targetDedicated)
+    let collisionNew = AtomicWriter(backupsDirectory: collisionLayout.backupsDirectory, backupDate: { baseDate }, legacyBackupPolicy: .targetDedicated)
+    try collisionOld.write(collisionRecord("older", activity: 10), to: collisionTarget)
+    try collisionOld.write(collisionRecord("newer collision", activity: 20), to: collisionTarget)
+    try collisionNew.write(collisionRecord("primary", activity: 30), to: collisionTarget)
+    try Data("corrupt".utf8).write(to: collisionTarget)
+    let collisionStore = AgentStore(applicationSupportDirectory: collisionRoot)
+    collisionStore.waitForBackupMigration()
+    guard try collisionStore.load(id: collisionID)?.displayName == "newer collision" else {
+        throw AgentStoreCheckError("collision ordering: newer migrated backup is not recoverable")
+    }
+    print("  agent-store recovery ordering: activity time, tombstone modification time, and collision recovery")
 }

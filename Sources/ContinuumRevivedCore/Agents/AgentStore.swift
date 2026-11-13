@@ -250,7 +250,7 @@ public final class AgentStore: @unchecked Sendable {
     public func load(id: AgentID) throws -> AgentRecord? {
         let url = layout.agentFile(id: id)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try writer(for: id).read(at: url, beforeBackup: waitForBackupMigration, preferBackupTimestamps: true)
+        return try writer(for: id).read(at: url, beforeBackup: waitForBackupMigration, recoveryTimestamp: { $0.lastActivityAt })
     }
 
     public func delete(id: AgentID) throws {
@@ -281,7 +281,7 @@ public final class AgentStore: @unchecked Sendable {
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         do {
             let ids: [UUID] = try writer(backups: layout.deletedAgentTilesBackupsDirectory)
-                .read(at: url, beforeBackup: waitForBackupMigration, preferBackupTimestamps: true)
+                .read(at: url, beforeBackup: waitForBackupMigration, recoveryTimestamp: { (_: [UUID]) in nil })
             return Set(ids)
         } catch {
             warn("AgentStore.loadDeletedAgentTiles: unreadable at \(url.path): \(error)")
@@ -333,7 +333,7 @@ public final class AgentStore: @unchecked Sendable {
                 if let id, known.contains(id) { continue }
                 let reader = id.map { writer(for: $0) } ?? writer(backups: layout.backupsDirectory)
                 Self.recordsDecoded.increment()
-                let record: AgentRecord = try reader.read(at: entry, beforeBackup: waitForBackupMigration, preferBackupTimestamps: true)
+                let record: AgentRecord = try reader.read(at: entry, beforeBackup: waitForBackupMigration, recoveryTimestamp: { $0.lastActivityAt })
                 records.append(record)
             } catch {
                 warn("AgentStore.loadAll: skipping unreadable record at \(entry.path): \(error)")
