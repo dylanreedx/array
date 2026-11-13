@@ -173,6 +173,7 @@ check --helper-completion-check
 check --helper-evidence-provider-check
 check --helper-liveness-check
 check --helper-message-result-check
+check --helper-protected-paths-check
 check --helper-provider-retry-check
 check --helper-retry-check
 check --helper-tile-auto-fold-check
@@ -230,6 +231,9 @@ check --note-conversion-writer-check
 check --note-file-tile-spawn-check
 check --observer-sweep-badge-check
 check --onboarding-panel-check
+check --orchestration-plan-check
+check --orchestration-request-lifecycle-check
+check --orchestration-request-policy-check
 check --palette-agent-harness-check
 check --palette-browser-spawn-check
 check --palette-duplicate-root-check
@@ -653,6 +657,7 @@ leg run_app_check .build/debug/Array --helper-completion-check
 leg run_app_check .build/debug/Array --helper-evidence-provider-check
 leg run_app_check .build/debug/Array --helper-liveness-check
 leg run_app_check .build/debug/Array --helper-message-result-check
+leg run_app_check .build/debug/Array --helper-protected-paths-check
 leg run_app_check .build/debug/Array --helper-provider-retry-check
 leg run_app_check .build/debug/Array --helper-retry-check
 leg run_app_check .build/debug/Array --helper-tile-auto-fold-check
@@ -707,6 +712,9 @@ leg run_app_check .build/debug/Array --note-conversion-writer-check
 leg run_app_check .build/debug/Array --note-file-tile-spawn-check
 leg run_app_check .build/debug/Array --observer-sweep-badge-check
 leg run_app_check .build/debug/Array --onboarding-panel-check
+leg run_app_check .build/debug/Array --orchestration-plan-check
+leg run_app_check .build/debug/Array --orchestration-request-lifecycle-check
+leg run_app_check .build/debug/Array --orchestration-request-policy-check
 leg run_app_check .build/debug/Array --palette-agent-harness-check
 leg run_app_check .build/debug/Array --palette-browser-spawn-check
 leg run_app_check .build/debug/Array --palette-duplicate-root-check

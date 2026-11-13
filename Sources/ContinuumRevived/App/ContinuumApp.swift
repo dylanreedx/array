@@ -3835,6 +3835,64 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--orchestration-request-lifecycle-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await OrchestrationChooserChecks.lifecycle()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--orchestration-request-policy-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await OrchestrationChooserChecks.policy()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--orchestration-plan-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await OrchestrationChooserChecks.run()
+                    print("Orchestration chooser checks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--helper-protected-paths-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HelperProtectedPathsChecks.run()
+                    print("Helper protected paths checks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--part-contract-check") {
             _ = NSApplication.shared
             Task { @MainActor in

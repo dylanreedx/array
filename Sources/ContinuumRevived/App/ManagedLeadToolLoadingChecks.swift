@@ -22,6 +22,10 @@ extension ManagedModeChecks {
     /// outcome, not read back from the production constant.
     static let expectedLeadPinnedTools: Set<String> = ["array_delegate", "array_message_agent", "array_status"]
     static let alwaysLoadKey = "anthropic/alwaysLoad"
+    // Independent delivery contract: never read the expected wording from
+    // production, or changing both delivery paths could keep this check green.
+    static let expectedChooserDelegationIntent = "In Managed mode, choose helpers when a split is justified without another delegation request. Honor requests to work alone; Array’s Agent permissions still apply."
+    static let originalDelegationIntent = "Delegate only when the user asked for it; discussing delegation is not an instruction to spawn."
 
     static func leadToolLoading() async throws {
         try await claudeLeadToolLoading()
@@ -36,6 +40,11 @@ extension ManagedModeChecks {
         try await settled(b, lead)
         let leadTools = try listedTools(claudeServer(b, lead))
         try expectPinned(leadTools, "a Claude Managed lead's launch")
+        try expectOriginalDelegationIntent(leadTools, "a chooser-OFF Claude Managed lead's launch")
+        let leadHook = try await hook(b, lead, ["hook_event_name": "SessionStart", "source": "startup", "session_id": UUID().uuidString])
+        let leadBrief = leadHook["additionalContext"] as? String ?? ""
+        try expect(leadBrief.contains("Helpers can edit files; you cannot.") && !leadBrief.contains(expectedChooserDelegationIntent),
+                   "chooser-OFF SessionStart changed its delegation brief")
 
         // A helper the lead delegates: Free, parented, same supervisor path.
         guard let helper = b.supervisor.handleSpawnRequest(SpawnRequest(role: nil, prompt: "helper", isolated: false),
@@ -46,11 +55,14 @@ extension ManagedModeChecks {
         try expect(b.supervisor.records[helper]?.parentAgentID == lead, "the helper must name the lead as parent")
         let helperTools = try listedTools(claudeServer(b, helper))
         try expectAllDeferred(helperTools, "a helper's launch")
+        try expectOriginalDelegationIntent(helperTools, "a Free helper's launch")
         try expect(names(helperTools) == names(leadTools), "a lead and its helper must be offered the same tools")
 
         let solo = try await delegate(b, mode: nil, label: "solo")
         try await settled(b, solo)
-        try expectAllDeferred(try listedTools(claudeServer(b, solo)), "a solo Free agent's launch")
+        let soloTools = try listedTools(claudeServer(b, solo))
+        try expectAllDeferred(soloTools, "a solo Free agent's launch")
+        try expectOriginalDelegationIntent(soloTools, "a solo Free agent's launch")
 
         // Mode switches apply at the next launch, in both directions.
         let launchesBefore = launches(b, lead).count
@@ -82,7 +94,9 @@ extension ManagedModeChecks {
         let server = try codexServer(argv)
         try expect(server.environment[WorkspaceMCPConfiguration.alwaysLoadedToolsEnvironmentKey] == nil,
                    "a Codex Managed lead's server environment must not name always-loaded tools")
-        try expectAllDeferred(try listedTools(server), "a Codex Managed lead's launch")
+        let tools = try listedTools(server)
+        try expectAllDeferred(tools, "a Codex Managed lead's launch")
+        try expectOriginalDelegationIntent(tools, "a Codex Managed lead's launch")
     }
 
     // MARK: - Helpers
@@ -94,6 +108,12 @@ extension ManagedModeChecks {
     }
 
     static func names(_ tools: [[String: Any]]) -> Set<String> { Set(tools.compactMap { $0["name"] as? String }) }
+
+    static func expectOriginalDelegationIntent(_ tools: [[String: Any]], _ what: String) throws {
+        let description = tools.first { $0["name"] as? String == "array_delegate" }?["description"] as? String ?? ""
+        try expect(description.contains(originalDelegationIntent) && !description.contains(expectedChooserDelegationIntent),
+                   "\(what): the original delegate guideline must remain and the chooser intent must be absent")
+    }
 
     static func alwaysLoads(_ tool: [String: Any]) -> Bool {
         (tool["_meta"] as? [String: Any])?[alwaysLoadKey] as? Bool == true

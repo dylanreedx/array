@@ -40,8 +40,14 @@ func runWorkspaceMCPChecks() {
            "Claude/Codex MCP tools must equal pi's minus the written pi-only list: missing \(expected.subtracting(mcpNames).sorted()), extra \(mcpNames.subtracting(expected).sorted())")
     expect(tools.map(\.name) == RoleRegistry.hostToolNames(for: .pi, projectStandards: true),
            "the catalog's host tools must be exactly pi's --tools host allowlist, in order: \(tools.map(\.name))")
-    expect(Set(tools.map(\.operation)) == Set(WorkspaceAPIOp.allCases) && Set(tools.map(\.operation)).count == tools.count,
-           "every host operation needs exactly one tool, or context() would advertise an op no tool reaches")
+    let chooserTools = WorkspaceMCPToolCatalog.tools(projectStandards: true, chooser: true)
+    expect(Set(tools.map(\.operation)) == Set(WorkspaceAPIOp.allCases).subtracting([.agentPlan]) && Set(tools.map(\.operation)).count == tools.count,
+           "every default host operation needs exactly one shared tool")
+    expect(Set(chooserTools.map(\.operation)) == Set(WorkspaceAPIOp.allCases)
+           && chooserTools.count == tools.count + 1
+           && chooserTools.filter { $0.name == "array_plan" }.count == 1,
+           "the chooser adds exactly its optional plan tool while covering every host operation")
+    expect(!tools.contains { $0.name == "array_plan" }, "chooser plan leaked into the switch-off/Pi catalog")
     for tool in tools {
         expect(!tool.description.isEmpty && !tool.promptGuidelines.isEmpty,
                "\(tool.name) lost its description or guidelines")
