@@ -1680,19 +1680,27 @@ class TileNSView: NSView, TokenThemed {
         let naturalBar = max(naturalTitleBarHeight, Self.minScreenGrabPx)
         let extra = max(0, chromeBarHeight - naturalBar)
             + max(0, base * underBarScale - naturalRow)
-        return inset + extra.rounded(.up)
+        return inset + extra.rounded(.up) + compactBubbleClearance
     }
 
     /// Natural chrome scale at 100%. This caps SCREEN size when zoomed out,
     /// not world size: the latter would make an 11pt label become 3pt at 25%.
     static var underBarMaximumScale: CGFloat { minScreenGrabPx / titleBarHeight }
 
+    // At reduced canvas zoom the bubble must not consume the readable row's
+    // width budget. Put that row below the bubble and reserve its height.
+    private var compactBubbleClearance: CGFloat {
+        guard (canvas?.viewport.zoom ?? 1) < 1, underBar != nil,
+              let bubble = titleBar?.bubbleRectInBar else { return 0 }
+        return max(0, bubble.maxY - chromeBarHeight)
+    }
+
     private var underBarScale: CGFloat {
         guard let underBar else { return 1 }
         let zoom = CGFloat(canvas?.viewport.zoom ?? 1)
-        let naturalScale = max(1, min(Self.underBarMaximumScale, bounds.width / underBar.minimumContentWidth))
+        let naturalScale = max(1, min(Self.underBarMaximumScale, bounds.width / max(1, underBar.minimumContentWidth - (compactBubbleClearance > 0 ? underBar.trailingReserve : 0))))
         let screenCap = naturalScale / max(0.01, min(1, zoom))
-        let width = zoom < 1 ? underBar.minimumReadableContentWidth : underBar.minimumContentWidth
+        let width = zoom < 1 ? max(1, underBar.minimumReadableContentWidth - (compactBubbleClearance > 0 ? underBar.trailingReserve : 0)) : underBar.minimumContentWidth
         return max(1, min(zoomChromeScale, screenCap, bounds.width / width))
     }
 
@@ -1831,10 +1839,10 @@ class TileNSView: NSView, TokenThemed {
         // The agent's bubble hangs into the row's trailing corner: the row's
         // content ends before it rather than running under it.
         var reserve: CGFloat = 0
-        if let bubble = titleBar?.bubbleRectInBar, bubble.maxY > bar {
+        if compactBubbleClearance == 0, let bubble = titleBar?.bubbleRectInBar, bubble.maxY > bar {
             reserve = bounds.width - bubble.minX + CGFloat(Space.xs) * zoomChromeScale
         }
-        underBar.place(frame: NSRect(x: 0, y: bar, width: bounds.width, height: base * scale), unscaledHeight: base,
+        underBar.place(frame: NSRect(x: 0, y: bar + compactBubbleClearance, width: bounds.width, height: base * scale), unscaledHeight: base,
                        trailingReserve: reserve)
     }
 
