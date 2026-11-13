@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "mappedLegs": 10,
+  "about": "Coverage is partial: this file maps 10 of the matrix's roughly 450 full-run legs (gate-prepass.py prints the live count). A changed path no entry covers is reported as coverage-unmapped, never as nothing to rerun; mappedLegs must equal the number of checks. Exact matrix invocation -> the source paths it covers and the files that implement the check. Read by scripts/gate-prepass.py (owner of this file). A change to a covered path recommends the check; listing never proves the check ran. Globs: ** spans directories, * and ? stay inside one. Every invocation must be a literal run-matrix.sh leg (args after run/run_leg/run_app_check) that the static reader does not find dead, and every glob must match a file, or the pre-pass reports the entry stale. Targeted-only declarations live in targetedOnly as {flag, reason}; reason must be one non-empty line. They declare intentional targeted checks without adding nightly coverage. Exceptions are line-specific (rule + path + exact trimmed line) and need a reason and an owner.",
+  "checks": [
+    {
+      "invocation": "scripts/check-app-bundle.sh --configuration debug --bundle \"$MATRIX_RESULTS/Array.app\"",
+      "covers": ["Package.swift", "Sources/*/Resources/**", "Packaging/**", "scripts/make-app-bundle.sh"],
+      "checkFiles": ["scripts/check-app-bundle.sh"],
+      "owner": "packaging",
+      "reason": "packaged resources and bundle identity are only proven in the assembled bundle (--packaged-resources-check runs there)"
+    },
+    {
+      "invocation": ".build/debug/Array --workspace-scene-owner-check",
+      "covers": ["Sources/ContinuumRevived/App/WorkspaceRuntime.swift", "Sources/ContinuumRevived/App/TileSpawner.swift"],
+      "checkFiles": ["Sources/ContinuumRevived/App/WorkspaceSceneOwnerChecks.swift", "Sources/ContinuumRevived/App/ContinuumApp.swift"],
+      "owner": "canvas",
+      "reason": "drives mountWorkspaceSceneAtBoot, the production scene mount"
+    },
+    {
+      "invocation": ".build/debug/Array --spawn-placement-check",
+      "covers": ["Sources/ContinuumRevived/App/TileSpawner.swift", "Sources/ContinuumRevived/Canvas/CanvasNSView.swift"],
+      "owner": "canvas",
+      "reason": "spawn placement against the target zone"
+    },
+    {
+      "invocation": ".build/debug/Array --zone-spawner-coverage-check",
+      "covers": ["Sources/ContinuumRevived/App/TileSpawner.swift"],
+      "checkFiles": ["Sources/ContinuumRevived/App/ZoneSpawnerCoverageChecks.swift"],
+      "owner": "canvas",
+      "reason": "every spawner installs through the zone path"
+    },
+    {
+      "invocation": ".build/debug/Array --flat-spawn-migration-check",
+      "covers": ["Sources/ContinuumRevived/App/TileSpawner.swift", "Sources/ContinuumRevived/App/WorkspaceRuntime.swift"],
+      "checkFiles": ["Sources/ContinuumRevived/App/WorkspaceDataProtectionChecks.swift"],
+      "owner": "canvas",
+      "reason": "flat-scene retirement never strands or drops a tile"
+    },
+    {
+      "invocation": ".build/debug/Array --workspace-api-delegation-check",
+      "covers": ["Sources/ContinuumRevived/App/AgentSupervisor*.swift", "Sources/ContinuumRevived/App/WorkspaceAPIService+Delegation.swift", "Sources/ContinuumRevivedCore/Agents/AgentDelegationContext.swift", "Sources/ContinuumRevivedCore/WorkspaceAPI/WorkspaceAPIContracts+Delegation.swift"],
+      "checkFiles": ["Sources/ContinuumRevived/App/WorkspaceAPIDelegationChecks.swift"],
+      "owner": "agents",
+      "reason": "delegation over the production workspace API"
+    },
+    {
+      "invocation": ".build/debug/Array --workspace-api-cross-harness-delegation-check",
+      "covers": ["Sources/ContinuumRevived/App/AgentSupervisor*.swift", "Sources/ContinuumRevived/App/WorkspaceAPIService+Delegation.swift", "Sources/ContinuumRevivedCore/Agents/AgentDelegationContext.swift", "Sources/ContinuumRevivedCore/WorkspaceAPI/WorkspaceAPIContracts+Delegation.swift"],
+      "checkFiles": ["Sources/ContinuumRevived/App/WorkspaceAPIDelegationChecks.swift"],
+      "owner": "agents",
+      "reason": "delegation across Claude, Codex and Pi harnesses"
+    },
+    {
+      "invocation": ".build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check",
+      "covers": ["Sources/ContinuumRevivedCore/WorkspaceAPI/WorkspaceAPIExposure.swift", "Sources/ContinuumRevivedCore/Agents/AgentRecord.swift", "Sources/ContinuumRevivedCore/CanvasState.swift"],
+      "checkFiles": ["Sources/ContinuumRevivedCoreChecks/WorkspaceAPIExposureChecks.swift"],
+      "owner": "workspace-api",
+      "reason": "every agent, tile, tile-metadata and zone coding key is classified; the diff cannot decide classification"
+    },
+    {
+      "invocation": "python3 scripts/check-notification-map.py --self-test",
+      "covers": ["docs/internals/notification-paths.md", "docs/internals/notification-senders.json", "Sources/ContinuumRevived/App/AgentCLIUpdateCenter.swift", "Sources/ContinuumRevived/App/AgentSoundSystem.swift", "Sources/ContinuumRevived/App/NeedsAttentionNotification.swift", "Sources/ContinuumRevivedCore/APNSPushService.swift", "Sources/ContinuumRevivedRelayCore/RelayAPNSService.swift", "ios/Continuum/Sources/SystemSurfaceCoordinator.swift"],
+      "checkFiles": ["scripts/check-notification-map.py"],
+      "owner": "notifications",
+      "reason": "sender census against the maintained notification map (structural, not behavioural)"
+    },
+    {
+      "invocation": "python3 scripts/check-gate-prepass.py",
+      "covers": ["scripts/gate-prepass.py", "scripts/check-coverage-manifest.json"],
+      "checkFiles": ["scripts/check-gate-prepass.py"],
+      "owner": "gate",
+      "reason": "fixture histories prove every pre-pass rule red and green"
+    }
+  ],
+  "targetedOnly": [
+    {
+      "flag": "--managed-run-ledger-timing-check",
+      "reason": "Prints what the run ledger adds to the request path and asserts nothing about time, so it guards no bug class."
+    },
+    {
+      "flag": "--managed-launch-timing-check",
+      "reason": "Prints Managed lead and helper launch time, request to CLI start, and asserts nothing about time, so it guards no bug class."
+    }
+  ],
+  "exceptions": []
+}

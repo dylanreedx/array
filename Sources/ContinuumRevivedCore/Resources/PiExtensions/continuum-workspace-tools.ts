@@ -116,6 +116,10 @@ const CATALOG = JSON.parse(
 
 export default function continuumWorkspaceTools(pi: ExtensionAPI) {
   for (const tool of CATALOG.tools) {
+    // `array_standards` only where Array found standards in this agent's
+    // checkout (`docs/internals/project-standards-on-demand.md`); the same
+    // rule as the MCP server's tools/list.
+    if (tool.op === "standards.read" && process.env.ARRAY_WORKSPACE_PROJECT_STANDARDS !== "1") continue;
     pi.registerTool({
       name: tool.name,
       label: tool.label,

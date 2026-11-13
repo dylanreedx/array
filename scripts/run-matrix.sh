@@ -736,10 +736,32 @@ run_ios_build() {
   return 0
 }
 
+# Offline replay checks never start the app or a provider. This subset permits
+# managed agents to verify them without entering the bare CoreChecks suite.
+run_leg python3 benchmarks/replay/check.py --replay-grader-check
+run_leg python3 benchmarks/replay/check.py --replay-isolation-check
+run_leg python3 benchmarks/replay/check.py --replay-scoring-check
+run_leg python3 benchmarks/replay/check.py --replay-containment-check
+if [[ "${REPLAY_CHECKS_ONLY:-0}" == "1" ]]; then
+  matrix_finish_jobs
+  matrix_report "Offline replay matrix"
+  exit $?
+fi
+
+if [[ "${REPLAY_DRIVER_ONLY:-0}" == "1" ]]; then
+  run swift build --configuration debug --product array-workspace-mcp -j 2
+  run swift build --configuration debug --product Array -j 2
+  run_app_check .build/debug/Array --replay-driver-check
+  matrix_finish_jobs
+  matrix_report "Replay driver matrix"
+  exit $?
+fi
+
 # Ticket P0.11: first leg, so a matrix that lost a check goes red before it
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+run_leg python3 scripts/check-gate-prepass.py
 if [[ "$BROWSER_SCHEDULING_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run_app_check .build/debug/Array --browser-background-scheduling-check
@@ -1024,6 +1046,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --helper-provider-retry-check
   run_app_check .build/debug/Array --helper-completion-check
   run_app_check .build/debug/Array --helper-watchdog-check
+  run_app_check .build/debug/Array --helper-liveness-check
   run_app_check .build/debug/Array --workspace-hook-pushback-check
   run_app_check .build/debug/Array --claude-adopted-turn-check
   run_app_check .build/debug/Array --sidebar-agent-status-line-check
@@ -1033,14 +1056,21 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --settings-search-check
   run_app_check .build/debug/Array --managed-setting-check
   run_app_check .build/debug/Array --managed-mode-launch-check
+  run_app_check .build/debug/Array --managed-lead-tool-loading-check
   run_app_check .build/debug/Array --managed-mode-hooks-check
   run_app_check .build/debug/Array --managed-mode-persistence-check
+  run_app_check .build/debug/Array --managed-run-ledger-check
+  run_app_check .build/debug/Array --helper-evidence-provider-check
+  run_app_check .build/debug/Array --lead-checkout-ledger-check
+  run_app_check .build/debug/Array --request-telemetry-check
+  run_app_check .build/debug/Array --run-ledger-gaps-check
   run_app_check .build/debug/Array --managed-lead-plan-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
   run_app_check .build/debug/Array --workspace-codex-hook-check
   run_app_check .build/debug/Array --managed-codex-launch-check
   run_app_check .build/debug/Array --managed-codex-hooks-check
   run_app_check .build/debug/Array --helper-retry-check
+  run_app_check .build/debug/Array --part-contract-check
   run_app_check .build/debug/Array --helper-worktree-check
   run_app_check .build/debug/Array --helper-tile-lifecycle-check
   run_app_check .build/debug/Array --helper-tile-cap-check
@@ -1063,6 +1093,7 @@ if [[ "$HOOK_BRIDGE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --helper-provider-retry-check
   run_app_check .build/debug/Array --helper-completion-check
   run_app_check .build/debug/Array --helper-watchdog-check
+  run_app_check .build/debug/Array --helper-liveness-check
   run_app_check .build/debug/Array --workspace-hook-bridge-check
   run_app_check .build/debug/Array --workspace-codex-hook-check
   run_app_check .build/debug/Array --workspace-mcp-host-check
@@ -1237,6 +1268,9 @@ run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
+# .plans/116 part 16: the project standards parser over fixtures it writes,
+# with explicit issues for broken standards and nothing read outside the checkout.
+run_leg .build/debug/ContinuumRevivedCoreChecks --project-standards-index-check
 if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 fi
@@ -1309,18 +1343,30 @@ run_app_check .build/debug/Array --helper-wake-setting-check
 run_app_check .build/debug/Array --helper-provider-retry-check
 run_app_check .build/debug/Array --helper-completion-check
 run_app_check .build/debug/Array --helper-watchdog-check
+run_app_check .build/debug/Array --helper-liveness-check
 # The opt-in push-back through the real hook command: silent while off; on,
 # one block for a helper's long hand-back, and silent for a continuation, a
 # short one, a top-level Stop, or an app that is down or silent.
 run_app_check .build/debug/Array --workspace-hook-pushback-check
 run_app_check .build/debug/Array --managed-setting-check
 run_app_check .build/debug/Array --managed-mode-launch-check
+run_app_check .build/debug/Array --managed-lead-tool-loading-check
 run_app_check .build/debug/Array --managed-mode-hooks-check
+run_app_check .build/debug/Array --personal-rules-delegation-check
+run_app_check .build/debug/Array --reply-rules-launch-check
+run_app_check .build/debug/Array --managed-lead-context-transition-check
+run_app_check .build/debug/Array --managed-compaction-tools-check
 run_app_check .build/debug/Array --managed-mode-persistence-check
+run_app_check .build/debug/Array --managed-run-ledger-check
+run_app_check .build/debug/Array --helper-evidence-provider-check
+run_app_check .build/debug/Array --lead-checkout-ledger-check
+run_app_check .build/debug/Array --request-telemetry-check
+run_app_check .build/debug/Array --run-ledger-gaps-check
 run_app_check .build/debug/Array --managed-lead-plan-check
 run_app_check .build/debug/Array --managed-codex-launch-check
 run_app_check .build/debug/Array --managed-codex-hooks-check
 run_app_check .build/debug/Array --helper-retry-check
+run_app_check .build/debug/Array --part-contract-check
 run_app_check .build/debug/Array --helper-worktree-check
 run_app_check .build/debug/Array --helper-tile-lifecycle-check
 run_app_check .build/debug/Array --helper-tile-cap-check
@@ -1356,6 +1402,7 @@ run_app_check .build/debug/Array --settings-panel-check
 # Launch polish: settings as an in-window modal, and its search.
 run_app_check .build/debug/Array --settings-modal-check
 run_app_check .build/debug/Array --settings-search-check
+run_app_check .build/debug/Array --settings-usage-check
 run_app_check .build/debug/Array --cli-update-settings-check
 run_app_check .build/debug/Array --agent-awareness-check
 run_app_check .build/debug/Array --completion-awareness-check
@@ -1927,6 +1974,10 @@ run_app_check .build/debug/Array --workspace-api-agent-camera-check
 # preset, other-agent approval, byte caps, zero lifecycle side effects.
 # Agent colour: durable record update through the real workspace API.
 run_app_check .build/debug/Array --workspace-api-agent-colour-check
+# .plans/116 part 16: standards.read offered only where a checkout has standards,
+# through Claude's and Codex's MCP launch, the real MCP server, Pi's argv,
+# environment and extension, and the production dispatch.
+run_app_check .build/debug/Array --standards-resolution-check
 # Plan 110: a per-agent character through agent.update and the tile's own menu.
 run_app_check .build/debug/Array --workspace-api-agent-character-check
 # Agent rename: agent.update displayName — self without approval, another agent
@@ -1953,6 +2004,7 @@ run_app_check .build/debug/Array --workspace-api-board-check
 # Busy messages: position/replay, sender/hops, two callers with turn-specific
 # results, caller-scoped restart replay, paused recovery and storage refusal.
 run_app_check .build/debug/Array --workspace-api-delegation-check
+run_app_check .build/debug/Array --replay-driver-check
 run_app_check .build/debug/Array --helper-wait-input-check
 run_leg python3 scripts/check-interruptible-helper-waits.py
 run_leg node --experimental-strip-types --no-warnings scripts/check-pi-helper-waits.mjs

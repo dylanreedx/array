@@ -43,6 +43,7 @@ public enum AgentCatalogQAFixture {
             "openai-codex/gpt-5.4-mini": "GPT-5.4 Mini",
             "openai-codex/gpt-5.3-codex-spark": "GPT-5.3 Codex Spark",
         ],
+        effortLevels: ["openai-codex/gpt-6-astra": ["low", "medium", "high", "xhigh"]],
         defaultModel: "openai-codex/gpt-6-astra")
 
     public static let pi: [String] = [

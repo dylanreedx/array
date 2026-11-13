@@ -37,6 +37,14 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     /// transcript), Claude's config file, or Codex's argv (`ps` shows argv).
     public let tokenFilePath: String
     public let resultDelivery: WorkspaceResultDelivery
+    /// The agent's checkout has standards, so the server lists `array_standards`.
+    public let projectStandards: Bool
+    /// Tools the server lists with `_meta["anthropic/alwaysLoad"]`, so Claude
+    /// Code sends their schemas up front instead of deferring them behind
+    /// tool search. Empty for everyone but a Claude Managed lead
+    /// (`docs/internals/managed-lead-tool-loading.md`).
+    public private(set) var alwaysLoadedTools: [String] = []
+    public static let alwaysLoadedToolsEnvironmentKey = "ARRAY_WORKSPACE_ALWAYS_LOADED_TOOLS"
 
     /// How long a client waits for one workspace tool call. An approval alert
     /// has no deadline of its own, and `wait_agents` blocks for up to an hour:
@@ -57,9 +65,11 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
         agentID: String,
         token: String,
         resultDelivery: WorkspaceResultDelivery = .push,
+        projectStandards: Bool = false,
         directory: URL = FileManager.default.temporaryDirectory
     ) {
         self.resultDelivery = resultDelivery
+        self.projectStandards = projectStandards
         self.serverExecutable = serverExecutable
         self.endpoint = endpoint
         self.agentID = agentID
@@ -72,6 +82,15 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
         // Best effort here; a launch calls `materialize()` again and fails
         // loudly if the files cannot be written.
         try? materialize()
+    }
+
+    /// This configuration with `tools` always loaded. Writes nothing: the
+    /// Claude runner materializes its configuration before every launch, so a
+    /// write here only added file I/O to the launch path.
+    public func alwaysLoading(_ tools: [String]) -> WorkspaceMCPConfiguration {
+        var copy = self
+        copy.alwaysLoadedTools = tools
+        return copy
     }
 
     public struct MaterializeError: Error, CustomStringConvertible, Sendable {
@@ -101,10 +120,19 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     /// The MCP SERVER's environment, delivered only through each provider's
     /// server config (`env`), never merged into the agent process.
     public var environment: [String: String] {
-        ["ARRAY_WORKSPACE_MCP_ENDPOINT": endpoint,
-         "ARRAY_WORKSPACE_AGENT_ID": agentID,
-         "ARRAY_WORKSPACE_MCP_TOKEN_FILE": tokenFilePath,
-         WorkspaceResultDelivery.environmentKey: resultDelivery.rawValue]
+        var environment = ["ARRAY_WORKSPACE_MCP_ENDPOINT": endpoint,
+                           "ARRAY_WORKSPACE_AGENT_ID": agentID,
+                           "ARRAY_WORKSPACE_MCP_TOKEN_FILE": tokenFilePath,
+                           WorkspaceResultDelivery.environmentKey: resultDelivery.rawValue]
+        // Absent, not "0", without standards: the server's environment is
+        // then byte-for-byte what it was before `array_standards` existed.
+        if projectStandards { environment[ProjectStandards.environmentKey] = "1" }
+        // Absent when empty, as above: every other agent's server environment,
+        // config file and argv stay exactly what they were.
+        if !alwaysLoadedTools.isEmpty {
+            environment[Self.alwaysLoadedToolsEnvironmentKey] = alwaysLoadedTools.joined(separator: ",")
+        }
+        return environment
     }
 
     public var claudeMCPConfigJSON: String {

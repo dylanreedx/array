@@ -85,6 +85,7 @@ for line in sys.stdin:
             record(dict(kind='launch', argv=sys.argv[1:], request=message, session=session_id))
         result = dict(thread=dict(id=session_id))
     elif method == 'turn/start':
+        if managed_log: record(dict(kind='turn', request=message, session=message.get('params', {}).get('threadId')))
         result = dict(turn=dict(id='fixture-turn'))
     emit(dict(id=message['id'], result=result))
     if managed_log and method == 'thread/start':

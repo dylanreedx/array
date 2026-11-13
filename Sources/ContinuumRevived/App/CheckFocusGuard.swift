@@ -32,7 +32,7 @@ enum CheckFocusGuard {
     static let parkedOrigin = CGPoint(x: -60_000, y: -60_000)
 
     /// Legs that deliberately present on a real display.
-    static let displayDependentFlags: Set<String> = ["--ui-baseline-check", "--component-lab-check"]
+    nonisolated static let displayDependentFlags: Set<String> = ["--ui-baseline-check", "--component-lab-check"]
 
     private(set) static var isInstalled = false
     /// Activation attempts the guard swallowed, in order (for diagnostics and the witness).
@@ -40,7 +40,7 @@ enum CheckFocusGuard {
     /// Windows the guard kept off the user's displays as they were ordered in.
     private(set) static var parkedWindows = 0
 
-    static func isQARun(arguments: [String] = CommandLine.arguments,
+    nonisolated static func isQARun(arguments: [String] = CommandLine.arguments,
                         environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
         if environment["CONTINUUM_QA_HOLD_OPEN"] == "1" { return false }
         if arguments.contains(where: displayDependentFlags.contains) { return false }

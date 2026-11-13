@@ -80,7 +80,8 @@ public enum ClaudeTerminalFace {
         effort: String?,
         processOwner: String,
         path: String,
-        forkSession: Bool = false
+        forkSession: Bool = false,
+        hostText: String? = nil
     ) -> [String] {
         let environment = [
             "\(AgentProcessAttribution.ownerEnvironmentKey)=\(processOwner)",
@@ -97,6 +98,7 @@ public enum ClaudeTerminalFace {
             : conversationExists ? ["--resume", sessionId] : ["--session-id", sessionId]
         return ["/usr/bin/env"] + environment + [claude.executable] + claude.prefixArgs
             + session + ["--model", model] + (effort.map { ["--effort", $0] } ?? [])
+            + (hostText.map { ["--append-system-prompt", $0] } ?? [])
     }
 
     #endif

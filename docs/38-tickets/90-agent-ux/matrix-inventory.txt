@@ -170,6 +170,8 @@ check --fresh-install-check
 check --gesture-telemetry-check
 check --helper-command-evidence-check
 check --helper-completion-check
+check --helper-evidence-provider-check
+check --helper-liveness-check
 check --helper-message-result-check
 check --helper-provider-retry-check
 check --helper-retry-check
@@ -192,6 +194,7 @@ check --language-server-release-check
 check --layout-commit-scope-check
 check --layout-commit-truth-check
 check --lead-character-check
+check --lead-checkout-ledger-check
 check --leader-activation-check
 check --leader-jump-check
 check --leader-jump-visible-indicators-check
@@ -204,12 +207,16 @@ check --managed-agent-model-spawn-check
 check --managed-agent-page-zoom-check
 check --managed-codex-hooks-check
 check --managed-codex-launch-check
+check --managed-compaction-tools-check
 check --managed-duckherd-check
 check --managed-duckherd-live-check
+check --managed-lead-context-transition-check
 check --managed-lead-plan-check
+check --managed-lead-tool-loading-check
 check --managed-mode-hooks-check
 check --managed-mode-launch-check
 check --managed-mode-persistence-check
+check --managed-run-ledger-check
 check --managed-setting-check
 check --markdown-frame-observer-check
 check --markdown-visible-rows-check
@@ -230,6 +237,7 @@ check --palette-first-responder-restore-check
 check --palette-jump-check
 check --palette-zone-check
 check --parser-identity-prefix-check
+check --part-contract-check
 check --perf-budget-camera-slope-check
 check --perf-budget-check
 check --perf-budget-geometry-hold-probe-check
@@ -237,6 +245,7 @@ check --perf-budget-raster-check
 check --perf-budget-surface-host-slope-check
 check --perf-budget-transcript-delta-check
 check --persistence-crash-safe-check
+check --personal-rules-delegation-check
 check --pi-extension-load-check
 check --picker-epoch-fence-check
 check --portal-board-check
@@ -246,12 +255,20 @@ check --project-icon-check
 check --project-lock-check
 check --project-picker-resolution-check
 check --project-root-resolution-check
+check --project-standards-index-check
 check --provider-context-support-check
 check --provider-model-picker-check
 check --provider-request-response-check
 check --push-payload-dump-check
 check --refused-spawn-teardown-check
 check --relationship-geometry-check
+check --replay-containment-check
+check --replay-driver-check
+check --replay-grader-check
+check --replay-isolation-check
+check --replay-scoring-check
+check --reply-rules-launch-check
+check --request-telemetry-check
 check --reserved-dispatch-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
@@ -259,12 +276,14 @@ check --retired-flat-write-check
 check --reveal-in-finder-check
 check --role-registry-check
 check --run-artifacts-tile-check
+check --run-ledger-gaps-check
 check --session-observer-check
 check --session-resume-check
 check --settings-modal-check
 check --settings-panel-check
 check --settings-schema-check
 check --settings-search-check
+check --settings-usage-check
 check --settle-closes-tile-check
 check --share-agent-relay-check
 check --share-copy-latency-check
@@ -314,6 +333,7 @@ check --spawn-live-framing-check
 check --spawn-placement-check
 check --spawn-rate-limit-check
 check --spawn-sizing-check
+check --standards-resolution-check
 check --stranded-tile-recovery-check
 check --stray-window-audit-check
 check --streaming-ingest-check
@@ -456,6 +476,8 @@ leg run git diff --check
 leg run python3 scripts/check-multiplayer-journey.py --relay local --name "$journey" --prepare-only
 leg run scripts/make-app-bundle.sh --skip-build --configuration debug --output "$MATRIX_RESULTS/Array.app"
 leg run swift build
+leg run swift build --configuration debug --product Array -j 2
+leg run swift build --configuration debug --product array-workspace-mcp -j 2
 leg run swift build --disable-sandbox --skip-update
 leg run swift build --disable-sandbox --skip-update --product Array
 leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
@@ -628,6 +650,8 @@ leg run_app_check .build/debug/Array --fresh-install-check
 leg run_app_check .build/debug/Array --gesture-telemetry-check
 leg run_app_check .build/debug/Array --helper-command-evidence-check
 leg run_app_check .build/debug/Array --helper-completion-check
+leg run_app_check .build/debug/Array --helper-evidence-provider-check
+leg run_app_check .build/debug/Array --helper-liveness-check
 leg run_app_check .build/debug/Array --helper-message-result-check
 leg run_app_check .build/debug/Array --helper-provider-retry-check
 leg run_app_check .build/debug/Array --helper-retry-check
@@ -649,6 +673,7 @@ leg run_app_check .build/debug/Array --language-server-release-check
 leg run_app_check .build/debug/Array --layout-commit-scope-check
 leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --lead-character-check
+leg run_app_check .build/debug/Array --lead-checkout-ledger-check
 leg run_app_check .build/debug/Array --leader-activation-check
 leg run_app_check .build/debug/Array --leader-jump-check
 leg run_app_check .build/debug/Array --leader-jump-visible-indicators-check
@@ -661,10 +686,14 @@ leg run_app_check .build/debug/Array --managed-agent-model-spawn-check
 leg run_app_check .build/debug/Array --managed-agent-page-zoom-check
 leg run_app_check .build/debug/Array --managed-codex-hooks-check
 leg run_app_check .build/debug/Array --managed-codex-launch-check
+leg run_app_check .build/debug/Array --managed-compaction-tools-check
+leg run_app_check .build/debug/Array --managed-lead-context-transition-check
 leg run_app_check .build/debug/Array --managed-lead-plan-check
+leg run_app_check .build/debug/Array --managed-lead-tool-loading-check
 leg run_app_check .build/debug/Array --managed-mode-hooks-check
 leg run_app_check .build/debug/Array --managed-mode-launch-check
 leg run_app_check .build/debug/Array --managed-mode-persistence-check
+leg run_app_check .build/debug/Array --managed-run-ledger-check
 leg run_app_check .build/debug/Array --managed-setting-check
 leg run_app_check .build/debug/Array --markdown-frame-observer-check
 leg run_app_check .build/debug/Array --markdown-visible-rows-check
@@ -684,6 +713,7 @@ leg run_app_check .build/debug/Array --palette-duplicate-root-check
 leg run_app_check .build/debug/Array --palette-first-responder-restore-check
 leg run_app_check .build/debug/Array --palette-jump-check
 leg run_app_check .build/debug/Array --palette-zone-check
+leg run_app_check .build/debug/Array --part-contract-check
 leg run_app_check .build/debug/Array --perf-budget-camera-slope-check
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
@@ -692,6 +722,7 @@ leg run_app_check .build/debug/Array --perf-budget-raster-check
 leg run_app_check .build/debug/Array --perf-budget-surface-host-slope-check
 leg run_app_check .build/debug/Array --perf-budget-transcript-delta-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
+leg run_app_check .build/debug/Array --personal-rules-delegation-check
 leg run_app_check .build/debug/Array --pi-extension-load-check
 leg run_app_check .build/debug/Array --picker-epoch-fence-check
 leg run_app_check .build/debug/Array --portal-board-check
@@ -706,17 +737,22 @@ leg run_app_check .build/debug/Array --provider-request-response-check
 leg run_app_check .build/debug/Array --push-payload-dump-check
 leg run_app_check .build/debug/Array --refused-spawn-teardown-check
 leg run_app_check .build/debug/Array --relationship-geometry-check
+leg run_app_check .build/debug/Array --replay-driver-check
+leg run_app_check .build/debug/Array --reply-rules-launch-check
+leg run_app_check .build/debug/Array --request-telemetry-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
 leg run_app_check .build/debug/Array --retired-flat-write-check
 leg run_app_check .build/debug/Array --reveal-in-finder-check
 leg run_app_check .build/debug/Array --run-artifacts-tile-check
+leg run_app_check .build/debug/Array --run-ledger-gaps-check
 leg run_app_check .build/debug/Array --session-observer-check
 leg run_app_check .build/debug/Array --session-resume-check
 leg run_app_check .build/debug/Array --settings-modal-check
 leg run_app_check .build/debug/Array --settings-panel-check
 leg run_app_check .build/debug/Array --settings-search-check
+leg run_app_check .build/debug/Array --settings-usage-check
 leg run_app_check .build/debug/Array --settle-closes-tile-check
 leg run_app_check .build/debug/Array --share-agent-relay-check
 leg run_app_check .build/debug/Array --share-copy-latency-check
@@ -766,6 +802,7 @@ leg run_app_check .build/debug/Array --spawn-live-framing-check
 leg run_app_check .build/debug/Array --spawn-placement-check
 leg run_app_check .build/debug/Array --spawn-rate-limit-check
 leg run_app_check .build/debug/Array --spawn-sizing-check
+leg run_app_check .build/debug/Array --standards-resolution-check
 leg run_app_check .build/debug/Array --stranded-tile-recovery-check
 leg run_app_check .build/debug/Array --stray-window-audit-check
 leg run_app_check .build/debug/Array --streaming-ingest-check
@@ -922,6 +959,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --companion-task-ledger-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --jelly-trajectory-probe
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --project-standards-index-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
@@ -950,8 +988,13 @@ leg run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 leg run_leg npm --prefix Tools/TaskEditor test
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
+leg run_leg python3 benchmarks/replay/check.py --replay-containment-check
+leg run_leg python3 benchmarks/replay/check.py --replay-grader-check
+leg run_leg python3 benchmarks/replay/check.py --replay-isolation-check
+leg run_leg python3 benchmarks/replay/check.py --replay-scoring-check
 leg run_leg python3 scripts/check-collaboration-pair-features.py
 leg run_leg python3 scripts/check-collaboration-pair.py
+leg run_leg python3 scripts/check-gate-prepass.py
 leg run_leg python3 scripts/check-interruptible-helper-waits.py
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --skip-build
@@ -986,7 +1029,7 @@ count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 205
+count ContinuumRevivedCoreChecks 206
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

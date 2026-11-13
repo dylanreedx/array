@@ -1525,7 +1525,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             effort: launch.effort,
             processOwner: launch.processOwner,
             path: PiAgentRunner.childEnvironment()["PATH"] ?? "/usr/bin:/bin",
-            forkSession: launch.forkSession)
+            forkSession: launch.forkSession,
+            hostText: launch.hostText)
         watch.launchArguments = arguments
         host(watch: watch, surface: AgentTerminalFaceSession(watch: watch, arguments: arguments))
     }

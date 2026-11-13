@@ -42,6 +42,8 @@ extension WorkspaceAPIService {
         guard let idempotencyKey = request.idempotencyKey?.trimmingCharacters(in: .whitespacesAndNewlines), !idempotencyKey.isEmpty else {
             return completion(.error(WorkspaceAPIError(code: .invalidRequest, message: "idempotencyKey is required for agent.delegate: a spawn without one cannot be retried safely.")))
         }
+        // Never refused: entries Array cannot use are left out and named.
+        let prepared = request.contract?.prepared(checkoutRoot: record.checkoutRoot)
         let generationAtDispatch = runtime.interactionGeneration
 
         // 2. Reserve the operation BEFORE any effect (§10.2). Same key + same
@@ -115,6 +117,15 @@ extension WorkspaceAPIService {
             let offered = catalog.models.prefix(24).joined(separator: ", ")
             return completion(fail(.unsupported, "\(childHarness.rawValue) does not offer the requested child model. Use an exact fully qualified id from its live catalogue: \(offered.isEmpty ? "none offered" : offered). No other CLI was tried."))
         }
+
+        func effortRefusal() -> String? {
+            guard let effort = request.effort else { return nil }
+            guard let accepted = AgentModelCatalog.shared.efforts(for: childModel, harness: childHarness), !accepted.isEmpty else {
+                return "The live catalogue has no effort data for \(childModel); explicit effort is unavailable. Omit effort to use the CLI default."
+            }
+            return accepted.contains(effort) ? nil : "Unsupported effort '\(effort)' for \(childModel). Accepted values: \(accepted.joined(separator: ", "))."
+        }
+        if let reason = effortRefusal() { return completion(fail(.unsupported, reason)) }
 
         // 4. Grant (§14.1). Delegation is outside the Phase 1 preset: the first
         //    request per agent session goes through the trusted approval UI.
@@ -191,16 +202,29 @@ extension WorkspaceAPIService {
             return completion(fail(.unsupported, "The selected child model is no longer offered by \(childHarness.rawValue). Delegate again with an exact catalogue id."))
         }
 
+        if let reason = effortRefusal() { return completion(fail(.unsupported, reason)) }
+
         // Approval may have let the old helper resume or disappear.
         var prompt = request.task
+        // A retry continues the same work: it keeps the failed helper's stored
+        // effort unless this call names its own. The inherited value is not
+        // refused here; launch leaves it off if the catalogue no longer lists it.
+        var retryEffort: String?
+        var retryContract: AgentDelegationContract?
         if let retryOf = request.retryOf {
             guard supervisor.mayRetry(retryOf, from: agentId), let old = supervisor.records[retryOf] else {
                 return completion(fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn."))
             }
+            retryEffort = old.thinking
+            retryContract = old.delegationContext?.contract
             let files = try? WorktreeManager().changedFiles(
                 repo: URL(fileURLWithPath: old.checkoutRoot), since: old.delegationContext?.baseHead)
             prompt += "\n\n" + AgentDelegationContext.handoff(from: old, changedFiles: files)
         }
+        // Told once, after the task; a retry keeps the failed helper's contract
+        // unless this call states its own.
+        let contract = prepared?.contract ?? retryContract
+        if let contract { prompt += "\n\n" + contract.promptText }
         // A Managed lead's helper reports through array_report (.plans/102).
         if supervisor.effectiveMode(for: agentId) == .managed {
             prompt += "\n\n" + ManagedLeadHookState.helperReportLine
@@ -213,6 +237,19 @@ extension WorkspaceAPIService {
             role: nil, prompt: prompt, isolated: false, sourceItemID: requestId,
             displayLabel: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
         func created(_ childId: AgentID) -> Reply {
+            if supervisor.qaRunLedgerRecording, let child = supervisor.records[childId] {
+                // `.plans/116` part 8: shadow evidence of the child's own tool calls,
+                // through the supervisor's observer seam; nothing reads it back.
+                supervisor.runLedger.delegated(parent: agentId.rawValue, child: childId.rawValue, source: requestId,
+                    root: child.checkoutRoot, base: child.delegationContext?.baseHead,
+                    shared: WorktreeManager.resolved(URL(fileURLWithPath: child.checkoutRoot))
+                        == WorktreeManager.resolved(URL(fileURLWithPath: record.checkoutRoot)))
+                let ledger = supervisor.runLedger
+                _ = supervisor.addRuntimeObservationObserver(for: childId) { [weak supervisor] observation in
+                    guard supervisor?.qaRunLedgerRecording == true, let sighting = HelperEvidence.Sighting(observation) else { return }
+                    ledger.observeTool(agent: childId.rawValue, sighting)
+                }
+            }
             operations.update(operationId: requestId) { op in
                 op.steps.creation = .succeeded
                 op.childAgentId = childId
@@ -242,6 +279,30 @@ extension WorkspaceAPIService {
             result.checkoutRoot = child?.checkoutRoot
             result.worktreeBranch = child?.worktreeBranch
             result.checkoutNotice = child?.delegationContext?.checkoutNotice
+            // Advice, never a refusal: paths a live sibling's contract also claims.
+            // Records are already in memory; nothing waits on disk. Past the size
+            // where comparing could cost the main actor about a millisecond, the
+            // result says so instead of comparing.
+            var notes = prepared?.notes ?? []
+            if let contract, !(contract.owns.isEmpty && contract.shared.isEmpty) {
+                let siblings = supervisor.children(of: agentId).compactMap { sibling -> (AgentID, AgentRecord, AgentDelegationContract)? in
+                    guard sibling != childId, supervisor.isRunning(sibling) || supervisor.turnPresence(for: sibling)?.phase.isLive == true,
+                          let record = supervisor.records[sibling], let theirs = record.delegationContext?.contract else { return nil }
+                    return (sibling, record, theirs)
+                }
+                let claims = siblings.reduce(contract.owns.count + contract.shared.count) { $0 + $1.2.owns.count + $1.2.shared.count }
+                if claims > Self.overlapClaimBudget {
+                    notes.append("ownership overlap not computed: \(claims) claimed paths across live siblings")
+                } else {
+                    let overlaps = siblings.compactMap { sibling, record, theirs -> AgentDelegateResult.OwnershipOverlap? in
+                        let paths = contract.claimOverlap(with: theirs)
+                        return paths.isEmpty ? nil : .init(agentId: sibling, title: record.humanDisplayName, paths: paths)
+                    }
+                    if !overlaps.isEmpty { result.ownershipOverlaps = overlaps }
+                }
+            }
+            if !notes.isEmpty { result.contractNotes = notes }
+
 
             // 7. Attachment: a tile in the PARENT's zone, framed against that zone
             //    (hazard 9), through the existing managed-agent tile route.
@@ -333,7 +394,7 @@ extension WorkspaceAPIService {
                   self.revocationGeneration(for: agentId) == generationAtGrant else { return "revoked" }
             return nil
         }
-        supervisor.handleSpawnRequestAsync(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking), mode: .free, retryOf: request.retryOf, originalBrief: request.task, checkoutOffMain: checkoutOffMain, gate: gate) { [weak self] outcome in
+        supervisor.handleSpawnRequestAsync(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? retryEffort ?? (childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)), mode: .free, retryOf: request.retryOf, originalBrief: request.task, contract: contract, checkoutOffMain: checkoutOffMain, gate: gate) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
             case let .spawned(childId):
@@ -965,6 +1026,11 @@ extension WorkspaceAPIService {
         guard let data = try? encoder.encode(normalized) else { return UUID().uuidString }
         return String(decoding: data, as: UTF8.self)
     }
+
+    /// Claimed paths (the new contract's plus its live siblings') above which
+    /// the overlap comparison is skipped and the result says so; measured to
+    /// stay near a millisecond on the main actor (about 0.35 µs a path, optimized).
+    static let overlapClaimBudget = 3_000
 
     private static func payloadHash(_ request: AgentDelegateRequest) -> String {
         var normalized = request

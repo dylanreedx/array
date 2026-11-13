@@ -559,3 +559,94 @@ func runAgentCompactionUIChecks() async throws {
         throw Failure(description: "legacy provider compact commands produced duplicate completion rows")
     }
 }
+
+@MainActor
+func runManagedCompactionToolsChecks() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    for harness in [AgentHarness.claudeCode, .codex] {
+        var launches: [AgentRunnerLaunch] = []
+        let runner = CompactionScriptRunner()
+        var supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root), makeRunner: { launch in
+            launches.append(launch)
+            return runner
+        }, submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0))
+        defer { supervisor.stopAll() }
+        let config = WorkspaceMCPConfiguration(serverExecutable: "/fixture/server", endpoint: "http://localhost/fixture", agentID: "fixture", token: "fixture", directory: root)
+        supervisor.workspaceMCPConfigurationProvider = { _, _, _ in config }
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: harness,
+            model: harness == .codex ? ManagedCodexChecks.model : ManagedModeChecks.model, thinking: AgentModelConfig.defaultThinking)
+        _ = supervisor.setMode(.managed, for: id)
+        // A prior provider session with no idle process, as after app restore.
+        var record = supervisor.records[id]!
+        record.latestTurnAt = Date()
+        record.providerSessionId = "fixture-session"
+        record.codexThreadId = "fixture-thread"
+        try AgentStore(applicationSupportDirectory: root).upsert(record)
+        supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root), makeRunner: { launch in
+            launches.append(launch)
+            return runner
+        }, submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0))
+        supervisor.workspaceMCPConfigurationProvider = { _, _, _ in config }
+        supervisor.restore()
+        _ = await supervisor.accept(.compact(AgentCompactionRequest()), for: id)
+        for _ in 0..<250 {
+            if !supervisor.isRunning(id) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        // A Claude lead also keeps its always-loaded tools across compaction.
+        let expected = harness == .claudeCode ? config.alwaysLoading(ManagedLeadHookState.alwaysLoadedTools) : config
+        try ManagedModeChecks.expect(launches.last?.workspaceMCP == expected, "compaction lost workspace tools for \(harness)")
+        let args = ClaudeAgentRunner.processArguments(model: record.model, effort: nil, sessionMode: .resume,
+            sessionId: "fixture-session", extraArgs: [], workspaceMCP: launches.last?.workspaceMCP, mode: .managed)
+        try ManagedModeChecks.expect(args.contains("--mcp-config") && args.contains("--append-system-prompt") && args.contains("--settings") && args.contains("Edit,Write,MultiEdit,NotebookEdit,ListAgents"), "compaction launch lost guidance or hooks")
+        let count = launches.count
+        try ManagedModeChecks.expect(supervisor.send("after compact", to: id), "post-compact turn refused")
+        for _ in 0..<250 {
+            if !supervisor.isRunning(id) { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try ManagedModeChecks.expect(launches.count == count && runner.snapshotOperations().contains("run:after compact"), "post-compact turn did not reuse configured runner")
+    }
+    // A compact after a mode switch launches fresh for the new mode, as a send
+    // does. Reusing the idle process kept the old mode's tools and hooks.
+    for harness in [AgentHarness.claudeCode, .codex] {
+        let support = root.appendingPathComponent("switch-\(harness.rawValue)")
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        var launches: [AgentRunnerLaunch] = []
+        var made: [CompactionScriptRunner] = []
+        let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: support), makeRunner: { launch in
+            launches.append(launch)
+            let runner = CompactionScriptRunner()
+            made.append(runner)
+            return runner
+        }, submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: support, debounceInterval: 0))
+        defer { supervisor.stopAll() }
+        let config = WorkspaceMCPConfiguration(serverExecutable: "/fixture/server", endpoint: "http://localhost/fixture", agentID: "switch", token: "fixture", directory: support)
+        supervisor.workspaceMCPConfigurationProvider = { _, _, _ in config }
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: harness,
+            model: harness == .codex ? ManagedCodexChecks.model : ManagedModeChecks.model, thinking: AgentModelConfig.defaultThinking)
+        func idle() async throws {
+            for _ in 0..<250 {
+                if !supervisor.isRunning(id) { return }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        _ = supervisor.setMode(.managed, for: id)
+        try ManagedModeChecks.expect(supervisor.send("as lead", to: id), "lead turn refused for \(harness)")
+        try await idle()
+        try ManagedModeChecks.expect(launches.count == 1 && launches[0].record.mode == .managed, "the lead did not launch Managed for \(harness)")
+        _ = supervisor.setMode(.free, for: id)
+        _ = await supervisor.accept(.compact(AgentCompactionRequest()), for: id)
+        try await idle()
+        try ManagedModeChecks.expect(launches.count == 2 && launches.last?.record.mode == .free && launches.last?.workspaceMCP == config
+            && made.last?.snapshotOperations().contains("compact") == true,
+            "a compact after Managed to Free must launch a fresh Free process for \(harness), not reuse the lead's: \(launches.count) launch(es), modes \(launches.map(\.record.mode))")
+        try ManagedModeChecks.expect(supervisor.send("as free", to: id), "free turn refused for \(harness)")
+        try await idle()
+        try ManagedModeChecks.expect(launches.count == 2 && made.last?.snapshotOperations().contains("run:as free") == true,
+            "the turn after that compact must reuse its fresh process for \(harness)")
+    }
+    print("Managed compaction tools checks passed: Claude and Codex retain workspace configuration across compaction and next turn; a compact after a mode switch launches fresh for the new mode")
+}

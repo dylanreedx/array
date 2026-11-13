@@ -35,6 +35,7 @@ public struct AgentHarnessCatalogSnapshot: Equatable, Sendable {
     public let readiness: HarnessReadiness
     public let models: [String]
     public let displayNames: [String: String]
+    public let effortLevels: [String: [String]]
     public let contextWindows: [String: Int]
     public let refreshedAt: Date?
     /// The model the CLI itself calls its default (claude's `default` entry,
@@ -48,6 +49,7 @@ public struct AgentHarnessCatalogSnapshot: Equatable, Sendable {
         models: [String],
         displayNames: [String: String] = [:],
         contextWindows: [String: Int] = [:],
+        effortLevels: [String: [String]] = [:],
         refreshedAt: Date? = nil,
         defaultModel: String? = nil
     ) {
@@ -55,6 +57,7 @@ public struct AgentHarnessCatalogSnapshot: Equatable, Sendable {
         self.readiness = readiness
         self.models = models
         self.displayNames = displayNames
+        self.effortLevels = effortLevels
         self.contextWindows = contextWindows
         self.refreshedAt = refreshedAt
         self.defaultModel = defaultModel

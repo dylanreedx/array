@@ -26,7 +26,7 @@ final class IOSPreviewMCPCheckClient {
             guard let api else { reply(["status": "error"]); return }
             api.handleMCPRequest(request, completion: reply)
         }
-        guard let config = host.configuration(for: agent, serverExecutable: helper), FileManager.default.isExecutableFile(atPath: helper) else {
+        guard let config = host.configuration(for: agent, serverExecutable: helper, projectStandards: false), FileManager.default.isExecutableFile(atPath: helper) else {
             throw WorkspaceAPIDeviceChecks.Failure(message: "rebuilt native MCP helper required")
         }
         configuration = config
