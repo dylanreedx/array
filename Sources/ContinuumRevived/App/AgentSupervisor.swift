@@ -1072,6 +1072,9 @@ final class AgentSupervisor {
     private var queuedSpawns: [() -> Void] = []
     private var spawnInFlight = false
     private var pendingSpawnCommits: [UUID: (Result<SpawnCheckoutPlan.Checkout, any Error>) -> Void] = [:]
+    /// QA: runs on main when an off-main git step has answered, before the
+    /// child is committed — the gap in which a synchronous spawn can land.
+    var _spawnCheckoutResolvedHookForQA: (() -> Void)?
     /// P2C.4: the branch each agent's working directory is on. Cached because the
     /// tile header that renders it re-lays out on every streamed token, and a
     /// `git rev-parse` per render is a process launch per token.
@@ -5983,10 +5986,14 @@ final class AgentSupervisor {
         }
         let managed = parent.mode == .managed
         let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
-        let overlapping = managed && records.values.contains {
-            $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
-                && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
-                && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)
+        // Another of this parent's helpers is live in the parent's checkout, so a
+        // new one gets its own worktree. Asked again at commit (see below).
+        func checkoutBusy() -> Bool {
+            managed && records.values.contains {
+                $0.parentAgentID == parentId && $0.capabilities != .observedReadOnly
+                    && (isRunning($0.id) || turnPresence(for: $0.id)?.phase.isLive == true)
+                    && WorktreeManager.resolved(URL(fileURLWithPath: $0.checkoutRoot)) == WorktreeManager.resolved(checkout)
+            }
         }
         // The id is minted before the git step because the worktree slug is
         // derived from it (see `spawn`).
@@ -5996,16 +6003,33 @@ final class AgentSupervisor {
         let childPrompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? request.prompt : agentMessageText(request.prompt, from: parentId)
         let isolationTitle = request.displayLabel ?? originalBrief ?? request.prompt
-        let plan = SpawnCheckoutPlan(
-            headRepo: managed ? checkout : projectRoot,
-            requestIsolated: request.isolated,
-            overlapping: overlapping,
-            worktreeRepo: managed ? checkout : projectRoot,
-            slug: WorktreeManager.slug(
-                role: request.role, prompt: overlapping ? isolationTitle : childPrompt, id: childID))
+        func makePlan(overlapping: Bool) -> SpawnCheckoutPlan {
+            SpawnCheckoutPlan(
+                headRepo: managed ? checkout : projectRoot,
+                requestIsolated: request.isolated,
+                overlapping: overlapping,
+                worktreeRepo: managed ? checkout : projectRoot,
+                slug: WorktreeManager.slug(
+                    role: request.role, prompt: overlapping ? isolationTitle : childPrompt, id: childID))
+        }
+        let worktrees = self.worktrees
 
-        let commit: (Result<SpawnCheckoutPlan.Checkout, any Error>) -> Void = { [weak self] resolution in
-            guard let self else { return }
+        func resolveThenCommit(_ plan: SpawnCheckoutPlan) {
+            guard checkoutOffMain else {
+                return commit(plan, Result { try plan.resolve(with: worktrees) })
+            }
+            let token = UUID()
+            pendingSpawnCommits[token] = { resolution in commit(plan, resolution) }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let resolution = Result { try plan.resolve(with: worktrees) }
+                DispatchQueue.main.async {
+                    self?.pendingSpawnCommits.removeValue(forKey: token)?(resolution)
+                }
+            }
+        }
+
+        func commit(_ plan: SpawnCheckoutPlan, _ resolution: Result<SpawnCheckoutPlan.Checkout, any Error>) {
+            let overlapping = plan.overlapping
             let checkoutResult: SpawnCheckoutPlan.Checkout
             do { checkoutResult = try resolution.get() } catch {
                 // The isolated spawn refuses to fall back to the shared checkout (P2C.2),
@@ -6020,6 +6044,7 @@ final class AgentSupervisor {
                 return completion(.gateClosed(closed))
             }
             if checkoutOffMain {
+                _spawnCheckoutResolvedHookForQA?()
                 // Main ran other work during the git step: the parent may be gone
                 // and a synchronous spawn may have taken the last child slot.
                 guard self.records[parentId] != nil else {
@@ -6033,6 +6058,12 @@ final class AgentSupervisor {
                         .childCapped(children: active, cap: cap), for: parentId,
                         handle: request.sourceItemID, requestedRole: request.role))
                 }
+                // A spawn that landed during the git step may now be live in the
+                // shared checkout this child was going to use. Take the busy-
+                // checkout path, its own worktree, as a spawn arriving now would.
+                if !overlapping, !checkoutResult.isolate, checkoutBusy() {
+                    return resolveThenCommit(makePlan(overlapping: true))
+                }
             }
             answer(self.commitSpawn(
                 request, from: parentId, parent: parent, parentHarness: parentHarness,
@@ -6041,18 +6072,7 @@ final class AgentSupervisor {
                 managed: managed, checkout: checkout, projectRoot: projectRoot,
                 overlapping: overlapping, isolationTitle: isolationTitle, resolved: checkoutResult))
         }
-        let worktrees = self.worktrees
-        guard checkoutOffMain else {
-            return commit(Result { try plan.resolve(with: worktrees) })
-        }
-        let token = UUID()
-        pendingSpawnCommits[token] = commit
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let resolution = Result { try plan.resolve(with: worktrees) }
-            DispatchQueue.main.async {
-                self?.pendingSpawnCommits.removeValue(forKey: token)?(resolution)
-            }
-        }
+        resolveThenCommit(makePlan(overlapping: checkoutBusy()))
     }
 
     /// A worktree made for a child that was then not created. Its branch has no

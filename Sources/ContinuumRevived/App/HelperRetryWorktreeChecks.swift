@@ -191,6 +191,33 @@ enum HelperRetryWorktreeChecks {
         print("Helper worktree checks passed: real runner cwd, first shared, concurrent distinct/title slugs, nested lead HEAD, dirty retention and free unchanged")
         b.supervisor.stopAll()
 
+        // A native spawn that lands while a delegation's git step runs off main
+        // takes the shared checkout first. The delegation must then get its own
+        // worktree rather than commit into the same checkout (2026-11-13 review).
+        let g = try bench("helper-overlap-gap"); defer { g.tearDown() }
+        let gRoot = URL(fileURLWithPath: g.supervisor.records[g.f.agentId]!.checkoutRoot)
+        try repository(gRoot)
+        try expect(g.supervisor.setProviderSettings(agentID: g.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "gap lead harness refused")
+        try expect(g.supervisor.setMode(.managed, for: g.f.agentId), "gap lead mode refused")
+        var native: AgentID?
+        g.supervisor._spawnCheckoutResolvedHookForQA = {
+            g.supervisor._spawnCheckoutResolvedHookForQA = nil
+            native = g.supervisor.handleSpawnRequest(
+                SpawnRequest(role: nil, prompt: "HOLD native spawn in the gap", isolated: false),
+                from: g.f.agentId)
+        }
+        let delegated = try child(await request(g, task: "HOLD delegated across the gap"))
+        try expect(g.supervisor._spawnCheckoutResolvedHookForQA == nil, "the delegation never reached the gap after its git step")
+        guard let native else { throw WorkspaceAgentReportChecks.Failure(description: "the native spawn in the gap was refused") }
+        let nativeRoot = URL(fileURLWithPath: g.supervisor.records[native]!.checkoutRoot)
+        let delegatedRoot = URL(fileURLWithPath: g.supervisor.records[delegated]!.checkoutRoot)
+        try expect(WorktreeManager.resolved(nativeRoot) == WorktreeManager.resolved(gRoot), "the native spawn did not take the shared checkout")
+        try expect(WorktreeManager.resolved(delegatedRoot) != WorktreeManager.resolved(gRoot)
+                   && delegatedRoot.deletingLastPathComponent().lastPathComponent == ".worktrees",
+                   "two helpers on one checkout: the delegation committed into the checkout a native spawn took during its git step")
+        print("Helper overlap gap check passed: a native spawn during the git step keeps the shared checkout; the delegation gets its own worktree")
+        g.supervisor.stopAll()
+
         let n = try bench("helper-nongit"); defer { n.tearDown() }
         try expect(n.supervisor.setMode(.managed, for: n.f.agentId), "non-git lead mode refused")
         let n1 = try child(await request(n, task: "HOLD first non-git")); _ = try await capture(n, n1)
