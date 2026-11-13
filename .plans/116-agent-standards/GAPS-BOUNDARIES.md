@@ -139,3 +139,11 @@ Documented dependency bootstrap: `README.md:24`,
 already-built `<GHOSTTY_SRC>/macos/GhosttyKit.xcframework`; it does not copy
 `.build` or build Ghostty. Ran that script successfully in this bench using
 its default local Ghostty source checkout.
+
+The lead subsequently requested explicit retry/Free opt-in cases. The witness
+now stops the resumed helper, retries through production MCP, checks a distinct
+checkout plus retry identity and retained old private file, and switches the
+lead to Free with the preference still enabled to check shared Free placement.
+These additional assertions are also uncompiled/unrun: the latest preflight
+again refused four active builds (34% free memory, 59.3 GiB disk). No production
+policy changes were made in either lifecycle extension.

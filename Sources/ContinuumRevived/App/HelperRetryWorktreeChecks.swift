@@ -151,6 +151,21 @@ enum HelperRetryWorktreeChecks {
         let countAfterResume = try worktreeCount(root)
         let retained = try String(contentsOf: oneRoot.appendingPathComponent("resume-private.txt"), encoding: .utf8)
         try expect(countAfterResume == countBeforeResume && retained == "private", "resume minted a checkout or lost dirty helper files")
+        // Retry keeps the old dirty checkout and launches a distinct child.
+        b.supervisor.stop(one)
+        let retryReply = try await request(b, task: "HOLD retry isolated helper", retry: one)
+        let retried = try child(retryReply)
+        let retryCapture = try await capture(b, retried)
+        let retryRoot = URL(fileURLWithPath: retryCapture["cwd"] as! String)
+        try expect(![root, childRoot, oneRoot, twoRoot, nestedRoot].contains(retryRoot), "retry reused a writable checkout")
+        try expect(b.supervisor.records[retried]?.delegationContext?.retryOf == one, "retry lost its original helper identity")
+        let oldPrivate = try String(contentsOf: oneRoot.appendingPathComponent("resume-private.txt"), encoding: .utf8)
+        try expect(oldPrivate == "private", "retry discarded the old helper's dirty state")
+        // The experimental preference must not alter Free delegation policy.
+        try expect(b.supervisor.setMode(.free, for: b.f.agentId), "Free mode refused")
+        let free = try child(await request(b, task: "HOLD Free policy with isolation preference"))
+        let freeCapture = try await capture(b, free)
+        try expect(freeCapture["cwd"] as? String == root.path, "isolation preference changed Free checkout policy")
         let n = try bench("first-helper-nongit"); defer { n.tearDown() }
         try expect(n.supervisor.setProviderSettings(agentID: n.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "non-git harness refused")
         try expect(n.supervisor.setMode(.managed, for: n.f.agentId), "non-git mode refused")
@@ -160,7 +175,7 @@ enum HelperRetryWorktreeChecks {
         let refused = try await request(n, task: "non-git must refuse")
         try expect(WorkspaceAgentReportChecks.errorCode(refused) == "unsupported" && n.supervisor.records.count == count,
                    "non-git isolation silently shared or created a child")
-        print("PASS first helper isolation: production MCP cwd, dirty HEAD disclosure, concurrent/nested/resumed ownership and non-git refusal")
+        print("PASS first helper isolation: production MCP cwd, dirty HEAD disclosure, concurrent/nested/resumed/retried ownership, Free compatibility and non-git refusal")
     }
 
     static func retry() async throws {
