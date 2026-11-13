@@ -166,3 +166,27 @@ remove operation after the run ended. The corrected rebuild preflight refused
 4 active builds (35% memory, 60.8 GiB disk), so the corrected complete lifecycle
 witness remains unverified. Log: `/tmp/gaps-isolation-expanded.log`.
 No universal gap22 closure or full-lifecycle GREEN is claimed.
+
+## Final corrected lifecycle GREEN
+
+Rebuilt `11ab0021` successfully after resource preflight (2 builds, 41% free
+memory, 58.7 GiB disk). Runtime then reached the final Free-policy assertion:
+that assertion incorrectly compared raw `/var` versus `/private/var` paths.
+Changed it to the established `WorktreeManager.resolved` comparison used by
+`worktrees()`. Rebuilt the corrected source successfully in 97.36 s after a
+new preflight (2 builds, 33% memory, 53.0 GiB disk).
+
+The complete `--first-helper-isolation-check` now exits **0** and prints:
+`PASS first helper isolation: production MCP cwd, dirty HEAD disclosure,
+concurrent/nested/resumed/retried ownership, Free compatibility and non-git
+refusal`. This includes the explicit first-helper created-worktree ownership
+assertion before siblings exist. Log: `/tmp/gaps-isolation-final-direct.log`.
+Same isolation/environment rules as previous runs; no live providers or tmux.
+
+Immediately attempted normal `scripts/run-matrix.sh --helper-isolation` with
+per-build resource/SDKROOT wrapper. It again refused before any build or leg:
+`another matrix or release build holds /tmp/array-matrix.lock`.
+Log: `/tmp/gaps-isolation-final-matrix.log`. No lock bypass. Thus full lifecycle
+is direct GREEN, but **actual matrix reporting remains pending**. Production
+policy remains `04dbe334`, OFF, with default-sharing risk OPEN. Lead-arranged
+review must inspect this final corrected witness before integration.

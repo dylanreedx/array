@@ -166,7 +166,8 @@ enum HelperRetryWorktreeChecks {
         try expect(b.supervisor.setMode(.free, for: b.f.agentId), "Free mode refused")
         let free = try child(await request(b, task: "HOLD Free policy with isolation preference"))
         let freeCapture = try await capture(b, free)
-        try expect(freeCapture["cwd"] as? String == root.path, "isolation preference changed Free checkout policy")
+        try expect(WorktreeManager.resolved(URL(fileURLWithPath: freeCapture["cwd"] as! String)) == WorktreeManager.resolved(root),
+                   "isolation preference changed Free checkout policy")
         let n = try bench("first-helper-nongit"); defer { n.tearDown() }
         try expect(n.supervisor.setProviderSettings(agentID: n.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "non-git harness refused")
         try expect(n.supervisor.setMode(.managed, for: n.f.agentId), "non-git mode refused")
