@@ -198,7 +198,10 @@ enum HelperContextDietChecks {
             try WorkspaceAgentReportChecks.expect(!branches.contains(child.worktreeBranch ?? "UNEXPECTED"), "unowned branch must retire")
         } else {
             try WorkspaceAgentReportChecks.expect(FileManager.default.fileExists(atPath: checkout.appendingPathComponent("preserve.txt").path), "unknown or owned checkout must survive: " + mode)
-            try WorkspaceAgentReportChecks.expect(trees.contains(checkout.path) && branches.contains(child.worktreeBranch ?? "UNEXPECTED"), "preserved/failed-removal checkout must retain registration and branch: " + mode)
+            try WorkspaceAgentReportChecks.expect(branches.contains(child.worktreeBranch ?? "UNEXPECTED"), "owned/unknown/failed-removal checkout must retain its branch: " + mode)
+            if mode != "remove-failure" {
+                try WorkspaceAgentReportChecks.expect(trees.contains(checkout.path), "owned or unknown checkout must retain registration: " + mode)
+            }
         }
         if mode == "corrupt" {
             try WorkspaceAgentReportChecks.expect((try? Data(contentsOf: store.layout.agentFile(id: child.id))) == Data("CORRUPT-OWNER-SENTINEL".utf8), "corrupt owner bytes must remain unchanged")

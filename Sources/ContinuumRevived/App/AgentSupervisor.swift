@@ -6458,6 +6458,15 @@ final class AgentSupervisor {
                 // deletion. Remove the branch only after removal succeeds.
                 guard store.ownershipPresence(id: child) == .absent else { return }
                 try worktrees.remove(repo: repo, path: worktree.path, force: true)
+                // Git can deregister a checkout it could not access and still
+                // exit zero. Its status alone cannot authorize branch deletion.
+                var remaining = stat()
+                let probe = lstat(worktree.path.path, &remaining)
+                let failure = errno
+                guard probe != 0 && failure == ENOENT else {
+                    fputs("Unowned helper branch retained: checkout removal is not definitive\n", stderr)
+                    return
+                }
                 if let branch = worktree.branch { try worktrees.deleteBranch(repo: repo, branch: branch) }
             } catch {
                 fputs("Unowned helper checkout cleanup could not complete: \(error)\n", stderr)
