@@ -602,7 +602,7 @@ final class WorkspaceAPIService {
             observedAt: Date(),
             displayName: record.humanDisplayName,
             nameSource: record.displayNameSource.workspaceAPINameSource)
-        if ProjectStandards.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)) != offeredStandards {
+        if ProjectStandardsPresence.shared.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true)) != offeredStandards {
             response.toolListNote = ProjectStandards.toolListNote
         }
         // Enforce the byte ceiling by shedding history, newest kept, never by

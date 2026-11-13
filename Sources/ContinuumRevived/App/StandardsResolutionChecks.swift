@@ -273,6 +273,62 @@ enum StandardsResolutionChecks {
         guard case .error(let off)? = read(claudeA, [:]), off.code == .permissionDenied else {
             throw Failure(description: "with workspace tools off, standards.read is denied like every operation")
         }
+        try launchBound(f, supervisor)
+    }
+
+    /// Review finding 3: deciding standards presence at launch is bounded. A
+    /// `docs/standards` whose subfolders are symlinks into one large folder was
+    /// listed through every link, on the main thread, at every launch.
+    /// Through the production launch builder; the fastest of three launches
+    /// must stay far under what that listing cost (hundreds of ms here).
+    static func launchBound(_ f: WorkspaceAPIChecks.Fixture, _ supervisor: AgentSupervisor) throws {
+        let fm = FileManager.default
+        let root = f.tempRoot.appendingPathComponent("standards-bound", isDirectory: true)
+        let big = f.tempRoot.appendingPathComponent("standards-bound-big", isDirectory: true)
+        try fm.createDirectory(at: big, withIntermediateDirectories: true)
+        for n in 0..<20_000 { fm.createFile(atPath: big.appendingPathComponent("f\(n)").path, contents: nil) }
+        let folder = root.appendingPathComponent("docs/standards", isDirectory: true)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        for n in 0..<40 { try fm.createSymbolicLink(atPath: folder.appendingPathComponent("linked\(n)").path, withDestinationPath: big.path) }
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: .claudeCode, model: "anthropic/claude-sonnet-5-5",
+                                  thinking: "high", projectId: f.projectPa, projectRoot: root)
+        supervisor.setWorkspaceToolsEnabled(agentID: id, true)
+        _ = supervisor.setMode(.free, for: id)
+        var fastest = Double.infinity
+        var offered = true
+        for _ in 0..<3 {
+            guard let record = supervisor.records[id] else { throw Failure(description: "no record for the bound agent") }
+            let start = DispatchTime.now().uptimeNanoseconds
+            let launch = supervisor.runnerLaunch(for: id, record: record)
+            fastest = min(fastest, Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6)
+            offered = launch.projectStandards
+            if let config = launch.workspaceMCP {
+                try? fm.removeItem(atPath: config.tokenFilePath)
+                try? fm.removeItem(atPath: config.claudeMCPConfigPath)
+            }
+        }
+        try expect(!offered, "a docs/standards with no standard reachable without following a symlink offered array_standards")
+        try expect(fastest < 50, "the launch builder spent \(String(format: "%.1f", fastest)) ms deciding standards presence on the main thread")
+        // After a turn ends the answer is listed off the main thread, so the
+        // next launch lists nothing there; a change since is still seen.
+        func launchOffered() throws -> Bool {
+            guard let record = supervisor.records[id] else { throw Failure(description: "no record for the bound agent") }
+            let launch = supervisor.runnerLaunch(for: id, record: record)
+            if let config = launch.workspaceMCP {
+                try? fm.removeItem(atPath: config.tokenFilePath)
+                try? fm.removeItem(atPath: config.claudeMCPConfigPath)
+            }
+            return launch.projectStandards
+        }
+        ProjectStandardsPresence.shared.refresh(checkoutRoot: root)
+        ProjectStandardsPresence.shared.drain()
+        let listedBefore = ProjectStandardsPresence.shared.qaListedOnMain
+        try expect(!(try launchOffered()) && ProjectStandardsPresence.shared.qaListedOnMain == listedBefore,
+                   "a launch after the off-main look listed docs/standards on the main thread")
+        try fm.createDirectory(at: folder.appendingPathComponent("project"), withIntermediateDirectories: true)
+        try Data("# Late\n".utf8).write(to: folder.appendingPathComponent("project/late.md"))
+        try expect(try launchOffered(), "a standard added since the last look was not seen at the next launch")
+        print(String(format: "standards resolution: launch with a linked large docs/standards took %.2f ms (fastest of 3)", fastest))
     }
 
     // MARK: - Helpers

@@ -67,11 +67,17 @@ No matching, no ranking, no model call. Matching is wave 4.
 
 ## Offered only where there are standards
 
-One decision per launch: `AgentSupervisor.runnerLaunch` calls
-`ProjectStandards.isPresent`, a name listing that reads no file, and carries
-the answer on `AgentRunnerLaunch.projectStandards`. Present means
-`docs/standards` is a symlink (so the refusal is seen) or holds a `*.md` other
-than `README.md` at its top level or one folder down.
+One decision per launch: `AgentSupervisor.runnerLaunch` asks
+`ProjectStandardsPresence` and carries the answer on
+`AgentRunnerLaunch.projectStandards`. Present means `docs/standards` is a
+symlink (so the refusal is seen) or holds a `*.md` other than `README.md` at
+its top level or one real folder down. The look reads names only, at most 512,
+and never descends a symlinked folder; past that budget the answer is present.
+It runs on its own queue after each turn, when an agent is made and after a
+restore. The launch keeps that answer while the `lstat` of every folder it
+listed is unchanged, so it lists nothing on the main thread; only a checkout
+first seen, or changed since its last look, is listed there, within the same
+budget. Witness: `--standards-resolution-check` (its launch-bound section).
 
 - Claude and Codex: the MCP server gets `ARRAY_WORKSPACE_PROJECT_STANDARDS=1`
   and only then lists `array_standards` (`WorkspaceMCPConfiguration`).

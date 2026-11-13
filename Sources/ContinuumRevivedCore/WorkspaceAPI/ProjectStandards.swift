@@ -396,18 +396,75 @@ public enum ProjectStandards {
     /// True when `docs/standards` is a symlink (reads then refuse it, naming
     /// it), or holds a `*.md` other than `README.md` at its top level or one
     /// folder down.
+    ///
+    /// Bounded: at most `presenceEntryBudget` names are read, and a folder
+    /// is descended only when it is a real directory, never through a
+    /// symlink (the reader never follows one either). Past the budget the
+    /// answer is present, and the reader reports what it finds.
     public static func isPresent(checkoutRoot: URL, fileManager: FileManager = .default) -> Bool {
-        let folder = checkoutRoot.appendingPathComponent(directory, isDirectory: true)
-        guard let type = (try? fileManager.attributesOfItem(atPath: folder.path))?[.type] as? FileAttributeType else { return false }
-        if type == .typeSymbolicLink { return true }
-        guard type == .typeDirectory else { return false }
-        func isCandidate(_ name: String) -> Bool { name.hasSuffix(".md") && name != readmeName }
-        for name in (try? fileManager.contentsOfDirectory(atPath: folder.path)) ?? [] {
-            if isCandidate(name) { return true }
-            let nested = (try? fileManager.contentsOfDirectory(atPath: folder.appendingPathComponent(name).path)) ?? []
-            if nested.contains(where: isCandidate) { return true }
+        presence(checkoutRoot: checkoutRoot).present
+    }
+
+    public static let presenceEntryBudget = 512
+
+    /// One folder's `lstat` identity: a name added, removed or renamed in it
+    /// changes its mtime, so an unchanged stamp means an unchanged listing.
+    struct PresenceStamp: Equatable {
+        var path: String
+        var exists = false, mode: mode_t = 0, device: Int32 = 0, inode: UInt64 = 0
+        var modified = timespec(), changed = timespec()
+        init(_ path: String) {
+            self.path = path
+            var info = stat()
+            guard lstat(path, &info) == 0 else { return }
+            exists = true; mode = info.st_mode & S_IFMT; device = info.st_dev; inode = info.st_ino
+            modified = info.st_mtimespec; changed = info.st_ctimespec
         }
-        return false
+        static func == (a: Self, b: Self) -> Bool {
+            a.path == b.path && a.exists == b.exists && a.mode == b.mode && a.device == b.device && a.inode == b.inode
+                && a.modified.tv_sec == b.modified.tv_sec && a.modified.tv_nsec == b.modified.tv_nsec
+                && a.changed.tv_sec == b.changed.tv_sec && a.changed.tv_nsec == b.changed.tv_nsec
+        }
+    }
+
+    /// The presence answer, the stamps of every folder it listed, and how many
+    /// folders it opened.
+    static func presence(checkoutRoot: URL) -> (present: Bool, stamps: [PresenceStamp], listed: Int) {
+        let folder = checkoutRoot.appendingPathComponent(directory, isDirectory: true).path
+        let top = PresenceStamp(folder)
+        guard top.exists else { return (false, [top], 0) }
+        if top.mode == S_IFLNK { return (true, [top], 0) }
+        guard top.mode == S_IFDIR else { return (false, [top], 0) }
+        func isCandidate(_ name: String) -> Bool { name.hasSuffix(".md") && name != readmeName }
+        var budget = presenceEntryBudget, stamps = [top], listed = 0
+        /// Names and whether each is a real directory; nil past the budget.
+        func names(_ path: String) -> [(name: String, isDirectory: Bool)]? {
+            guard let handle = opendir(path) else { return [] }
+            defer { closedir(handle) }
+            listed += 1
+            var found: [(String, Bool)] = []
+            while let item = readdir(handle) {
+                let name = withUnsafePointer(to: &item.pointee.d_name) {
+                    $0.withMemoryRebound(to: CChar.self, capacity: Int(item.pointee.d_namlen) + 1) { String(cString: $0) }
+                }
+                if name == "." || name == ".." { continue }
+                budget -= 1
+                if budget < 0 { return nil }
+                var isDirectory = item.pointee.d_type == DT_DIR
+                if item.pointee.d_type == DT_UNKNOWN { isDirectory = PresenceStamp(path + "/" + name).mode == S_IFDIR }
+                found.append((name, isDirectory))
+            }
+            return found
+        }
+        guard let entries = names(folder) else { return (true, stamps, listed) }
+        if entries.contains(where: { isCandidate($0.name) }) { return (true, stamps, listed) }
+        for entry in entries where entry.isDirectory {
+            let path = folder + "/" + entry.name
+            stamps.append(PresenceStamp(path))
+            guard let nested = names(path) else { return (true, stamps, listed) }
+            if nested.contains(where: { isCandidate($0.name) }) { return (true, stamps, listed) }
+        }
+        return (false, stamps, listed)
     }
 
     /// What `workspace.context` says when presence changed after launch.
@@ -416,6 +473,54 @@ public enum ProjectStandards {
 
     public static func version(of data: Data) -> String {
         "sha256:" + SHA256.hash(data: data).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Standards presence for the launch path (review of the orchestration
+/// release, finding 3). Each answer is kept with the stamps of the folders it
+/// listed. A launch checks those stamps, one `lstat` each, and lists nothing
+/// while they hold; the listing itself runs on this type's own queue, after
+/// each turn and when an agent is made, so the next launch finds it ready.
+/// Only a checkout first seen, or changed since its last look, is listed on
+/// the caller's thread, and that listing is bounded.
+public final class ProjectStandardsPresence: @unchecked Sendable {
+    public static let shared = ProjectStandardsPresence()
+    private struct Answer { var present: Bool; var stamps: [ProjectStandards.PresenceStamp] }
+    private let lock = NSLock()
+    private var answers: [String: Answer] = [:]
+    private var listedOnMain = 0
+    private let queue = DispatchQueue(label: "dev.array.standards-presence", qos: .utility)
+
+    public init() {}
+
+    /// The answer for a launch now: the kept one while its stamps hold.
+    public func isPresent(checkoutRoot: URL) -> Bool {
+        if let kept = lock.withLock({ answers[checkoutRoot.path] }), kept.stamps.allSatisfy({ ProjectStandards.PresenceStamp($0.path) == $0 }) {
+            return kept.present
+        }
+        return look(checkoutRoot)
+    }
+
+    /// Looks again off the calling thread when the kept answer is missing or stale.
+    public func refresh(checkoutRoot: URL) {
+        queue.async { _ = self.isPresent(checkoutRoot: checkoutRoot) }
+    }
+
+    /// Checks only: waits for every refresh so far.
+    public func drain() { queue.sync {} }
+    /// Checks only: folders listed on the main thread so far.
+    public var qaListedOnMain: Int { lock.withLock { listedOnMain } }
+
+    private func look(_ checkoutRoot: URL) -> Bool {
+        let found = ProjectStandards.presence(checkoutRoot: checkoutRoot)
+        let main = Thread.isMainThread
+        lock.withLock {
+            if main { listedOnMain += found.listed }
+            // Helper worktrees come and go: the kept set stays small.
+            if answers.count >= 1_024 { answers.removeAll() }
+            answers[checkoutRoot.path] = Answer(present: found.present, stamps: found.stamps)
+        }
+        return found.present
     }
 }
 

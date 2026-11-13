@@ -65,7 +65,7 @@ from plan documents.
 | Lead tools loaded up front | **Changes what an agent receives**: about 2,900 more start-up tokens for a Claude Managed lead only. It saves the turn a lead spent loading the tools before its first delegation. |
 | `effort` and `contract` in the delegate schema | **Changes what an agent receives**: a longer delegate tool description for every agent. Both parameters are optional. |
 | Live effort list | A stored effort the CLI no longer lists is left out of the launch, so the CLI uses its own default instead of failing. |
-| `array_standards` | Offered only where `docs/standards` exists, and the Array repo has none. The presence test is a name listing with no file reads. |
+| `array_standards` | Offered only where `docs/standards` exists, and the Array repo has none. The presence test reads names only, at most 512, and never through a symlinked folder. It runs off the main thread after each turn and when an agent is made; a launch checks that answer still holds with one `lstat` per folder it listed. |
 
 ## Off by default
 

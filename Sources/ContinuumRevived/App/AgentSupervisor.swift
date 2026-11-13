@@ -1176,10 +1176,12 @@ final class AgentSupervisor {
     private(set) var standardsOfferedAtLaunch: [AgentID: Bool] = [:]
 
     /// What a turn's runner is built from. Decides standards presence ONCE
-    /// (a name listing, no file reads) and hands that one answer to the MCP
-    /// configuration, Pi's argv and environment, and `workspace.context`.
+    /// and hands that one answer to the MCP configuration, Pi's argv and
+    /// environment, and `workspace.context`. The answer was listed off the
+    /// main thread after the last turn or when the agent was made; the
+    /// launch only checks it still holds (`ProjectStandardsPresence`).
     func runnerLaunch(for id: AgentID, record: AgentRecord) -> AgentRunnerLaunch {
-        let standards = ProjectStandards.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
+        let standards = ProjectStandardsPresence.shared.isPresent(checkoutRoot: URL(fileURLWithPath: record.checkoutRoot, isDirectory: true))
         standardsOfferedAtLaunch[id] = standards
         var workspaceMCP = workspaceMCPConfigurationProvider?(id, record.harness ?? .pi, standards)
         // Only Claude reads the always-load pin; a helper is Free and parented.
@@ -3029,6 +3031,9 @@ final class AgentSupervisor {
         reconcileManagedMode()
         restoreHelperMessageSubscriptions()
         settleHelpersCutOffByRestart()
+        for root in Set(records.values.map(\.checkoutRoot)) {
+            ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
+        }
         // The first flush reads each lead's journal once: staged and held rows
         // from the previous launch are rebuilt there.
         Task { @MainActor [weak self] in await self?.flushHelperCompletions() }
@@ -3377,6 +3382,9 @@ final class AgentSupervisor {
             record.workspaceToolsEnabled = WorkspaceToolsConfig.enabledForNewAgents(workspaceToolsPermission())
             records[id] = record
             persist(record)
+        }
+        if let root = records[id]?.checkoutRoot {
+            ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
         }
         if let prompt, !prompt.isEmpty {
             if let parentAgentID {
@@ -12281,6 +12289,10 @@ final class AgentSupervisor {
                                   lead: effectiveMode(for: id) == .managed)
             }
         case let .turnCompleted(_, turnID, outcome, _):
+            // The next launch then finds standards presence already listed.
+            if let root = records[id]?.checkoutRoot {
+                ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
+            }
             if qaRunLedgerRecording, let record = records[id] {
                 runLedger.usageTurnEnded(agent: id.rawValue, turn: turnID, Self.usageIdentity(record),
                                          record: AgentTokenTelemetryConfig.enabled(defaults: managedModeDefaults))
