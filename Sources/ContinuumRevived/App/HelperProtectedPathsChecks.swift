@@ -238,6 +238,15 @@ enum HelperProtectedPathsChecks {
 
         try expect(await supervisor.accept(.sendPrompt(AgentPrompt("HOLD-lead")), for: lead) == .accepted, "lead submission refused")
         try await wait("lead did not start") { supervisor.isRunning(lead) }
+        // This opted-in fixture declares through the same MCP configuration
+        // the production lead launch received, before any helper effects.
+        guard let chooser = supervisor.runnerLaunch(for: lead, record: supervisor.records[lead]!).workspaceMCP,
+              chooser.chooser else {
+            throw WorkspaceAgentReportChecks.Failure(description: "helper-protected-paths: chooser launch configuration absent")
+        }
+        let declaration = try await WorkspaceAgentReportChecks.call(chooser, "array_plan",
+            ["choice": "solo", "reason": "exercise protected-path reporting"])
+        try expect(!declaration.isError, "lead declaration refused: \(declaration.reply)")
         // The first helper shares the lead's checkout; the second overlaps it
         // and gets its own worktree.
         let helpers: [(name: String, actions: [Action], contract: [String: Any]?)] = [

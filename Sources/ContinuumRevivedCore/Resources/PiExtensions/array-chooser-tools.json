@@ -4,7 +4,7 @@
       "name": "array_plan",
       "label": "Choose solo or split",
       "op": "agent.plan",
-      "description": "Declare one task choice. Solo keeps implementation with you. Split declares two or more independent parts, each with a contract, then start every part immediately with array_delegate. The host replies with ownership overlap, partial registered coverage and unowned check files; it posts a visible line and records the choice. A one-part split is accepted with advice; no plan refuses delegation. Available only to experimental Claude Managed leads.",
+      "description": "Required once per task before editing, commands or starting helpers. Solo unlocks your own implementation without delegation. Native reads remain available before declaration. Outstanding implementation-helper fences still apply. Split declares two or more independent parts, each with a contract, then start every part immediately with array_delegate. The host replies with ownership overlap, partial registered coverage and unowned check files; it posts a visible line and records the choice. A one-part split is accepted with advice; either declared choice permits delegation. Available only to experimental Claude Managed leads.",
       "promptSnippet": "Choose solo or split once per task.",
       "promptGuidelines": [],
       "parameters": {
