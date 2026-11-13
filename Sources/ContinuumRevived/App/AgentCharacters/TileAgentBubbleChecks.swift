@@ -165,6 +165,27 @@ enum TileAgentBubbleChecks {
             let expected = spec.colour.map { ZoneChromeNSView.color(named: $0) }
             try expect(bubble.tint == expected, "\(spec.name): the bubble wears the agent's colour (\(String(describing: bubble.tint)))")
         }
+        // Accessibility refresh must reconcile motion with unchanged status/geometry.
+        var reduced = false
+        controller.reduceMotion = { reduced }
+        let unchangedFrames = views.map { $0.agentBubbleFrame }
+        reduced = true
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        pump()
+        let stopped = views[0].qaAgentBubble!.qaAnimationKeys.isEmpty
+        reduced = false
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        pump()
+        let resumed = !views[0].qaAgentBubble!.qaAnimationKeys.isEmpty
+        views[0].resetCursorRects()
+        let disc = views[0].agentBubbleFrame!
+        let centre = NSPoint(x: disc.midX, y: disc.midY)
+        let corner = NSPoint(x: disc.maxX - 0.1, y: disc.minY + 0.1)
+        let hand = views[0].qaAgentBubbleCursorRect!
+        try expect(stopped && resumed && unchangedFrames == views.map { $0.agentBubbleFrame }
+                   && hand.contains(centre) && !hand.contains(corner)
+                   && views[0].qaResizeEdge(at: corner) != nil,
+                   "live Reduce Motion stopped=\(stopped) resumed=\(resumed); cursor centre=\(hand.contains(centre)) corner=\(hand.contains(corner)) (corner must resize)")
         _ = supervisor.setIdentityColor(agentID: agents[3], "mint")
         try expect(pump(until: { views[3].qaAgentBubble?.tint == ZoneChromeNSView.color(named: "mint") }),
                    "a new identity colour reaches the bubble")

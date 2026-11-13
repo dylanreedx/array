@@ -1528,7 +1528,10 @@ class TileNSView: NSView, TokenThemed {
     /// Make the resize ring discoverable: tracking-area-driven cursor rects
     /// for each edge zone, plus a drag-handle cursor over the title bar so the
     /// user reads it as draggable instead of a thin gray strip.
+    private(set) var qaAgentBubbleCursorRect: NSRect?
+
     override func resetCursorRects() {
+        qaAgentBubbleCursorRect = nil
         super.resetCursorRects()
         let m = resizeMarginInLocalCoordinates
         // Floor the open-hand cursor band to the grab strip (not the drawn 24-px
@@ -1555,7 +1558,14 @@ class TileNSView: NSView, TokenThemed {
         }
         // The agent's bubble is a grab handle, corner band or not. Added last so
         // it wins where it overlaps the edge bands.
-        if let bubble = agentBubbleFrame { addCursorRect(bubble, cursor: .openHand) }
+        if let bubble = agentBubbleFrame {
+            // Cursor rectangles cannot describe a circle. Inscribe the hand
+            // region so its corners never override the surrounding resize band.
+            let inset = bubble.width * (1 - 1 / sqrt(2)) / 2
+            let grab = bubble.insetBy(dx: inset, dy: inset)
+            qaAgentBubbleCursorRect = grab
+            addCursorRect(grab, cursor: .openHand)
+        }
     }
 
     var resizeMarginInLocalCoordinates: CGFloat {
