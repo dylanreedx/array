@@ -43,8 +43,49 @@ enum HelperContextDietChecks {
         try WorkspaceAgentReportChecks.expect(durable.count == 1 && durableParent?.nextChildOrdinal == 1, "failed atomic claim must retain only parent and its ordinal")
     }
 
+    static func mcpWriteFailure() async throws {
+        var rejected = 0, runnerStarts = 0
+        var faultStore: AgentStore?
+        let b = try WorkspaceAgentReportChecks.makeBench(label: "diet-mcp-write-failure", configureDelegate: { delegate in
+            let store = AgentStore(smokeTest: false)
+            faultStore = store
+            delegate.agentSupervisor = AgentSupervisor(store: store,
+                makeRunner: { _ in runnerStarts += 1; return ScriptedAgentRunner(script: []) },
+                upsertRecord: { record in
+                    if record.parentAgentID != nil && record.delegationContext?.contextDietRequested == true {
+                        rejected += 1
+                        throw WorkspaceAgentReportChecks.Failure(description: "injected MCP snapshot write failure")
+                    }
+                    try store.upsert(record)
+                })
+        })
+        defer { b.tearDown() }
+        b.settings.set(true, forKey: HelperContextDiet.enabledKey)
+        let before = Set(b.supervisor.records.keys)
+        let ordinal = b.supervisor.records[b.f.agentId]!.nextChildOrdinal
+        let startedBefore = runnerStarts
+        let reply = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "array_delegate",
+            ["task": "MCP-POLICY-MUST-NOT-START", "title": "MCP failure", "idempotencyKey": "diet-mcp-write-failure"])
+        try WorkspaceAgentReportChecks.expect(rejected == 1, "MCP write-failure witness must reach the production writer")
+        try WorkspaceAgentReportChecks.expect(reply.isError && WorkspaceAgentReportChecks.errorCode(reply) != nil,
+            "MCP must return an error for failed policy persistence, never successful delegation: \(reply.reply)")
+        try WorkspaceAgentReportChecks.expect((reply.reply["result"] as? [String: Any])?["childAgentId"] == nil,
+            "MCP refusal must not publish a child id")
+        try WorkspaceAgentReportChecks.expect(Set(b.supervisor.records.keys) == before && runnerStarts == startedBefore,
+            "MCP refusal must create no child record or task runner")
+        let durable = try faultStore!.loadAll()
+        let parent = try faultStore!.load(id: b.f.agentId)
+        try WorkspaceAgentReportChecks.expect(Set(durable.map(\.id)) == before && parent?.nextChildOrdinal == ordinal,
+            "MCP refusal must retain durable records and ordinal")
+        print("helper-context-diet MCP persistence refusal: actual MCP error, no child id, task, durable child or ordinal advance")
+    }
+
     static func run() async throws {
+        if ProcessInfo.processInfo.environment["CONTINUUM_DIET_MCP_WRITE_FAILURE_ONLY"] == "1" {
+            try await mcpWriteFailure(); return
+        }
         try writeFailures()
+        try await mcpWriteFailure()
         if ProcessInfo.processInfo.environment["CONTINUUM_DIET_WRITE_FAILURE_ONLY"] == "1" { return }
         let b = try WorkspaceAgentReportChecks.makeBench(label: "helper-diet")
         defer { b.tearDown() }

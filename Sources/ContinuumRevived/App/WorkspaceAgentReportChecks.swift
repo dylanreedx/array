@@ -152,7 +152,7 @@ enum WorkspaceAgentReportChecks {
         }
     }
 
-    static func makeBench(label: String) throws -> Bench {
+    static func makeBench(label: String, configureDelegate: ((AppDelegate) -> Void)? = nil) throws -> Bench {
         guard let originalSupport = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"],
               isTemporary(URL(fileURLWithPath: originalSupport)),
               Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else {
@@ -182,7 +182,7 @@ enum WorkspaceAgentReportChecks {
         guard let helper = AppDelegate.workspaceMCPExecutablePath() else {
             throw Failure(description: "array-workspace-mcp is not beside the app binary — build the package, not just the Array product")
         }
-        let f = try WorkspaceAPIChecks.makeFixture(settings: settings)
+        let f = try WorkspaceAPIChecks.makeFixture(settings: settings, configureDelegate: configureDelegate)
         f.api.approvalHandler = { _ in .deny }
         return Bench(f: f, settings: settings, helper: helper, binDir: binDir, originalPath: originalPath, originalSupport: originalSupport)
     }
