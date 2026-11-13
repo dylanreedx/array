@@ -742,6 +742,7 @@ run_leg python3 benchmarks/replay/check.py --replay-grader-check
 run_leg python3 benchmarks/replay/check.py --replay-isolation-check
 run_leg python3 benchmarks/replay/check.py --replay-scoring-check
 run_leg python3 benchmarks/replay/check.py --replay-containment-check
+run_leg python3 benchmarks/replay/check_live_temp.py
 if [[ "${REPLAY_CHECKS_ONLY:-0}" == "1" ]]; then
   matrix_finish_jobs
   matrix_report "Offline replay matrix"

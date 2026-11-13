@@ -11,7 +11,12 @@ named=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -p|-p*|--tmpdir|--tmpdir=*|--) exec /usr/bin/mktemp "${args[@]}" "$@" ;;
-        -t) prefix="$2"; shift 2 ;;
+        -t)
+            if [ $# -lt 2 ]; then
+                echo 'mktemp: option requires an argument -- t' >&2
+                exit 1
+            fi
+            prefix="$2"; shift 2 ;;
         -t*) prefix="${1#-t}"; shift ;;
         -*) args+=("$1"); shift ;;
         *) args+=("$1"); named=1; shift ;;
