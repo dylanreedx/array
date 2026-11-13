@@ -89,6 +89,7 @@ public final class AgentStore: @unchecked Sendable {
     public init(
         applicationSupportDirectory: URL? = nil,
         retainedBackups: Int = 3,
+        migrationHookForQA: @escaping @Sendable () -> Void = {},
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) }
     ) {
         let baseDir = applicationSupportDirectory
@@ -100,6 +101,7 @@ public final class AgentStore: @unchecked Sendable {
         let layout = self.layout
         migration.enter()
         Self.migrationQueue.async { [migration] in
+            migrationHookForQA()
             Self.migrateSharedBackups(layout: layout, warn: warn)
             migration.leave()
         }
@@ -115,15 +117,6 @@ public final class AgentStore: @unchecked Sendable {
     /// backup still in the shared folder matter.
     public func waitForBackupMigration() {
         migration.wait()
-    }
-
-    /// `read`, retried once after the backup move when it fails: a corrupt
-    /// record's backups may still be on their way out of the shared folder.
-    private func readAfterMigrationIfNeeded<T>(_ read: () throws -> T) throws -> T {
-        do { return try read() } catch {
-            waitForBackupMigration()
-            return try read()
-        }
     }
 
     /// Each record's writer keeps its backups in that record's own folder, so
@@ -256,7 +249,7 @@ public final class AgentStore: @unchecked Sendable {
     public func load(id: AgentID) throws -> AgentRecord? {
         let url = layout.agentFile(id: id)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try readAfterMigrationIfNeeded { try writer(for: id).read(at: url) }
+        return try writer(for: id).read(at: url, beforeBackup: waitForBackupMigration)
     }
 
     public func delete(id: AgentID) throws {
@@ -286,9 +279,8 @@ public final class AgentStore: @unchecked Sendable {
         let url = layout.deletedAgentTilesFile
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         do {
-            let ids: [UUID] = try readAfterMigrationIfNeeded {
-                try writer(backups: layout.deletedAgentTilesBackupsDirectory).read(at: url)
-            }
+            let ids: [UUID] = try writer(backups: layout.deletedAgentTilesBackupsDirectory)
+                .read(at: url, beforeBackup: waitForBackupMigration)
             return Set(ids)
         } catch {
             warn("AgentStore.loadDeletedAgentTiles: unreadable at \(url.path): \(error)")
@@ -340,7 +332,7 @@ public final class AgentStore: @unchecked Sendable {
                 if let id, known.contains(id) { continue }
                 let reader = id.map { writer(for: $0) } ?? writer(backups: layout.backupsDirectory)
                 Self.recordsDecoded.increment()
-                let record: AgentRecord = try readAfterMigrationIfNeeded { try reader.read(at: entry) }
+                let record: AgentRecord = try reader.read(at: entry, beforeBackup: waitForBackupMigration)
                 records.append(record)
             } catch {
                 warn("AgentStore.loadAll: skipping unreadable record at \(entry.path): \(error)")

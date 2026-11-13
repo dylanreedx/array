@@ -171,8 +171,8 @@ public struct AtomicWriter: Sendable {
     /// Read JSON from `url`. If the main file is missing or corrupt, fall back
     /// to the newest valid backup. Throws if neither path yields a parseable
     /// value of `T`.
-    public func read<T: Codable>(at url: URL) throws -> T {
-        try read(at: url, decoder: JSONCodec.makeDecoder())
+    public func read<T: Codable>(at url: URL, beforeBackup: () -> Void = {}) throws -> T {
+        try read(at: url, decoder: JSONCodec.makeDecoder(), beforeBackup: beforeBackup)
     }
 
     /// Every store read through any writer, process-wide. Instrumentation only:
@@ -184,13 +184,14 @@ public struct AtomicWriter: Sendable {
     private static let readCountLock = NSLock()
     nonisolated(unsafe) private static var readCountValue = 0
 
-    public func read<T: Codable>(at url: URL, decoder: JSONDecoder) throws -> T {
+    public func read<T: Codable>(at url: URL, decoder: JSONDecoder, beforeBackup: () -> Void = {}) throws -> T {
         Self.readCountLock.lock(); Self.readCountValue += 1; Self.readCountLock.unlock()
         if let data = try? Data(contentsOf: url),
            let value = try? decoder.decode(T.self, from: data) {
             return value
         }
 
+        beforeBackup()
         // Try backups from newest to oldest.
         for backupURL in try backupURLsNewestFirst(for: url) {
             if let data = try? Data(contentsOf: backupURL),

@@ -27,6 +27,7 @@ func runAgentStoreChecks() {
         try runAgentStoreBackupScanCheck(root: root)
         try runAgentStoreBackupScaleCheck(root: root)
         try runAgentStoreDowngradeRoundTripCheck(root: root)
+        try runHeldMigrationRecoveryCheck(root: root)
         print("AgentStore checks: app-support root, round-trip, cross-project deterministic order, corrupt-file skip, concurrent upsert, one backup scan per save, save cost independent of agent count, and a 0.7.47 round trip healing passed")
     } catch {
         fputs("FAIL: AgentStore checks failed: \(error)\n", stderr)
@@ -677,4 +678,35 @@ private func runAgentStoreDowngradeRoundTripCheck(root: URL) throws {
         throw AgentStoreCheckError("round trip: a save read \(read) directory entries, expected its own 3")
     }
     print("  agent-store round trip: 60 backups moved, 0.7.47's 2 later writes healed (1 kept beside a same-named file), save reads \(read) entries")
+}
+
+// A corrupt primary with a valid old dedicated backup must not recover before
+// the newer downgrade backup has moved from the shared directory.
+private func runHeldMigrationRecoveryCheck(root: URL) throws {
+    let base = root.appendingPathComponent("held-migration")
+    let layout = AgentStoreLayout(applicationSupportDirectory: base)
+    let id = AgentID(rawValue: UUID())
+    let date = Date(timeIntervalSinceReferenceDate: 806_100_000)
+    func record(_ name: String) -> AgentRecord {
+        makeAgentStoreFixture(id: id, displayName: name, createdAt: date)
+    }
+    let dedicated = AtomicWriter(backupsDirectory: layout.backupsDirectory(for: id), legacyBackupPolicy: .targetDedicated)
+    let shared = AtomicWriter(backupsDirectory: layout.backupsDirectory, legacyBackupPolicy: .targetDedicated)
+    try dedicated.write(record("old-backup"), to: layout.agentFile(id: id))
+    try dedicated.write(record("newer-backup"), to: layout.agentFile(id: id))
+    try shared.write(record("primary"), to: layout.agentFile(id: id))
+    try Data("corrupt".utf8).write(to: layout.agentFile(id: id))
+    let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+    let store = AgentStore(applicationSupportDirectory: base, migrationHookForQA: {
+        entered.signal()
+        release.wait()
+    })
+    entered.wait()
+    DispatchQueue.global().asyncAfter(deadline: .now() + 1) { release.signal() }
+    let recovered = try store.load(id: id)?.displayName
+    store.waitForBackupMigration()
+    guard recovered == "newer-backup" else {
+        throw AgentStoreCheckError("held migration: recovered \(String(describing: recovered)), expected newer-backup")
+    }
+    print("  agent-store held migration: newest downgrade backup recovered")
 }
