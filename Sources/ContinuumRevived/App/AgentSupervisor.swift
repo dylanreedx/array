@@ -6257,6 +6257,9 @@ final class AgentSupervisor {
                 handle: request.sourceItemID, requestedRole: request.role))
         }
         let managed = parent.mode == .managed
+        // Experimental: every helper owns a checkout, even the first. Keep off
+        // until paired live runs establish the cost and dirty-lead workflow.
+        let isolateEveryHelper = managed && (managedModeDefaults.object(forKey: "agents.managedMode.isolateEveryHelper") as? Bool == true)
         let checkout = URL(fileURLWithPath: parent.checkoutRoot, isDirectory: true)
         // Another of this parent's helpers is live in the parent's checkout, so a
         // new one gets its own worktree. Asked again at commit (see below).
@@ -6278,7 +6281,7 @@ final class AgentSupervisor {
         func makePlan(overlapping: Bool) -> SpawnCheckoutPlan {
             SpawnCheckoutPlan(
                 headRepo: managed ? checkout : projectRoot,
-                requestIsolated: request.isolated,
+                requestIsolated: request.isolated || isolateEveryHelper,
                 overlapping: overlapping,
                 worktreeRepo: managed ? checkout : projectRoot,
                 slug: WorktreeManager.slug(
@@ -6303,7 +6306,7 @@ final class AgentSupervisor {
         func commit(_ plan: SpawnCheckoutPlan, _ resolution: Result<SpawnCheckoutPlan.Checkout, any Error>) {
             if checkoutOffMain { _spawnCheckoutResolvedHookForQA?() }
             let overlapping = plan.overlapping
-            let checkoutResult: SpawnCheckoutPlan.Checkout
+            var checkoutResult: SpawnCheckoutPlan.Checkout
             do { checkoutResult = try resolution.get() } catch {
                 // The isolated spawn refuses to fall back to the shared checkout (P2C.2),
                 // so a failed worktree is a failed spawn — reported, not downgraded.
@@ -6311,6 +6314,9 @@ final class AgentSupervisor {
                 return answer(self.refuseSpawn(
                     .worktreeFailed, for: parentId,
                     handle: request.sourceItemID, requestedRole: request.role))
+            }
+            if isolateEveryHelper {
+                checkoutResult.notice = "Isolated helper starts at the lead HEAD; uncommitted lead changes are absent."
             }
             if let closed = gate() {
                 self.discard(checkoutResult.worktree, repo: plan.worktreeRepo)
@@ -6344,7 +6350,7 @@ final class AgentSupervisor {
                 managed: managed, checkout: checkout, projectRoot: projectRoot,
                 overlapping: overlapping, isolationTitle: isolationTitle, resolved: checkoutResult))
         }
-        resolveThenCommit(makePlan(overlapping: checkoutBusy()))
+        resolveThenCommit(makePlan(overlapping: isolateEveryHelper || checkoutBusy()))
     }
 
     /// A worktree made for a child that was then not created. Its branch has no

@@ -103,6 +103,7 @@ AGENT_SCHEDULES_ONLY=0
 COMPANION_TASKS_ONLY=0
 NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
+HELPER_ISOLATION_ONLY=0
 MANAGED_MODE_ONLY=0
 PERMISSION_UX_ONLY=0
 MATRIX_MODE=full
@@ -211,6 +212,10 @@ if [[ $# -gt 0 ]]; then
       NOTIFICATIONS_LINUX_ONLY=1
       shift
       ;;
+    --helper-isolation)
+      HELPER_ISOLATION_ONLY=1
+      shift
+      ;;
     --managed-mode)
       MANAGED_MODE_ONLY=1
       shift
@@ -221,7 +226,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode]
+Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation]
 
 
 --focus-safe-input runs only the browser input witnesses and their contract/catalog neighbors.
@@ -1027,6 +1032,13 @@ if [[ "$NOTIFICATIONS_ONLY" -eq 1 ]]; then
   matrix_report 'Notifications matrix (targeted)'
   exit $?
 fi
+if [[ "$HELPER_ISOLATION_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product Array -j 4
+  run swift build --disable-sandbox --skip-update --product array-workspace-mcp -j 4
+  run_app_check .build/debug/Array --first-helper-isolation-check
+  matrix_report 'Helper isolation matrix (targeted)'
+  exit $?
+fi
 if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
@@ -1071,6 +1083,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --workspace-codex-hook-check
   run_app_check .build/debug/Array --managed-codex-launch-check
   run_app_check .build/debug/Array --managed-codex-hooks-check
+  run_app_check .build/debug/Array --first-helper-isolation-check
   run_app_check .build/debug/Array --helper-retry-check
   run_app_check .build/debug/Array --orchestration-plan-check
   run_app_check .build/debug/Array --orchestration-request-lifecycle-check
@@ -1371,6 +1384,7 @@ run_app_check .build/debug/Array --run-ledger-gaps-check
 run_app_check .build/debug/Array --managed-lead-plan-check
 run_app_check .build/debug/Array --managed-codex-launch-check
 run_app_check .build/debug/Array --managed-codex-hooks-check
+run_app_check .build/debug/Array --first-helper-isolation-check
 run_app_check .build/debug/Array --helper-retry-check
 run_app_check .build/debug/Array --orchestration-plan-check
 run_app_check .build/debug/Array --orchestration-request-lifecycle-check

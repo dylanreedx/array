@@ -87,6 +87,38 @@ enum HelperRetryWorktreeChecks {
         return root
     }
 
+    static func firstHelperIsolation() async throws {
+        let b = try bench("first-helper-isolation"); defer { b.tearDown() }
+        let root = try managedRepository(b)
+        b.settings.set(true, forKey: "agents.managedMode.isolateEveryHelper")
+        b.supervisor.configureManagedMode(defaults: b.settings)
+        try "lead draft".write(to: root.appendingPathComponent("tracked.txt"), atomically: true, encoding: .utf8)
+        let reply = try await request(b, task: "HOLD isolated first helper")
+        let first = try child(reply)
+        let captured = try await capture(b, first)
+        let childRoot = URL(fileURLWithPath: captured["cwd"] as! String)
+        try expect(WorktreeManager.resolved(childRoot) != WorktreeManager.resolved(root),
+                   "first helper shares its Managed lead's writable checkout")
+        let initialHelperText = try String(contentsOf: childRoot.appendingPathComponent("tracked.txt"), encoding: .utf8)
+        try expect(initialHelperText == "initial\n", "helper did not start from committed HEAD")
+        let notice = (reply.reply["result"] as? [String: Any])?["checkoutNotice"] as? String
+        try expect(notice?.contains("uncommitted lead changes are absent") == true, "HEAD-only limitation was not disclosed")
+        try "helper only".write(to: childRoot.appendingPathComponent("tracked.txt"), atomically: true, encoding: .utf8)
+        let leadText = try String(contentsOf: root.appendingPathComponent("tracked.txt"), encoding: .utf8)
+        try expect(leadText == "lead draft",
+                   "helper write reached the lead checkout")
+        let n = try bench("first-helper-nongit"); defer { n.tearDown() }
+        try expect(n.supervisor.setProviderSettings(agentID: n.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "non-git harness refused")
+        try expect(n.supervisor.setMode(.managed, for: n.f.agentId), "non-git mode refused")
+        n.settings.set(true, forKey: "agents.managedMode.isolateEveryHelper")
+        n.supervisor.configureManagedMode(defaults: n.settings)
+        let count = n.supervisor.records.count
+        let refused = try await request(n, task: "non-git must refuse")
+        try expect(WorkspaceAgentReportChecks.errorCode(refused) == "unsupported" && n.supervisor.records.count == count,
+                   "non-git isolation silently shared or created a child")
+        print("PASS first helper isolation: production MCP runner cwd and independent file contents")
+    }
+
     static func retry() async throws {
         let b = try bench("helper-retry"); defer { b.tearDown() }
         let root = URL(fileURLWithPath: b.supervisor.records[b.f.agentId]!.checkoutRoot)

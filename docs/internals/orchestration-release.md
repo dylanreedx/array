@@ -71,6 +71,7 @@ from plan documents.
 
 | Switch | Setting | How to turn it on |
 |---|---|---|
+| Every Managed helper isolated | `agents.managedMode.isolateEveryHelper` | Experimental, no UI toggle. When explicitly enabled, each helper starts in its own worktree at the lead HEAD; uncommitted lead changes are absent, and non-git delegation refuses. Requires paired live validation before enabling. |
 | Reply rules | `agents.replyRules.enabled` | Settings ▸ Agents ▸ Reply rules ▸ "Give every agent Array's reply rules". Applies from each agent's next launch. |
 | Personal rules | `agents.personalRules.enabled`, `agents.personalRules.path` | Settings ▸ Agents ▸ Personal rules: turn on "Give Codex and Pi agents my rules" and give the full path of a short rules file. Claude reads its own instructions and is left alone. |
 | Stalled-helper alert | `agents.managedMode.stallAlerts` | Settings ▸ Agents ▸ Managed mode ▸ "Tell the lead only when a helper is stuck". |
