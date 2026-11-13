@@ -1678,7 +1678,7 @@ class TileNSView: NSView, TokenThemed {
         let inset = naturalTitleBarHeight + naturalRow.rounded(.up)
         guard base > 0 else { return inset }
         let naturalBar = max(naturalTitleBarHeight, Self.minScreenGrabPx)
-        let extra = max(0, chromeBarHeight - naturalBar)
+        let extra = max(0, underBarTop - naturalBar)
             + max(0, base * underBarScale - naturalRow)
         return inset + extra.rounded(.up)
     }
@@ -1686,6 +1686,14 @@ class TileNSView: NSView, TokenThemed {
     /// Natural chrome scale at 100%. This caps SCREEN size when zoomed out,
     /// not world size: the latter would make an 11pt label become 3pt at 25%.
     static var underBarMaximumScale: CGFloat { minScreenGrabPx / titleBarHeight }
+
+    // At low zoom the bubble and a readable row cannot share a narrow tile.
+    // Put the row below the bubble, preserving its font and its hit targets.
+    private var underBarTop: CGFloat {
+        guard (canvas?.viewport.zoom ?? 1) < 1,
+              let bubble = titleBar?.bubbleRectInBar else { return chromeBarHeight }
+        return max(chromeBarHeight, bubble.maxY)
+    }
 
     private var underBarScale: CGFloat {
         guard let underBar else { return 1 }
@@ -1823,10 +1831,11 @@ class TileNSView: NSView, TokenThemed {
         let base = underBarWorldHeight
         if underBar.isHidden != (base == 0) { underBar.isHidden = base == 0 }
         guard base > 0 else { return }
-        let bar = chromeBarHeight
+        let bar = underBarTop
         (underBar.accessory as? TileUnderBarAccessory)?.setReadableChrome((canvas?.viewport.zoom ?? 1) < 1)
         // Preserve the chrome's natural screen role size, allowing width pressure
         // to compact the row using the accessory's actual minimum geometry.
+        if (canvas?.viewport.zoom ?? 1) < 1 { underBar.clearTrailingReserve() }
         let scale = underBarScale
         // The agent's bubble hangs into the row's trailing corner: the row's
         // content ends before it rather than running under it.
@@ -4072,6 +4081,8 @@ final class TileUnderBarView: NSView {
             needsLayout = true; needsDisplay = true
         }
     }
+
+    func clearTrailingReserve() { trailingReserve = 0 }
 
     static let indicatorFont = NSFont.token(.caption)
 
