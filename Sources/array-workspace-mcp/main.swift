@@ -75,6 +75,8 @@ struct ArrayWorkspaceMCP {
         /// Listed with `_meta["anthropic/alwaysLoad"]`: a Claude Managed lead's
         /// first tools, loaded up front rather than through tool search.
         let alwaysLoadedTools: Set<String>
+        /// Opt-in protocol accounting only; no compact text or token estimate.
+        let toolContextFacts: WorkspaceMCPJSON?
         let session: URLSession
         let writer = ResponseWriter()
         let requests = RequestTasks()
@@ -105,6 +107,66 @@ struct ArrayWorkspaceMCP {
             configuration.timeoutIntervalForRequest = TimeInterval(WorkspaceMCPConfiguration.toolCallTimeoutSeconds)
             configuration.timeoutIntervalForResource = TimeInterval(WorkspaceMCPConfiguration.toolCallTimeoutSeconds)
             self.session = URLSession(configuration: configuration)
+            if environment["ARRAY_WORKSPACE_TOOL_CONTEXT_FACTS"] == "1" {
+                toolContextFacts = Self.measureToolContext(
+                    tools: Self.listedTools(projectStandards: projectStandards, chooser: chooser,
+                        delivery: delivery, alwaysLoadedTools: alwaysLoadedTools),
+                    instructions: WorkspaceMCPToolCatalog.serverInstructions(for: delivery))
+            } else { toolContextFacts = nil }
+        }
+
+        private static func listedTools(projectStandards: Bool, chooser: Bool,
+                                        delivery: WorkspaceResultDelivery, alwaysLoadedTools: Set<String>) -> [WorkspaceMCPJSON] {
+            var tools = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards, chooser: chooser).map { tool in
+                var listed: [String: WorkspaceMCPJSON] = [
+                    "name": .string(tool.name),
+                    "description": .string(WorkspaceMCPToolCatalog.mcpDescription(tool, for: delivery)),
+                    "inputSchema": .object(tool.inputSchema)]
+                if alwaysLoadedTools.contains(tool.name) {
+                    listed["_meta"] = .object(["anthropic/alwaysLoad": .bool(true)])
+                }
+                return WorkspaceMCPJSON.object(listed)
+            }
+            if delivery == .collect {
+                tools.append(.object(["name": .string(WorkspaceMCPToolCatalog.waitAgentsName),
+                                      "description": .string(WorkspaceMCPToolCatalog.waitAgentsDescription),
+                                      "inputSchema": .object(WorkspaceMCPToolCatalog.waitAgentsInputSchema)]))
+            }
+            return tools
+        }
+
+        private static func measureToolContext(tools: [WorkspaceMCPJSON], instructions: String) -> WorkspaceMCPJSON {
+            func object(_ value: WorkspaceMCPJSON) -> [String: WorkspaceMCPJSON] {
+                if case .object(let fields) = value { return fields }; return [:]
+            }
+            func text(_ value: WorkspaceMCPJSON?) -> String {
+                if case .string(let text)? = value { return text }; return ""
+            }
+            func words(_ text: String) -> Int { text.split(whereSeparator: \.isWhitespace).count }
+            func schemaWords(_ value: WorkspaceMCPJSON) -> Int {
+                switch value {
+                case .object(let fields): return words(text(fields["description"])) + fields.values.reduce(0) { $0 + schemaWords($1) }
+                case .array(let values): return values.reduce(0) { $0 + schemaWords($1) }
+                default: return 0
+                }
+            }
+            let descriptions = tools.map { text(object($0)["description"]) }
+            let schemas = tools.map { object($0)["inputSchema"] ?? .null }
+            return .object([
+                "schema": .string("array.tool-context.v1"),
+                "units": .string("Unicode-whitespace words and UTF-8 bytes"),
+                "scope": .string("MCP protocol only; excludes this metadata, client rendering, provider framing, Pi prompt assembly and personal/project context."),
+                "toolCount": .int(tools.count),
+                "initializeInstructionsWords": .int(words(instructions)),
+                "initializeInstructionsUTF8Bytes": .int(instructions.utf8.count),
+                "toolTextWords": .int(descriptions.reduce(0) { $0 + words($1) }),
+                "toolTextUTF8Bytes": .int(descriptions.reduce(0) { $0 + $1.utf8.count }),
+                "inputSchemaJSONUTF8Bytes": .int(schemas.reduce(0) { $0 + $1.jsonString.utf8.count }),
+                "schemaDescriptionWords": .int(schemas.reduce(0) { $0 + schemaWords($1) }),
+                "toolsListResultJSONUTF8Bytes": .int(WorkspaceMCPJSON.object(["tools": .array(tools)]).jsonString.utf8.count),
+                "tokenCount": .null,
+                "compactVariant": .bool(false)
+            ])
         }
 
         func run() async throws {
@@ -143,28 +205,17 @@ struct ArrayWorkspaceMCP {
             if request.id == nil, request.method.hasPrefix("notifications/") { return Data() }
             switch request.method {
             case "initialize":
-                return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null, "result": .object([
+                var result: [String: WorkspaceMCPJSON] = [
                     "protocolVersion": .string("2024-11-05"),
                     "capabilities": .object(["tools": .object([:])]),
                     "serverInfo": .object(["name": .string("array-workspace"), "version": .string("0.1")]),
                     "instructions": .string(WorkspaceMCPToolCatalog.serverInstructions(for: delivery))
-                ])]))
+                ]
+                if let toolContextFacts { result["_meta"] = .object(["array/toolContext": toolContextFacts]) }
+                return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null, "result": .object(result)]))
             case "tools/list":
-                var tools = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards, chooser: chooser).map { tool in
-                    var listed: [String: WorkspaceMCPJSON] = [
-                        "name": .string(tool.name),
-                        "description": .string(WorkspaceMCPToolCatalog.mcpDescription(tool, for: delivery)),
-                        "inputSchema": .object(tool.inputSchema)]
-                    if alwaysLoadedTools.contains(tool.name) {
-                        listed["_meta"] = .object(["anthropic/alwaysLoad": .bool(true)])
-                    }
-                    return WorkspaceMCPJSON.object(listed)
-                }
-                if delivery == .collect {
-                    tools.append(.object(["name": .string(WorkspaceMCPToolCatalog.waitAgentsName),
-                                          "description": .string(WorkspaceMCPToolCatalog.waitAgentsDescription),
-                                          "inputSchema": .object(WorkspaceMCPToolCatalog.waitAgentsInputSchema)]))
-                }
+                let tools = Self.listedTools(projectStandards: projectStandards, chooser: chooser,
+                                             delivery: delivery, alwaysLoadedTools: alwaysLoadedTools)
                 return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null,
                                        "result": .object(["tools": .array(tools)])]))
             case "tools/call":

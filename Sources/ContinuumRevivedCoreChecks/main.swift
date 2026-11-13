@@ -222,6 +222,10 @@ if CommandLine.arguments.contains("--agent-steering-runner-check") {
     runAgentSteeringRunnerChecks()
     Foundation.exit(0)
 }
+if CommandLine.arguments.contains("--workspace-tool-context-check") {
+    do { try runWorkspaceToolContextChecks(); Foundation.exit(0) }
+    catch { print("FAIL tool context: \(error)"); Foundation.exit(1) }
+}
 if CommandLine.arguments.contains("--workspace-mcp-check") {
     runWorkspaceMCPChecks()
     Foundation.exit(0)

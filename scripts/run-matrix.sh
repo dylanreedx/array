@@ -104,6 +104,7 @@ AGENT_SCHEDULES_ONLY=0
 COMPANION_TASKS_ONLY=0
 NOTIFICATIONS_ONLY=0
 NOTIFICATIONS_LINUX_ONLY=0
+TOOL_CONTEXT_ONLY=0
 HELPER_ISOLATION_ONLY=0
 MANAGED_MODE_ONLY=0
 PERMISSION_UX_ONLY=0
@@ -214,6 +215,10 @@ if [[ $# -gt 0 ]]; then
       NOTIFICATIONS_LINUX_ONLY=1
       shift
       ;;
+    --tool-context)
+      TOOL_CONTEXT_ONLY=1
+      shift
+      ;;
     --helper-isolation)
       HELPER_ISOLATION_ONLY=1
       shift
@@ -228,7 +233,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation]
+Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context]
 
 
 --focus-safe-input runs only the browser input witnesses and their contract/catalog neighbors.
@@ -1063,6 +1068,13 @@ if [[ "$NOTIFICATIONS_ONLY" -eq 1 ]]; then
   matrix_report 'Notifications matrix (targeted)'
   exit $?
 fi
+if [[ "$TOOL_CONTEXT_ONLY" -eq 1 ]]; then
+  run swift build --disable-sandbox --skip-update --product array-workspace-mcp -j 4
+  run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks -j 4
+  run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check
+  matrix_report 'Tool context matrix (targeted)'
+  exit $?
+fi
 if [[ "$HELPER_ISOLATION_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array -j 4
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp -j 4
@@ -1323,6 +1335,7 @@ printf '\n==> Independent group (%s workers), then serial awake group; mode=%s\n
 run_leg scripts/check-film-absent.sh
 run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
+run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check
 run_leg .build/debug/ContinuumRevivedCoreChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 # .plans/116 part 16: the project standards parser over fixtures it writes,
