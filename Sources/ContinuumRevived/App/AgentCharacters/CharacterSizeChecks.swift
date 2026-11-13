@@ -220,7 +220,7 @@ enum CharacterSizeChecks {
                 }
                 if let title = view.qaTitleRectInBar(), title.width > 0 {
                     try expect(abs(title.midY - bar / 2) < 0.51, "\(where_): the title is centred (\(title.midY))")
-                    try expect(title.minX >= sprite.maxX, "\(where_): the title starts after the character")
+                    try expect(title.maxX <= sprite.minX, "\(where_): the title ends before the corner character")
                 }
                 let titleSize = 12 * max(1 + (factor - 1) / 2, chrome)
                 try expect(abs(view.qaTitleFontWorldSize - titleSize) < 0.01,

@@ -395,11 +395,17 @@ enum TileAgentBubbleChecks {
     static func runDrag() async throws -> String {
         acceptFirstMouseEverywhere()
         var lines: [String] = []
-        for zoom in [1.0, 0.5] { lines.append(try await exerciseDrag(zoom: zoom)) }
+        for zoom in [1.0, 0.5] {
+            lines.append(try await exerciseDrag(zoom: zoom).0)
+            let bubble = try await exerciseDrag(zoom: zoom, snapping: true)
+            let title = try await exerciseDrag(zoom: zoom, snapping: true, titleBar: true)
+            try expect(bubble.1 == title.1, "zoom=\(zoom): snapped bubble and title-bar final frames differ: \(bubble.1) vs \(title.1)")
+            lines.append("zoom=\(zoom): production snapping bubble/title-bar parity PASS: \(bubble.1)")
+        }
         return lines.joined(separator: "\n")
     }
 
-    private static func exerciseDrag(zoom: Double) async throws -> String {
+    private static func exerciseDrag(zoom: Double, snapping: Bool = false, titleBar: Bool = false) async throws -> (String, TileFrame) {
         let label = "zoom=\(zoom)"
         let suite = "ArrayTileAgentBubbleDrag-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -446,7 +452,7 @@ enum TileAgentBubbleChecks {
         TileInsertSlideChecks.pin(canvas, autoLayout: false)
         // No magnet: the tile must follow the pointer exactly, so the witness can
         // tell a move from a snap.
-        canvas.dragMagnetizeDefaults.set(false, forKey: DragMagnetizeConfig.enabledKey)
+        canvas.dragMagnetizeDefaults.set(snapping, forKey: DragMagnetizeConfig.enabledKey)
         canvas.setViewport(CanvasViewport(x: 300, y: 250, zoom: zoom))
         let window = KeyWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
@@ -477,7 +483,7 @@ enum TileAgentBubbleChecks {
         if let filmDirectory { try FileManager.default.createDirectory(at: filmDirectory, withIntermediateDirectories: true) }
         var filmed = 0
         func film(_ name: String) throws {
-            guard let filmDirectory, zoom == 1 else { return }
+            guard let filmDirectory, zoom == 1, !snapping else { return }
             let around = view.frame.insetBy(dx: -80, dy: -80)
             let image = try capture(canvas, window, rect: canvas.convert(around, from: view.superview))
             try write(image, to: filmDirectory.appendingPathComponent("drag-\(name).png"))
@@ -487,9 +493,11 @@ enum TileAgentBubbleChecks {
         /// Drag from `local` (tile coordinates) by `delta` screen points in three steps.
         func drag(from local: NSPoint, by delta: CGSize, name: String) throws -> (before: TileFrame, after: TileFrame) {
             guard let before = world() else { throw Failure(description: "\(label): no world frame") }
-            let start = view.convert(local, to: nil)
+            let bar = view.qaTitleBarView!
+            let grab = bar.convert(NSPoint(x: bar.bounds.midX, y: bar.bounds.midY), to: view)
+            let start = view.convert(titleBar ? grab : local, to: nil)
             // The real hit-test answers the tile itself, not the bar or the body.
-            if let host = canvas.superview {
+            if !titleBar, let host = canvas.superview {
                 let hit = canvas.hitTest(canvas.convert(canvas.convert(start, from: nil), to: host))
                 var chain: [String] = []
                 var cursor: NSView? = hit
@@ -513,11 +521,15 @@ enum TileAgentBubbleChecks {
         // 1. From the bubble's centre.
         guard let bubble = view.agentBubbleFrame else { throw Failure(description: "\(label): no bubble") }
         try expect(view.qaDragKindIsMove(at: NSPoint(x: bubble.midX, y: bubble.midY)), "\(label): the bubble's centre is a grab")
-        let centre = try drag(from: NSPoint(x: bubble.midX, y: bubble.midY), by: CGSize(width: 48, height: 36), name: "centre")
+        let centre = try drag(from: NSPoint(x: bubble.midX, y: bubble.midY), by: snapping ? CGSize(width: 245 * zoom, height: -98 * zoom) : CGSize(width: 48, height: 36), name: "centre")
         try expect(centre.after.width == centre.before.width && centre.after.height == centre.before.height,
                    "\(label): dragging the bubble resized the tile (\(centre.before) → \(centre.after))")
+        if snapping {
+            try expect(centre.after.x != centre.before.x + 245 || centre.after.y != centre.before.y - 98,
+                       "\(label): snapping arm must engage a magnet, not merely follow freely")
+        }
         let moved = (x: centre.after.x - centre.before.x, y: centre.after.y - centre.before.y)
-        try expect(abs(moved.x - 48 / zoom) < 2 / zoom && abs(moved.y - 36 / zoom) < 2 / zoom,
+        try expect(snapping || (abs(moved.x - 48 / zoom) < 2 / zoom && abs(moved.y - 36 / zoom) < 2 / zoom),
                    "\(label): the tile follows the bubble by the pointer's delta (moved \(moved), expected \((48 / zoom, 36 / zoom)))")
 
         // 2. From the part of the bubble that lies in the corner's resize band.
@@ -530,7 +542,7 @@ enum TileAgentBubbleChecks {
         let banded = try drag(from: corner, by: CGSize(width: -40, height: 24), name: "corner")
         try expect(banded.after.width == banded.before.width && banded.after.height == banded.before.height,
                    "\(label): a press on the bubble inside the resize band resized the tile (\(banded.before) → \(banded.after))")
-        try expect(abs(banded.after.x - banded.before.x + 40 / zoom) < 2 / zoom,
+        try expect(snapping || abs(banded.after.x - banded.before.x + 40 / zoom) < 2 / zoom,
                    "\(label): ...and moved it with the pointer (\(banded.after.x - banded.before.x))")
 
         // 3. Just outside the bubble, the corner still resizes.
@@ -539,7 +551,7 @@ enum TileAgentBubbleChecks {
         let outside = NSPoint(x: view.bounds.width - 1 / zoom, y: 1 / zoom)
         try expect(!view.agentBubbleContains(outside) && view.qaResizeEdge(at: outside) == .topRight,
                    "\(label): the corner itself, outside the bubble \(last), is still a resize")
-        return "tile agent bubble drag \(label): centre moved \(moved), corner band moved, PASS"
-            + (filmed > 0 ? " (\(filmed) drag frames)" : "")
+        return ("tile agent bubble drag \(label): centre moved \(moved), corner band moved, PASS"
+            + (filmed > 0 ? " (\(filmed) drag frames)" : ""), banded.after)
     }
 }
