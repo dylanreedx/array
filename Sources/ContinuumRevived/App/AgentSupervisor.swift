@@ -6583,8 +6583,9 @@ final class AgentSupervisor {
                                      lastProgressAt: helperProgress[id]?.at ?? helperLiveness[id]?.lastProgressAt ?? now,
                                      liveChildren: 0, openToolCalls: 0, detail: retrying ? "retrying" : nil, now: now)
                 helperProgress[id] = nil
-                pendingHelperAlerts[id] = nil
-                if stallAlerts, queuedHelperAlerts[id] != nil || helperAlertsInFlight.contains(id) { withdrawQueuedHelperAlert(id) }
+                // Terminal helpers make every queued warning stale, including
+                // the legacy no-progress alert when stall alerts are disabled.
+                withdrawQueuedHelperAlert(id)
                 if records[id]?.helperWatchdogNeedsYou != nil {
                     records[id]?.helperWatchdogNeedsYou = nil
                     notifyLeadPlanChanged(id)

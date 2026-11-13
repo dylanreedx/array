@@ -90,8 +90,8 @@ Activity sender. It is recorded here because its flag also heads a helper's
 Managed mode ▸ "Tell the lead only when a helper is stuck"
 (`agents.managedMode.stallAlerts`), is off by default.
 - Off (unchanged): one message after 10 minutes without progress, whatever the
-  helper is doing, including during a long build. A queued message is withdrawn
-  only if the helper is stopped first.
+  helper is doing, including during a long build. A pending or queued message is
+  withdrawn when the helper finishes, fails or is stopped.
 - On: quiet is always measured from the helper's last progress, checked every
   30 seconds; a flap between waiting and stalled does not restart it.
 - On, stalled (in a turn, nothing it started this turn running, no tool call
@@ -116,7 +116,8 @@ Managed mode ▸ "Tell the lead only when a helper is stuck"
   an idle lead's new turn cannot be withdrawn. A withdraw stays withdrawn when
   another message joins the lead's queue before it reaches the store, and when
   it lands while the message itself is still being queued (then the message is
-  cancelled as it lands). Stopping a helper does the same with the switch off.
+  cancelled as it lands). Terminal-helper withdrawal applies with the switch
+  either on or off; progress withdrawal remains specific to the on policy.
 - Every case: one message per quiet episode, re-armed only by the helper's
   progress; sent on the existing agent-message path (queued behind a running
   lead turn, a new turn for an idle lead, nothing to a gone lead). The helper
@@ -132,7 +133,9 @@ this path is removed in 0.7.44 (one channel per recipient, below). A refused
 lead send remains pending for another flush rather than creating a user alert.
 The no-progress watchdog remains independent. Under **SRC-01**, a sweep
 withdraws pending and queued watchdog alerts when a helper is no longer working
-or waiting for action, including failed and completed turns. Withdrawal is
+or waiting for action, including failed and completed turns, with
+`agents.managedMode.stallAlerts` either on or off. It also cancels an alert that
+is still being queued when the terminal state arrives. Withdrawal is
 witnessed by `--helper-watchdog-check`; a lead receives no stale queued warning.
 Under **SRC-01**, the stored
 helper-wake message uses plain lines: helper status, summary, findings, nonpassing
