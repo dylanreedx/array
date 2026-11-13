@@ -44,7 +44,7 @@ public struct AgentStoreLayout: Sendable {
     /// save listed all of it to number and prune its own three: 6,724 files for
     /// 2,228 agents, 10-21% of the main thread (2026-11-12). Each record now owns
     /// a subfolder, `backups(for:)`, so a save lists only its own backups. Files
-    /// still here are moved by `AgentStore.migrateSharedBackups` once.
+    /// still here are moved by `AgentStore.migrateSharedBackups` on every launch.
     public var backupsDirectory: URL {
         agentsDirectory.appendingPathComponent("backups", isDirectory: true)
     }
@@ -57,12 +57,6 @@ public struct AgentStoreLayout: Sendable {
     /// The deleted-agent tombstone's backups, apart from every record's.
     public var deletedAgentTilesBackupsDirectory: URL {
         backupsDirectory.appendingPathComponent("deleted-agent-tiles", isDirectory: true)
-    }
-
-    /// Present once every backup in the shared folder that belongs to a known
-    /// record or the tombstone has moved into its own folder.
-    public var perRecordBackupsMarker: URL {
-        backupsDirectory.appendingPathComponent(".per-record-backups-v1", isDirectory: false)
     }
 
     public func agentFile(id: AgentID) -> URL {
@@ -95,6 +89,7 @@ public final class AgentStore: @unchecked Sendable {
     public init(
         applicationSupportDirectory: URL? = nil,
         retainedBackups: Int = 3,
+        migrationHookForQA: @escaping @Sendable () -> Void = {},
         warn: @escaping (String) -> Void = { fputs($0 + "\n", stderr) }
     ) {
         let baseDir = applicationSupportDirectory
@@ -103,7 +98,25 @@ public final class AgentStore: @unchecked Sendable {
         self.layout = AgentStoreLayout(applicationSupportDirectory: baseDir)
         self.retainedBackups = retainedBackups
         self.warn = warn
-        migrateSharedBackups()
+        let layout = self.layout
+        migration.enter()
+        Self.migrationQueue.async { [migration] in
+            migrationHookForQA()
+            Self.migrateSharedBackups(layout: layout, warn: warn)
+            migration.leave()
+        }
+    }
+
+    /// One queue for every store in the process, so two stores on one root
+    /// never move the same file at once.
+    private static let migrationQueue = DispatchQueue(label: "AgentStore.backup-migration", qos: .utility)
+    private let migration = DispatchGroup()
+
+    /// Blocks until this store's launch move of shared backups has finished.
+    /// Reads call it only when a record fails to decode, since only then can a
+    /// backup still in the shared folder matter.
+    public func waitForBackupMigration() {
+        migration.wait()
     }
 
     /// Each record's writer keeps its backups in that record's own folder, so
@@ -117,21 +130,26 @@ public final class AgentStore: @unchecked Sendable {
         AtomicWriter(
             backupsDirectory: backups,
             retainedBackups: retainedBackups,
-            legacyBackupPolicy: .targetDedicated
+            legacyBackupPolicy: .targetDedicated,
+            preferBackupTimestampsForRetention: true
         )
     }
 
     /// Moves each backup 0.7.47 and earlier left in the shared folder into its
     /// record's folder (or the tombstone's), so the restore reader finds it
-    /// where that record's writer now looks. Runs once: the marker skips it on
-    /// every later launch. A backup whose record no longer exists stays put; no
-    /// save lists the shared folder any more, so it costs nothing. An
-    /// interrupted run leaves no marker and resumes on the next launch.
-    private func migrateSharedBackups() {
+    /// where that record's writer now looks. Runs on every launch, off the main
+    /// thread: 0.7.47 still writes into the shared folder, so a downgrade and
+    /// upgrade heals on the next launch. Once the folder holds only the
+    /// per-record subfolders this is one listing. A backup whose record no
+    /// longer exists stays put; no save lists the shared folder, so it costs
+    /// nothing. A name already taken in the destination is never overwritten:
+    /// the moved file keeps both, with a `.moved-N` suffix.
+    private static func migrateSharedBackups(layout: AgentStoreLayout, warn: (String) -> Void) {
         let shared = layout.backupsDirectory
         let fileManager = FileManager.default
-        guard !fileManager.fileExists(atPath: layout.perRecordBackupsMarker.path),
-              fileManager.fileExists(atPath: shared.path),
+        // The run-once marker an earlier build of this change wrote.
+        try? fileManager.removeItem(at: shared.appendingPathComponent(".per-record-backups-v1"))
+        guard fileManager.fileExists(atPath: shared.path),
               let names = try? fileManager.contentsOfDirectory(atPath: shared.path),
               let recordFiles = try? fileManager.contentsOfDirectory(atPath: layout.agentsDirectory.path)
         else { return }
@@ -154,7 +172,6 @@ public final class AgentStore: @unchecked Sendable {
 
         let v2Head = "array-backup-v2-"
         let v2PrefixLength = v2Head.count + 64 + 1
-        var stranded = 0
         for name in names {
             let destination: URL?
             if name.hasPrefix(v2Head) {
@@ -165,21 +182,23 @@ public final class AgentStore: @unchecked Sendable {
                 destination = nil
             }
             guard let destination else { continue }
+            let source = shared.appendingPathComponent(name)
             do {
                 try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
-                try fileManager.moveItem(
-                    at: shared.appendingPathComponent(name),
-                    to: destination.appendingPathComponent(name))
+                var target = destination.appendingPathComponent(name)
+                var suffix = 1
+                while fileManager.fileExists(atPath: target.path) {
+                    target = destination.appendingPathComponent("\(name).moved-\(suffix)")
+                    suffix += 1
+                }
+                try fileManager.moveItem(at: source, to: target)
             } catch {
-                // Another store in this process may have moved it first.
-                if fileManager.fileExists(atPath: shared.appendingPathComponent(name).path) {
-                    stranded += 1
+                // Left in place; the next launch tries again.
+                if fileManager.fileExists(atPath: source.path) {
                     warn("AgentStore: could not move backup \(name) into its record's folder: \(error)")
                 }
             }
         }
-        guard stranded == 0 else { return }
-        fileManager.createFile(atPath: layout.perRecordBackupsMarker.path, contents: Data())
     }
 
     /// The pure half of `AppDelegate.resolveAppSupportDir(smokeTest:)`, in Core
@@ -231,7 +250,7 @@ public final class AgentStore: @unchecked Sendable {
     public func load(id: AgentID) throws -> AgentRecord? {
         let url = layout.agentFile(id: id)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try writer(for: id).read(at: url)
+        return try writer(for: id).read(at: url, beforeBackup: waitForBackupMigration, recoveryTimestamp: { $0.lastActivityAt })
     }
 
     public func delete(id: AgentID) throws {
@@ -261,7 +280,8 @@ public final class AgentStore: @unchecked Sendable {
         let url = layout.deletedAgentTilesFile
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         do {
-            let ids: [UUID] = try writer(backups: layout.deletedAgentTilesBackupsDirectory).read(at: url)
+            let ids: [UUID] = try writer(backups: layout.deletedAgentTilesBackupsDirectory)
+                .read(at: url, beforeBackup: waitForBackupMigration, recoveryTimestamp: { (_: [UUID]) in nil })
             return Set(ids)
         } catch {
             warn("AgentStore.loadDeletedAgentTiles: unreadable at \(url.path): \(error)")
@@ -313,7 +333,7 @@ public final class AgentStore: @unchecked Sendable {
                 if let id, known.contains(id) { continue }
                 let reader = id.map { writer(for: $0) } ?? writer(backups: layout.backupsDirectory)
                 Self.recordsDecoded.increment()
-                let record: AgentRecord = try reader.read(at: entry)
+                let record: AgentRecord = try reader.read(at: entry, beforeBackup: waitForBackupMigration, recoveryTimestamp: { $0.lastActivityAt })
                 records.append(record)
             } catch {
                 warn("AgentStore.loadAll: skipping unreadable record at \(entry.path): \(error)")

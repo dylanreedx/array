@@ -62,6 +62,9 @@ enum HelperTileChecks {
     static func lifecycle() async throws {
         let (b, _) = try bench("helper-tiles-lifecycle"); defer { b.tearDown() }
         let s = b.supervisor
+        // This parent collects results; set that capability before the child
+        // starts so a fast completion cannot queue a push that interrupts wait.
+        let collect = try b.collectConfiguration(for: b.f.agentId)
         let count = b.f.canvas.allWorkspaceTiles().count
         let id = try await child(b, "HOLD running helper")
         try await AgentPresenceChecks.eventually("helper runner did not start") { s.isRunning(id) }
@@ -100,9 +103,9 @@ enum HelperTileChecks {
         try expect(!inspected.isError, "tile-less helper cannot be inspected")
         let handle = s.records[id]!.spawnResultHandle!
         // Collected as an agent Array does not run would (the collect channel).
-        let waited = try await WorkspaceAgentReportChecks.call(b.collectConfiguration(for: b.f.agentId), "wait_agents", ["handles": [handle], "timeoutSeconds": 5])
+        let waited = try await WorkspaceAgentReportChecks.call(collect, "wait_agents", ["handles": [handle], "timeoutSeconds": 5])
         let agents = (waited.reply["result"] as? [String: Any])?["agents"] as? [[String: Any]]
-        try expect(!waited.isError && agents?.first?["status"] as? String == "completed", "folded helper lost wait_agents result")
+        try expect(!waited.isError && agents?.first?["status"] as? String == "completed", "folded helper lost wait_agents result: \(waited.reply)")
         try expect(agents?.first?["finalText"] as? String == WorkspaceAgentReportChecks.childFinalText, "folded transcript did not reach wait_agents")
         let message = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "array_message_agent", [
             "agentId": id.rawValue.uuidString, "text": "NEXT HOLD after fold", "idempotencyKey": UUID().uuidString])

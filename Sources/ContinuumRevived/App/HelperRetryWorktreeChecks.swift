@@ -136,6 +136,23 @@ enum HelperRetryWorktreeChecks {
         let encodedHandoff = String(decoding: try JSONEncoder().encode(handoff), as: UTF8.self).dropFirst().dropLast()
         try expect(prompt.contains(String(encodedHandoff)), "runner did not receive the exact bounded handoff")
         try expect(b.supervisor.records[old]?.lastReport != nil && FileManager.default.fileExists(atPath: root.appendingPathComponent("new-00.txt").path), "retry removed earlier work")
+        // An old helper that resumes while the retry's git step runs off main is
+        // no longer retryable: the retry must create nothing (2026-11-13 review).
+        let resumed = try child(await request(b, task: "HOLD resumed in the gap"))
+        _ = try await capture(b, resumed)
+        b.supervisor.stop(resumed)
+        try expect(b.supervisor.mayRetry(resumed, from: b.f.agentId), "stopped helper not eligible before the gap")
+        b.supervisor._spawnCheckoutResolvedHookForQA = {
+            b.supervisor._spawnCheckoutResolvedHookForQA = nil
+            _ = b.supervisor.send("HOLD resume the old helper", to: resumed)
+        }
+        let countBeforeGap = b.supervisor.records.count
+        let gapRetry = try await request(b, task: "retry across the gap", retry: resumed)
+        try expect(b.supervisor._spawnCheckoutResolvedHookForQA == nil, "the retry never reached the gap after its git step")
+        try expect(!b.supervisor.mayRetry(resumed, from: b.f.agentId), "the old helper did not resume in the gap")
+        try expect(WorkspaceAgentReportChecks.errorCode(gapRetry) == "invalid_request" && b.supervisor.records.count == countBeforeGap,
+                   "a retry committed after its old helper resumed during the git step: \(gapRetry.reply)")
+        b.supervisor.stop(resumed)
         let held = try child(await request(b, task: "HOLD stopped helper"))
         _ = try await capture(b, held)
         b.supervisor.stop(held)
@@ -254,6 +271,33 @@ enum HelperRetryWorktreeChecks {
         try expect(!accepted.isError, "a re-message after the other helper finished was refused: \(accepted.reply)")
         r.supervisor.stopAll()
         print("Helper checkout writers passed: the first helper shares with no worktree made; two delegations in one moment get one checkout each; a finished helper re-messaged while another writes the checkout is refused, then accepted once it finishes")
+
+        // A native spawn that lands while a delegation's git step runs off main
+        // takes the shared checkout first. The delegation must then get its own
+        // worktree rather than commit into the same checkout (2026-11-13 review).
+        let g = try bench("helper-overlap-gap"); defer { g.tearDown() }
+        let gRoot = URL(fileURLWithPath: g.supervisor.records[g.f.agentId]!.checkoutRoot)
+        try repository(gRoot)
+        try expect(g.supervisor.setProviderSettings(agentID: g.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "gap lead harness refused")
+        try expect(g.supervisor.setMode(.managed, for: g.f.agentId), "gap lead mode refused")
+        var native: AgentID?
+        g.supervisor._spawnCheckoutResolvedHookForQA = {
+            g.supervisor._spawnCheckoutResolvedHookForQA = nil
+            native = g.supervisor.handleSpawnRequest(
+                SpawnRequest(role: nil, prompt: "HOLD native spawn in the gap", isolated: false),
+                from: g.f.agentId)
+        }
+        let delegated = try child(await request(g, task: "HOLD delegated across the gap"))
+        try expect(g.supervisor._spawnCheckoutResolvedHookForQA == nil, "the delegation never reached the gap after its git step")
+        guard let native else { throw WorkspaceAgentReportChecks.Failure(description: "the native spawn in the gap was refused") }
+        let nativeRoot = URL(fileURLWithPath: g.supervisor.records[native]!.checkoutRoot)
+        let delegatedRoot = URL(fileURLWithPath: g.supervisor.records[delegated]!.checkoutRoot)
+        try expect(WorktreeManager.resolved(nativeRoot) == WorktreeManager.resolved(gRoot), "the native spawn did not take the shared checkout")
+        try expect(WorktreeManager.resolved(delegatedRoot) != WorktreeManager.resolved(gRoot)
+                   && delegatedRoot.deletingLastPathComponent().lastPathComponent == ".worktrees",
+                   "two helpers on one checkout: the delegation committed into the checkout a native spawn took during its git step")
+        print("Helper overlap gap check passed: a native spawn during the git step keeps the shared checkout; the delegation gets its own worktree")
+        g.supervisor.stopAll()
 
         let n = try bench("helper-nongit"); defer { n.tearDown() }
         try expect(n.supervisor.setMode(.managed, for: n.f.agentId), "non-git lead mode refused")
