@@ -6029,6 +6029,7 @@ final class AgentSupervisor {
         }
 
         func commit(_ plan: SpawnCheckoutPlan, _ resolution: Result<SpawnCheckoutPlan.Checkout, any Error>) {
+            if checkoutOffMain { _spawnCheckoutResolvedHookForQA?() }
             let overlapping = plan.overlapping
             let checkoutResult: SpawnCheckoutPlan.Checkout
             do { checkoutResult = try resolution.get() } catch {
@@ -6044,7 +6045,6 @@ final class AgentSupervisor {
                 return completion(.gateClosed(closed))
             }
             if checkoutOffMain {
-                _spawnCheckoutResolvedHookForQA?()
                 // Main ran other work during the git step: the parent may be gone
                 // and a synchronous spawn may have taken the last child slot.
                 guard self.records[parentId] != nil else {

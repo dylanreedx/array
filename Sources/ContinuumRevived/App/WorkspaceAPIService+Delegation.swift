@@ -323,14 +323,17 @@ extension WorkspaceAPIService {
             }
             return .result(object)
         }
-        // The gate repeats step 5's authorization at the moment of creation: the
-        // git step ran in between, and access revoked during it creates nothing.
+        // The gate repeats step 5's authorization, and the retry eligibility
+        // checked after approval, at the moment of creation: the git step ran in
+        // between, and access revoked or an old helper resumed during it creates
+        // nothing.
         // Cancellation is not re-checked: past the commit boundary the child is
         // committed, and step 8 reports it truthfully.
         let gate: () -> String? = { [weak self] in
             guard let self else { return "revoked" }
             guard self.supervisor.records[agentId]?.workspaceToolsEnabled == true,
                   self.revocationGeneration(for: agentId) == generationAtGrant else { return "revoked" }
+            if let retryOf = request.retryOf, !self.supervisor.mayRetry(retryOf, from: agentId) { return "retryIneligible" }
             return nil
         }
         supervisor.handleSpawnRequestAsync(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking), mode: .free, retryOf: request.retryOf, originalBrief: request.task, checkoutOffMain: checkoutOffMain, gate: gate) { [weak self] outcome in
@@ -341,6 +344,8 @@ extension WorkspaceAPIService {
             case .refused:
                 let reason = self.supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
                 completion(fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true))
+            case .gateClosed("retryIneligible"):
+                completion(fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn."))
             case .gateClosed:
                 completion(fail(.permissionDenied, "Access was revoked before the child was created.", approvalRequestId: approvalRequestId))
             }
