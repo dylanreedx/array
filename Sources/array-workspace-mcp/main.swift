@@ -419,21 +419,18 @@ private enum HookMode {
         // fail-open transport and byte-identical command/configuration.
         let failClosed = arguments.contains("--fail-closed")
         if !failClosed && ProcessInfo.processInfo.environment[PiAgentRunner.arrayHostedEnvironmentKey] != "1" { return }
-        let input = FileHandle.standardInput.readDataToEndOfFile()
-        let decoded = try? JSONSerialization.jsonObject(with: input) as? [String: Any]
-        // Only PreToolUse is an enforcement boundary. Brief/report hook failures
-        // must not print a tool-decision object on another event's protocol.
-        let enforcing = failClosed && (decoded == nil || decoded?["hook_event_name"] as? String == "PreToolUse")
+        // Arm before guards and stdin: a provider may never close its pipe.
+        // Before decoding an event, an opted-in hook must assume enforcement.
+        DispatchQueue.global().asyncAfter(deadline: .now() + WorkspaceAgentHook.postTimeoutSeconds + 0.5) {
+            Foundation.exit(failClosed ? 2 : 0)
+        }
+        var enforcing = failClosed
         var acknowledged = false
         defer {
             if enforcing && !acknowledged,
                let denial = try? JSONSerialization.data(withJSONObject: ManagedChooser.deny(ManagedChooser.unavailable)) {
                 FileHandle.standardOutput.write(denial + Data("\n".utf8))
             }
-        }
-        // A hung stdin/read/network operation must also refuse the tool.
-        DispatchQueue.global().asyncAfter(deadline: .now() + WorkspaceAgentHook.postTimeoutSeconds + 0.5) {
-            Foundation.exit(enforcing ? 2 : 0)
         }
         guard ProcessInfo.processInfo.environment[PiAgentRunner.arrayHostedEnvironmentKey] == "1" else { return }
         var options: [String: String] = [:]
@@ -447,6 +444,9 @@ private enum HookMode {
               let tokenPath = options["--token-file"],
               let tokenData = FileManager.default.contents(atPath: tokenPath),
               case let token = String(decoding: tokenData, as: UTF8.self), !token.isEmpty else { return }
+        let input = FileHandle.standardInput.readDataToEndOfFile()
+        let decoded = try? JSONSerialization.jsonObject(with: input) as? [String: Any]
+        enforcing = failClosed && (decoded == nil || decoded?["hook_event_name"] as? String == "PreToolUse")
         guard var payload = decoded else { return }
         if input.count > WorkspaceAgentHook.maxPostedPayloadBytes {
             if let message = payload["last_assistant_message"] as? String {

@@ -331,13 +331,17 @@ enum OrchestrationChooserChecks {
         let silent = try WorkspaceHookBridgeChecks.SilentListener(); defer { silent.close() }
         try expect(try await hookFailure(configuration, token: configuration.tokenFilePath, endpoint: "http://127.0.0.1:\(silent.port)/workspace-mcp")["permissionDecision"] as? String == "deny", "host timeout failed open")
         let nonTool = try await hookFailure(configuration, token: "/nonexistent-array-chooser-token", body: #"{"hook_event_name":"SessionStart","source":"resume"}"#)
-        try expect(nonTool.isEmpty, "non-tool failure printed a tool decision")
+        try expect(nonTool["permissionDecision"] as? String == "deny", "invalid token was not rejected before reading event input")
+        let hung = try await hookFailure(configuration, token: configuration.tokenFilePath, keepInputOpen: true)
+        try expect(hung["exitCode"] as? Int == 2, "hung stdin failed open")
+        let invalid = try await hookFailure(configuration, token: "/nonexistent-array-chooser-token", keepInputOpen: true)
+        try expect(invalid["permissionDecision"] as? String == "deny", "token guard waited for stdin")
         try await HelperRetryWorktreeChecks.finish(b, child)
         try expect(try await edit(lead, "Edit"), "integration edit stayed closed")
         print("PASS chooser policy: solo edits, latched edits/shell/unknown/oversize refused, helper edits, missing-token fail closed, integration reopens")
     }
     static func hookFailure(_ config: WorkspaceMCPConfiguration, token: String, endpoint: String? = nil,
-                            body: String = #"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#) async throws -> [String: Any] {
+                            body: String = #"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#, keepInputOpen: Bool = false) async throws -> [String: Any] {
         let process = Process(), input = Pipe(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: config.serverExecutable)
         process.arguments = ["hook", "--endpoint", endpoint ?? config.endpoint, "--agent-id", config.agentID, "--token-file", token, "--fail-closed", "1"]
@@ -345,7 +349,8 @@ enum OrchestrationChooserChecks {
         process.environment = ProcessInfo.processInfo.environment.merging([PiAgentRunner.arrayHostedEnvironmentKey: "1"]) { _, new in new }
         try process.run()
         try input.fileHandleForWriting.write(contentsOf: Data(body.utf8))
-        try input.fileHandleForWriting.close()
+        if !keepInputOpen { try input.fileHandleForWriting.close() }
+        defer { try? input.fileHandleForWriting.close() }
         try await AgentPresenceChecks.eventually("failed hook did not exit", timeout: 5) { !process.isRunning }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         if process.terminationStatus == 2 { return ["permissionDecision": "deny", "exitCode": 2] }
