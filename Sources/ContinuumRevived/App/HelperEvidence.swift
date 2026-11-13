@@ -337,7 +337,11 @@ struct HelperEvidence {
         }
         if let editsEnd, let run = runs.filter({ $0.start > editsEnd }).max(by: { $0.start < $1.start }) {
             record(run)
-            var reasons: [String] = []
+            // A shell check may itself rewrite any covered file. Runtime
+            // observations reach this queue asynchronously, so a snapshot here
+            // cannot bracket tool execution. Preserve observed order and exit,
+            // but do not claim freshness without a trusted write boundary.
+            var reasons: [String] = ["checkWritesUnobserved"]
             if changed == nil { reasons.append("changesUnverifiable") }
             if shared { reasons.append("sharedCheckout") }
             if !reportSeen { reasons.append("observationsInFlight") }
@@ -349,7 +353,7 @@ struct HelperEvidence {
             }) { reasons.append("backgroundJobBeforeCheck") }
             let entry = shellOf(run)!.runs.first(where: covering.contains)!
             if manifest.entries[entry].binary && !fresh(manifest.entries[entry].executable, before: run) { reasons.append("buildFreshnessUnknown") }
-            if reasons.isEmpty { fact.status = "after" } else { fact.reasons = Array(Set(reasons)).sorted() }
+            fact.reasons = Array(Set(reasons)).sorted()
             return fact
         }
         // A run that overlaps an edit to this file has no provable order.

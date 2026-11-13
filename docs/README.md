@@ -29,6 +29,8 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
 
 - [Architecture overview](./internals/architecture-overview.md)
 - [Agent providers (pi, claude, codex)](./internals/providers.md)
+- [Managed orchestration gap status](./internals/managed-orchestration-gap-status.md) —
+  host-text delivery, evidence limits and remaining contract consumers
 - [QA: the matrix, self-checks, witnesses](./internals/qa.md)
 - [Helper completion message attribution](./internals/helper-completion-attribution.md) —
   the 0.7.42/0.7.43 hotfixes, behavioral witnesses and historical-transcript limit

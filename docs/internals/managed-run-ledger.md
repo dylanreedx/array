@@ -187,17 +187,22 @@ flag, or a `.py`/`.sh` script the manifest names. The manifest is
 gate pre-pass and read, never copied. A check's identity is the flag in its
 `invocation`, else the script.
 
-**Per edited file**, relative to the helper's checkout: `after` (a covering
-check completed after the last edit), `before` (only before it), `none` (no
+**Per edited file**, relative to the helper's checkout: `before` (a covering
+check completed only before the last observed edit), `none` (no
 covering run seen), `unmapped` (the manifest maps no check to it), or `unknown`
-with a reason: `noManifest`, `checkIncomplete` (a covering run started and did
+with a reason: `checkWritesUnobserved` (a covering run completed after the
+last observed edit, but the host cannot observe writes inside that run),
+`noManifest`, `checkIncomplete` (a covering run started and did
 not finish, or was interrupted, timed out or backgrounded), or
 `shellCommandNotObserved` (a shell call after the edit whose command the host
 did not see, as when "Show shell commands in transcripts" is off), or
 `backgroundJobBeforeCheck` (a shell call before the check left a job running:
 a lone `&`, `nohup`, `disown` or `setsid`, or a call the harness reported
 backgrounded; the job can write after the check). Each fact names the check,
-the edit and check call ids and their order.
+the edit and check call ids and their order. `after` remains readable in old
+ledger rows but is no longer emitted: shell-call order alone cannot establish
+file freshness. This conservative classification also applies to checks that
+appear read-only; it is not evidence that the check wrote anything.
 
 **Exit status.** Codex: the numeric `exitCode` the app-server transport
 reports (recorded in `codex-appserver-single-agent.jsonl`), unless the command
@@ -206,11 +211,13 @@ fixture shows the host a numeric exit, and a successful Bash result has none.
 
 **What stays unobserved.** Files written by shell commands; edits made by a
 Claude in-process subagent (its tool calls are not on the side channel); a
-check run rewriting the file it covers, which still reads `after` (the host
-sees the check as one call and has no per-file write times; witnessed as such);
+check run rewriting the file it covers (the host sees one call and has no
+per-file write times, so freshness is `unknown`);
 a job started inside an unseen (hidden) shell command;
 anything before this process started (`observed: notSinceDelegation`);
-observations still in the runner's pipe when the report arrives. Counters live
+observations still in the runner's pipe when the report arrives. Snapshots on
+the asynchronous ledger queue cannot reliably bracket tool execution and do
+not establish complete write visibility. Counters live
 in memory per helper, constant in size per file and check, with no 128-event
 window.
 

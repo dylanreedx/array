@@ -316,17 +316,17 @@ enum HelperEvidenceChecks {
                 expectFact(name, facts, "Sources/Iota.swift", "unknown", reasons: ["buildFreshnessUnknown"], "a binary check with no rebuild counted as fresh")
                 expectFact(name, facts, "Sources/Kappa.swift", "before", "an edit after the check was not before")
             }
-            expectFact(name, facts, "Sources/Omicron.swift", "unknown", reasons: ["shellAfterCheck"], exactly: true, "a shell after the check left it after")
+            expectFact(name, facts, "Sources/Omicron.swift", "unknown", reasons: ["checkWritesUnobserved", "shellAfterCheck"], exactly: true, "a shell after the check left it after")
             expectFact(name, facts, "Sources/Lambda.swift", "unknown", reasons: ["manifestUnparsed"], exactly: true, "an unparsed manifest entry read as unmapped")
             expectFact(name, facts, "docs/notes.md", "unmapped", "an unmapped file was not unmapped")
             expectFact(name, facts, "Sources/Delta.swift", "none", "a covered file with no run was not none")
-            expectFact(name, facts, "Sources/Theta.swift", "after", "a script check after the last edit was not after")
+            expectFact(name, facts, "Sources/Theta.swift", "unknown", reasons: ["checkWritesUnobserved"], exactly: true, "a completed check with unobserved writes claimed after")
             check(facts["Sources/Theta.swift"]?["exit"] as? String == (claude ? "unknown" : "0"), "\(name): Theta exit is not what the harness reported")
-            if claude { expectFact(name, facts, "Sources/Alpha.swift", "unknown", reasons: ["buildFreshnessUnknown"], exactly: true, "a run after a build with no reported exit counted as fresh") }
-            else { expectFact(name, facts, "Sources/Alpha.swift", "after", "a check after a rebuild that exited 0 was not after") }
+            if claude { expectFact(name, facts, "Sources/Alpha.swift", "unknown", reasons: ["buildFreshnessUnknown", "checkWritesUnobserved"], exactly: true, "a run after a build with no reported exit counted as fresh") }
+            else { expectFact(name, facts, "Sources/Alpha.swift", "unknown", reasons: ["checkWritesUnobserved"], exactly: true, "a fresh binary check with unobserved writes claimed after") }
             check(facts["Sources/Alpha.swift"]?["checkFilesChanged"] as? Bool == true, "\(name): an edit to the check's own file was not recorded")
-            if claude { expectFact(name, facts, "Sources/AlphaChecks.swift", "unknown", reasons: ["buildFreshnessUnknown"], exactly: true, "a check file's edit was not covered by its check") }
-            else { expectFact(name, facts, "Sources/AlphaChecks.swift", "after", "a check file's edit was not covered by its check") }
+            if claude { expectFact(name, facts, "Sources/AlphaChecks.swift", "unknown", reasons: ["buildFreshnessUnknown", "checkWritesUnobserved"], exactly: true, "a check file's edit was not covered by its check") }
+            else { expectFact(name, facts, "Sources/AlphaChecks.swift", "unknown", reasons: ["checkWritesUnobserved"], exactly: true, "a check file's edit bypassed unknown write visibility") }
             expectFact(name, facts, "Sources/Rho.swift", "unknown", reasons: ["buildFreshnessUnknown"], "a build of another product counted as a rebuild of the check's binary")
             check(facts["Sources/Alpha.swift"]?["check"] as? String == ".build/debug/Array --evidence-alpha-check", "\(name): check identity not the baseline manifest's")
             expectFact(name, facts, "Sources/Beta.swift", "before", "an edit after the last check was not before")
@@ -360,7 +360,7 @@ enum HelperEvidenceChecks {
             check(false, "codex: file change activities not observed: \(reported.keys.sorted())")
         }
         let sharedRow = row("shared")
-        expectFact("shared", files(sharedRow), "Sources/Theta.swift", "unknown", reasons: ["sharedCheckout"], exactly: true, "a shared checkout gave after")
+        expectFact("shared", files(sharedRow), "Sources/Theta.swift", "unknown", reasons: ["checkWritesUnobserved", "sharedCheckout"], exactly: true, "a shared checkout gave after")
         let lost = row("lost"), lostFacts = files(lost), lostSummary = lost["evidence"] as? [String: String] ?? [:]
         check(lostSummary["changes"] == "unavailable" && lostSummary["changesReason"] == "gitFailed", "lost: git failure not recorded: \(lostSummary)")
         check(lostSummary["reportCallObserved"] == "false", "lost: observations in flight left no marker: \(lostSummary)")
@@ -368,11 +368,19 @@ enum HelperEvidenceChecks {
                    reasons: ["changesUnverifiable", "observationsInFlight", "callStillRunning"], "an unverifiable record gave after")
         expectFact("lost", lostFacts, "Sources/Gamma.swift", "unknown", reasons: ["checkIncomplete"], "an unfinished check was not unknown")
         // A background job started before the check may write after it.
-        expectFact("background", files(row("background")), "Sources/Psi.swift", "unknown", reasons: ["backgroundJobBeforeCheck"], exactly: true,
+        expectFact("background", files(row("background")), "Sources/Psi.swift", "unknown", reasons: ["backgroundJobBeforeCheck", "checkWritesUnobserved"], exactly: true,
                    "a background job started before the check left it after")
-        // Not seen: the check run itself rewriting the file it covers reads
-        // as after (docs/internals/managed-run-ledger.md, helper evidence).
-        expectFact("inside", files(row("inside")), "Sources/Chi.swift", "after", "the recorded blind spot for a check's own writes changed")
+        // The check really rewrites its covered file within its own shell call.
+        // Without trusted write boundaries, observed call order is not freshness.
+        expectFact("inside", files(row("inside")), "Sources/Chi.swift", "unknown", reasons: ["checkWritesUnobserved"], exactly: true, "a check rewriting its covered file falsely claimed after")
+
+        let insideFact = files(row("inside"))["Sources/Chi.swift"] ?? [:]
+        check(insideFact["check"] as? String == "python3 scripts/check-chi.py"
+              && insideFact["exit"] as? String == "unknown"
+              && insideFact["editCall"] != nil && insideFact["checkCall"] != nil
+              && (insideFact["editEnd"] as? Int ?? Int.max) < (insideFact["checkStart"] as? Int ?? Int.min)
+              && (insideFact["checkStart"] as? Int ?? Int.max) < (insideFact["checkEnd"] as? Int ?? Int.min),
+              "inside: conservative freshness discarded independent observed call order or exit: \(insideFact)")
 
         // Recording off records nothing.
         check(!off.rows.contains { $0["kind"] as? String == "helperEvidence" }, "evidence recorded with recording off")
@@ -395,7 +403,7 @@ enum HelperEvidenceChecks {
             check(Set(row.keys).isSubset(of: ManagedRunLedgerChecks.allowedKeys), "unexpected row keys: \(row.keys.sorted())")
         }
         if !failures.isEmpty { throw WorkspaceAgentReportChecks.Failure(description: "helper-evidence:\n- " + failures.joined(separator: "\n- ")) }
-        print("Helper evidence passed: Claude and Codex: unobserved shell and subagent edits recorded editNotObserved; grep, guarded, syntax-check and same-named-script commands are possible runs; a failed start is no run; one Claude batch is orderUnknown; no rebuild, a rebuild of another product or no reported build exit is buildFreshnessUnknown; a check file's edit is covered by its check; every path of a Codex file change is an observed edit and other paths alone change no location activity; a shell after the check, a background job started before it, a shared checkout, git failure, a call still running and no report call seen each block after; a check rewriting its own file still reads after (known blind spot); manifest read from the baseline with its edit, check-file edit and unparsed entry recorded; lead input and report replies match the base behaviour on and off; nothing shown to any agent; nothing sensitive stored")
+        print("Helper evidence passed: Claude and Codex: unobserved shell and subagent edits recorded editNotObserved; grep, guarded, syntax-check and same-named-script commands are possible runs; a failed start is no run; one Claude batch is orderUnknown; no rebuild, a rebuild of another product or no reported build exit is buildFreshnessUnknown; a check file's edit is covered by its check; every path of a Codex file change is an observed edit and other paths alone change no location activity; a shell after the check, a background job started before it, a shared checkout, git failure, a call still running and no report call seen each block after; checks with unobserved internal writes remain unknown while retaining call order and exit; manifest read from the baseline with its edit, check-file edit and unparsed entry recorded; lead input and report replies match the base behaviour on and off; nothing shown to any agent; nothing sensitive stored")
         try await timing()
     }
 
