@@ -161,6 +161,11 @@ public final class CompanionTaskLedger: @unchecked Sendable {
             file = try writer.read(at: url, decoder: JSONDecoder())
             guard file.version == 1 else { throw CompanionTaskLedgerError.unsupportedVersion }
             Self.replayJournal(at: journalURL, onto: &file)
+            // The base does not hold the last session's journal yet. Fold it in
+            // before this launch writes anything, so no failed startup write can
+            // trim a committed line; if this throws, the journal is untouched.
+            journalBytes = ((try? FileManager.default.attributesOfItem(atPath: journalURL.path)[.size]) as? Int) ?? 0
+            if journalBytes > 0 { try compact(file) }
         } else {
             file = File()
             try? FileManager.default.removeItem(at: journalURL)
@@ -182,11 +187,6 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         try change(touching: false) { next in
             for id in Array(next.tasks.keys) where next.tasks[id]!.touchedAt == nil { next.tasks[id]!.touchedAt = now }
         }
-        // Launch folds the last session's journal into the base, so the journal
-        // only ever holds this session's changes.
-        if (try? FileManager.default.attributesOfItem(atPath: journalURL.path)[.size] as? Int) ?? 0 > 0 {
-            try compact(file)
-        }
     }
 
     /// Lines whose revision is past the base, in order. An unreadable line is a
@@ -204,19 +204,28 @@ public final class CompanionTaskLedger: @unchecked Sendable {
 
     /// Commit point for one change: the line is on stable storage. A failed
     /// append trims the journal back so a torn line cannot precede the next one.
+    /// It trims to the length the file had before this write, never to a count
+    /// kept in memory: a count that disagrees with the file would cut committed
+    /// lines, or pad with zeros that swallow the next one. Each line also starts
+    /// on a fresh line, so a tail whose trim failed is skipped on its own instead
+    /// of gluing itself to the next committed change.
     private func append(_ delta: Delta) throws {
-        var data = try JSONEncoder().encode(delta)
+        var data = Data([UInt8(ascii: "\n")])
+        data.append(try JSONEncoder().encode(delta))
         data.append(UInt8(ascii: "\n"))
         let fd = Darwin.open(journalURL.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { Darwin.close(fd) }
+        var status = stat()
+        guard Darwin.fstat(fd, &status) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let committed = status.st_size
         let written = data.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
         guard written == data.count, Darwin.fsync(fd) == 0 else {
             let code = POSIXErrorCode(rawValue: errno) ?? .EIO
-            _ = Darwin.ftruncate(fd, off_t(journalBytes))
+            _ = Darwin.ftruncate(fd, committed)
             throw POSIXError(code)
         }
-        journalBytes += data.count
+        journalBytes = Int(committed) + data.count
     }
 
     /// The base takes every change; only then is the journal emptied. A journal
