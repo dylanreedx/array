@@ -3149,9 +3149,16 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         closeButton.toolTip = close
     }
 
+    private var identityProviderModel: String?
+    private var hasIdentity = false
+
     func setIdentity(title: String?, providerModel: String?) {
         let normalized = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        displayTitleOverride = normalized.flatMap { $0.isEmpty ? nil : $0 }
+        let title = normalized.flatMap { $0.isEmpty ? nil : $0 }
+        guard !hasIdentity || title != displayTitleOverride || providerModel != identityProviderModel else { return }
+        hasIdentity = true
+        identityProviderModel = providerModel
+        displayTitleOverride = title
         if let providerModel, let source = BrandMark96.mark(forModel: providerModel),
            let image = source.copy() as? NSImage {
             image.isTemplate = true

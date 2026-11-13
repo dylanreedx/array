@@ -1500,18 +1500,25 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return "\(hours / 24)d ago"
     }
 
-    private func updateStateLabel(for row: AgentInboxRow, now: Date) {
+    @discardableResult
+    private func updateStateLabel(for row: AgentInboxRow, now: Date) -> Bool {
+        let text: String
+        let hidden: Bool
         if proposal.isTwoLine {
-            stateLabel.stringValue = Self.ownershipClock(row, isSubagent: row.depth > 0 || row.parentId != nil, now: now) ?? ""
-            stateLabel.isHidden = stateLabel.stringValue.isEmpty || reportPillText != nil
-            return
+            text = Self.ownershipClock(row, isSubagent: row.depth > 0 || row.parentId != nil, now: now) ?? ""
+            hidden = text.isEmpty || reportPillText != nil
+        } else {
+            let word = Self.stateWord(row, now: now)
+            let elapsed = AgentInboxCellView.elapsedText(Self.stateAge(row, now: now))
+            let completion = word == nil && elapsed == nil
+                ? Self.relativeCompletionText(row, now: now) : nil
+            text = [word, elapsed, completion].compactMap { $0 }.joined(separator: " · ")
+            hidden = text.isEmpty
         }
-        let word = Self.stateWord(row, now: now)
-        let elapsed = AgentInboxCellView.elapsedText(Self.stateAge(row, now: now))
-        let completion = word == nil && elapsed == nil
-            ? Self.relativeCompletionText(row, now: now) : nil
-        stateLabel.stringValue = [word, elapsed, completion].compactMap { $0 }.joined(separator: " · ")
-        stateLabel.isHidden = stateLabel.stringValue.isEmpty
+        let changed = stateLabel.stringValue != text || stateLabel.isHidden != hidden
+        if stateLabel.stringValue != text { stateLabel.stringValue = text }
+        if stateLabel.isHidden != hidden { stateLabel.isHidden = hidden }
+        return changed
     }
 
     /// Called by the inbox's one shared clock. This changes and locally reflows
@@ -1521,9 +1528,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         guard let row = shown?.row,
               row.state == .working || Self.seenCompletionDate(row) != nil
                 || (proposal.isTwoLine && row.terminalEvent != nil) else { return }
-        updateStateLabel(for: row, now: now)
-        needsLayout = true
-        applyAccessibility()
+        if updateStateLabel(for: row, now: now) {
+            needsLayout = true
+            applyAccessibility()
+        }
         // Slowing at 40 s and dozing at 180 s are time alone; this tick is already
         // running for a working row, so no timer of the character's own.
         if row.state == .working { applyCharacter(now: now) }
