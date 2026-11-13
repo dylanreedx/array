@@ -2168,6 +2168,10 @@ run_app_check .build/debug/Array --agent-local-file-link-check
 # of Markdown built 12,000 TextKit stacks, 1.39 GB resident, and the process died.
 # Preview is budgeted and says where it stopped, and a relayout re-measures nothing.
 run_app_check .build/debug/Array --file-markdown-perf-check
+# Markdown preview with only the rows its clip shows attached (dev switch
+# markdownVisibleRows): pixels, scrolling, selection/copy and accessibility
+# against the switch-off document. Off-screen windows.
+run_app_check .build/debug/Array --markdown-visible-rows-check
 # A paired mouse flips macOS to legacy scrollers mid-run. The scroller must not
 # take width from the text, or every Markdown tile re-measures on the main thread.
 run_app_check .build/debug/Array --file-markdown-scroller-check
@@ -2216,6 +2220,14 @@ run_app_check .build/debug/Array --canvas-zoom-invalidation-probe-check
 # workload's four visible Markdown tiles, each reflowing its document. They wait
 # for the settle now. Off-screen window, production camera driver entry.
 run_app_check .build/debug/Array --canvas-zoom-step-cost-check
+# The same scene with the Markdown visible-rows switch on and off, six
+# interleaved pairs: switch on must repaint fewer layers every pair, at most half
+# the Markdown text views, and never remount a row during a zoom. ms reported only.
+run_app_check .build/debug/Array --markdown-visible-rows-zoom-cost-check
+# AppKit makes every text view outside a clip view observe EVERY view's frame
+# changes; a visible-rows document's unattached rows made one unrelated frame
+# change cost 423 µs instead of 2.5 in the motion scene.
+run_app_check .build/debug/Array --markdown-frame-observer-check
 # The Slice 2 contract (.plans/22): N input events inside one display interval
 # cause a bounded number of camera commits and preserve the final desired
 # viewport. The control condition drives 6 direct setViewport calls and must

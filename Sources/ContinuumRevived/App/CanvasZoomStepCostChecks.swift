@@ -366,4 +366,111 @@ enum CanvasZoomStepCostChecks {
         print("[zoom-step-cost] \(motion.steps) zoom steps: \(requests) code-block retile requests deferred, 0 grid-only re-snaps; \(clipOriginRequests) sub-pixel clip re-snaps deferred, 0 reached AppKit; "
               + "every deferred retile ran at settle")
     }
+
+    // MARK: Markdown visible rows, switch on vs off
+
+    static func markdownDocuments(in canvas: CanvasNSView) -> [FileMarkdownDocumentView] {
+        var found: [FileMarkdownDocumentView] = []
+        func walk(_ view: NSView) {
+            if let document = view as? FileMarkdownDocumentView { found.append(document); return }
+            for child in view.subviews { walk(child) }
+        }
+        for tile in canvas.tileViewsInVisualOrder { walk(tile) }
+        return found
+    }
+
+    /// `--markdown-visible-rows-zoom-cost-check`. The motion workload's scene,
+    /// the production zoom entry, and `MarkdownVisibleRowsConfig` flipped on every
+    /// Markdown document between arms. Six or more interleaved pairs (order
+    /// alternating), each a 48-post in-and-out zoom from the same camera. Layer
+    /// repaints per camera state are the verdict; milliseconds are reported only,
+    /// because the Mac running this is loaded.
+    static func runVisibleRowsComparison() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let rootPath = env["CONTINUUM_PROJECT_ROOT"], let supportPath = env["CONTINUUM_APP_SUPPORT"] else {
+            throw Failure(description: "requires isolated CONTINUUM_PROJECT_ROOT and CONTINUUM_APP_SUPPORT")
+        }
+        MarkdownVisibleRowsConfig.qaOverride = false
+        let fixture = try CanvasMotionWorkload(root: URL(fileURLWithPath: rootPath),
+            support: URL(fileURLWithPath: supportPath), markdownCount: 24, agentCount: 8, offscreen: true)
+        defer { fixture.close() }
+        MarkdownVisibleRowsConfig.qaOverride = nil
+        let canvas = fixture.canvas
+        installHooks()
+        await spin(Double(env["CANVAS_ZOOM_STEP_COST_WARMUP"] ?? "") ?? 3)
+        var parked = -1
+        let parkDeadline = ProcessInfo.processInfo.systemUptime + 30
+        while canvas.qaFarParkedTileCount != parked, ProcessInfo.processInfo.systemUptime < parkDeadline {
+            parked = canvas.qaFarParkedTileCount
+            await spin(1)
+        }
+        let documents = markdownDocuments(in: canvas)
+        guard documents.count >= 4 else {
+            throw Failure(description: "positive control: expected the scene's Markdown documents, found \(documents.count)")
+        }
+        let pairs = max(6, Int(env["MARKDOWN_VISIBLE_ROWS_PAIRS"] ?? "") ?? 6)
+        let posts = 48
+        struct Arm { var ms: Double; var displays: Double; var inline: Double; var layouts: Double; var churn: Int; var attached: Int }
+        var on: [Arm] = [], off: [Arm] = []
+
+        func arm(_ enabled: Bool) async -> Arm {
+            for document in documents { document.setVirtualizesRows(enabled) }
+            await spin(0.6)
+            let churnBefore = documents.reduce(0) { $0 + $1.qaMountChangeCount }
+            let tally = await measure(canvas, posts: posts) { ($0 / 8) % 2 == 0 ? 1.03 : 1 / 1.03 }
+            let churn = documents.reduce(0) { $0 + $1.qaMountChangeCount } - churnBefore
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            while canvas.isCameraInMotion, ProcessInfo.processInfo.systemUptime < deadline { await spin(0.05) }
+            await spin(0.3)
+            return Arm(ms: tally.milliseconds / Double(max(1, tally.steps)),
+                       displays: tally.perStep(Tally.total(tally.displays)),
+                       inline: tally.perStep(tally.displays["RichInlineTextView", default: 0]),
+                       layouts: tally.perStep(Tally.total(tally.layouts)),
+                       churn: churn,
+                       attached: documents.reduce(0) { $0 + $1.qaMountedRowIndices.count })
+        }
+
+        let f = { (value: Double) in String(format: "%.1f", value) }
+        for document in documents { document.setVirtualizesRows(true) }
+        for (index, document) in documents.enumerated() {
+            print("[visible-rows-zoom] document \(index + 1): \(document.qaMountedRowIndices.count)/\(document.qaRowCount) rows attached, "
+                  + "clip \(Int(document.qaDocumentVisibleRect.width))x\(Int(document.qaDocumentVisibleRect.height)) pt, document \(Int(document.qaDocumentHeight)) pt tall")
+        }
+        for pair in 0..<pairs {
+            let order = pair.isMultiple(of: 2) ? [false, true] : [true, false]
+            for enabled in order {
+                let result = await arm(enabled)
+                if enabled { on.append(result) } else { off.append(result) }
+                print("[visible-rows-zoom] pair=\(pair + 1) switch=\(enabled ? "on " : "off") msPerState=\(f(result.ms)) "
+                      + "displays/step=\(f(result.displays)) richInline/step=\(f(result.inline)) layouts/step=\(f(result.layouts)) "
+                      + "attachedRows=\(result.attached) mountChanges=\(result.churn)")
+            }
+        }
+        for document in documents { document.setVirtualizesRows(false) }
+        func median(_ values: [Double]) -> Double {
+            let sorted = values.sorted()
+            return sorted.count.isMultiple(of: 2)
+                ? (sorted[sorted.count / 2 - 1] + sorted[sorted.count / 2]) / 2 : sorted[sorted.count / 2]
+        }
+        let onDisplays = median(on.map(\.displays)), offDisplays = median(off.map(\.displays))
+        let onInline = median(on.map(\.inline)), offInline = median(off.map(\.inline))
+        print("[visible-rows-zoom] medians over \(pairs) pairs: off msPerState=\(f(median(off.map(\.ms)))) on msPerState=\(f(median(on.map(\.ms)))); "
+              + "off displays/step=\(f(offDisplays)) on displays/step=\(f(onDisplays)); "
+              + "off richInline/step=\(f(offInline)) on richInline/step=\(f(onInline)); "
+              + "off layouts/step=\(f(median(off.map(\.layouts)))) on layouts/step=\(f(median(on.map(\.layouts))))")
+
+        guard offInline > 100 else {
+            throw Failure(description: "positive control: switch off repainted only \(f(offInline)) Markdown text views per step; the scene no longer repaints rows on zoom")
+        }
+        let churned = on.map(\.churn).reduce(0, +)
+        guard churned == 0 else {
+            throw Failure(description: "the attached row set changed \(churned) times during zoom gestures; it must hold still while the camera moves")
+        }
+        for (index, pair) in zip(on, off).enumerated() where pair.0.displays >= pair.1.displays {
+            throw Failure(description: "pair \(index + 1): switch on repainted \(f(pair.0.displays)) layers per step, not fewer than switch off \(f(pair.1.displays))")
+        }
+        guard onInline <= offInline * 0.5 else {
+            throw Failure(description: "switch on still repainted \(f(onInline)) Markdown text views per step against \(f(offInline)) off; expected at most half")
+        }
+    }
 }
