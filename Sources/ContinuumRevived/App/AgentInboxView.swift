@@ -9944,6 +9944,8 @@ final class AgentInboxCardView: NSView, TokenThemed {
     }
 
     private func applyIndicator() {
+        indicatorWash.cornerRadius = Radius.card
+        indicatorEdge.cornerRadius = CGFloat(CornerRole.radius(base: CornerRole.card.base - 1.5))
         let style = indicatorStyle
         let enabled = !sharesGroupLight && style != "current" && isIndicatorWorking
         indicatorWash.isHidden = !enabled
@@ -10174,7 +10176,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
             layer.insertSublayer(hoverMark, at: 0)
         }
         hoverMark.frame = rect
-        hoverMark.cornerRadius = rect.height / 2
+        hoverMark.cornerRadius = min(rect.height / 2, CGFloat(CornerRole.radius(base: 9)))
         CATransaction.commit()
     }
 
@@ -10297,6 +10299,7 @@ final class AgentInboxCardView: NSView, TokenThemed {
             for: surfaceRole, increasedContrast: usesIncreasedContrast, theme: effectiveTokenTheme,
             underlay: underlayAlpha)
         applyIndicator()
+        placeHoverMark()
         applyHoverMark(fading: fading)
         let presented = layer.presentation()?.backgroundColor ?? layer.backgroundColor
         layer.backgroundColor = sharesGroupLight && !isPressed ? nil : fill
