@@ -200,7 +200,8 @@ let package = Package(
                 .copy("Resources/CodeEditor"),
                 .copy("Resources/IOSPreview"),
                 .copy("Resources/TaskEditor"),
-                .copy("Resources/FocusInputFixtures")
+                .copy("Resources/FocusInputFixtures"),
+                .copy("Resources/GatePrepass")
             ],
             swiftSettings: [.define("ARRAY_CHECKS", .when(configuration: .debug))],
             linkerSettings: [

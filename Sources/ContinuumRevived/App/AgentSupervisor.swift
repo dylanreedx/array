@@ -6894,6 +6894,14 @@ final class AgentSupervisor {
                 runLedger.helperEvidence(agent: id.rawValue, at: date)
             }
         }
+        // Scheduling remains OFF until representative timing and review proof.
+        // This seam consumes host-owned record identity, never report check prose.
+        if record.parentAgentID != nil {
+            CandidatePrepass.shared.candidateReady(
+                checkout: record.checkoutRoot, hostBase: record.delegationContext?.baseHead,
+                destination: URL(fileURLWithPath: record.checkoutRoot)
+                    .appendingPathComponent(".array/prepass/\(id.rawValue.uuidString).json"))
+        }
         onSelfReportChanged?(id)
         // A report filed between turns is a result: it releases a turn held
         // as progress, or follows a result already delivered as a note.
