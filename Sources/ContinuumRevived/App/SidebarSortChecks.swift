@@ -367,18 +367,25 @@ enum SidebarSortChecks {
         // 8. The working glyph on a lead whose helper works, open or folded. The
         //    glyph is the working fact and always shows; the outline is the active
         //    style, which shows iff the group works AND (scope = all working OR the
-        //    group is selected). Both go once the helper finishes.
+        //    group holds the open agent). The table's selection alone never counts.
+        //    Both go once the helper finishes.
         for open in [true, false] {
-            for (scope, selectLead) in [(SidebarActiveIndicatorScope.working, false), (.selected, false), (.selected, true)] {
-                let shape = "\(open ? "open" : "folded")/\(scope.rawValue)/\(selectLead ? "lead selected" : "none selected")"
+            for (scope, pick) in [(SidebarActiveIndicatorScope.working, "none"), (.selected, "none"),
+                                  (.selected, "table"), (.selected, "open")] {
+                let selectLead = pick == "open"
+                let shape = "\(open ? "open" : "folded")/\(scope.rawValue)/lead \(pick)"
                 let (leads, leadWindow) = build(dark: false, leadOpen: open, scope: scope)
                 defer { leadWindow.orderOut(nil) }
                 leads.setSortMode(.mostActive)
                 leads.layoutForQA()
-                if selectLead {
+                if pick == "table" {
                     guard leads.selectRowForQA(id: uuid(epsilon)) else {
                         throw Failure(description: "\(shape): could not select the Epsilon lead")
                     }
+                    leads.layoutForQA()
+                }
+                if pick == "open" {
+                    leads.openAgentId = uuid(epsilon)
                     leads.layoutForQA()
                 }
                 func lead(_ n: Int) throws -> AgentInbox96CellView {
@@ -423,7 +430,7 @@ enum SidebarSortChecks {
             throw Failure(description: "the lead's working fact does not follow its helpers")
         }
         report.append("header: search and compose above trailing-aligned sort and scope at 280 and 220 pt; sort remains available while typing")
-        report.append("lead glyph: on with a working helper (open and folded); outline under All working, or Selected with the lead selected, absent unselected under Selected; both off when it finishes")
+        report.append("lead glyph: on with a working helper (open and folded); outline under All working, or Selected with the lead open, absent under Selected when only selected or not open; both off when it finishes")
 
         // 9. Stills.
         if let outputDirectory {

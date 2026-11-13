@@ -2837,12 +2837,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // agents, on every working group; selection never takes it away.
             let lit = working && (lightsEveryWorkingGroup || openLead?.id == lead.id)
             let activeGroup = end > start && lit
-            // Classic's sweep also keeps a selected working agent's style when
-            // nothing open holds the group; 0.7.47 swept every working group.
-            let selectedWorks = (start...end).contains {
-                tableView.selectedRowIndexes.contains($0)
-                    && ($0 == start ? working : items[$0].agentRow?.state == .working)
-            }
             let focusHeight = max(1, groupHeight - SidebarDensityProposal.production.gapBetweenRows)
             let focusTarget = runningOffset.map { $0 / focusHeight } ?? min(0.9, heights[0] / focusHeight * 0.8)
             if let old = groupFocusMemory[lead.id] {
@@ -2859,7 +2853,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     offset: offset, groupHeight: groupHeight,
                     continuesAbove: index > start, continuesBelow: index < end,
                     leadLane: lanes[index - start].0, helperLane: lanes[index - start].1,
-                    sweepPhase: (lit || selectedWorks) && ask == nil ? sweepPhase : nil, sweepColour: lead.identityColor,
+                    sweepPhase: lit && ask == nil ? sweepPhase : nil, sweepColour: lead.identityColor,
                     raisedAsk: index == start ? ask : nil,
                     activeGroup: activeGroup,
                     leadHeight: heights[0], runningY: runningOffset,
@@ -4449,9 +4443,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // selections — with a range selected, a single index cannot name them.
         let previous = selectedRowsForEmphasis
         selectedRowsForEmphasis = tableView.selectedRowIndexes
-        // Classic's sweep follows a selected working agent (`ownershipSlices`).
-        ownershipByTableRow = ownsSubagents ? ownershipSlices() : []
-        refreshVisibleOwnership()
         let visible = tableView.rows(in: tableView.visibleRect)
         if visible.length > 0 {
             for index in visible.location..<min(tableView.numberOfRows, visible.location + visible.length) {
@@ -5765,9 +5756,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The three fill/ring facts for one table row, each answered separately.
     private func interaction(forTableRow row: Int) -> RowInteraction {
         guard let id = agentIdForTableRow(row) else { return .none }
-        // The open agent and the table's selection carry the style, exactly the
-        // two that carried it in 0.7.47, and only while the agent works. Only the
-        // open agent's style moves, unless every working agent is lit.
+        // Only the open agent carries the style under "Selected agent", and only
+        // while it works. The table's selection never counts: a fold, reload or
+        // push drops it (as 0.7.47 did), and the style may not go with it.
         // A folded lead draws its group's style on its own card, as 0.7.47 drew a
         // lone open lead: it works while any hidden helper works, and it holds
         // the open agent while that agent is a helper folded under it.
@@ -5776,14 +5767,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let works = items[row].agentRow?.state == .working
             || (isLead && (rollupsByParent[id]?.working ?? 0) > 0)
         let holdsOpen = id == openAgentId || (isLead && openAgentIsFolded(under: id))
-        let showsStyle = works
-            && (everyWorking || holdsOpen || tableView.selectedRowIndexes.contains(row))
+        let showsStyle = works && (everyWorking || holdsOpen)
         return RowInteraction(
             isHovered: id == hoveredAgentId,
             isPressed: row == pressedTableRow,
             isRouteActive: id == openAgentId,
             isIndicatorWorking: showsStyle,
-            indicatorMoves: showsStyle && (holdsOpen || everyWorking),
+            indicatorMoves: showsStyle,
             hasKeyboardFocus: id == keyboardFocusAgentId
         )
     }

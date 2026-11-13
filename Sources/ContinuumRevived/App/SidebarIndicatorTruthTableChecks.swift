@@ -29,7 +29,9 @@ enum SidebarIndicatorTruthTableChecks {
                     window.contentView = inbox
                     window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                     window.orderFrontOffscreenForChecks()
-                    for selection in ["lead", "helper", "none"] {
+                    // "table": the table selects the lead but nothing is open. Only the
+                    // open agent counts as selected, so it lights nothing on its own.
+                    for selection in ["lead", "helper", "table", "none"] {
                         // "helper": an idle lead whose helper works — the group still works.
                         for work in ["none", "both", "helper"] {
                             let working = work != "none"
@@ -48,9 +50,20 @@ enum SidebarIndicatorTruthTableChecks {
                                     inbox.restoreParentFolds([lead: true])
                                     let rows = [row(lead), row(helper, parent: lead)]
                                     inbox.reload(rows: rows)
-                                    inbox.openAgentId = selection == "none" ? nil : (selection == "lead" ? lead : helper)
+                                    inbox.openAgentId = selection == "lead" ? lead : (selection == "helper" ? helper : nil)
                                     inbox.layoutViewportForQA()
-                                    if selection != "none" { _ = inbox.selectRowForQA(id: selection == "lead" ? lead : helper) }
+                                    if selection != "none" { _ = inbox.selectRowForQA(id: selection == "helper" ? helper : lead) }
+                                    inbox.layoutViewportForQA()
+                                    // What shows before any fold: a fold may never change it.
+                                    let shownBeforeFold = { () -> Bool in
+                                        let cells = [lead, helper].compactMap { inbox.cellForQA(id: $0) }
+                                        if style == .classic {
+                                            return cells.flatMap { descendants($0, InboxSweepBorderView.self) }.contains { !$0.isHidden }
+                                        }
+                                        return cells.flatMap { descendants($0, InboxExpandedGroupLight.self) }.contains { !$0.isHidden }
+                                            || cells.flatMap { descendants($0, AgentInboxCardView.self) }.contains {
+                                                !$0.qaIndicatorLayers.wash.isHidden && $0.qaIndicatorLayers.wash.superlayer != nil }
+                                    }()
                                     if fold == "expanded" && selection == "helper" {
                                         inbox.toggleCollapse(parentId: lead)
                                         inbox.toggleCollapse(parentId: lead)
@@ -62,7 +75,7 @@ enum SidebarIndicatorTruthTableChecks {
                                             changed: AgentsBoardChangeSet(added: [arrival], updated: [lead], removed: []))
                                     }
                                     inbox.layoutViewportForQA()
-                                    let expected = working && (scope == "working" || selection != "none")
+                                    let expected = working && (scope == "working" || selection == "lead" || selection == "helper")
                                     let visibleCells = [lead, helper, arrival].compactMap { inbox.cellForQA(id: $0) }
                                     let lights = visibleCells.flatMap { descendants($0, InboxExpandedGroupLight.self) }
                                     let sweeps = visibleCells.flatMap { descendants($0, InboxSweepBorderView.self) }
@@ -79,7 +92,7 @@ enum SidebarIndicatorTruthTableChecks {
                                     let outlines = cards.filter {
                                         !$0.qaIndicatorLayers.edge.isHidden && $0.qaIndicatorLayers.edge.borderWidth > 0
                                     }.count
-                                    var correct = present == expected && moving == expected && outlines == 0
+                                    var correct = present == expected && moving == expected && outlines == 0 && present == shownBeforeFold
                                     // Sheen keeps 0.7.47's faint identity rim; the others stroke nothing.
                                     if style != .classic && style != .sheen {
                                         correct = correct && lights.filter { !$0.isHidden }.allSatisfy {
@@ -133,7 +146,7 @@ enum SidebarIndicatorTruthTableChecks {
                                         correct = correct && routePresent == expected && routeMoving == expected && routeOutlines == 0
                                     }
                                     if correct { passed += 1 } else {
-                                        failures.append("\(label): style=\(present) motion=\(moving) expected=\(expected) outlines=\(outlines)")
+                                        failures.append("\(label): style=\(present) motion=\(moving) expected=\(expected) beforeFold=\(shownBeforeFold) outlines=\(outlines)")
                                     }
                                 }
                             }

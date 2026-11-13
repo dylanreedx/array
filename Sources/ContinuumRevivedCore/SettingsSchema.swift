@@ -72,7 +72,7 @@ public enum SettingsSchema {
                                     options: SidebarActiveIndicatorScope.allCases.map(\.rawValue),
                                     default: SidebarActiveIndicatorScope.fallback.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorScope.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Highlight the selected agent or every working agent and its lead."),
+                            help: "Highlight every working agent and its lead, or only the agent you have open."),
                 SettingsRow(.choice(key: SidebarActiveIndicatorStyle.defaultsKey, label: "Active agent",
                                     options: SidebarActiveIndicatorStyle.allCases.map(\.rawValue),
                                     default: SidebarActiveIndicatorStyle.fallback.rawValue,
