@@ -144,7 +144,7 @@ public struct AtomicWriter: Sendable {
     /// Write `value` as JSON to `url`. The previous file (if any) is copied to
     /// `backupsDirectory` before the new content lands; old backups beyond
     /// `retainedBackups` are pruned.
-    public func write<T: Codable>(_ value: T, to url: URL) throws {
+    public func write<T: Codable>(_ value: T, to url: URL, retentionTimestamp: ((T) -> Date?)? = nil) throws {
         let encoder = JSONCodec.makeEncoder(prettyPrinted: prettyPrint)
         let data = try encoder.encode(value)
         // Validate the encoded bytes round-trip into the same type before we
@@ -162,12 +162,12 @@ public struct AtomicWriter: Sendable {
             // cross-process critical section. A failed writer can therefore
             // never roll an acknowledged later writer back out of existence.
             let priorBytes = try existingBytes(at: url)
-            let backups = try backupExistingFile(at: url)
+            let backups = try backupExistingFile(at: url, includeMoved: retentionTimestamp != nil)
             try atomicDurableWrite(data, to: url, priorBytes: priorBytes)
             // Replacement + directory fsync is the commit point. Backup
             // maintenance is deliberately non-transactional and must not turn
             // an already durable generation into a reported save failure.
-            pruneOldBackups(backups)
+            pruneOldBackups(backups, retentionTimestamp: retentionTimestamp)
         }
     }
 
@@ -201,29 +201,16 @@ public struct AtomicWriter: Sendable {
 
         beforeBackup()
         if let recoveryTimestamp {
-            // Histories merged from different folders can reuse generation
-            // numbers; do not rank ties by those unrelated counters.
-            let backups: [URL]
+            // Rank the same valid candidates as retention. Merged histories
+            // share a folder; generation matters only for exact time ties.
+            let backups: [BackupEntry]
             if let directory = backupsDirectory, FileManager.default.fileExists(atPath: directory.path) {
-                backups = try recoveryBackupEntries(for: url, in: directory).map(\.url)
+                backups = try recoveryBackupEntries(for: url, in: directory)
             } else {
                 backups = []
             }
-            var best: (value: T, time: Date, modification: Date)?
-            for backupURL in backups {
-                guard let data = try? Data(contentsOf: backupURL),
-                      let value = try? decoder.decode(T.self, from: data) else { continue }
-                let modification = (try? backupURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let time = recoveryTimestamp(value) ?? modification
-                if let current = best {
-                    if time > current.time || (time == current.time && modification > current.modification) {
-                        best = (value, time, modification)
-                    }
-                } else {
-                    best = (value, time, modification)
-                }
-            }
-            if let best { return best.value }
+            if let recovered = rankedBackups(backups, decoder: decoder, timestamp: recoveryTimestamp)
+                .compactMap(\.value).first { return recovered }
             throw AtomicWriterError.noValidBackup(path: url.path)
         }
         // Try backups from newest to oldest.
@@ -438,7 +425,7 @@ public struct AtomicWriter: Sendable {
     /// agents on one machine), so pruning reuses this scan instead of making a
     /// second one: the target lock keeps the set from changing in between
     /// (.plans/81-live-performance).
-    private func backupExistingFile(at url: URL) throws -> [BackupEntry] {
+    private func backupExistingFile(at url: URL, includeMoved: Bool) throws -> [BackupEntry] {
         guard let backupsDirectory else { return [] }
         let targetExists = FileManager.default.fileExists(atPath: url.path)
         if targetExists {
@@ -456,7 +443,9 @@ public struct AtomicWriter: Sendable {
         Self.backupScans.increment()
         let names = try FileManager.default.contentsOfDirectory(atPath: backupsDirectory.path)
         Self.backupEntriesScanned.increment(by: names.count)
-        var existing = backupEntries(for: url, in: backupsDirectory, names: names)
+        var existing = includeMoved
+            ? recoveryBackupEntries(for: url, in: backupsDirectory, files: names.map { backupsDirectory.appendingPathComponent($0) })
+            : backupEntries(for: url, in: backupsDirectory, names: names)
         guard targetExists else { return existing }
         let maximum = existing.compactMap(\.generation).max() ?? 0
         guard maximum < UInt64.max else { throw POSIXError(.EOVERFLOW) }
@@ -471,8 +460,18 @@ public struct AtomicWriter: Sendable {
         return existing
     }
 
-    private func pruneOldBackups(_ backups: [BackupEntry]) {
-        let urls = newestFirst(backups, preferTimestamps: preferBackupTimestampsForRetention)
+    private func pruneOldBackups<T: Codable>(_ backups: [BackupEntry], retentionTimestamp: ((T) -> Date?)?) {
+        guard backups.count > retainedBackups else { return }
+        let urls: [URL]
+        if let retentionTimestamp {
+            let ranked = rankedBackups(backups, decoder: JSONCodec.makeDecoder(), timestamp: retentionTimestamp)
+            // If a candidate cannot be read or dated, its rank is unknown.
+            // Preserve the set rather than risk deleting the newest backup.
+            guard !ranked.contains(where: \.uncertain) else { return }
+            urls = ranked.map(\.entry.url)
+        } else {
+            urls = newestFirst(backups, preferTimestamps: preferBackupTimestampsForRetention)
+        }
         guard urls.count > retainedBackups else { return }
         for stale in urls.dropFirst(retainedBackups) {
             try? FileManager.default.removeItem(at: stale)
@@ -506,10 +505,43 @@ public struct AtomicWriter: Sendable {
         var timestamp: String? = nil
     }
 
+    private struct RankedBackup<T> {
+        let entry: BackupEntry
+        let value: T?
+        let time: Date
+        let modification: Date
+        let uncertain: Bool
+    }
+
+    /// Both recovery and retention use the same order. Invalid backups sort
+    /// after valid ones; generation breaks exact ties only within one folder.
+    private func rankedBackups<T: Codable>(_ backups: [BackupEntry], decoder: JSONDecoder, timestamp: (T) -> Date?) -> [RankedBackup<T>] {
+        backups.map { entry in
+            let data = try? Data(contentsOf: entry.url)
+            let value = data.flatMap { try? decoder.decode(T.self, from: $0) }
+            let modification = try? entry.url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            let contentTime = value.flatMap(timestamp)
+            let uncertain = data == nil || (value != nil && contentTime == nil && modification == nil)
+            return RankedBackup(entry: entry, value: value, time: contentTime ?? modification ?? .distantPast,
+                                modification: modification ?? .distantPast, uncertain: uncertain)
+        }.sorted { lhs, rhs in
+            if (lhs.value != nil) != (rhs.value != nil) { return lhs.value != nil }
+            if lhs.time != rhs.time { return lhs.time > rhs.time }
+            if lhs.modification != rhs.modification { return lhs.modification > rhs.modification }
+            if lhs.entry.url.deletingLastPathComponent() == rhs.entry.url.deletingLastPathComponent(),
+               let left = lhs.entry.generation, let right = rhs.entry.generation, left != right { return left > right }
+            return lhs.entry.url.lastPathComponent > rhs.entry.url.lastPathComponent
+        }
+    }
+
     /// AgentStore preserves a same-named shared backup as `.moved-N`.
-    /// Inspect those copies only during recovery, leaving save scans unchanged.
+    /// Recovery and retention both include those copies from one folder scan.
     private func recoveryBackupEntries(for url: URL, in directory: URL) throws -> [BackupEntry] {
         let files = try fileOperations.listDirectory(directory)
+        return recoveryBackupEntries(for: url, in: directory, files: files)
+    }
+
+    private func recoveryBackupEntries(for url: URL, in directory: URL, files: [URL]) -> [BackupEntry] {
         var entries = backupEntries(for: url, entries: files)
         for file in files {
             let name = file.lastPathComponent

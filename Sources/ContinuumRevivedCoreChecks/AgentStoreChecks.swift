@@ -29,6 +29,7 @@ func runAgentStoreChecks() {
         try runAgentStoreDowngradeRoundTripCheck(root: root)
         try runHeldMigrationRecoveryCheck(root: root)
         try runRecoveryOrderingCheck(root: root)
+        try runUnreadableBackupRetentionCheck(root: root)
         print("AgentStore checks: app-support root, round-trip, cross-project deterministic order, corrupt-file skip, concurrent upsert, one backup scan per save, save cost independent of agent count, and a 0.7.47 round trip healing passed")
     } catch {
         fputs("FAIL: AgentStore checks failed: \(error)\n", stderr)
@@ -759,6 +760,16 @@ private func runRecoveryOrderingCheck(root: URL) throws {
     guard try store.loadAll().first?.displayName == "newer" else {
         throw AgentStoreCheckError("content ordering: loadAll did not recover the newest activity")
     }
+    // A save must keep the low-generation backup with newer activity even
+    // when its filename and mtime are older than the other candidates.
+    let scanBefore = AtomicWriter.backupEntriesScannedForQA
+    try store.upsert(record("replacement", activity: 30))
+    let scanned = AtomicWriter.backupEntriesScannedForQA - scanBefore
+    guard scanned == 3 else { throw AgentStoreCheckError("content retention: save read \(scanned) entries, expected 3") }
+    try Data("corrupt".utf8).write(to: target)
+    guard try store.load(id: id)?.displayName == "newer" else {
+        throw AgentStoreCheckError("content retention: save pruned the backup with newest activity")
+    }
 
     // Tombstones have no content timestamp. Invert filename and file mtime so
     // recovery has to choose the actual modification time instead.
@@ -780,6 +791,19 @@ private func runRecoveryOrderingCheck(root: URL) throws {
     tombStore.waitForBackupMigration()
     guard tombStore.loadDeletedAgentTiles() == [newID] else {
         throw AgentStoreCheckError("tombstone ordering: did not recover the newest modification time")
+    }
+    let tombPrefix = AtomicWriter.backupNamePrefix(forCanonicalIdentityPath: AtomicWriter.canonicalIdentityPath(for: tomb))
+    let anotherOldTomb = tombLayout.deletedAgentTilesBackupsDirectory.appendingPathComponent(tombPrefix + "00000000000000000002-2026-01-01T00-00-00.000Z")
+    try Data(contentsOf: oldName).write(to: anotherOldTomb)
+    try fm.setAttributes([.modificationDate: baseDate.addingTimeInterval(-60)], ofItemAtPath: anotherOldTomb.path)
+    let tombScanBefore = AtomicWriter.backupEntriesScannedForQA
+    try tombStore.setDeletedAgentTiles([UUID()])
+    guard AtomicWriter.backupEntriesScannedForQA - tombScanBefore == 3 else {
+        throw AgentStoreCheckError("tombstone retention: save did not scan exactly three entries")
+    }
+    try Data("corrupt".utf8).write(to: tomb)
+    guard tombStore.loadDeletedAgentTiles() == [newID] else {
+        throw AgentStoreCheckError("tombstone retention: save pruned the backup with newest modification time")
     }
     // Identical filenames can collide when a downgraded writer restarts its
     // generation and clock. The migrated copy remains a valid candidate.
@@ -803,5 +827,52 @@ private func runRecoveryOrderingCheck(root: URL) throws {
     guard try collisionStore.load(id: collisionID)?.displayName == "newer collision" else {
         throw AgentStoreCheckError("collision ordering: newer migrated backup is not recoverable")
     }
-    print("  agent-store recovery ordering: activity time, tombstone modification time, and collision recovery")
+    let collisionDirectory = collisionLayout.backupsDirectory(for: collisionID)
+    let collisionFiles = try fm.contentsOfDirectory(at: collisionDirectory, includingPropertiesForKeys: nil)
+    guard let olderCollision = collisionFiles.first(where: { !$0.lastPathComponent.contains(".moved-") }) else {
+        throw AgentStoreCheckError("collision retention: missing original backup")
+    }
+    let collisionPrefix = AtomicWriter.backupNamePrefix(forCanonicalIdentityPath: AtomicWriter.canonicalIdentityPath(for: collisionTarget))
+    let anotherOldCollision = collisionDirectory.appendingPathComponent(collisionPrefix + "00000000000000000002-2026-01-01T00-00-00.000Z")
+    try Data(contentsOf: olderCollision).write(to: anotherOldCollision)
+    let collisionScanBefore = AtomicWriter.backupEntriesScannedForQA
+    try collisionStore.upsert(collisionRecord("replacement", activity: 30))
+    guard AtomicWriter.backupEntriesScannedForQA - collisionScanBefore == 3,
+          try fm.contentsOfDirectory(atPath: collisionDirectory.path).count == 3 else {
+        throw AgentStoreCheckError("collision retention: save did not count and prune the moved backup with its siblings")
+    }
+    try Data("corrupt".utf8).write(to: collisionTarget)
+    guard try collisionStore.load(id: collisionID)?.displayName == "newer collision" else {
+        throw AgentStoreCheckError("collision retention: save pruned the newest moved backup")
+    }
+    print("  agent-store recovery ordering: activity time, tombstone modification time, and collision recovery and retention")
+}
+
+// An unreadable candidate has unknown rank; pruning must preserve it and the
+// remaining history until a later save can determine a safe order.
+private func runUnreadableBackupRetentionCheck(root: URL) throws {
+    let base = root.appendingPathComponent("unreadable-retention")
+    let store = AgentStore(applicationSupportDirectory: base)
+    store.waitForBackupMigration()
+    let id = AgentID(rawValue: UUID())
+    var record = makeAgentStoreFixture(id: id, createdAt: Date())
+    for revision in 0..<4 {
+        record.displayName = "Revision \(revision)"
+        try store.upsert(record)
+    }
+    let directory = store.layout.backupsDirectory(for: id)
+    let fm = FileManager.default
+    let existing = Set(try fm.contentsOfDirectory(atPath: directory.path))
+    guard existing.count == 3 else { throw AgentStoreCheckError("unreadable retention: expected three seeded backups") }
+    let target = store.layout.agentFile(id: id)
+    let prefix = AtomicWriter.backupNamePrefix(forCanonicalIdentityPath: AtomicWriter.canonicalIdentityPath(for: target))
+    let unreadableName = prefix + "00000000000000000999-2030-01-01T00-00-00.000Z"
+    try fm.createSymbolicLink(at: directory.appendingPathComponent(unreadableName), withDestinationURL: base.appendingPathComponent("missing"))
+    record.displayName = "After unreadable candidate"
+    try store.upsert(record)
+    let after = Set(try fm.contentsOfDirectory(atPath: directory.path))
+    guard existing.isSubset(of: after), after.contains(unreadableName), after.count == 5 else {
+        throw AgentStoreCheckError("unreadable retention: pruning discarded history with an unknown candidate")
+    }
+    print("  agent-store retention: unreadable candidate preserves backup history")
 }

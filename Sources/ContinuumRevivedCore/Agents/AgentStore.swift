@@ -244,7 +244,7 @@ public final class AgentStore: @unchecked Sendable {
     }
 
     public func upsert(_ record: AgentRecord) throws {
-        try writer(for: record.id).write(record, to: layout.agentFile(id: record.id))
+        try writer(for: record.id).write(record, to: layout.agentFile(id: record.id), retentionTimestamp: { $0.lastActivityAt })
     }
 
     public func load(id: AgentID) throws -> AgentRecord? {
@@ -293,7 +293,7 @@ public final class AgentStore: @unchecked Sendable {
     /// agents in a different order.
     public func setDeletedAgentTiles(_ tiles: Set<UUID>) throws {
         try writer(backups: layout.deletedAgentTilesBackupsDirectory)
-            .write(tiles.sorted { $0.uuidString < $1.uuidString }, to: layout.deletedAgentTilesFile)
+            .write(tiles.sorted { $0.uuidString < $1.uuidString }, to: layout.deletedAgentTilesFile, retentionTimestamp: { (_: [UUID]) in nil })
     }
 
     /// Every agent from every project. One unreadable file is skipped and named
