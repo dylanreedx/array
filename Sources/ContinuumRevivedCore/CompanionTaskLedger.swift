@@ -168,6 +168,7 @@ public final class CompanionTaskLedger: @unchecked Sendable {
                 // the base plus every line before the damage.
                 let aside = directory.appendingPathComponent("ledger.journal.damaged-\(UUID().uuidString)")
                 try FileManager.default.copyItem(at: journalURL, to: aside)
+                fputs("CompanionTaskLedger: damaged journal line; replay stopped before it, journal set aside at \(aside.path)\n", stderr)
             }
             // The base does not hold the last session's journal yet. Fold it in
             // before this launch writes anything, so no failed startup write can
