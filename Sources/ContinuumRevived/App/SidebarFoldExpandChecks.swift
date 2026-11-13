@@ -168,6 +168,7 @@ extension SidebarOwnershipChecks {
         func fail(_ message: String) -> Failure { Failure(description: "\(label): \(message)") }
         var pushed = foldRows()
         let (inbox, window) = build(dark: dark, height: 720, rows: pushed, folds: [uuid(foldLead): true]) { _, _ in }
+        window.acceptsMouseMovedEvents = true
         // An untouched lead opens, but its helpers stay under the eight-row cap
         // until the remainder is pressed (P6.5); never all of them at once.
         guard !inbox.expandedFanoutParentsForQA.contains(uuid(foldLead)),
@@ -263,21 +264,36 @@ extension SidebarOwnershipChecks {
             throw fail("the card's foot is not on screen to point at")
         }
 
-        // 2. It lights like a subagent row: the same fill, on the same footprint.
-        let neighbour = try cell(foldRecent[2])
-        let neighbourCentre = neighbour.convert(NSPoint(x: neighbour.bounds.midX, y: neighbour.bounds.midY), to: nil)
-        inbox.mouseMoved(with: try mouse(.mouseMoved, at: neighbourCentre, window: window))
-        let rowHover = neighbour.qaGeometry.resolvedFill
-        let rowCard = neighbour.qaCardFrameForQA
-        let lineWords = try fold().qaLabelFrameInWindow
-        inbox.mouseMoved(with: try mouse(.mouseMoved, at: NSPoint(x: lineWords.midX, y: lineWords.midY), window: window))
-        let lit = try fold()
-        guard lit.qaFillRole == .hover, let lineHover = lit.qaFillColor, let rowHover,
-              NSColor(cgColor: lineHover) == NSColor(cgColor: rowHover) else {
-            throw fail("the pointer on the line paints \(lit.qaFillRole) \(String(describing: lit.qaFillColor)), a subagent row \(String(describing: rowHover))")
+        // Hover travels through the application, and paints only the content pill.
+        // The helper-row redesign deliberately leaves the underlying card at rest.
+        func move(to point: NSPoint) throws {
+            NSApp.sendEvent(try mouse(.mouseMoved, at: point, window: window))
         }
-        guard abs(lit.qaFillFrame.minX - rowCard.minX) < 0.5, abs(lit.qaFillFrame.width - rowCard.width) < 0.5 else {
-            throw fail("the line's fill \(lit.qaFillFrame) is not a subagent row's \(rowCard)")
+        func expectPill(_ row: AgentInbox96CellView) throws {
+            guard row.qaHoverMarkOpacity > 0.5,
+                  let pill = row.qaHoverMarkFrame, pill.width > 0, pill.height > 0 else {
+                throw fail("the hovered helper has no visible pill")
+            }
+        }
+        let neighbour = try cell(foldRecent[2])
+        let neighbourCentre = neighbour.convert(NSPoint(x: neighbour.bounds.midX, y: neighbour.isFlipped ? 9 : neighbour.bounds.height - 9), to: nil)
+        let rowFill = neighbour.qaGeometry.resolvedFill
+        inbox.updateTrackingAreas()
+        SidebarParityCapture.pump()
+        try SidebarHelperHoverChecks.crossing(.mouseEntered, at: neighbourCentre, inbox: inbox, window: window)
+        try move(to: neighbourCentre)
+        try expectPill(neighbour)
+        guard neighbour.qaGeometry.resolvedFill == rowFill else {
+            throw fail("helper hover changed the underlying card fill")
+        }
+        let lineWords = try fold().qaLabelFrameInWindow
+        let lineFill = try fold().qaFillColor
+        try move(to: NSPoint(x: lineWords.midX, y: lineWords.midY))
+        let lit = try fold()
+        guard lit.qaHoverMarkOpacity > 0.5, let pill = lit.qaHoverMarkFrame,
+              pill.width > 0, pill.height > 0, lit.qaFillColor == lineFill,
+              neighbour.qaHoverMarkOpacity == 0 else {
+            throw fail("the remainder pill did not appear alone over its resting card")
         }
         try still("hover")
 
@@ -305,11 +321,23 @@ extension SidebarOwnershipChecks {
         let visibleStyle = try cell(foldRecent[1])
         let styleCard = visibleStyle.qaCardFrameForQA
         let styleHeight = visibleStyle.frame.height
+        let expandedFill = visibleStyle.qaGeometry.resolvedFill
+        try move(to: visibleStyle.convert(NSPoint(x: visibleStyle.bounds.midX, y: visibleStyle.isFlipped ? 9 : visibleStyle.bounds.height - 9), to: nil))
+        try expectPill(visibleStyle)
+        guard visibleStyle.qaGeometry.resolvedFill == expandedFill else {
+            throw fail("expanded helper hover changed the underlying card fill")
+        }
+        try move(to: NSPoint(x: -100, y: -100))
+        guard visibleStyle.qaHoverMarkOpacity == 0 else {
+            throw fail("expanded helper pill survived pointer exit")
+        }
         try still("open")
         for n in [foldFolded[0], foldFolded[20], foldFolded[39]] {
             // Through the table's own scroll, as a user reaches them.
             guard inbox.scrollToAgentForQA(id: uuid(n)) else { throw fail("could not scroll to \(name(uuid(n)))") }
             let opened = try cell(n)
+            try move(to: opened.convert(NSPoint(x: opened.bounds.midX, y: opened.isFlipped ? 9 : opened.bounds.height - 9), to: nil))
+            try expectPill(opened)
             guard opened.isSubagentRow, opened.frame.height == styleHeight,
                   abs(opened.qaCardFrameForQA.minX - styleCard.minX) < 0.5,
                   abs(opened.qaCardFrameForQA.width - styleCard.width) < 0.5 else {
