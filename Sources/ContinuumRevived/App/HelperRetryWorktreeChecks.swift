@@ -10,8 +10,8 @@ enum HelperRetryWorktreeChecks {
         try WorkspaceAgentReportChecks.expect(condition(), "helper-retry-worktree: " + message)
     }
 
-    static func bench(_ name: String) throws -> Bench {
-        let b = try ManagedModeChecks.bench(name)
+    static func bench(_ name: String, efforts: [String]? = nil) throws -> Bench {
+        let b = try ManagedModeChecks.bench(name, efforts: efforts)
         let capture = b.binDir.appendingPathComponent("capture-").path
         var script = ManagedModeChecks.fakeClaude
         script = script.replacingOccurrences(of: "        if 'HOLD' in json.dumps(o):", with: "        if 'HOLD' in json.dumps(o) and 'Retry context' not in json.dumps(o):")

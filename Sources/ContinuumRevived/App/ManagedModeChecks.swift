@@ -50,13 +50,14 @@ enum ManagedModeChecks {
         emit({'type':'result','subtype':'success','is_error':False,'session_id':sid,'result':'done','duration_ms':1,'num_turns':1})
     """#
 
-    static func bench(_ label: String) throws -> WorkspaceAgentReportChecks.Bench {
+    static func bench(_ label: String, efforts: [String]? = nil) throws -> WorkspaceAgentReportChecks.Bench {
         let b = try WorkspaceAgentReportChecks.makeBench(label: label)
         let executable = b.binDir.appendingPathComponent("claude")
         try fakeClaude.write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready,
-            models: [model], displayNames: [model: "Fixture"], contextWindows: [model: 200_000]))
+            models: [model], displayNames: [model: "Fixture"], contextWindows: [model: 200_000],
+            effortLevels: efforts.map { [model: $0] } ?? [:]))
         return b
     }
 
@@ -102,7 +103,7 @@ enum ManagedModeChecks {
     }
 
     static func launch() async throws {
-        let b = try bench("managed-launch"); defer { b.tearDown() }
+        let b = try bench("managed-launch", efforts: [AgentModelConfig.defaultThinking]); defer { b.tearDown() }
         let managed = try await delegate(b, mode: "managed", label: "managed")
         try await settled(b, managed)
         let section = ProcessInfo.processInfo.environment["CONTINUUM_MANAGED_CHECK_SECTION"]

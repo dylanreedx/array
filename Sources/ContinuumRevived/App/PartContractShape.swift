@@ -13,7 +13,7 @@ import Foundation
 @MainActor
 enum PartContractShape {
     static func capture() async throws -> [String: Any] {
-        let b = try HelperRetryWorktreeChecks.bench("part-contract-shape"); defer { b.tearDown() }
+        let b = try HelperRetryWorktreeChecks.bench("part-contract-shape", efforts: [AgentModelConfig.defaultThinking]); defer { b.tearDown() }
         // The fakes hold any prompt containing HOLD; keep the lead's name neutral.
         _ = b.supervisor.rename(agentID: b.f.agentId, to: "Lead")
         let fixture = try String(contentsOf: URL(fileURLWithPath: "scripts/fixtures/codex-hook-cli.py"), encoding: .utf8)

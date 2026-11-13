@@ -975,9 +975,11 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   matrix_report 'Collaboration matrix (targeted)'
   exit $?
 fi
-# This focused leg consumes the freshly built app; no provider or tmux work.
+# These focused legs consume fresh app/MCP products and use offline provider doubles.
 if [[ "$EFFORT_CATALOG_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --effort-catalog-check
+  run_app_check .build/debug/Array --managed-mode-launch-check
+  run_app_check .build/debug/Array --part-contract-check
   matrix_report 'Effort catalogue matrix (targeted)'
   exit $?
 fi
