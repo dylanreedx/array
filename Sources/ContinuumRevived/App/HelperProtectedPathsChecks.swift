@@ -156,7 +156,18 @@ enum HelperProtectedPathsChecks {
         try write("a", "checks/Existing.swift", in: root)
         for args in [["init", "-q"], ["add", "."], ["commit", "-qm", "fixture"]] { try HelperEvidenceChecks.git(args, root) }
         let base = try HelperEvidenceChecks.gitOutput(["rev-parse", "HEAD"], root).trimmingCharacters(in: .whitespacesAndNewlines)
-        var detector = HelperProtectedPaths(root: root, base: base, shared: false, contract: nil)
+        let sub = root.appendingPathComponent("sub")
+        try write("a", "checks/Nested.swift", in: sub)
+        try write("a", "custom/ManifestOnly.swift", in: sub)
+        try write(#"{"checks":[{"invocation":"scripts/nested-check","covers":["custom/**"],"checkFiles":["custom/ManifestOnly.swift"]}]}"#, "scripts/check-coverage-manifest.json", in: sub)
+        for args in [["add", "."], ["commit", "-qm", "nested"]] { try HelperEvidenceChecks.git(args, root) }
+        let nestedBase = try HelperEvidenceChecks.gitOutput(["rev-parse", "HEAD"], root).trimmingCharacters(in: .whitespacesAndNewlines)
+        var nested = HelperProtectedPaths(root: sub, base: nestedBase, shared: false, contract: nil)
+        try write("changed", "checks/Nested.swift", in: sub)
+        try FileManager.default.removeItem(at: sub.appendingPathComponent("custom/ManifestOnly.swift"))
+        let nestedChanges = nested.sweep()
+        try expect(Set(nestedChanges.compactMap(\.path)) == ["checks/Nested.swift", "custom/ManifestOnly.swift"], "subdirectory paths or manifest did not agree")
+        var detector = HelperProtectedPaths(root: root, base: nestedBase, shared: false, contract: nil)
         try write("changed", "checks/Existing.swift", in: root)
         let index = root.appendingPathComponent(".git/index").path
         let before = try FileManager.default.attributesOfItem(atPath: index)

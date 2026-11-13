@@ -108,7 +108,8 @@ struct HelperProtectedPaths {
             problem = "baselineUnreadable"; return
         }
         atBase = Set(tree.split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
-        if let data = try? Self.git(["show", "\(base):\(HelperEvidence.Manifest.relativePath)"], root) {
+        if let prefixData = try? Self.git(["rev-parse", "--show-prefix"], root),
+           let data = try? Self.git(["show", "\(base):\(String(decoding: prefixData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))\(HelperEvidence.Manifest.relativePath)"], root) {
             manifestCheckFiles = HelperEvidence.Manifest(json: data).entries.flatMap(\.checkFiles)
         }
         // updateValue: a subscript assignment of nil would drop a path absent at delegation.
@@ -119,7 +120,7 @@ struct HelperProtectedPaths {
     /// deletion and an addition, plus untracked files. Nil when git fails.
     static func changed(root: URL, base: String) -> Set<String>? {
         let scope = ["--", ".", ":(exclude).array", ":(exclude).worktrees"]
-        guard let diff = try? Self.git(["diff-index", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base] + scope, root),
+        guard let diff = try? Self.git(["diff-index", "--relative", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base] + scope, root),
               let others = try? Self.git(["ls-files", "--others", "--exclude-standard", "-z"] + scope, root) else { return nil }
         return Set((diff + others).split(separator: 0).map { String(decoding: $0, as: UTF8.self) })
     }
