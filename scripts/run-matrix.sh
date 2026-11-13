@@ -783,13 +783,12 @@ fi
 # spends minutes building. The guard is a normal leg, so deleting it removes its
 # own inventory record and trips the same gate.
 run_leg scripts/check-matrix-inventory.sh
+run_leg python3 scripts/check-matrix-build-ordering.py
 run_leg python3 scripts/check-gate-prepass.py
 run_leg scripts/check-candidate-prepass.sh
 run_leg python3 scripts/check-prepass-process-bounds.py
 run_leg python3 scripts/check-prepass-source-patterns.py
 run_leg python3 scripts/check-prepass-source-patterns.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
-run_app_check .build/debug/Array --candidate-prepass-check
-run_leg python3 scripts/check-candidate-prepass-bundle.py
 run_leg python3 scripts/check-prepass-signature-safety.py
 run_leg python3 scripts/check-prepass-signature-safety.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
 if [[ "$BROWSER_SCHEDULING_ONLY" -eq 1 ]]; then
@@ -1067,6 +1066,10 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp
+  # These app/resource witnesses require this checkout's successful builds.
+  run_app_check .build/debug/Array --candidate-prepass-check
+  run_leg python3 scripts/check-candidate-prepass-bundle.py
+  run_app_check .build/debug/Array --settings-usage-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
   if [[ "${CONTINUUM_CHECK_MANAGED_DUCKHERD_LIVE:-0}" == "1" ]]; then
@@ -1284,6 +1287,10 @@ run env IOS_PREVIEW_PROOF_OUT="$MATRIX_RESULTS/ios-preview-proof" scripts/check-
 # an allowlisted line disappears, so the list cannot rot.
 run_leg scripts/check-color-hygiene.sh
 run swift build
+# A clean/stale checkout must build both Array and its MCP helper before any
+# pre-pass app flag or bundle witness can execute.
+run_app_check .build/debug/Array --candidate-prepass-check
+run_leg python3 scripts/check-candidate-prepass-bundle.py
 run_ios_build
 run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 run_leg scripts/check-cursor-contrast.sh

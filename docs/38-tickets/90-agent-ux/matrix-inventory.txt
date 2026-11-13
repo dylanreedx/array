@@ -1027,6 +1027,7 @@ leg run_leg python3 benchmarks/replay/check_live_temp.py
 leg run_leg python3 scripts/check-candidate-prepass-bundle.py
 leg run_leg python3 scripts/check-collaboration-pair-features.py
 leg run_leg python3 scripts/check-collaboration-pair.py
+leg run_leg python3 scripts/check-matrix-build-ordering.py
 leg run_leg python3 scripts/check-gate-prepass.py
 leg run_leg python3 scripts/check-interruptible-helper-waits.py
 leg run_leg python3 scripts/check-multiplayer-journey.py --relay local --mode terminal --name ShareTerminal --no-lock
