@@ -6442,7 +6442,30 @@ final class AgentSupervisor {
         }
     }
 
+    private func discardUnownedPreparedWorktree(_ worktree: WorktreeManager.Worktree?, repo: URL, child: AgentID) {
+        guard let worktree, records[child] == nil else { return }
+        let store = self.store
+        let worktrees = self.worktrees
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                // Unknown ownership is preserved: a read error never authorizes
+                // deletion. Remove the branch only after removal succeeds.
+                guard try store.load(id: child) == nil else { return }
+                try worktrees.remove(repo: repo, path: worktree.path, force: true)
+                if let branch = worktree.branch { try worktrees.deleteBranch(repo: repo, branch: branch) }
+            } catch {
+                fputs("Unowned helper checkout cleanup could not complete: \(error)\n", stderr)
+            }
+        }
+    }
+
     private func commitSpawn(_ request: SpawnRequest, from parentId: AgentID, parent: AgentRecord, parentHarness: AgentHarness, childID mintedID: AgentID, childPrompt: String, childSelection: AgentLaunchSelection?, resolvedRole: RoleRegistry.Resolution, mode: AgentMode, retryOf: AgentID?, originalBrief: String?, contract: AgentDelegationContract?, managed: Bool, checkout: URL, projectRoot: URL, overlapping: Bool, isolationTitle: String, resolved: SpawnCheckoutPlan.Checkout) -> AgentID? {
+        defer {
+            // A prepared checkout has no owner when the initial child claim
+            // failed. Reclamation checks the durable store off main too: a
+            // committed-but-unpublished child must keep its checkout.
+            discardUnownedPreparedWorktree(resolved.worktree, repo: projectRoot, child: mintedID)
+        }
         do {
             chooserPendingChildRequests[mintedID] = request.sourceItemID.flatMap { chooserSourceRequests["\(parentId.rawValue)/\($0)"] }
             defer { chooserPendingChildRequests[mintedID] = nil }

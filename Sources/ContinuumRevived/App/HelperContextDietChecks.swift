@@ -43,10 +43,10 @@ enum HelperContextDietChecks {
         try WorkspaceAgentReportChecks.expect(durable.count == 1 && durableParent?.nextChildOrdinal == 1, "failed atomic claim must retain only parent and its ordinal")
     }
 
-    static func mcpWriteFailure() async throws {
+    static func mcpWriteFailure(isolated: Bool = false) async throws {
         var rejected = 0, runnerStarts = 0
         var faultStore: AgentStore?
-        let b = try WorkspaceAgentReportChecks.makeBench(label: "diet-mcp-write-failure", configureDelegate: { delegate in
+        let b = try WorkspaceAgentReportChecks.makeBench(label: "diet-mcp-write-failure-\(isolated)", configureDelegate: { delegate in
             let store = AgentStore(smokeTest: false)
             faultStore = store
             delegate.agentSupervisor = AgentSupervisor(store: store,
@@ -61,11 +61,22 @@ enum HelperContextDietChecks {
         })
         defer { b.tearDown() }
         b.settings.set(true, forKey: HelperContextDiet.enabledKey)
+        let repo = URL(fileURLWithPath: b.supervisor.records[b.f.agentId]!.checkoutRoot)
+        var worktreesBefore = "", branchesBefore = ""
+        if isolated {
+            try HelperRetryWorktreeChecks.repository(repo)
+            AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: [ManagedModeChecks.model]))
+            try WorkspaceAgentReportChecks.expect(b.supervisor.setProviderSettings(agentID: b.f.agentId, harness: .claudeCode, model: ManagedModeChecks.model), "isolated fault lead harness refused")
+            try WorkspaceAgentReportChecks.expect(b.supervisor.setMode(.managed, for: b.f.agentId), "isolated fault lead mode refused")
+            b.settings.set(true, forKey: "agents.managedMode.isolateEveryHelper")
+            worktreesBefore = try HelperRetryWorktreeChecks.git(repo, ["worktree", "list", "--porcelain"])
+            branchesBefore = try HelperRetryWorktreeChecks.git(repo, ["for-each-ref", "--format=%(refname)", "refs/heads"])
+        }
         let before = Set(b.supervisor.records.keys)
         let ordinal = b.supervisor.records[b.f.agentId]!.nextChildOrdinal
         let startedBefore = runnerStarts
         let reply = try await WorkspaceAgentReportChecks.call(b.configuration(for: b.f.agentId), "array_delegate",
-            ["task": "MCP-POLICY-MUST-NOT-START", "title": "MCP failure", "idempotencyKey": "diet-mcp-write-failure"])
+            ["task": "MCP-POLICY-MUST-NOT-START", "title": "MCP failure", "harness": "Pi", "model": WorkspaceAgentReportChecks.model, "idempotencyKey": "diet-mcp-write-failure"])
         try WorkspaceAgentReportChecks.expect(rejected == 1, "MCP write-failure witness must reach the production writer")
         try WorkspaceAgentReportChecks.expect(reply.isError && WorkspaceAgentReportChecks.errorCode(reply) != nil,
             "MCP must return an error for failed policy persistence, never successful delegation: \(reply.reply)")
@@ -77,15 +88,28 @@ enum HelperContextDietChecks {
         let parent = try faultStore!.load(id: b.f.agentId)
         try WorkspaceAgentReportChecks.expect(Set(durable.map(\.id)) == before && parent?.nextChildOrdinal == ordinal,
             "MCP refusal must retain durable records and ordinal")
+        if isolated {
+            try await AgentPresenceChecks.eventually("isolated failed allocation leaked prepared worktree or branch", timeout: 8) {
+                (try? HelperRetryWorktreeChecks.git(repo, ["worktree", "list", "--porcelain"])) == worktreesBefore
+                    && (try? HelperRetryWorktreeChecks.git(repo, ["for-each-ref", "--format=%(refname)", "refs/heads"])) == branchesBefore
+            }
+            let container = repo.appendingPathComponent(".worktrees")
+            let remaining = (try? FileManager.default.contentsOfDirectory(atPath: container.path)) ?? []
+            try WorkspaceAgentReportChecks.expect(remaining.isEmpty, "unowned prepared checkout directory must also be removed")
+        }
         print("helper-context-diet MCP persistence refusal: actual MCP error, no child id, task, durable child or ordinal advance")
     }
 
     static func run() async throws {
+        if ProcessInfo.processInfo.environment["CONTINUUM_DIET_MCP_ISOLATED_FAILURE_ONLY"] == "1" {
+            try await mcpWriteFailure(isolated: true); return
+        }
         if ProcessInfo.processInfo.environment["CONTINUUM_DIET_MCP_WRITE_FAILURE_ONLY"] == "1" {
             try await mcpWriteFailure(); return
         }
         try writeFailures()
         try await mcpWriteFailure()
+        try await mcpWriteFailure(isolated: true)
         if ProcessInfo.processInfo.environment["CONTINUUM_DIET_WRITE_FAILURE_ONLY"] == "1" { return }
         let b = try WorkspaceAgentReportChecks.makeBench(label: "helper-diet")
         defer { b.tearDown() }
