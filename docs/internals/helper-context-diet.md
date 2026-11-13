@@ -52,3 +52,63 @@ Array sends; the installed loader probe establishes only that installed loader's
 resource discovery semantics. Neither proves model obedience or a speed/quality
 gain. Live OAuth provider tasks, real payload capture, real compaction and paired
 hazard/quality trials remain OPEN before default rollout.
+
+## Candidate verification record
+
+Implementation `dd39d279`; atomic persistence correction `3cf1080f`.
+Defaults remain OFF; complete personal-memory exclusion and gap 19 adoption
+remain OPEN. Independent reviewer CD692146 requested the persistence correction;
+re-review is pending through the lead.
+
+Behavioral results on the corrected source:
+
+- RED before policy wiring: production delegation reached a real scripted Pi
+  RPC process, captured argv and failed `enabled helper must disable Pi
+  automatic skill discovery` (`/tmp/gaps-helper-diet-red.log`).
+- Independent review exposed a second failure. A production `upsertRecord`
+  fault rejecting the snapshot reproduced RED: `failed policy write must
+  refuse delegation, never report a child`
+  (`/tmp/gaps-helper-diet-write-red.log`). The correction puts policy and the
+  initial task brief in the first durable child claim, before the ordinal
+  advances. The witness asserts an actual attempted write, no returned child,
+  no runner, only the parent durable, and its unchanged ordinal.
+- GREEN after correction: `--helper-context-diet-check` exits 0, including the
+  write-failure scenario, real delegated RPC argv, default OFF and lead
+  isolation, retained contract, stored record reconstruction, actual restored
+  process and native compaction protocol, resumed turn, ON-policy retry after
+  changing the default OFF, and unknown/unsupported inspection scope.
+  Log: `/tmp/gaps-helper-diet-fixed-green.log`.
+- Array and MCP were rebuilt before GREEN, with SDKROOT exported and stdin
+  `/dev/null`; ARRAY_AGENT_ID, TMUX and TMUX_PANE unset; TERM=xterm-256color;
+  CONTINUUM_SKIP_UI_BASELINES=1. Managed crash marker was preserved. Before
+  each corrected-source build: Array 1 existing build / 56% free memory /
+  51.7 GiB disk; MCP 1 / 51% / 50.9 GiB. GhosttyKit was prepared with the
+  repository script. Build log: `/tmp/gaps-helper-diet-fixed-build.log`.
+- Neighbor app checks all exit 0: `--managed-mode-launch-check`,
+  `--managed-agent-model-spawn-check`, `--workspace-api-delegation-check`, and
+  `--workspace-api-cross-harness-delegation-check`. Their environment used a
+  unique verified private tmux socket under `/private/tmp/array-diet-tmux-*`;
+  only that namespace was cleaned up. Results:
+  `/tmp/gaps-helper-diet-neighbors.json`.
+- Installed Pi loader compatibility probe: automatic skill discovery OFF/ON
+  and explicit-skill case all pass; project hazard retained in all three.
+  Runnable with `scripts/probe-helper-diet-pi.mjs` and the installed package
+  root. No provider inference, personal text capture, or user config edits.
+- Pre-pass fixtures: 44 passed, 0 failed, manifest 12 checks / 0 stale.
+  Range pre-pass: 0 failures, 2 advisories (unmapped scripts; notification-map
+  heuristic on a dispatcher-only edit). No notification path changed.
+
+Discarded attempts are not behavioral proof: one GREEN build refused because
+its check source changed during compilation; a failure-fixture compile attempt
+used a private property, corrected to `configureManagedMode` before the actual
+write-failure RED. Final source was frozen through successful builds/checks.
+
+The witness is registered both in full `scripts/run-matrix.sh` and focused
+`--helper-context-diet` mode, whose builds check resources individually. A
+normal-lock focused run reached global fixture checks (44 PASS) but its build
+was the discarded modified-input attempt. Later normal-lock runs were refused
+because another matrix held `/tmp/array-matrix.lock`; no lock was bypassed.
+**No successful matrix summary reports this leg yet.** Gate verification stays
+OPEN until the lead runs it on the combined candidate. Direct passes above do
+not substitute for that report. Full matrix, live payload, paired task quality,
+real provider compaction and no-added-latency proof were not run here.
