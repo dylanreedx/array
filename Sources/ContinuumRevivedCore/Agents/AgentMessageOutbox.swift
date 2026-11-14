@@ -53,11 +53,16 @@ public final class AgentMessageOutbox {
         return try JSONCodec.makeDecoder().decode(Entry.self, from: Data(contentsOf: path))
     }
 
+    /// Entry files `entries()` has decoded since launch, for the restore-at-scale
+    /// witness: restore once decoded the whole outbox per agent and hung boot.
+    public static var entriesDecodedForQA: Int { entriesDecoded.value }
+    private static let entriesDecoded = QACounter()
+
     public func entries() throws -> [Entry] {
         guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
         return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
-            .map { try JSONCodec.makeDecoder().decode(Entry.self, from: Data(contentsOf: $0)) }
+            .map { Self.entriesDecoded.increment(); return try JSONCodec.makeDecoder().decode(Entry.self, from: Data(contentsOf: $0)) }
             .sorted { $0.message.queuedAt < $1.message.queuedAt }
     }
 

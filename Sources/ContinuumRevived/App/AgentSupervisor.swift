@@ -2971,6 +2971,10 @@ final class AgentSupervisor {
                 warn("AgentSupervisor.restore: could not persist migrated agent \(record.id.rawValue.uuidString): \(error)")
             }
         }
+        // Read the outbox once. Re-reading it per record decoded every retained
+        // entry once per agent: 2,406 agents x 674 entries hung prod boot.
+        let queuedOutboxRecipients: Set<AgentID> = submissionRecoveryStore == nil ? [] :
+            Set(((try? agentMessageOutbox.entries()) ?? []).filter { $0.phase == .queued }.map(\.context.recipient))
 
         for storedRecord in stored {
             // An agent this session already owns wins over the stored copy: `records`
@@ -3073,7 +3077,7 @@ final class AgentSupervisor {
             // T5 — a queue (or held steer) a previous launch left behind waits for
             // the user: it never auto-resumes into a turn nobody is watching.
             if submissionRecoveryStore != nil,
-               (((try? agentMessageOutbox.entries().contains { $0.context.recipient == record.id && $0.phase == .queued }) ?? false)
+               (queuedOutboxRecipients.contains(record.id)
                 || ((try? Data(contentsOf: submissionRecoveryStore!.layout.queuedMessagesFile(for: record.id)))?.count ?? 0) > 2) {
                 pauseQueue(record.id, .afterRelaunch)
                 companionQueueHydrationPending.insert(record.id)

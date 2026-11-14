@@ -1562,7 +1562,24 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
         transcriptStore: AgentTranscriptStore(root: scaleRoot.appendingPathComponent("transcripts")))
     defer { scaleSupervisor.stopAll() }
     scaleSupervisor.workspaceToolsPermission = { .free }
+    // Restore at scale (2026-11-13). Red before the fix: restore decoded the
+    // whole outbox once per agent, and prod's 2,406 agents x 674 retained
+    // entries hung 0.7.49 at boot. Settled entries are kept forever, so seed them.
+    let scaleCaller = AgentID(rawValue: UUID())
+    for index in 0..<50 {
+        let context = AgentMessageQueueContext(caller: scaleCaller, recipient: AgentID(rawValue: UUID()),
+            operationId: "scale-op-\(index)", idempotencyKey: "scale-key-\(index)", payloadHash: "h")
+        var entry = AgentMessageOutbox.Entry(context: context, message: AgentComposerQueuedMessage(
+            text: "settled \(index)", queuedAt: scaleCreated, agentMessageContext: context))
+        entry.phase = .settled
+        try scaleSupervisor.agentMessageOutbox.save(entry)
+    }
+    let outboxDecodedBefore = AgentMessageOutbox.entriesDecodedForQA
     _ = scaleSupervisor.restore()
+    let outboxDecodedByRestore = AgentMessageOutbox.entriesDecodedForQA - outboxDecodedBefore
+    try expect(outboxDecodedByRestore <= 50,
+               "restore must read the outbox once, not once per agent: decoded \(outboxDecodedByRestore) entries for 50 on disk")
+    print("Restore at scale reads the outbox once (\(outboxDecodedByRestore) decodes for 50 entries, 2,000 agents) PASS")
     try expect(scaleSupervisor.records.count >= 2_000, "the scale supervisor must hold the 2,000 seeded agents, got \(scaleSupervisor.records.count)")
     let scaleParent = scaleSupervisor.spawn(
         role: nil, prompt: nil, cwd: pbRoot, harness: .pi, model: "fixture-model", thinking: "low",
