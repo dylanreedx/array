@@ -3,10 +3,10 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import QuartzCore
 
-/// The agent's icon on its tile: a bubble in the tile's top-right corner, in the
-/// agent's identity colour, that is also a grab handle for the tile.
+/// The agent's icon on its tile: a bubble breaking the tile's top-left corner,
+/// in the agent's identity colour, that is also a grab handle for the tile.
 ///
-/// One `CALayer` subtree on the tile's own layer, never a view: no layout pass,
+/// One `CALayer` subtree in `TileAgentBubbleView`, never drawn: no layout pass,
 /// no `draw(_:)`, nothing AppKit hit-tests, and nothing a camera step touches.
 /// Every part is geometry the render server draws itself (gradients, corner
 /// radii, a border-mask ring, a shadow with an explicit path), so it is sharp at
@@ -400,5 +400,74 @@ final class TileAgentBubbleLayer: CALayer {
     }
     var qaAnimationKeys: [String] {
         [wash, sheen, orbit].flatMap { $0.animationKeys() ?? [] }
+    }
+}
+
+/// Where a tile's agent bubble lives: a small view in the world plane, beside
+/// its tile rather than inside it, so the bubble can break the tile's top-left
+/// corner. The tile's own layer clips to its rounded rect (and a tidy animates
+/// that clip), so nothing inside the tile can overflow it.
+///
+/// The canvas stacks every bubble above every tile (`reorderTileSubviews`): a
+/// badge that breaks its tile's corner must never be cut by a neighbour's
+/// chrome, whichever of the two was focused last. The tile places it
+/// (`TileNSView.placeAgentBubble`) whenever its frame, its superview or its
+/// bubble changes. A press on the circle — inside the tile or outside it —
+/// hit-tests to the tile itself, so the tile's own drag handles it.
+@MainActor
+final class TileAgentBubbleView: NSView {
+    weak var tile: TileNSView?
+    let bubble: TileAgentBubbleLayer
+    private var cursorTrackingArea: NSTrackingArea?
+
+    override var isFlipped: Bool { true }
+
+    init(bubble: TileAgentBubbleLayer, tile: TileNSView) {
+        self.bubble = bubble
+        self.tile = tile
+        super.init(frame: .zero)
+        wantsLayer = true
+        identifier = NSUserInterfaceItemIdentifier("tile.agentBubble")
+        layer?.addSublayer(bubble)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let inLayer = convertToLayer(bounds)
+        if bubble.frame != inLayer { bubble.frame = inLayer }
+        CATransaction.commit()
+    }
+
+    /// The circle belongs to the tile: a press there is the tile's.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, let tile, let superview else { return nil }
+        return tile.agentBubbleContains(tile.convert(point, from: superview)) ? tile : nil
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let cursorTrackingArea { removeTrackingArea(cursorTrackingArea) }
+        // Include the circle's maximum edges too: NSRect excludes them, while
+        // the circular hit-test includes its circumference.
+        let area = NSTrackingArea(rect: bounds.insetBy(dx: -1, dy: -1),
+                                  options: [.mouseMoved, .cursorUpdate, .activeInActiveApp],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        cursorTrackingArea = area
+    }
+
+    override func mouseMoved(with event: NSEvent) { setCursor(for: event) }
+    override func cursorUpdate(with event: NSEvent) { setCursor(for: event) }
+
+    /// The tile's own answer at that point: the open hand on the circle, and
+    /// outside it whatever the tile shows there (resize, header, nothing).
+    private func setCursor(for event: NSEvent) {
+        guard let tile else { return }
+        tile.agentBubbleCursor(at: tile.convert(event.locationInWindow, from: nil)).set()
     }
 }

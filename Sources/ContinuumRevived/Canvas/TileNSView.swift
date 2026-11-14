@@ -65,6 +65,7 @@ class TileNSView: NSView, TokenThemed {
     override func setFrameOrigin(_ newOrigin: NSPoint) {
         super.setFrameOrigin(newOrigin)
         invalidateWorldPlaneVisibilityIndex()
+        placeAgentBubble()
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -80,6 +81,7 @@ class TileNSView: NSView, TokenThemed {
         }
         super.setFrameSize(newSize)
         invalidateWorldPlaneVisibilityIndex()
+        placeAgentBubble()
     }
     struct ChromeSnapshot: Equatable {
         var title: String
@@ -188,15 +190,19 @@ class TileNSView: NSView, TokenThemed {
     }
     var qaCharacterLayer: CharacterSpriteLayer? { titleBar?.characterLayer }
 
-    /// The bubble's side and corner inset at chrome scale 1.
+    /// The bubble's side, and how far it hangs past the tile's top and left
+    /// edges, at chrome scale 1.
     static var agentBubbleSide: CGFloat { TitleBarView.bubbleSide }
-    static var agentBubbleInset: CGFloat { TitleBarView.bubbleInset }
+    static var agentBubbleOverflow: CGFloat { TitleBarView.bubbleOverflow }
 
     /// The agent's identity colour on its bubble; nil for none.
     func setAgentBubbleTint(_ tint: NSColor?) { titleBar?.bubbleTint = tint }
     var qaAgentBubble: TileAgentBubbleLayer? { titleBar?.bubble }
+    /// The view in the world plane that carries the bubble past the tile's edge.
+    private(set) var agentBubbleView: TileAgentBubbleView?
 
-    /// The bubble in this tile's coordinates, while it shows.
+    /// The bubble in this tile's coordinates, while it shows. It hangs past the
+    /// tile's top-left corner, so its origin is negative.
     var agentBubbleFrame: NSRect? {
         guard let titleBar, let rect = titleBar.qaBubbleRect else { return nil }
         return titleBar.convert(rect, to: self)
@@ -208,6 +214,39 @@ class TileNSView: NSView, TokenThemed {
         guard let frame = agentBubbleFrame else { return false }
         let dx = local.x - frame.midX, dy = local.y - frame.midY, radius = frame.width / 2
         return dx * dx + dy * dy <= radius * radius
+    }
+
+    /// Put the bubble's view where the bar says the bubble goes, in this tile's
+    /// superview, on top: bubbles stack above every tile (the canvas keeps them
+    /// there when it next sorts the plane).
+    func placeAgentBubble() {
+        guard let bubbleView = agentBubbleView else { return }
+        guard let superview, let titleBar, let rect = titleBar.bubbleRectInBar else {
+            if bubbleView.superview != nil { bubbleView.removeFromSuperview() }
+            return
+        }
+        if bubbleView.superview !== superview {
+            superview.addSubview(bubbleView, positioned: .above, relativeTo: nil)
+        }
+        let target = titleBar.convert(rect, to: superview)
+        if bubbleView.frame != target { bubbleView.frame = target }
+        let hidden = isHidden
+        if bubbleView.isHidden != hidden { bubbleView.isHidden = hidden }
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        placeAgentBubble()
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        placeAgentBubble()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        placeAgentBubble()
     }
     var qaCharacterRect: NSRect? { titleBar?.qaCharacterRect }
     var qaProviderMarkRect: NSRect? { titleBar?.qaProviderMarkRect }
@@ -454,24 +493,13 @@ class TileNSView: NSView, TokenThemed {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas where area.owner === self && area !== bubbleCursorTrackingArea { removeTrackingArea(area) }
+        for area in trackingAreas where area.owner === self { removeTrackingArea(area) }
         addTrackingArea(NSTrackingArea(
             rect: .zero,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
             owner: self,
             userInfo: nil
         ))
-        updateBubbleCursorTracking()
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        if let cursor = bubbleCursor(at: convert(event.locationInWindow, from: nil)) { cursor.set() }
-        else { super.mouseMoved(with: event) }
-    }
-
-    override func cursorUpdate(with event: NSEvent) {
-        if let cursor = bubbleCursor(at: convert(event.locationInWindow, from: nil)) { cursor.set() }
-        else { super.cursorUpdate(with: event) }
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -826,14 +854,11 @@ class TileNSView: NSView, TokenThemed {
         }
         addSubview(bar)
         self.titleBar = bar
-        // The agent's bubble floats over the bar and the body's corner, so it
-        // lives on the tile's own layer (hidden until there is an icon).
-        layer?.addSublayer(bar.bubble)
-        bar.onBubbleChange = { [weak self] in
-            guard let self else { return }
-            window?.invalidateCursorRects(for: self)
-            layoutUnderBar()
-        }
+        // The agent's bubble breaks the tile's top-left corner, which this
+        // layer clips, so it lives in a view beside the tile in the world plane
+        // (hidden until there is an icon).
+        agentBubbleView = TileAgentBubbleView(bubble: bar.bubble, tile: self)
+        bar.onBubbleChange = { [weak self] in self?.placeAgentBubble() }
 
         installCornerOverlay()
     }
@@ -1543,26 +1568,12 @@ class TileNSView: NSView, TokenThemed {
     /// Make the resize ring discoverable: tracking-area-driven cursor rects
     /// for each edge zone, plus a drag-handle cursor over the title bar so the
     /// user reads it as draggable instead of a thin gray strip.
-    private var bubbleCursorTrackingArea: NSTrackingArea?
-
-    private func updateBubbleCursorTracking() {
-        // Include the circle's maximum edges too: NSRect excludes them, while
-        // the circular hit-test includes its circumference.
-        let rect = agentBubbleFrame?.insetBy(dx: -1, dy: -1)
-        guard bubbleCursorTrackingArea?.rect != rect else { return }
-        if let area = bubbleCursorTrackingArea { removeTrackingArea(area) }
-        bubbleCursorTrackingArea = nil
-        guard let rect else { return }
-        let area = NSTrackingArea(rect: rect, options: [.mouseMoved, .cursorUpdate, .activeInActiveApp],
-                                  owner: self, userInfo: nil)
-        addTrackingArea(area)
-        bubbleCursorTrackingArea = area
-    }
-
-    private func bubbleCursor(at point: NSPoint) -> NSCursor? {
-        guard agentBubbleFrame?.insetBy(dx: -1, dy: -1).contains(point) == true else { return nil }
-        // Exactly the same circle takes precedence over resize in mouseDown.
+    /// The cursor over the bubble's square (tile coordinates), for its view's
+    /// tracking area: the open hand on the circle, which takes precedence over
+    /// resize in mouseDown, and outside it what the tile shows there.
+    func agentBubbleCursor(at point: NSPoint) -> NSCursor {
         if agentBubbleContains(point) { return .openHand }
+        guard bounds.contains(point) else { return .arrow }
         if let edge = resizeEdge(at: point) {
             return edge == .left || edge == .right ? .resizeLeftRight : .resizeUpDown
         }
@@ -1570,7 +1581,6 @@ class TileNSView: NSView, TokenThemed {
     }
 
     override func resetCursorRects() {
-        updateBubbleCursorTracking()
         super.resetCursorRects()
         let m = resizeMarginInLocalCoordinates
         // Floor the open-hand cursor band to the grab strip (not the drawn 24-px
@@ -1595,8 +1605,8 @@ class TileNSView: NSView, TokenThemed {
         if titleDragHeight > 0 {
             addCursorRect(NSRect(x: m, y: m, width: w - 2 * m, height: titleDragHeight), cursor: .openHand)
         }
-        // The bubble's tracking area classifies its circle on cursor entry and
-        // pointer movement, rather than overriding resize with a square rect.
+        // The bubble's view classifies its circle on cursor entry and pointer
+        // movement, rather than overriding resize with a square rect.
 
     }
 
@@ -1680,27 +1690,19 @@ class TileNSView: NSView, TokenThemed {
         let naturalBar = max(naturalTitleBarHeight, Self.minScreenGrabPx)
         let extra = max(0, chromeBarHeight - naturalBar)
             + max(0, base * underBarScale - naturalRow)
-        return inset + extra.rounded(.up) + compactBubbleClearance
+        return inset + extra.rounded(.up)
     }
 
     /// Natural chrome scale at 100%. This caps SCREEN size when zoomed out,
     /// not world size: the latter would make an 11pt label become 3pt at 25%.
     static var underBarMaximumScale: CGFloat { minScreenGrabPx / titleBarHeight }
 
-    // At reduced canvas zoom the bubble must not consume the readable row's
-    // width budget. Put that row below the bubble and reserve its height.
-    private var compactBubbleClearance: CGFloat {
-        guard (canvas?.viewport.zoom ?? 1) < 1, underBar != nil,
-              let bubble = titleBar?.bubbleRectInBar else { return 0 }
-        return max(0, bubble.maxY - chromeBarHeight)
-    }
-
     private var underBarScale: CGFloat {
         guard let underBar else { return 1 }
         let zoom = CGFloat(canvas?.viewport.zoom ?? 1)
-        let naturalScale = max(1, min(Self.underBarMaximumScale, bounds.width / max(1, underBar.minimumContentWidth - (compactBubbleClearance > 0 ? underBar.trailingReserve : 0))))
+        let naturalScale = max(1, min(Self.underBarMaximumScale, bounds.width / max(1, underBar.minimumContentWidth)))
         let screenCap = naturalScale / max(0.01, min(1, zoom))
-        let width = zoom < 1 ? max(1, underBar.minimumReadableContentWidth - (compactBubbleClearance > 0 ? underBar.trailingReserve : 0)) : underBar.minimumContentWidth
+        let width = zoom < 1 ? max(1, underBar.minimumReadableContentWidth) : underBar.minimumContentWidth
         return max(1, min(zoomChromeScale, screenCap, bounds.width / width))
     }
 
@@ -1836,14 +1838,9 @@ class TileNSView: NSView, TokenThemed {
         // Preserve the chrome's natural screen role size, allowing width pressure
         // to compact the row using the accessory's actual minimum geometry.
         let scale = underBarScale
-        // The agent's bubble hangs into the row's trailing corner: the row's
-        // content ends before it rather than running under it.
-        var reserve: CGFloat = 0
-        if compactBubbleClearance == 0, let bubble = titleBar?.bubbleRectInBar, bubble.maxY > bar {
-            reserve = bounds.width - bubble.minX + CGFloat(Space.xs) * zoomChromeScale
-        }
-        underBar.place(frame: NSRect(x: 0, y: bar + compactBubbleClearance, width: bounds.width, height: base * scale), unscaledHeight: base,
-                       trailingReserve: reserve)
+        // The agent's bubble stays within the bar's height (it hangs out past
+        // the corner, not down), so the row keeps its whole width.
+        underBar.place(frame: NSRect(x: 0, y: bar, width: bounds.width, height: base * scale), unscaledHeight: base)
     }
 
     func setOwnershipMark(_ mark: OwnershipMark?) {
@@ -2411,13 +2408,13 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         return host.surface.width * host.surface.height * 4
     }
     private let providerMarkView = NSImageView(frame: .zero)
-    /// Plan 110: the agent's character, in its bubble at the tile's top-right
-    /// corner. A layer, never drawn in `draw(_:)`: a sprite frame never
+    /// Plan 110: the agent's character, in its bubble breaking the tile's
+    /// top-left corner. A layer, never drawn in `draw(_:)`: a sprite frame never
     /// invalidates the chrome, and it survives the controls being drawn inline.
     let characterLayer = CharacterSpriteLayer()
     /// The bubble that holds the character: a grab handle in the agent's colour.
-    /// A sublayer of the TILE's layer (the tile adds it), so it can float over
-    /// the body as well as the bar; framed by this bar's `layout()`.
+    /// Hosted by a view beside the tile (`TileAgentBubbleView`), so it can hang
+    /// past the tile's corner; sized by this bar's `layout()`, placed by the tile.
     lazy var bubble = TileAgentBubbleLayer(sprite: characterLayer)
     /// The agent's identity colour for the bubble; nil for none.
     var bubbleTint: NSColor? {
@@ -2755,40 +2752,44 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             at: NSPoint(x: rect.minX + side + CGFloat(Space.xs) * chromeScale, y: rect.minY), withAttributes: attributes)
     }
 
-    /// Where the title starts: past the provider mark. The character lives in
-    /// the bubble at the other end of the bar.
+    /// Where the bar's leading content (the provider mark, else the title)
+    /// starts: past the part of the bubble inside the tile when it shows.
+    private var leadingInset: CGFloat {
+        let inset = CGFloat(Space.m) * chromeScale
+        guard let bubble = bubbleRect else { return inset }
+        return max(inset, bubble.maxX + CGFloat(Space.s) * chromeScale)
+    }
+
+    /// Where the title starts: past the provider mark.
     private var titleLeadingX: CGFloat {
-        let scale = chromeScale
-        return providerMarkView.isHidden
-            ? CGFloat(Space.m) * scale
-            : providerMarkView.frame.maxX + CGFloat(Space.s) * scale
+        providerMarkView.isHidden
+            ? leadingInset
+            : providerMarkView.frame.maxX + CGFloat(Space.s) * chromeScale
     }
 
     /// The bubble's side at chrome scale 1: room for the widest art (a lead's
     /// 28 pt) with a 2 pt margin, so every agent's bubble is the same size.
     static let bubbleSide: CGFloat = 32
-    /// The bubble's inset from the tile's top and right edges at scale 1.
-    static let bubbleInset: CGFloat = 2
+    /// How far the bubble hangs past the tile's top and left edges at scale 1:
+    /// a badge breaking the corner. What stays inside (side - overflow) is never
+    /// taller than the bar, so the bubble never reaches the row under it.
+    static let bubbleOverflow: CGFloat = 12
 
-    /// The bubble, in this bar's coordinates: tucked into the tile's top-right
-    /// corner, a little taller than the bar so it floats over the body's corner.
-    /// Scales with the icon's size and the zoom floor, as the character always has.
+    /// The bubble, in this bar's coordinates: breaking the tile's top-left
+    /// corner, so its origin is negative. Scales with the icon's size and the
+    /// zoom floor, as the character always has.
     private var bubbleRect: NSRect? {
         guard let size = characterSize else { return nil }
         let scale = sizeScale
         let side = max(Self.bubbleSide, size.width + 4) * scale
-        let inset = Self.bubbleInset * scale
+        let overflow = Self.bubbleOverflow * scale
         let backing = backingScaleForCharacter
         func snap(_ value: CGFloat) -> CGFloat { (value * backing).rounded() / backing }
-        return NSRect(x: snap(bounds.width - inset - side), y: snap(inset), width: side, height: side)
+        return NSRect(x: snap(-overflow), y: snap(-overflow), width: side, height: side)
     }
 
-    /// Where the band's controls stop on the right: before the bubble when the
-    /// tile shows one, else today's inset.
-    private var trailingInset: CGFloat {
-        guard let bubble = bubbleRect else { return Self.closeButtonTrailingInset }
-        return bounds.width - bubble.minX + CGFloat(Space.xs) * chromeScale
-    }
+    /// Where the band's controls stop on the right.
+    private var trailingInset: CGFloat { Self.closeButtonTrailingInset }
 
     /// The character's slot: centred in the bubble, scaled with the chrome so it
     /// holds its size on screen as the title does.
@@ -2814,7 +2815,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// QA: the bubble in this bar's coordinates, while it shows.
     var qaBubbleRect: NSRect? { bubble.isHidden ? nil : bubbleRect }
     /// Where the bubble goes in this bar whenever the tile has an icon, before
-    /// the bar has laid it out: the under-bar keeps clear of it.
+    /// the bar has laid it out or shown it: its view is placed from this.
     var bubbleRectInBar: NSRect? { bubbleRect }
     var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
 
@@ -2862,8 +2863,10 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         reconcileCharacterVisibility()
     }
 
-    /// Told when the bubble appears, goes or moves: the tile's cursor rects follow.
+    /// Told when the bubble appears, goes or moves: the tile places its view.
     var onBubbleChange: (() -> Void)?
+    /// The bubble rect last handed to the tile.
+    private var placedBubbleRect: NSRect?
 
     /// The sidebar's working light on the bubble: shown while the agent works,
     /// in the sidebar's chosen style, on the agent's own phase of the shared clock.
@@ -3127,20 +3130,19 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         )
         let markSize = markSide
         providerMarkView.frame = NSRect(
-            x: CGFloat(Space.m) * chromeScale,
+            x: leadingInset,
             y: (bounds.height - markSize) / 2,
             width: markSize,
             height: markSize
         )
         // The bubble's and the character's frames, only when they moved (a zoom
-        // step can move them; a sprite frame never does). The bubble lives on the
-        // tile's layer, so its frame is the bar's rect in that layer's space.
-        if let rect = bubbleRect, let sprite = characterRect, let host = superview {
-            let inHost = host.convertToLayer(convert(rect, to: host))
+        // step can move them; a sprite frame never does). The bubble lives in a
+        // view beside the tile, which the tile places from `bubbleRect`.
+        if let rect = bubbleRect, let sprite = characterRect {
             let local = sprite.offsetBy(dx: -rect.minX, dy: -rect.minY)
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            if bubble.frame != inHost { bubble.frame = inHost; onBubbleChange?() }
+            if rect != placedBubbleRect { placedBubbleRect = rect; onBubbleChange?() }
             if characterLayer.frame != local { characterLayer.frame = local }
             if characterLayer.isHidden { characterLayer.isHidden = false }
             CATransaction.commit()
@@ -3657,7 +3659,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         // zoom, and the switch sits left of both.
         let maxX = min(bounds.width - statusPillTrailingInset, leadingBandControlX - CGFloat(Space.s))
         let x = maxX - pillWidth
-        guard x >= CGFloat(Space.m) * chromeScale else { return nil }
+        guard x >= leadingInset else { return nil }
         return NSRect(
             x: x, y: (bounds.height - pillHeight) / 2,
             width: pillWidth, height: pillHeight)
