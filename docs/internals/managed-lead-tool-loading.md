@@ -237,7 +237,17 @@ Requests to work alone and Array's Agent permissions still apply. This changes
 no host grants; the default delegate guideline and shared Pi resource stay intact.
 
 The short chooser brief asks for solo work unless two or more different-file
-parts justify the repeated reading. `array_plan` carries `choice`, `reason`,
+parts justify the repeated reading. With the chooser ON, the host requires one
+`array_plan` declaration per dispatched user task before editing, commands or new
+helpers. `choice="solo"` unlocks the lead's own implementation without requiring
+delegation. Before declaration, native Read/Grep/Glob and Array inspection, status,
+choice and result collection remain available. All Bash commands (including
+apparent reads) and unknown MCP/plugin routes are refused; shell text cannot
+reliably prove absence of writes. The refusal tells the lead to call `array_plan`.
+Direct MCP delegation, including read-only helpers, and messaging that starts an
+idle helper's turn enforce the same host rule. Coordination with already-running
+own helpers remains available. Existing grants and idempotent operation replays
+still apply. `array_plan` carries `choice`, `reason`,
 and titled contracts in `parts`. The host stores the status and posts one local transcript notice,
 returns an ownership verdict and partial pre-pass coverage, and records the
 choice in the ledger without its prose. The visible reason stays in the local
@@ -253,9 +263,12 @@ child creation begins. `readOnly: true` labels investigation/review and does
 not latch. While latched, authenticated Array coordination and native reads
 remain available; all command execution, editing and unknown MCP/plugin tools
 are refused. The last implementation helper's terminal result reopens editing
-for integration. The next dispatched user request starts with a new identity and declaration.
+for integration when that task has declared a plan. The next dispatched user request
+starts with a new identity and requires its own declaration; session resume,
+compaction and prompt hooks cannot supply one. After an app restart, a relaunched
+lead must declare again.
 Unfinished implementation writes from an older task remain fenced until those
-helpers finish. A follow-up to a completed implementation helper re-fences the
+helpers finish, even after a new solo declaration. A follow-up to a completed implementation helper re-fences the
 lead while the helper works again; stop/archive releases that fence. Queued
 helper-result wakes keep their task identity.
 

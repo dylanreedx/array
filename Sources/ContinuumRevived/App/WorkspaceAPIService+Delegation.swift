@@ -79,6 +79,10 @@ extension WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: code, message: message, approvalRequestId: approvalRequestId))
         }
 
+        if supervisor.chooserRequiresPlan(for: agentId) {
+            return completion(fail(.permissionDenied, ManagedChooser.planRequired))
+        }
+
         if let retryOf = request.retryOf, !supervisor.mayRetry(retryOf, from: agentId) {
             return completion(fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn."))
         }
@@ -194,6 +198,9 @@ extension WorkspaceAPIService {
         _beforeCommitHook?()
 
         // Approval can run a nested event loop; validate again at the effect seam.
+        if supervisor.chooserRequiresPlan(for: agentId) {
+            return completion(fail(.permissionDenied, ManagedChooser.planRequired))
+        }
         if let reason = AgentSupervisor.readinessRefusal(for: childHarness, retry: "delegate again") {
             return completion(fail(.unsupported, reason))
         }
@@ -401,6 +408,7 @@ extension WorkspaceAPIService {
             guard let self else { return "revoked" }
             guard self.supervisor.records[agentId]?.workspaceToolsEnabled == true,
                   self.revocationGeneration(for: agentId) == generationAtGrant else { return "revoked" }
+            if self.supervisor.chooserRequiresPlan(for: agentId) { return "planRequired" }
             if let retryOf = request.retryOf, !self.supervisor.mayRetry(retryOf, from: agentId) { return "retryIneligible" }
             return nil
         }
@@ -413,6 +421,9 @@ extension WorkspaceAPIService {
                 _ = self.supervisor.chooserDelegated(agentId, source: requestId, pending: chooserPending, child: nil)
                 let reason = self.supervisor.spawnRefusal(for: agentId)?.reason ?? "the supervisor refused the spawn"
                 completion(fail(.unsupported, "Array did not start a child: \(reason).", approvalRequestId: approvalRequestId, keep: true))
+            case .gateClosed("planRequired"):
+                _ = self.supervisor.chooserDelegated(agentId, source: requestId, pending: chooserPending, child: nil)
+                completion(fail(.permissionDenied, ManagedChooser.planRequired))
             case .gateClosed("retryIneligible"):
                 _ = self.supervisor.chooserDelegated(agentId, source: requestId, pending: chooserPending, child: nil)
                 completion(fail(.invalidRequest, "retryOf must name your failed, stopped or errored child, with no active turn."))
@@ -720,6 +731,15 @@ extension WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: code, message: message, approvalRequestId: approvalRequestId))
         }
 
+        // A busy own helper can still receive coordination. Starting an idle
+        // helper's new turn is implementation intent and needs this task's plan.
+        func planRefusal() -> Reply? {
+            guard supervisor.chooserRequiresPlan(for: agentId),
+                  !supervisor.chooserMayCoordinateRunningHelper(from: agentId, to: childId) else { return nil }
+            return failNothingDelivered(.permissionDenied, ManagedChooser.planRequired)
+        }
+        if let refusal = planRefusal() { return refusal }
+
         // 4. Grant (§14.1). Outside the preset, so the first message per agent
         //    session reaches the trusted approval UI; the alert names the child.
         let effectivePolicy: WorkspacePresentationPolicy
@@ -796,6 +816,8 @@ extension WorkspaceAPIService {
             return .cancelled(result: nil)
         }
         _beforeCommitHook?()
+
+        if let refusal = planRefusal() { return refusal }
 
         // 6. The known seam (`AgentSupervisor.sendRefusal`): the send path
         //    refuses unless the catalogue reports the child's harness ready AND

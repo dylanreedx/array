@@ -491,7 +491,9 @@ events, while the ledger retains its existing task attribution.
 `implementationDelegated` and `delegationFailed` carry the same request
 identity. `oneHelperHandoff` is written at request closure, only when exactly
 one implementation part actually started. A split declaring two parts
-but starting only one is counted; two unplanned parts are not. A `retryOf` chain
+but starting only one is counted; two actual parts under a solo declaration
+are not a one-helper hand-off. New delegations require a declaration when the
+chooser is enabled. A `retryOf` chain
 counts as the original logical part, while every attempt retains its own
 `implementationDelegated` row for rework accounting. This final
 metric is separate from the immediate delegate-result advisory, which is advice

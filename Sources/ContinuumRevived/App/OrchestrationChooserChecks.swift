@@ -169,15 +169,34 @@ enum OrchestrationChooserChecks {
         try await AgentPresenceChecks.eventually("next request did not start", timeout: 15) { b.supervisor.chooserRequests[lead]?.id != original }
         let next = b.supervisor.chooserRequests[lead]!.id
         try expect(b.supervisor.chooserRequests[lead]?.latched == true && b.supervisor.chooserRequests[lead]?.plan == nil, "new user task dropped outstanding implementation fence")
+        let readCoordination = try await WorkspaceAgentReportChecks.call(config(b), "array_message_agent", [
+            "agentId": reviewer.rawValue.uuidString, "text": "HOLD continue reading", "idempotencyKey": UUID().uuidString])
+        try expect(!readCoordination.isError, "new-task declaration blocked coordination with a running own helper")
+        let coordinatingHook = try await ManagedModeChecks.hook(b, lead, ["hook_event_name": "PreToolUse",
+            "tool_name": "mcp__array_workspace__array_message_agent", "tool_input": ["agentId": reviewer.rawValue.uuidString]])
+        try expect(coordinatingHook["permissionDecision"] == nil, "hook blocked existing running-helper coordination")
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            _ = try await ManagedModeChecks.hook(b, lead, ["hook_event_name": event, "source": "resume", "session_id": UUID().uuidString])
+        }
+        try expect(b.supervisor.chooserRequests[lead]?.plan == nil, "session hooks manufactured a declaration")
         b.supervisor.qaDeliver(.turnCompleted(threadId: "fixture", turnId: originalTurn, outcome: .completed, errorMessage: nil), to: lead)
         try expect(b.supervisor.chooserRequests[lead]?.id == next, "late root terminal closed newer request")
         try await HelperRetryWorktreeChecks.finish(b, a)
         try expect(b.supervisor.chooserRequests[lead]?.latched == true, "first helper reopened before last part")
         try await HelperRetryWorktreeChecks.finish(b, c)
         try expect(b.supervisor.chooserRequests[lead]?.latched == false, "last helper did not reopen integration")
-        try await HelperRetryWorktreeChecks.finish(b, reviewer)
+        b.supervisor.stop(reviewer)
+        try expect(b.supervisor.chooserHookPolicy(for: b.supervisor.records[lead]!) == "plan_required", "last old helper bypassed the new task declaration")
+        let unplannedEdit = try await hookFailure(config(b), token: config(b).tokenFilePath)
+        try expect((unplannedEdit["permissionDecisionReason"] as? String ?? "").contains("array_plan"), "new task did not explain declaration after old writers finished")
+        let idleMessage = ["agentId": a.rawValue.uuidString, "text": "HOLD followup", "idempotencyKey": UUID().uuidString]
+        let idleRefusal = try await WorkspaceAgentReportChecks.call(config(b), "array_message_agent", idleMessage)
+        try expect(WorkspaceAgentReportChecks.errorCode(idleRefusal) == "permission_denied" && !b.supervisor.isRunning(a), "idle helper started a new turn without a declaration")
+        let idleHook = try await ManagedModeChecks.hook(b, lead, ["hook_event_name": "PreToolUse", "tool_name": "mcp__array_workspace__array_message_agent", "tool_input": ["agentId": a.rawValue.uuidString]])
+        try expect(idleHook["permissionDecision"] as? String == "deny", "hook allowed idle helper turn before declaration")
+        _ = try await plan(b, choice: "solo", reason: "integrate the finished parts")
         try expect(b.supervisor.chooserRequests[lead]?.id == next && b.supervisor.chooserRequests[lead]?.latched == false, "late read-only helper modified next task")
-        let followup = try await WorkspaceAgentReportChecks.call(config(b), "array_message_agent", ["agentId": a.rawValue.uuidString, "text": "HOLD followup", "idempotencyKey": UUID().uuidString])
+        let followup = try await WorkspaceAgentReportChecks.call(config(b), "array_message_agent", idleMessage)
         try expect(!followup.isError, "implementation follow-up refused: \(followup.reply)")
         try await AgentPresenceChecks.eventually("follow-up did not relatch", timeout: 15) { b.supervisor.isRunning(a) && b.supervisor.chooserRequests[lead]?.latched == true }
         b.supervisor.stop(a)
@@ -197,6 +216,7 @@ enum OrchestrationChooserChecks {
     static func restart() async throws {
         let b = try await bench("restart"); defer { b.tearDown() }
         let lead = b.f.agentId
+        _ = try await plan(b, choice: "solo", reason: "one restart fixture part")
         let (child, _) = try await PartContractChecks.delegate(b, "HOLD restart-helper", contract: ["owns": ["Restart.swift"]])
         _ = try await HelperRetryWorktreeChecks.capture(b, child)
         try expect(b.supervisor.records[child]?.delegationContext?.chooserWriteInProgress == true, "implementation recovery marker absent before helper work")
@@ -238,14 +258,18 @@ enum OrchestrationChooserChecks {
         try expect(fresh.chooserHookPolicy(for: fresh.records[lead]!) == "latched", "resume forgot unresolved helper writer")
         try expect(try await hookFailure(warm, token: warm.tokenFilePath)["permissionDecision"] as? String == "deny", "resumed lead could write beside orphan helper")
         fresh.stop(child) // explicit host stop resolves the conservatively retained writer
-        try expect(fresh.chooserHookPolicy(for: fresh.records[lead]!) == "open", "explicit stop did not release restored fence")
+        try expect(fresh.chooserHookPolicy(for: fresh.records[lead]!) == "plan_required", "restart inherited the old task declaration")
+        let resumedDenial = try await hookFailure(warm, token: warm.tokenFilePath)
+        try expect((resumedDenial["permissionDecisionReason"] as? String ?? "").contains("array_plan"), "resumed task without writers bypassed declaration")
+        let resumePlan = try await WorkspaceAgentReportChecks.call(warm, "array_plan", ["choice": "solo", "reason": "resume this task"])
+        try expect(!resumePlan.isError && fresh.chooserHookPolicy(for: fresh.records[lead]!) == "open", "resumed solo declaration did not unlock implementation")
         try expect(try store.load(id: child)?.delegationContext?.chooserWriteInProgress == false, "resolved fence was not persisted")
     }
     static func handoffCounts() async throws {
-        for (label, planned, actual, expected) in [("declaredtwo", true, 1, 1), ("unplannedtwo", false, 2, 0)] {
+        for (label, planned, actual, expected) in [("declaredtwo", true, 1, 1), ("solotwo", false, 2, 0)] {
             let b = try await bench(label); defer { b.tearDown() }
             b.supervisor.helperCompletionEnabled = { _ in false }
-            if planned { _ = try await plan(b, choice: "split", paths: [["A.swift"], ["B.swift"]]) }
+            _ = try await plan(b, choice: planned ? "split" : "solo", paths: planned ? [["A.swift"], ["B.swift"]] : [])
             var helpers: [AgentID] = []
             for index in 0..<actual {
                 let (id, _) = try await PartContractChecks.delegate(b, "HOLD metric \(index)", contract: ["owns": ["part-\(index).swift"]])
@@ -263,6 +287,7 @@ enum OrchestrationChooserChecks {
     static func retryMetric() async throws {
         let b = try await bench("retrymetric"); defer { b.tearDown() }
         b.supervisor.helperCompletionEnabled = { _ in false }
+        _ = try await plan(b, choice: "solo", reason: "one logical part with retries")
         let (old, _) = try await PartContractChecks.delegate(b, "PRIOR-BRIEF", contract: ["owns": ["A.swift"]])
         try await AgentPresenceChecks.eventually("metric helper did not fail", timeout: 15) { !b.supervisor.isRunning(old) && b.supervisor.records[old]?.latestTerminalEvent?.outcome == .failed }
         let (retry, _) = try await PartContractChecks.delegate(b, "retry same part", retry: old)
@@ -275,10 +300,11 @@ enum OrchestrationChooserChecks {
     }
     static func policy() async throws {
         let b = try await bench("policy"); defer { b.tearDown() }
+        b.supervisor.helperCompletionEnabled = { _ in false }
         let lead = b.f.agentId
-        func decision(_ agent: AgentID, _ tool: String, huge: Bool = false) async throws -> [String: Any] {
+        func decision(_ agent: AgentID, _ tool: String, huge: Bool = false, command: String? = nil) async throws -> [String: Any] {
             try await ManagedModeChecks.hook(b, agent, ["hook_event_name": "PreToolUse", "tool_name": tool,
-                "tool_input": ["command": huge ? String(repeating: "x", count: WorkspaceAgentHook.maxPostedPayloadBytes + 1) : "printf changed > chooser-edited.txt"]])
+                "tool_input": ["command": huge ? String(repeating: "x", count: WorkspaceAgentHook.maxPostedPayloadBytes + 1) : command ?? "printf changed > chooser-edited.txt"]])
         }
         func edit(_ agent: AgentID, _ tool: String) async throws -> Bool {
             let c = agent == lead ? try config(b) : try b.configuration(for: agent)
@@ -312,10 +338,54 @@ enum OrchestrationChooserChecks {
             try expect(wrote == FileManager.default.fileExists(atPath: file.path), "tool outcome disagrees with filesystem")
             return wrote
         }
-        try expect(try await edit(lead, "Edit"), "solo edit failed")
+        let configurationBeforePlan = try config(b)
+        let planDenied = try await hookFailure(configurationBeforePlan, token: configurationBeforePlan.tokenFilePath)
+        let planMessage = planDenied["permissionDecisionReason"] as? String ?? ""
+        try expect(planMessage.contains("array_plan") && planMessage.contains("solo") && planMessage.contains("split") && planMessage.contains("contract"), "fail-closed transport lost actionable plan-required acknowledgement")
+        var missingPlan: [String] = []
+        if try await edit(lead, "Edit") { missingPlan.append("undeclared chooser Edit wrote a file") }
+        if try await edit(lead, "Bash") { missingPlan.append("undeclared chooser Bash wrote a file") }
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit", "mcp__other__write"] {
+            let denied = try await decision(lead, tool)
+            if denied["permissionDecision"] as? String != "deny"
+                || !(denied["permissionDecisionReason"] as? String ?? "").contains("array_plan") {
+                missingPlan.append("\(tool) did not require array_plan before implementation")
+            }
+        }
+        if try await decision(lead, "Bash", command: "git status")["permissionDecision"] as? String != "deny" {
+            missingPlan.append("a purported read-only shell command bypassed declaration")
+        }
+        for tool in ["Read", "Grep", "Glob", "ToolSearch", "mcp__array_workspace__array_plan", "mcp__array_workspace__array_status"] {
+            try expect(try await decision(lead, tool)["permissionDecision"] == nil, "pre-plan orientation/choice tool refused: \(tool)")
+        }
+        let beforeChildren = b.supervisor.children(of: lead).count
+        for readOnly in [false, true] {
+            let reply = try await WorkspaceAgentReportChecks.call(config(b), "array_delegate", [
+                "task": "HOLD before declaration", "readOnly": readOnly, "idempotencyKey": UUID().uuidString])
+            if !reply.isError {
+                let child = try HelperRetryWorktreeChecks.child(reply)
+                b.supervisor.stop(child)
+                missingPlan.append("direct production MCP delegation bypassed declaration (readOnly=\(readOnly))")
+            } else {
+                let message = (reply.reply["error"] as? [String: Any])?["message"] as? String ?? ""
+                if WorkspaceAgentReportChecks.errorCode(reply) != "permission_denied" || !message.contains("array_plan") || !message.contains("solo") {
+                    missingPlan.append("backend denial did not explain the solo array_plan unlock")
+                }
+            }
+        }
+        if b.supervisor.children(of: lead).count != beforeChildren { missingPlan.append("pre-plan delegation created a child record") }
+        try expect(missingPlan.isEmpty, missingPlan.joined(separator: "; "))
+        _ = try await plan(b, choice: "solo", reason: "one small implementation")
+        try expect(try await edit(lead, "Edit"), "one solo declaration did not unlock Edit")
+        try expect(try await edit(lead, "Bash"), "one solo declaration did not unlock shell mutation")
         let (child, _) = try await PartContractChecks.delegate(b, "HOLD implementation", contract: ["owns": ["chooser-edited.txt"]])
         _ = try await HelperRetryWorktreeChecks.capture(b, child)
         try expect(!(try await edit(lead, "Edit")), "latched edit succeeded")
+        try await HelperRetryWorktreeChecks.finish(b, lead)
+        try expect(await b.supervisor.accept(.sendPrompt(AgentPrompt("HOLD next solo task")), for: lead) == .accepted, "next solo task refused")
+        try await AgentPresenceChecks.eventually("next solo request did not start", timeout: 15) { b.supervisor.chooserRequests[lead]?.plan == nil }
+        _ = try await plan(b, choice: "solo", reason: "small next task")
+        try expect(!(try await edit(lead, "Edit")), "new task solo declaration erased older writer fence")
         try expect(!(try await edit(lead, "Bash")), "latched shell write succeeded")
         try expect(try await edit(child, "Edit"), "helper edit failed")
         try expect(try await decision(lead, "Bash", huge: true)["permissionDecision"] as? String == "deny", "trimmed tool input bypassed latch")
@@ -338,7 +408,7 @@ enum OrchestrationChooserChecks {
         try expect(invalid["permissionDecision"] as? String == "deny", "token guard waited for stdin")
         try await HelperRetryWorktreeChecks.finish(b, child)
         try expect(try await edit(lead, "Edit"), "integration edit stayed closed")
-        print("PASS chooser policy: solo edits, latched edits/shell/unknown/oversize refused, helper edits, missing-token fail closed, integration reopens")
+        print("PASS chooser policy: pre-plan edits/shell/delegation refused, one solo plan unlocks implementation, carried writer fences win, latched edits/shell/unknown/oversize refused, helper edits, missing-token fail closed, integration reopens")
     }
     static func hookFailure(_ config: WorkspaceMCPConfiguration, token: String, endpoint: String? = nil,
                             body: String = #"{"hook_event_name":"PreToolUse","tool_name":"Bash"}"#, keepInputOpen: Bool = false) async throws -> [String: Any] {

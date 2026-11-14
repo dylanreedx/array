@@ -522,7 +522,7 @@ private enum HookMode {
               let object = try? JSONSerialization.jsonObject(with: reply) as? [String: Any],
               object["status"] as? String == "ok", let result = object["result"] as? [String: Any] else { return }
         if enforcing {
-            guard let policy = result["chooserPolicy"] as? String, ["open", "latched"].contains(policy) else { return }
+            guard let policy = result["chooserPolicy"] as? String, ["open", "latched", "plan_required"].contains(policy) else { return }
         }
         acknowledged = true
         if let output = result[WorkspaceAgentHook.hookOutputKey] as? [String: Any],

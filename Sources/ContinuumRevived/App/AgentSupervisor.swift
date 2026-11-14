@@ -9243,7 +9243,16 @@ final class AgentSupervisor {
         guard record.harness == .claudeCode, record.parentAgentID == nil,
               chooserAtLaunch.contains(record.id),
               (runningModes[record.id] ?? record.mode) == .managed else { return nil }
-        return chooserWriteFences[record.id]?.isEmpty == false ? "latched" : "open"
+        if chooserWriteFences[record.id]?.isEmpty == false { return "latched" }
+        return chooserRequests[record.id]?.plan == nil ? "plan_required" : "open"
+    }
+    /// Host request state, never a session/hook-supplied declaration. A fresh or
+    /// restored request must choose again; outstanding writers remain separate.
+    func chooserRequiresPlan(for id: AgentID) -> Bool {
+        chooserEnabled(for: id) && chooserRequests[id]?.plan == nil
+    }
+    func chooserMayCoordinateRunningHelper(from parent: AgentID, to child: AgentID) -> Bool {
+        records[child]?.parentAgentID == parent && isRunning(child)
     }
     private func beginChooserRequest(_ id: AgentID) {
         guard chooserEnabled(for: id) else { return }
@@ -9464,7 +9473,15 @@ final class AgentSupervisor {
         var state = managedHookStates[record.id] ?? ManagedLeadHookState()
         state.briefedSessions = records[record.id]?.managedBriefedSessions ?? []
         let choosing = chooserAtLaunch.contains(record.id)
-        if choosing, let output = ManagedChooser.toolReply(payload, latched: chooserWriteFences[record.id]?.isEmpty == false) { return output }
+        if choosing {
+            let input = payload["tool_input"] as? [String: Any]
+            let target = (input?["agentId"] as? String).flatMap(UUID.init(uuidString:)).map { AgentID(rawValue: $0) }
+            let coordinating = target.map { chooserMayCoordinateRunningHelper(from: record.id, to: $0) } ?? false
+            if let output = ManagedChooser.toolReply(payload,
+                latched: chooserWriteFences[record.id]?.isEmpty == false,
+                hasPlan: chooserRequests[record.id]?.plan != nil,
+                mayCoordinateRunningHelper: coordinating) { return output }
+        }
         let reply = state.reply(payload: payload, harness: harness, chooser: choosing)
         if var current = records[record.id], current.managedBriefedSessions != state.briefedSessions {
             current.managedBriefedSessions = state.briefedSessions

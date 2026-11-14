@@ -130,8 +130,11 @@ walk that keeps only what the pass reads brought it back to origin's level.
 
 Plan 117 adds an off-by-default Claude Managed task chooser
 (`agents.managedMode.chooser`, launch override `ARRAY_MANAGED_CHOOSER`). It
-restores solo editing and adds structured `array_plan`, host status rendering,
-recorded choices, advisory contracts, and a delegation-scoped hook latch. See
+requires one structured `array_plan` declaration per user task before editing,
+commands or new helpers. A solo choice unlocks own implementation; outstanding
+implementation-helper fences still win. It adds host status rendering, recorded
+choices, advisory contracts, and a delegation-scoped hook latch. Chooser OFF
+retains the existing catalog, defaults and policy. See
 [tool loading](managed-lead-tool-loading.md#experimental-task-chooser-plan-117)
 for its enforcement limits. In particular the dynamic strict-sandbox backstop
 and background jobs started before delegation remain unproven; Codex and Pi do
