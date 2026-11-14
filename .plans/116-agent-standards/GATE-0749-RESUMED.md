@@ -58,3 +58,17 @@ Focus load-flake classification follows the explicit decision. Original failures
 - Awake/display legs, external crash witnesses and a new full matrix remain unrun, by requested targeted scope.
 
 Final benches inventory: `/tmp/orchestration-gaps-decision-benches.log`. Candidate bench retained because it has not landed. No test workflow or matrix lock holder remains. No release, push or production app operation performed.
+
+## Exact pre-pass merge comparison
+
+Completed the subsequently requested runtime comparison with fresh app and MCP builds at each exact revision. All exit codes were zero:
+
+| Revision | App pre-pass | Real dev-bundle pre-pass |
+|---|---|---|
+| `8425cd28^1` = `c1937534` | PASS | PASS |
+| `8425cd28` | PASS | PASS |
+| Final candidate `19df389d` | PASS | PASS |
+
+Machine-readable record: `/tmp/orchestration-exact-prepass-comparison.json`. Build and witness logs: `/tmp/orchestration-exact-{before,after,candidate}-{build,mcp-build,app,bundle}.log`. All three revisions' bundled resources independently matched their pinned SHA256. The launch-hang merge did not cause the pre-pass failure. It was the intervening uncommitted bundled-scanner edit from the census repair, already reverted before the final candidate. Production evaluator completion/hydration needed no change.
+
+The comparison held the normal matrix lock, checked resources before each revision, preserved the managed crash marker, used isolated stores/project roots and disabled terminal tmux in direct app checks. The original candidate branch was restored in a finally block and its products rebuilt; no source edits were made during comparison. No full matrix or redundant managed-mode run: final source is unchanged from the already witnessed supervisor PASS, restore 24/24 and managed-mode 66/66. Final inventory `/tmp/orchestration-exact-final-benches.log`. No push.
