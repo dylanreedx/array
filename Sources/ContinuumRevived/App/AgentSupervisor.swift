@@ -1126,6 +1126,8 @@ final class AgentSupervisor {
     private var companionCompactionItems: [AgentID: UUID] = [:]
     private var companionAcceptedStarts: Set<AgentID> = []
     private var companionQueueHydrationPending: Set<AgentID> = []
+    var qaBeforeRestoreQueueHydration: (() async -> Void)?
+    var qaPendingQueueHydrationCount: Int { companionQueueHydrationPending.count }
     private var companionHeldStarts: [AgentID: CompanionTaskRunHandle] = [:]
     var onCompanionTasksChanged: (() -> Void)?
     /// Channel-local storage for browser images produced by this agent.
@@ -1963,7 +1965,8 @@ final class AgentSupervisor {
     private var arrayOwnedNoticeCounts: [AgentID: Int] = [:]
     /// Restore-time Codex rollout lookup. Injected in checks so repair is
     /// deterministic and never depends on a developer's real ~/.codex tree.
-    private let codexRestoredContextSnapshot: @Sendable (AgentRecord) -> AgentContextWindowSnapshot?
+    private let codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)?
+    var codexRestoreHomeForQA: URL?
 
     init(
         store: AgentStore,
@@ -2003,10 +2006,7 @@ final class AgentSupervisor {
         self.agentMessageOutbox = AgentMessageOutbox(applicationSupportDirectory: store.layout.applicationSupportDirectory)
         self.transcriptStore = transcriptStore
         self.maximumActiveManagedChildren = maximumActiveManagedChildren
-        self.codexRestoredContextSnapshot = codexRestoredContextSnapshot ?? { record in
-            guard let threadId = record.codexThreadId else { return nil }
-            return CodexRolloutTelemetry.latestSnapshot(threadId: threadId, freshness: .stale)
-        }
+        self.codexRestoredContextSnapshot = codexRestoredContextSnapshot
         startHelperWatchdog()
         startHelperTileSweep()
         if submissionRecoveryStore != nil {
@@ -3033,6 +3033,20 @@ final class AgentSupervisor {
                 warn("AgentSupervisor.restore: could not persist migrated agent \(record.id.rawValue.uuidString): \(error)")
             }
         }
+        // One snapshot for the entire restore, including asynchronous queue hydration.
+        // Keep the existing all-or-nothing corrupt-entry fallback.
+        let restoredOutboxRead: [AgentMessageOutbox.Entry]? = submissionRecoveryStore == nil ? [] : (try? agentMessageOutbox.entries())
+        let restoredOutbox = restoredOutboxRead ?? []
+        let outboxByRecipient = Dictionary(grouping: restoredOutbox, by: \.context.recipient)
+        let queuedOutboxRecipients = Set(restoredOutbox.filter { $0.phase == .queued }.map(\.context.recipient))
+        let rolloutIndex = codexRestoredContextSnapshot == nil ? CodexRolloutTelemetry.RestoreIndex(
+            threadIds: Set(stored.filter { records[$0.id] == nil }.compactMap(\.codexThreadId)),
+            codexHome: codexRestoreHomeForQA) : nil
+        let restoreContext: (AgentRecord) -> AgentContextWindowSnapshot? = { record in
+            if let custom = self.codexRestoredContextSnapshot { return custom(record) }
+            guard let id = record.codexThreadId, let url = rolloutIndex?.rolloutURL(threadId: id) else { return nil }
+            return CodexRolloutTelemetry.latestSnapshot(in: url, afterOffset: 0, freshness: .stale)
+        }
 
         for storedRecord in stored {
             // An agent this session already owns wins over the stored copy: `records`
@@ -3088,7 +3102,7 @@ final class AgentSupervisor {
             // cumulative accounting fields. restore() never owns a live runner,
             // so this bounded tail read cannot race an active turn.
             if record.codexThreadId != nil {
-                if var exact = codexRestoredContextSnapshot(record) {
+                if var exact = restoreContext(record) {
                     exact.freshness = .stale
                     if record.lastContextWindow != exact {
                         record.lastContextWindow = exact
@@ -3135,12 +3149,12 @@ final class AgentSupervisor {
             // T5 — a queue (or held steer) a previous launch left behind waits for
             // the user: it never auto-resumes into a turn nobody is watching.
             if submissionRecoveryStore != nil,
-               (((try? agentMessageOutbox.entries().contains { $0.context.recipient == record.id && $0.phase == .queued }) ?? false)
+               (queuedOutboxRecipients.contains(record.id)
                 || ((try? Data(contentsOf: submissionRecoveryStore!.layout.queuedMessagesFile(for: record.id)))?.count ?? 0) > 2) {
                 pauseQueue(record.id, .afterRelaunch)
                 companionQueueHydrationPending.insert(record.id)
                 updateCompanionTasks { ledger in _ = try ledger.ensureUnknown(agentID: record.id.rawValue) }
-                hydrateQueueCache(for: record.id)
+                hydrateQueueCache(for: record.id, restoredOutbox: outboxByRecipient[record.id] ?? [], restoreOutboxFailed: restoredOutboxRead == nil)
             }
             restoredIDs.insert(record.id)
             report.restored.append(record.id)
@@ -4731,9 +4745,16 @@ final class AgentSupervisor {
             && (helperMessageSubscriptions[context.recipient] ?? []).contains { $0.queueContext == context }
     }
 
-    private func recoverAgentMessageQueue(for id: AgentID) async throws {
+    private func recoverAgentMessageQueue(for id: AgentID, restoredOutbox: [AgentMessageOutbox.Entry]? = nil, snapshotRevision: UInt64? = nil) async throws {
         guard let queue = submissionRecoveryStore else { return }
-        for entry in try agentMessageOutbox.entries() where entry.context.recipient == id {
+        for saved in try restoredOutbox ?? agentMessageOutbox.entries() where saved.context.recipient == id {
+            // A synchronous cancel/admission may happen while the queue actor is awaited.
+            // Revalidate changed snapshots by key, preserving terminal idempotency.
+            let entry: AgentMessageOutbox.Entry
+            if let revision = snapshotRevision, revision != agentMessageOutbox.writeRevision {
+                guard let current = try agentMessageOutbox.lookup(caller: saved.context.caller, key: saved.context.idempotencyKey) else { continue }
+                entry = current
+            } else { entry = saved }
             if entry.phase == .queued { try await queue.enqueueAgentMessage(entry.message, for: id) }
             else { await queue.removeQueuedMessage(id: entry.message.id, for: id) }
         }
@@ -11511,15 +11532,20 @@ final class AgentSupervisor {
         pausedQueues.contains(id)
     }
 
-    private func hydrateQueueCache(for id: AgentID) {
+    private func hydrateQueueCache(for id: AgentID, restoredOutbox: [AgentMessageOutbox.Entry]? = nil, restoreOutboxFailed: Bool = false) {
         guard let store = submissionRecoveryStore else { return }
         queuedWorkItemsCache[id] = []
-        Task { @MainActor [weak self] in
+        let revision = agentMessageOutbox.writeRevision
+        let previous = queueOpTasks[id]
+        queueOpTasks[id] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
             guard let self else { return }
-            do { try await self.recoverAgentMessageQueue(for: id) }
+            await self.qaBeforeRestoreQueueHydration?()
+            if restoreOutboxFailed { self.warn("Agent message queue recovery could not complete.") }
+            do { try await self.recoverAgentMessageQueue(for: id, restoredOutbox: restoredOutbox, snapshotRevision: revision) }
             catch { self.warn("Agent message queue recovery could not complete.") }
             let messages = await store.queuedWorkItems(for: id)
-            self.queuedWorkItemsCache[id] = self.agentMessageQueueCache(messages, for: id)
+            self.queuedWorkItemsCache[id] = self.agentMessageQueueCache(messages, for: id, restoredOutbox: revision == self.agentMessageOutbox.writeRevision ? restoredOutbox : nil)
             if messages.contains(where: { if case .prompt(let m) = $0 { return m.steerUncertain }; return false }) {
                 self.pauseQueue(id, .unconfirmed)
             }
@@ -11583,9 +11609,9 @@ final class AgentSupervisor {
         if runners[id] == nil { drainQueue(for: id) }
     }
 
-    private func agentMessageQueueCache(_ items: [AgentComposerQueuedWorkItem], for id: AgentID) -> [AgentComposerQueuedWorkItem] {
+    private func agentMessageQueueCache(_ items: [AgentComposerQueuedWorkItem], for id: AgentID, restoredOutbox: [AgentMessageOutbox.Entry]? = nil) -> [AgentComposerQueuedWorkItem] {
         var result = items
-        if let entries = try? agentMessageOutbox.entries() {
+        if let entries = try? restoredOutbox ?? agentMessageOutbox.entries() {
             for entry in entries where entry.phase == .queued && entry.context.recipient == id
                 && !result.contains(where: { $0.id == entry.message.id }) {
                 result.append(.prompt(entry.message))

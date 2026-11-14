@@ -34,6 +34,7 @@ public final class AgentMessageOutbox {
         }
     }
 
+    public private(set) var writeRevision: UInt64 = 0
     public let directory: URL
     private let writer = AtomicWriter(retainedBackups: 0)
 
@@ -53,11 +54,20 @@ public final class AgentMessageOutbox {
         return try JSONCodec.makeDecoder().decode(Entry.self, from: Data(contentsOf: path))
     }
 
+    /// Entry files `entries()` has decoded since launch, for the restore-at-scale
+    /// witness: restore once decoded the whole outbox per agent and hung boot.
+    public static var entriesDecodedForQA: Int { entriesDecoded.value }
+    private static let entriesDecoded = QACounter()
+
+    public static var enumerationsForQA: Int { enumerations.value }
+    private static let enumerations = QACounter()
+
     public func entries() throws -> [Entry] {
         guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
+        Self.enumerations.increment()
         return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
-            .map { try JSONCodec.makeDecoder().decode(Entry.self, from: Data(contentsOf: $0)) }
+            .map { Self.entriesDecoded.increment(); return try JSONCodec.makeDecoder().decode(Entry.self, from: Data(contentsOf: $0)) }
             .sorted { $0.message.queuedAt < $1.message.queuedAt }
     }
 
@@ -65,5 +75,6 @@ public final class AgentMessageOutbox {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         try writer.write(entry, to: url(caller: entry.context.caller, key: entry.context.idempotencyKey))
+        writeRevision &+= 1
     }
 }

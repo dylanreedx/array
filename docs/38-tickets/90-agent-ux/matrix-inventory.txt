@@ -114,6 +114,7 @@ check --choice-geometry-check
 check --claude-adopted-turn-check
 check --claude-hook-bridge-check
 check --cli-update-settings-check
+check --codex-agent-backend-check
 check --codex-appserver-runner-check
 check --codex-hook-bridge-check
 check --collaboration-cursor-motion-check
@@ -281,6 +282,7 @@ check --request-telemetry-check
 check --reserved-dispatch-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
+check --restore-scaling-check
 check --retired-flat-write-check
 check --reveal-in-finder-check
 check --role-registry-check
@@ -775,6 +777,7 @@ leg run_app_check .build/debug/Array --request-telemetry-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
+leg run_app_check .build/debug/Array --restore-scaling-check
 leg run_app_check .build/debug/Array --retired-flat-write-check
 leg run_app_check .build/debug/Array --reveal-in-finder-check
 leg run_app_check .build/debug/Array --run-artifacts-tile-check
@@ -988,6 +991,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-tool-detail-store-ch
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-agent-backend-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --codex-hook-bridge-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --collaboration-usage-telemetry-check
