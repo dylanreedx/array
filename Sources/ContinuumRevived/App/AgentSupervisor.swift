@@ -14587,6 +14587,17 @@ func runAgentSupervisorChecks() async throws {
     }
     func fail(_ message: String) -> CheckError { CheckError(description: message) }
 
+    // This corpus exercises explicit Pi role effort overrides. Declare synthetic
+    // capabilities locally; the shared fixture and live Pi probes remain unknown.
+    let priorPiCatalog = AgentModelCatalog.shared.snapshot(for: .pi)
+    AgentModelCatalog.shared.resetForQA(snapshot: .init(
+        harness: .pi, readiness: .ready, models: priorPiCatalog.models,
+        displayNames: priorPiCatalog.displayNames,
+        effortLevels: Dictionary(uniqueKeysWithValues: priorPiCatalog.models.map {
+            ($0, ["low", "medium", "high", "xhigh"])
+        }), defaultModel: priorPiCatalog.defaultModel))
+    defer { AgentModelCatalog.shared.resetForQA(snapshot: priorPiCatalog) }
+
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("continuum-agent-supervisor-check-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -16226,7 +16237,7 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     let fixtureAfter = fixtureManifest(in: fixtureRoots)
     let expectedArgs = [
         "--no-session", "--print", "--mode", "text",
-        "--model", piModel, "--thinking", "low",
+        "--model", piModel,
         "--no-tools", "--no-extensions", "--no-skills", "--no-context-files", "--no-approve",
         "--system-prompt", AgentNameOneShot.titleRules,
     ].joined(separator: "\n") + "\n"
@@ -17977,10 +17988,11 @@ private func checkPerHarnessSessionTitles<Failure: Error>(
         })
     defer { runners.forEach { $0.releaseRunAfterStop() } }
 
+    // These synthetic models advertise no effort capability; titling omits it.
     let cases: [(AgentHarness, String, String, [String])] = [
         (.claudeCode, "anthropic/claude-fixture-opus", "Fix zone drag snapping", [
             "-p", "--no-session-persistence", "--output-format", "json", "--json-schema", schema,
-            "--model", "claude-fixture-opus", "--effort", "low", "--tools", "", "--strict-mcp-config",
+            "--model", "claude-fixture-opus", "--tools", "", "--strict-mcp-config",
             "--setting-sources", "", "--disable-slash-commands", "--settings", #"{"disableAllHooks":true}"#,
             "--system-prompt", AgentNameOneShot.titleRules,
         ]),
@@ -17994,11 +18006,11 @@ private func checkPerHarnessSessionTitles<Failure: Error>(
             "--disable", "skill_search", "--disable", "skill_mcp_dependency_install",
             "-c", "web_search=disabled",
             "--output-schema", "<schema>", "-o", "<last-message>",
-            "-m", "gpt-fixture-codex", "-c", "model_reasoning_effort=low",
+            "-m", "gpt-fixture-codex",
         ]),
         (.pi, piModel, "Model picker error handling", [
             "--no-session", "--print", "--mode", "text", "--model", piModel,
-            "--thinking", "low", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files",
+            "--no-tools", "--no-extensions", "--no-skills", "--no-context-files",
             "--no-approve", "--system-prompt", AgentNameOneShot.titleRules,
         ]),
     ]
@@ -24623,10 +24635,11 @@ private func checkPerAgentProviderSettings(
 
     // Capability fixture for these explicit Pi picks, independent of the CLI.
     let piFixtureModels = AgentModelCatalog.shared.models(for: .pi)
+    let previousPiCatalog = AgentModelCatalog.shared.snapshot(for: .pi)
     AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready,
         models: piFixtureModels, effortLevels: Dictionary(uniqueKeysWithValues:
-            piFixtureModels.map { ($0, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) })))
-    defer { AgentModelCatalog.shared.resetForQA() }
+            (piFixtureModels + ["openai-codex/gpt-4o-legacy"]).map { ($0, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) })))
+    defer { AgentModelCatalog.shared.resetForQA(snapshot: previousPiCatalog) }
 
     // This section exercises Pi-only contracts (`--model`, `--thinking`, role
     // tools, and Pi's full catalogue). Scope the ambient defaults used by the

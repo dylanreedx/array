@@ -863,7 +863,7 @@ enum AgentPresenceChecks {
                 makeRunner: { _ in runner }, idleRunnerTimeout: mode == "idle-reap" ? 0.08 : 60)
             defer { supervisor.stopAll() }
             let parent = supervisor.spawn(role: nil, prompt: nil, cwd: root,
-                harness: .claudeCode, model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
+                harness: .claudeCode, model: "anthropic/claude-opus-5-5", thinking: "low")
             try expect(supervisor.send("parent", to: parent), "\(mode): parent refused")
             try await eventually("\(mode): parent did not start") { supervisor.turnSnapshot(for: parent)?.state == .working }
             let id = try child(supervisor, parent, "child-\(mode)")

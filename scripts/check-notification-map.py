@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PATTERNS = {
@@ -40,7 +41,7 @@ def actual_senders(root):
         for path in (root / folder).rglob("*"):
             if not path.is_file() or path.suffix not in {".swift", ".sh", ".ts", ".js", ".cjs", ".m", ".mm", ".py"}:
                 continue
-            if path.resolve() == Path(__file__).resolve():
+            if path.resolve() == Path(__file__).resolve() or path == root / "Sources/ContinuumRevived/Resources/GatePrepass/check-notification-map.py":
                 continue  # The scanner's own mutation fixtures are not senders.
             if any(part.endswith(("Checks", "Tests")) for part in path.parts):
                 continue
@@ -90,6 +91,15 @@ def self_test():
         "alternate-sender": 'osascript -e \'display notification "hello"\'',
     }.items():
         assert census(sample).get(kind) == 1, f"{kind} not detected"
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        bundle = root / "Sources/ContinuumRevived/Resources/GatePrepass"
+        bundle.mkdir(parents=True)
+        (bundle / "check-notification-map.py").write_text(Path(__file__).read_text())
+        (bundle / "sender.py").write_text('UNNotificationRequest(identifier="real")')
+        assert actual_senders(root) == {
+            "Sources/ContinuumRevived/Resources/GatePrepass/sender.py": {"local-banner": 1}
+        }, "bundled scanner exclusion hid an adjacent sender"
     print("Notification map structural mutation checks passed")
 
 
