@@ -66,6 +66,7 @@ public enum CodexRolloutTelemetry {
         ]
         var matches: [URL] = []
         for root in roots where fileManager.fileExists(atPath: root.path) {
+            rolloutEnumerations.increment()
             guard let enumerator = fileManager.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.isRegularFileKey],
@@ -80,6 +81,34 @@ public enum CodexRolloutTelemetry {
             }
         }
         return matches.first
+    }
+
+    /// A restore owns one immutable index; never cached across launches or turns.
+    public struct RestoreIndex: Sendable {
+        private var paths: [String: URL] = [:]
+        public init(threadIds: Set<String>, codexHome: URL? = nil, fileManager: FileManager = .default) {
+            guard !threadIds.isEmpty else { return }
+            let home = codexHome ?? effectiveCodexHome()
+            var ambiguous: Set<String> = []
+            for name in ["sessions", "archived_sessions"] {
+                let root = home.appendingPathComponent(name, isDirectory: true)
+                guard fileManager.fileExists(atPath: root.path) else { continue }
+                rolloutEnumerations.increment()
+                guard let files = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey],
+                                                         options: [.skipsHiddenFiles]) else { continue }
+                for case let url as URL in files {
+                    guard url.pathExtension == "jsonl",
+                          threadIds.contains(where: { url.lastPathComponent.hasSuffix("-\($0).jsonl") }),
+                          let id = sessionId(in: url), !id.isEmpty, threadIds.contains(id),
+                          url.lastPathComponent.hasSuffix("-\(id).jsonl") else { continue }
+                    if paths[id] != nil { ambiguous.insert(id) }
+                    else { paths[id] = url }
+                }
+            }
+            for id in ambiguous { paths.removeValue(forKey: id) }
+        }
+        public func rolloutURL(threadId: String) -> URL? { paths[threadId] }
+        public static var enumerationsForQA: Int { rolloutEnumerations.value }
     }
 
     public static func fileSize(of url: URL, fileManager: FileManager = .default) -> UInt64? {
@@ -168,7 +197,12 @@ public enum CodexRolloutTelemetry {
             .appendingPathComponent(".codex", isDirectory: true)
     }
 
+    private static let rolloutEnumerations = QACounter()
+    private static let metadataReads = QACounter()
+    public static var metadataReadsForQA: Int { metadataReads.value }
+
     private static func sessionId(in url: URL) -> String? {
+        metadataReads.increment()
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         let data = handle.readData(ofLength: 64 * 1024)

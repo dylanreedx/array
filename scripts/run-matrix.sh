@@ -80,6 +80,7 @@ if [[ -n "$MATRIX_TMUX_BIN" ]]; then
   esac
 fi
 
+RESTORE_SCALING_ONLY=0
 COMPOSER_SEND_ONLY=0
 CROSS_HARNESS_DELEGATION_ONLY=0
 SIDEBAR_REFINEMENTS_ONLY=0
@@ -111,6 +112,7 @@ BROWSER_SCHEDULING_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --restore-scaling) RESTORE_SCALING_ONLY=1; shift ;;
     --awake-only) MATRIX_MODE=awake-only; shift ;;
     --skip-awake) MATRIX_MODE=skip-awake; shift ;;
     --browser-scheduling) BROWSER_SCHEDULING_ONLY=1; shift ;;
@@ -925,6 +927,24 @@ if [[ "$COLLABORATION_ONLY" -eq 1 ]]; then
   matrix_report 'Collaboration matrix (targeted)'
   exit $?
 fi
+# Offline launch regression subset. Uses the same result reporting and app isolation
+# as the full gate; every product is rebuilt before its witnesses run.
+if [[ "$RESTORE_SCALING_ONLY" -eq 1 ]]; then
+  run swift build --product Array -j 2
+  run swift build --product ContinuumRevivedCoreChecks -j 2
+  run_app_check .build/debug/Array --restore-scaling-check
+  run_app_check .build/debug/Array --agent-restore-check
+  run_app_check .build/debug/Array --workspace-scene-owner-check
+  run_app_check .build/debug/Array --workspace-api-delegation-check
+  run_app_check .build/debug/Array --workspace-api-cross-harness-delegation-check
+  run_app_check .build/debug/Array --agent-message-bus-check
+  run_app_check .build/debug/Array --strict-agent-harness-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --codex-agent-backend-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-composer-draft-store-check
+  matrix_report 'Restore scaling matrix (targeted)'
+  exit $?
+fi
 if [[ "$CROSS_HARNESS_DELEGATION_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update
   run_app_check .build/debug/Array --workspace-api-cross-harness-delegation-check
@@ -1517,6 +1537,7 @@ run_app_check .build/debug/Array --agent-display-name-check
 # P2A.7: agents persisted by a previous launch are adopted at boot — idle, with
 # their identity/model/role intact, the tiled one re-resolved from its tileId and
 # carrying a previous-session notice — and a prompt is what starts them again.
+run_app_check .build/debug/Array --restore-scaling-check
 run_app_check .build/debug/Array --agent-restore-check
 # P2D.6: selecting N queue rows starts one isolated agent per row. Three rows in a
 # real temp repo get three worktrees, three branches and their own prompts;

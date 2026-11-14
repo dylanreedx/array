@@ -2268,6 +2268,15 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        if CommandLine.arguments.contains("--restore-scaling-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await RestoreScalingChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            CFRunLoopRun()
+            return
+        }
         if CommandLine.arguments.contains("--workspace-scene-owner-check") {
             do {
                 _ = NSApplication.shared
