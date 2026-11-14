@@ -24638,7 +24638,10 @@ private func checkPerAgentProviderSettings(
     let previousPiCatalog = AgentModelCatalog.shared.snapshot(for: .pi)
     AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .ready,
         models: piFixtureModels, effortLevels: Dictionary(uniqueKeysWithValues:
-            (piFixtureModels + ["openai-codex/gpt-4o-legacy"]).map { ($0, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) })))
+            (piFixtureModels + ["openai-codex/gpt-4o-legacy"]).map { model in
+                (model, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+                    + (model == "openai-codex/gpt-5.4-mini" ? ["legacy-auto"] : []))
+            })))
     defer { AgentModelCatalog.shared.resetForQA(snapshot: previousPiCatalog) }
 
     // This section exercises Pi-only contracts (`--model`, `--thinking`, role
