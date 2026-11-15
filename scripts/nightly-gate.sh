@@ -31,6 +31,17 @@ SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 env['PATH'] = ':'.join(p for p in [SYSTEM_PATH, os.environ.get('PATH', '')] if p)
 # Gating a named ref is for this process only; no leg may inherit it.
 REF = env.pop('ARRAY_NIGHTLY_REF', 'origin/array/integration')
+# Before the matrix the gate waits, still holding the shared lock, until the Mac
+# is quiet: no other swift-build (an agent's build bypasses the lock) and
+# fseventsd under a CPU ceiling for consecutive samples. Timing legs that need
+# FSEvents within seconds failed under exactly that load. The wait is bounded;
+# after it the gate proceeds and the summary records the contention. These
+# knobs are for this process only; no leg inherits them.
+QUIET = dict(build=env.pop('ARRAY_NIGHTLY_BUILD_PROCESS', 'swift-build'),
+             fsevents_cpu=float(env.pop('ARRAY_NIGHTLY_FSEVENTS_CPU_MAX', '50')),
+             max_seconds=float(env.pop('ARRAY_NIGHTLY_QUIET_MAX_SECONDS', '1800')),
+             poll=float(env.pop('ARRAY_NIGHTLY_QUIET_POLL_SECONDS', '30')),
+             samples=int(env.pop('ARRAY_NIGHTLY_QUIET_SAMPLES', '2')))
 # The checkout sits on this local branch, never a detached HEAD: legs that read
 # the checkout's branch (an agent tile's branch chip) must see what a bench sees.
 # The gate owns it; it never moves a branch that lives anywhere else.
@@ -192,7 +203,39 @@ def owned(command, owner, log, extra_env=None):
     return sp.run(['/usr/bin/caffeinate', '-i', '/bin/bash', '-c', script], cwd=checkout,
                   env=dict(env, **(extra_env or {})), stdin=sp.DEVNULL, stdout=log, stderr=sp.STDOUT).returncode
 
+def machine_load():
+    builds, fsevents = 0, None  # None: no fseventsd in the listing
+    listing = sp.run(['/bin/ps', '-axo', '%cpu=,comm='], capture_output=True, text=True).stdout
+    for line in listing.splitlines():
+        cpu, _, comm = line.strip().partition(' ')
+        name = os.path.basename(comm.strip())
+        if name == QUIET['build']:
+            builds += 1
+        elif name == 'fseventsd':
+            fsevents = max(fsevents or 0.0, float(cpu or 0))
+    return dict(swift_builds=builds, fseventsd_cpu=fsevents)
+
+def wait_until_quiet(log):
+    started, quiet_in_row, worst, polls, first = time.monotonic(), 0, dict(swift_builds=0, fseventsd_cpu=0.0), 0, None
+    while True:
+        load = machine_load()
+        polls += 1
+        first = first or load
+        worst = dict(swift_builds=max(worst['swift_builds'], load['swift_builds']),
+                     fseventsd_cpu=max(worst['fseventsd_cpu'], load['fseventsd_cpu'] or 0.0))
+        calm = load['swift_builds'] == 0 and (load['fseventsd_cpu'] or 0.0) <= QUIET['fsevents_cpu']
+        quiet_in_row = quiet_in_row + 1 if calm else 0
+        waited = time.monotonic() - started
+        if quiet_in_row >= QUIET['samples'] or waited >= QUIET['max_seconds']:
+            result = dict(quiet=quiet_in_row >= QUIET['samples'], waited_seconds=round(waited, 2), polls=polls,
+                          first=first, last=load, worst=worst, limits=dict(QUIET))
+            print('Machine ' + ('quiet' if result['quiet'] else 'still busy; proceeding') + ': ' + json.dumps(result),
+                  file=log, flush=True)
+            return result
+        time.sleep(QUIET['poll'])
+
 def matrix(mode, log):
+    contention = wait_until_quiet(log)
     matrix_results = out / ('matrix-' + mode + '-' + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
     code = owned('bash scripts/run-matrix.sh --' + mode, 'ARRAY_MATRIX_LOCK_OWNER', log,
                  dict(ARRAY_MATRIX_RESULTS=str(matrix_results)))
@@ -206,7 +249,7 @@ def matrix(mode, log):
                 failed=len(failed), failed_legs=failed,
                 retry_passed=[r['leg'] for r in rows if r['status'] == 'retry-passed'],
                 known=[r['leg'] for r in rows if r['status'] in ('known-red', 'known-flaky')],
-                matrix_results=str(matrix_results))
+                matrix_results=str(matrix_results), contention=contention)
 
 def notify(message):
     # One completion signal; notification delivery failure does not alter gate results.

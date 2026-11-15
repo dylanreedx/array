@@ -25,6 +25,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import uuid
 
 HERE = Path(__file__).resolve().parent
 REAL = ["nightly-gate.sh", "ship-release.sh", "append-appcast.py", "generate-appcast.sh", "wait-live-release.py"]
@@ -37,6 +39,7 @@ STUBS = {
 mode=$1
 case $mode in --skip-awake) ;; --awake-only) ;; *) echo "unknown mode $mode" >&2; exit 2 ;; esac
 # What a leg would see: the checkout's branch, the CLIs on PATH, inherited gate state.
+name=$(cat "$SHIP_PLAN/build-name"); echo "$(git rev-parse HEAD) $(/bin/ps -axo comm= | grep -c "/$name\$")" >> "$SHIP_EVENTS.busy"
 echo "$(git rev-parse HEAD) branch=$(git branch --show-current) first=${PATH%%:*} cli=$(command -v array-fixture-cli || echo none) ref=${ARRAY_NIGHTLY_REF:-unset}" >> "$SHIP_EVENTS.legs"
 echo "matrix $mode $(git rev-parse HEAD) owner=${ARRAY_MATRIX_LOCK_OWNER:-none}" >> "$SHIP_EVENTS"
 mkdir -p "$ARRAY_MATRIX_RESULTS"
@@ -99,6 +102,8 @@ class Fixture:
         self.origin, self.repo, self.plan = self.root / "origin.git", self.root / "repo", self.root / "plan"
         self.base, self.events = self.root / "gate-base", self.root / "events"
         self.plan.mkdir()
+        self.build_name = "array-fixture-build-" + uuid.uuid4().hex[:8]  # a swift-build no other agent runs
+        (self.plan / "build-name").write_text(self.build_name)
         sh("git", "init", "-q", "--bare", "-b", "main", str(self.origin))
         sh("git", "init", "-q", "-b", "array/integration", str(self.repo))
         for key, value in (("user.name", "Fixture"), ("user.email", "fixture@example.invalid")):
@@ -136,6 +141,8 @@ class Fixture:
         (clis / "array-fixture-cli").write_text("#!/bin/sh\n")
         (clis / "array-fixture-cli").chmod(0o755)
         self.env = dict(os.environ, PATH=f"{clis}:{os.environ['PATH']}", ARRAY_NIGHTLY_BASE=str(self.base), ARRAY_NIGHTLY_NOTIFY="0",
+                        ARRAY_NIGHTLY_BUILD_PROCESS=self.build_name, ARRAY_NIGHTLY_FSEVENTS_CPU_MAX="100000",
+                        ARRAY_NIGHTLY_QUIET_POLL_SECONDS="0.1", ARRAY_NIGHTLY_QUIET_MAX_SECONDS="20",
                         ARRAY_MATRIX_LOCK=str(self.root / "matrix.lock"), SHIP_EVENTS=str(self.events),
                         SHIP_PLAN=str(self.plan), SPARKLE_SIGN_UPDATE=str(self.root / "sign_update"),
                         ARRAY_SHIP_GH=str(bindir / "gh"), ARRAY_SHIP_WAIT_SECONDS="20",
@@ -332,6 +339,56 @@ def ship_cases(fx, gated, head):
     print("PASS publish-waits-for-live-feed")
 
 
+def quiet_cases(fx):
+    """Before the matrix the gate waits for no other build and a calm fseventsd,
+    holding the shared lock, for at most the bound; then it proceeds and records it."""
+    # /bin/sleep under the stand-in's name: ps reports argv[0], as it does for a
+    # real swift-build (a copied platform binary would be killed on launch).
+    stand_in = lambda: subprocess.Popen([str(fx.root / fx.build_name), "60"], executable="/bin/sleep")
+    busy = lambda: dict(line.split() for line in Path(str(fx.events) + ".busy").read_text().splitlines())
+
+    build = stand_in()
+    head = fx.commit("feat(app): change while another build runs", {"Sources/App.swift": "let app = 5\n"})
+    gate = subprocess.Popen(["/bin/bash", "scripts/nightly-gate.sh"], cwd=fx.repo, env=dict(fx.env, ARRAY_NIGHTLY_REF="HEAD"),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    time.sleep(1.5)
+    with open(fx.root / "matrix.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = False
+        except BlockingIOError:
+            held = True
+    started_early = head in busy() if Path(str(fx.events) + ".busy").exists() else False
+    build.kill(); build.wait()
+    output = gate.communicate(timeout=60)[0].decode(errors="replace")
+    waited = fx.summary(head).get("contention", {})
+    expect(held and not started_early, f"the gate waits for another build while holding the lock (held={held}, "
+           f"matrix started early={started_early}): {waited}\n{output[-1500:]}")
+    expect(waited.get("quiet") is True and waited["waited_seconds"] >= 1.0 and waited["worst"]["swift_builds"] == 1
+           and busy()[head] == "0", f"the matrix starts only once the build is gone: {waited} {busy()}")
+    print("PASS gate-waits-for-other-build")
+
+    build = stand_in()
+    head = fx.commit("feat(app): change under a build that never ends", {"Sources/App.swift": "let app = 6\n"})
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_QUIET_MAX_SECONDS="1.5"))
+    build.kill(); build.wait()
+    summary = fx.summary(head)
+    waited = summary.get("contention", {})
+    expect(result.returncode == 0 and summary["candidate"] and waited.get("quiet") is False
+           and waited["waited_seconds"] >= 1.5 and waited["last"]["swift_builds"] == 1 and busy()[head] == "1",
+           f"past the bound the gate proceeds and records the contention: {waited}", result)
+    print("PASS gate-bounded-wait-records-contention")
+
+    head = fx.commit("feat(app): change while fseventsd is over the ceiling", {"Sources/App.swift": "let app = 7\n"})
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_FSEVENTS_CPU_MAX="-1",
+                                                ARRAY_NIGHTLY_QUIET_MAX_SECONDS="0.5"))
+    waited = fx.summary(head).get("contention", {})
+    expect(result.returncode == 0 and waited.get("quiet") is False and waited["last"]["swift_builds"] == 0
+           and waited["last"]["fseventsd_cpu"] is not None and waited["polls"] > 1,
+           f"a busy fseventsd (the real daemon, read through ps) holds the gate: {waited}", result)
+    print("PASS gate-waits-for-fseventsd")
+
+
 def schedule_case():
     # What launchd loads: an hourly, per-change check and no fixed nightly slot
     # (the Mac's scheduled 03:00 sleep would cut that run off).
@@ -365,6 +422,7 @@ def ref_case(fx):
     after = sh("git", "-C", str(fx.repo), "rev-parse", "gate/nightly-checkout").stdout
     expect(result.returncode == 1 and before == after and "refusing to move it" in result.stdout,
            "a foreign branch of the gate's name is left alone", result)
+    sh("git", "-C", str(fx.repo), "branch", "-D", "gate/nightly-checkout")  # let later cases gate again
     print("PASS gate-leaves-foreign-branch")
 
 
@@ -374,6 +432,7 @@ with tempfile.TemporaryDirectory(prefix="array-ship-") as temp:
     try:
         ship_cases(fixture, *gate_cases(fixture))
         ref_case(fixture)
+        quiet_cases(fixture)
         schedule_case()
     except AssertionError as error:
         failures += 1
