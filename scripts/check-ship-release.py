@@ -36,6 +36,8 @@ STUBS = {
     "run-matrix.sh": r'''#!/bin/bash
 mode=$1
 case $mode in --skip-awake) ;; --awake-only) ;; *) echo "unknown mode $mode" >&2; exit 2 ;; esac
+# What a leg would see: the checkout's branch, the CLIs on PATH, inherited gate state.
+echo "$(git rev-parse HEAD) branch=$(git branch --show-current) cli=$(command -v array-fixture-cli || echo none) ref=${ARRAY_NIGHTLY_REF:-unset}" >> "$SHIP_EVENTS.legs"
 echo "matrix $mode $(git rev-parse HEAD) owner=${ARRAY_MATRIX_LOCK_OWNER:-none}" >> "$SHIP_EVENTS"
 mkdir -p "$ARRAY_MATRIX_RESULTS"
 status=$(cat "$SHIP_PLAN/matrix$mode" 2>/dev/null || echo pass)
@@ -114,14 +116,18 @@ class Fixture:
         (bindir / "gh").chmod(0o755)
         (self.root / "sign_update").write_text(SIGN)
         (self.root / "sign_update").chmod(0o755)
-        self.env = dict(os.environ, ARRAY_NIGHTLY_BASE=str(self.base), ARRAY_NIGHTLY_NOTIFY="0",
+        clis = self.root / "clis"  # stands in for ~/.local/bin (claude) and the node bin (codex, pi)
+        clis.mkdir()
+        (clis / "array-fixture-cli").write_text("#!/bin/sh\n")
+        (clis / "array-fixture-cli").chmod(0o755)
+        self.env = dict(os.environ, PATH=f"{clis}:{os.environ['PATH']}", ARRAY_NIGHTLY_BASE=str(self.base), ARRAY_NIGHTLY_NOTIFY="0",
                         ARRAY_MATRIX_LOCK=str(self.root / "matrix.lock"), SHIP_EVENTS=str(self.events),
                         SHIP_PLAN=str(self.plan), SPARKLE_SIGN_UPDATE=str(self.root / "sign_update"),
                         ARRAY_SHIP_GH=str(bindir / "gh"), ARRAY_SHIP_WAIT_SECONDS="20",
                         ARRAY_SHIP_WAIT_INTERVAL="0.2", GIT_AUTHOR_NAME="Fixture",
                         GIT_AUTHOR_EMAIL="fixture@example.invalid", GIT_COMMITTER_NAME="Fixture",
                         GIT_COMMITTER_EMAIL="fixture@example.invalid")
-        for key in ("ARRAY_MATRIX_LOCK_OWNER", "ARRAY_RELEASE_LOCK_OWNER", "ARRAY_MATRIX_LEGS"):
+        for key in ("ARRAY_MATRIX_LOCK_OWNER", "ARRAY_RELEASE_LOCK_OWNER", "ARRAY_MATRIX_LEGS", "ARRAY_NIGHTLY_REF"):
             self.env.pop(key, None)
 
     def commit(self, message, files=None, push=False):
@@ -140,6 +146,10 @@ class Fixture:
 
     def log(self):
         return self.events.read_text().splitlines() if self.events.exists() else []
+
+    def legs_saw(self):
+        path = Path(str(self.events) + ".legs")
+        return path.read_text().splitlines() if path.exists() else []
 
     def summary(self, sha):
         return json.loads((self.base / "results" / sha / "summary.json").read_text())
@@ -187,6 +197,8 @@ def gate_cases(fx):
     events = fx.log()
     expect(events[0].startswith(f"matrix --skip-awake {gated} owner=") and "owner=none" not in events[0], f"matrix under lock: {events}")
     expect("--configuration release --channel prod" in events[1] and "owner=none" not in events[1], f"release bundle under lock: {events}")
+    expect(fx.legs_saw() == [f"{gated} branch=array/nightly-gate cli={fx.root / 'clis/array-fixture-cli'} ref=unset"],
+           f"legs run on a named branch with the caller's CLIs: {fx.legs_saw()}")
     print("PASS gate-builds-candidate")
 
     result = fx.run("nightly-gate.sh")
@@ -201,8 +213,11 @@ def gate_cases(fx):
     print("PASS gate-skips-held-lock")
 
     (fx.plan / "matrix--skip-awake").write_text("fail")
+    (fx.base / "checkout/stray-leg-output.png").write_text("x")  # legs leave untracked files
     result = fx.run("nightly-gate.sh")
     red = fx.summary(red_head)
+    expect(any(line.startswith(f"matrix --skip-awake {red_head}") for line in fx.log()),
+           "untracked leg output does not stop the next gate", result)
     expect(result.returncode == 1 and not red["green"] and not red["candidate"], "a red gate is not green", result)
     expect(not any(line.startswith("bundle") for line in fx.log()[2:]), "a red gate builds no candidate")
     print("PASS red-gate-builds-nothing")
@@ -309,6 +324,8 @@ def ref_case(fx):
     expect(result.returncode == 0 and fx.summary(branch)["candidate"], "ARRAY_NIGHTLY_REF gates that commit", result)
     pushed = sh("git", "--git-dir", str(fx.origin), "rev-parse", "array/integration").stdout.strip()
     expect(pushed != branch, "gating a branch pushes nothing")
+    expect(fx.legs_saw()[-1].startswith(branch) and fx.legs_saw()[-1].endswith("ref=unset"),
+           f"no leg inherits ARRAY_NIGHTLY_REF: {fx.legs_saw()[-1]}")
     print("PASS gate-named-ref")
 
 

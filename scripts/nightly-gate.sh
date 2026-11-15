@@ -23,8 +23,16 @@ label = 'dev.arrayapp.nightly-gate'
 plist = Path.home() / 'Library/LaunchAgents' / (label + '.plist')
 args = sys.argv[2:]
 env = dict(os.environ)
-# LaunchAgents have a minimal PATH. Keep managed-agent crash protection intact.
-env['PATH'] = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+# Legs resolve claude, codex and pi on PATH. --install records the installing
+# shell's PATH in the LaunchAgent; by hand the caller's PATH applies. The system
+# directories are appended either way. Keep managed-agent crash protection intact.
+SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+env['PATH'] = ':'.join(p for p in [os.environ.get('PATH', ''), SYSTEM_PATH] if p)
+# Gating a named ref is for this process only; no leg may inherit it.
+REF = env.pop('ARRAY_NIGHTLY_REF', 'origin/array/integration')
+# The checkout sits on this local branch, never a detached HEAD: legs that read
+# the checkout's branch (an agent tile's branch chip) must see what a bench sees.
+BRANCH = 'array/nightly-gate'
 # A gate always runs the committed known-failure list, every leg and the retry.
 for key in ('ARRAY_AGENT_ID', 'TMUX', 'TMUX_PANE', 'ARRAY_MATRIX_LOCK_OWNER', 'ARRAY_RELEASE_LOCK_OWNER',
             'ARRAY_MATRIX_LEGS', 'ARRAY_MATRIX_RETRY', 'ARRAY_MATRIX_KNOWN_FAILURES'):
@@ -74,6 +82,8 @@ if args and args[0] in ('--install', '--uninstall'):
         config['ProgramArguments'] = ['/bin/bash', str(installed)]
         config['StandardOutPath'] = str(base / 'launchd.log')
         config['StandardErrorPath'] = str(base / 'launchd.log')
+        config['EnvironmentVariables'] = {'PATH': os.environ.get('PATH', SYSTEM_PATH)}
+        print('PATH for the job:', config['EnvironmentVariables']['PATH'])
         plist.parent.mkdir(parents=True, exist_ok=True)
         plist.write_bytes(plistlib.dumps(config))
         run(commands[1])
@@ -130,7 +140,7 @@ except BlockingIOError:
 git('fetch', 'origin')
 # ARRAY_NIGHTLY_REF gates another ref by hand (a branch before it lands); the
 # LaunchAgent never sets it.
-commit = git('rev-parse', '--verify', env.get('ARRAY_NIGHTLY_REF', 'origin/array/integration') + '^{commit}')
+commit = git('rev-parse', '--verify', REF + '^{commit}')
 if args[:1] == ['--awake']:
     commit = git('rev-parse', '--verify', args[1] + '^{commit}')
 if args == ['--latest-green']:
@@ -160,10 +170,12 @@ out.mkdir(parents=True, exist_ok=True)
 def checkout_at(log):
     if not checkout.exists():
         git('worktree', 'add', '--detach', str(checkout), commit)
-    dirty = run(['git', '-C', str(checkout), 'status', '--porcelain'], stdout=sp.PIPE, text=True).stdout
+    # Legs leave untracked output (caches, screenshots); only tracked edits are dirt.
+    dirty = run(['git', '-C', str(checkout), 'status', '--porcelain', '--untracked-files=no'],
+                stdout=sp.PIPE, text=True).stdout
     if dirty.strip():
         raise RuntimeError('Nightly checkout is dirty; refusing to change it')
-    run(['git', '-C', str(checkout), 'checkout', '--detach', commit], stdout=log, stderr=sp.STDOUT)
+    run(['git', '-C', str(checkout), 'checkout', '-B', BRANCH, commit], stdout=log, stderr=sp.STDOUT)
     if not (checkout / 'ThirdParty/GhosttyKit.xcframework').exists():
         run(['bash', str(checkout / 'scripts/prepare-ghosttykit.sh')], stdout=log, stderr=sp.STDOUT)
 
