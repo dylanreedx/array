@@ -75,6 +75,13 @@ public struct AgentStoreLayout: Sendable {
         archiveDirectory.appendingPathComponent("\(id.rawValue.uuidString).json", isDirectory: false)
     }
 
+    /// Archived files that hold no record: moved here once, never retried at
+    /// boot, never deleted. A subdirectory, so nothing that lists the archive's
+    /// `.json` files sees it.
+    public var archiveQuarantineDirectory: URL {
+        archiveDirectory.appendingPathComponent("quarantine", isDirectory: true)
+    }
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
     /// The tiles whose agent was deliberately deleted.
     ///
@@ -271,10 +278,15 @@ public final class AgentStore: @unchecked Sendable {
         if lstat(layout.agentFile(id: id).path, &info) == 0 { return .present }
         let failure = errno
         guard failure == ENOENT else { return .indeterminate(failure) }
-        // An archived agent still owns its checkout.
-        if lstat(layout.archivedAgentFile(id: id).path, &info) == 0 { return .present }
-        let archiveFailure = errno
-        return archiveFailure == ENOENT ? .absent : .indeterminate(archiveFailure)
+        // An archived agent still owns its checkout, and so does one whose
+        // archived file was quarantined: nothing proves it gone.
+        for file in [layout.archivedAgentFile(id: id),
+                     layout.archiveQuarantineDirectory.appendingPathComponent("\(id.rawValue.uuidString).json")] {
+            if lstat(file.path, &info) == 0 { return .present }
+            let archiveFailure = errno
+            guard archiveFailure == ENOENT else { return .indeterminate(archiveFailure) }
+        }
+        return .absent
     }
 
     public func load(id: AgentID) throws -> AgentRecord? {
@@ -319,8 +331,13 @@ public final class AgentStore: @unchecked Sendable {
             try FileManager.default.removeItem(at: archived)
             return try load(id: id)
         }
-        let record: AgentRecord = try writer(for: id).read(at: archived, beforeBackup: waitForBackupMigration,
-                                                           recoveryTimestamp: { $0.lastActivityAt })
+        let record: AgentRecord
+        do {
+            record = try writer(for: id).read(at: archived, beforeBackup: waitForBackupMigration,
+                                              recoveryTimestamp: { $0.lastActivityAt })
+        } catch {
+            throw quarantineIfDamaged(archived, error)
+        }
         guard Darwin.rename(archived.path, live.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
@@ -342,7 +359,8 @@ public final class AgentStore: @unchecked Sendable {
         for name in names.sorted() where name.hasSuffix(".json") && !name.hasPrefix(".") {
             let file = directory.appendingPathComponent(name, isDirectory: false)
             guard let uuid = UUID(uuidString: String(name.dropLast(5))) else {
-                unreadable.append((file, CocoaError(.fileReadCorruptFile)))
+                // Not a name the archive writes: no lookup can ever reach it.
+                unreadable.append((file, quarantine(file, CocoaError(.fileReadCorruptFile))))
                 continue
             }
             do {
@@ -352,6 +370,43 @@ public final class AgentStore: @unchecked Sendable {
             }
         }
         return (restored, unreadable)
+    }
+
+    /// An archived file read but held no record, and no backup recovered one.
+    /// It now sits in `archiveQuarantineDirectory`; the warning that reports
+    /// this error is the only one it gets.
+    public struct ArchivedRecordQuarantined: Error, CustomStringConvertible {
+        public let file: URL
+        public let quarantinedAt: URL
+        public let underlying: Error
+        public var description: String {
+            "\(file.lastPathComponent) held no readable record (\(underlying)); moved to \(quarantinedAt.path)"
+        }
+    }
+
+    /// Damaged, not unreachable: a file whose bytes cannot be read at all
+    /// (permissions, I/O) may read next time, so it stays where it is.
+    private func quarantineIfDamaged(_ file: URL, _ error: Error) -> Error {
+        guard (try? Data(contentsOf: file)) != nil else { return error }
+        return quarantine(file, error)
+    }
+
+    /// One move, never a delete. A name already taken in the quarantine (the
+    /// same agent damaged twice) gets a suffix rather than replacing it.
+    /// Returns the error to report: `ArchivedRecordQuarantined`, or `error`
+    /// itself when the move failed and the file stays.
+    private func quarantine(_ file: URL, _ error: Error) -> Error {
+        let directory = layout.archiveQuarantineDirectory
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch { return error }
+        var target = directory.appendingPathComponent(file.lastPathComponent, isDirectory: false)
+        if renamex_np(file.path, target.path, UInt32(RENAME_EXCL)) != 0 {
+            guard errno == EEXIST else { return error }
+            target = directory.appendingPathComponent("\(file.lastPathComponent).\(UUID().uuidString)", isDirectory: false)
+            guard renamex_np(file.path, target.path, UInt32(RENAME_EXCL)) == 0 else { return error }
+        }
+        return ArchivedRecordQuarantined(file: file, quarantinedAt: target, underlying: error)
     }
 
     /// Every archived record, STRICT: one unreadable file throws. Only the

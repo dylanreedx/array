@@ -3289,11 +3289,21 @@ final class AgentSupervisor {
               names.contains(where: { $0.hasSuffix(".json") }) else { return }
         do {
             let result = try withAgentStoreLock { store.unarchiveAll() }
-            for (file, error) in result.unreadable {
-                warn("AgentSupervisor.restore: archived agent \(file.lastPathComponent) stays archived, it could not be read: \(error)")
-            }
+            warnUnarchiveFailures(result.unreadable, from: "AgentSupervisor.restore")
         } catch {
             warn("AgentSupervisor.restore: archived agents stay archived, the store lock is unavailable: \(error)")
+        }
+    }
+
+    /// A quarantined file is reported once, as moved; anything else stays
+    /// archived and is tried again next time.
+    private func warnUnarchiveFailures(_ failures: [(file: URL, error: Error)], from caller: String) {
+        for (file, error) in failures {
+            if error is AgentStore.ArchivedRecordQuarantined {
+                warn("\(caller): archived agent quarantined: \(error)")
+            } else {
+                warn("\(caller): archived agent \(file.lastPathComponent) stays archived, it could not be read: \(error)")
+            }
         }
     }
 
@@ -3318,9 +3328,7 @@ final class AgentSupervisor {
             warn("AgentSupervisor: archived agents stay archived, the store lock is unavailable: \(error)")
             return
         }
-        for (file, error) in result.unreadable {
-            warn("AgentSupervisor: archived agent \(file.lastPathComponent) stays archived, it could not be read: \(error)")
-        }
+        warnUnarchiveFailures(result.unreadable, from: "AgentSupervisor")
         for record in result.restored where records[record.id] == nil {
             adoptUnarchived(record)
         }
@@ -7955,7 +7963,16 @@ final class AgentSupervisor {
                 "\(files.count) record file(s) in \(directory.lastPathComponent)/ but only \(stored.count) could be read, so an agent could be mistaken for an orphan"
             )
         }
-        // Archived agents own their checkouts too; `loadArchived` is strict.
+        // Archived agents own their checkouts too; `loadArchived` is strict. A
+        // quarantined archived file names no checkout we can read, so it
+        // refuses exactly as an unreadable archived file did before it moved.
+        let quarantined = ((try? FileManager.default.contentsOfDirectory(atPath: store.layout.archiveQuarantineDirectory.path)) ?? [])
+            .filter { !$0.hasPrefix(".") }
+        guard quarantined.isEmpty else {
+            throw CleanupRefusal.unreadableAgentStore(
+                "\(quarantined.count) archived record file(s) in \(store.layout.archiveQuarantineDirectory.path) could not be read, so an agent could be mistaken for an orphan"
+            )
+        }
         return Set(records.values.map(\.cwd)).union(stored.map(\.cwd)).union(try store.loadArchived().map(\.cwd))
     }
 

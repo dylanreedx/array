@@ -253,9 +253,11 @@ enum AgentRecordArchiveChecks {
     }
 
     /// One production boot: the mount wires the gate from Settings.
-    static func boot(_ store: AgentStore, settings: QAIsolatedDefaults) throws -> (AgentSupervisor, AppDelegate, Int, Double) {
+    final class Warnings { var lines: [String] = [] }
+
+    static func boot(_ store: AgentStore, settings: QAIsolatedDefaults, warnings: Warnings? = nil) throws -> (AgentSupervisor, AppDelegate, Int, Double) {
         let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
-            warn: { _ in }, nameTitlerCommand: { _ in nil })
+            warn: { line in warnings?.lines.append(line) }, nameTitlerCommand: { _ in nil })
         supervisor.codexRestoreHomeForQA = store.layout.applicationSupportDirectory.appendingPathComponent("codex-empty")
         supervisor.recordArchiveNow = { now }
         let app = AppDelegate()
@@ -585,6 +587,56 @@ enum AgentRecordArchiveChecks {
         print("PASS agent record archive: the gate turned off while Array runs brings every archived agent back on the next workspace API request, without walking its payload")
     }
 
+    /// Follow-up (c): a damaged archived file was retried, and warned about,
+    /// on every boot. Two production boots with the gate off over an archive
+    /// holding a corrupt record and a file with no agent id: the first warns
+    /// once per file and quarantines both; the second says nothing about them.
+    /// Quarantine moves, never deletes, and keeps the destructive paths closed.
+    static func quarantineWitness() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-quarantine-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let good = idleRecord("Readable archived", cwd: root.path, idleFor: 30)
+        try write([good], to: store)
+        store.waitForBackupMigration()
+        try fm.createDirectory(at: store.layout.archiveDirectory, withIntermediateDirectories: true)
+        try fm.moveItem(at: store.layout.agentFile(id: good.id), to: store.layout.archivedAgentFile(id: good.id))
+        let damagedID = AgentID(rawValue: UUID())
+        let damaged = "\(damagedID.rawValue.uuidString).json", stray = "not-an-agent.json"
+        try Data("{ not a record".utf8).write(to: store.layout.archiveDirectory.appendingPathComponent(damaged))
+        try Data("{}".utf8).write(to: store.layout.archiveDirectory.appendingPathComponent(stray))
+        let off = gateSuite(false)
+        defer { off.removePersistentDomain(forName: off.suiteDomainName) }
+        func mentions(_ warnings: Warnings, _ name: String) -> Int { warnings.lines.filter { $0.contains(name) }.count }
+
+        let firstWarnings = Warnings()
+        let (first, firstApp, _, _) = try boot(store, settings: off, warnings: firstWarnings)
+        try expect(first.records[good.id] != nil, "control: the readable archived record is restored")
+        try expect(mentions(firstWarnings, damaged) == 1 && mentions(firstWarnings, stray) == 1,
+                   "first boot warns once per damaged file: \(firstWarnings.lines)")
+        first.stopAll()
+        withExtendedLifetime(firstApp) {}
+
+        let secondWarnings = Warnings()
+        let (second, secondApp, _, _) = try boot(store, settings: off, warnings: secondWarnings)
+        try expect(mentions(secondWarnings, damaged) == 0 && mentions(secondWarnings, stray) == 0,
+                   "the next boot neither retries nor warns about a damaged archived file: \(secondWarnings.lines)")
+        try expect(archivedFiles(store).isEmpty, "the archive holds no damaged file, holds \(archivedFiles(store))")
+        let quarantine = store.layout.archiveQuarantineDirectory
+        try expect(exists(quarantine.appendingPathComponent(damaged)) && exists(quarantine.appendingPathComponent(stray)),
+                   "quarantine moves the damaged files, never deletes them")
+        try expect(store.ownershipPresence(id: damagedID) == .present, "a quarantined agent still owns its checkout")
+        do {
+            _ = try second.orphanWorktrees(repo: root)
+            throw Failure(message: "worktree repair ran past a quarantined archived record")
+        } catch is AgentSupervisor.CleanupRefusal {}
+        second.stopAll()
+        withExtendedLifetime(secondApp) {}
+        print("PASS agent record archive: a damaged archived file is quarantined once, warned about once, kept, and still closes worktree repair")
+    }
+
     static func archivedFiles(_ store: AgentStore) -> [String] {
         ((try? FileManager.default.contentsOfDirectory(atPath: store.layout.archiveDirectory.path)) ?? [])
             .filter { $0.hasSuffix(".json") }.sorted()
@@ -641,7 +693,8 @@ enum AgentRecordArchiveChecks {
         }
         try expect(try store.load(id: fixtureAgent!.id)?.displayName == fixtureAgent!.displayName,
                    "gate off: the live record wins over its archived copy")
-        try expect(archivedFiles(store) == [corrupt], "gate off: the archive holds only the corrupt file, holds \(archivedFiles(store))")
+        try expect(archivedFiles(store).isEmpty && exists(store.layout.archiveQuarantineDirectory.appendingPathComponent(corrupt)),
+                   "gate off: the corrupt file is quarantined and the archive is empty, holds \(archivedFiles(store))")
         // Through the real workspace API, which with the gate off adopts nothing.
         supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
         let scans = WorkspaceAPIService.archivedAgentScansForQA
@@ -652,8 +705,8 @@ enum AgentRecordArchiveChecks {
             try expect("\(reply)".lowercased().contains(id.rawValue.uuidString.lowercased()), "gate off: inspect answers for \(id.rawValue)")
         }
         try expect(WorkspaceAPIService.archivedAgentScansForQA == scans, "gate off: the workspace API scanned a payload")
-        try? FileManager.default.removeItem(at: store.layout.archiveDirectory.appendingPathComponent(corrupt))
-        print("PASS agent record archive: gate off restores every archived record at boot (live copy wins, a corrupt file stays without blocking boot) and agent.inspect answers for them")
+        try? FileManager.default.removeItem(at: store.layout.archiveQuarantineDirectory)
+        print("PASS agent record archive: gate off restores every archived record at boot (live copy wins, a corrupt file is quarantined without blocking boot) and agent.inspect answers for them")
     }
 
     static func run() async throws {
@@ -672,7 +725,8 @@ enum AgentRecordArchiveChecks {
         try apiWitness()
         try gateOffRevertWitness()
         try runtimeGateOffWitness()
+        try quarantineWitness()
         print("PASS agent record archive: gate off unchanged; gate on archives only old finished tile-less records nothing holds, next boot skips them, and id lookups bring them back")
-        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; gate off scans no API payload and restores every archived record at boot, or on the next API request when it goes off at runtime; worktree repair and checkout cleanup treat archived agents as owners.")
+        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; gate off scans no API payload and restores every archived record at boot, or on the next API request when it goes off at runtime; a damaged archived file is quarantined once; worktree repair and checkout cleanup treat archived agents as owners.")
     }
 }
