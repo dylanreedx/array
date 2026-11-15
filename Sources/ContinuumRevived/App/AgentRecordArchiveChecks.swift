@@ -171,6 +171,34 @@ enum AgentRecordArchiveChecks {
             Double(result.mallocBytes) / 1_048_576, Double(result.footprint) / 1_048_576, result.rows, result.rowBuildMs))
     }
 
+    /// The measure mode moves records, so it refuses every store under
+    /// `~/Library/Application Support` — prod "Array" as well as this
+    /// binary's own channel — after resolving symlinks and `..`.
+    static func isOutsideRealStores(_ root: String) -> Bool {
+        func resolved(_ path: String) -> String {
+            URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        let real = resolved(RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent().path)
+        let candidate = resolved(root)
+        return !root.isEmpty && candidate != real && !candidate.hasPrefix(real + "/")
+    }
+
+    /// The guard above, driven over the paths that must be refused.
+    static func measureStoreGuardWitness() throws {
+        let real = RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
+        let prod = real.appendingPathComponent("Array").path
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("archive-guard-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let link = tmp.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: prod)
+        for refused in [prod, real.appendingPathComponent("Array Dev").path, real.path,
+                        tmp.path + "/../../../../../../../../" + String(prod.dropFirst()), link.path, ""] {
+            try expect(!isOutsideRealStores(refused), "measure-store guard accepted a real store: \(refused)")
+        }
+        try expect(isOutsideRealStores(tmp.appendingPathComponent("copy").path), "measure-store guard refused a copy outside Application Support")
+    }
+
     /// `--agent-record-archive-measure-store=off|on`: one production boot over
     /// the store `CONTINUUM_APP_SUPPORT` names — a COPY of a real one, never
     /// the original — with the gate as given. Prints the mount's time and the
@@ -178,8 +206,8 @@ enum AgentRecordArchiveChecks {
     /// Never stops the agents it restored: they may name real processes.
     static func measureStore(gate: Bool) async throws {
         guard let root = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"],
-              !root.hasPrefix(RegistryStore.defaultApplicationSupportDirectory().path) else {
-            throw Failure(message: "measure-store needs CONTINUUM_APP_SUPPORT pointing at a copy of a store")
+              isOutsideRealStores(root) else {
+            throw Failure(message: "measure-store needs CONTINUUM_APP_SUPPORT pointing at a copy of a store, outside ~/Library/Application Support")
         }
         let store = AgentStore()
         store.waitForBackupMigration()
@@ -957,6 +985,7 @@ enum AgentRecordArchiveChecks {
               Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else {
             throw Failure(message: "agent-record-archive check requires isolated CONTINUUM_APP_SUPPORT and a dev binary")
         }
+        try measureStoreGuardWitness()
         try await bootWitness(gate: false)
         try await bootWitness(gate: true)
         try await sharedScanOffMainWitness()
@@ -968,6 +997,6 @@ enum AgentRecordArchiveChecks {
         try await runtimeGateOffWitness()
         try await quarantineWitness()
         print("PASS agent record archive: gate off unchanged; gate on archives only old finished tile-less records nothing holds, next boot skips them, and id lookups bring them back")
-        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; the shared-area scan runs off the main thread and a skip names the file; gate off scans no API payload and restores every archived record at boot, or on the next API request when it goes off at runtime; a damaged archived file is quarantined once; worktree repair and checkout cleanup treat archived agents as owners.")
+        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; the shared-area scan runs off the main thread and a skip names the file; gate off scans no API payload and restores every archived record at boot, or on the next API request when it goes off at runtime; a damaged archived file is quarantined once; worktree repair and checkout cleanup treat archived agents as owners; the real-store measure mode refuses every store under Application Support.")
     }
 }

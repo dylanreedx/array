@@ -3216,6 +3216,7 @@ final class AgentSupervisor {
     private func scheduleRecordArchivePass(stored: [AgentRecord], skipped: Set<AgentID>) {
         let scan = recordArchiveSharedAgents
         recordArchivePassForQA?.cancel()
+        recordArchivePassCostForQA = nil
         recordArchivePassForQA = Task { @MainActor [weak self] in
             let (shared, scanMs) = await Task.detached(priority: .utility) { () -> (Result<Set<AgentID>, Error>, Double) in
                 let start = ContinuousClock.now
