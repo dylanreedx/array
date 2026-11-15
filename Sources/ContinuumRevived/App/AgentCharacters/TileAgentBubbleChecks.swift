@@ -3,13 +3,15 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import ObjectiveC
 
-// The agent's icon in a bubble at its tile's top-right corner.
+// The agent's icon in a bubble breaking its tile's top-left corner.
 //
 // `--tile-agent-bubble-check`: four real agent tiles in a tinted zone, attached to
 // a real supervisor with identity colours, two of them working. Asserts the
-// bubble's place and size at every chrome scale bucket (and that its layer is
-// drawn where the view says it is), that the band's controls and the title stay
-// clear of it, the working light following the agent's status and the sidebar's
+// bubble's place and size at every chrome scale bucket — hanging past the tile's
+// top and left edges, drawn where the view says it is, with no clipping layer
+// between it and the world plane, its overflow actually painted, stacked above
+// every tile, and a press on its outside part hitting the tile — that the
+// mark and title start after it, that it lands with its tile's snap animation, the working light following the agent's status and the sidebar's
 // style, the identity colour, the Minimal/Orb setting live, the bubble holding
 // still out of sight, a camera pan costing it nothing, and icons off restoring
 // today's bar. `TILE_AGENT_BUBBLE_PNG_DIR=<dir>` writes both styles in light and
@@ -18,8 +20,9 @@ import ObjectiveC
 //
 // `--tile-agent-bubble-drag-check`: on the production mount, a drag that starts
 // on the bubble moves the tile through `NSApp.sendEvent` (local monitors, the
-// window's hit-test, AppKit's drag routing) — including from the part of the
-// bubble that lies in the corner's resize band — at zoom 1 and 0.5.
+// window's hit-test, AppKit's drag routing) — from its centre, from the part
+// outside the tile, and from the part in the top edge's resize band — at zoom 1
+// and 0.5, and the bubble's view travels with the tile.
 @MainActor
 enum TileAgentBubbleChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -179,10 +182,10 @@ enum TileAgentBubbleChecks {
         let resumed = !views[0].qaAgentBubble!.qaAnimationKeys.isEmpty
         views[0].resetCursorRects()
         let disc = views[0].agentBubbleFrame!
-        let corner = NSPoint(x: disc.maxX - 0.1, y: disc.minY + 0.1)
+        let corner = NSPoint(x: 0.1, y: disc.maxY - 0.1)
         try expect(stopped && resumed && unchangedFrames == views.map { $0.agentBubbleFrame }
-                   && views[0].qaResizeEdge(at: corner) != nil,
-                   "live Reduce Motion stopped=\(stopped) resumed=\(resumed); outside-circle corner must resize")
+                   && !views[0].agentBubbleContains(corner) && views[0].qaResizeEdge(at: corner) != nil,
+                   "live Reduce Motion stopped=\(stopped) resumed=\(resumed); off the circle, the left edge must resize")
         // Real cursor output from both tracking handlers, at caps and corners.
         try checkCursor(view: views[0], window: window)
         _ = supervisor.setIdentityColor(agentID: agents[3], "mint")
@@ -214,15 +217,44 @@ enum TileAgentBubbleChecks {
                 try expect(frame.width * zoom >= TileNSView.agentBubbleSide - 0.01,
                            "\(label): never smaller than \(TileNSView.agentBubbleSide) pt on screen (\(frame.width * zoom))")
                 let pixel = 1 / ((window.backingScaleFactor) * zoom) + 0.01
-                let inset = TileNSView.agentBubbleInset * max(chrome, view.titleBarScale)
-                try expect(abs(view.bounds.width - frame.maxX - inset) <= pixel && abs(frame.minY - inset) <= pixel,
-                           "\(label): tucked \(inset) pt into the top-right corner, got right \(view.bounds.width - frame.maxX) top \(frame.minY)")
+                let overflow = TileNSView.agentBubbleOverflow * max(chrome, view.titleBarScale)
+                try expect(abs(frame.minX + overflow) <= pixel && abs(frame.minY + overflow) <= pixel,
+                           "\(label): hangs \(overflow) pt past the top-left corner, got left \(frame.minX) top \(frame.minY)")
+                try expect(frame.minX < 0 && frame.minY < 0 && frame.maxX > 0 && frame.maxY > 0,
+                           "\(label): the bubble breaks the corner, partly outside the tile \(frame)")
+                try expect(frame.maxY <= view.chromeBarHeight + pixel,
+                           "\(label): inside the tile it stays within the bar (\(frame.maxY) vs \(view.chromeBarHeight))")
                 // The layer is drawn where the view says the bubble is (a flipped
-                // host would otherwise put it at the bottom of the tile).
-                let drawn = view.convertFromLayer(bubble.frame)
+                // host would otherwise put it upside down), by a view in the
+                // world plane, stacked above every tile.
+                guard let host = view.agentBubbleView, let plane = view.superview, host.superview === plane else {
+                    throw Failure(description: "\(label): the bubble has no view in the tile's superview")
+                }
+                let drawn = view.convert(plane.convert(host.convertFromLayer(bubble.frame), from: host), from: plane)
                 try expect(abs(drawn.minX - frame.minX) < 0.01 && abs(drawn.minY - frame.minY) < 0.01
                            && abs(drawn.width - frame.width) < 0.01,
                            "\(label): the bubble's layer is drawn at \(drawn), the view expects \(frame)")
+                // No clipping: no layer between the bubble and the world plane masks.
+                var clips: [String] = []
+                var ancestor = bubble.superlayer
+                while let current = ancestor, current !== plane.layer {
+                    if current.masksToBounds || current.mask != nil { clips.append(String(describing: current.delegate.map { type(of: $0) })) }
+                    ancestor = current.superlayer
+                }
+                try expect(ancestor === plane.layer && clips.isEmpty,
+                           "\(label): the bubble reaches the world plane unclipped (clipped by \(clips))")
+                let hostIndex = plane.subviews.firstIndex(of: host) ?? -1
+                let topTile = plane.subviews.lastIndex { $0 is TileNSView } ?? Int.max
+                try expect(hostIndex > topTile, "\(label): the bubble is stacked above every tile (\(hostIndex) vs \(topTile))")
+                // A press on the part outside the tile is the tile's.
+                let r = frame.width / 2
+                let outside = NSPoint(x: frame.midX - r * 0.6, y: frame.midY - r * 0.6)
+                try expect(!view.bounds.contains(outside) && view.agentBubbleContains(outside),
+                           "\(label): fixture point \(outside) is on the bubble, outside the tile")
+                if let frameView = canvas.superview {
+                    let hit = canvas.hitTest(frameView.convert(view.convert(outside, to: nil), from: nil))
+                    try expect(hit === view, "\(label): a press outside the tile on its bubble hit \(String(describing: hit.map { type(of: $0) }))")
+                }
                 if let sprite = view.qaCharacterRect {
                     let inTile = bar.convert(sprite, to: view)
                     try expect(abs(inTile.midX - frame.midX) <= pixel && abs(inTile.midY - frame.midY) <= pixel,
@@ -231,23 +263,85 @@ enum TileAgentBubbleChecks {
                                "\(label): the icon sits inside its bubble")
                 }
                 let close = view.qaCloseButtonFrame
-                try expect(close.maxX <= frame.minX + 0.01, "\(label): × stays clear of the bubble (\(close.maxX) vs \(frame.minX))")
-                if let actions = view.titleBarActionsFrameForQA, actions.width > 0 {
-                    try expect(actions.maxX <= frame.minX + 0.01, "\(label): ⋯ stays clear of the bubble")
+                try expect(close.minX >= frame.maxX, "\(label): × stays clear of the bubble (\(close.minX) vs \(frame.maxX))")
+                if let mark = view.qaProviderMarkRect {
+                    try expect(bar.convert(mark, to: view).minX >= frame.maxX, "\(label): the provider mark starts after the bubble")
                 }
                 if let title = view.qaTitleRectInBar(), title.width > 0 {
-                    try expect(bar.convert(title, to: view).maxX <= frame.minX, "\(label): the title stops before the bubble")
+                    try expect(bar.convert(title, to: view).minX >= frame.maxX, "\(label): the title starts after the bubble")
                 }
                 if let pill = view.qaStatusPillRectInBar() {
                     try expect(!bar.convert(pill, to: view).intersects(frame), "\(label): the status pill never runs under the bubble")
                 }
-                try expect(view.bounds.contains(frame), "\(label): the bubble stays inside its tile, clear of its neighbours")
                 if let badge = view.qaManagedBadgeFrameInTile {
                     try expect(!badge.intersects(frame), "\(label): the Managed badge \(badge) runs under the bubble \(frame)")
                 }
             }
         }
         try expect(buckets.count >= 3, "the sweep crossed several chrome scale buckets: \(buckets.sorted())")
+
+        // 2b. The overflow is painted. The world plane's layer tree is rendered
+        // in-process (`render(in:)` honours every clip on the way, as the render
+        // server does) with the bubble shown and faded out; the columns left of
+        // the tile's edge lie outside the tile, so a change there is the overflow.
+        // (Not the window server's picture: for an offscreen check window it
+        // trails model changes by a second or more.)
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        canvas.layoutSubtreeIfNeeded()
+        guard views[0].agentBubbleFrame != nil, let paintedHost = views[0].agentBubbleView,
+              let planeLayer = views[0].superview?.layer, let hostLayer = paintedHost.layer, let tileLayer = views[0].layer else {
+            throw Failure(description: "no bubble to render")
+        }
+        let square = hostLayer.frame
+        let outsideColumns = Int(((tileLayer.frame.minX - square.minX) * 2).rounded(.down))
+        try expect(outsideColumns > 0, "the bubble's square starts left of its tile (\(square) vs \(tileLayer.frame))")
+        func render() throws -> CGImage {
+            let width = Int((square.width * 2).rounded(.up)), height = Int((square.height * 2).rounded(.up))
+            guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                throw Failure(description: "no render context")
+            }
+            context.scaleBy(x: 2, y: 2)
+            context.translateBy(x: -square.minX, y: -square.minY)
+            planeLayer.render(in: context)
+            guard let image = context.makeImage() else { throw Failure(description: "no render") }
+            return image
+        }
+        let shown = try render()
+        paintedHost.alphaValue = 0
+        let faded = try render()
+        paintedHost.alphaValue = 1
+        let change = try largestChannelChange(shown, faded) { x, _ in x * CGFloat(shown.width) < CGFloat(outsideColumns) }
+        try expect(change >= 48, "the bubble's part outside its tile is painted (largest channel change \(change))")
+
+        // 2c. It lands with its tile: a snap landing gives the bubble's view the
+        // same flight as the tile's — same timing, same displacement.
+        canvas.autoLayoutReduceMotionProvider = { false }
+        let rest = views[0].frame.origin
+        let restOffset = CGPoint(x: paintedHost.frame.minX - rest.x, y: paintedHost.frame.minY - rest.y)
+        canvas.animateSnapLanding(tileId: views[0].tile.id, from: NSPoint(x: rest.x + 90, y: rest.y + 60))
+        // AppKit installs a position flight on each layer; whatever it starts
+        // from, the bubble's must start the same distance from its resting
+        // place as the tile's does, and last as long.
+        func flight(_ layer: CALayer) -> (from: CGPoint, duration: CFTimeInterval)? {
+            guard let animation = layer.animation(forKey: "position") as? CABasicAnimation,
+                  let from = (animation.fromValue as? NSValue)?.pointValue else { return nil }
+            return (from, animation.duration)
+        }
+        guard let tileFlight = flight(tileLayer), let hostFlight = flight(hostLayer) else {
+            throw Failure(description: "a snap landing animates the tile and its bubble: tile \(tileLayer.animationKeys() ?? []) bubble \(hostLayer.animationKeys() ?? [])")
+        }
+        func start(_ from: CGPoint, _ layer: CALayer, restingAt origin: CGPoint) -> CGFloat {
+            from.x - (origin.x + layer.anchorPoint.x * layer.bounds.width)
+        }
+        let tileStart = start(tileFlight.from, tileLayer, restingAt: rest)
+        let hostStart = start(hostFlight.from, hostLayer, restingAt: CGPoint(x: rest.x + restOffset.x, y: rest.y + restOffset.y))
+        try expect(abs(hostStart - tileStart) < 0.5 && hostFlight.duration == tileFlight.duration,
+                   "the bubble flies with its tile: tile starts \(tileStart) pt out over \(tileFlight.duration)s, bubble \(hostStart) pt over \(hostFlight.duration)s")
+        pump(0.3)
+        try expect(paintedHost.frame.origin == CGPoint(x: rest.x + restOffset.x, y: rest.y + restOffset.y),
+                   "after the landing the bubble is back on its tile's corner")
 
         // 3. A camera pan costs the bubble nothing: no new motion, no bar redraw.
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
@@ -335,6 +429,32 @@ enum TileAgentBubbleChecks {
         return cropped
     }
 
+    /// The largest change in any colour channel between two same-size pictures.
+    /// `where` takes a pixel's centre as a fraction of the picture (top-left origin).
+    static func largestChannelChange(_ a: CGImage, _ b: CGImage,
+                                     where include: (CGFloat, CGFloat) -> Bool = { _, _ in true }) throws -> Int {
+        func pixels(_ image: CGImage) throws -> [UInt8] {
+            var data = [UInt8](repeating: 0, count: image.width * image.height * 4)
+            guard let context = CGContext(data: &data, width: image.width, height: image.height, bitsPerComponent: 8,
+                                          bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                throw Failure(description: "could not read a capture")
+            }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            return data
+        }
+        guard a.width == b.width, a.height == b.height else { throw Failure(description: "captures differ in size") }
+        let (left, right) = (try pixels(a), try pixels(b))
+        var largest = 0
+        for y in 0..<a.height {
+            for x in 0..<a.width where include((CGFloat(x) + 0.5) / CGFloat(a.width), (CGFloat(y) + 0.5) / CGFloat(a.height)) {
+                let i = (y * a.width + x) * 4
+                for c in 0..<3 { largest = max(largest, abs(Int(left[i + c]) - Int(right[i + c]))) }
+            }
+        }
+        return largest
+    }
+
     static func write(_ image: CGImage, to url: URL) throws {
         guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
             throw Failure(description: "could not encode \(url.lastPathComponent)")
@@ -351,24 +471,24 @@ enum TileAgentBubbleChecks {
             pump(0.2)
             for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
                 window.appearance = NSAppearance(named: appearance)
-                // Whole zone at 1 and at 0.5 (the 0.5 picture is the same window, zoomed out).
-                for zoom in [1.0, 0.5] {
+                // Whole zone at 1, 0.5 and 0.3 (the same window, zoomed out).
+                for zoom in [1.0, 0.5, 0.3] {
                     canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
                     pump(0.3)
                     let image = try capture(canvas, window, rect: canvas.bounds)
-                    let url = directory.appendingPathComponent("bubble-\(style.rawValue)-\(name)-zoom\(zoom == 1 ? "100" : "50").png")
+                    let url = directory.appendingPathComponent("bubble-\(style.rawValue)-\(name)-zoom\(Int((zoom * 100).rounded())).png")
                     try write(image, to: url)
                     written.append(url.path)
                 }
-                // A close-up of two neighbours' corners at 200%.
-                canvas.setViewport(CanvasViewport(x: 380, y: 60, zoom: 2))
+                // A close-up at 200%: a bubble breaking its corner beside its neighbour.
+                canvas.setViewport(CanvasViewport(x: 370, y: 40, zoom: 2))
                 pump(0.3)
                 let close = try capture(canvas, window, rect: NSRect(x: 260, y: 0, width: 760, height: 380))
                 let url = directory.appendingPathComponent("bubble-\(style.rawValue)-\(name)-closeup200.png")
                 try write(close, to: url)
                 written.append(url.path)
-                // Where four tiles meet: a bubble beside the tile above's bottom edge.
-                canvas.setViewport(CanvasViewport(x: 330, y: 250, zoom: 2))
+                // Where four tiles meet: a bubble over its neighbours' corners.
+                canvas.setViewport(CanvasViewport(x: 375, y: 300, zoom: 2))
                 pump(0.3)
                 let junction = try capture(canvas, window, rect: NSRect(x: 250, y: 60, width: 700, height: 500))
                 let junctionURL = directory.appendingPathComponent("bubble-\(style.rawValue)-\(name)-junction200.png")
@@ -383,21 +503,21 @@ enum TileAgentBubbleChecks {
         return written.map { "wrote \($0)" }
     }
 
-    /// Frames of the working light, every sidebar style, both bubble styles: the
-    /// two working tiles' corners at 200%, 0.25 s apart.
+    /// Frames of the working light, every sidebar style, both bubble styles: a
+    /// working tile's corner at 200%, 0.1 s apart.
     private static func writeFilm(canvas: CanvasNSView, window: NSWindow, defaults: UserDefaults,
                                   views: [ManagedAgentTileNSView], to directory: URL) throws -> [String] {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var written = 0
         window.appearance = NSAppearance(named: .darkAqua)
-        canvas.setViewport(CanvasViewport(x: 380, y: 60, zoom: 2))
+        canvas.setViewport(CanvasViewport(x: 20, y: 60, zoom: 2))
         for style in AgentCharacterConfig.BubbleStyle.allCases {
             setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, style.rawValue)
             for working in SidebarActiveIndicatorStyle.allCases {
                 setSetting(defaults, SidebarActiveIndicatorStyle.defaultsKey, working.rawValue)
                 pump(0.3)
                 for frame in 0..<12 {
-                    let image = try capture(canvas, window, rect: NSRect(x: 360, y: 0, width: 560, height: 200))
+                    let image = try capture(canvas, window, rect: NSRect(x: 40, y: 40, width: 560, height: 200))
                     try write(image, to: directory.appendingPathComponent(
                         "working-\(style.rawValue)-\(working.rawValue)-\(String(format: "%02d", frame)).png"))
                     written += 1
@@ -415,17 +535,22 @@ enum TileAgentBubbleChecks {
 
     private static func checkCursor(view: ManagedAgentTileNSView, window: NSWindow) throws {
         view.resetCursorRects()
-        view.updateTrackingAreas()
+        guard let host = view.agentBubbleView, let plane = host.superview else {
+            throw Failure(description: "the bubble has no view")
+        }
+        host.updateTrackingAreas()
         let disc = view.agentBubbleFrame!
-        try expect(view.trackingAreas.contains { $0.rect.contains(disc) && $0.options.contains(.mouseMoved)
-            && $0.options.contains(.cursorUpdate) }, "bubble has pointer and cursor tracking")
+        let discInHost = host.convert(plane.convert(disc, from: view), from: plane)
+        try expect(host.trackingAreas.contains { $0.rect.contains(discInHost) && $0.options.contains(.mouseMoved)
+            && $0.options.contains(.cursorUpdate) }, "bubble has pointer and cursor tracking over its whole circle")
         let points: [(String, NSPoint, NSCursor)] = [
             ("right cap", NSPoint(x: disc.maxX - 0.1, y: disc.midY), .openHand),
-            ("top cap", NSPoint(x: disc.midX, y: disc.minY + 0.1), .openHand),
-            ("left cap", NSPoint(x: disc.minX + 0.1, y: disc.midY), .openHand),
+            ("top cap, outside the tile", NSPoint(x: disc.midX, y: disc.minY + 0.1), .openHand),
+            ("left cap, outside the tile", NSPoint(x: disc.minX + 0.1, y: disc.midY), .openHand),
             ("bottom cap", NSPoint(x: disc.midX, y: disc.maxY - 0.1), .openHand),
             ("centre", NSPoint(x: disc.midX, y: disc.midY), .openHand),
-            ("square corner", NSPoint(x: disc.maxX - 0.1, y: disc.minY + 0.1), .resizeUpDown),
+            ("square corner, outside the tile", NSPoint(x: disc.minX + 0.1, y: disc.minY + 0.1), .arrow),
+            ("square corner on the left edge", NSPoint(x: 0.1, y: disc.maxY - 0.1), .resizeLeftRight),
         ]
         let savedCursor = NSCursor.current
         defer { savedCursor.set() }
@@ -436,18 +561,20 @@ enum TileAgentBubbleChecks {
             try expect(view.agentBubbleContains(point) == (expected == NSCursor.openHand),
                        "\(label): cursor and circular grab agree")
             NSCursor.arrow.set()
-            view.mouseMoved(with: event)
+            if expected == .arrow { NSCursor.openHand.set() }
+            host.mouseMoved(with: event)
             try expect(NSCursor.current == expected, "\(label): pointer movement selects \(expected)")
-            NSCursor.arrow.set()
-            view.cursorUpdate(with: event)
+            NSCursor.openHand.set()
+            if expected == .openHand { NSCursor.arrow.set() }
+            host.cursorUpdate(with: event)
             try expect(NSCursor.current == expected, "\(label): cursor entry selects \(expected)")
         }
-        for point in [NSPoint(x: disc.maxX, y: disc.midY), NSPoint(x: disc.midX, y: disc.maxY)] {
+        for point in [NSPoint(x: disc.maxX, y: disc.midY), NSPoint(x: disc.midX, y: disc.maxY), NSPoint(x: disc.minX, y: disc.midY)] {
             let event = NSEvent.mouseEvent(with: .mouseMoved, location: view.convert(point, to: nil),
                 modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
             NSCursor.arrow.set()
-            view.mouseMoved(with: event)
+            host.mouseMoved(with: event)
             let receivedPoint = view.convert(event.locationInWindow, from: nil)
             try expect((NSCursor.current == NSCursor.openHand) == view.agentBubbleContains(receivedPoint),
                        "circumference: cursor and circular hit-test agree at the received window point \(receivedPoint)")
@@ -605,12 +732,33 @@ enum TileAgentBubbleChecks {
         try expect(snapping || (abs(moved.x - 48 / zoom) < 2 / zoom && abs(moved.y - 36 / zoom) < 2 / zoom),
                    "\(label): the tile follows the bubble by the pointer's delta (moved \(moved), expected \((48 / zoom, 36 / zoom)))")
 
-        // 2. From the part of the bubble that lies in the corner's resize band.
+        // The bubble's view travels with the tile.
         canvas.layoutSubtreeIfNeeded()
-        guard let again = view.agentBubbleFrame else { throw Failure(description: "\(label): no bubble after the drag") }
+        guard let again = view.agentBubbleFrame, let host = view.agentBubbleView, let plane = view.superview else {
+            throw Failure(description: "\(label): no bubble after the drag")
+        }
+        let expectedHost = view.convert(again, to: plane)
+        try expect(host.superview === plane && abs(host.frame.minX - expectedHost.minX) < 0.01
+                   && abs(host.frame.minY - expectedHost.minY) < 0.01,
+                   "\(label): the bubble's view \(host.frame) followed its tile to \(expectedHost)")
+
+        // 2. From the part of the bubble outside the tile: the press hits the tile.
         let r = again.width / 2
-        let corner = NSPoint(x: again.midX + r * 0.45, y: again.midY - r * 0.45)
-        try expect(view.qaResizeEdge(at: corner) != nil, "\(label): the probe point lies in the corner's resize band")
+        let outside = NSPoint(x: again.midX - r * 0.6, y: again.midY - r * 0.6)
+        try expect(!view.bounds.contains(outside) && view.agentBubbleContains(outside),
+                   "\(label): the probe point lies on the bubble, outside the tile")
+        let hung = try drag(from: outside, by: CGSize(width: 36, height: -30), name: "outside")
+        try expect(hung.after.width == hung.before.width && hung.after.height == hung.before.height,
+                   "\(label): dragging the bubble from outside the tile resized it (\(hung.before) → \(hung.after))")
+        try expect(snapping || (abs(hung.after.x - hung.before.x - 36 / zoom) < 2 / zoom
+                                && abs(hung.after.y - hung.before.y + 30 / zoom) < 2 / zoom),
+                   "\(label): ...and moved it with the pointer (\(hung.after.x - hung.before.x), \(hung.after.y - hung.before.y))")
+
+        // 3. From the part of the bubble that lies in the top edge's resize band.
+        canvas.layoutSubtreeIfNeeded()
+        guard let third = view.agentBubbleFrame else { throw Failure(description: "\(label): no bubble") }
+        let corner = NSPoint(x: third.midX + third.width / 4, y: 1 / zoom)
+        try expect(view.qaResizeEdge(at: corner) != nil, "\(label): the probe point lies in the top edge's resize band")
         try expect(view.agentBubbleContains(corner), "\(label): the probe point lies on the bubble")
         let banded = try drag(from: corner, by: CGSize(width: -40, height: 24), name: "corner")
         try expect(banded.after.width == banded.before.width && banded.after.height == banded.before.height,
@@ -618,13 +766,13 @@ enum TileAgentBubbleChecks {
         try expect(snapping || abs(banded.after.x - banded.before.x + 40 / zoom) < 2 / zoom,
                    "\(label): ...and moved it with the pointer (\(banded.after.x - banded.before.x))")
 
-        // 3. Just outside the bubble, the corner still resizes.
+        // 4. The far corner, nowhere near the bubble, still resizes.
         canvas.layoutSubtreeIfNeeded()
         guard let last = view.agentBubbleFrame else { throw Failure(description: "\(label): no bubble") }
-        let outside = NSPoint(x: view.bounds.width - 1 / zoom, y: 1 / zoom)
-        try expect(!view.agentBubbleContains(outside) && view.qaResizeEdge(at: outside) == .topRight,
+        let farCorner = NSPoint(x: view.bounds.width - 1 / zoom, y: 1 / zoom)
+        try expect(!view.agentBubbleContains(farCorner) && view.qaResizeEdge(at: farCorner) == .topRight,
                    "\(label): the corner itself, outside the bubble \(last), is still a resize")
-        return ("tile agent bubble drag \(label): centre moved \(moved), corner band moved, PASS"
+        return ("tile agent bubble drag \(label): centre moved \(moved), outside part and edge band moved, PASS"
             + (filmed > 0 ? " (\(filmed) drag frames)" : ""), banded.after)
     }
 }

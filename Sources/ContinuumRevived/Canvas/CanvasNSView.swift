@@ -3556,6 +3556,9 @@ final class CanvasNSView: NSView, TokenThemed {
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.11
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            // The agent's bubble, a view beside the tile, follows the tile's
+            // frame directly; implicit animation lets it land with the tile.
+            context.allowsImplicitAnimation = true
             view.animator().setFrameOrigin(destination)
         }
     }
@@ -6924,6 +6927,12 @@ final class CanvasNSView: NSView, TokenThemed {
         for (rank, entry) in tileEntries.enumerated() {
             let id = ObjectIdentifier(entry.view)
             keys[id] = .init(tier: 2, rank: rank, originalIndex: originals[id] ?? rank)
+            // An agent's bubble breaks its tile's corner, so it sits above every
+            // tile: a neighbour's chrome never cuts it, whichever was focused last.
+            if let bubble = entry.view.agentBubbleView, bubble.superview === worldPlane {
+                let bubbleId = ObjectIdentifier(bubble)
+                keys[bubbleId] = .init(tier: 3, rank: rank, originalIndex: originals[bubbleId] ?? rank)
+            }
         }
 
         // Unknown world-plane children retain a deterministic position after the
@@ -6931,7 +6940,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // extension view from making the comparator non-total.
         for view in worldPlane.subviews where keys[ObjectIdentifier(view)] == nil {
             let id = ObjectIdentifier(view)
-            keys[id] = .init(tier: 3, rank: originals[id] ?? 0, originalIndex: originals[id] ?? 0)
+            keys[id] = .init(tier: 4, rank: originals[id] ?? 0, originalIndex: originals[id] ?? 0)
         }
         let context = CanvasWorldPlaneSubviewSortContext(keys: keys)
         worldPlane.sortSubviews({ lhs, rhs, rawContext in

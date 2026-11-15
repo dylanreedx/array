@@ -3145,7 +3145,7 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
-        // The agent's icon in a bubble at its tile's top-right corner.
+        // The agent's icon in a bubble breaking its tile's top-left corner.
         if CommandLine.arguments.contains("--tile-agent-bubble-check") {
             _ = NSApplication.shared
             do {
