@@ -37,7 +37,7 @@ STUBS = {
 mode=$1
 case $mode in --skip-awake) ;; --awake-only) ;; *) echo "unknown mode $mode" >&2; exit 2 ;; esac
 # What a leg would see: the checkout's branch, the CLIs on PATH, inherited gate state.
-echo "$(git rev-parse HEAD) branch=$(git branch --show-current) cli=$(command -v array-fixture-cli || echo none) ref=${ARRAY_NIGHTLY_REF:-unset}" >> "$SHIP_EVENTS.legs"
+echo "$(git rev-parse HEAD) branch=$(git branch --show-current) first=${PATH%%:*} cli=$(command -v array-fixture-cli || echo none) ref=${ARRAY_NIGHTLY_REF:-unset}" >> "$SHIP_EVENTS.legs"
 echo "matrix $mode $(git rev-parse HEAD) owner=${ARRAY_MATRIX_LOCK_OWNER:-none}" >> "$SHIP_EVENTS"
 mkdir -p "$ARRAY_MATRIX_RESULTS"
 status=$(cat "$SHIP_PLAN/matrix$mode" 2>/dev/null || echo pass)
@@ -197,8 +197,8 @@ def gate_cases(fx):
     events = fx.log()
     expect(events[0].startswith(f"matrix --skip-awake {gated} owner=") and "owner=none" not in events[0], f"matrix under lock: {events}")
     expect("--configuration release --channel prod" in events[1] and "owner=none" not in events[1], f"release bundle under lock: {events}")
-    expect(fx.legs_saw() == [f"{gated} branch=gate/nightly-checkout cli={fx.root / 'clis/array-fixture-cli'} ref=unset"],
-           f"legs run on a named branch with the caller's CLIs: {fx.legs_saw()}")
+    expect(fx.legs_saw() == [f"{gated} branch=gate/nightly-checkout first=/opt/homebrew/bin cli={fx.root / 'clis/array-fixture-cli'} ref=unset"],
+           f"legs run on a named branch, system tools first, with the caller's CLIs: {fx.legs_saw()}")
     print("PASS gate-builds-candidate")
 
     result = fx.run("nightly-gate.sh")

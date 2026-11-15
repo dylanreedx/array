@@ -23,11 +23,12 @@ label = 'dev.arrayapp.nightly-gate'
 plist = Path.home() / 'Library/LaunchAgents' / (label + '.plist')
 args = sys.argv[2:]
 env = dict(os.environ)
-# Legs resolve claude, codex and pi on PATH. --install records the installing
-# shell's PATH in the LaunchAgent; by hand the caller's PATH applies. The system
-# directories are appended either way. Keep managed-agent crash protection intact.
+# The system directories come first, so python3, git and node resolve the same
+# however the gate starts. The caller's PATH follows, for what lives only there:
+# claude, codex and pi. --install records the installing shell's PATH in the
+# LaunchAgent. Keep managed-agent crash protection intact.
 SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
-env['PATH'] = ':'.join(p for p in [os.environ.get('PATH', ''), SYSTEM_PATH] if p)
+env['PATH'] = ':'.join(p for p in [SYSTEM_PATH, os.environ.get('PATH', '')] if p)
 # Gating a named ref is for this process only; no leg may inherit it.
 REF = env.pop('ARRAY_NIGHTLY_REF', 'origin/array/integration')
 # The checkout sits on this local branch, never a detached HEAD: legs that read
