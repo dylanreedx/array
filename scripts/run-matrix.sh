@@ -1020,6 +1020,9 @@ fi
 if [[ "$RESTORE_SCALING_ONLY" -eq 1 ]]; then
   run swift build --product Array -j 2
   run swift build --product ContinuumRevivedCoreChecks -j 2
+  # The full --skip-awake pass defers CoreChecks; keep this offline scaling
+  # witness visible in the targeted gate's result accounting as well.
+  run_leg .build/debug/ContinuumRevivedCoreChecks --activity-snapshot-scaling-check
   run_app_check .build/debug/Array --restore-scaling-check
   run_app_check .build/debug/Array --agent-record-archive-check
   run_app_check .build/debug/Array --agent-restore-check
