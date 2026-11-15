@@ -4150,22 +4150,46 @@ final class CanvasNSView: NSView, TokenThemed {
     /// plate and a neighbour's hanging into the gutter alike. O(1) in the
     /// number of tiles: the plane answers from the cells the ring's stroke
     /// crosses (`CanvasWorldPlaneView.agentBubbles(alongOutlineOf:margin:)`).
-    func agentBubbleRingCut(around ring: CGRect) -> CGPath? {
+    func agentBubbleRingCut(around ring: CGRect) -> RingCut? {
         let zoom = CGFloat(canvasState.viewport.zoom)
         guard zoom > 0, !ring.isEmpty else { return nil }
         let breathing = TileAgentBubbleLayer.Squircle.ringBreathing
         let world = worldPlane.convert(ring, from: self)
         let margin = (breathing + FocusBorderOverlayView.lineWidth) / zoom
+        // Ring-local and rounded to 1/64 pt, so a pan (which moves the ring and
+        // its plates together) yields an EQUAL cut and every mask is reused.
+        func q(_ v: CGFloat) -> CGFloat { (v * 64).rounded() / 64 }
         let plates = worldPlane.agentBubbles(alongOutlineOf: world, margin: margin)
-        guard !plates.isEmpty else { return nil }
-        let cut = CGMutablePath()
-        for plate in plates where !plate.isHidden {
-            let box = convert(plate.frame, from: worldPlane)
-            cut.addPath(TileAgentBubbleLayer.Squircle.path(
-                in: box, tileRadius: plate.bubble.tileRadius * zoom, scale: plate.bubble.chromeScale * zoom,
-                outset: breathing))
+            .filter { !$0.isHidden }
+            .map { plate -> RingCut.Plate in
+                let box = convert(plate.frame, from: worldPlane).offsetBy(dx: -ring.minX, dy: -ring.minY)
+                return RingCut.Plate(box: CGRect(x: q(box.minX), y: q(box.minY), width: q(box.width), height: q(box.height)),
+                                     tileRadius: q(plate.bubble.tileRadius * zoom), scale: q(plate.bubble.chromeScale * zoom))
+            }
+        return plates.isEmpty ? nil : RingCut(plates: plates)
+    }
+
+    /// The squircles a ring passes, in the ring's own coordinates (origin at
+    /// its frame's top-left): Equatable, so a ring can keep its mask while its
+    /// cut is unchanged.
+    struct RingCut: Equatable {
+        struct Plate: Equatable {
+            var box: CGRect
+            var tileRadius: CGFloat
+            var scale: CGFloat
         }
-        return cut.isEmpty ? nil : cut
+        var plates: [Plate]
+
+        /// Each plate's outline outset by the breathing gap, ring-local.
+        var path: CGPath {
+            let cut = CGMutablePath()
+            for plate in plates {
+                cut.addPath(TileAgentBubbleLayer.Squircle.path(
+                    in: plate.box, tileRadius: plate.tileRadius, scale: plate.scale,
+                    outset: TileAgentBubbleLayer.Squircle.ringBreathing))
+            }
+            return cut
+        }
     }
 
     /// A plate appeared, moved or went: every ring it was or is near cuts
@@ -4177,9 +4201,11 @@ final class CanvasNSView: NSView, TokenThemed {
             let world = worldPlane.convert(ring, from: self).insetBy(dx: -reach, dy: -reach)
             return [old, new].contains { $0.map(world.intersects) ?? false }
         }
+        // Deferred to the overlay's next layout: a drag moves the plate and then
+        // the ring in one step, and the ring cuts once, after both.
         for overlay in [focusBorderOverlay].compactMap({ $0 }) + Array(attentionBorderOverlays.values)
         where !overlay.isHidden && near(overlay.frame) {
-            overlay.refreshBubbleCut()
+            overlay.needsLayout = true
         }
         if let selection = tileSelection.qaOverlay, !selection.isHidden { selection.needsDisplay = true }
     }
@@ -15010,13 +15036,16 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
     private(set) var qaResolvedGeometry: TileOutlineGeometry.Result?
     /// Where the ring must not paint, for a ring at a frame (canvas
     /// coordinates): the squircles it passes (`agentBubbleRingCut`).
-    var bubbleCut: ((CGRect) -> CGPath?)?
+    var bubbleCut: ((CGRect) -> CanvasNSView.RingCut?)?
     /// The cut and occluders the mask was last built from, overlay-local: a
     /// camera step that moves the ring with its plates rebuilds nothing.
-    private var builtMask: (size: CGSize, occluders: [CGRect], cut: CGPath?)?
+    private var builtMask: (size: CGSize, occluders: [CGRect], cut: CanvasNSView.RingCut?)?
 
-    /// A plate near the ring moved: cut again.
+    /// Cut again now (a plate near the ring moved; the canvas defers this to
+    /// layout, a witness calls it directly).
     func refreshBubbleCut() { layoutShape() }
+    /// QA: how many times the mask was built (a pan reuses it).
+    private(set) var qaMaskBuilds = 0
     var qaMaskPath: CGPath? { shape.mask == nil ? nil : outlineMask.path }
     /// Filled screen-space stroke envelope after the actual drawing mask.
     var qaVisibleStrokePath: CGPath? {
@@ -15142,9 +15171,12 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
         CATransaction.setDisableActions(true)
         shape.frame = bounds
         shape.path = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
-        let occluders = (qaResolvedGeometry?.occluders ?? []).map { $0.offsetBy(dx: -frame.minX, dy: -frame.minY) }
-        var toLocal = CGAffineTransform(translationX: -frame.minX, y: -frame.minY)
-        let cut = bubbleCut?(frame)?.copy(using: &toLocal)
+        func q(_ v: CGFloat) -> CGFloat { (v * 64).rounded() / 64 }
+        let occluders = (qaResolvedGeometry?.occluders ?? []).map {
+            let r = $0.offsetBy(dx: -frame.minX, dy: -frame.minY)
+            return CGRect(x: q(r.minX), y: q(r.minY), width: q(r.width), height: q(r.height))
+        }
+        let cut = bubbleCut?(frame)
         if occluders.isEmpty && cut == nil {
             shape.mask = nil
             builtMask = nil
@@ -15154,12 +15186,13 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
             for occluder in occluders {
                 visible = visible.subtracting(CGPath(rect: occluder, transform: nil))
             }
-            if let cut { visible = visible.subtracting(cut) }
+            if let cut { visible = visible.subtracting(cut.path) }
             outlineMask.frame = bounds
             outlineMask.fillColor = NSColor.black.cgColor
             outlineMask.path = visible
             shape.mask = outlineMask
             builtMask = (bounds.size, occluders, cut)
+            qaMaskBuilds += 1
         }
         CATransaction.commit()
     }

@@ -48,7 +48,9 @@ final class AgentCharacterSpriteAtlas: @unchecked Sendable {
     /// fitting the frame, or the union of every frame, shrinks the art to a speck.
     let typicalInkSide: CGFloat
 
-    /// One pass over the atlas, once per atlas.
+    /// One pass over the atlas, once per atlas. Ink is what reads as the
+    /// character: at least half opaque, so a faint shadow or outline never
+    /// makes the art seem wider than it looks.
     private static func measureInk(_ atlas: AgentCharacterAtlas) -> (CGRect, CGFloat) {
         var union = (minX: Int.max, minY: Int.max, maxX: -1, maxY: -1)
         var sides: [Int] = []
@@ -56,7 +58,7 @@ final class AgentCharacterSpriteAtlas: @unchecked Sendable {
             var minX = Int.max, minY = Int.max, maxX = -1, maxY = -1
             for y in 0..<frame.height {
                 let row = (frame.y + y) * atlas.width
-                for x in 0..<frame.width where atlas.pixels[(row + frame.x + x) * 4 + 3] > 24 {
+                for x in 0..<frame.width where atlas.pixels[(row + frame.x + x) * 4 + 3] > 127 {
                     minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
                 }
             }

@@ -333,6 +333,13 @@ final class CanvasWorldPlaneView: NSView {
         onAgentBubbleMoved?(previous?.frame, frame)
     }
 
+    /// A filed plate kept its box but changed its outline (a corner style):
+    /// the rings near it cut again.
+    func agentBubbleReshaped(_ view: TileAgentBubbleView) {
+        guard let entry = agentBubbleEntries[ObjectIdentifier(view)] else { return }
+        onAgentBubbleMoved?(entry.frame, entry.frame)
+    }
+
     private func forgetAgentBubble(_ view: TileAgentBubbleView) {
         let id = ObjectIdentifier(view)
         guard let previous = agentBubbleEntries[id] else { return }

@@ -80,10 +80,12 @@ enum TileAgentBubbleChecks {
         return views.allSatisfy { view in
             view.layoutSubtreeIfNeeded()
             guard view.qaAgentBubble?.bubbleStyle == style, let frame = view.agentBubbleFrame else { return false }
-            let hosted = view.agentBubbleView?.superview != nil
+            guard let host = view.agentBubbleView, let bar = view.qaTitleBarView else { return false }
             // AppKit attaches a newly added view's layer on the next turn of the run loop.
-            let attached = view.agentBubbleView.map { $0.layer?.superlayer != nil && $0.layer?.superlayer === $0.superview?.layer } ?? false
-            return style.breaksCorner ? hosted && attached && frame.minX < 0 : !hosted && frame.minX >= 0
+            let attached = host.layer?.superlayer != nil && host.layer?.superlayer === host.superview?.layer
+                && host.bubble.superlayer === host.layer
+            return attached && (style.breaksCorner ? host.superview === view.superview && frame.minX < 0
+                                                   : host.superview === bar && frame.minX >= 0)
         }
     }
 
@@ -265,8 +267,8 @@ enum TileAgentBubbleChecks {
                 try expect(views[0].qaAgentBubble?.qaParts.sphereShown == false && views[0].qaAgentBubble?.qaParts.plateShown == true,
                            "a Squircle draws a plate and no sphere")
             } else {
-                try expect(views[0].qaAgentBubble?.qaParts.plateShown == false && views[0].qaAgentBubble?.qaParts.ringShown == false,
-                           "Inline draws no container")
+                try expect(views[0].qaAgentBubble?.qaParts.plateShown == true && views[0].qaAgentBubble?.qaParts.sphereShown == false,
+                           "Inline draws its own plate")
             }
         }
         try expect(buckets.count >= 3, "the sweep crossed several chrome scale buckets: \(buckets.sorted())")
@@ -281,7 +283,7 @@ enum TileAgentBubbleChecks {
         /// point, row 0 at `region.minY`: a probe square at the region's top
         /// decides which way the render's rows run, so every lookup below reads
         /// plane coordinates whichever it is.
-        func render(_ region: CGRect) throws -> CGImage {
+        func render(_ region: CGRect, under: CGColor? = nil) throws -> CGImage {
             canvas.layoutSubtreeIfNeeded()
             let width = Int((region.width * 2).rounded(.up)), height = Int((region.height * 2).rounded(.up))
             guard let planeLayer = plane.layer else { throw Failure(description: "no plane layer") }
@@ -298,6 +300,10 @@ enum TileAgentBubbleChecks {
                                               space: CGColorSpaceCreateDeviceRGB(),
                                               bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
                     throw Failure(description: "no render context")
+                }
+                if let under {
+                    context.setFillColor(under)
+                    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
                 }
                 context.scaleBy(x: 2, y: 2)
                 context.translateBy(x: -region.minX, y: -region.minY)
@@ -359,6 +365,85 @@ enum TileAgentBubbleChecks {
             let change = try largestChannelChange(shown, faded) { x, _ in x < outsideColumns }
             try expect(change >= 48, "the squircle's part outside its tile is painted (largest channel change \(change))")
         }
+
+        // 2c-0. The plate: opaque (nothing behind it shows through), clear of
+        // its bar in both appearances, with or without a colour, and filled by
+        // the art. At Dylan's 125%.
+        for style in [Style.inline, .squircle] {
+            setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, style.rawValue)
+            try expect(pump(until: { showsStyle(style, views, canvas) }), "\(style.title) for the plate")
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                window.appearance = NSAppearance(named: appearance)
+                canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1.25))
+                canvas.layoutSubtreeIfNeeded()
+                for view in views { view.layoutSubtreeIfNeeded() }
+                pump(0.05)
+                for (index, view) in views.enumerated() {
+                    let label = "\(style.title) \(appearance == .aqua ? "light" : "dark") tile \(index)"
+                    guard let frame = view.agentBubbleFrame, let bubble = view.qaAgentBubble, view.qaTitleBarView != nil else {
+                        throw Failure(description: "\(label): no plate")
+                    }
+                    try expect(bubble.qaPlateColors.count >= 2 && bubble.qaPlateColors.allSatisfy { $0.alpha >= 0.999 },
+                               "\(label): the plate's fill is opaque (\(bubble.qaPlateColors.map(\.alpha)))")
+                    let fill = view.qaArtFill ?? 0
+                    try expect(fill >= 0.6, "\(label): the art fills its plate (\(fill) of the side)")
+                    // Opaque, witnessed: the plate's own layer tree, rendered
+                    // over magenta and over green, shows neither inside its outline.
+                    guard let host = view.agentBubbleView, let hostLayer = host.layer else {
+                        throw Failure(description: "\(label): no host")
+                    }
+                    let plateBox = CGRect(origin: .zero, size: frame.size)
+                    let outline = style.breaksCorner
+                        ? TileAgentBubbleLayer.Squircle.path(in: plateBox, tileRadius: bubble.tileRadius, scale: bubble.chromeScale)
+                        : TileAgentBubbleLayer.Inline.path(in: plateBox, tileRadius: bubble.tileRadius, scale: bubble.chromeScale)
+                    let edge = outline.copy(strokingWithWidth: 3, lineCap: .round, lineJoin: .round, miterLimit: 10)
+                    func renderPlate(over colour: CGColor) throws -> CGImage {
+                        let width = Int((plateBox.width * 4).rounded(.up)), height = Int((plateBox.height * 4).rounded(.up))
+                        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                                      space: CGColorSpaceCreateDeviceRGB(),
+                                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                            throw Failure(description: "no plate context")
+                        }
+                        context.setFillColor(colour)
+                        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+                        context.scaleBy(x: 4, y: 4)
+                        hostLayer.render(in: context)
+                        guard let image = context.makeImage() else { throw Failure(description: "no plate render") }
+                        return image
+                    }
+                    let overMagenta = try renderPlate(over: NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1).cgColor)
+                    let overGreen = try renderPlate(over: NSColor(srgbRed: 0, green: 1, blue: 0, alpha: 1).cgColor)
+                    // The outline is symmetric enough top to bottom that either row
+                    // order reads it; test both and take the better.
+                    func bleed(flipped: Bool) throws -> Int {
+                        try largestChannelChange(overMagenta, overGreen) { x, y in
+                            let p = CGPoint(x: x * plateBox.width, y: (flipped ? 1 - y : y) * plateBox.height)
+                            return outline.contains(p) && !edge.contains(p)
+                        }
+                    }
+                    let through = min(try bleed(flipped: false), try bleed(flipped: true))
+                    let corner = try largestChannelChange(overMagenta, overGreen) { x, y in x < 0.04 && y < 0.04 }
+                    try expect(corner >= 100 || !style.breaksCorner || bubble.tileRadius == 0,
+                               "\(label): fixture: past the plate's rounded corner the backdrop shows (\(corner))")
+                    try expect(through <= 2, "\(label): what lies behind the plate shows through it (largest channel change \(through))")
+                    // Clear of the bar: the plate's fill against the bar's own
+                    // colour (its fill with its identity wash over it).
+                    func components(_ colour: CGColor?) -> [CGFloat] {
+                        guard let c = colour.flatMap({ NSColor(cgColor: $0)?.usingColorSpace(.sRGB) }) else { return [0, 0, 0, 0] }
+                        return [c.redComponent, c.greenComponent, c.blueComponent, c.alphaComponent]
+                    }
+                    let plateColour = Array(components(bubble.qaPlateColors.first).prefix(3))
+                    let base = components(view.qaTitleBarView?.layer?.backgroundColor)
+                    let wash = components(view.qaTitleBarTint?.cgColor)
+                    let barColour = (0..<3).map { base[$0] * (1 - wash[3]) + wash[$0] * wash[3] }
+                    let ratio = contrast(plateColour, barColour)
+                    try expect(ratio >= 1.3, "\(label): the plate \(plateColour) stands clear of its bar \(barColour) (contrast \(ratio))")
+                }
+            }
+            window.appearance = nil
+        }
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        canvas.layoutSubtreeIfNeeded()
 
         // 2c. The squircle's hit shape is its visible shape, outside the tile
         // where it matters (a press there is the tile's, or the canvas's). A dark
@@ -576,14 +661,13 @@ enum TileAgentBubbleChecks {
             try expect(frame.minX >= 0 && frame.minY >= -0.01 && frame.maxX <= view.bounds.width
                        && frame.maxY <= view.chromeBarHeight + pixel,
                        "\(label): Inline sits inside the bar \(frame) (bar \(view.chromeBarHeight))")
-            try expect(abs(frame.height - view.chromeBarHeight) <= pixel,
-                       "\(label): Inline is one bar tall (\(frame.height) vs \(view.chromeBarHeight))")
-            try expect(view.agentBubbleView?.superview == nil, "\(label): Inline has no view in the world plane")
-            guard let clip = bubble.superlayer, clip.masksToBounds,
-                  abs(clip.bounds.width - bar.bounds.width) < 0.01, abs(clip.bounds.height - bar.bounds.height) < 0.01 else {
-                throw Failure(description: "\(label): Inline is hosted behind a clip the size of the bar")
-            }
-            var ancestor: CALayer? = clip
+            let margin = 2 * TileAgentBubbleLayer.Inline.inset * scale
+            try expect(frame.height <= view.chromeBarHeight + pixel && frame.height >= view.chromeBarHeight - margin - pixel
+                       && abs(frame.width - frame.height) <= pixel,
+                       "\(label): Inline is a square plate a little less than the bar tall (\(frame.size) vs \(view.chromeBarHeight))")
+            try expect(bubble.qaArtClippedToPlate, "\(label): the art stays on its plate")
+            try expect(view.agentBubbleView?.superview === bar, "\(label): Inline is hosted in its title bar, not the world plane")
+            var ancestor: CALayer? = bubble.superlayer
             while let current = ancestor, current !== view.layer { ancestor = current.superlayer }
             try expect(ancestor === view.layer, "\(label): Inline's host lies inside its tile's layer")
             if let frameView = canvas.superview {
@@ -683,10 +767,12 @@ enum TileAgentBubbleChecks {
         let home = below.frame.origin
         for dy in [-3.0, -5.0, 2.0] {
             below.setFrameOrigin(NSPoint(x: home.x + 2, y: home.y + dy))
+            canvas.layoutSubtreeIfNeeded()
             guard let stroke = canvas.qaFocusBorderVisibleStrokePath else { throw Failure(description: "no ants") }
             try expect(crossings(stroke).isEmpty, "a neighbour moved \(dy) pt: the ants cross plates \(crossings(stroke))")
         }
         below.setFrameOrigin(home)
+        canvas.layoutSubtreeIfNeeded()
 
         // O(1): a few hundred plates far away cost the ring nothing more.
         guard let overlay = canvas.qaFocusBorderOverlay else { throw Failure(description: "no ants") }
@@ -719,8 +805,59 @@ enum TileAgentBubbleChecks {
         for (index, stroke) in selection.qaVisibleStrokePaths.enumerated() {
             try expect(crossings(stroke).isEmpty, "member ring \(index) crosses the plates of tiles \(crossings(stroke))")
         }
+        // A pan moves every ring with its plates: no mask is built again, the
+        // ants' or a member ring's, and still nothing crosses.
+        let maskBuilds = overlay.qaMaskBuilds, areaBuilds = selection.qaAreaBuilds
+        for step in 1...12 {
+            canvas.setViewport(CanvasViewport(x: Double(step) * 7, y: Double(step) * 3, zoom: 1))
+            canvas.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            for stroke in selection.qaVisibleStrokePaths + [canvas.qaFocusBorderVisibleStrokePath].compactMap({ $0 }) {
+                try expect(crossings(stroke).isEmpty, "pan step \(step): a ring crosses plates \(crossings(stroke))")
+            }
+        }
+        try expect(overlay.qaMaskBuilds == maskBuilds && selection.qaAreaBuilds == areaBuilds,
+                   "a pan rebuilt ring masks: ants \(overlay.qaMaskBuilds - maskBuilds), members \(selection.qaAreaBuilds - areaBuilds)")
+        // Positive control: a neighbour's plate moving does rebuild them.
+        below.setFrameOrigin(NSPoint(x: below.frame.minX + 3, y: below.frame.minY - 3))
+        canvas.layoutSubtreeIfNeeded()
+        _ = selection.qaVisibleStrokePaths
+        try expect(overlay.qaMaskBuilds > maskBuilds || selection.qaAreaBuilds > areaBuilds,
+                   "fixture: moving a plate near the rings rebuilds a mask")
+        below.setFrameOrigin(home)
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        canvas.layoutSubtreeIfNeeded()
         canvas.tileSelection.clear()
         canvas.layoutSubtreeIfNeeded()
+
+        // Every corner style: the plate's top-left stays concentric with the
+        // tile's corner (Rounded's radius outgrows half the plate), and the
+        // ants cut around the new outline.
+        defer { CornerStyleController.apply(.standard); canvas.layoutSubtreeIfNeeded() }
+        for cornerStyle in CornerStyle.allCases {
+            CornerStyleController.apply(cornerStyle)
+            canvas.layoutSubtreeIfNeeded()
+            for view in views { view.layoutSubtreeIfNeeded() }
+            canvas.layoutSubtreeIfNeeded()
+            let view = views[3]
+            guard let frame = view.agentBubbleFrame, let radius = view.layer?.cornerRadius else {
+                throw Failure(description: "\(cornerStyle): no plate")
+            }
+            let overflow = -frame.minX
+            let diagonal = CGPoint(x: -1 / 2.0.squareRoot(), y: -1 / 2.0.squareRoot())
+            if radius > 0 {
+                let reach = radius + overflow
+                let inner = NSPoint(x: radius + diagonal.x * (reach - 0.75), y: radius + diagonal.y * (reach - 0.75))
+                let outer = NSPoint(x: radius + diagonal.x * (reach + 0.75), y: radius + diagonal.y * (reach + 0.75))
+                try expect(view.agentBubbleContains(inner) && !view.agentBubbleContains(outer),
+                           "\(cornerStyle): the plate's top-left is concentric with the tile's \(radius) pt corner (in \(inner): \(view.agentBubbleContains(inner)), out \(outer): \(view.agentBubbleContains(outer)))")
+            } else {
+                try expect(view.agentBubbleContains(NSPoint(x: frame.minX + 0.3, y: frame.minY + 0.3)),
+                           "\(cornerStyle): a sharp tile has a square plate")
+            }
+            guard let stroke = canvas.qaFocusBorderVisibleStrokePath else { throw Failure(description: "no ants") }
+            try expect(crossings(stroke).isEmpty, "\(cornerStyle): the ants cross the plates of tiles \(crossings(stroke))")
+        }
     }
 
     // MARK: Settings
@@ -800,6 +937,22 @@ enum TileAgentBubbleChecks {
         let crop = CGRect(x: inHost.minX * scale, y: y * scale, width: inHost.width * scale, height: inHost.height * scale).integral
         guard let cropped = image.cropping(to: crop) else { throw Failure(description: "could not crop \(rect)") }
         return cropped
+    }
+
+    /// The first pixel's sRGB-ish channels, 0...1.
+    static func pixel(_ image: CGImage) throws -> [CGFloat] {
+        let data = try rgba(image)
+        return (0..<3).map { CGFloat(data[$0]) / 255 }
+    }
+
+    /// WCAG contrast ratio of two colours.
+    static func contrast(_ a: [CGFloat], _ b: [CGFloat]) -> CGFloat {
+        func luminance(_ c: [CGFloat]) -> CGFloat {
+            let linear = c.map { $0 <= 0.03928 ? $0 / 12.92 : pow(($0 + 0.055) / 1.055, 2.4) }
+            return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+        }
+        let (x, y) = (luminance(a), luminance(b))
+        return (max(x, y) + 0.05) / (min(x, y) + 0.05)
     }
 
     static func rgba(_ image: CGImage) throws -> [UInt8] {
@@ -913,35 +1066,37 @@ enum TileAgentBubbleChecks {
         var points: [(String, NSPoint, NSCursor)] = [("centre", NSPoint(x: icon.midX, y: icon.midY), .openHand)]
         let savedCursor = NSCursor.current
         defer { savedCursor.set() }
-        guard style.breaksCorner else {
-            // Inline: the bar's own grab, and the left edge still resizes.
-            try expect(view.agentBubbleCursor(at: points[0].1) == .openHand, "Inline: the open hand on the icon")
-            try expect(view.agentBubbleCursor(at: NSPoint(x: 0.1, y: icon.maxY - 0.1)) == .resizeLeftRight,
-                       "Inline: the left edge beside the icon resizes")
-            return
-        }
-        guard let host = view.agentBubbleView, let plane = host.superview else {
-            throw Failure(description: "the squircle has no view")
+        guard let host = view.agentBubbleView, let hostSuper = host.superview else {
+            throw Failure(description: "\(style.title): the icon has no view")
         }
         host.updateTrackingAreas()
-        let boxInHost = host.convert(plane.convert(icon, from: view), from: plane)
+        let boxInHost = host.convert(hostSuper.convert(icon, from: view), from: hostSuper)
         try expect(host.trackingAreas.contains { $0.rect.contains(boxInHost) && $0.options.contains(.mouseMoved)
-            && $0.options.contains(.cursorUpdate) }, "the squircle has pointer and cursor tracking over its whole box")
+            && $0.options.contains(.cursorUpdate) }, "\(style.title): pointer and cursor tracking over the whole plate")
+        if !style.breaksCorner {
+            // Inline overlaps the tile's top resize band: there, as a press
+            // moves the tile, the cursor is the open hand.
+            let banded = NSPoint(x: icon.midX, y: icon.minY + 0.5)
+            try expect(view.qaResizeEdge(at: banded) != nil, "fixture: Inline's top lies in the resize band")
+            points.append(("on the plate, in the top resize band", banded, .openHand))
+            try expect(view.agentBubbleCursor(at: NSPoint(x: 0.1, y: icon.maxY - 0.1)) == .resizeLeftRight,
+                       "Inline: the left edge beside the icon resizes")
+        }
         let overflow = -icon.minX
-        points += [
+        if style.breaksCorner { points += [
             ("right edge", NSPoint(x: icon.maxX - 0.1, y: icon.midY), .openHand),
             ("left edge, outside the tile", NSPoint(x: icon.minX + 0.1, y: icon.midY), .openHand),
             ("top edge, outside the tile", NSPoint(x: icon.midX, y: icon.minY + 0.1), .openHand),
             ("on the plate, outside the tile", NSPoint(x: icon.minX + overflow / 2, y: icon.midY), .openHand),
             ("the box's empty corner, outside the tile", NSPoint(x: icon.minX + 0.1, y: icon.minY + 0.1), .arrow),
             ("the box's lower-left corner on the left edge", NSPoint(x: 0.1, y: icon.maxY - 0.1), .resizeLeftRight),
-        ]
+        ] }
         for (label, point, expected) in points {
             let event = NSEvent.mouseEvent(with: .mouseMoved, location: view.convert(point, to: nil),
                 modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0)!
             try expect(view.agentBubbleContains(point) == (expected == NSCursor.openHand),
-                       "\(label): cursor and the plate's grab agree")
+                       "\(style.title) \(label): cursor and the plate's grab agree")
             NSCursor.arrow.set()
             if expected == .arrow { NSCursor.openHand.set() }
             host.mouseMoved(with: event)
@@ -1108,14 +1263,15 @@ enum TileAgentBubbleChecks {
                                     && abs(hung.after.y - hung.before.y + 30 / zoom) < 2 / zoom),
                        "\(label): ...and moved it with the pointer (\(hung.after.x - hung.before.x), \(hung.after.y - hung.before.y))")
         } else {
-            try expect(view.agentBubbleView?.superview == nil && again.minX >= 0 && again.minY >= -0.01,
-                       "\(label): Inline stays in its tile through the drag (\(again))")
+            try expect(view.agentBubbleView?.superview === view.qaTitleBarView && again.minX >= 0 && again.minY >= -0.01,
+                       "\(label): Inline stays in its title bar through the drag (\(again))")
         }
 
         // 3. From the part of the icon that lies in the top edge's resize band.
         canvas.layoutSubtreeIfNeeded()
         guard let third = view.agentBubbleFrame else { throw Failure(description: "\(label): no icon") }
-        let corner = NSPoint(x: third.midX + third.width / 4, y: 1 / zoom)
+        // The squircle's top crosses the tile's edge; Inline's sits just below it.
+        let corner = NSPoint(x: third.midX + third.width / 4, y: max(1 / zoom, third.minY + 0.5 / zoom))
         try expect(view.qaResizeEdge(at: corner) != nil, "\(label): the probe point lies in the top edge's resize band")
         try expect(view.agentBubbleContains(corner), "\(label): the probe point lies on the icon")
         let banded = try drag(from: corner, by: CGSize(width: -40, height: 24), name: "corner")
