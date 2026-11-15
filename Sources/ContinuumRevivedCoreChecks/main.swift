@@ -8,6 +8,10 @@ if CommandLine.arguments.contains("--companion-agent-destination-check") {
     do { try runCompanionAgentDestinationChecks(); exit(0) }
     catch { print("FAIL companion agent destination: \(error)"); exit(1) }
 }
+if CommandLine.arguments.contains("--activity-snapshot-scaling-check") {
+    do { print(try runActivitySnapshotScalingChecks()); exit(0) }
+    catch { print("FAIL activity snapshot scaling: \(error)"); exit(1) }
+}
 if CommandLine.arguments.contains("--companion-task-ledger-check") {
     do { try runCompanionTaskLedgerChecks(); exit(0) }
     catch { print("FAIL companion task ledger: \(error)"); exit(1) }

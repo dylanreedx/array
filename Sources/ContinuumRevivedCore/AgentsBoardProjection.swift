@@ -130,16 +130,32 @@ public enum AgentsBoardProjection {
     /// Still ORDER-INDEPENDENT in the sense that matters: `apply` is a merge on
     /// `(sequence, replicaId)`, not an overwrite, so folding a foreign event that
     /// arrives afterwards with a HIGHER sequence still wins.
+    ///
+    /// Folds in place (`applyInPlace`): the host's snapshot is changed where it
+    /// lives, so an event costs the same however many agents the snapshot holds.
+    public static func appendLocal(
+        _ draft: AgentActivityEventDraft,
+        into snapshot: inout ActivityLogSnapshot,
+        replicaId: UUID
+    ) {
+        applyInPlace(&snapshot, AgentActivityEvent(
+            stamping: draft,
+            sequence: snapshot.snapshotSequence + 1,
+            replicaId: replicaId
+        ))
+    }
+
+    /// `appendLocal(_:into:replicaId:)` onto a copy. A host advancing the snapshot
+    /// it holds uses `into:`; `held = appendLocal(draft, to: held, ...)` copies every
+    /// agent's entry per event.
     public static func appendLocal(
         _ draft: AgentActivityEventDraft,
         to snapshot: ActivityLogSnapshot,
         replicaId: UUID
     ) -> ActivityLogSnapshot {
-        apply(snapshot, AgentActivityEvent(
-            stamping: draft,
-            sequence: snapshot.snapshotSequence + 1,
-            replicaId: replicaId
-        ))
+        var next = snapshot
+        appendLocal(draft, into: &next, replicaId: replicaId)
+        return next
     }
 
     /// P2B.7: which agents' rows differ between two snapshots.

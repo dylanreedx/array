@@ -52,7 +52,7 @@ public actor ActivityStore: ActivityStoreProtocol {
         // (arriving later via the transport) never dictate this host's next number.
         for event in existing.sorted(by: activityEventOrder) {
             self.log.append(event)
-            self.snapshot = apply(self.snapshot, event)
+            applyInPlace(&self.snapshot, event)
             if event.replicaId == replicaId {
                 self.nextSequence = max(self.nextSequence, event.sequence + 1)
             }
@@ -67,7 +67,7 @@ public actor ActivityStore: ActivityStoreProtocol {
         precondition(draft.summary.count <= 500, "summary too long — transcript body leaked? (I5)")
         let event = AgentActivityEvent(stamping: draft, sequence: nextSequence, replicaId: replicaId)
         log.append(event)
-        snapshot = apply(snapshot, event)   // THE pure fold — no inline duplicate
+        applyInPlace(&snapshot, event)   // THE pure fold — no inline duplicate
         nextSequence += 1
         for continuation in observers.values {
             continuation.yield(.event(event))
