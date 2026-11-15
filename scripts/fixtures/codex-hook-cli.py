@@ -2,14 +2,25 @@
 """Offline Codex hook-surface/runner double. Never starts a provider or model."""
 import hashlib, json, os, re, subprocess, sys, time, uuid
 
-import os, select, time
+import os, select, sys, time
 _fixture_parent = os.getppid()
 _fixture_deadline = time.monotonic() + 600
-_fixture_input = select.poll()
-_fixture_input.register(0, select.POLLHUP | select.POLLERR | select.POLLNVAL)
 def fixture_pause(seconds):
-    if (os.getppid() == 1 or os.getppid() != _fixture_parent
-            or time.monotonic() >= _fixture_deadline or _fixture_input.poll(0)):
+    reason = None
+    if os.getppid() == 1 or os.getppid() != _fixture_parent:
+        reason = 'parent gone'
+    elif time.monotonic() >= _fixture_deadline:
+        reason = 'deadline expired'
+    else:
+        # A poll object cannot be entered concurrently by prompt threads.
+        fixture_input = select.poll()
+        fixture_input.register(0, select.POLLHUP | select.POLLERR | select.POLLNVAL)
+        if fixture_input.poll(0): reason = 'stdin closed'
+    if reason:
+        try:
+            print('fixture_pause: ' + reason, file=sys.stderr, flush=True)
+        except (OSError, ValueError):
+            pass  # The parent may already have closed its stderr reader.
         os._exit(0)
     time.sleep(seconds)
 

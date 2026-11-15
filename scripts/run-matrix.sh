@@ -64,7 +64,6 @@ matrix_cleanup_tmux() {
     env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$MATRIX_TMUX_TMPDIR" "$MATRIX_TMUX_BIN" kill-server >/dev/null 2>&1 || true
   fi
   rm -rf "$MATRIX_TMUX_TMPDIR"
-  if [[ -n "${MATRIX_FAKE_CLI_TMPDIR:-}" ]]; then rmdir "$MATRIX_FAKE_CLI_TMPDIR" 2>/dev/null || true; fi
 }
 trap matrix_cleanup_tmux EXIT
 
@@ -322,11 +321,12 @@ MATRIX_RESULTS=$(cd "$MATRIX_RESULTS" && pwd)
 : > "$MATRIX_RESULTS/results.tsv"
 : > "$MATRIX_RESULTS/awake.sh"
 
-# Fixture executables inherit a private temporary namespace. Other benches may
-# run concurrently; neither their existing nor their new children belong to us.
-MATRIX_FAKE_CLI_TMPDIR=$(mktemp -d /tmp/array-matrix-fake-cli.XXXXXX)
-export TMPDIR="$MATRIX_FAKE_CLI_TMPDIR/"
-python3 scripts/check-fake-cli-leaks.py snapshot "$MATRIX_RESULTS/fake-cli-before.json" "$MATRIX_FAKE_CLI_TMPDIR"
+export ARRAY_CHECK_RUN_ID="$(uuidgen)"
+
+# Foundation chooses its own Darwin temp directory, ignoring TMPDIR. Attribute
+# only QA executable paths whose process environment carries this run's UUID.
+# The marker survives bench-directory deletion and excludes concurrent runs.
+python3 scripts/check-fake-cli-leaks.py snapshot "$MATRIX_RESULTS/fake-cli-before.json" "$ARRAY_CHECK_RUN_ID"
 
 run() {
   local log status=0
@@ -765,9 +765,19 @@ run_ios_build() {
   return 0
 }
 
+# The positive-control driver reaps only the PID/group this real bench hands off.
+if [[ "${CONTINUUM_FAKE_CLI_LEAK_PROBE_ONLY:-0}" == "1" ]]; then
+  export ARRAY_FAKE_CLI_CONTROL_PATH="$MATRIX_RESULTS/fake-cli-control.json"
+  run_app_check .build/debug/Array --fake-cli-leak-probe-check
+  matrix_finish_jobs
+  matrix_report "Fake CLI real bench leak probe (targeted; already built)"
+  exit $?
+fi
+
 # Already-built fixture lifecycle gate; builds are admitted by the caller.
 if [[ "${CONTINUUM_FAKE_CLI_LIFECYCLE_ONLY:-0}" == "1" ]]; then
   run_leg python3 scripts/check-fake-cli-leaks-test.py
+  run_leg python3 scripts/check-fake-cli-leaks-test.py --real-bench .build/debug/Array
   run_app_check .build/debug/Array --fake-cli-lifecycle-check
   run_app_check .build/debug/Array --helper-retry-check
   matrix_finish_jobs
@@ -1521,6 +1531,7 @@ run_app_check .build/debug/Array --managed-codex-launch-check
 run_app_check .build/debug/Array --managed-codex-hooks-check
 run_app_check .build/debug/Array --first-helper-isolation-check
 run_leg python3 scripts/check-fake-cli-leaks-test.py
+run_leg python3 scripts/check-fake-cli-leaks-test.py --real-bench .build/debug/Array
 run_app_check .build/debug/Array --fake-cli-lifecycle-check
 run_app_check .build/debug/Array --helper-retry-check
 run_app_check .build/debug/Array --helper-context-diet-check

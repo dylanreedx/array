@@ -1,19 +1,35 @@
 #!/usr/bin/env python3
-"""Report surviving fixture CLIs in one run's private TMPDIR. Never signal them."""
+"""Report surviving QA fixture CLIs tagged by this matrix run. Never signal them."""
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
 import sys
 import time
+import uuid
+
+RUN_KEY = 'ARRAY_CHECK_RUN_ID'
+UUID = r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}'
+BENCH = re.compile(r'continuum-[^/]+-' + UUID + r'\Z')
 
 
-def fixtures(root):
-    # Match an executable argument, never a path embedded inside a prompt.
-    aliases = {str(root), str(root).removeprefix('/private')}
-    prefix = '(?:' + '|'.join(re.escape(alias) for alias in aliases) + ')'
-    pattern = re.compile(r'(?:^|\s)(' + prefix + r'/\S*/(?:claude|codex|pi))(?=\s|$)')
+def executable(command):
+    # A script is argv[0], or argv[1] after its Python/shell interpreter.
+    # A later argument or quoted prompt mentioning a fixture is not a CLI.
+    for token in command.split(None, 2)[:2]:
+        path = Path(token)
+        if not path.is_absolute() or path.name not in ('claude', 'codex', 'pi'):
+            continue
+        parent = path.parent
+        if ((BENCH.fullmatch(parent.name) and '-bin-' in parent.name)
+                or (parent.name == 'bin' and BENCH.fullmatch(parent.parent.name))):
+            return str(path)
+    return None
+
+
+def fixtures(run_id):
+    uuid.UUID(run_id)  # Refuse an empty/ambiguous ownership marker.
+    marker = re.compile(r'(?:^|\s)' + RUN_KEY + '=' + re.escape(run_id) + r'(?=\s|$)')
     rows = subprocess.check_output(['/bin/ps', '-axo', 'pid=,ppid=,pgid=,command='], text=True)
     found = {}
     for row in rows.splitlines():
@@ -21,9 +37,15 @@ def fixtures(root):
         if len(fields) != 4:
             continue
         pid, parent, group, command = fields
-        match = pattern.search(command)
-        if match:
-            found[pid] = dict(ppid=int(parent), pgid=int(group), executable=match[1])
+        script = executable(command)
+        if script is None:
+            continue
+        # Read environments only for candidate QA scripts. Never print them.
+        current = subprocess.run(['/bin/ps', 'eww', '-p', pid, '-o', 'command='],
+                                 text=True, capture_output=True)
+        if current.returncode or not marker.search(current.stdout) or executable(current.stdout) != script:
+            continue
+        found[pid] = dict(ppid=int(parent), pgid=int(group), executable=script)
     return found
 
 
@@ -31,19 +53,17 @@ def main():
     mode, snapshot, *args = sys.argv[1:]
     path = Path(snapshot)
     if mode == 'snapshot':
-        root = Path(args[0]).resolve()
-        # A private namespace avoids blaming checks another bench starts later.
-        if not root.is_dir() or root == Path('/'):
-            raise ValueError('snapshot requires an existing private temporary directory')
-        before = fixtures(root)
-        path.write_text(json.dumps(dict(root=str(root), before=before)) + '\n')
-        print(f'Fake CLI snapshot: {len(before)} existing process(es), root {root}')
+        run_id = args[0]
+        before = fixtures(run_id)
+        path.write_text(json.dumps(dict(runID=run_id, before=before)) + '\n')
+        print(f'Fake CLI snapshot: {len(before)} existing process(es), run {run_id}')
     elif mode == 'check':
         saved = json.loads(path.read_text())
         deadline = time.monotonic() + 3
         while True:
-            after = fixtures(Path(saved['root']))
-            leaked = {pid: row for pid, row in after.items() if saved['before'].get(pid, {}).get('executable') != row['executable']}
+            after = fixtures(saved['runID'])
+            leaked = {pid: row for pid, row in after.items()
+                      if saved['before'].get(pid, {}).get('executable') != row['executable']}
             if not leaked or time.monotonic() >= deadline:
                 break
             time.sleep(.05)

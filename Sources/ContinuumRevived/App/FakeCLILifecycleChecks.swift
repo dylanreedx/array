@@ -9,14 +9,25 @@ enum FakeCLILifecycleChecks {
     /// Polling a release file must also notice EOF without consuming another
     /// protocol frame. POLLHUP works even if TextIOWrapper buffered input.
     static let pythonLifetime = #"""
-    import os, select, time
+    import os, select, sys, time
     _fixture_parent = os.getppid()
     _fixture_deadline = time.monotonic() + 600
-    _fixture_input = select.poll()
-    _fixture_input.register(0, select.POLLHUP | select.POLLERR | select.POLLNVAL)
     def fixture_pause(seconds):
-        if (os.getppid() == 1 or os.getppid() != _fixture_parent
-                or time.monotonic() >= _fixture_deadline or _fixture_input.poll(0)):
+        reason = None
+        if os.getppid() == 1 or os.getppid() != _fixture_parent:
+            reason = 'parent gone'
+        elif time.monotonic() >= _fixture_deadline:
+            reason = 'deadline expired'
+        else:
+            # A poll object cannot be entered concurrently by prompt threads.
+            fixture_input = select.poll()
+            fixture_input.register(0, select.POLLHUP | select.POLLERR | select.POLLNVAL)
+            if fixture_input.poll(0): reason = 'stdin closed'
+        if reason:
+            try:
+                print('fixture_pause: ' + reason, file=sys.stderr, flush=True)
+            except (OSError, ValueError):
+                pass  # The parent may already have closed its stderr reader.
             os._exit(0)
         time.sleep(seconds)
     """#
@@ -75,7 +86,88 @@ enum FakeCLILifecycleChecks {
         while Date() < killedDeadline, !ownedProcesses(in: bin).isEmpty { Thread.sleep(forTimeInterval: 0.02) }
     }
 
+    /// Stretch the OS poll window so two real prompt threads overlap
+    /// deterministically; every holder still uses the production fixture guard.
+    static func overlappingHolds() async throws {
+        let b = try WorkspaceAgentReportChecks.makeBench(label: "fake-cli-overlap")
+        defer { b.tearDown() }
+        let script = WorkspaceAgentReportChecks.fakePi
+            .replacingOccurrences(of: ".poll(0)", with: ".poll(10)")
+            .replacingOccurrences(of: #""release.flag""#, with: #""release-" + str(cmd["id"]) + ".flag""#)
+        let cli = b.binDir.appendingPathComponent("pi")
+        try script.write(to: cli, atomically: true, encoding: .utf8)
+        let child = try ProcessGroupChild.spawn(executable: cli.path, arguments: [],
+            environment: ProcessInfo.processInfo.environment, currentDirectory: b.binDir, standardInput: .pipe)
+        defer { child.terminateGroup() }
+        for id in ["a", "b"] {
+            let frame: [String: String] = ["id": id, "type": "prompt", "message": "HOLD-" + id]
+            try child.standardInput!.write(contentsOf: JSONSerialization.data(withJSONObject: frame) + Data([10]))
+        }
+        var output = ""
+        func count(_ marker: String) -> Int { output.components(separatedBy: marker).count - 1 }
+        let started = await waitUntil(timeout: 5, pollInterval: 0.02) {
+            output += String(decoding: ProcessGroupChild.drainRemainder(of: child.standardOutput, cap: 0.02), as: UTF8.self)
+            return count("turn_start") == 2
+        }
+        try WorkspaceAgentReportChecks.expect(started, "two overlapping holds never started: \(output)")
+        try await Task.sleep(for: .milliseconds(100))
+        for id in ["a", "b"] { try Data().write(to: b.binDir.appendingPathComponent("release-" + id + ".flag")) }
+        let settled = await waitUntil(timeout: 3, pollInterval: 0.02) {
+            output += String(decoding: ProcessGroupChild.drainRemainder(of: child.standardOutput, cap: 0.02), as: UTF8.self)
+            return count("agent_settled") == 2
+        }
+        let errors = String(decoding: ProcessGroupChild.drainRemainder(of: child.standardError, cap: 0.05), as: UTF8.self)
+        print("Fake CLI overlapping holds: starts \(count("turn_start"))/2; settled \(count("agent_settled"))/2; concurrent poll errors \(errors.components(separatedBy: "concurrent poll() invocation").count - 1)")
+        if !errors.isEmpty { fputs(errors, stderr) }
+        try WorkspaceAgentReportChecks.expect(settled && !errors.contains("Traceback"), "overlapping fixture holds lost a holder thread")
+    }
+
+    /// A real production bench intentionally hands off one held fake to the
+    /// matrix. The positive-control driver owns its PID/group and always reaps
+    /// it. An old-fixture mode restores the original unguarded release poll.
+    static func leakProbe() async throws {
+        guard let path = ProcessInfo.processInfo.environment["ARRAY_FAKE_CLI_CONTROL_PATH"],
+              let runID = ProcessInfo.processInfo.environment["ARRAY_CHECK_RUN_ID"], !runID.isEmpty else {
+            throw WorkspaceAgentReportChecks.Failure(description: "leak probe requires its matrix driver and run marker")
+        }
+        let b = try ManagedModeChecks.bench("fake-cli-positive-control")
+        var handedOff = false
+        var child: ProcessGroupChild?
+        defer { if !handedOff { child?.terminateGroup(); b.tearDown() } }
+        let old = ProcessInfo.processInfo.environment["CONTINUUM_FAKE_CLI_LEAK_OLD_FIXTURE"] == "1"
+        let cli = b.binDir.appendingPathComponent("claude")
+        if old {
+            let script = ManagedModeChecks.fakeClaude
+                .replacingOccurrences(of: "time.monotonic() + 600", with: "time.monotonic() + 60")
+                .replacingOccurrences(of: "while not os.path.exists('managed-release'): fixture_pause(.02)",
+                    with: "while not os.path.exists('managed-release') and time.monotonic() < _fixture_deadline: time.sleep(.02)")
+            try script.write(to: cli, atomically: true, encoding: .utf8)
+        }
+        let spawned = try ProcessGroupChild.spawn(executable: cli.path, arguments: ["--session-id", "positive-control"],
+            environment: ProcessInfo.processInfo.environment, currentDirectory: b.binDir, standardInput: .pipe)
+        child = spawned
+        try spawned.standardInput!.write(contentsOf: Data(#"{"type":"user","message":"HOLD"}"#.utf8) + Data([10]))
+        var output = ""
+        let held = await waitUntil(timeout: 5, pollInterval: 0.02) {
+            output += String(decoding: ProcessGroupChild.drainRemainder(of: spawned.standardOutput, cap: 0.02), as: UTF8.self)
+            return output.contains("\"init\"")
+        }
+        try WorkspaceAgentReportChecks.expect(held, "real bench fake never entered HOLD: \(output)")
+        let record: [String: Any] = ["pid": spawned.pid, "pgid": spawned.processGroupId,
+            "bin": b.binDir.path, "executable": cli.path, "runID": runID, "oldFixture": old,
+            "foundationTemp": FileManager.default.temporaryDirectory.path,
+            "environmentTMPDIR": ProcessInfo.processInfo.environment["TMPDIR"] ?? ""]
+        try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]).write(to: URL(fileURLWithPath: path))
+        print("Real bench leak probe: pid \(spawned.pid), old fixture \(old), bin \(b.binDir.path)")
+        b.settings.removePersistentDomain(forName: b.settings.suiteDomainName)
+        b.f.tearDown()
+        setenv("PATH", b.originalPath, 1)
+        setenv("CONTINUUM_APP_SUPPORT", b.originalSupport, 1)
+        handedOff = true
+    }
+
     static func run() async throws {
+        try await overlappingHolds()
         var failures: [String] = []
         var eofSurvivors = 0
         // The real generated scripts, including the string-patched derivatives.
@@ -110,6 +202,10 @@ enum FakeCLILifecycleChecks {
             try child.standardInput!.close()
             let exited = await waitUntil(timeout: 2, pollInterval: 0.02) { child.pollExitRaw() != nil }
             if !exited { eofSurvivors += 1; failures.append("\(variant) survived stdin EOF during HOLD") }
+            let diagnostic = String(decoding: ProcessGroupChild.drainRemainder(of: child.standardError, cap: 0.05), as: UTF8.self)
+            if exited && !diagnostic.contains("fixture_pause: stdin closed") {
+                failures.append("\(variant) omitted its EOF exit diagnostic: \(diagnostic)")
+            }
         }
 
         let orphanBench = try ManagedModeChecks.bench("fake-lifecycle-orphan")
