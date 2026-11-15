@@ -14,11 +14,24 @@ enum UndoToastPlacementChecks {
     typealias Fixture = WorkspaceInvariantsFixture
     struct Failure: Error, CustomStringConvertible { let description: String }
 
+    /// The optional render directory after the flag. Any option that follows is
+    /// not a directory: the matrix passes `-continuum.terminal.tmux.enabled NO`
+    /// (a single-dash defaults argument), which used to become a directory of
+    /// screenshots in the checkout.
+    static func renderDirectory(in args: [String]) -> URL? {
+        guard let i = args.firstIndex(of: "--undo-toast-placement-check"), args.indices.contains(i + 1),
+              !args[i + 1].hasPrefix("-") else { return nil }
+        return URL(fileURLWithPath: args[i + 1])
+    }
+
     static func run() throws {
-        let args = CommandLine.arguments
-        let renderDir = args.firstIndex(of: "--undo-toast-placement-check").flatMap { i in
-            args.indices.contains(i + 1) && !args[i + 1].hasPrefix("--") ? URL(fileURLWithPath: args[i + 1]) : nil
+        let flag = "--undo-toast-placement-check"
+        guard renderDirectory(in: ["Array", flag, "-continuum.terminal.tmux.enabled", "NO"]) == nil,
+              renderDirectory(in: ["Array", flag, "--ui-probe-check"]) == nil,
+              renderDirectory(in: ["Array", flag, "/tmp/undo-toast-renders"])?.path == "/tmp/undo-toast-renders" else {
+            throw Failure(description: "render directory: an option after the flag was read as a directory")
         }
+        let renderDir = renderDirectory(in: CommandLine.arguments)
         setenv("CONTINUUM_TOOLBAR_QA", "1", 1)
         let suite = "undo-toast-placement.\(UUID().uuidString)"
         guard let toolbarDefaults = QAIsolatedDefaults(isolatedSuiteName: suite) else {
