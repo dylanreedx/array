@@ -8,6 +8,14 @@
       "evidence": "Classified KNOWN-RED in the 0.7.49 and 0.7.50 gates (.plans/release-0750-artifacts.md).",
       "added": "2026-11-15",
       "expires": "2026-12-15"
+    },
+    {
+      "leg": "--subagent-sidebar-open-check",
+      "kind": "known-red",
+      "reason": "The subagent's WORLD frame lands at (3788, 440), not beside its lead at (3040, 458), in all four cases; red since at least 0.7.49, a placement defect not yet fixed.",
+      "evidence": "Classified pre-existing by hand in the 0.7.49 and 0.7.50 gates (.plans/release-0750-artifacts.md); the same four failures, red in the parallel group and again on serial retry, in the fast-ship proof gate at 0ae0c265.",
+      "added": "2026-11-15",
+      "expires": "2026-12-15"
     }
   ]
 }
