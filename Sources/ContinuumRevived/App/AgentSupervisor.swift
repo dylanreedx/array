@@ -3189,6 +3189,7 @@ final class AgentSupervisor {
         restoreHelperMessageSubscriptions()
         settleHelpersCutOffByRestart()
         if AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
+            archiveMayHoldRecords = true
             archiveIdleRecordsAfterRestore(stored: stored, report: &report)
         }
         for root in Set(records.values.map(\.checkoutRoot)) {
@@ -3296,6 +3297,35 @@ final class AgentSupervisor {
         }
     }
 
+    /// True once this session ran with the gate on: the archive may hold
+    /// records the live set lacks. Cleared when the gate goes off and they are
+    /// brought back.
+    private var archiveMayHoldRecords = false
+
+    /// The gate went off while Array runs. With it off nothing adopts by id,
+    /// so what this session's restore archived would answer not_found until
+    /// the next launch's restore brought it back. The workspace API calls this
+    /// on every request: one Bool while there is nothing to do, and the whole
+    /// archive brought back once, the first time the gate reads off.
+    func restoreArchivedRecordsIfGateOff() {
+        guard archiveMayHoldRecords, !AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) else { return }
+        archiveMayHoldRecords = false
+        let result: (restored: [AgentRecord], unreadable: [(file: URL, error: Error)])
+        do {
+            result = try withAgentStoreLock { store.unarchiveAll() }
+        } catch {
+            archiveMayHoldRecords = true
+            warn("AgentSupervisor: archived agents stay archived, the store lock is unavailable: \(error)")
+            return
+        }
+        for (file, error) in result.unreadable {
+            warn("AgentSupervisor: archived agent \(file.lastPathComponent) stays archived, it could not be read: \(error)")
+        }
+        for record in result.restored where records[record.id] == nil {
+            adoptUnarchived(record)
+        }
+    }
+
     /// Brings an archived agent back into this session — the lazy load on miss
     /// for anything that names an agent by id. True when the agent is live
     /// afterwards. Works with the gate off: turning archiving off must never
@@ -3313,6 +3343,13 @@ final class AgentSupervisor {
             return false
         }
         guard let record else { return false }
+        return adoptUnarchived(record, fileManager: fileManager)
+    }
+
+    /// A record just moved back to the live store joins this session.
+    @discardableResult
+    private func adoptUnarchived(_ record: AgentRecord, fileManager: FileManager = .default) -> Bool {
+        let id = record.id
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: record.cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
             // Back in the live store, unavailable exactly as restore marks it.

@@ -331,13 +331,13 @@ public final class AgentStore: @unchecked Sendable {
     /// through `unarchive`, so each is decoded before it moves and a live copy
     /// wins. A file that cannot be read stays where it is and is reported, so
     /// one bad file never blocks the rest. An absent archive costs one lstat.
-    public func unarchiveAll() -> (restored: [AgentID], unreadable: [(file: URL, error: Error)]) {
+    public func unarchiveAll() -> (restored: [AgentRecord], unreadable: [(file: URL, error: Error)]) {
         let directory = layout.archiveDirectory
         var info = stat()
         guard lstat(directory.path, &info) == 0 else { return ([], []) }
         let names: [String]
         do { names = try FileManager.default.contentsOfDirectory(atPath: directory.path) } catch { return ([], [(directory, error)]) }
-        var restored: [AgentID] = []
+        var restored: [AgentRecord] = []
         var unreadable: [(file: URL, error: Error)] = []
         for name in names.sorted() where name.hasSuffix(".json") && !name.hasPrefix(".") {
             let file = directory.appendingPathComponent(name, isDirectory: false)
@@ -346,7 +346,7 @@ public final class AgentStore: @unchecked Sendable {
                 continue
             }
             do {
-                if try unarchive(id: AgentID(rawValue: uuid)) != nil { restored.append(AgentID(rawValue: uuid)) }
+                if let record = try unarchive(id: AgentID(rawValue: uuid)) { restored.append(record) }
             } catch {
                 unreadable.append((file, error))
             }

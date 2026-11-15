@@ -515,14 +515,8 @@ enum AgentRecordArchiveChecks {
             try expect(supervisor.records[id] == nil && exists(store.layout.archivedAgentFile(id: id)), "fixture helper archived at boot")
         }
         supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
-        // Gate off: a request naming an archived agent walks no payload.
+        // The gate off walks no payload: `runtimeGateOffWitness`.
         let scans = WorkspaceAPIService.archivedAgentScansForQA
-        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
-        _ = f.api.dispatch(agentId: f.agentId, requestId: "archive-off", op: "agent.inspect",
-            payload: ["agentId": archivedIDs[0].rawValue.uuidString])
-        try expect(WorkspaceAPIService.archivedAgentScansForQA == scans && supervisor.records[archivedIDs[0]] == nil,
-                   "gate off: the workspace API scanned a payload")
-        settings.set(true, forKey: AgentRecordArchiveConfig.enabledKey)
         let inspected = f.api.dispatch(agentId: f.agentId, requestId: "archive-inspect", op: "agent.inspect",
             payload: ["agentId": archivedIDs[0].rawValue.uuidString])
         guard case let .result(value) = inspected else { throw Failure(message: "agent.inspect of an archived agent: \(inspected)") }
@@ -533,6 +527,62 @@ enum AgentRecordArchiveChecks {
         let found = f.api.dispatch(agentId: f.agentId, requestId: "archive-find", op: "agent.find",
             payload: ["query": archivedIDs[1].rawValue.uuidString])
         try expect("\(found)".lowercased().contains(archivedIDs[1].rawValue.uuidString.lowercased()), "agent.find by id finds an archived agent: \(found)")
+    }
+
+    /// Follow-up (a): the gate goes off while Array runs. With it off the
+    /// workspace API adopts nothing by id, so what this session archived
+    /// answered not_found until the next launch. Production mount (gate on)
+    /// archives two helpers; the gate flips off in Settings; the first
+    /// request through the real dispatch answers for both, walks no payload,
+    /// and leaves the archive empty.
+    static func runtimeGateOffWitness() throws {
+        let settings = gateSuite(true)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        var helpers: [AgentID] = []
+        let f = try WorkspaceAPIChecks.makeFixture(settings: settings, beforeMount: { delegate, _ in
+            delegate.qaAgentSupervisor.recordArchiveNow = { Date() }
+            guard let lead = delegate.qaAgentSupervisor.records.values.first(where: { $0.tileId != nil }) else {
+                throw Failure(message: "fixture lead missing")
+            }
+            var records: [AgentRecord] = []
+            for name in ["Runtime off inspect", "Runtime off find"] {
+                var r = idleRecord(name, cwd: lead.cwd, idleFor: 30)
+                r.parentAgentID = lead.id
+                r.projectId = lead.projectId
+                records.append(r)
+            }
+            try write(records, to: AgentStore(smokeTest: false))
+            helpers = records.map(\.id)
+        })
+        defer { f.tearDown() }
+        let supervisor = f.delegate.qaAgentSupervisor
+        let store = AgentStore(smokeTest: false)
+        for id in helpers {
+            try expect(supervisor.records[id] == nil && exists(store.layout.archivedAgentFile(id: id)),
+                       "fixture: the mount archived helper \(id.rawValue)")
+        }
+        supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
+        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
+        let scans = WorkspaceAPIService.archivedAgentScansForQA
+        let inspected = f.api.dispatch(agentId: f.agentId, requestId: "runtime-off-inspect", op: "agent.inspect",
+            payload: ["agentId": helpers[0].rawValue.uuidString])
+        guard case .result = inspected else {
+            throw Failure(message: "gate turned off at runtime: agent.inspect of an archived agent answered \(inspected)")
+        }
+        try expect("\(inspected)".lowercased().contains(helpers[0].rawValue.uuidString.lowercased()),
+                   "gate turned off at runtime: inspect answers for the archived agent")
+        // Not named by any request: the whole archive came back with the first.
+        let found = f.api.dispatch(agentId: f.agentId, requestId: "runtime-off-find", op: "agent.find",
+            payload: ["query": "Runtime off find"])
+        try expect("\(found)".lowercased().contains(helpers[1].rawValue.uuidString.lowercased()),
+                   "gate turned off at runtime: agent.find by name finds the other archived agent: \(found)")
+        for id in helpers {
+            try expect(supervisor.records[id] != nil && exists(store.layout.agentFile(id: id)) && !exists(store.layout.archivedAgentFile(id: id)),
+                       "gate turned off at runtime: helper \(id.rawValue) is live, one copy")
+        }
+        try expect(archivedFiles(store).isEmpty, "gate turned off at runtime: the archive is empty, holds \(archivedFiles(store))")
+        try expect(WorkspaceAPIService.archivedAgentScansForQA == scans, "gate turned off at runtime: the workspace API walked a payload")
+        print("PASS agent record archive: the gate turned off while Array runs brings every archived agent back on the next workspace API request, without walking its payload")
     }
 
     static func archivedFiles(_ store: AgentStore) -> [String] {
@@ -621,7 +671,8 @@ enum AgentRecordArchiveChecks {
         try await sharedWitness()
         try apiWitness()
         try gateOffRevertWitness()
+        try runtimeGateOffWitness()
         print("PASS agent record archive: gate off unchanged; gate on archives only old finished tile-less records nothing holds, next boot skips them, and id lookups bring them back")
-        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; gate off scans no API payload and restores every archived record at boot; worktree repair and checkout cleanup treat archived agents as owners.")
+        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; gate off scans no API payload and restores every archived record at boot, or on the next API request when it goes off at runtime; worktree repair and checkout cleanup treat archived agents as owners.")
     }
 }
