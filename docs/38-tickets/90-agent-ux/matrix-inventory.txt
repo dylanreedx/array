@@ -1073,6 +1073,8 @@ leg run_leg python3 scripts/check-prepass-signature-safety.py
 leg run_leg python3 scripts/check-prepass-signature-safety.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
 leg run_leg python3 scripts/check-prepass-source-patterns.py
 leg run_leg python3 scripts/check-prepass-source-patterns.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
+leg run_leg python3 scripts/check-ship-release.py
+leg run_leg python3 scripts/check-wait-live-release.py
 leg run_leg scripts/capture-cli-fixtures.sh check
 leg run_leg scripts/check-app-bundle.sh --configuration debug --bundle "$MATRIX_RESULTS/Array.app"
 leg run_leg scripts/check-candidate-prepass.sh

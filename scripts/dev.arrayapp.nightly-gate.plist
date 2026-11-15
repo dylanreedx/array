@@ -5,5 +5,8 @@
 <!-- --install fills absolute paths in this template. -->
 <key>ProgramArguments</key><array><string>/bin/bash</string><string>__NIGHTLY_SCRIPT__</string></array>
 <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+<!-- Hourly as well: a new integration head is gated (and its release candidate
+     built) within the hour; an already-gated head exits in seconds. -->
+<key>StartInterval</key><integer>3600</integer>
 <key>ProcessType</key><string>Background</string>
 </dict></plist>

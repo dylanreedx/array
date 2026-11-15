@@ -1,5 +1,31 @@
 # Releasing Array
 
+## Ship from a gated head (the fast path)
+
+`scripts/nightly-gate.sh` (installed below) gates each new
+`origin/array/integration` head hourly and at 03:00. When the matrix is green it
+builds the optimized prod candidate for that exact commit. A ship reuses both:
+
+```sh
+scripts/ship-release.sh --version X.Y.Z --notes notes.md   # prepare: no compile, no push
+scripts/ship-release.sh --version X.Y.Z --publish          # only on Dylan's go
+```
+
+Prepare runs on a clean checkout at `origin/array/integration`. It finds the
+green gate covering HEAD: that commit, or an ancestor whose later commits touch
+only `.plans/`, `website/` or `docs/VERSIONING.md`. It runs the awake group
+there if it has not run (an unlocked, awake screen), takes the next build
+number, signs and notarizes the candidate, audits the bundle, appends one
+appcast item and one ledger row, and commits locally. Publish uploads both
+DMGs, pushes `array/integration` and `main`, and returns only once
+arrayapp.dev serves the build and both downloads answer (15-minute timeout).
+
+Pre-existing reds classify from `scripts/matrix-known-failures.json`: each entry
+has a reason, evidence and an expiry within 30 days, after which the leg counts
+as a real failure again. A leg red in the parallel group gets one serial retry,
+reported as `retry-passed`. Witness: `scripts/check-ship-release.py`. The manual
+steps below remain the fallback.
+
 ## Cut a preview and release candidate together
 
 1. Run `scripts/nightly-gate.sh --latest-green` to select the newest green
@@ -44,8 +70,9 @@
 1. Stable: archive the notarized `Array-X.Y.Z.dmg` under releases/; upload BOTH
    `Array.dmg` and `Array-X.Y.Z.dmg` to `dylanreedx/array-releases`, tag `vX.Y.Z`,
    with friend-readable release notes. Use `gh release create` only after approval.
-2. Run `scripts/generate-appcast.sh`. It signs stable archives using the Keychain
-   key, preserves tip items, and adds a one-hour phased rollout interval on the new item only (seven
+2. Run `scripts/generate-appcast.sh --dmg releases/Array-X.Y.Z.dmg --version X.Y.Z
+   --build N`. It signs the new DMG using the Keychain key, leaves every existing
+   item byte-for-byte, and adds a one-hour phased rollout interval on the new item only (seven
    Sparkle groups, reaching all groups in about six hours). Manual checks can see the update immediately.
 3. Append the stable row to docs/VERSIONING.md. Review the feed, then commit ledger
    and website/public/appcast.xml. With Dylan's approval push array/integration,
@@ -92,7 +119,8 @@ replacement.
 
 One-time setup: run `scripts/nightly-gate.sh --install` from the landed repository
 (`--install --dry-run` previews paths and launchctl commands). This schedules
-03:00 local in the logged-in user's session; `--uninstall` removes the job.
+03:00 local and hourly in the logged-in user's session (an already-gated head
+exits in seconds); `--uninstall` removes the job.
 The Mac must be awake to start it; caffeinate prevents idle system sleep during
 the run. The installed wrapper is copied to `~/array-scratch/nightly-gate`;
 rerun install after wrapper changes. Installation only sets up the scheduled job.
