@@ -56,10 +56,15 @@ mkdir -p "$o"; cp -R "$b" "$o/Array.app"; head -c 4096 /dev/urandom > "$o/Array-
 }
 SIGN = '#!/bin/sh\nprintf \'sparkle:edSignature="%s" length="%s"\\n\' "$(head -c 64 /dev/zero | base64)" "$(stat -f %z "$1")"\n'
 GH = r'''#!/bin/bash
+# Each release is a file listing its uploaded asset names.
 echo "gh $*" >> "$SHIP_EVENTS"
-if [[ $1 == release && $2 == view ]]; then [[ -f "$SHIP_PLAN/gh-$3" ]]; exit; fi
-if [[ $1 == release && $2 == create ]]; then
-  for asset in "${@: -2}"; do [[ -s $asset ]] || exit 9; done; touch "$SHIP_PLAN/gh-$3"; fi
+release="$SHIP_PLAN/gh-$3"
+if [[ $1 == release && $2 == view ]]; then
+  [[ -f $release ]] || exit 1; [[ " $* " == *" --json assets "* ]] && cat "$release"; exit 0; fi
+if [[ $1 == release && ( $2 == create || $2 == upload ) ]]; then
+  for asset in "${@: -2}"; do [[ -s $asset ]] || exit 9; done
+  [[ $2 == upload && -f "$SHIP_PLAN/gh-upload-inert" ]] && exit 0  # reports success, uploads nothing
+  touch "$release"; for asset in "${@: -2}"; do basename "$asset" >> "$release"; done; fi
 '''
 LEDGER = "# Versioning\n\n| Version | Build | Date | Tag | Notes |\n|---|---|---|---|---|\n| 0.7.50 | 101 | 2026-11-14 | `v0.7.50` | fixture |\n"
 
@@ -207,6 +212,12 @@ def gate_cases(fx):
     sh("git", "-C", str(fx.repo), "reset", "-q", "--hard", gated)
     sh("git", "-C", str(fx.repo), "push", "-q", "-f", "origin", "HEAD:array/integration")
     (fx.plan / "matrix--skip-awake").write_text("pass")
+    (fx.repo / ".plans").mkdir(exist_ok=True)
+    sh("git", "-C", str(fx.repo), "mv", "Sources/App.swift", ".plans/App.swift")
+    moved = fx.commit("docs(plans): move the app source")
+    result = fx.run("nightly-gate.sh", "--ship-base", moved)
+    expect(result.returncode == 1 and "Sources/App.swift" in result.stderr, "a move out of live code voids the gate", result)
+    sh("git", "-C", str(fx.repo), "reset", "-q", "--hard", gated)
     spaced = fx.commit("docs(plans): trailing space", {".plans/notes.md": "trailing \n"})
     result = fx.run("nightly-gate.sh", "--ship-base", spaced)
     expect(result.returncode == 1 and "diff --check" in result.stderr, "whitespace errors refuse the gate", result)
@@ -224,6 +235,13 @@ def ship_cases(fx, gated, head):
     notes = fx.root / "notes.md"
     notes.write_text("Faster shipping | fixture.\n\nMore words.\n")
     before = (fx.repo / "website/public/appcast.xml").read_bytes()
+    with open(fx.root / "matrix.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        result = fx.run("ship-release.sh", "--version", "0.7.51", "--notes", str(notes))
+    expect(result.returncode != 0 and "awake group" in result.stderr
+           and not any(line.startswith("sign ") for line in fx.log()), "a skipped awake group stops prepare", result)
+    shutil.rmtree(fx.repo / "qa-runs/ship-0.7.51")
+    print("PASS prepare-refuses-skipped-awake")
     result = fx.run("ship-release.sh", "--version", "0.7.51", "--notes", str(notes))
     events = fx.log()
     expect(result.returncode == 0, "prepare succeeds", result)
@@ -256,10 +274,21 @@ def ship_cases(fx, gated, head):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Feed)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
+    publish_env = dict(ARRAY_SHIP_FEED_URL=f"http://127.0.0.1:{port}/appcast.xml",
+                       ARRAY_SHIP_DOWNLOAD_BASE=f"http://127.0.0.1:{port}/download/v0.7.51/")
+    (fx.plan / "gh-v0.7.51").write_text("Array.dmg\n")  # an earlier publish died mid-upload
+    (fx.plan / "gh-upload-inert").write_text("")
+    result = fx.run("ship-release.sh", "--version", "0.7.51", "--publish", env=publish_env)
+    pushed = sh("git", "--git-dir", str(fx.origin), "rev-parse", "array/integration").stdout.strip()
+    expect(result.returncode != 0 and "lacks Array-0.7.51.dmg" in result.stderr and pushed == head,
+           "a release missing an asset is never pushed", result)
+    expect(any(line.startswith("gh release upload v0.7.51") and "--clobber" in line for line in fx.log()),
+           "a partial release is re-uploaded", result)
+    (fx.plan / "gh-v0.7.51").unlink()
+    (fx.plan / "gh-upload-inert").unlink()
+    print("PASS publish-refuses-missing-asset")
     try:
-        result = fx.run("ship-release.sh", "--version", "0.7.51", "--publish",
-                        env=dict(ARRAY_SHIP_FEED_URL=f"http://127.0.0.1:{port}/appcast.xml",
-                                 ARRAY_SHIP_DOWNLOAD_BASE=f"http://127.0.0.1:{port}/download/v0.7.51/"))
+        result = fx.run("ship-release.sh", "--version", "0.7.51", "--publish", env=publish_env)
     finally:
         server.shutdown()
     local = sh("git", "-C", str(fx.repo), "rev-parse", "HEAD").stdout.strip()

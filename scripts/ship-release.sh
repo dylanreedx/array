@@ -51,12 +51,19 @@ if [[ "$PUBLISH" == 1 ]]; then
   git merge-base --is-ancestor origin/main HEAD ||
     die "origin/main has commits HEAD lacks; merge origin/main, then prepare again (never force)"
   step "GitHub release v$VERSION (both assets)"
+  ASSETS=("$STATE_DIR/release/Array.dmg" "$STATE_DIR/release/Array-$VERSION.dmg")
   if "$GH" release view "v$VERSION" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
-    echo "v$VERSION already exists; not uploading again."
+    # A rerun after a partial upload: replace both assets before anything is pushed.
+    echo "v$VERSION already exists; uploading both assets again."
+    "$GH" release upload "v$VERSION" --repo "$RELEASES_REPO" --clobber "${ASSETS[@]}"
   else
     "$GH" release create "v$VERSION" --repo "$RELEASES_REPO" --title "Array $VERSION" \
-      --notes-file "$STATE_DIR/notes.md" "$STATE_DIR/release/Array.dmg" "$STATE_DIR/release/Array-$VERSION.dmg"
+      --notes-file "$STATE_DIR/notes.md" "${ASSETS[@]}"
   fi
+  UPLOADED=$("$GH" release view "v$VERSION" --repo "$RELEASES_REPO" --json assets --jq '.assets[].name')
+  for asset in Array.dmg "Array-$VERSION.dmg"; do
+    grep -qxF "$asset" <<<"$UPLOADED" || die "v$VERSION lacks $asset after upload; nothing pushed"
+  done
   step "Fast-forward array/integration and main"
   git push origin HEAD:array/integration
   git push origin HEAD:main
@@ -87,7 +94,9 @@ echo "gate $GATE: $(gate "summary['passed']") legs green; candidate $CANDIDATE"
 if [[ "$(gate "bool(awake and awake.get('green'))")" != True ]]; then
   step "Awake group at $GATE (display/focus legs the unattended gate skips)"
   bash scripts/nightly-gate.sh --awake "$GATE" > "$STATE_DIR/awake.json" ||
-    die "awake group is red at $GATE: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("failed_legs"))' "$STATE_DIR/awake.json")"
+    die "awake group did not pass at $GATE: $(head -c 2000 "$STATE_DIR/awake.json")"
+  python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("green") is True else 1)' \
+    "$STATE_DIR/awake.json" 2>/dev/null || die "awake group reported no green result at $GATE"
 fi
 
 step "Allocate the build number"
@@ -100,7 +109,7 @@ nums += [int(i.findtext(ns + 'version')) for i in E.parse('website/public/appcas
 print(max(nums) + 1)
 PY
 )
-if grep -qE "^\| *$VERSION *\|" docs/VERSIONING.md; then die "$VERSION is already in the ledger"; fi
+if grep -qE "^\| *${VERSION//./\\.} *\|" docs/VERSIONING.md; then die "$VERSION is already in the ledger"; fi
 if "$GH" release view "v$VERSION" --repo "$RELEASES_REPO" >/dev/null 2>&1; then die "v$VERSION is already published"; fi
 echo "Array $VERSION = build $BUILD"
 

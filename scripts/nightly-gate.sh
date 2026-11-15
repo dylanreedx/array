@@ -100,7 +100,8 @@ if args[:1] == ['--ship-base']:
         if not (summary and summary.get('green') and summary.get('candidate')
                 and Path(summary['candidate']).is_dir()):
             continue
-        changed = git('diff', '--name-only', sha, head).splitlines()
+        # --no-renames: a move from Sources/ into .plans/ must list its source path.
+        changed = git('diff', '--no-renames', '--name-only', sha, head).splitlines()
         live = [path for path in changed if not path.startswith(INERT)]
         if live:
             sys.exit(f'Gate {sha[:12]} is the newest green one, but {len(live)} changed path(s) since then '
@@ -123,7 +124,9 @@ try:
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
     print('Skipped: matrix/release lock held', file=sys.stderr)
-    sys.exit(1 if args == ['--latest-green'] else 0)
+    # Only the scheduled run treats contention as a quiet skip; a caller waiting
+    # on --awake or --latest-green must never read a skip as success.
+    sys.exit(0 if args == [] else 1)
 git('fetch', 'origin')
 commit = git('rev-parse', 'origin/array/integration')
 if args[:1] == ['--awake']:

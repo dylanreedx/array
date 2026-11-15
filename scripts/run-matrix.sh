@@ -399,6 +399,7 @@ for entry in entries:
         expires = datetime.date.fromisoformat(entry['expires'])
         if kind not in ('known-red', 'flaky'): raise ValueError(f'kind {kind!r}')
         if not entry['reason'].strip() or not entry['evidence'].strip(): raise ValueError('empty reason or evidence')
+        if added > today: raise ValueError('added is in the future')
         if not 0 <= (expires - added).days <= 30: raise ValueError('expires must be 0-30 days after added')
     except (KeyError, TypeError, AttributeError, ValueError) as error:
         bad(f'entry {entry!r}: {error}'); continue

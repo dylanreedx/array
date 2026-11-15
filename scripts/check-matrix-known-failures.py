@@ -137,6 +137,14 @@ def malformed_list():
     expect(rows.get(KNOWN) == "fail" and rows.get(FLAKY) == "fail", "malformed", out, f"invalid entries must not classify: {rows}")
 
 @case
+def future_dated_entry():
+    # Dating an entry ahead would make it never expire; it must not classify.
+    late = [entry(KNOWN, "known-red", added=today + datetime.timedelta(days=60))]
+    code, rows, runs, out = execute("future", {KNOWN: "fail"}, late, [KNOWN])
+    expect(code == 1 and rows.get("matrix-known-failures") == "fail" and rows.get(KNOWN) == "fail",
+           "future", out, f"a future-dated entry must be rejected: {rows}")
+
+@case
 def committed_list_is_valid():
     path = SOURCE.with_name("matrix-known-failures.json")
     code, rows, runs, out = execute("committed", {}, json.loads(path.read_text())["failures"], [GREEN])
