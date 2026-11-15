@@ -1682,6 +1682,10 @@ run_app_check .build/debug/Array --sidebar-liveness-check
 # rows and a focus move between read agents only moves the open row; neither
 # builds every sidebar row.
 run_app_check .build/debug/Array --sidebar-event-cost-check
+# Live-usage sample 2026-11-14: every app switch re-read every project's stores
+# and rebuilt every sidebar row (24.5% of main at ~2,400 agents). A switch now
+# reads nothing and builds rows only when the clock has moved one.
+run_app_check .build/debug/Array --app-switch-cost-check
 # P2B.8: with no ZoneRuntimeController and no canvas, every agent is still listed
 # from disk with its persisted status and marked as unobserved; a live view or
 # observer status overrides the file and clears the mark.
