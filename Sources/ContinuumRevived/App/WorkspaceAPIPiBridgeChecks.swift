@@ -38,7 +38,10 @@ func runWorkspaceAPIPiBridgeChecks() async throws {
     let cwdA = tempRoot.appendingPathComponent("agent-a", isDirectory: true)
     let cwdB = tempRoot.appendingPathComponent("agent-b", isDirectory: true)
     for dir in [binDir, cwdA, cwdB] { try fileManager.createDirectory(at: dir, withIntermediateDirectories: true) }
-    defer { try? fileManager.removeItem(at: tempRoot) }
+    defer {
+        FakeCLILifecycleChecks.terminate(in: binDir)
+        try? fileManager.removeItem(at: tempRoot)
+    }
 
     let scenario: [String: Any] = ["calls": [["toolCallId": "tc-1", "toolName": "array_open_document", "op": "artifact.open", "payload": ["relativePath": "README.md"]]]]
     let scenarioURL = tempRoot.appendingPathComponent("scenario.json")

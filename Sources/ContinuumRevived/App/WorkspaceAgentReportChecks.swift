@@ -42,7 +42,7 @@ enum WorkspaceAgentReportChecks {
     /// and settles at once, except for a prompt containing HOLD: that turn
     /// stays open until `release.flag` appears in its cwd, so a check can act
     /// DURING the child's turn.
-    static let fakePi = """
+    static let fakePi = FakeCLILifecycleChecks.protectPython("""
     #!/usr/bin/env python3
     import json, os, sys, threading, time
 
@@ -64,7 +64,7 @@ enum WorkspaceAgentReportChecks {
                 flag = os.path.join(os.getcwd(), "release.flag")
                 deadline = time.time() + 60
                 while not os.path.exists(flag) and time.time() < deadline:
-                    time.sleep(0.02)
+                    fixture_pause(0.02)
                 try:
                     os.remove(flag)
                 except OSError:
@@ -86,10 +86,10 @@ enum WorkspaceAgentReportChecks {
         threading.Thread(target=handle, args=(obj,), daemon=True).start()
 
     time.sleep(0.3)
-    """
+    """)
 
     /// The isolated pieces every leg shares. `tearDown` puts PATH back and
-    /// removes the settings suite and the temp dirs.
+    /// reaps its fake CLI groups, then removes the settings suite and temp dirs.
     @MainActor
     struct Bench {
         let f: WorkspaceAPIChecks.Fixture
@@ -102,6 +102,7 @@ enum WorkspaceAgentReportChecks {
 
         func tearDown() {
             supervisor.stopAll()
+            FakeCLILifecycleChecks.terminate(in: binDir)
             setenv("PATH", originalPath, 1)
             setenv("CONTINUUM_APP_SUPPORT", originalSupport, 1)
             settings.removePersistentDomain(forName: settings.suiteDomainName)

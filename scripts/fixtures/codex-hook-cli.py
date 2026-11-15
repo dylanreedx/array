@@ -2,6 +2,17 @@
 """Offline Codex hook-surface/runner double. Never starts a provider or model."""
 import hashlib, json, os, re, subprocess, sys, time, uuid
 
+import os, select, time
+_fixture_parent = os.getppid()
+_fixture_deadline = time.monotonic() + 600
+_fixture_input = select.poll()
+_fixture_input.register(0, select.POLLHUP | select.POLLERR | select.POLLNVAL)
+def fixture_pause(seconds):
+    if (os.getppid() == 1 or os.getppid() != _fixture_parent
+            or time.monotonic() >= _fixture_deadline or _fixture_input.poll(0)):
+        os._exit(0)
+    time.sleep(seconds)
+
 events = [('SessionStart', 'session_start'), ('UserPromptSubmit', 'user_prompt_submit'),
           ('PreToolUse', 'pre_tool_use'), ('PostToolUse', 'post_tool_use'), ('Stop', 'stop'),
           ('SubagentStart', 'subagent_start'), ('SubagentStop', 'subagent_stop')]
@@ -100,7 +111,7 @@ for line in sys.stdin:
                 record(dict(kind='held', session=session_id))
                 release = managed_log + '.release'
                 deadline = time.monotonic() + 30
-                while not os.path.exists(release) and time.monotonic() < deadline: time.sleep(.01)
+                while not os.path.exists(release) and time.monotonic() < deadline: fixture_pause(.01)
                 if not os.path.exists(release): raise RuntimeError('held turn timed out')
                 os.unlink(release)
         else:

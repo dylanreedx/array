@@ -44,7 +44,10 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
     for dir in [paRoot, pbRoot, appSupport, binDir] {
         try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
     }
-    defer { try? fileManager.removeItem(at: tempRoot) }
+    defer {
+        FakeCLILifecycleChecks.terminate(in: binDir)
+        try? fileManager.removeItem(at: tempRoot)
+    }
 
     // A fake `pi --mode rpc`: it answers a prompt and settles. Enough for the
     // supervisor's real runner to start, accept the child's task and finish it —
@@ -73,12 +76,12 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
             emit({"type": "turn_start"})
             if "BUSY-HOLD" in (cmd.get("message") or cmd.get("prompt") or ""):
                 while not os.path.exists(os.path.join(cwd, "release-busy")):
-                    time.sleep(0.01)
+                    fixture_pause(0.01)
             prompt_text = cmd.get("message") or cmd.get("prompt") or ""
             for marker, flag in [("QCALL-A", "release-q-a"), ("QCALL-B", "release-q-b")]:
                 if marker in prompt_text:
                     while not os.path.exists(os.path.join(cwd, flag)):
-                        time.sleep(0.01)
+                        fixture_pause(0.01)
             emit({"type": "message_update", "assistantMessageEvent": {"type": "text_delta", "contentIndex": 0, "delta": "ANSWER: " + prompt_text}})
             emit({"type": "turn_end"})
             emit({"type": "agent_end", "willRetry": False})
@@ -101,7 +104,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
     time.sleep(0.3)
     """
     let executable = binDir.appendingPathComponent("pi")
-    try fakePi.write(to: executable, atomically: true, encoding: .utf8)
+    try FakeCLILifecycleChecks.protectPython(fakePi).write(to: executable, atomically: true, encoding: .utf8)
     try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
     let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
     setenv("PATH", "\(binDir.path):\(originalPath)", 1)

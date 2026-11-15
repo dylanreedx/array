@@ -47,7 +47,7 @@ def card4_turn(message):
         record(dict(kind='card4-helper-ready', index=index))
         flag = managed_log + '.helper-' + index
         deadline = time.monotonic()+45
-        while not os.path.exists(flag) and time.monotonic()<deadline: time.sleep(.01)
+        while not os.path.exists(flag) and time.monotonic()<deadline: fixture_pause(.01)
         if not os.path.exists(flag): raise RuntimeError('helper release timed out')
         os.unlink(flag)
         card4_call('array_report', dict(summary='CARD4-RESULT-'+index))
@@ -55,7 +55,7 @@ def card4_turn(message):
         record(dict(kind='card4-busy'))
         flag = managed_log + '.lead-release'
         deadline = time.monotonic()+20
-        while not os.path.exists(flag) and time.monotonic()<deadline: time.sleep(.01)
+        while not os.path.exists(flag) and time.monotonic()<deadline: fixture_pause(.01)
         if not os.path.exists(flag): raise RuntimeError('lead release timed out')
         os.unlink(flag)
 '''
