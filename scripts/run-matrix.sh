@@ -365,8 +365,45 @@ matrix_run_leg_now() {
 # `--composer-image-components-check` sat in this file failing from the day it was
 # written without anyone noticing. Two documented reds must cost two results, not
 # a hundred and thirty.
-MATRIX_KNOWN_RED=(
-  --empty-workspace-creation-check # Fixture omits the already-registered Beta project.
+#
+# The list lives in scripts/matrix-known-failures.json so a gate can classify
+# pre-existing reds without a person: every entry carries a reason, evidence and
+# an expiry at most 30 days after it was added. An expired entry stops applying,
+# and its leg is a real failure again until someone fixes or renews it. Kinds:
+# known-red (always red; a pass means the entry is stale) and flaky (may pass).
+MATRIX_KNOWN_RED=()
+MATRIX_KNOWN_FLAKY=()
+MATRIX_KNOWN_EXPIRED=()
+MATRIX_KNOWN_FAILURES_FILE=${ARRAY_MATRIX_KNOWN_FAILURES:-"$ROOT_DIR/scripts/matrix-known-failures.json"}
+MATRIX_KNOWN_FAILURES_ERRORS=()
+while IFS=$'\t' read -r kind leg detail; do
+  case "$kind" in
+    known-red) MATRIX_KNOWN_RED+=("$leg") ;;
+    flaky) MATRIX_KNOWN_FLAKY+=("$leg") ;;
+    expired) MATRIX_KNOWN_EXPIRED+=("$leg (expired $detail)") ;;
+    *) MATRIX_KNOWN_FAILURES_ERRORS+=("$leg") ;;
+  esac
+done < <(python3 - "$MATRIX_KNOWN_FAILURES_FILE" <<'KNOWN_FAILURES_PY'
+import datetime, json, sys
+def bad(message):
+    print('error\t' + message.replace('\t', ' '))
+try:
+    entries = json.load(open(sys.argv[1]))['failures']
+except (OSError, ValueError, KeyError, TypeError) as error:
+    bad(f'{sys.argv[1]}: {error}'); sys.exit(0)
+today = datetime.date.today()
+for entry in entries:
+    try:
+        leg, kind = entry['leg'], entry['kind']
+        added = datetime.date.fromisoformat(entry['added'])
+        expires = datetime.date.fromisoformat(entry['expires'])
+        if kind not in ('known-red', 'flaky'): raise ValueError(f'kind {kind!r}')
+        if not entry['reason'].strip() or not entry['evidence'].strip(): raise ValueError('empty reason or evidence')
+        if not 0 <= (expires - added).days <= 30: raise ValueError('expires must be 0-30 days after added')
+    except (KeyError, TypeError, AttributeError, ValueError) as error:
+        bad(f'entry {entry!r}: {error}'); continue
+    print(f'{kind}\t{leg}' if today <= expires else f'expired\t{leg}\t{expires}')
+KNOWN_FAILURES_PY
 )
 # Advisory legs whose status the caller captures itself (`|| var=$?`); these must
 # keep returning their real status or that handling silently stops working.
@@ -376,8 +413,37 @@ MATRIX_ADVISORY=(
 MATRIX_UNEXPECTED_FAILURES=()
 MATRIX_KNOWN_RED_OBSERVED=()
 MATRIX_KNOWN_RED_UNEXPECTED_PASS=()
+MATRIX_KNOWN_FLAKY_OBSERVED=()
+MATRIX_RETRY_PASSED=()
 MATRIX_LEGS_RUN=0
 MATRIX_NOTES=()
+
+# One serial retry for a leg that failed in the parallel group, the way load
+# flakes were classified by hand before every release. A pass is reported as
+# retry-passed, never as a plain pass. ARRAY_MATRIX_RETRY=0 turns it off.
+MATRIX_RETRY=${ARRAY_MATRIX_RETRY:-1}
+MATRIX_PARALLEL_PHASE=1
+MATRIX_RETRYING=0
+MATRIX_RETRY_IDS=()
+
+# ARRAY_MATRIX_LEGS (comma or newline separated leg names) runs only those legs,
+# through the same builds, scheduler and classification. It is a targeted run,
+# never a gate: a name that matches no leg is a failure, not a silent green.
+MATRIX_SELECTED=()
+MATRIX_SELECTED_SEEN=()
+if [[ -n "${ARRAY_MATRIX_LEGS:-}" ]]; then
+  while IFS= read -r leg; do
+    leg=$(printf '%s' "$leg" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+    [[ -n "$leg" ]] && MATRIX_SELECTED+=("$leg")
+  done < <(printf '%s\n' "$ARRAY_MATRIX_LEGS" | tr ',' '\n')
+fi
+matrix_selected() {
+  [[ ${#MATRIX_SELECTED[@]} -eq 0 ]] && return 0
+  local leg
+  leg=$(matrix_leg_name "$@")
+  matrix_list_contains "$leg" "${MATRIX_SELECTED[@]}" || return 1
+  MATRIX_SELECTED_SEEN+=("$leg")
+}
 
 matrix_leg_name() {
   local arg
@@ -406,10 +472,16 @@ matrix_classify() {
     printf '%s\n' "$status" > "$MATRIX_JOB_STATUS_FILE"
     return 0
   fi
-  local classification=pass
+  local classification=pass known_red=0 flaky=0
+  matrix_list_contains "$leg" ${MATRIX_KNOWN_RED[@]+"${MATRIX_KNOWN_RED[@]}"} && known_red=1
+  matrix_list_contains "$leg" ${MATRIX_KNOWN_FLAKY[@]+"${MATRIX_KNOWN_FLAKY[@]}"} && flaky=1
   if [[ "$status" != 0 ]]; then classification=fail; fi
-  if matrix_list_contains "$leg" "${MATRIX_KNOWN_RED[@]}"; then
+  if [[ "$known_red" == 1 ]]; then
     if [[ "$status" != 0 ]]; then classification=known-red; else classification=known-red-passed; fi
+  elif [[ "$flaky" == 1 && "$status" != 0 ]]; then
+    classification=known-flaky
+  elif [[ "$MATRIX_RETRYING" == 1 && "$status" == 0 ]]; then
+    classification=retry-passed
   elif matrix_list_contains "$leg" "${MATRIX_ADVISORY[@]}"; then
     classification=advisory
   fi
@@ -420,13 +492,24 @@ matrix_classify() {
     return "$status"
   fi
 
-  if matrix_list_contains "$leg" "${MATRIX_KNOWN_RED[@]}"; then
+  if [[ "$classification" == known-flaky ]]; then
+    MATRIX_KNOWN_FLAKY_OBSERVED+=("$leg")
+    printf 'KNOWN-FLAKY (listed, expected): %s exited %d — continuing.\n' "$leg" "$status"
+    return 0
+  fi
+  if [[ "$classification" == retry-passed ]]; then
+    MATRIX_RETRY_PASSED+=("$leg")
+    printf 'PASSED ON SERIAL RETRY: %s failed in the parallel group, passed alone.\n' "$leg"
+    return 0
+  fi
+
+  if [[ "$known_red" == 1 ]]; then
     if [[ $status -ne 0 ]]; then
       MATRIX_KNOWN_RED_OBSERVED+=("$leg")
       printf 'KNOWN-RED (documented, expected): %s exited %d — continuing.\n' "$leg" "$status"
     else
       MATRIX_KNOWN_RED_UNEXPECTED_PASS+=("$leg")
-      printf 'KNOWN-RED PASSED: %s — the allowlist in this script is stale.\n' "$leg"
+      printf 'KNOWN-RED PASSED: %s — its entry in scripts/matrix-known-failures.json is stale.\n' "$leg"
     fi
     return 0
   fi
@@ -438,6 +521,12 @@ matrix_classify() {
   fi
   return 0
 }
+
+# A malformed known-failure list must not classify anything quietly.
+if [[ ${#MATRIX_KNOWN_FAILURES_ERRORS[@]} -gt 0 ]]; then
+  printf 'Known-failure list rejected: %s\n' "${MATRIX_KNOWN_FAILURES_ERRORS[@]}"
+  MATRIX_LEG_SECONDS=0 matrix_classify matrix-known-failures 1
+fi
 
 # A leg that passes with a caveat prints `MATRIX-NOTE: <text>` on stdout, and the
 # report lists it, so a pass that excludes something cannot read as a clean one.
@@ -451,8 +540,24 @@ matrix_collect_notes() {
 # Prints the verdict and decides the exit code. Known-reds are reported apart from
 # regressions, and a known-red that PASSES is called out too — a stale allowlist
 # silently re-hides whatever it still covers.
+matrix_check_selection() {
+  [[ ${#MATRIX_SELECTED[@]} -gt 0 && "${MATRIX_SELECTION_CHECKED:-0}" == 0 ]] || return 0
+  MATRIX_SELECTION_CHECKED=1
+  local leg
+  for leg in "${MATRIX_SELECTED[@]}"; do
+    if ! matrix_list_contains "$leg" ${MATRIX_SELECTED_SEEN[@]+"${MATRIX_SELECTED_SEEN[@]}"}; then
+      printf 'SELECTED LEG NOT FOUND in this matrix mode: %s\n' "$leg"
+      MATRIX_LEG_SECONDS=0 matrix_classify "matrix-selection: $leg" 1
+    fi
+  done
+}
+
 matrix_report() {
   local label=$1
+  matrix_check_selection
+  if [[ ${#MATRIX_SELECTED[@]} -gt 0 ]]; then
+    label="$label (ARRAY_MATRIX_LEGS selected ${#MATRIX_SELECTED[@]} leg(s); not a full gate)"
+  fi
   printf '\n---- %s: %d leg(s) run ----\n' "$label" "$MATRIX_LEGS_RUN"
 
   if [[ ${#MATRIX_NOTES[@]} -gt 0 ]]; then
@@ -469,8 +574,23 @@ matrix_report() {
   fi
 
   if [[ ${#MATRIX_KNOWN_RED_UNEXPECTED_PASS[@]} -gt 0 ]]; then
-    printf 'KNOWN-RED that PASSED — remove from MATRIX_KNOWN_RED in this script (%d): %s\n' \
+    printf 'KNOWN-RED that PASSED — remove its entry from scripts/matrix-known-failures.json (%d): %s\n' \
       "${#MATRIX_KNOWN_RED_UNEXPECTED_PASS[@]}" "${MATRIX_KNOWN_RED_UNEXPECTED_PASS[*]}"
+  fi
+
+  if [[ ${#MATRIX_KNOWN_FLAKY_OBSERVED[@]} -gt 0 ]]; then
+    printf 'KNOWN-FLAKY, failed as listed (%d): %s\n' \
+      "${#MATRIX_KNOWN_FLAKY_OBSERVED[@]}" "${MATRIX_KNOWN_FLAKY_OBSERVED[*]}"
+  fi
+
+  if [[ ${#MATRIX_RETRY_PASSED[@]} -gt 0 ]]; then
+    printf 'PASSED ON SERIAL RETRY — red under parallel load, green alone (%d): %s\n' \
+      "${#MATRIX_RETRY_PASSED[@]}" "${MATRIX_RETRY_PASSED[*]}"
+  fi
+
+  if [[ ${#MATRIX_KNOWN_EXPIRED[@]} -gt 0 ]]; then
+    printf 'EXPIRED known failures, now counted as real failures — fix or renew (%d): %s\n' \
+      "${#MATRIX_KNOWN_EXPIRED[@]}" "${MATRIX_KNOWN_EXPIRED[*]}"
   fi
 
   if [[ ${#MATRIX_UNEXPECTED_FAILURES[@]} -gt 0 ]]; then
@@ -610,6 +730,15 @@ matrix_join_one() {
   fi
   MATRIX_LEG_SECONDS=$seconds
   matrix_collect_notes "$leg" "$MATRIX_RESULTS/$id.log"
+  if [[ "$status" != 0 && "$MATRIX_RETRY" == 1 && "$MATRIX_PARALLEL_PHASE" == 1 ]] &&
+    ! matrix_list_contains "$leg" ${MATRIX_KNOWN_RED[@]+"${MATRIX_KNOWN_RED[@]}"} \
+      ${MATRIX_KNOWN_FLAKY[@]+"${MATRIX_KNOWN_FLAKY[@]}"} "${MATRIX_ADVISORY[@]}"; then
+    printf '  %5ss  RED (retrying alone after the parallel group)  %s\n' "$seconds" "$leg"
+    tail -25 "$MATRIX_RESULTS/$id.log"
+    MATRIX_RETRY_IDS+=("$id")
+    MATRIX_JOB_JOIN=$((MATRIX_JOB_JOIN + 1))
+    return 0
+  fi
   matrix_classify "$leg" "$status" || true
   printf '  %5ss  %s  %s\n' "$seconds" "$([[ $status == 0 ]] && printf PASS || printf RED)" "$leg"
   if [[ "$status" != 0 ]]; then tail -25 "$MATRIX_RESULTS/$id.log"; fi
@@ -624,6 +753,7 @@ matrix_launch() {
   local id=$MATRIX_JOB_NEXT
   MATRIX_JOB_NEXT=$((MATRIX_JOB_NEXT + 1))
   matrix_leg_name "$@" > "$MATRIX_RESULTS/$id.leg"
+  printf '%q ' "$runner" "$@" > "$MATRIX_RESULTS/$id.cmd"
   (
     trap - EXIT
     MATRIX_JOB_STATUS_FILE="$MATRIX_RESULTS/$id.status"
@@ -652,10 +782,12 @@ matrix_queue() {
   fi
 }
 run_leg() {
+  matrix_selected "$@" || return 0
   if [[ "$MATRIX_SCHEDULING" == 1 ]]; then matrix_queue matrix_run_leg_now "$@"
   else matrix_run_leg_now "$@"; fi
 }
 run_app_check() {
+  matrix_selected "$@" || return 0
   if [[ "$MATRIX_SCHEDULING" == 1 ]]; then matrix_queue matrix_run_app_now "$@"
   else matrix_run_app_now "$@"; fi
 }
@@ -684,6 +816,18 @@ AWAKE_PY
 
 matrix_finish_jobs() {
   matrix_drain
+  MATRIX_PARALLEL_PHASE=0
+  if [[ ${#MATRIX_RETRY_IDS[@]} -gt 0 ]]; then
+    printf '\n==> Serial retry of %d leg(s) that failed in the parallel group\n' "${#MATRIX_RETRY_IDS[@]}"
+    MATRIX_RETRYING=1
+    local retry
+    for retry in "${MATRIX_RETRY_IDS[@]}"; do
+      # Only the shell-escaped invocation matrix_launch wrote is evaluated.
+      eval "matrix_launch $(cat "$MATRIX_RESULTS/$retry.cmd")"
+      matrix_drain
+    done
+    MATRIX_RETRYING=0
+  fi
   if [[ -s "$MATRIX_RESULTS/awake.sh" ]]; then
     matrix_require_awake
     printf '\n==> Serial awake group\n'
@@ -693,7 +837,8 @@ matrix_finish_jobs() {
       matrix_drain
     done < "$MATRIX_RESULTS/awake.sh"
   fi
-  if [[ "$MATRIX_JOB_NEXT" != "$MATRIX_QUEUED_LEGS" ]]; then
+  matrix_check_selection
+  if [[ "$MATRIX_JOB_NEXT" != "$((MATRIX_QUEUED_LEGS + ${#MATRIX_RETRY_IDS[@]}))" ]]; then
     printf 'RUNNER FAILURE: queued %s legs but launched %s\n' "$MATRIX_QUEUED_LEGS" "$MATRIX_JOB_NEXT"
     MATRIX_LEG_SECONDS=0 matrix_classify matrix-runner-completeness 1
   fi
@@ -1431,6 +1576,11 @@ printf '\n==> Independent group (%s workers), then serial awake group; mode=%s\n
 # .plans/73-film-studio: the film recorder is compiled only into the film build
 # (-DARRAY_FILM). The normal binary must carry none of it and refuse --film.
 run_leg scripts/check-film-absent.sh
+# Release pipeline witnesses (fast ship): pre-existing reds classify from
+# scripts/matrix-known-failures.json with one serial retry; the appcast only
+# ever appends.
+run_leg python3 scripts/check-matrix-known-failures.py
+run_leg python3 scripts/check-appcast-append.py
 run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check

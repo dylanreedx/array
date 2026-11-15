@@ -68,6 +68,8 @@ def execute(mode, stale, fail=None):
         root = Path(temp)
         (root / "scripts").mkdir()
         shutil.copyfile(SOURCE, root / "scripts/run-matrix.sh")
+        # The matrix refuses to classify without its known-failure list.
+        shutil.copyfile(Path(__file__).with_name("matrix-known-failures.json"), root / "scripts/matrix-known-failures.json")
         bindir = root / "bin"
         bindir.mkdir()
         stub = "#!" + sys.executable + "\n" + DOUBLE

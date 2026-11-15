@@ -1,0 +1,13 @@
+{
+  "about": "Pre-existing matrix failures that scripts/run-matrix.sh classifies without a person. kind is known-red (always red; a pass reports the entry as stale) or flaky (may pass or fail). Every entry needs a reason, evidence and an expiry 0-30 days after added; once expired the leg counts as a real failure again. Fix the leg or renew the entry with fresh evidence. Never add an entry to make a new regression green.",
+  "failures": [
+    {
+      "leg": "--empty-workspace-creation-check",
+      "kind": "known-red",
+      "reason": "The fixture's empty-workspace palette omits the already-registered Beta project; red since 2026-09-09, a fixture defect, not the product.",
+      "evidence": "Classified KNOWN-RED in the 0.7.49 and 0.7.50 gates (.plans/release-0750-artifacts.md).",
+      "added": "2026-11-15",
+      "expires": "2026-12-15"
+    }
+  ]
+}
