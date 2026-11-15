@@ -130,8 +130,8 @@ reinstall after moving those CLIs. The checkout runs on the local branch
 `ARRAY_NIGHTLY_REF=<branch> scripts/nightly-gate.sh`.
 
 Before the matrix, the gate waits, still holding the shared lock, until no other
-`swift-build` runs and `fseventsd` stays under 50% CPU for two samples 30 s
-apart, for at most 30 minutes. Then it proceeds either way. `summary.json`
+`swift-build` is compiling (an idle one does not count) and `fseventsd` stays
+under 50% CPU for two samples 30 s apart, for at most 30 minutes. Then it proceeds either way. `summary.json`
 records the wait under `contention` (`quiet`, `waited_seconds`, the worst
 load seen). A red leg from a run with `quiet: false` is worth re-gating before
 it is treated as a regression.

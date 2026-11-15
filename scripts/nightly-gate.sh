@@ -23,6 +23,9 @@ label = 'dev.arrayapp.nightly-gate'
 plist = Path.home() / 'Library/LaunchAgents' / (label + '.plist')
 args = sys.argv[2:]
 env = dict(os.environ)
+# Every ARRAY_NIGHTLY_* setting belongs to this process; no leg inherits one.
+NOTIFY = env.pop('ARRAY_NIGHTLY_NOTIFY', '1') != '0'
+env.pop('ARRAY_NIGHTLY_BASE', None)
 # The system directories come first, so python3, git and node resolve the same
 # however the gate starts. The caller's PATH follows, for what lives only there:
 # claude, codex and pi. --install records the installing shell's PATH in the
@@ -37,11 +40,29 @@ REF = env.pop('ARRAY_NIGHTLY_REF', 'origin/array/integration')
 # FSEvents within seconds failed under exactly that load. The wait is bounded;
 # after it the gate proceeds and the summary records the contention. These
 # knobs are for this process only; no leg inherits them.
+KNOB_ERRORS = []
+
+def knob(name, default, low, high):
+    # A bad value falls back to the default and is recorded; it never crashes
+    # the read-only commands or turns the wait endless (nan, inf, negatives).
+    raw = env.pop(name, None)
+    try:
+        value = float(default if raw is None else raw)
+        if not low <= value <= high:  # also false for nan
+            raise ValueError(f'outside {low}..{high}')
+        return value
+    except ValueError as error:
+        KNOB_ERRORS.append(f'{name}={raw!r}: {error}; using {default}')
+        return float(default)
+
 QUIET = dict(build=env.pop('ARRAY_NIGHTLY_BUILD_PROCESS', 'swift-build'),
-             fsevents_cpu=float(env.pop('ARRAY_NIGHTLY_FSEVENTS_CPU_MAX', '50')),
-             max_seconds=float(env.pop('ARRAY_NIGHTLY_QUIET_MAX_SECONDS', '1800')),
-             poll=float(env.pop('ARRAY_NIGHTLY_QUIET_POLL_SECONDS', '30')),
-             samples=int(env.pop('ARRAY_NIGHTLY_QUIET_SAMPLES', '2')))
+             fsevents_cpu=knob('ARRAY_NIGHTLY_FSEVENTS_CPU_MAX', 50, -1, 100000),
+             max_seconds=knob('ARRAY_NIGHTLY_QUIET_MAX_SECONDS', 1800, 0, 86400),
+             poll=knob('ARRAY_NIGHTLY_QUIET_POLL_SECONDS', 30, 0.05, 3600),
+             samples=int(knob('ARRAY_NIGHTLY_QUIET_SAMPLES', 2, 1, 100)),
+             # A build counts while it or its compiler children use this much CPU;
+             # an idle or stuck swift-build process does not hold the gate.
+             build_cpu=knob('ARRAY_NIGHTLY_BUILD_CPU_MIN', 5, 0, 100000))
 # The checkout sits on this local branch, never a detached HEAD: legs that read
 # the checkout's branch (an agent tile's branch chip) must see what a bench sees.
 # The gate owns it; it never moves a branch that lives anywhere else.
@@ -203,32 +224,55 @@ def owned(command, owner, log, extra_env=None):
     return sp.run(['/usr/bin/caffeinate', '-i', '/bin/bash', '-c', script], cwd=checkout,
                   env=dict(env, **(extra_env or {})), stdin=sp.DEVNULL, stdout=log, stderr=sp.STDOUT).returncode
 
+LAST_CONTENTION = {}  # the latest wait, kept for a summary written after an error
+
 def machine_load():
-    builds, fsevents = 0, None  # None: no fseventsd in the listing
-    listing = sp.run(['/bin/ps', '-axo', '%cpu=,comm='], capture_output=True, text=True).stdout
-    for line in listing.splitlines():
-        cpu, _, comm = line.strip().partition(' ')
-        name = os.path.basename(comm.strip())
-        if name == QUIET['build']:
-            builds += 1
-        elif name == 'fseventsd':
-            fsevents = max(fsevents or 0.0, float(cpu or 0))
-    return dict(swift_builds=builds, fseventsd_cpu=fsevents)
+    listing = sp.run(['/bin/ps', '-axo', 'pid=,ppid=,%cpu=,comm='], capture_output=True, text=True)
+    procs = {}
+    for line in listing.stdout.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) == 4:
+            procs[int(fields[0])] = (int(fields[1]), float(fields[2]), os.path.basename(fields[3].strip()))
+    if listing.returncode or not procs:
+        # Unknown load is not quiet: wait (bounded) and say why.
+        return dict(swift_builds=None, idle_swift_builds=None, fseventsd_cpu=None,
+                    probe_error=f'ps exit {listing.returncode}, {len(procs)} processes')
+    children = {}
+    for pid, (ppid, _, _) in procs.items():
+        children.setdefault(ppid, []).append(pid)
+    def tree_cpu(pid):
+        stack, total, seen = [pid], 0.0, set()
+        while stack:
+            current = stack.pop()
+            if current in seen or current not in procs:
+                continue
+            seen.add(current)
+            total += procs[current][1]
+            stack.extend(children.get(current, []))
+        return total
+    builds = [tree_cpu(pid) for pid, (_, _, name) in procs.items() if name == QUIET['build']]
+    active = sum(cpu >= QUIET['build_cpu'] for cpu in builds)
+    fsevents = [cpu for _, cpu, name in procs.values() if name == 'fseventsd']
+    return dict(swift_builds=active, idle_swift_builds=len(builds) - active,
+                fseventsd_cpu=max(fsevents) if fsevents else None)
 
 def wait_until_quiet(log):
-    started, quiet_in_row, worst, polls, first = time.monotonic(), 0, dict(swift_builds=0, fseventsd_cpu=0.0), 0, None
+    # Wall clock, so a Mac that slept through the wait does not stretch the bound.
+    started, quiet_in_row, worst, polls, first = time.time(), 0, dict(swift_builds=0, fseventsd_cpu=0.0), 0, None
     while True:
         load = machine_load()
         polls += 1
         first = first or load
-        worst = dict(swift_builds=max(worst['swift_builds'], load['swift_builds']),
+        worst = dict(swift_builds=max(worst['swift_builds'], load['swift_builds'] or 0),
                      fseventsd_cpu=max(worst['fseventsd_cpu'], load['fseventsd_cpu'] or 0.0))
         calm = load['swift_builds'] == 0 and (load['fseventsd_cpu'] or 0.0) <= QUIET['fsevents_cpu']
         quiet_in_row = quiet_in_row + 1 if calm else 0
-        waited = time.monotonic() - started
+        waited = time.time() - started
         if quiet_in_row >= QUIET['samples'] or waited >= QUIET['max_seconds']:
             result = dict(quiet=quiet_in_row >= QUIET['samples'], waited_seconds=round(waited, 2), polls=polls,
-                          first=first, last=load, worst=worst, limits=dict(QUIET))
+                          first=first, last=load, worst=worst, limits=dict(QUIET), knob_errors=KNOB_ERRORS)
+            LAST_CONTENTION.clear()
+            LAST_CONTENTION.update(result)
             print('Machine ' + ('quiet' if result['quiet'] else 'still busy; proceeding') + ': ' + json.dumps(result),
                   file=log, flush=True)
             return result
@@ -236,6 +280,7 @@ def wait_until_quiet(log):
 
 def matrix(mode, log):
     contention = wait_until_quiet(log)
+    began = time.monotonic()
     matrix_results = out / ('matrix-' + mode + '-' + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
     code = owned('bash scripts/run-matrix.sh --' + mode, 'ARRAY_MATRIX_LOCK_OWNER', log,
                  dict(ARRAY_MATRIX_RESULTS=str(matrix_results)))
@@ -249,11 +294,12 @@ def matrix(mode, log):
                 failed=len(failed), failed_legs=failed,
                 retry_passed=[r['leg'] for r in rows if r['status'] == 'retry-passed'],
                 known=[r['leg'] for r in rows if r['status'] in ('known-red', 'known-flaky')],
-                matrix_results=str(matrix_results), contention=contention)
+                matrix_results=str(matrix_results), contention=contention,
+                matrix_seconds=round(time.monotonic() - began, 2))
 
 def notify(message):
     # One completion signal; notification delivery failure does not alter gate results.
-    if env.get('ARRAY_NIGHTLY_NOTIFY', '1') == '0':
+    if not NOTIFY:
         return
     notice = sp.run(['/usr/bin/osascript', '-e', 'on run argv\n display notification (item 1 of argv) with title "Array nightly gate"\nend run', message], capture_output=True, text=True)
     (out / 'notification.log').write_text(notice.stdout + notice.stderr)
@@ -267,7 +313,7 @@ if args[:1] == ['--awake']:
             checkout_at(log)
             awake = matrix('awake-only', log)
         except Exception as error:
-            awake = dict(green=False, failed=1, failed_legs=[str(error)])
+            awake = dict(green=False, failed=1, failed_legs=[str(error)], contention=dict(LAST_CONTENTION) or None)
     awake.update(commit=commit, date=dt.datetime.now(dt.timezone.utc).isoformat(),
                  seconds=round(time.monotonic() - started, 2))
     atomic(out / 'awake.json', awake)
@@ -284,7 +330,7 @@ with (out / 'run.log').open('a') as log:
                 raise RuntimeError('Integration must first land array/matrix-cleanup (skip-awake, shared lock, JSON results)')
             summary = matrix('skip-awake', log)
     except Exception as error:
-        summary = dict(green=False, passed=0, failed=1, failed_legs=[str(error)])
+        summary = dict(green=False, passed=0, failed=1, failed_legs=[str(error)], contention=dict(LAST_CONTENTION) or None)
         print(str(error), file=log)
     summary.update(commit=commit, date=dt.datetime.now(dt.timezone.utc).isoformat(), mode='skip-awake',
                    managed_agent=env.get('CONTINUUM_ARRAY_MANAGED_AGENT') == '1', results=str(out),

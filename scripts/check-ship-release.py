@@ -39,6 +39,7 @@ STUBS = {
 mode=$1
 case $mode in --skip-awake) ;; --awake-only) ;; *) echo "unknown mode $mode" >&2; exit 2 ;; esac
 # What a leg would see: the checkout's branch, the CLIs on PATH, inherited gate state.
+env | grep '^ARRAY_NIGHTLY_' >> "$SHIP_EVENTS.knobs" || true
 name=$(cat "$SHIP_PLAN/build-name"); echo "$(git rev-parse HEAD) $(/bin/ps -axo comm= | grep -c "/$name\$")" >> "$SHIP_EVENTS.busy"
 echo "$(git rev-parse HEAD) branch=$(git branch --show-current) first=${PATH%%:*} cli=$(command -v array-fixture-cli || echo none) ref=${ARRAY_NIGHTLY_REF:-unset}" >> "$SHIP_EVENTS.legs"
 echo "matrix $mode $(git rev-parse HEAD) owner=${ARRAY_MATRIX_LOCK_OWNER:-none}" >> "$SHIP_EVENTS"
@@ -342,22 +343,32 @@ def ship_cases(fx, gated, head):
 def quiet_cases(fx):
     """Before the matrix the gate waits for no other build and a calm fseventsd,
     holding the shared lock, for at most the bound; then it proceeds and records it."""
-    # /bin/sleep under the stand-in's name: ps reports argv[0], as it does for a
+    # Stand-ins run under the build's name: ps reports argv[0], as it does for a
     # real swift-build (a copied platform binary would be killed on launch).
-    stand_in = lambda: subprocess.Popen([str(fx.root / fx.build_name), "60"], executable="/bin/sleep")
+    # A compiling build burns CPU (yes); an idle one sleeps.
+    stand_in = lambda: subprocess.Popen([str(fx.root / fx.build_name)], executable="/usr/bin/yes",
+                                        stdout=subprocess.DEVNULL)
+    idle_stand_in = lambda: subprocess.Popen([str(fx.root / fx.build_name), "60"], executable="/bin/sleep")
+
+    def lock_held_within(seconds):
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            with open(fx.root / "matrix.lock", "a") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                except BlockingIOError:
+                    return True
+            time.sleep(0.05)
+        return False
     busy = lambda: dict(line.split() for line in Path(str(fx.events) + ".busy").read_text().splitlines())
 
     build = stand_in()
     head = fx.commit("feat(app): change while another build runs", {"Sources/App.swift": "let app = 5\n"})
     gate = subprocess.Popen(["/bin/bash", "scripts/nightly-gate.sh"], cwd=fx.repo, env=dict(fx.env, ARRAY_NIGHTLY_REF="HEAD"),
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    held = lock_held_within(10)
     time.sleep(1.5)
-    with open(fx.root / "matrix.lock", "a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            held = False
-        except BlockingIOError:
-            held = True
     started_early = head in busy() if Path(str(fx.events) + ".busy").exists() else False
     build.kill(); build.wait()
     output = gate.communicate(timeout=60)[0].decode(errors="replace")
@@ -387,6 +398,26 @@ def quiet_cases(fx):
            and waited["last"]["fseventsd_cpu"] is not None and waited["polls"] > 1,
            f"a busy fseventsd (the real daemon, read through ps) holds the gate: {waited}", result)
     print("PASS gate-waits-for-fseventsd")
+
+    idle = idle_stand_in()
+    head = fx.commit("feat(app): change beside an idle build process", {"Sources/App.swift": "let app = 8\n"})
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_QUIET_MAX_SECONDS="5"))
+    idle.kill(); idle.wait()
+    waited = fx.summary(head).get("contention", {})
+    expect(result.returncode == 0 and waited.get("quiet") is True and waited["waited_seconds"] < 2
+           and waited["last"]["idle_swift_builds"] == 1, f"an idle swift-build does not hold the gate: {waited}", result)
+    print("PASS gate-ignores-idle-build")
+
+    head = fx.commit("feat(app): change with a malformed knob", {"Sources/App.swift": "let app = 9\n"})
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_QUIET_MAX_SECONDS="nan",
+                                                ARRAY_NIGHTLY_QUIET_SAMPLES="abc"))
+    waited = fx.summary(head).get("contention", {})
+    expect(result.returncode == 0 and len(waited.get("knob_errors", [])) == 2 and waited["limits"]["max_seconds"] == 1800,
+           f"bad knobs fall back to defaults and are recorded: {waited}", result)
+    knobs = Path(str(fx.events) + ".knobs")
+    expect(not (knobs.exists() and knobs.read_text().strip()),
+           f"no ARRAY_NIGHTLY_* knob reaches the matrix: {knobs.read_text() if knobs.exists() else ''}")
+    print("PASS gate-knobs-safe-and-private")
 
 
 def schedule_case():
