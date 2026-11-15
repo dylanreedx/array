@@ -525,6 +525,8 @@ func runAgentCompletionChecks() async throws {
         "AgentCompletion: the first @ after preparing scanned the checkout again (\(warmDiscovery.invocationCount) scans)"
     )
 
+    try await checkOlderScanNeverReplacesNewerListing(scratch: fileIndexRoot)
+
     let untrusted = AgentCompletionContext(
         agentID: falconContext.agentID,
         backend: falconContext.backend,
@@ -652,4 +654,95 @@ func runAgentCompletionChecks() async throws {
 
     print("Agent completion negative witness observed red (exit \(witness.terminationStatus)): \(expected)")
     print("Agent completion checks passed: semantic payloads/context, checkout-aware and explicit external file index/root/ignore/symlink/deletion/fuzzy/navigation/acceptance behavior, quote/escape/middle-caret detection, replacement registry, deterministic dedupe/rank/provenance, trigger isolation, and stale cancellation")
+}
+
+/// Tiles on one checkout share its listing, and each scans on its own index, so
+/// scans of one root finish in any order. One that started first and finishes
+/// last must not replace the newer listing: a file created between the two
+/// starts would vanish from every tile until each listed the root again.
+///
+/// Two production indexes are driven. Only `git` is held: a wrapper put first
+/// on `PATH` lists with the real git, then keeps its first answer back until
+/// released, which is a slow scan whose snapshot was taken early.
+private func checkOlderScanNeverReplacesNewerListing(scratch: URL) async throws {
+    let fileManager = FileManager.default
+    let root = scratch.appendingPathComponent("scan-order-checkout", isDirectory: true)
+    let shim = scratch.appendingPathComponent("scan-order-git", isDirectory: true)
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    try fileManager.createDirectory(at: shim, withIntermediateDirectories: true)
+    try "scan order".write(to: root.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+
+    let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+    guard let realGit = originalPath.split(separator: ":")
+        .map({ URL(fileURLWithPath: String($0)).appendingPathComponent("git").path })
+        .first(where: { fileManager.isExecutableFile(atPath: $0) }) else {
+        expect(false, "AgentCompletion: no git on PATH for the scan-order fixture")
+        return
+    }
+    let initGit = Process()
+    initGit.executableURL = URL(fileURLWithPath: realGit)
+    initGit.arguments = ["-C", root.path, "init", "-q"]
+    initGit.standardOutput = Pipe()
+    initGit.standardError = Pipe()
+    try initGit.run()
+    initGit.waitUntilExit()
+    expect(initGit.terminationStatus == 0, "AgentCompletion: git init failed for the scan-order fixture")
+
+    let held = shim.path
+    let wrapper = shim.appendingPathComponent("git")
+    try """
+    #!/bin/sh
+    if mkdir '\(held)/first' 2>/dev/null; then
+      '\(realGit)' "$@" > '\(held)/first-listing' || exit $?
+      touch '\(held)/first-listed'
+      while [ ! -e '\(held)/release' ]; do sleep 0.02; done
+      cat '\(held)/first-listing'
+    else
+      exec '\(realGit)' "$@"
+    fi
+
+    """.write(to: wrapper, atomically: true, encoding: .utf8)
+    try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapper.path)
+
+    func context(_ uuid: String) -> AgentCompletionContext {
+        AgentCompletionContext(
+            agentID: AgentID(rawValue: UUID(uuidString: uuid)!),
+            backend: .codex,
+            checkoutRoot: root,
+            gitRoot: root,
+            arrayProjectRoot: root,
+            trustState: .trusted
+        )
+    }
+    let olderContext = context("0DE70000-1234-1234-1234-1234567890AB")
+    let newerContext = context("0DE70001-1234-1234-1234-1234567890AB")
+    let older = AgentFileIndex()
+    let newer = AgentFileIndex()
+
+    setenv("PATH", "\(shim.path):\(originalPath)", 1)
+    defer { setenv("PATH", originalPath, 1) }
+    let olderScan = Task { await older.prepare(for: olderContext) }
+    let listed = shim.appendingPathComponent("first-listed").path
+    let deadline = Date().addingTimeInterval(10)
+    while !fileManager.fileExists(atPath: listed), Date() < deadline {
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    expect(fileManager.fileExists(atPath: listed), "AgentCompletion: the held scan never listed the checkout")
+    try "created between the scans".write(
+        to: root.appendingPathComponent("NEWFILE.md"), atomically: true, encoding: .utf8)
+    await newer.prepare(for: newerContext)
+    expect(fileManager.createFile(atPath: shim.appendingPathComponent("release").path, contents: nil),
+           "AgentCompletion: could not release the held scan")
+    await olderScan.value
+    setenv("PATH", originalPath, 1)
+
+    for (name, index, context) in [("newer", newer, newerContext), ("older", older, olderContext)] {
+        let rows = await index.suggestions(for: AgentCompletionQuery(
+            trigger: "@", text: "newfile", replacementRange: NSRange(location: 0, length: 8), context: context
+        ))
+        expect(
+            rows.contains { $0.title == "NEWFILE.md" },
+            "AgentCompletion: a scan that started first and finished last replaced the newer listing; the \(name) index no longer offers NEWFILE.md, created between the two scans (got \(rows.map(\.title)))"
+        )
+    }
 }

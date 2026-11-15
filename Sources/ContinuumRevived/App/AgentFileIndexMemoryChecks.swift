@@ -16,7 +16,9 @@ import Foundation
 /// taking the keyboard through `NSWindow.makeFirstResponder`, which is what
 /// warms the index in the app. Memory is malloc bytes in use, read before and
 /// after; suggestions are compared against a digest recorded from the build
-/// before the fix, so the change is proven not to alter a single row.
+/// before the fix, so the change is proven not to alter a single row. Then the
+/// tiles close through `AppDelegate.deleteTile`: the last one open still holds
+/// the listing and answers from it, and closing it gives the listing back.
 @MainActor
 enum AgentFileIndexMemoryChecks {
     struct Failure: Error, CustomStringConvertible {
@@ -256,6 +258,51 @@ enum AgentFileIndexMemoryChecks {
         // checkout must cost about one index, however many tiles use it.
         try expect(allMalloc < oneMalloc * 2,
                    "\(tileCount) tiles on one checkout hold one index, not \(tileCount): \(report)")
-        return report
+
+        // Release. Every tile but one closes the way its ✕ does. The survivor
+        // still holds the listing and answers exactly from it; when it closes
+        // too, the listing goes and the memory with it.
+        func heldFixtureRoots() -> Set<String> {
+            AgentFileIndex.qaSharedListingRoots().filter { $0.contains(temporary.lastPathComponent) }
+        }
+        try expect(heldFixtureRoots().count == 1,
+                   "the open tiles share one listing of the checkout, got \(heldFixtureRoots())")
+        var survivor: ManagedAgentTileNSView? = views.removeLast()
+        for view in views { delegate.deleteTile(id: view.tile.id) }
+        views.removeAll()
+        _ = await waitUntil(timeout: 0.5, pollInterval: 0.1) { false }
+        try expect(heldFixtureRoots().count == 1,
+                   "the surviving tile keeps the checkout's listing after its \(tileCount - 1) siblings close, got \(heldFixtureRoots())")
+        do {
+            guard let composer = survivor?.qaComposerForChecks,
+                  let context = survivor?.qaCompletionContext else {
+                throw Failure(description: "the surviving tile lost its composer or completion context")
+            }
+            var batches: [[AgentCompletion]] = []
+            for query in queries(context: context) {
+                batches.append(await composer.qaCompletionSource.suggestions(for: query)
+                    .filter { $0.providerIDs.contains("checkout.files") })
+            }
+            let survivorDigest = digest(batches, root: projectRoot)
+            try expect(survivorDigest == goldenSuggestionDigest,
+                       "the surviving tile answers exactly after its siblings close: got \(survivorDigest), want \(goldenSuggestionDigest)")
+        }
+
+        // Closing the tiles also frees their own views, which were in the
+        // baseline, so the total drops far below it either way. The listing is
+        // what closing the last holder frees beyond its one tile.
+        let beforeLastClose = mallocBytesInUse()
+        if let id = survivor?.tile.id { delegate.deleteTile(id: id) }
+        survivor = nil
+        let released = await waitUntil(timeout: 3, pollInterval: 0.1) { heldFixtureRoots().isEmpty }
+        _ = await waitUntil(timeout: 0.3, pollInterval: 0.1) { false }
+        let lastCloseFreed = beforeLastClose - mallocBytesInUse()
+        let releasedMalloc = mallocBytesInUse() - baselineMalloc
+        let releaseReport = "closing the last tile freed \(mb(lastCloseFreed)), all closed \(mb(releasedMalloc)) against baseline, listings held \(heldFixtureRoots().count)"
+        print("file-index memory: \(releaseReport)")
+        try expect(released, "closing every tile releases the checkout's listing: \(releaseReport)")
+        try expect(lastCloseFreed > oneMalloc / 2 && releasedMalloc < oneMalloc / 2,
+                   "closing the last tile returns the index memory (first index cost +\(mb(oneMalloc))): \(releaseReport)")
+        return report + "; " + releaseReport
     }
 }

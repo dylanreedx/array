@@ -401,6 +401,13 @@ final class AgentTileChromeCanvasView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    /// The resting host outlives every tile. A tile closed while resting left
+    /// its whole body there, composer and `@` file index included, for the life
+    /// of the app.
+    isolated deinit {
+        if isResting { body.removeFromSuperview() }
+    }
+
     override var isFlipped: Bool { false }
     override var isOpaque: Bool { false }
 

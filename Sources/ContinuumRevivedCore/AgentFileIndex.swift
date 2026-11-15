@@ -50,18 +50,37 @@ public actor AgentFileIndex {
         static let shared = Listings()
 
         private let lock = NSLock()
-        private var listings: [Key: [Indexed]] = [:]
+        private var listings: [Key: (scan: UInt64, listing: [Indexed])] = [:]
         private var holders: [Key: Set<ObjectIdentifier>] = [:]
+        private var lastScan: UInt64 = 0
 
         func listing(for key: Key) -> [Indexed]? {
-            lock.withLock { listings[key] }
+            lock.withLock { listings[key]?.listing }
         }
 
-        /// The newest listing replaces the root's older one for every holder.
-        func publish(_ listing: [Indexed], for key: Key, holder: ObjectIdentifier) {
+        /// The roots whose listings are held.
+        var roots: Set<String> {
+            lock.withLock { Set(listings.keys.map(\.root)) }
+        }
+
+        /// Stamps a scan as it starts. Each index scans on its own actor, so
+        /// scans of one root can finish in any order.
+        func beginScan() -> UInt64 {
             lock.withLock {
-                listings[key] = listing
+                lastScan += 1
+                return lastScan
+            }
+        }
+
+        /// Keeps the listing of the scan that started last, for every holder,
+        /// and returns it: a scan that started earlier and finished later would
+        /// bring back files deleted since and drop files created since.
+        func publish(_ listing: [Indexed], scan: UInt64, for key: Key, holder: ObjectIdentifier) -> [Indexed] {
+            lock.withLock {
                 holders[key, default: []].insert(holder)
+                if let held = listings[key], held.scan > scan { return held.listing }
+                listings[key] = (scan, listing)
+                return listing
             }
         }
 
@@ -111,6 +130,11 @@ public actor AgentFileIndex {
         listings.release(holder: ObjectIdentifier(self), roots: nil)
     }
 
+    /// QA: the roots whose listings production indexes share right now.
+    public static func qaSharedListingRoots() -> Set<String> {
+        Listings.shared.roots
+    }
+
     /// The next request for an invalidated scope lists its root again.
     public func invalidate(context: AgentCompletionContext? = nil) {
         let dropped = listed.filter { key in
@@ -148,15 +172,16 @@ public actor AgentFileIndex {
         // actor serializes requests: abandoning materialization here made every
         // queued query start the same full repository scan again, so normal
         // typing could keep `@` completion permanently behind the editor.
+        let scan = listings.beginScan()
         let entries: [Indexed]
         if let paths = pathDiscovery?(root) ?? gitPaths(root: root) {
             entries = materialize(paths: paths, root: root)
         } else {
             entries = walk(root: root)
         }
-        listings.publish(entries, for: listingKey, holder: holder)
+        let published = listings.publish(entries, scan: scan, for: listingKey, holder: holder)
         listed.insert(key)
-        return entries
+        return published
     }
 
     public func suggestions(for query: AgentCompletionQuery) async -> [AgentCompletion] {
