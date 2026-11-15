@@ -34,8 +34,7 @@ SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 env['PATH'] = ':'.join(p for p in [SYSTEM_PATH, os.environ.get('PATH', '')] if p)
 # Gating a named ref is for this process only; no leg may inherit it.
 REF = env.pop('ARRAY_NIGHTLY_REF', 'origin/array/integration')
-# Before the matrix the gate waits, still holding the shared lock, until the Mac
-# is quiet: no other swift-build (an agent's build bypasses the lock) and
+# Before taking the shared lock the gate waits until the Mac is quiet: no other swift-build (an agent's build bypasses the lock) and
 # fseventsd under a CPU ceiling for consecutive samples. Timing legs that need
 # FSEvents within seconds failed under exactly that load. The wait is bounded;
 # after it the gate proceeds and the summary records the contention. These
@@ -160,6 +159,81 @@ if args[:1] == ['--ship-base']:
                               summary=summary), indent=2))
         sys.exit(0)
     sys.exit(f'No green gate with a release candidate among the ancestors of {head[:12]}.')
+LAST_CONTENTION = {}  # the latest wait, kept for a summary written after an error
+
+def machine_load():
+    listing = sp.run(['/bin/ps', '-axo', 'pid=,ppid=,%cpu=,comm='], capture_output=True, text=True)
+    procs = {}
+    for line in listing.stdout.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) == 4:
+            procs[int(fields[0])] = (int(fields[1]), float(fields[2]), os.path.basename(fields[3].strip()))
+    if listing.returncode or not procs:
+        # Unknown load is not quiet: wait (bounded) and say why.
+        return dict(swift_builds=None, idle_swift_builds=None, fseventsd_cpu=None,
+                    probe_error=f'ps exit {listing.returncode}, {len(procs)} processes')
+    children = {}
+    for pid, (ppid, _, _) in procs.items():
+        children.setdefault(ppid, []).append(pid)
+    def tree_cpu(pid):
+        stack, total, seen = [pid], 0.0, set()
+        while stack:
+            current = stack.pop()
+            if current in seen or current not in procs:
+                continue
+            seen.add(current)
+            total += procs[current][1]
+            stack.extend(children.get(current, []))
+        return total
+    builds = [tree_cpu(pid) for pid, (_, _, name) in procs.items() if name == QUIET['build']]
+    active = sum(cpu >= QUIET['build_cpu'] for cpu in builds)
+    fsevents = [cpu for _, cpu, name in procs.values() if name == 'fseventsd']
+    return dict(swift_builds=active, idle_swift_builds=len(builds) - active,
+                fseventsd_cpu=max(fsevents) if fsevents else None)
+
+def wait_until_quiet(log):
+    # Wall clock, so a Mac that slept through the wait does not stretch the bound.
+    started, quiet_in_row, worst, polls, first = time.time(), 0, dict(swift_builds=0, fseventsd_cpu=0.0), 0, None
+    while True:
+        load = machine_load()
+        polls += 1
+        first = first or load
+        worst = dict(swift_builds=max(worst['swift_builds'], load['swift_builds'] or 0),
+                     fseventsd_cpu=max(worst['fseventsd_cpu'], load['fseventsd_cpu'] or 0.0))
+        calm = load['swift_builds'] == 0 and (load['fseventsd_cpu'] or 0.0) <= QUIET['fsevents_cpu']
+        quiet_in_row = quiet_in_row + 1 if calm else 0
+        waited = time.time() - started
+        if quiet_in_row >= QUIET['samples'] or waited >= QUIET['max_seconds']:
+            result = dict(quiet=quiet_in_row >= QUIET['samples'], waited_seconds=round(waited, 2), polls=polls,
+                          first=first, last=load, worst=worst, limits=dict(QUIET), knob_errors=KNOB_ERRORS)
+            LAST_CONTENTION.clear()
+            LAST_CONTENTION.update(result)
+            print('Machine ' + ('quiet' if result['quiet'] else 'still busy; proceeding') + ': ' + json.dumps(result),
+                  file=log, flush=True)
+            return result
+        time.sleep(QUIET['poll'])
+
+# Wait for a quiet Mac BEFORE taking the shared lock. Holding it through a long
+# wait blocks every other gate and release build, and an idle lock holder reads
+# as stuck (one was killed as an orphan after 77 minutes). Only a run with work
+# to do waits; afterwards the lock is taken exactly as below, and a run that
+# finds it taken skips as before.
+PRE_CONTENTION = None
+if args == [] or args[:1] == ['--awake']:
+    git('fetch', 'origin')
+    wanted = git('rev-parse', '--verify', (REF if args == [] else args[1]) + '^{commit}')
+    done = load(wanted)
+    if args == [] and done and done.get('green') and done.get('candidate') and Path(done['candidate']).is_dir():
+        pass  # already gated; the locked path below records and skips it in seconds
+    elif args[:1] == ['--awake'] and not (done and done.get('green')):
+        pass  # the locked path below refuses it
+    else:
+        print(f'Waiting for a quiet Mac before gating {wanted[:12]} (no compiling {QUIET["build"]}, '
+              f'fseventsd <= {QUIET["fsevents_cpu"]:g}% CPU, at most {QUIET["max_seconds"]:g} s); '
+              'the shared lock is not held while waiting.', file=sys.stderr, flush=True)
+        # stderr: --awake prints its JSON result on stdout for ship-release.sh.
+        PRE_CONTENTION = wait_until_quiet(sys.stderr)
+
 # The same regular-file lock as matrix/release; held through fetch and checkout.
 lock = open(env.get('ARRAY_MATRIX_LOCK', '/tmp/array-matrix.lock'), 'a+')
 if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
@@ -224,62 +298,10 @@ def owned(command, owner, log, extra_env=None):
     return sp.run(['/usr/bin/caffeinate', '-i', '/bin/bash', '-c', script], cwd=checkout,
                   env=dict(env, **(extra_env or {})), stdin=sp.DEVNULL, stdout=log, stderr=sp.STDOUT).returncode
 
-LAST_CONTENTION = {}  # the latest wait, kept for a summary written after an error
-
-def machine_load():
-    listing = sp.run(['/bin/ps', '-axo', 'pid=,ppid=,%cpu=,comm='], capture_output=True, text=True)
-    procs = {}
-    for line in listing.stdout.splitlines():
-        fields = line.split(None, 3)
-        if len(fields) == 4:
-            procs[int(fields[0])] = (int(fields[1]), float(fields[2]), os.path.basename(fields[3].strip()))
-    if listing.returncode or not procs:
-        # Unknown load is not quiet: wait (bounded) and say why.
-        return dict(swift_builds=None, idle_swift_builds=None, fseventsd_cpu=None,
-                    probe_error=f'ps exit {listing.returncode}, {len(procs)} processes')
-    children = {}
-    for pid, (ppid, _, _) in procs.items():
-        children.setdefault(ppid, []).append(pid)
-    def tree_cpu(pid):
-        stack, total, seen = [pid], 0.0, set()
-        while stack:
-            current = stack.pop()
-            if current in seen or current not in procs:
-                continue
-            seen.add(current)
-            total += procs[current][1]
-            stack.extend(children.get(current, []))
-        return total
-    builds = [tree_cpu(pid) for pid, (_, _, name) in procs.items() if name == QUIET['build']]
-    active = sum(cpu >= QUIET['build_cpu'] for cpu in builds)
-    fsevents = [cpu for _, cpu, name in procs.values() if name == 'fseventsd']
-    return dict(swift_builds=active, idle_swift_builds=len(builds) - active,
-                fseventsd_cpu=max(fsevents) if fsevents else None)
-
-def wait_until_quiet(log):
-    # Wall clock, so a Mac that slept through the wait does not stretch the bound.
-    started, quiet_in_row, worst, polls, first = time.time(), 0, dict(swift_builds=0, fseventsd_cpu=0.0), 0, None
-    while True:
-        load = machine_load()
-        polls += 1
-        first = first or load
-        worst = dict(swift_builds=max(worst['swift_builds'], load['swift_builds'] or 0),
-                     fseventsd_cpu=max(worst['fseventsd_cpu'], load['fseventsd_cpu'] or 0.0))
-        calm = load['swift_builds'] == 0 and (load['fseventsd_cpu'] or 0.0) <= QUIET['fsevents_cpu']
-        quiet_in_row = quiet_in_row + 1 if calm else 0
-        waited = time.time() - started
-        if quiet_in_row >= QUIET['samples'] or waited >= QUIET['max_seconds']:
-            result = dict(quiet=quiet_in_row >= QUIET['samples'], waited_seconds=round(waited, 2), polls=polls,
-                          first=first, last=load, worst=worst, limits=dict(QUIET), knob_errors=KNOB_ERRORS)
-            LAST_CONTENTION.clear()
-            LAST_CONTENTION.update(result)
-            print('Machine ' + ('quiet' if result['quiet'] else 'still busy; proceeding') + ': ' + json.dumps(result),
-                  file=log, flush=True)
-            return result
-        time.sleep(QUIET['poll'])
-
 def matrix(mode, log):
-    contention = wait_until_quiet(log)
+    contention = PRE_CONTENTION
+    if contention:
+        print('Machine before the lock: ' + json.dumps(contention), file=log, flush=True)
     began = time.monotonic()
     matrix_results = out / ('matrix-' + mode + '-' + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
     code = owned('bash scripts/run-matrix.sh --' + mode, 'ARRAY_MATRIX_LOCK_OWNER', log,

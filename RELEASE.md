@@ -129,10 +129,11 @@ reinstall after moving those CLIs. The checkout runs on the local branch
 `gate/nightly-checkout`. To gate a branch before it lands, run it by hand with
 `ARRAY_NIGHTLY_REF=<branch> scripts/nightly-gate.sh`.
 
-Before the matrix, the gate waits, still holding the shared lock, until no other
+Before the matrix, and before taking the shared lock, the gate waits until no other
 `swift-build` is compiling (an idle one does not count) and `fseventsd` stays
-under 50% CPU for two samples 30 s apart, for at most 30 minutes. Then it proceeds either way. `summary.json`
-records the wait under `contention` (`quiet`, `waited_seconds`, the worst
+under 50% CPU for two samples 30 s apart, for at most 30 minutes, then runs
+even if the Mac is still busy. It then takes the lock as usual; if another gate
+or release holds it, this run is skipped. `summary.json` records the wait under `contention` (`quiet`, `waited_seconds`, the worst
 load seen). A red leg from a run with `quiet: false` is worth re-gating before
 it is treated as a regression.
 

@@ -341,43 +341,62 @@ def ship_cases(fx, gated, head):
 
 
 def quiet_cases(fx):
-    """Before the matrix the gate waits for no other build and a calm fseventsd,
-    holding the shared lock, for at most the bound; then it proceeds and records it."""
+    """Before taking the shared lock the gate waits for no compiling build and a
+    calm fseventsd, for at most the bound; then it takes the lock (never bypassing
+    it), yields if someone else holds it, and records the wait."""
     # Stand-ins run under the build's name: ps reports argv[0], as it does for a
     # real swift-build (a copied platform binary would be killed on launch).
     # A compiling build burns CPU (yes); an idle one sleeps.
     stand_in = lambda: subprocess.Popen([str(fx.root / fx.build_name)], executable="/usr/bin/yes",
                                         stdout=subprocess.DEVNULL)
     idle_stand_in = lambda: subprocess.Popen([str(fx.root / fx.build_name), "60"], executable="/bin/sleep")
-
-    def lock_held_within(seconds):
-        deadline = time.time() + seconds
-        while time.time() < deadline:
-            with open(fx.root / "matrix.lock", "a") as lock:
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    fcntl.flock(lock, fcntl.LOCK_UN)
-                except BlockingIOError:
-                    return True
-            time.sleep(0.05)
-        return False
     busy = lambda: dict(line.split() for line in Path(str(fx.events) + ".busy").read_text().splitlines())
+
+    def start_waiting_gate():
+        log = open(fx.root / "waiting-gate.log", "w+")
+        gate = subprocess.Popen(["/bin/bash", "scripts/nightly-gate.sh"], cwd=fx.repo,
+                                env=dict(fx.env, ARRAY_NIGHTLY_REF="HEAD"), stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=subprocess.STDOUT)
+        deadline = time.time() + 15
+        while "Waiting for a quiet Mac" not in (fx.root / "waiting-gate.log").read_text() and time.time() < deadline:
+            time.sleep(0.05)
+        return gate, (fx.root / "waiting-gate.log")
+
+    def lock_is_free():
+        with open(fx.root / "matrix.lock", "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                return True
+            except BlockingIOError:
+                return False
 
     build = stand_in()
     head = fx.commit("feat(app): change while another build runs", {"Sources/App.swift": "let app = 5\n"})
-    gate = subprocess.Popen(["/bin/bash", "scripts/nightly-gate.sh"], cwd=fx.repo, env=dict(fx.env, ARRAY_NIGHTLY_REF="HEAD"),
-                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    held = lock_held_within(10)
-    time.sleep(1.5)
-    started_early = head in busy() if Path(str(fx.events) + ".busy").exists() else False
+    gate, log = start_waiting_gate()
+    time.sleep(1.0)
+    free = lock_is_free()
+    started_early = Path(str(fx.events) + ".busy").exists() and head in busy()
     build.kill(); build.wait()
-    output = gate.communicate(timeout=60)[0].decode(errors="replace")
+    gate.wait(timeout=60)
     waited = fx.summary(head).get("contention", {})
-    expect(held and not started_early, f"the gate waits for another build while holding the lock (held={held}, "
-           f"matrix started early={started_early}): {waited}\n{output[-1500:]}")
+    expect("Waiting for a quiet Mac" in log.read_text() and free and not started_early,
+           f"the gate waits for another build without holding the lock (lock free={free}, "
+           f"matrix started early={started_early}): {waited}\n{log.read_text()[-1500:]}")
     expect(waited.get("quiet") is True and waited["waited_seconds"] >= 1.0 and waited["worst"]["swift_builds"] == 1
            and busy()[head] == "0", f"the matrix starts only once the build is gone: {waited} {busy()}")
     print("PASS gate-waits-for-other-build")
+
+    build = stand_in()
+    head = fx.commit("feat(app): change while a release takes the lock", {"Sources/App.swift": "let app = 55\n"})
+    gate, log = start_waiting_gate()
+    with open(fx.root / "matrix.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # another gate or a release build arrives during the wait
+        build.kill(); build.wait()
+        code = gate.wait(timeout=60)
+    expect(code == 0 and "lock held" in log.read_text() and head not in (busy() if Path(str(fx.events) + ".busy").exists() else {}),
+           f"after its wait the gate yields to a lock holder and runs nothing\n{log.read_text()[-1500:]}")
+    print("PASS gate-yields-lock-after-wait")
 
     build = stand_in()
     head = fx.commit("feat(app): change under a build that never ends", {"Sources/App.swift": "let app = 6\n"})
