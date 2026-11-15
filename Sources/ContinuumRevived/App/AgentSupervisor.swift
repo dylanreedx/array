@@ -3260,7 +3260,7 @@ final class AgentSupervisor {
         // read per parent; an unreadable journal keeps all of its helpers.
         let parents = Set(eligible.compactMap { current[$0]?.parentAgentID })
         for parent in parents {
-            guard let cwd = current[parent]?.cwd else { continue }
+            guard let cwd = (records[parent] ?? current[parent])?.cwd else { continue }
             let pending: Set<UUID>?
             do {
                 pending = Set(try SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue)
@@ -3271,10 +3271,13 @@ final class AgentSupervisor {
             }
         }
         // Never strand a child that stays: its parent stays too, up the tree.
+        // Every live record counts, including one that came live after
+        // restore (a spawn, an adoption by id), which `current` never held.
+        let everyone = Array(current.values) + records.values.filter { current[$0.id] == nil }
         var changed = true
         while changed {
             changed = false
-            for record in current.values where !eligible.contains(record.id) {
+            for record in everyone where !eligible.contains(record.id) {
                 if let parent = record.parentAgentID, eligible.remove(parent) != nil { changed = true }
             }
         }
@@ -3297,6 +3300,9 @@ final class AgentSupervisor {
             pendingModeRestarts.remove(id)
         }
         guard !moved.isEmpty else { return }
+        // The flag a runtime gate-off reads: the pass may run after it was
+        // last cleared.
+        archiveMayHoldRecords = true
         scheduleCharacterPacks()
         onRecordsArchived?(moved)
     }

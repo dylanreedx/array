@@ -760,6 +760,55 @@ enum AgentRecordArchiveChecks {
         print("PASS agent record archive: the boot scans shared areas off the main thread; an unreadable area skips the archive and the warning names its file")
     }
 
+    /// The pass runs after boot, against live state. Two things change in
+    /// the window between restore and the pass, through production entries:
+    /// a child of an idle parent comes live (adoption by id), and the gate goes
+    /// off and on again while the workspace API restores the archive. The
+    /// parent must stay with its child, and what the pass then archives must
+    /// still come back when the gate goes off once more.
+    static func windowWitness() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-window-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let parent = idleRecord("Idle parent", cwd: root.path, idleFor: 8)
+        let unrelated = idleRecord("Idle unrelated", cwd: root.path, idleFor: 8)
+        var child = idleRecord("Child live after boot", cwd: root.path, idleFor: 0)
+        child.parentAgentID = parent.id
+        try write([parent, unrelated, child], to: store)
+        store.waitForBackupMigration()
+        try fm.createDirectory(at: store.layout.archiveDirectory, withIntermediateDirectories: true)
+        try fm.moveItem(at: store.layout.agentFile(id: child.id), to: store.layout.archivedAgentFile(id: child.id))
+        let settings = gateSuite(true)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
+            warn: { _ in }, nameTitlerCommand: { _ in nil })
+        defer { supervisor.stopAll() }
+        supervisor.codexRestoreHomeForQA = store.layout.applicationSupportDirectory.appendingPathComponent("codex-empty")
+        let app = AppDelegate()
+        app.agentSupervisor = supervisor
+        app.qaSettingsDefaults = settings
+        try app.mountWorkspaceSceneAtBoot(canvasView: CanvasNSView(canvasState: emptyCanvas), spawner: nil,
+            projectStore: nil, canvasState: emptyCanvas, installsGlobalEventMonitors: false)
+        // The window: the pass cannot run until this check awaits.
+        try expect(supervisor.adoptArchivedAgent(child.id), "fixture: the child comes live by id")
+        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
+        supervisor.restoreArchivedRecordsIfGateOff() // what a workspace API request runs
+        settings.set(true, forKey: AgentRecordArchiveConfig.enabledKey)
+        await supervisor.recordArchivePassForQA?.value
+        try expect(supervisor.records[unrelated.id] == nil && exists(store.layout.archivedAgentFile(id: unrelated.id)),
+                   "control: the pass archived the unrelated idle agent")
+        try expect(supervisor.records[parent.id] != nil && !exists(store.layout.archivedAgentFile(id: parent.id)),
+                   "a parent whose child came live after restore stays live")
+        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
+        supervisor.restoreArchivedRecordsIfGateOff()
+        try expect(supervisor.records[unrelated.id] != nil && archivedFiles(store).isEmpty,
+                   "what the pass archived comes back when the gate goes off again")
+        withExtendedLifetime(app) {}
+        print("PASS agent record archive: a child that comes live after restore keeps its parent; what the late pass archives still comes back when the gate goes off")
+    }
+
     static func archivedFiles(_ store: AgentStore) -> [String] {
         ((try? FileManager.default.contentsOfDirectory(atPath: store.layout.archiveDirectory.path)) ?? [])
             .filter { $0.hasSuffix(".json") }.sorted()
@@ -848,6 +897,7 @@ enum AgentRecordArchiveChecks {
         try await bootWitness(gate: false)
         try await bootWitness(gate: true)
         try await sharedScanOffMainWitness()
+        try await windowWitness()
         try await wakeupWitness()
         try await sharedWitness()
         try await apiWitness()
