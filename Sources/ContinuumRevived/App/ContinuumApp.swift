@@ -3876,6 +3876,34 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--fake-cli-leak-probe-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await FakeCLILifecycleChecks.leakProbe()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        if CommandLine.arguments.contains("--fake-cli-lifecycle-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await FakeCLILifecycleChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--helper-retry-check") {
             _ = NSApplication.shared
             Task { @MainActor in

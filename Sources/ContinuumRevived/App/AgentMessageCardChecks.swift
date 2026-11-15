@@ -51,7 +51,10 @@ func runAgentMessageCardChecks() async throws {
     for dir in [projectRoot, appSupport, binDir] {
         try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
     }
-    defer { try? fileManager.removeItem(at: tempRoot) }
+    defer {
+        FakeCLILifecycleChecks.terminate(in: binDir)
+        try? fileManager.removeItem(at: tempRoot)
+    }
 
     let executable = binDir.appendingPathComponent("pi")
     try ("#!/usr/bin/env python3\n" + agentMessageFakePiSource).write(to: executable, atomically: true, encoding: .utf8)

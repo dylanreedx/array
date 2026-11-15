@@ -28,7 +28,7 @@ enum HelperEvidenceChecks {
     /// quotes the brief). A `{"__write": path}` line changes that file.
     static let replay = """
     def replay(name, out):
-        while not os.path.exists('go-' + name): time.sleep(.02)
+        while not os.path.exists('go-' + name): fixture_pause(.02)
         if not os.path.exists('frames-' + name + '.jsonl'): return
         for frame in open('frames-' + name + '.jsonl'):
             o = json.loads(frame)

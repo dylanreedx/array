@@ -38,7 +38,10 @@ func runWorkspaceAPIFreePermissionsChecks() async throws {
     let binDir = fileManager.temporaryDirectory
         .appendingPathComponent("continuum-free-permissions-bin-\(UUID().uuidString)", isDirectory: true)
     try fileManager.createDirectory(at: binDir, withIntermediateDirectories: true)
-    defer { try? fileManager.removeItem(at: binDir) }
+    defer {
+        FakeCLILifecycleChecks.terminate(in: binDir)
+        try? fileManager.removeItem(at: binDir)
+    }
     let fakePi = """
     #!/usr/bin/env python3
     import json, os, sys, threading, time

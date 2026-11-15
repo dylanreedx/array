@@ -21,8 +21,8 @@ enum ManagedRunLedgerChecks {
     static let script = ManagedModeChecks.fakeClaude
         .replacingOccurrences(of: "import json, os, sys, time", with: "import json, os, re, sys, time")
         .replacingOccurrences(of: "if 'HOLD' in json.dumps(o):", with: "m = re.search(r'HOLD-([a-z0-9]+)', json.dumps(o))\n    if m:")
-        .replacingOccurrences(of: "while not os.path.exists('managed-release'): time.sleep(.02)",
-                              with: "while not os.path.exists('release-' + m.group(1)): time.sleep(.02)")
+        .replacingOccurrences(of: "while not os.path.exists('managed-release'): fixture_pause(.02)",
+                              with: "while not os.path.exists('release-' + m.group(1)): fixture_pause(.02)")
         .replacingOccurrences(of: "os.unlink('managed-release')", with: "pass # leave the named release available to the result wake")
 
     /// Every key a row may carry. None of them holds free text.

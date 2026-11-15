@@ -321,6 +321,13 @@ MATRIX_RESULTS=$(cd "$MATRIX_RESULTS" && pwd)
 : > "$MATRIX_RESULTS/results.tsv"
 : > "$MATRIX_RESULTS/awake.sh"
 
+export ARRAY_CHECK_RUN_ID="$(uuidgen)"
+
+# Foundation chooses its own Darwin temp directory, ignoring TMPDIR. Attribute
+# only QA executable paths whose process environment carries this run's UUID.
+# The marker survives bench-directory deletion and excludes concurrent runs.
+python3 scripts/check-fake-cli-leaks.py snapshot "$MATRIX_RESULTS/fake-cli-before.json" "$ARRAY_CHECK_RUN_ID"
+
 run() {
   local log status=0
   log=$(mktemp "$MATRIX_RESULTS/build.XXXXXX")
@@ -690,6 +697,9 @@ matrix_finish_jobs() {
     printf 'RUNNER FAILURE: queued %s legs but launched %s\n' "$MATRIX_QUEUED_LEGS" "$MATRIX_JOB_NEXT"
     MATRIX_LEG_SECONDS=0 matrix_classify matrix-runner-completeness 1
   fi
+  # Run after every queued/awake app leg, and include the verdict in the report.
+  MATRIX_SCHEDULING=0
+  run_leg python3 scripts/check-fake-cli-leaks.py check "$MATRIX_RESULTS/fake-cli-before.json"
   python3 - "$MATRIX_RESULTS" <<'RESULTS_PY'
 import csv, json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
@@ -754,6 +764,26 @@ run_ios_build() {
   rm -f "$log"
   return 0
 }
+
+# The positive-control driver reaps only the PID/group this real bench hands off.
+if [[ "${CONTINUUM_FAKE_CLI_LEAK_PROBE_ONLY:-0}" == "1" ]]; then
+  export ARRAY_FAKE_CLI_CONTROL_PATH="$MATRIX_RESULTS/fake-cli-control.json"
+  run_app_check .build/debug/Array --fake-cli-leak-probe-check
+  matrix_finish_jobs
+  matrix_report "Fake CLI real bench leak probe (targeted; already built)"
+  exit $?
+fi
+
+# Already-built fixture lifecycle gate; builds are admitted by the caller.
+if [[ "${CONTINUUM_FAKE_CLI_LIFECYCLE_ONLY:-0}" == "1" ]]; then
+  run_leg python3 scripts/check-fake-cli-leaks-test.py
+  run_leg python3 scripts/check-fake-cli-leaks-test.py --real-bench .build/debug/Array
+  run_app_check .build/debug/Array --fake-cli-lifecycle-check
+  run_app_check .build/debug/Array --helper-retry-check
+  matrix_finish_jobs
+  matrix_report "Fake CLI lifecycle matrix (targeted; already built)"
+  exit $?
+fi
 
 # Already-built host instruction gate; caller admits each build separately.
 if [[ "${CONTINUUM_PI_ROLE_CONTEXT_ONLY:-0}" == "1" ]]; then
@@ -1504,6 +1534,9 @@ run_app_check .build/debug/Array --managed-lead-plan-check
 run_app_check .build/debug/Array --managed-codex-launch-check
 run_app_check .build/debug/Array --managed-codex-hooks-check
 run_app_check .build/debug/Array --first-helper-isolation-check
+run_leg python3 scripts/check-fake-cli-leaks-test.py
+run_leg python3 scripts/check-fake-cli-leaks-test.py --real-bench .build/debug/Array
+run_app_check .build/debug/Array --fake-cli-lifecycle-check
 run_app_check .build/debug/Array --helper-retry-check
 run_app_check .build/debug/Array --helper-context-diet-check
 run_app_check .build/debug/Array --orchestration-plan-check

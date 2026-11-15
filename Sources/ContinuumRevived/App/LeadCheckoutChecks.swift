@@ -27,7 +27,7 @@ enum LeadCheckoutChecks {
                 elif '__rmtree' in o: __import__('shutil').rmtree(o['__rmtree'])
                 elif '__sleep' in o: time.sleep(o['__sleep'])
                 elif '__wait' in o:
-                    while not os.path.exists(o['__wait']): time.sleep(.02)
+                    while not os.path.exists(o['__wait']): fixture_pause(.02)
                 elif '__git' in o:
                     r = __import__('subprocess').run(['git', '-c', 'user.name=f', '-c', 'user.email=f@invalid', '-c', 'commit.gpgsign=false'] + o['__git'], capture_output=True)
                     open('git-exits.txt', 'a').write(str(r.returncode) + '\\n')

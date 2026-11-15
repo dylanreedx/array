@@ -11,7 +11,7 @@ enum ManagedModeChecks {
         if !condition { throw Failure(description: "managed-mode: " + message) }
     }
     static let model = "anthropic/claude-haiku-5-5"
-    static let fakeClaude = #"""
+    static let fakeClaude = FakeCLILifecycleChecks.protectPython(#"""
     #!/usr/bin/env python3
     import json, os, sys, time
     args = sys.argv[1:]
@@ -45,10 +45,10 @@ enum ManagedModeChecks {
         if o.get('type') != 'user': continue
         emit({'type':'system','subtype':'init','session_id':sid,'model':'claude-haiku-5-5','tools':[]})
         if 'HOLD' in json.dumps(o):
-            while not os.path.exists('managed-release'): time.sleep(.02)
+            while not os.path.exists('managed-release'): fixture_pause(.02)
             os.unlink('managed-release')
         emit({'type':'result','subtype':'success','is_error':False,'session_id':sid,'result':'done','duration_ms':1,'num_turns':1})
-    """#
+    """#)
 
     static func bench(_ label: String, efforts: [String]? = nil) throws -> WorkspaceAgentReportChecks.Bench {
         let b = try WorkspaceAgentReportChecks.makeBench(label: label)
