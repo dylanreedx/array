@@ -4408,6 +4408,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private var pressedTableRow: Int?
+    /// The agent under the pointer at mouse-down, and its row's rect then, held
+    /// until the table's tracking loop (and the action it sends) ends.
+    private var pressedAgentId: UUID?
+    private var pressedRowRect: NSRect?
     fileprivate func isClickableRow(_ row: Int) -> Bool {
         guard items.indices.contains(row) else { return false }
         switch items[row] {
@@ -4418,8 +4422,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     fileprivate func beginRowPress(_ event: NSEvent) {
         let row = tableView.row(at: tableView.convert(event.locationInWindow, from: nil))
-        guard isClickableRow(row), agentIdForTableRow(row) != nil else { return }
+        guard isClickableRow(row), let agentId = agentIdForTableRow(row) else { return }
         pressedTableRow = row
+        pressedAgentId = agentId
+        pressedRowRect = tableView.rect(ofRow: row)
         if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
             cell.applyInteraction(interaction(forTableRow: row))
             CATransaction.flush()
@@ -4427,6 +4433,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     fileprivate func endRowPress() {
+        pressedAgentId = nil
+        pressedRowRect = nil
         guard let row = pressedTableRow else { return }
         pressedTableRow = nil
         if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
@@ -4461,9 +4469,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
     @objc private func rowClicked(_ sender: Any?) {
-        _ = activateRow(
-            atTableRow: tableView.clickedRow,
-            event: NSApp.currentEvent)
+        // The agent PRESSED, not the slot: a push that re-renders the list while
+        // the button is down moves rows under the pointer, and `clickedRow` still
+        // names the old slot. The default sort re-selects the pressed row by id,
+        // so it stayed highlighted while the click opened its neighbour. Only for
+        // a release inside the row as it was pressed: a drag onto another row is
+        // AppKit's drag-select, and its release row stays the target.
+        let tableRow: Int
+        if let pressed = pressedAgentId, let pressedRect = pressedRowRect,
+           let release = NSApp.currentEvent.map({ tableView.convert($0.locationInWindow, from: nil) }),
+           pressedRect.contains(release) {
+            guard let current = self.tableRow(forAgentId: pressed) else { return }
+            tableRow = current
+        } else {
+            tableRow = tableView.clickedRow
+        }
+        _ = activateRow(atTableRow: tableRow, event: NSApp.currentEvent)
     }
 
     /// The one activation path for the table's ordinary click action. Keeping the
