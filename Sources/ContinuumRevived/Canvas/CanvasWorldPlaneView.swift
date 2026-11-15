@@ -198,6 +198,7 @@ final class CanvasWorldPlaneView: NSView {
 
     override func willRemoveSubview(_ subview: NSView) {
         super.willRemoveSubview(subview)
+        if let bubble = subview as? TileAgentBubbleView { forgetAgentBubble(bubble) }
         if subview is FileTileNSView {
             fileTileViewCount -= 1
             onFileTileCountChanged?()
@@ -272,6 +273,111 @@ final class CanvasWorldPlaneView: NSView {
             }
         }
         return ordinals.sorted().map { visibilityTiles[$0] }
+    }
+
+    // MARK: Agent bubbles past their tiles' corners
+
+    /// A squircle hangs past its tile, into the gutter a neighbour's selection
+    /// ring runs along. The rings stop short of every plate they meet, and find
+    /// them here: each plate's frame is filed under the cells it covers when it
+    /// moves (O(1) a move), and a ring asks only the cells its stroke crosses.
+    /// Separate from the tile grid, which rebuilds after any tile move and so
+    /// would cost a walk of the plane on every step of a drag.
+    static let agentBubbleCellSize: CGFloat = 256
+
+    private struct AgentBubbleEntry {
+        weak var view: TileAgentBubbleView?
+        var frame: CGRect
+        var cells: [VisibilityCell]
+    }
+
+    private var agentBubbleCells: [VisibilityCell: [ObjectIdentifier]] = [:]
+    private var agentBubbleEntries: [ObjectIdentifier: AgentBubbleEntry] = [:]
+    /// Told when a filed plate appears, moves or goes: old and new WORLD frames.
+    var onAgentBubbleMoved: ((CGRect?, CGRect?) -> Void)?
+    /// QA: how many filed plates ring queries have examined. Must not grow with
+    /// plates far from the ring.
+    private(set) var qaAgentBubbleCandidateVisits = 0
+    /// QA: how many times a plate was filed again (a camera step must file none).
+    private(set) var qaAgentBubbleRefiles = 0
+    var qaAgentBubbleCount: Int { agentBubbleEntries.count }
+
+    /// The cells `rect` covers; nil past `limit` (or a non-finite rect).
+    private func agentBubbleCells(for rect: CGRect, limit: Int = 4_096) -> [VisibilityCell]? {
+        let cell = Self.agentBubbleCellSize
+        guard rect.minX.isFinite, rect.minY.isFinite, rect.maxX.isFinite, rect.maxY.isFinite,
+              max(abs(rect.minX), abs(rect.maxX), abs(rect.minY), abs(rect.maxY)) < 1e12 else { return nil }
+        let minColumn = Int((rect.minX / cell).rounded(.down)), maxColumn = Int((rect.maxX / cell).rounded(.down))
+        let minRow = Int((rect.minY / cell).rounded(.down)), maxRow = Int((rect.maxY / cell).rounded(.down))
+        guard (maxColumn - minColumn + 1) * (maxRow - minRow + 1) <= limit else { return nil }
+        var cells: [VisibilityCell] = []
+        for column in minColumn...max(minColumn, maxColumn) {
+            for row in minRow...max(minRow, maxRow) { cells.append(VisibilityCell(column: column, row: row)) }
+        }
+        return cells
+    }
+
+    /// File `view` where it is now: its frame while it shows in this plane,
+    /// nothing otherwise.
+    func noteAgentBubble(_ view: TileAgentBubbleView) {
+        let id = ObjectIdentifier(view)
+        let frame: CGRect? = view.superview === self && !view.isHidden && !view.frame.isEmpty ? view.frame : nil
+        let previous = agentBubbleEntries[id]
+        guard previous?.frame != frame else { return }
+        qaAgentBubbleRefiles += 1
+        unfile(id, previous)
+        if let frame, let cells = agentBubbleCells(for: frame) {
+            for cell in cells { agentBubbleCells[cell, default: []].append(id) }
+            agentBubbleEntries[id] = AgentBubbleEntry(view: view, frame: frame, cells: cells)
+        }
+        onAgentBubbleMoved?(previous?.frame, frame)
+    }
+
+    private func forgetAgentBubble(_ view: TileAgentBubbleView) {
+        let id = ObjectIdentifier(view)
+        guard let previous = agentBubbleEntries[id] else { return }
+        unfile(id, previous)
+        onAgentBubbleMoved?(previous.frame, nil)
+    }
+
+    private func unfile(_ id: ObjectIdentifier, _ entry: AgentBubbleEntry?) {
+        guard let entry else { return }
+        for cell in entry.cells {
+            agentBubbleCells[cell]?.removeAll { $0 == id }
+            if agentBubbleCells[cell]?.isEmpty == true { agentBubbleCells[cell] = nil }
+        }
+        agentBubbleEntries[id] = nil
+    }
+
+    /// Plates that come within `margin` of the outline of `ring` (WORLD
+    /// rects): the cells along its four edges, never the plane.
+    func agentBubbles(alongOutlineOf ring: CGRect, margin: CGFloat) -> [TileAgentBubbleView] {
+        guard !agentBubbleEntries.isEmpty, !ring.isNull, !ring.isEmpty else { return [] }
+        let outer = ring.insetBy(dx: -margin, dy: -margin)
+        let band = 2 * margin
+        let strips = [CGRect(x: outer.minX, y: outer.minY, width: outer.width, height: band),
+                      CGRect(x: outer.minX, y: outer.maxY - band, width: outer.width, height: band),
+                      CGRect(x: outer.minX, y: outer.minY, width: band, height: outer.height),
+                      CGRect(x: outer.maxX - band, y: outer.minY, width: band, height: outer.height)]
+        var seen = Set<ObjectIdentifier>()
+        var found: [TileAgentBubbleView] = []
+        func visit(_ id: ObjectIdentifier) {
+            guard seen.insert(id).inserted else { return }
+            qaAgentBubbleCandidateVisits += 1
+            guard let entry = agentBubbleEntries[id], let view = entry.view,
+                  strips.contains(where: { $0.intersects(entry.frame) }) else { return }
+            found.append(view)
+        }
+        for strip in strips {
+            // A ring longer than the grid can answer (a tile thousands of
+            // cells long) asks every plate instead: still never the tiles.
+            guard let cells = agentBubbleCells(for: strip) else {
+                agentBubbleEntries.keys.forEach(visit)
+                return found
+            }
+            for cell in cells { (agentBubbleCells[cell] ?? []).forEach(visit) }
+        }
+        return found
     }
 
     /// QA anti-teeth: the index must answer EXACTLY what a full subview walk

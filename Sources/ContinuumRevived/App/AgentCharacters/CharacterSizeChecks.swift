@@ -203,11 +203,12 @@ enum CharacterSizeChecks {
                 }
                 let markSide = (14 * factor).rounded() * sizeScale / factor
                 try expect(abs(mark.width - markSide) < 0.01, "\(where_): the mark is \(markSide) pt, got \(mark.width)")
-                // The character is centred in its bubble at the tile's top-left corner.
-                guard let bubble = view.agentBubbleFrame else { throw Failure(description: "\(where_): no bubble") }
-                let spriteInTile = barView.convert(sprite, to: view)
-                try expect(abs(spriteInTile.midY - bubble.midY) < tolerance && abs(spriteInTile.midX - bubble.midX) < tolerance,
-                           "\(where_): the character is centred in its bubble (\(spriteInTile) in \(bubble))")
+                // The character's art is centred in its bubble's slot.
+                guard view.agentBubbleFrame != nil, let ink = view.qaCharacterInk else {
+                    throw Failure(description: "\(where_): no bubble")
+                }
+                try expect(abs(ink.rect.midY - ink.target.y) < tolerance && abs(ink.rect.midX - ink.target.x) < tolerance,
+                           "\(where_): the character is centred in its bubble (\(ink.rect) at \(ink.target))")
                 try expect(abs(mark.midY - bar / 2) < 0.01, "\(where_): the mark is centred in the bar (\(mark.midY))")
                 let close = view.qaCloseButtonFrame
                 try expect(abs(close.midY - bar / 2) < 0.01, "\(where_): × stays centred (\(close.midY))")

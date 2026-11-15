@@ -190,44 +190,51 @@ class TileNSView: NSView, TokenThemed {
     }
     var qaCharacterLayer: CharacterSpriteLayer? { titleBar?.characterLayer }
 
-    /// The bubble's side, and how far it hangs past the tile's top and left
+    /// The squircle's side, and how far it hangs past the tile's top and left
     /// edges, at chrome scale 1.
-    static var agentBubbleSide: CGFloat { TitleBarView.bubbleSide }
-    static var agentBubbleOverflow: CGFloat { TitleBarView.bubbleOverflow }
+    static var agentBubbleSide: CGFloat { TileAgentBubbleLayer.Squircle.side }
+    static var agentBubbleOverflow: CGFloat { TileAgentBubbleLayer.Squircle.overflow }
 
     /// The agent's identity colour on its bubble; nil for none.
     func setAgentBubbleTint(_ tint: NSColor?) { titleBar?.bubbleTint = tint }
     var qaAgentBubble: TileAgentBubbleLayer? { titleBar?.bubble }
-    /// The view in the world plane that carries the bubble past the tile's edge.
+    /// The view in the world plane that carries a squircle past the tile's
+    /// edge. Inline, the bar hosts the bubble itself and this view is out of
+    /// the plane.
     private(set) var agentBubbleView: TileAgentBubbleView?
 
-    /// The bubble in this tile's coordinates, while it shows. It hangs past the
-    /// tile's top-left corner, so its origin is negative.
+    /// The bubble in this tile's coordinates, while it shows. A squircle hangs
+    /// past the tile's top-left corner, so its origin is negative; inline sits
+    /// in the bar.
     var agentBubbleFrame: NSRect? {
         guard let titleBar, let rect = titleBar.qaBubbleRect else { return nil }
         return titleBar.convert(rect, to: self)
     }
 
-    /// Whether `local` (tile coordinates) is on the bubble: inside its circle.
-    /// A press there moves the tile, ahead of the corner's resize band.
+    /// Whether `local` (tile coordinates) is on the bubble: its visible shape
+    /// (the squircle's outline, never the empty corner of its box outside the
+    /// tile), or inline the art's slot in the bar. A press there moves the tile,
+    /// ahead of the corner's resize band.
     func agentBubbleContains(_ local: NSPoint) -> Bool {
-        guard let frame = agentBubbleFrame else { return false }
-        let dx = local.x - frame.midX, dy = local.y - frame.midY, radius = frame.width / 2
-        return dx * dx + dy * dy <= radius * radius
+        guard let frame = agentBubbleFrame, let bubble = titleBar?.bubble else { return false }
+        guard bubble.bubbleStyle.breaksCorner else { return frame.contains(local) }
+        return TileAgentBubbleLayer.Squircle.path(in: frame, tileRadius: bubble.tileRadius, scale: bubble.chromeScale)
+            .contains(local)
     }
 
-    /// Put the bubble's view where the bar says the bubble goes, in this tile's
-    /// superview, on top: bubbles stack above every tile (the canvas keeps them
-    /// there when it next sorts the plane).
+    /// Put the bubble's view where the bar says the squircle goes, in this
+    /// tile's superview, on top: bubbles stack above every tile (the canvas
+    /// keeps them there when it next sorts the plane). Inline needs no view.
     func placeAgentBubble() {
         guard let bubbleView = agentBubbleView else { return }
-        guard let superview, let titleBar, let rect = titleBar.bubbleRectInBar else {
+        guard let superview, let titleBar, let rect = titleBar.bubbleRectInBar, titleBar.bubbleBreaksCorner else {
             if bubbleView.superview != nil { bubbleView.removeFromSuperview() }
             return
         }
         if bubbleView.superview !== superview {
             superview.addSubview(bubbleView, positioned: .above, relativeTo: nil)
         }
+        bubbleView.adoptBubble()
         let target = titleBar.convert(rect, to: superview)
         if bubbleView.frame != target { bubbleView.frame = target }
         let hidden = isHidden
@@ -249,6 +256,11 @@ class TileNSView: NSView, TokenThemed {
         placeAgentBubble()
     }
     var qaCharacterRect: NSRect? { titleBar?.qaCharacterRect }
+    /// QA: the art's ink in tile coordinates, and where its centre belongs.
+    var qaCharacterInk: (rect: NSRect, target: NSPoint)? {
+        guard let titleBar, let ink = titleBar.qaCharacterInk else { return nil }
+        return (titleBar.convert(ink.rect, to: self), titleBar.convert(ink.target, to: self))
+    }
     var qaProviderMarkRect: NSRect? { titleBar?.qaProviderMarkRect }
     func qaTitleRectInBar() -> NSRect? { titleBar?.qaTitleRect() }
     func qaStatusPillRectInBar() -> NSRect? { agentStatus.flatMap { titleBar?.qaStatusPillRect(for: $0) } }
@@ -2410,14 +2422,28 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         return host.surface.width * host.surface.height * 4
     }
     private let providerMarkView = NSImageView(frame: .zero)
-    /// Plan 110: the agent's character, in its bubble breaking the tile's
-    /// top-left corner. A layer, never drawn in `draw(_:)`: a sprite frame never
-    /// invalidates the chrome, and it survives the controls being drawn inline.
+    /// Plan 110: the agent's character, inline at the start of this bar or in
+    /// a squircle breaking the tile's top-left corner. A layer, never drawn in
+    /// `draw(_:)`: a sprite frame never invalidates the chrome, and it survives
+    /// the controls being drawn inline.
     let characterLayer = CharacterSpriteLayer()
-    /// The bubble that holds the character: a grab handle in the agent's colour.
-    /// Hosted by a view beside the tile (`TileAgentBubbleView`), so it can hang
-    /// past the tile's corner; sized by this bar's `layout()`, placed by the tile.
+    /// The bubble that holds the character: a grab handle. Inline, it lives in
+    /// `inlineBubbleHost`, clipped to this bar, so it never leaves the tile; a
+    /// squircle is hosted by a view beside the tile (`TileAgentBubbleView`), so
+    /// it can hang past the tile's corner. Sized by this bar's `layout()`.
     lazy var bubble = TileAgentBubbleLayer(sprite: characterLayer)
+    /// Inline's host: this bar's bounds, clipping, so neither the art nor its
+    /// working glow ever leaves the bar.
+    private let inlineBubbleHost: CALayer = {
+        let host = CALayer()
+        host.masksToBounds = true
+        host.zPosition = 50
+        host.actions = ["position": NSNull(), "bounds": NSNull(), "sublayers": NSNull(), "hidden": NSNull()]
+        return host
+    }()
+    /// Whether the bubble breaks the tile's corner (a squircle) rather than
+    /// sitting inline: the tile hosts it in the world plane only then.
+    var bubbleBreaksCorner: Bool { bubble.bubbleStyle.breaksCorner }
     /// The agent's identity colour for the bubble; nil for none.
     var bubbleTint: NSColor? {
         didSet { if bubbleTint != oldValue { bubble.setTint(bubbleTint) } }
@@ -2769,51 +2795,77 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             : providerMarkView.frame.maxX + CGFloat(Space.s) * chromeScale
     }
 
-    /// The bubble's side at chrome scale 1: room for the widest art (a lead's
-    /// 28 pt) with a 2 pt margin, so every agent's bubble is the same size.
-    static let bubbleSide: CGFloat = 32
-    /// How far the bubble hangs past the tile's top and left edges at scale 1:
-    /// a badge breaking the corner. What stays inside (side - overflow) is never
-    /// taller than the bar, so the bubble never reaches the row under it.
-    static let bubbleOverflow: CGFloat = 12
-
-    /// The bubble, in this bar's coordinates: breaking the tile's top-left
-    /// corner, so its origin is negative. Scales with the icon's size and the
-    /// zoom floor, as the character always has.
+    /// The bubble, in this bar's coordinates. Inline: a slot one bar tall
+    /// where the leading inset already is, so the art starts where the mark
+    /// used to. Squircle: breaking the tile's top-left corner, so its origin is
+    /// negative; what stays inside (side - overflow) is never taller than the
+    /// bar. Scales with the icon's size and the zoom floor, as the character
+    /// always has.
     private var bubbleRect: NSRect? {
-        guard let size = characterSize else { return nil }
+        guard characterSize != nil else { return nil }
         let scale = sizeScale
-        let side = max(Self.bubbleSide, size.width + 4) * scale
-        let overflow = Self.bubbleOverflow * scale
         let backing = backingScaleForCharacter
         func snap(_ value: CGFloat) -> CGFloat { (value * backing).rounded() / backing }
-        return NSRect(x: snap(-overflow), y: snap(-overflow), width: side, height: side)
+        guard bubbleBreaksCorner else {
+            let height = bounds.height > 0 ? bounds.height : 24 * scale
+            let inset = TileAgentBubbleLayer.Inline.inset * scale
+            return NSRect(x: snap(CGFloat(Space.m) * chromeScale - inset / 2), y: 0,
+                          width: snap(height - inset), height: height)
+        }
+        let side = snap(TileAgentBubbleLayer.Squircle.side * scale)
+        let overflow = snap(TileAgentBubbleLayer.Squircle.overflow * scale)
+        return NSRect(x: -overflow, y: -overflow, width: side, height: side)
     }
 
     /// Where the band's controls stop on the right.
     private var trailingInset: CGFloat { Self.closeButtonTrailingInset }
 
-    /// The character's slot: centred in the bubble, scaled with the chrome so it
-    /// holds its size on screen as the title does.
+    /// The character's frame: its typical pose fitted to the bubble's slot (a
+    /// bar tall less the inset inline; a fraction of the squircle), its ink
+    /// centred there, the squircle's dropped onto the title's row.
+    ///
+    /// Fitted to the typical pose, not the frame: frames carry wide motion
+    /// margins, so a frame-sized fit draws the resting art as a speck. Never
+    /// smaller than the art's own size. A whole number of device pixels per art
+    /// pixel from a device-pixel origin, so it is exact on screen at 100%; zoomed,
+    /// nearest-neighbour like the rest of the canvas.
     private var characterRect: NSRect? {
-        guard let size = characterSize, let bubble = bubbleRect else { return nil }
-        guard headerScale > chromeScale else {
-            // Small, or any size once the zoom floor is the larger: the original
-            // geometry, the art scaled with the chrome.
-            let width = size.width * sizeScale, height = size.height * sizeScale
-            return NSRect(x: bubble.midX - width / 2, y: bubble.midY - height / 2, width: width, height: height)
-        }
-        // Medium and Large at their own scale: the sidebar's rule, a whole number
-        // of device pixels per art pixel (`Size.devicePixelsPerArtPixel`), from a
-        // device-pixel origin. Exact on screen at 100%; zoomed, nearest-neighbour
-        // like the rest of the canvas.
+        guard let size = characterSize, let bubble = bubbleRect, let art = characterArt else { return nil }
         let backing = backingScaleForCharacter
-        let perArt = max(1, (headerScale * backing).rounded(.toNearestOrAwayFromZero)) / backing
-        let width = size.width * perArt, height = size.height * perArt
         func snap(_ value: CGFloat) -> CGFloat { (value * backing).rounded() / backing }
-        return NSRect(x: snap(bubble.midX - width / 2), y: snap(bubble.midY - height / 2), width: width, height: height)
+        let squircle = bubbleBreaksCorner
+        let slot = squircle ? bubble.height * TileAgentBubbleLayer.Squircle.artFit
+                            : bubble.height - TileAgentBubbleLayer.Inline.inset * sizeScale
+        // Points per art pixel (`size` is the frame at 1 pt per art pixel).
+        // Never smaller than the art's own size: Small, and any size once the
+        // zoom floor is the larger, at the chrome scale as always; Medium and
+        // Large at their own scale on the sidebar's rule, a whole number of
+        // device pixels per art pixel (`Size.devicePixelsPerArtPixel`).
+        let floor = headerScale > chromeScale
+            ? max(1, (headerScale * backing).rounded(.toNearestOrAwayFromZero)) / backing : sizeScale
+        let fitted = (slot / art.typicalSide * backing).rounded(.down) / backing
+        let perArt = max(floor, fitted)
+        let drop = squircle ? TileAgentBubbleLayer.Squircle.artDrop * sizeScale : 0
+        let centre = CGPoint(x: bubble.midX, y: bubble.midY + drop)
+        return NSRect(x: snap(centre.x - art.ink.midX * perArt), y: snap(centre.y - art.ink.midY * perArt),
+                      width: size.width * perArt, height: size.height * perArt)
     }
+    /// Where the character's opaque pixels sit in its frame, and its typical
+    /// pose's longest side, in points at 1 pt per art pixel; nil for none.
+    private var characterArt: (ink: CGRect, typicalSide: CGFloat)?
     var qaCharacterRect: NSRect? { characterLayer.isHidden ? nil : characterRect }
+    /// QA: the art's opaque pixels (every frame's union) in this bar's
+    /// coordinates, and where their centre belongs: the slot's centre, the
+    /// squircle's dropped onto the title's row.
+    var qaCharacterInk: (rect: NSRect, target: NSPoint)? {
+        guard !characterLayer.isHidden, let frame = characterRect, let art = characterArt, let size = characterSize,
+              let bubble = bubbleRect, size.width > 0 else { return nil }
+        let perArt = frame.width / size.width
+        let ink = NSRect(x: frame.minX + art.ink.minX * perArt, y: frame.minY + art.ink.minY * perArt,
+                         width: art.ink.width * perArt, height: art.ink.height * perArt)
+        let drop = bubbleBreaksCorner ? TileAgentBubbleLayer.Squircle.artDrop * sizeScale : 0
+        return (ink, NSPoint(x: bubble.midX, y: bubble.midY + drop))
+    }
     /// QA: the bubble in this bar's coordinates, while it shows.
     var qaBubbleRect: NSRect? { bubble.isHidden ? nil : bubbleRect }
     /// Where the bubble goes in this bar whenever the tile has an icon, before
@@ -2838,6 +2890,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             controller.scheduleRevisit(for: self, at: nil)
             if characterSize != nil {
                 characterSize = nil
+                characterArt = nil
                 characterLayer.clear()
                 characterLayer.isHidden = true
                 bubble.setShown(false)
@@ -2853,13 +2906,27 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         controller.scheduleRevisit(for: self, at: plan.revisitAt)
         let scale = CGFloat(sharedCharacter?.set.theme.scale ?? controller.theme?.scale ?? 1)
         let size = NSSize(width: CGFloat(atlas.atlas.frameWidth) / scale, height: CGFloat(atlas.atlas.frameHeight) / scale)
+        let ink = atlas.inkRect
+        let art = (ink: CGRect(x: ink.minX / scale, y: ink.minY / scale, width: ink.width / scale, height: ink.height / scale),
+                   typicalSide: max(1, atlas.typicalInkSide / scale))
+        if characterArt?.ink != art.ink || characterArt?.typicalSide != art.typicalSide {
+            characterArt = art
+            needsLayout = true
+        }
         if characterSize != size {
             characterSize = size
             needsLayout = true
             invalidateChrome()
             onBubbleChange?()
         }
-        bubble.setStyle(controller.bubbleStyle)
+        if bubble.bubbleStyle != controller.bubbleStyle {
+            bubble.setStyle(controller.bubbleStyle)
+            // Inline and the squircle start the title in different places, and
+            // only the squircle has a view in the world plane.
+            needsLayout = true
+            invalidateChrome()
+            onBubbleChange?()
+        }
         applyBubbleWorking()
         setHeaderScale(controller.layoutFactor)
         reconcileCharacterVisibility()
@@ -2867,8 +2934,9 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
 
     /// Told when the bubble appears, goes or moves: the tile places its view.
     var onBubbleChange: (() -> Void)?
-    /// The bubble rect last handed to the tile.
+    /// The bubble rect last handed to the tile, and where it was hosted.
     private var placedBubbleRect: NSRect?
+    private var placedBubbleBreaksCorner: Bool?
 
     /// The sidebar's working light on the bubble: shown while the agent works,
     /// in the sidebar's chosen style, on the agent's own phase of the shared clock.
@@ -3144,7 +3212,23 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             let local = sprite.offsetBy(dx: -rect.minX, dy: -rect.minY)
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            if rect != placedBubbleRect { placedBubbleRect = rect; onBubbleChange?() }
+            bubble.setGeometry(tileRadius: superview?.layer?.cornerRadius ?? CGFloat(Radius.container), scale: sizeScale)
+            if bubbleBreaksCorner {
+                if inlineBubbleHost.superlayer != nil { inlineBubbleHost.removeFromSuperlayer() }
+            } else if let barLayer = layer {
+                // Inline: the bar hosts the bubble, clipped to its bounds.
+                if inlineBubbleHost.superlayer !== barLayer { barLayer.addSublayer(inlineBubbleHost) }
+                let hostFrame = convertToLayer(bounds)
+                if inlineBubbleHost.frame != hostFrame { inlineBubbleHost.frame = hostFrame }
+                if bubble.superlayer !== inlineBubbleHost { inlineBubbleHost.addSublayer(bubble) }
+                let inHost = convertToLayer(rect)
+                if bubble.frame != inHost { bubble.frame = inHost }
+            }
+            if rect != placedBubbleRect || bubbleBreaksCorner != placedBubbleBreaksCorner {
+                placedBubbleRect = rect
+                placedBubbleBreaksCorner = bubbleBreaksCorner
+                onBubbleChange?()
+            }
             if characterLayer.frame != local { characterLayer.frame = local }
             if characterLayer.isHidden { characterLayer.isHidden = false }
             CATransaction.commit()

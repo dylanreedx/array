@@ -409,11 +409,15 @@ final class TileSelectionOverlay: NSView {
                             xRadius: radius, yRadius: radius)
     }
 
-    /// The same clipping area is used by drawing and the overlap witness.
+    /// The same clipping area is used by drawing and the overlap witness. A
+    /// ring stops short of every squircle it passes, as the ants do.
     private func visibleArea(_ outline: TileOutlineGeometry.Result) -> CGPath {
         var area = CGPath(rect: outline.rect, transform: nil)
         for occluder in outline.occluders {
             area = area.subtracting(CGPath(rect: occluder, transform: nil))
+        }
+        if let cut = selection?.canvas?.agentBubbleRingCut(around: outline.rect) {
+            area = area.subtracting(cut)
         }
         return area
     }

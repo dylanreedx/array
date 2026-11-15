@@ -33,10 +33,44 @@ final class AgentCharacterSpriteAtlas: @unchecked Sendable {
             durations[loop] = max(Self.minimumFrameDuration, (loops[loop]?.frameMs ?? 300) / 1000)
         }
         loopFrameDuration = durations
+        (inkRect, typicalInkSide) = Self.measureInk(atlas)
     }
 
     /// 12 fps: the fastest any character steps (plan 110 §5.2 rule 6).
     static let minimumFrameDuration: CFTimeInterval = 1.0 / 12
+
+    /// Where the character actually is inside its frame: the union of every
+    /// frame's opaque pixels, frame-relative, origin top-left, in atlas pixels.
+    let inkRect: CGRect
+    /// The size a character reads at: the median, over every frame, of that
+    /// frame's longest opaque side, in atlas pixels. Frames carry wide motion
+    /// margins (a run spans the whole frame, a resting pose a third of it), so
+    /// fitting the frame, or the union of every frame, shrinks the art to a speck.
+    let typicalInkSide: CGFloat
+
+    /// One pass over the atlas, once per atlas.
+    private static func measureInk(_ atlas: AgentCharacterAtlas) -> (CGRect, CGFloat) {
+        var union = (minX: Int.max, minY: Int.max, maxX: -1, maxY: -1)
+        var sides: [Int] = []
+        for frame in atlas.frames {
+            var minX = Int.max, minY = Int.max, maxX = -1, maxY = -1
+            for y in 0..<frame.height {
+                let row = (frame.y + y) * atlas.width
+                for x in 0..<frame.width where atlas.pixels[(row + frame.x + x) * 4 + 3] > 24 {
+                    minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+                }
+            }
+            guard maxX >= minX else { continue }
+            sides.append(max(maxX - minX + 1, maxY - minY + 1))
+            union = (min(union.minX, minX), min(union.minY, minY), max(union.maxX, maxX), max(union.maxY, maxY))
+        }
+        let frameSide = CGFloat(max(atlas.frameWidth, atlas.frameHeight))
+        guard union.maxX >= union.minX, !sides.isEmpty else {
+            return (CGRect(x: 0, y: 0, width: atlas.frameWidth, height: atlas.frameHeight), frameSide)
+        }
+        let rect = CGRect(x: union.minX, y: union.minY, width: union.maxX - union.minX + 1, height: union.maxY - union.minY + 1)
+        return (rect, CGFloat(sides.sorted()[sides.count / 2]))
+    }
 }
 
 /// A surface whose character may change with time alone.
@@ -59,7 +93,7 @@ final class AgentCharacterController {
     private(set) var motion = AgentCharacterConfig.defaultMotion
     private(set) var size = AgentCharacterConfig.defaultSize
     /// How a tile draws its agent's icon bubble (Settings › Agent Icons › Tile bubble).
-    private(set) var bubbleStyle = AgentCharacterConfig.BubbleStyle.minimal
+    private(set) var bubbleStyle = AgentCharacterConfig.defaultBubbleStyle
     /// The sidebar's active style: a working bubble borrows its light.
     private(set) var workingStyle = SidebarActiveIndicatorStyle.fallback
     /// How much a character's line grows: the size's factor while characters

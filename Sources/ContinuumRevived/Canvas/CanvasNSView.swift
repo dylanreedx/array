@@ -2135,6 +2135,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // every screen-fixed overlay added later with `positioned: .above` sits
         // above all world content without any further ordering work.
         worldPlane.frame = bounds
+        worldPlane.onAgentBubbleMoved = { [weak self] old, new in self?.agentBubbleMoved(from: old, to: new) }
         worldPlane.onFileTileCountChanged = { [weak self] in
             guard let self else { return }
             if self.hasSurfaceResidency { self.startResidencyEvaluation() }
@@ -3967,6 +3968,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // Born with the CURRENT suspension: an overlay created while the app is
         // inactive must be born static, not animate until the next transition.
         overlay.setMarchingSuspended(overlayAnimationsSuspended)
+        overlay.bubbleCut = { [weak self] ring in self?.agentBubbleRingCut(around: ring) }
         focusBorderOverlay = overlay
         addSubview(overlay, positioned: .above, relativeTo: nil)
         return overlay
@@ -4140,10 +4142,53 @@ final class CanvasNSView: NSView, TokenThemed {
         return (Self.focusBorderColor(named: config.color).withAlphaComponent(0.7), CGFloat(config.gap))
     }
 
+    // MARK: Rings stop short of squircles
+
+    /// Where every ring that passes a squircle must not paint: each plate's
+    /// outline outset by a breathing gap, in canvas coordinates, for the
+    /// plates along the outline of `ring` (canvas coordinates). Its own tile's
+    /// plate and a neighbour's hanging into the gutter alike. O(1) in the
+    /// number of tiles: the plane answers from the cells the ring's stroke
+    /// crosses (`CanvasWorldPlaneView.agentBubbles(alongOutlineOf:margin:)`).
+    func agentBubbleRingCut(around ring: CGRect) -> CGPath? {
+        let zoom = CGFloat(canvasState.viewport.zoom)
+        guard zoom > 0, !ring.isEmpty else { return nil }
+        let breathing = TileAgentBubbleLayer.Squircle.ringBreathing
+        let world = worldPlane.convert(ring, from: self)
+        let margin = (breathing + FocusBorderOverlayView.lineWidth) / zoom
+        let plates = worldPlane.agentBubbles(alongOutlineOf: world, margin: margin)
+        guard !plates.isEmpty else { return nil }
+        let cut = CGMutablePath()
+        for plate in plates where !plate.isHidden {
+            let box = convert(plate.frame, from: worldPlane)
+            cut.addPath(TileAgentBubbleLayer.Squircle.path(
+                in: box, tileRadius: plate.bubble.tileRadius * zoom, scale: plate.bubble.chromeScale * zoom,
+                outset: breathing))
+        }
+        return cut.isEmpty ? nil : cut
+    }
+
+    /// A plate appeared, moved or went: every ring it was or is near cuts
+    /// again. O(rings), never O(tiles).
+    private func agentBubbleMoved(from old: CGRect?, to new: CGRect?) {
+        let zoom = CGFloat(canvasState.viewport.zoom)
+        let reach = (TileAgentBubbleLayer.Squircle.ringBreathing + FocusBorderOverlayView.lineWidth) / max(zoom, 0.0001)
+        func near(_ ring: CGRect) -> Bool {
+            let world = worldPlane.convert(ring, from: self).insetBy(dx: -reach, dy: -reach)
+            return [old, new].contains { $0.map(world.intersects) ?? false }
+        }
+        for overlay in [focusBorderOverlay].compactMap({ $0 }) + Array(attentionBorderOverlays.values)
+        where !overlay.isHidden && near(overlay.frame) {
+            overlay.refreshBubbleCut()
+        }
+        if let selection = tileSelection.qaOverlay, !selection.isHidden { selection.needsDisplay = true }
+    }
+
     private var resolvedTileOutlineItems: [TileOutlineGeometry.Item] = []
     private(set) var qaResolvedTileOutlines: [UUID: TileOutlineGeometry.Result] = [:]
 
     var qaFocusBorderVisibleStrokePath: CGPath? { focusBorderOverlay?.qaVisibleStrokePath }
+    var qaFocusBorderOverlay: FocusBorderOverlayView? { focusBorderOverlay }
 
     func qaAttentionBorderVisibleStrokePath(for id: UUID) -> CGPath? {
         attentionBorderOverlays[id]?.qaVisibleStrokePath
@@ -4301,6 +4346,7 @@ final class CanvasNSView: NSView, TokenThemed {
             guard let view = tileView(for: tileId) else { continue }
             let overlay = attentionBorderOverlays[tileId] ?? FocusBorderOverlayView(frame: .zero)
             overlay.setMarchingSuspended(overlayAnimationsSuspended)
+            overlay.bubbleCut = { [weak self] ring in self?.agentBubbleRingCut(around: ring) }
             attentionBorderOverlays[tileId] = overlay
             overlay.configure(color: color, gap: gap, animationDuration: FocusBorderConfig.attentionSpeed)
             showOverlayIfOnViewport(overlay, around: tileRectInCanvasSpace(view))
@@ -14962,6 +15008,15 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
     private let shape = CAShapeLayer()
     private let outlineMask = CAShapeLayer()
     private(set) var qaResolvedGeometry: TileOutlineGeometry.Result?
+    /// Where the ring must not paint, for a ring at a frame (canvas
+    /// coordinates): the squircles it passes (`agentBubbleRingCut`).
+    var bubbleCut: ((CGRect) -> CGPath?)?
+    /// The cut and occluders the mask was last built from, overlay-local: a
+    /// camera step that moves the ring with its plates rebuilds nothing.
+    private var builtMask: (size: CGSize, occluders: [CGRect], cut: CGPath?)?
+
+    /// A plate near the ring moved: cut again.
+    func refreshBubbleCut() { layoutShape() }
     var qaMaskPath: CGPath? { shape.mask == nil ? nil : outlineMask.path }
     /// Filled screen-space stroke envelope after the actual drawing mask.
     var qaVisibleStrokePath: CGPath? {
@@ -15087,18 +15142,24 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
         CATransaction.setDisableActions(true)
         shape.frame = bounds
         shape.path = CGPath(roundedRect: rect, cornerWidth: cornerRadius, cornerHeight: cornerRadius, transform: nil)
-        if let geometry = qaResolvedGeometry, !geometry.occluders.isEmpty {
+        let occluders = (qaResolvedGeometry?.occluders ?? []).map { $0.offsetBy(dx: -frame.minX, dy: -frame.minY) }
+        var toLocal = CGAffineTransform(translationX: -frame.minX, y: -frame.minY)
+        let cut = bubbleCut?(frame)?.copy(using: &toLocal)
+        if occluders.isEmpty && cut == nil {
+            shape.mask = nil
+            builtMask = nil
+        } else if builtMask?.size != bounds.size || builtMask?.occluders != occluders || builtMask?.cut != cut
+                    || shape.mask == nil {
             var visible = CGPath(rect: bounds, transform: nil)
-            for occluder in geometry.occluders {
-                let local = occluder.offsetBy(dx: -frame.minX, dy: -frame.minY)
-                visible = visible.subtracting(CGPath(rect: local, transform: nil))
+            for occluder in occluders {
+                visible = visible.subtracting(CGPath(rect: occluder, transform: nil))
             }
+            if let cut { visible = visible.subtracting(cut) }
             outlineMask.frame = bounds
             outlineMask.fillColor = NSColor.black.cgColor
             outlineMask.path = visible
             shape.mask = outlineMask
-        } else {
-            shape.mask = nil
+            builtMask = (bounds.size, occluders, cut)
         }
         CATransaction.commit()
     }

@@ -120,13 +120,12 @@ enum TileCharacterChecks {
             let scale = rect.height / 12
             buckets.append(Double(scale))
             try expect(abs(rect.width - 20 * scale) < 0.01, "zoom \(zoom): 20 x 12 art at chrome scale \(scale)")
-            // The character lives in its bubble breaking the tile's top-left corner.
-            guard let bubble = view.agentBubbleFrame, let bar = view.qaTitleBarView else {
+            // The character lives in its bubble, its art centred in the slot.
+            guard let bubble = view.agentBubbleFrame, let bar = view.qaTitleBarView, let ink = view.qaCharacterInk else {
                 throw Failure(description: "zoom \(zoom): the character has no bubble")
             }
-            let inTile = bar.convert(rect, to: view)
-            try expect(abs(inTile.midX - bubble.midX) < 0.51 && abs(inTile.midY - bubble.midY) < 0.51,
-                       "zoom \(zoom): centred in its bubble (\(inTile) in \(bubble))")
+            try expect(abs(ink.rect.midX - ink.target.x) < 0.51 && abs(ink.rect.midY - ink.target.y) < 0.51,
+                       "zoom \(zoom): centred in its bubble (\(ink.rect) at \(ink.target))")
             if title.width > 0 {
                 try expect(title.minX >= mark.maxX + CGFloat(Space.s) * scale - 0.01,
                            "zoom \(zoom): the title starts after the mark (\(title.minX) vs \(mark.maxX))")
