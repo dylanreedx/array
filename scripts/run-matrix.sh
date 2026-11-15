@@ -1622,6 +1622,9 @@ run_app_check .build/debug/Array --agent-completion-semantic-check
 # tile rebinding its context on every agent event (which closed the menu while
 # an agent worked) was invisible to it.
 run_app_check .build/debug/Array --agent-tile-file-mention-check
+# Forty tiles on one checkout share one `@` file index: each kept its own, 76 MB
+# apiece on a 45k-file checkout, most of a 7.6 GB heap after 2.5 days (0.7.47).
+run_app_check .build/debug/Array --agent-file-index-memory-check
 run_app_check .build/debug/Array --agent-tile-reference-check
 # Resize, title-bar focus, Shift-select, live agent moves, header references
 # and swaps, through NSApp.sendEvent: the window hit-test and the focus monitor

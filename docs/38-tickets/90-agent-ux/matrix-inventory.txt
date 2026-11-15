@@ -11,6 +11,7 @@ check --agent-display-name-check
 check --agent-face-flip-check
 check --agent-face-switch-check
 check --agent-fanout-check
+check --agent-file-index-memory-check
 check --agent-first-paint-check
 check --agent-identity-color-check
 check --agent-inbox-check
@@ -529,6 +530,7 @@ leg run_app_check .build/debug/Array --agent-display-name-check
 leg run_app_check .build/debug/Array --agent-face-flip-check
 leg run_app_check .build/debug/Array --agent-face-switch-check
 leg run_app_check .build/debug/Array --agent-fanout-check
+leg run_app_check .build/debug/Array --agent-file-index-memory-check
 leg run_app_check .build/debug/Array --agent-first-paint-check
 leg run_app_check .build/debug/Array --agent-identity-color-check
 leg run_app_check .build/debug/Array --agent-inbox-check

@@ -14,7 +14,13 @@ public struct AgentFileIndexEntry: Equatable, Sendable {
 
 /// Bounded file discovery for managed-agent `@` completion. Browsing begins at
 /// the checkout but may move to an explicit host-local directory outside it.
-/// Cache keys include agent/backend/root identity so scopes never cross tiles.
+///
+/// One checkout has one index, however many tiles complete against it. The
+/// listing depends on the root alone (agent and backend only shape each row at
+/// query time), and every tile used to keep its own: forty helpers on one
+/// checkout held forty 76 MB copies, most of a 7.6 GB heap. Each index still
+/// rebuilds the listing the first time it asks for a root, so a tile opened
+/// later sees files added since, and its siblings see them too.
 public actor AgentFileIndex {
     public typealias PathDiscovery = @Sendable (_ root: URL) -> [String]?
 
@@ -34,6 +40,46 @@ public actor AgentFileIndex {
         let folded: [UInt8]
     }
 
+    /// Listings by root, each held while any index that listed the root lives.
+    private final class Listings: @unchecked Sendable {
+        struct Key: Hashable {
+            let root: String
+            let entryLimit: Int
+        }
+
+        static let shared = Listings()
+
+        private let lock = NSLock()
+        private var listings: [Key: [Indexed]] = [:]
+        private var holders: [Key: Set<ObjectIdentifier>] = [:]
+
+        func listing(for key: Key) -> [Indexed]? {
+            lock.withLock { listings[key] }
+        }
+
+        /// The newest listing replaces the root's older one for every holder.
+        func publish(_ listing: [Indexed], for key: Key, holder: ObjectIdentifier) {
+            lock.withLock {
+                listings[key] = listing
+                holders[key, default: []].insert(holder)
+            }
+        }
+
+        /// Drops `holder` from `roots`, or from every root when nil.
+        func release(holder: ObjectIdentifier, roots: Set<String>?) {
+            guard roots?.isEmpty != true else { return }
+            lock.withLock {
+                for key in holders.keys where roots?.contains(key.root) ?? true {
+                    holders[key]?.remove(holder)
+                    if holders[key]?.isEmpty == true {
+                        holders[key] = nil
+                        listings[key] = nil
+                    }
+                }
+            }
+        }
+    }
+
     private struct Ranked {
         let entry: AgentFileIndexEntry
         let tier: Int
@@ -43,7 +89,12 @@ public actor AgentFileIndex {
     private let entryLimit: Int
     private let resultLimit: Int
     private let pathDiscovery: PathDiscovery?
-    private var cache: [CacheKey: [Indexed]] = [:]
+    /// Where the listings live: shared by every production index, private to
+    /// one built with its own discovery, whose listing is its own.
+    private let listings: Listings
+    /// The roots this index has listed; it holds their listings alive.
+    private var listed: Set<CacheKey> = []
+    private var holder: ObjectIdentifier { ObjectIdentifier(self) }
 
     public init(
         entryLimit: Int = 50_000,
@@ -53,16 +104,21 @@ public actor AgentFileIndex {
         self.entryLimit = max(1, entryLimit)
         self.resultLimit = max(1, resultLimit)
         self.pathDiscovery = pathDiscovery
+        self.listings = pathDiscovery == nil ? .shared : Listings()
     }
 
+    deinit {
+        listings.release(holder: ObjectIdentifier(self), roots: nil)
+    }
+
+    /// The next request for an invalidated scope lists its root again.
     public func invalidate(context: AgentCompletionContext? = nil) {
-        guard let context else {
-            cache.removeAll()
-            return
+        let dropped = listed.filter { key in
+            context.map { key.agentID == $0.agentID && key.backend == $0.backend } ?? true
         }
-        cache = cache.filter { key, _ in
-            key.agentID != context.agentID || key.backend != context.backend
-        }
+        listed.subtract(dropped)
+        let stillHeld = Set(listed.map(\.root))
+        listings.release(holder: holder, roots: Set(dropped.map(\.root)).subtracting(stillHeld))
     }
 
     public func entries(for context: AgentCompletionContext) async -> [AgentFileIndexEntry] {
@@ -83,7 +139,8 @@ public actor AgentFileIndex {
     ) async -> [Indexed] {
         let root = root.standardizedFileURL
         let key = cacheKey(for: context, root: root)
-        if let cached = cache[key] { return cached }
+        let listingKey = Listings.Key(root: key.root, entryLimit: entryLimit)
+        if listed.contains(key), let cached = listings.listing(for: listingKey) { return cached }
         guard isDirectory(root), !isSymbolicLink(root) else { return [] }
 
         // Finish and cache a scan once it has started, even when the query that
@@ -97,7 +154,8 @@ public actor AgentFileIndex {
         } else {
             entries = walk(root: root)
         }
-        cache[key] = entries
+        listings.publish(entries, for: listingKey, holder: holder)
+        listed.insert(key)
         return entries
     }
 
