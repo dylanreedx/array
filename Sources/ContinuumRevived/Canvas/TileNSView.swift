@@ -1781,6 +1781,8 @@ class TileNSView: NSView, TokenThemed {
         }
     }
 
+    var qaUnderBarAccessoryIsResting: Bool { underBar?.accessoryIsResting == true }
+
     /// The resting accessory's content changed: lay it out and draw it again.
     func invalidateUnderBarPicture() {
         guard let underBar, underBar.accessoryIsResting else { return }
@@ -4020,6 +4022,12 @@ final class TileUnderBarView: NSView {
     override var isFlipped: Bool { true }
 
     private(set) var accessoryIsResting = false
+
+    /// The resting host outlives every tile: a tile closed while its accessory
+    /// rested left the accessory there for the life of the app.
+    isolated deinit {
+        if accessoryIsResting { accessory?.removeFromSuperview() }
+    }
 
     func restAccessory(in host: NSView?) {
         guard let accessory, let host, !accessoryIsResting else { return }

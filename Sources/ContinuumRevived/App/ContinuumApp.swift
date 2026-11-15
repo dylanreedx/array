@@ -4330,6 +4330,21 @@ enum ContinuumApp {
             RunLoop.main.run()
             return
         }
+        if CommandLine.arguments.contains("--agent-file-index-memory-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let summary = try await AgentFileIndexMemoryChecks.run()
+                    print("ContinuumRevivedAgentFileIndexMemoryChecks passed: \(summary)")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains("--agent-tile-file-mention-check") {
             _ = NSApplication.shared
             Task { @MainActor in

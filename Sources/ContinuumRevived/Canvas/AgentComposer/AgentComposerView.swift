@@ -2059,6 +2059,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     var qaCompletionFocusedRowIsVisible: Bool { completionController.qaFocusedRowIsVisible }
     var qaCompletionRequestStartCount: Int { completionController.qaRequestStartCount }
     var qaCompletionContext: AgentCompletionContext? { completionContext }
+    /// The source the editor queries, so a check can await the index the
+    /// editor's own focus warmed.
+    var qaCompletionSource: any AgentCompletionSuggestionSource { completionSource }
     /// The context the editor last asked its completion source to prepare.
     private(set) var qaPreparedCompletionContext: AgentCompletionContext?
 
