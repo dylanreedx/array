@@ -268,9 +268,28 @@ enum AgentFileIndexMemoryChecks {
         try expect(heldFixtureRoots().count == 1,
                    "the open tiles share one listing of the checkout, got \(heldFixtureRoots())")
         var survivor: ManagedAgentTileNSView? = views.removeLast()
+        // One sibling closes mid-turn and resting. Its header rests in the
+        // shared host as the under-bar's accessory, and must go with the tile.
+        weak var midTurnHeader: AgentTileHeaderView?
+        do {
+            let midTurn = views[0]
+            midTurn.ingest(.turnStarted(threadId: "thread-main", turnId: "file-index-close"))
+            window.makeFirstResponder(nil)
+            ManagedAgentTileNSView.qaPointerInside = { _ in false }
+            defer { ManagedAgentTileNSView.qaPointerInside = nil }
+            _ = midTurn.restChromeIfIdle()
+            try expect(midTurn.isChromeResting && midTurn.qaUnderBarAccessoryIsResting,
+                       "the mid-turn tile rests with its header in the resting host: chrome resting \(midTurn.isChromeResting), header resting \(midTurn.qaUnderBarAccessoryIsResting)")
+            midTurnHeader = midTurn.qaPageZoomHeaderView
+            // A managed tile's clock is the compact row's, in the body, so the
+            // header runs no timer of its own; its deinit would stop one.
+            print("file-index memory: mid-turn resting tile, header timer active \(midTurn.qaPageZoomHeaderView.qaTimerIsActive)")
+        }
         for view in views { delegate.deleteTile(id: view.tile.id) }
         views.removeAll()
         _ = await waitUntil(timeout: 0.5, pollInterval: 0.1) { false }
+        try expect(midTurnHeader == nil,
+                   "a tile closed mid-turn while resting frees its header, which rested in the shared host")
         try expect(heldFixtureRoots().count == 1,
                    "the surviving tile keeps the checkout's listing after its \(tileCount - 1) siblings close, got \(heldFixtureRoots())")
         do {
