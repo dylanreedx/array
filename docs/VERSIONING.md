@@ -40,14 +40,17 @@ The two move together: every shipped `X.Y.Z` gets the next build number
   `Array.dmg` — constant name, the site's
   `releases/latest/download/Array.dmg` URL depends on it — and
   `Array-X.Y.Z.dmg` — the permalink the appcast enclosure points at.
-- **Regenerate and ship the appcast after every release:**
-  `scripts/generate-appcast.sh` rewrites `website/public/appcast.xml` (signed
-  with the Keychain EdDSA key); commit it and push to `main`. Why: Vercel
+- **Append and ship the appcast after every release:**
+  `scripts/generate-appcast.sh --dmg releases/Array-X.Y.Z.dmg --version X.Y.Z
+  --build N` adds one item to `website/public/appcast.xml` (signed with the
+  Keychain EdDSA key) and leaves every existing item byte-for-byte; commit it
+  and push to `main`. Why: Vercel
   deploys arrayapp.dev from `main`, and installed apps poll
   `https://arrayapp.dev/appcast.xml` — until it deploys, no one sees the
   update.
 - **Archive every shipped DMG in `releases/`** (gitignored, repo root). Why:
-  the appcast is generated from it.
+  it is the only copy of what was signed; the appcast is no longer regenerated
+  from it (that dropped 0.2.0 and rewrote old dates).
 - **Never commit:** the Sparkle private EdDSA key (Keychain-only — back it
   up), `releases/`, `.env`, QA stores, signing material.
 - **Append a row to the ledger below on every release.** Why: this table is

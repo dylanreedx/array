@@ -3,92 +3,35 @@ set -euo pipefail
 
 PHASED_ROLLOUT_INTERVAL=3600
 
-# Phase 2 step 6 (docs/38-tickets/95-go-live.md): regenerate the Sparkle appcast
-# from the local archive of shipped DMGs and write the copy the site deploys.
+# Phase 2 step 6 (docs/38-tickets/95-go-live.md): add ONE new stable release to
+# the Sparkle appcast the site deploys.
 #
-# releases/ is the source of truth: every shipped Array-<version>.dmg from the
-# first Sparkle-capable version on lands there (gitignored — DMGs don't belong
-# in the repo; back the directory up). generate_appcast signs each item with the
-# private EdDSA key in the login Keychain and writes releases/appcast.xml; the
-# site copy then gets each enclosure URL rewritten to that version's
-# array-releases tag, because --download-url-prefix is global while our GitHub
-# download URLs embed the version tag.
+# Usage: generate-appcast.sh --dmg releases/Array-X.Y.Z.dmg --version X.Y.Z --build N [--feed PATH]
+#
+# This used to regenerate the whole feed from releases/ with generate_appcast.
+# That dropped the 0.2.0 item (its DMG was never archived), rewrote old pubDates
+# from DMG mtimes, and re-serialized every item, so each release needed a hand
+# repair. Now append-appcast.py signs the one DMG with sign_update (private
+# EdDSA key in the login Keychain) and splices its item above the newest one;
+# every existing byte of the feed is left as it was. The new item gets a
+# one-hour phased rollout; older items keep whatever they were published with.
 
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-RELEASES_DIR="${1:-$ROOT_DIR/releases}"
-SITE_APPCAST="$ROOT_DIR/website/public/appcast.xml"
-GENERATE_APPCAST="$ROOT_DIR/.build/artifacts/sparkle/Sparkle/bin/generate_appcast"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+FEED="$SCRIPT_DIR/../website/public/appcast.xml"
+DMG= VERSION= BUILD=
+usage() { echo "Usage: generate-appcast.sh --dmg PATH --version X.Y.Z --build N [--feed PATH]" >&2; exit 2; }
+while [[ $# -gt 0 ]]; do
+  [[ $# -ge 2 ]] || usage
+  case "$1" in
+    --dmg) DMG="$2" ;;
+    --version) VERSION="$2" ;;
+    --build) BUILD="$2" ;;
+    --feed) FEED="$2" ;;
+    *) usage ;;
+  esac
+  shift 2
+done
+[[ -n "$DMG" && -n "$VERSION" && -n "$BUILD" ]] || usage
 
-[[ -x "$GENERATE_APPCAST" ]] || { echo "generate_appcast not found: $GENERATE_APPCAST (run swift build first)" >&2; exit 1; }
-[[ -d "$RELEASES_DIR" ]] || { echo "releases dir not found: $RELEASES_DIR" >&2; exit 1; }
-ls "$RELEASES_DIR"/Array-*.dmg >/dev/null 2>&1 || { echo "no Array-<version>.dmg archives in $RELEASES_DIR" >&2; exit 1; }
-
-# --maximum-versions 0 keeps every shipped version in the feed (nothing is
-# moved to old_updates/); deltas are off until delta files are part of the
-# GitHub upload flow.
-"$GENERATE_APPCAST" "$RELEASES_DIR" \
-  --link "https://arrayapp.dev" \
-  --maximum-versions 0 \
-  --maximum-deltas 0
-
-/usr/bin/python3 - "$RELEASES_DIR/appcast.xml" "$SITE_APPCAST" "$PHASED_ROLLOUT_INTERVAL" <<'PY'
-import sys
-import os
-import copy
-import xml.etree.ElementTree as ET
-
-SPARKLE = "http://www.andymatuschak.org/xml-namespaces/sparkle"
-ET.register_namespace("sparkle", SPARKLE)
-src, dst, rollout_interval = sys.argv[1:]
-tree = ET.parse(src)
-channel = tree.getroot().find("channel")
-items = channel.findall("item") if channel is not None else []
-if not items:
-    raise SystemExit(f"no update items found in {src}")
-def version(item):
-    enclosure = item.find("enclosure")
-    return item.findtext(f"{{{SPARKLE}}}version") or (enclosure.get(f"{{{SPARKLE}}}version") if enclosure is not None else None)
-
-previous = ET.parse(dst).findall("./channel/item") if os.path.exists(dst) else []
-previous_stable = {version(item): item for item in previous if item.find(f"{{{SPARKLE}}}channel") is None}
-# Build numbers are monotonic integers. Only the newest stable item can be
-# the release being published; older archives must never acquire staging.
-newest = max(items, key=lambda item: int(version(item)))
-for item in items:
-    enclosure = item.find("enclosure")
-    if enclosure is None:
-        raise SystemExit("update item without enclosure")
-    short = item.findtext(f"{{{SPARKLE}}}shortVersionString") or enclosure.get(f"{{{SPARKLE}}}shortVersionString")
-    if not short:
-        raise SystemExit("update item without sparkle:shortVersionString")
-    rollout_tag = f"{{{SPARKLE}}}phasedRolloutInterval"
-    old = previous_stable.get(version(item))
-    if old is not None:
-        # Preserve the published policy, including an absent interval.
-        for interval in item.findall(rollout_tag):
-            item.remove(interval)
-        old_interval = old.find(rollout_tag)
-        if old_interval is not None:
-            item.append(copy.deepcopy(old_interval))
-    elif item is newest:
-        interval = item.find(rollout_tag)
-        if interval is None:
-            interval = ET.SubElement(item, rollout_tag)
-        interval.text = rollout_interval
-    else:
-        for interval in item.findall(rollout_tag):
-            item.remove(interval)
-    enclosure.set("url", f"https://github.com/dylanreedx/array-releases/releases/download/v{short}/Array-{short}.dmg")
-    if item.find(f"{{{SPARKLE}}}releaseNotesLink") is None:
-        notes = ET.SubElement(item, f"{{{SPARKLE}}}releaseNotesLink")
-        notes.text = f"https://github.com/dylanreedx/array-releases/releases/tag/v{short}"
-# Tip archives live separately; preserve their signed items on stable regeneration.
-if previous:
-    for old in previous:
-        if old.findtext(f"{{{SPARKLE}}}channel") == "tip":
-            channel.insert(0, old)
-tree.write(dst, encoding="UTF-8", xml_declaration=True)
-with open(dst, "a") as handle:
-    handle.write("\n")
-print(f"wrote {dst} ({len(items)} update item(s))")
-PY
+/usr/bin/python3 "$SCRIPT_DIR/append-appcast.py" --feed "$FEED" --dmg "$DMG" \
+  --version "$VERSION" --build "$BUILD" --rollout-seconds "$PHASED_ROLLOUT_INTERVAL"
