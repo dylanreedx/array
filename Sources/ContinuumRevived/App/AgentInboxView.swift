@@ -296,6 +296,7 @@ private final class AgentInboxTableView: NSTableView {
             contextHandler?.beginRowPress(event)
             defer { contextHandler?.endRowPress() }
             super.mouseDown(with: event)
+            contextHandler?.completePlainPressInsideSelection(event)
         }
     }
 
@@ -4412,6 +4413,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// until the table's tracking loop (and the action it sends) ends.
     private var pressedAgentId: UUID?
     private var pressedRowRect: NSRect?
+    /// The pressed row was one of several selected rows at mouse-down.
+    private var pressedInsideMultiSelection = false
+    /// The table sent its action during this press.
+    private var pressActivated = false
+    /// The row a plain press inside a selection opened, and until when AppKit's
+    /// own late action for that same click (sent once the double-click interval
+    /// passes) is still owed and must not open it a second time.
+    private var openedPressInsideSelection: (agentId: UUID, until: TimeInterval)?
     fileprivate func isClickableRow(_ row: Int) -> Bool {
         guard items.indices.contains(row) else { return false }
         switch items[row] {
@@ -4421,20 +4430,43 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     fileprivate func beginRowPress(_ event: NSEvent) {
+        pressActivated = false
         let row = tableView.row(at: tableView.convert(event.locationInWindow, from: nil))
         guard isClickableRow(row), let agentId = agentIdForTableRow(row) else { return }
         pressedTableRow = row
         pressedAgentId = agentId
         pressedRowRect = tableView.rect(ofRow: row)
+        pressedInsideMultiSelection = tableView.selectedRowIndexes.count > 1
+            && tableView.selectedRowIndexes.contains(row)
         if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
             cell.applyInteraction(interaction(forTableRow: row))
             CATransaction.flush()
         }
     }
 
+    /// A plain click on one of several selected rows. NSTableView keeps the
+    /// selection and sends no action for it (it is waiting to see whether the
+    /// press drags the selection), so the row stayed lit among the others and
+    /// the canvas never moved. As in Finder and Mail, the selection collapses to
+    /// that row and it opens. ⌘ and ⇧ stay AppKit's; a drag off the row, a
+    /// double-click, or a press the table already acted on are left alone.
+    fileprivate func completePlainPressInsideSelection(_ down: NSEvent) {
+        guard pressedInsideMultiSelection, !pressActivated, down.clickCount == 1,
+              AgentInboxView.revealsOnClick(modifiers: down.modifierFlags.intersection(.deviceIndependentFlagsMask)),
+              let pressed = pressedAgentId, let pressedRect = pressedRowRect,
+              let up = NSApp.currentEvent, up.type == .leftMouseUp,
+              pressedRect.contains(tableView.convert(up.locationInWindow, from: nil)),
+              let row = tableRow(forAgentId: pressed) else { return }
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        if activateRow(atTableRow: row, event: up) {
+            openedPressInsideSelection = (pressed, ProcessInfo.processInfo.systemUptime + NSEvent.doubleClickInterval + 1)
+        }
+    }
+
     fileprivate func endRowPress() {
         pressedAgentId = nil
         pressedRowRect = nil
+        pressedInsideMultiSelection = false
         guard let row = pressedTableRow else { return }
         pressedTableRow = nil
         if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
@@ -4469,6 +4501,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
     @objc private func rowClicked(_ sender: Any?) {
+        // AppKit's late action for a click `completePlainPressInsideSelection`
+        // already opened arrives outside any press; a new click never does.
+        if pressedAgentId == nil, let opened = openedPressInsideSelection {
+            openedPressInsideSelection = nil
+            let clicked = agentIdForTableRow(tableView.clickedRow)
+            if ProcessInfo.processInfo.systemUptime < opened.until, clicked == nil || clicked == opened.agentId { return }
+        }
+        pressActivated = true
         // The agent PRESSED, not the slot: a push that re-renders the list while
         // the button is down moves rows under the pointer, and `clickedRow` still
         // names the old slot. The default sort re-selects the pressed row by id,
