@@ -302,11 +302,22 @@ def ship_cases(fx, gated, head):
     print("PASS publish-waits-for-live-feed")
 
 
+def ref_case(fx):
+    # A branch that has not landed can be gated by hand; the default stays integration.
+    branch = fx.commit("feat(app): unlanded branch work", {"Sources/App.swift": "let app = 3\n"})
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD"))
+    expect(result.returncode == 0 and fx.summary(branch)["candidate"], "ARRAY_NIGHTLY_REF gates that commit", result)
+    pushed = sh("git", "--git-dir", str(fx.origin), "rev-parse", "array/integration").stdout.strip()
+    expect(pushed != branch, "gating a branch pushes nothing")
+    print("PASS gate-named-ref")
+
+
 failures = 0
 with tempfile.TemporaryDirectory(prefix="array-ship-") as temp:
     fixture = Fixture(temp)
     try:
         ship_cases(fixture, *gate_cases(fixture))
+        ref_case(fixture)
     except AssertionError as error:
         failures += 1
         print("FAIL", error)

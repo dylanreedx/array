@@ -128,7 +128,9 @@ except BlockingIOError:
     # on --awake or --latest-green must never read a skip as success.
     sys.exit(0 if args == [] else 1)
 git('fetch', 'origin')
-commit = git('rev-parse', 'origin/array/integration')
+# ARRAY_NIGHTLY_REF gates another ref by hand (a branch before it lands); the
+# LaunchAgent never sets it.
+commit = git('rev-parse', '--verify', env.get('ARRAY_NIGHTLY_REF', 'origin/array/integration') + '^{commit}')
 if args[:1] == ['--awake']:
     commit = git('rev-parse', '--verify', args[1] + '^{commit}')
 if args == ['--latest-green']:
