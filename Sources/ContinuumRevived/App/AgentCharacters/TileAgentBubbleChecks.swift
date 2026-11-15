@@ -437,13 +437,32 @@ enum TileAgentBubbleChecks {
                     let wash = components(view.qaTitleBarTint?.cgColor)
                     let barColour = (0..<3).map { base[$0] * (1 - wash[3]) + wash[$0] * wash[3] }
                     let ratio = contrast(plateColour, barColour)
-                    try expect(ratio >= 1.3, "\(label): the plate \(plateColour) stands clear of its bar \(barColour) (contrast \(ratio))")
+                    let needed: CGFloat = bubble.tint == nil ? 1.3 : TileAgentBubbleLayer.plateContrast - 0.01
+                    try expect(ratio >= needed, "\(label): the plate \(plateColour) stands clear of its bar \(barColour) (contrast \(ratio), needs \(needed))")
                 }
             }
             window.appearance = nil
         }
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
         canvas.layoutSubtreeIfNeeded()
+        // Every colour an agent can wear, pale ones included, in both
+        // appearances: a plate stands 1.45:1 clear of its bar's 30 % wash.
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            guard let appearance = NSAppearance(named: appearanceName) else { continue }
+            let theme: TokenTheme = appearanceName == .aqua ? .light : .dark
+            let chrome = SurfaceToken.tileChrome.color.nsColor(for: theme)
+            _ = appearance
+            func rgb(_ c: NSColor) -> [CGFloat] { let s = c.usingColorSpace(.sRGB)!; return [s.redComponent, s.greenComponent, s.blueComponent] }
+            for name in ZoneColorConfig.palette {
+                let tint = ZoneChromeNSView.color(named: name)
+                let plate = TileAgentBubbleLayer.plateFill(tint: tint, chrome: chrome, dark: theme != .light)
+                let base = rgb(chrome), wash = rgb(tint), a = ManagedAgentTileNSView.identityBarAlpha
+                let bar = (0..<3).map { base[$0] * (1 - a) + wash[$0] * a }
+                let ratio = contrast(rgb(plate), bar)
+                try expect(ratio >= TileAgentBubbleLayer.plateContrast - 0.01,
+                           "\(name) \(theme): the plate stands \(ratio):1 from its bar, needs \(TileAgentBubbleLayer.plateContrast)")
+            }
+        }
 
         // 2c. The squircle's hit shape is its visible shape, outside the tile
         // where it matters (a press there is the tile's, or the canvas's). A dark
@@ -676,6 +695,24 @@ enum TileAgentBubbleChecks {
             }
             try expect(view.qaDragKindIsMove(at: NSPoint(x: frame.midX, y: frame.midY)), "\(label): the inline icon is a grab")
         }
+        // The fit adds no fractional scaling of its own: a whole number of
+        // device pixels per art pixel, unless the chrome floor (Small's own
+        // scale, as before) holds it.
+        if let art = view.qaArtScale {
+            let device = art.perArt * art.backing * CGFloat(zoom)
+            let whole = abs(device - device.rounded()) < 0.001
+            try expect(abs(zoom - 1) > 0.001 || whole || abs(art.perArt - art.floor) < 0.0001,
+                       "\(label): \(device) device px per art px at 100% is neither whole nor the chrome floor \(art.floor)")
+        }
+        if !style.breaksCorner {
+            try expect(bar.subviews.last === view.agentBubbleView, "\(label): Inline's plate is above the bar's controls")
+            // Drawn controls detach and reattach the bar's controls: the plate
+            // must come back on top.
+            view.setTitleBarControlsDrawn(true)
+            view.setTitleBarControlsDrawn(false)
+            try expect(bar.subviews.last === view.agentBubbleView,
+                       "\(label): after the controls reattach, Inline's plate is still above them (\(bar.subviews.map { String(describing: type(of: $0)) }))")
+        }
         if let ink = view.qaCharacterInk {
             try expect(abs(ink.rect.midX - ink.target.x) <= pixel && abs(ink.rect.midY - ink.target.y) <= pixel,
                        "\(label): the art is centred in its slot (\(ink.rect) at \(ink.target))")
@@ -818,12 +855,22 @@ enum TileAgentBubbleChecks {
         }
         try expect(overlay.qaMaskBuilds == maskBuilds && selection.qaAreaBuilds == areaBuilds,
                    "a pan rebuilt ring masks: ants \(overlay.qaMaskBuilds - maskBuilds), members \(selection.qaAreaBuilds - areaBuilds)")
-        // Positive control: a neighbour's plate moving does rebuild them.
-        below.setFrameOrigin(NSPoint(x: below.frame.minX + 3, y: below.frame.minY - 3))
+        // A plate moving under still rings: the ants cut again in layout, and
+        // the group's overlay redraws (a real display pass, not a QA read).
+        let views0 = views[0]
+        let side = views[1]
+        let sideHome = side.frame.origin
+        side.setFrameOrigin(NSPoint(x: side.frame.minX - 3, y: side.frame.minY + 2))
         canvas.layoutSubtreeIfNeeded()
-        _ = selection.qaVisibleStrokePaths
-        try expect(overlay.qaMaskBuilds > maskBuilds || selection.qaAreaBuilds > areaBuilds,
-                   "fixture: moving a plate near the rings rebuilds a mask")
+        selection.displayIfNeeded()
+        CATransaction.flush()
+        try expect(overlay.qaMaskBuilds > maskBuilds, "a neighbour's plate moved: the ants did not cut again")
+        try expect(selection.qaAreaBuilds > areaBuilds, "a member's plate moved: the group's rings did not redraw their cut")
+        for stroke in selection.qaVisibleStrokePaths + [canvas.qaFocusBorderVisibleStrokePath].compactMap({ $0 }) {
+            try expect(crossings(stroke).isEmpty, "after a plate moved, a ring crosses plates \(crossings(stroke))")
+        }
+        side.setFrameOrigin(sideHome)
+        _ = views0
         below.setFrameOrigin(home)
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
         canvas.layoutSubtreeIfNeeded()
@@ -851,6 +898,13 @@ enum TileAgentBubbleChecks {
                 let outer = NSPoint(x: radius + diagonal.x * (reach + 0.75), y: radius + diagonal.y * (reach + 0.75))
                 try expect(view.agentBubbleContains(inner) && !view.agentBubbleContains(outer),
                            "\(cornerStyle): the plate's top-left is concentric with the tile's \(radius) pt corner (in \(inner): \(view.agentBubbleContains(inner)), out \(outer): \(view.agentBubbleContains(outer)))")
+                // And the mask the plate is really drawn through says the same,
+                // once a commit has laid it out (as before any frame is drawn).
+                CATransaction.flush()
+                guard let mask = view.qaAgentBubble?.qaPlateMaskPath else { throw Failure(description: "\(cornerStyle): no plate mask") }
+                func local(_ p: NSPoint) -> CGPoint { CGPoint(x: p.x - frame.minX, y: p.y - frame.minY) }
+                try expect(mask.contains(local(inner)) && !mask.contains(local(outer)),
+                           "\(cornerStyle): the installed plate mask is concentric with the tile's corner")
             } else {
                 try expect(view.agentBubbleContains(NSPoint(x: frame.minX + 0.3, y: frame.minY + 0.3)),
                            "\(cornerStyle): a sharp tile has a square plate")

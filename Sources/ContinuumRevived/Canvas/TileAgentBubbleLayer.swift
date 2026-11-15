@@ -574,6 +574,8 @@ final class TileAgentBubbleLayer: CALayer {
     }
     /// QA: whether the art is clipped to the plate.
     var qaArtClippedToPlate: Bool { artClip.mask === artMask && artMask.path != nil }
+    /// QA: the outline the plate is actually masked to, in this layer.
+    var qaPlateMaskPath: CGPath? { plateMask.path }
     /// QA: the plate's fill stops, which must all be opaque.
     var qaPlateColors: [CGColor] { (plate.colors as? [CGColor]) ?? [] }
 }

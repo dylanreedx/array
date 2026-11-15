@@ -234,9 +234,13 @@ class TileNSView: NSView, TokenThemed {
             if bubbleView.superview != nil { bubbleView.removeFromSuperview() }
             return
         }
-        if bubbleView.superview !== host {
+        // Inline stays above the bar's controls, which come and go (drawn
+        // controls detach and reattach them): the plate wins a press, so it
+        // must win the paint too.
+        if bubbleView.superview !== host || (host === titleBar && host.subviews.last !== bubbleView) {
             host.addSubview(bubbleView, positioned: .above, relativeTo: nil)
         }
+        bubbleView.layer?.zPosition = host === titleBar ? 1 : 0
         bubbleView.adoptBubble()
         let target = titleBar.convert(rect, to: host)
         if bubbleView.frame != target { bubbleView.frame = target }
@@ -262,6 +266,7 @@ class TileNSView: NSView, TokenThemed {
     var qaCharacterRect: NSRect? { titleBar?.qaCharacterRect }
     /// QA: the art's ink in tile coordinates, and where its centre belongs.
     var qaArtFill: CGFloat? { titleBar?.qaArtFill }
+    var qaArtScale: (perArt: CGFloat, floor: CGFloat, backing: CGFloat)? { titleBar?.qaArtScale }
     var qaCharacterInk: (rect: NSRect, target: NSPoint)? {
         guard let titleBar, let ink = titleBar.qaCharacterInk else { return nil }
         return (titleBar.convert(ink.rect, to: self), titleBar.convert(ink.target, to: self))
@@ -2535,6 +2540,13 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         layoutSubtreeIfNeeded()
     }
 
+    /// A control (re)attached above an inline plate: the tile puts the plate
+    /// back on top.
+    override func didAddSubview(_ subview: NSView) {
+        super.didAddSubview(subview)
+        if !(subview is TileAgentBubbleView), subviews.contains(where: { $0 is TileAgentBubbleView }) { onBubbleChange?() }
+    }
+
     private var actionsMenuController: ChoiceMenuController?
     var actionsMenuControllerForQA: ChoiceMenuController? { actionsMenuController }
     var actionsMenuIsPresented: Bool { actionsMenuController?.isPresented == true }
@@ -2836,9 +2848,12 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         // device pixels per art pixel (`Size.devicePixelsPerArtPixel`).
         let floor = headerScale > chromeScale
             ? max(1, (headerScale * backing).rounded(.toNearestOrAwayFromZero)) / backing : sizeScale
+        // A whole number of device pixels per art pixel: the nearest to the
+        // fit, or the next down where the nearest would outgrow the plate.
         let exact = slot / art.typicalSide
-        let fitted = headerScale > chromeScale ? (exact * backing).rounded(.down) / backing : exact
-        let perArt = max(floor, fitted)
+        var devicePerArt = (exact * backing).rounded()
+        if devicePerArt / backing * art.typicalSide > bubble.height * 0.95 { devicePerArt = (exact * backing).rounded(.down) }
+        let perArt = max(floor, devicePerArt / backing)
         let drop = squircle ? TileAgentBubbleLayer.Squircle.artDrop * sizeScale : 0
         let centre = CGPoint(x: bubble.midX, y: bubble.midY + drop)
         return NSRect(x: snap(centre.x - art.ink.midX * perArt), y: snap(centre.y - art.ink.midY * perArt),
@@ -2863,11 +2878,20 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let drop = bubbleBreaksCorner ? TileAgentBubbleLayer.Squircle.artDrop * sizeScale : 0
         return (ink, NSPoint(x: bubble.midX, y: bubble.midY + drop))
     }
-    /// QA: how much of the plate's side the art's typical pose fills.
+    /// QA: how much of the plate's side the art's typical pose fills, from
+    /// the sprite layer's real frame.
     var qaArtFill: CGFloat? {
-        guard !characterLayer.isHidden, let frame = characterRect, let art = characterArt, let size = characterSize,
-              let bubble = bubbleRect, size.width > 0, bubble.height > 0 else { return nil }
-        return art.typicalSide * (frame.width / size.width) / bubble.height
+        guard let scale = qaArtScale, let art = characterArt, let bubble = bubbleRect, bubble.height > 0 else { return nil }
+        return art.typicalSide * scale.perArt / bubble.height
+    }
+    /// QA: the sprite layer's real points per art pixel, and the floor (the
+    /// chrome scale, or Medium/Large's whole-pixel rule) it may not go below.
+    var qaArtScale: (perArt: CGFloat, floor: CGFloat, backing: CGFloat)? {
+        guard !characterLayer.isHidden, let size = characterSize, size.width > 0 else { return nil }
+        let backing = backingScaleForCharacter
+        let floor = headerScale > chromeScale
+            ? max(1, (headerScale * backing).rounded(.toNearestOrAwayFromZero)) / backing : sizeScale
+        return (characterLayer.frame.width / size.width, floor, backing)
     }
     /// QA: the bubble in this bar's coordinates, while it shows.
     var qaBubbleRect: NSRect? { bubble.isHidden ? nil : bubbleRect }
