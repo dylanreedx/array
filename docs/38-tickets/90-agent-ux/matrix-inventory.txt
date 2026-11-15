@@ -28,6 +28,7 @@ check --agent-paused-elsewhere-check
 check --agent-presence-check
 check --agent-process-tracker-check
 check --agent-prompt-image-contract-check
+check --agent-record-archive-check
 check --agent-report-contract-check
 check --agent-restore-check
 check --agent-status-check
@@ -545,6 +546,7 @@ leg run_app_check .build/debug/Array --agent-observer-independence-check
 leg run_app_check .build/debug/Array --agent-paused-elsewhere-check
 leg run_app_check .build/debug/Array --agent-presence-check
 leg run_app_check .build/debug/Array --agent-process-tracker-check
+leg run_app_check .build/debug/Array --agent-record-archive-check
 leg run_app_check .build/debug/Array --agent-restore-check
 leg run_app_check .build/debug/Array --agent-status-check
 leg run_app_check .build/debug/Array --agent-steering-recovery-check

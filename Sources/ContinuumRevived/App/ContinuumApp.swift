@@ -2268,6 +2268,15 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        if CommandLine.arguments.contains("--agent-record-archive-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await AgentRecordArchiveChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            CFRunLoopRun()
+            return
+        }
         if CommandLine.arguments.contains("--restore-scaling-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -16464,6 +16473,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return revealTileFromInbox(tile)
         }
         let agentId = AgentID(rawValue: rowId)
+        // A helper chip in an old transcript can name an archived agent.
+        agentSupervisor.adoptArchivedAgent(agentId)
         guard let record = agentSupervisor.records[agentId] else {
             // A terminal-session agent: the row's id IS its tile. `focusTile` resolves
             // to no managed agent and therefore disarms the read-mark rather than
@@ -24707,6 +24718,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
         agentSupervisor.configureManagedMode(defaults: settingsDefaults)
+        // Performance at scale, item 4: off unless `agents.recordArchive.enabled`.
+        agentSupervisor.recordArchiveDefaults = settingsDefaults
+        agentSupervisor.onArchivedAgentAdopted = { [weak self] _ in
+            self?.scheduleAgentSurfacePush(debounce: 0.05)
+        }
         workspaceAPI.shortReportsEnabled = { [weak self] in
             AgentShortReportConfig.enabled(defaults: self?.settingsDefaults ?? .standard)
         }

@@ -424,6 +424,7 @@ final class WorkspaceAPIService {
         isCancelled: @escaping () -> Bool = { false },
         completion: @escaping (Reply) -> Void
     ) {
+        adoptArchivedAgents(namedIn: payload)
         if let operation = WorkspaceAPIOp(rawValue: op), WorkspaceAPIOp.deviceOperations.contains(operation) {
             Task { @MainActor in
                 completion(await self.deviceDispatch(agentId: agentId, requestId: requestId, op: operation, payload: payload, isCancelled: isCancelled))
@@ -459,6 +460,24 @@ final class WorkspaceAPIService {
             return
         }
         completion(dispatch(agentId: agentId, requestId: requestId, op: op, payload: payload, isCancelled: isCancelled))
+    }
+
+    /// Performance at scale, item 4: an archived agent is out of the live set
+    /// until something names it. Every id in a request — `agentId`, `retryOf`,
+    /// a list of handles — is brought back before any operation looks it up,
+    /// so no operation needs to know the archive exists. An id that is not an
+    /// archived agent costs one stat.
+    private func adoptArchivedAgents(namedIn value: Any) {
+        switch value {
+        case let text as String:
+            if text.count == 36, let uuid = UUID(uuidString: text) { supervisor.adoptArchivedAgent(AgentID(rawValue: uuid)) }
+        case let object as [String: Any]:
+            object.values.forEach { adoptArchivedAgents(namedIn: $0) }
+        case let list as [Any]:
+            list.forEach { adoptArchivedAgents(namedIn: $0) }
+        default:
+            break
+        }
     }
 
     private enum Caller {
@@ -497,6 +516,7 @@ final class WorkspaceAPIService {
         guard let op = WorkspaceAPIOp(rawValue: opName) else {
             return .error(WorkspaceAPIError(code: .unsupported, message: "Unknown operation \(opName). Supported: \(WorkspaceAPIOp.allCases.map(\.rawValue).joined(separator: ", "))."))
         }
+        adoptArchivedAgents(namedIn: payload)
         let record: AgentRecord, runtime: WorkspaceRuntime, canvas: CanvasNSView, ownHandle: CheckoutHandle
         switch resolveCaller(agentId) {
         case let .refused(reply): return reply

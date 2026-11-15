@@ -64,6 +64,17 @@ public struct AgentStoreLayout: Sendable {
         agentsDirectory.appendingPathComponent("\(id.rawValue.uuidString).json", isDirectory: false)
     }
 
+    /// Old, finished, tile-less records (`AgentRecordArchivePolicy`). Inside
+    /// `agents/` like `backups/`, and for the same reason never read by
+    /// `loadAll`, which lists one level and takes `.json` files only.
+    public var archiveDirectory: URL {
+        agentsDirectory.appendingPathComponent("archive", isDirectory: true)
+    }
+
+    public func archivedAgentFile(id: AgentID) -> URL {
+        archiveDirectory.appendingPathComponent("\(id.rawValue.uuidString).json", isDirectory: false)
+    }
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
     /// The tiles whose agent was deliberately deleted.
     ///
@@ -259,7 +270,11 @@ public final class AgentStore: @unchecked Sendable {
         var info = stat()
         if lstat(layout.agentFile(id: id).path, &info) == 0 { return .present }
         let failure = errno
-        return failure == ENOENT ? .absent : .indeterminate(failure)
+        guard failure == ENOENT else { return .indeterminate(failure) }
+        // An archived agent still owns its checkout.
+        if lstat(layout.archivedAgentFile(id: id).path, &info) == 0 { return .present }
+        let archiveFailure = errno
+        return archiveFailure == ENOENT ? .absent : .indeterminate(archiveFailure)
     }
 
     public func load(id: AgentID) throws -> AgentRecord? {
@@ -269,9 +284,59 @@ public final class AgentStore: @unchecked Sendable {
     }
 
     public func delete(id: AgentID) throws {
+        let archived = layout.archivedAgentFile(id: id)
+        if FileManager.default.fileExists(atPath: archived.path) {
+            try FileManager.default.removeItem(at: archived)
+        }
         let url = layout.agentFile(id: id)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         try FileManager.default.removeItem(at: url)
+    }
+
+    // MARK: - Archive (performance at scale, item 4)
+
+    /// Moves a record out of the set `loadAll` reads. One `rename(2)` on one
+    /// volume: at every instant the record is in exactly one of the two
+    /// places, so a crash can neither lose it nor leave two copies.
+    public func archive(id: AgentID) throws {
+        try FileManager.default.createDirectory(at: layout.archiveDirectory, withIntermediateDirectories: true)
+        guard Darwin.rename(layout.agentFile(id: id).path, layout.archivedAgentFile(id: id).path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    /// Brings an archived record back into the live set and returns it; nil
+    /// when the archive does not hold `id`. The record is decoded BEFORE it
+    /// moves, so an unreadable file stays where it was rather than becoming a
+    /// live record `loadAll` warns about forever. A live copy, if one exists,
+    /// is newer by construction (nothing writes the archive) and wins.
+    public func unarchive(id: AgentID) throws -> AgentRecord? {
+        let archived = layout.archivedAgentFile(id: id)
+        var info = stat()
+        guard lstat(archived.path, &info) == 0 else { return nil }
+        let live = layout.agentFile(id: id)
+        if lstat(live.path, &info) == 0 {
+            try FileManager.default.removeItem(at: archived)
+            return try load(id: id)
+        }
+        let record: AgentRecord = try writer(for: id).read(at: archived, beforeBackup: waitForBackupMigration,
+                                                           recoveryTimestamp: { $0.lastActivityAt })
+        guard Darwin.rename(archived.path, live.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return record
+    }
+
+    /// Every archived record, STRICT: one unreadable file throws. Only the
+    /// destructive worktree repair reads the whole archive, and an incomplete
+    /// known set would make an archived agent's checkout look orphaned.
+    public func loadArchived() throws -> [AgentRecord] {
+        let dir = layout.archiveDirectory
+        guard FileManager.default.fileExists(atPath: dir.path) else { return [] }
+        let decoder = JSONCodec.makeDecoder()
+        return try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            .filter { $0.pathExtension == "json" }
+            .map { try decoder.decode(AgentRecord.self, from: Data(contentsOf: $0)) }
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
