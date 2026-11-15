@@ -317,6 +317,19 @@ def ship_cases(fx, gated, head):
     print("PASS publish-waits-for-live-feed")
 
 
+def schedule_case():
+    # What launchd loads: an hourly, per-change check and no fixed nightly slot
+    # (the Mac's scheduled 03:00 sleep would cut that run off).
+    import plistlib
+    try:  # --install loads the template with plistlib, which rejects "--" inside a comment
+        job = plistlib.loads((HERE / "dev.arrayapp.nightly-gate.plist").read_bytes())
+    except Exception as error:
+        raise AssertionError(f"--install cannot load the plist template: {error}")
+    expect(job.get("StartInterval") == 3600 and "StartCalendarInterval" not in job
+           and job.get("Label") == "dev.arrayapp.nightly-gate", f"hourly per-change schedule only: {job}")
+    print("PASS gate-schedule-hourly-only")
+
+
 def ref_case(fx):
     # A branch that has not landed can be gated by hand; the default stays integration.
     branch = fx.commit("feat(app): unlanded branch work", {"Sources/App.swift": "let app = 3\n"})
@@ -346,6 +359,7 @@ with tempfile.TemporaryDirectory(prefix="array-ship-") as temp:
     try:
         ship_cases(fixture, *gate_cases(fixture))
         ref_case(fixture)
+        schedule_case()
     except AssertionError as error:
         failures += 1
         print("FAIL", error)

@@ -3,7 +3,7 @@
 ## Ship from a gated head (the fast path)
 
 `scripts/nightly-gate.sh` (installed below) gates each new
-`origin/array/integration` head hourly and at 03:00. When the matrix is green it
+`origin/array/integration` head within the hour. When the matrix is green it
 builds the optimized prod candidate for that exact commit. A ship reuses both:
 
 ```sh
@@ -118,9 +118,9 @@ replacement.
 ## Promote a nightly checked commit
 
 One-time setup: run `scripts/nightly-gate.sh --install` from the landed repository
-(`--install --dry-run` previews paths and launchctl commands). This schedules
-03:00 local and hourly in the logged-in user's session (an already-gated head
-exits in seconds); `--uninstall` removes the job.
+(`--install --dry-run` previews paths and launchctl commands). This checks
+hourly in the logged-in user's session and gates only a new head (an
+already-gated head exits in seconds); `--uninstall` removes the job.
 The Mac must be awake to start it; caffeinate prevents idle system sleep during
 the run. The installed wrapper is copied to `~/array-scratch/nightly-gate`;
 rerun install after wrapper changes. Installation only sets up the scheduled job.

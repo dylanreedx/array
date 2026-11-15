@@ -10,7 +10,7 @@ no hand-classification and no hand-repair.
 
 | Item | What it does | Time saved per release (ESTIMATE) | Commit |
 |---|---|---|---|
-| Continuous gate builds the candidate | `nightly-gate.sh` runs hourly and at 03:00. When green, it builds the optimized prod bundle for that exact commit. | Matrix (28 min to 2 h) plus release build (20–27 min) leave ship time: about 50–90 min | `543b658b` |
+| Continuous gate builds the candidate | `nightly-gate.sh` checks hourly and gates each new head. When green, it builds the optimized prod bundle for that exact commit. | Matrix (28 min to 2 h) plus release build (20–27 min) leave ship time: about 50–90 min | `543b658b` |
 | Gate covers release-prep commits | `--ship-base` reuses a green gate when later commits touch only `.plans/`, `website/` or `docs/VERSIONING.md`. | Removes "no gate for the exact head" full reruns: 1–2 h when it happens | `543b658b` |
 | Known-failure list + serial retry | `scripts/matrix-known-failures.json` with reason, evidence, and an expiry of 30 days or less. A parallel-group red is retried once alone and reported as `retry-passed`. | 15–40 min of triage per release, plus reruns | `41604fe4` |
 | Append-only appcast | Signs only the new DMG and splices one item. Old bytes stay identical, so 0.2.0 and the old dates survive. | The hand repair, about 10–20 min | `8c92c12b` |
@@ -105,4 +105,4 @@ Screen and tmux:
 Left open:
 - `--undo-toast-bottom-bar-*` writes screenshots into a checkout directory literally named `-continuum.terminal.tmux.enabled/`. It takes the next argument as its output path. This is a pre-existing check bug; the gate now ignores untracked output.
 - `check-prepass-source-patterns.py` breaks under Apple's python3 because of `pycache_prefix`. It is pre-existing; the gate avoids it.
-- The plist's 03:00 slot collides with this Mac's daily `pmset` sleep at 03:00.
+- Fixed: the plist's 03:00 slot collided with this Mac's daily `pmset` sleep at 03:00. The job is now hourly, per change, only.
