@@ -197,7 +197,7 @@ def gate_cases(fx):
     events = fx.log()
     expect(events[0].startswith(f"matrix --skip-awake {gated} owner=") and "owner=none" not in events[0], f"matrix under lock: {events}")
     expect("--configuration release --channel prod" in events[1] and "owner=none" not in events[1], f"release bundle under lock: {events}")
-    expect(fx.legs_saw() == [f"{gated} branch=array/nightly-gate cli={fx.root / 'clis/array-fixture-cli'} ref=unset"],
+    expect(fx.legs_saw() == [f"{gated} branch=gate/nightly-checkout cli={fx.root / 'clis/array-fixture-cli'} ref=unset"],
            f"legs run on a named branch with the caller's CLIs: {fx.legs_saw()}")
     print("PASS gate-builds-candidate")
 
@@ -327,6 +327,17 @@ def ref_case(fx):
     expect(fx.legs_saw()[-1].startswith(branch) and fx.legs_saw()[-1].endswith("ref=unset"),
            f"no leg inherits ARRAY_NIGHTLY_REF: {fx.legs_saw()[-1]}")
     print("PASS gate-named-ref")
+
+    # A branch of that name living elsewhere is never moved.
+    sh("git", "-C", str(fx.base / "checkout"), "checkout", "-q", "--detach")
+    sh("git", "-C", str(fx.repo), "branch", "-f", "gate/nightly-checkout", "HEAD~1")
+    before = sh("git", "-C", str(fx.repo), "rev-parse", "gate/nightly-checkout").stdout
+    fx.commit("feat(app): another unlanded change", {"Sources/App.swift": "let app = 4\n"})
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD"))
+    after = sh("git", "-C", str(fx.repo), "rev-parse", "gate/nightly-checkout").stdout
+    expect(result.returncode == 1 and before == after and "refusing to move it" in result.stdout,
+           "a foreign branch of the gate's name is left alone", result)
+    print("PASS gate-leaves-foreign-branch")
 
 
 failures = 0

@@ -32,7 +32,8 @@ env['PATH'] = ':'.join(p for p in [os.environ.get('PATH', ''), SYSTEM_PATH] if p
 REF = env.pop('ARRAY_NIGHTLY_REF', 'origin/array/integration')
 # The checkout sits on this local branch, never a detached HEAD: legs that read
 # the checkout's branch (an agent tile's branch chip) must see what a bench sees.
-BRANCH = 'array/nightly-gate'
+# The gate owns it; it never moves a branch that lives anywhere else.
+BRANCH = 'gate/nightly-checkout'
 # A gate always runs the committed known-failure list, every leg and the retry.
 for key in ('ARRAY_AGENT_ID', 'TMUX', 'TMUX_PANE', 'ARRAY_MATRIX_LOCK_OWNER', 'ARRAY_RELEASE_LOCK_OWNER',
             'ARRAY_MATRIX_LEGS', 'ARRAY_MATRIX_RETRY', 'ARRAY_MATRIX_KNOWN_FAILURES'):
@@ -175,6 +176,10 @@ def checkout_at(log):
                 stdout=sp.PIPE, text=True).stdout
     if dirty.strip():
         raise RuntimeError('Nightly checkout is dirty; refusing to change it')
+    current = run(['git', '-C', str(checkout), 'branch', '--show-current'], stdout=sp.PIPE, text=True).stdout.strip()
+    taken = sp.run(['git', '-C', str(repo), 'show-ref', '--verify', '--quiet', 'refs/heads/' + BRANCH], env=env).returncode == 0
+    if taken and current != BRANCH:
+        raise RuntimeError(f'Branch {BRANCH} exists outside the nightly checkout; refusing to move it')
     run(['git', '-C', str(checkout), 'checkout', '-B', BRANCH, commit], stdout=log, stderr=sp.STDOUT)
     if not (checkout / 'ThirdParty/GhosttyKit.xcframework').exists():
         run(['bash', str(checkout / 'scripts/prepare-ghosttykit.sh')], stdout=log, stderr=sp.STDOUT)
