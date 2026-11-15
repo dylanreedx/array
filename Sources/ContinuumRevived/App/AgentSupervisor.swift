@@ -3035,6 +3035,9 @@ final class AgentSupervisor {
     @discardableResult
     func restore(fileManager: FileManager = .default) -> RestoreReport {
         var report = RestoreReport()
+        if !AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
+            unarchiveAllBeforeRestore()
+        }
         let stored: [AgentRecord]
         do {
             stored = try store.loadAll()
@@ -3274,6 +3277,23 @@ final class AgentSupervisor {
         }
         let archived = Set(report.archived)
         report.restored.removeAll { archived.contains($0) }
+    }
+
+    /// Turning the gate off reverts it: what an earlier launch archived is
+    /// live again before this restore decodes the store, so nothing depends on
+    /// adoption by id while the feature is off.
+    private func unarchiveAllBeforeRestore() {
+        // Absent or empty: one directory listing, no lock.
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: store.layout.archiveDirectory.path),
+              names.contains(where: { $0.hasSuffix(".json") }) else { return }
+        do {
+            let result = try withAgentStoreLock { store.unarchiveAll() }
+            for (file, error) in result.unreadable {
+                warn("AgentSupervisor.restore: archived agent \(file.lastPathComponent) stays archived, it could not be read: \(error)")
+            }
+        } catch {
+            warn("AgentSupervisor.restore: archived agents stay archived, the store lock is unavailable: \(error)")
+        }
     }
 
     /// Brings an archived agent back into this session — the lazy load on miss

@@ -327,6 +327,33 @@ public final class AgentStore: @unchecked Sendable {
         return record
     }
 
+    /// The gate's off switch: every archived record goes back to the live set
+    /// through `unarchive`, so each is decoded before it moves and a live copy
+    /// wins. A file that cannot be read stays where it is and is reported, so
+    /// one bad file never blocks the rest. An absent archive costs one lstat.
+    public func unarchiveAll() -> (restored: [AgentID], unreadable: [(file: URL, error: Error)]) {
+        let directory = layout.archiveDirectory
+        var info = stat()
+        guard lstat(directory.path, &info) == 0 else { return ([], []) }
+        let names: [String]
+        do { names = try FileManager.default.contentsOfDirectory(atPath: directory.path) } catch { return ([], [(directory, error)]) }
+        var restored: [AgentID] = []
+        var unreadable: [(file: URL, error: Error)] = []
+        for name in names.sorted() where name.hasSuffix(".json") && !name.hasPrefix(".") {
+            let file = directory.appendingPathComponent(name, isDirectory: false)
+            guard let uuid = UUID(uuidString: String(name.dropLast(5))) else {
+                unreadable.append((file, CocoaError(.fileReadCorruptFile)))
+                continue
+            }
+            do {
+                if try unarchive(id: AgentID(rawValue: uuid)) != nil { restored.append(AgentID(rawValue: uuid)) }
+            } catch {
+                unreadable.append((file, error))
+            }
+        }
+        return (restored, unreadable)
+    }
+
     /// Every archived record, STRICT: one unreadable file throws. Only the
     /// destructive worktree repair reads the whole archive, and an incomplete
     /// known set would make an archived agent's checkout look orphaned.
