@@ -13953,14 +13953,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// Store constructors add their channel directory. A QA override is
+    /// already isolated app support, so nest a parent under that root.
+    var collaborationSupportRoot: URL {
+        Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
+            .map { $0.appendingPathComponent("collaboration-support", isDirectory: true) }
+            ?? RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
+    }
+
     func collaborationAccountModel() throws -> CollaborationAccountController {
         if let collaborationHub { return collaborationHub.content.model }
         if let collaborationAccount { return collaborationAccount }
-        // Store constructors add their channel directory. A QA override is
-        // already isolated app support, so nest a parent under that root.
-        let parent = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
-            .map { $0.appendingPathComponent("collaboration-support", isDirectory: true) }
-            ?? RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
+        let parent = collaborationSupportRoot
         // A multiplayer preview keeps its credential in a file, never the Keychain.
         let vault: any CollaborationCredentialVault = try MultiplayerPreview.current
             .map { try MultiplayerPreviewCredentialVault($0.rootURL.appendingPathComponent("vault", isDirectory: true)) }
@@ -24722,6 +24726,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.recordArchiveDefaults = settingsDefaults
         agentSupervisor.onArchivedAgentAdopted = { [weak self] _ in
             self?.scheduleAgentSurfacePush(debounce: 0.05)
+        }
+        let collaborationRoot = collaborationSupportRoot
+        agentSupervisor.recordArchiveSharedAgents = {
+            try SharedAreaLocalStore.boundAgentIDs(applicationSupportRoot: collaborationRoot)
         }
         workspaceAPI.shortReportsEnabled = { [weak self] in
             AgentShortReportConfig.enabled(defaults: self?.settingsDefaults ?? .standard)

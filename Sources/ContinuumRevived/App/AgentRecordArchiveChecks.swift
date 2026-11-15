@@ -2,6 +2,7 @@ import AppKit
 import Darwin
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
+import ContinuumRevivedCollaborationProtocol
 
 /// Performance item 4: what old, tile-less, finished agent records cost the
 /// production boot mount. Drives `AppDelegate.mountWorkspaceSceneAtBoot` (which
@@ -346,6 +347,142 @@ enum AgentRecordArchiveChecks {
         third.stopAll()
     }
 
+    /// An old, finished, tile-less record the policy alone would archive.
+    static func idleRecord(_ name: String, cwd: String, idleFor days: Double) -> AgentRecord {
+        let at = Date().addingTimeInterval(-days * day)
+        var r = AgentRecord(id: AgentID(rawValue: UUID()), displayName: name, harness: .claudeCode,
+            model: "anthropic/claude-haiku-4-5-20251001", thinking: "low", cwd: cwd, projectId: UUID(),
+            createdAt: at.addingTimeInterval(-60), lastActivityAt: at)
+        r.latestTurnAt = at.addingTimeInterval(-30)
+        r.runCompletedAt = at
+        r.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "t", outcome: .succeeded, endedAt: at)
+        r.acknowledgedTerminalSequence = 1
+        r.automaticCharacterIndex = 0
+        r.workspaceToolsEnabled = true
+        return r
+    }
+
+    final class Prompts { var texts: [String] = [] }
+    final class PromptRunner: AgentRunning, @unchecked Sendable {
+        let prompts: Prompts
+        init(_ prompts: Prompts) { self.prompts = prompts }
+        var commandCapabilities: AgentSessionCommandCapabilities { .oneShotProse }
+        func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+            let text = prompt.text
+            Task { @MainActor in self.prompts.texts.append(text) }
+            onEvent(.turnStarted(threadId: "archive", turnId: "wake"))
+            onEvent(.turnCompleted(threadId: "archive", turnId: "wake", outcome: .completed, errorMessage: nil))
+        }
+        func stop() {}
+        func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+        func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+    }
+
+    static func eventually(_ label: String, _ condition: @MainActor () async -> Bool) async throws {
+        for _ in 0..<300 {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw Failure(message: label)
+    }
+
+    /// Review blocker 1: a durable wakeup finds its agent by id when it fires.
+    /// Drives the production restore and the production scheduler tick.
+    static func wakeupWitness() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-wakeup-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let support = root.appendingPathComponent("support")
+        let store = AgentStore(applicationSupportDirectory: support)
+        let held = idleRecord("Ten-day check-in", cwd: root.path, idleFor: 8)
+        let later = idleRecord("Scheduled after archiving", cwd: root.path, idleFor: 8)
+        try write([held, later], to: store)
+        store.waitForBackupMigration()
+        let due = Date().addingTimeInterval(2 * day)
+        let schedules = try AgentWakeupScheduleStore(applicationSupportDirectory: support)
+        try schedules.replace([AgentWakeupSchedule(id: UUID(), agent: held.id, key: "check-in", prompt: "held check-in",
+            startsAt: due, nextFireAt: due, intervalSeconds: nil)])
+        let settings = gateSuite(true)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        let prompts = Prompts()
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in PromptRunner(prompts) }, warn: { _ in },
+            nameTitlerCommand: { _ in nil }, submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: support))
+        defer { supervisor.stopAll() }
+        supervisor.codexRestoreHomeForQA = support.appendingPathComponent("codex-empty")
+        supervisor.recordArchiveDefaults = settings
+        _ = supervisor.restore()
+        try expect(supervisor.records[later.id] == nil && exists(store.layout.archivedAgentFile(id: later.id)),
+                   "control: an unscheduled idle agent is archived")
+        try expect(supervisor.records[held.id] != nil && !exists(store.layout.archivedAgentFile(id: held.id)),
+                   "an agent with a durable wakeup stays out of the archive")
+        // A schedule written after the agent was archived.
+        _ = try supervisor.wakeupRequest(["op": "create", "idempotencyKey": "later", "prompt": "later check-in",
+            "runAt": ISO8601DateFormatter().string(from: due)], for: later.id)
+        let fire = due.addingTimeInterval(60)
+        do {
+            try await eventually("") {
+                try? await supervisor.qaTickWakeups(now: fire)
+                return Set(prompts.texts) == ["held check-in", "later check-in"]
+            }
+        } catch { throw Failure(message: "both due wakeups run: prompts \(prompts.texts)") }
+        try expect(supervisor.records[later.id] != nil, "the tick brought the archived agent back")
+        print("PASS agent record archive: a scheduled agent stays live; a wakeup added after archiving brings its agent back when due")
+    }
+
+    final class NullProjectionSink: SharedAgentProjectionSink {
+        func publish(_ batch: Collaboration.AgentProjection.Batch) async throws {}
+    }
+
+    /// Review issue 2: a shared area names its agent by id. The hold is read by
+    /// the production mount from the real shared-area cache; the adoption is
+    /// driven through the production projector.
+    static func sharedWitness() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-shared-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let shared = idleRecord("Shared helper", cwd: root.path, idleFor: 8)
+        let unshared = idleRecord("Unshared helper", cwd: root.path, idleFor: 8)
+        try write([shared, unshared], to: store)
+        store.waitForBackupMigration()
+        // The cache a shared area keeps, where the app keeps it.
+        let document = SharedArea.Document()
+        let endpoint = try CollaborationServiceEndpoint(URL(string: "https://archive-check.example.test")!)
+        let area = try SharedAreaLocalStore(applicationSupportRoot: AppDelegate().collaborationSupportRoot, endpoint: endpoint,
+            person: .init(), area: document.id)
+        defer { try? fm.removeItem(at: area.layout.areaDirectory) }
+        try area.save(.init(scope: area.scope, document: document, observedMembershipEpoch: 1, sourceBindings: [
+            SharedAreaLocalSourceBinding(object: .init(), binding: .init(), host: .init(), projectID: shared.projectId!, agentID: shared.id)]))
+        let settings = gateSuite(true)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        let (booted, app, _, _) = try boot(store, settings: settings)
+        try expect(booted.records[unshared.id] == nil && exists(store.layout.archivedAgentFile(id: unshared.id)),
+                   "control: an unbound idle agent is archived")
+        try expect(booted.records[shared.id] != nil && !exists(store.layout.archivedAgentFile(id: shared.id)),
+                   "an agent a shared area binds stays out of the archive")
+        booted.stopAll()
+        withExtendedLifetime(app) {}
+
+        // Bound after it was archived: re-attaching the projection brings it back.
+        let projecting = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) }, warn: { _ in },
+            nameTitlerCommand: { _ in nil },
+            transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)))
+        defer { projecting.stopAll() }
+        _ = projecting.restore()
+        try expect(projecting.records[unshared.id] == nil, "fixture: the unbound agent is still archived")
+        let projector: SharedAgentProjector
+        do {
+            projector = try SharedAgentProjector(supervisor: projecting, agent: unshared.id, host: .init(), object: .init(),
+                generation: 1, sink: NullProjectionSink())
+        } catch { throw Failure(message: "projecting an archived shared agent: \(error)") }
+        projector.stop()
+        try expect(projecting.records[unshared.id] != nil && !exists(store.layout.archivedAgentFile(id: unshared.id)),
+                   "the projector brought the archived agent back")
+        print("PASS agent record archive: a shared-bound agent stays live; projecting an archived agent brings it back")
+    }
+
     /// The workspace API, through the production mount and dispatch: an
     /// archived agent is inspectable and findable by id.
     static func apiWitness() throws {
@@ -376,12 +513,21 @@ enum AgentRecordArchiveChecks {
             try expect(supervisor.records[id] == nil && exists(store.layout.archivedAgentFile(id: id)), "fixture helper archived at boot")
         }
         supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
+        // Gate off: a request naming an archived agent walks no payload.
+        let scans = WorkspaceAPIService.archivedAgentScansForQA
+        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
+        _ = f.api.dispatch(agentId: f.agentId, requestId: "archive-off", op: "agent.inspect",
+            payload: ["agentId": archivedIDs[0].rawValue.uuidString])
+        try expect(WorkspaceAPIService.archivedAgentScansForQA == scans && supervisor.records[archivedIDs[0]] == nil,
+                   "gate off: the workspace API scanned a payload")
+        settings.set(true, forKey: AgentRecordArchiveConfig.enabledKey)
         let inspected = f.api.dispatch(agentId: f.agentId, requestId: "archive-inspect", op: "agent.inspect",
             payload: ["agentId": archivedIDs[0].rawValue.uuidString])
         guard case let .result(value) = inspected else { throw Failure(message: "agent.inspect of an archived agent: \(inspected)") }
         try expect(value["agent"]?.object?["agentId"]?.string?.lowercased() == archivedIDs[0].rawValue.uuidString.lowercased()
                    || "\(value)".lowercased().contains(archivedIDs[0].rawValue.uuidString.lowercased()), "inspect answers for the archived agent")
-        try expect(supervisor.records[archivedIDs[0]] != nil, "inspect adopted it")
+        try expect(supervisor.records[archivedIDs[0]] != nil && WorkspaceAPIService.archivedAgentScansForQA > scans,
+                   "inspect adopted it")
         let found = f.api.dispatch(agentId: f.agentId, requestId: "archive-find", op: "agent.find",
             payload: ["query": archivedIDs[1].rawValue.uuidString])
         try expect("\(found)".lowercased().contains(archivedIDs[1].rawValue.uuidString.lowercased()), "agent.find by id finds an archived agent: \(found)")
@@ -398,8 +544,10 @@ enum AgentRecordArchiveChecks {
         }
         try await bootWitness(gate: false)
         try await bootWitness(gate: true)
+        try await wakeupWitness()
+        try await sharedWitness()
         try apiWitness()
         print("PASS agent record archive: gate off unchanged; gate on archives only old finished tile-less records nothing holds, next boot skips them, and id lookups bring them back")
-        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect and agent.find adopt by id; worktree repair and checkout cleanup treat archived agents as owners.")
+        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; gate off scans no API payload; worktree repair and checkout cleanup treat archived agents as owners.")
     }
 }

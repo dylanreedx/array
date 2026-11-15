@@ -2993,6 +2993,11 @@ final class AgentSupervisor {
     var recordArchiveNow: () -> Date = { Date() }
     /// An archived agent came back because something asked for it by id.
     var onArchivedAgentAdopted: ((AgentID) -> Void)?
+    /// Agents a shared area binds by id (`SharedAreaLocalSourceBinding.agentID`).
+    /// A peer's prompt and the host's projection look those up by id, so they
+    /// stay live. Throwing skips the archive pass: an unread binding could name
+    /// any agent.
+    var recordArchiveSharedAgents: (() throws -> Set<AgentID>)?
 
     /// The agents this supervisor adopted from a previous launch. Read by
     /// `wireManagedAgentTile`, which shows a "previous session" notice for them: the
@@ -3199,10 +3204,17 @@ final class AgentSupervisor {
     /// tile, sidebar row or flush has seen the records. A record leaves the
     /// live set only if it says it may (`AgentRecordArchivePolicy`) AND nothing
     /// here still holds it: a process, a queue, an event this restore
-    /// delivered, a parent's subscription or undelivered completion, or a
-    /// child that stays.
+    /// delivered, a durable wakeup, a shared-area binding, a parent's
+    /// subscription or undelivered completion, or a child that stays.
     private func archiveIdleRecordsAfterRestore(stored: [AgentRecord], report: inout RestoreReport) {
         let now = recordArchiveNow()
+        let shared: Set<AgentID>
+        do { shared = try recordArchiveSharedAgents?() ?? [] } catch {
+            warn("AgentSupervisor.restore: archive skipped, shared-area bindings are unreadable: \(error)")
+            return
+        }
+        // A durable wakeup finds its agent by id when it fires.
+        let scheduled = Set(wakeupScheduler?.store.entries.map(\.agent) ?? [])
         let skipped = Set(report.skipped)
         var current: [AgentID: AgentRecord] = [:]
         for record in stored where !skipped.contains(record.id) {
@@ -3211,6 +3223,7 @@ final class AgentSupervisor {
         var eligible = Set(current.values.filter { record in
             let id = record.id
             return AgentRecordArchivePolicy.recordAllowsArchive(record, now: now)
+                && !shared.contains(id) && !scheduled.contains(id)
                 && !isRunning(id) && !isQueuePaused(for: id)
                 && !companionQueueHydrationPending.contains(id)
                 && (history[id]?.isEmpty ?? true)

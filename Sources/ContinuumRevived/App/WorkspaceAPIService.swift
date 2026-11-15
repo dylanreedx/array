@@ -424,7 +424,7 @@ final class WorkspaceAPIService {
         isCancelled: @escaping () -> Bool = { false },
         completion: @escaping (Reply) -> Void
     ) {
-        adoptArchivedAgents(namedIn: payload)
+        adoptArchivedAgentsIfEnabled(namedIn: payload)
         if let operation = WorkspaceAPIOp(rawValue: op), WorkspaceAPIOp.deviceOperations.contains(operation) {
             Task { @MainActor in
                 completion(await self.deviceDispatch(agentId: agentId, requestId: requestId, op: operation, payload: payload, isCancelled: isCancelled))
@@ -466,11 +466,21 @@ final class WorkspaceAPIService {
     /// until something names it. Every id in a request — `agentId`, `retryOf`,
     /// a list of handles — is brought back before any operation looks it up,
     /// so no operation needs to know the archive exists. An id that is not an
-    /// archived agent costs one stat.
+    /// archived agent costs one stat. With the gate off no payload is walked.
+    private func adoptArchivedAgentsIfEnabled(namedIn payload: Any) {
+        guard AgentRecordArchiveConfig.enabled(defaults: supervisor.recordArchiveDefaults) else { return }
+        Self.archivedAgentScansForQA += 1
+        adoptArchivedAgents(namedIn: payload)
+    }
+
+    /// Payload walks for archived ids; `--agent-record-archive-check` asserts
+    /// the gate-off path never makes one.
+    private(set) static var archivedAgentScansForQA = 0
+
     private func adoptArchivedAgents(namedIn value: Any) {
         switch value {
         case let text as String:
-            if text.count == 36, let uuid = UUID(uuidString: text) { supervisor.adoptArchivedAgent(AgentID(rawValue: uuid)) }
+            if text.utf8.count == 36, let uuid = UUID(uuidString: text) { supervisor.adoptArchivedAgent(AgentID(rawValue: uuid)) }
         case let object as [String: Any]:
             object.values.forEach { adoptArchivedAgents(namedIn: $0) }
         case let list as [Any]:
@@ -516,7 +526,7 @@ final class WorkspaceAPIService {
         guard let op = WorkspaceAPIOp(rawValue: opName) else {
             return .error(WorkspaceAPIError(code: .unsupported, message: "Unknown operation \(opName). Supported: \(WorkspaceAPIOp.allCases.map(\.rawValue).joined(separator: ", "))."))
         }
-        adoptArchivedAgents(namedIn: payload)
+        adoptArchivedAgentsIfEnabled(namedIn: payload)
         let record: AgentRecord, runtime: WorkspaceRuntime, canvas: CanvasNSView, ownHandle: CheckoutHandle
         switch resolveCaller(agentId) {
         case let .refused(reply): return reply

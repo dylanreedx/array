@@ -30,8 +30,13 @@ final class AgentWakeupScheduler {
         ticking = true
         defer { ticking = false }
         for original in store.entries {
-            guard !stopped, let saved = store.entries.first(where: { $0.id == original.id }),
-                  owner.canDeliverScheduledWakeup(to: saved.agent) else { continue }
+            guard !stopped, let saved = store.entries.first(where: { $0.id == original.id }) else { continue }
+            // An agent archived before this schedule existed comes back when
+            // the wakeup is due; until then it costs nothing.
+            if saved.pendingDelivery != nil || saved.nextFireAt.map({ $0 <= now }) == true {
+                owner.adoptArchivedAgent(saved.agent)
+            }
+            guard owner.canDeliverScheduledWakeup(to: saved.agent) else { continue }
             var job = saved
             if job.pendingDelivery == nil {
                 guard let due = job.nextFireAt, due <= now else { continue }

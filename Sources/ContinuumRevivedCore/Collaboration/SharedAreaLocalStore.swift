@@ -332,3 +332,40 @@ extension SharedAreaLocalStore {
         layout.uploadsDirectory.appendingPathComponent(revision.uuidString + ".json")
     }
 }
+
+extension SharedAreaLocalStore {
+    /// Every agent a cached shared area binds by id, over every endpoint,
+    /// person and area of one channel (the directories `init` builds). Throws
+    /// on any area it cannot read, including one awaiting recovery from
+    /// backups, so a caller that must not lose a bound agent can fail closed.
+    public static func boundAgentIDs(applicationSupportRoot: URL,
+                                     bundleIdentifier: String? = Bundle.main.bundleIdentifier) throws -> Set<AgentID> {
+        struct Bindings: Decodable { let sourceBindings: [SharedAreaLocalSourceBinding] }
+        let collaboration = applicationSupportRoot.standardizedFileURL.resolvingSymlinksInPath()
+            .appendingPathComponent(AppChannel.applicationSupportDirectoryName(bundleIdentifier: bundleIdentifier), isDirectory: true)
+            .appendingPathComponent("collaboration", isDirectory: true)
+        let fm = FileManager.default
+        func directories(in url: URL) throws -> [URL] {
+            var isDirectory: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { return [] }
+            return try fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+        }
+        let decoder = JSONCodec.makeDecoder()
+        var ids: Set<AgentID> = []
+        for endpoint in try directories(in: collaboration) {
+            for person in try directories(in: endpoint) {
+                for area in try directories(in: person) {
+                    let state = area.appendingPathComponent("state.json")
+                    guard fm.fileExists(atPath: state.path) else {
+                        if try !directories(in: area.appendingPathComponent("backups", isDirectory: true)).isEmpty {
+                            throw SharedAreaLocalStoreError.recoveryRequired
+                        }
+                        continue
+                    }
+                    ids.formUnion(try decoder.decode(Bindings.self, from: Data(contentsOf: state)).sourceBindings.compactMap(\.agentID))
+                }
+            }
+        }
+        return ids
+    }
+}
