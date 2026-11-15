@@ -281,7 +281,7 @@ public final class AgentStore: @unchecked Sendable {
         // An archived agent still owns its checkout, and so does one whose
         // archived file was quarantined: nothing proves it gone.
         for file in [layout.archivedAgentFile(id: id),
-                     layout.archiveQuarantineDirectory.appendingPathComponent("\(id.rawValue.uuidString).json")] {
+                     quarantinedAgentFile(id: id)] {
             if lstat(file.path, &info) == 0 { return .present }
             let archiveFailure = errno
             guard archiveFailure == ENOENT else { return .indeterminate(archiveFailure) }
@@ -331,12 +331,17 @@ public final class AgentStore: @unchecked Sendable {
             try FileManager.default.removeItem(at: archived)
             return try load(id: id)
         }
+        func read() throws -> AgentRecord {
+            try writer(for: id).read(at: archived, beforeBackup: waitForBackupMigration,
+                                     recoveryTimestamp: { $0.lastActivityAt })
+        }
         let record: AgentRecord
         do {
-            record = try writer(for: id).read(at: archived, beforeBackup: waitForBackupMigration,
-                                              recoveryTimestamp: { $0.lastActivityAt })
+            record = try read()
         } catch {
-            throw quarantineIfDamaged(archived, error)
+            // Read twice before calling it damaged: a transient failure inside
+            // the first read must not move a good record out of reach.
+            do { record = try read() } catch { throw quarantineIfDamaged(archived, error) }
         }
         guard Darwin.rename(archived.path, live.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
@@ -380,8 +385,31 @@ public final class AgentStore: @unchecked Sendable {
         public let quarantinedAt: URL
         public let underlying: Error
         public var description: String {
-            "\(file.lastPathComponent) held no readable record (\(underlying)); moved to \(quarantinedAt.path)"
+            "\(file.lastPathComponent) held no readable record (\(underlying)); moved to \(quarantinedAt.path) and kept. "
+                + "Asking for its agent by id reads it again; moving it back into agents/ restores it at the next launch"
         }
+    }
+
+    public func quarantinedAgentFile(id: AgentID) -> URL {
+        layout.archiveQuarantineDirectory.appendingPathComponent("\(id.rawValue.uuidString).json", isDirectory: false)
+    }
+
+    /// The way back from the quarantine, by id only, so no boot pays for it: a
+    /// record a build could not decode comes back once a build can. Decoded
+    /// before it moves; a file that still holds no record stays and throws.
+    /// nil when the quarantine does not hold `id`; a live copy wins.
+    public func unquarantine(id: AgentID) throws -> AgentRecord? {
+        let quarantined = quarantinedAgentFile(id: id)
+        var info = stat()
+        guard lstat(quarantined.path, &info) == 0 else { return nil }
+        let live = layout.agentFile(id: id)
+        if lstat(live.path, &info) == 0 { return try load(id: id) }
+        let record = try JSONCodec.makeDecoder().decode(AgentRecord.self, from: Data(contentsOf: quarantined))
+        guard record.id == id else { throw CocoaError(.fileReadCorruptFile) }
+        guard Darwin.rename(quarantined.path, live.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        return record
     }
 
     /// Damaged, not unreachable: a file whose bytes cannot be read at all

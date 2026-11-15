@@ -606,23 +606,35 @@ enum AgentRecordArchiveChecks {
     }
 
     /// Follow-up (c): a damaged archived file was retried, and warned about,
-    /// on every boot. Two production boots with the gate off over an archive
-    /// holding a corrupt record and a file with no agent id: the first warns
-    /// once per file and quarantines both; the second says nothing about them.
-    /// Quarantine moves, never deletes, and keeps the destructive paths closed.
+    /// on every boot. Production boots with the gate off over an archive
+    /// holding a corrupt record, a file with no agent id and a record whose
+    /// bytes cannot be read: the first boot warns once per damaged file and
+    /// quarantines both, the second says nothing about them, and the
+    /// unreadable one stays archived until it reads. Quarantine moves, never
+    /// deletes, keeps the destructive paths closed, and gives a record back
+    /// by id once it decodes.
     static func quarantineWitness() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-quarantine-\(UUID())")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: root) }
         let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let quarantine = store.layout.archiveQuarantineDirectory
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: quarantine.path)
+            try? fm.removeItem(at: root)
+        }
         let good = idleRecord("Readable archived", cwd: root.path, idleFor: 30)
-        try write([good], to: store)
+        let locked = idleRecord("Unreadable for now", cwd: root.path, idleFor: 30)
+        try write([good, locked], to: store)
         store.waitForBackupMigration()
         try fm.createDirectory(at: store.layout.archiveDirectory, withIntermediateDirectories: true)
-        try fm.moveItem(at: store.layout.agentFile(id: good.id), to: store.layout.archivedAgentFile(id: good.id))
+        for id in [good.id, locked.id] {
+            try fm.moveItem(at: store.layout.agentFile(id: id), to: store.layout.archivedAgentFile(id: id))
+        }
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: store.layout.archivedAgentFile(id: locked.id).path)
         let damagedID = AgentID(rawValue: UUID())
         let damaged = "\(damagedID.rawValue.uuidString).json", stray = "not-an-agent.json"
+        let lockedName = "\(locked.id.rawValue.uuidString).json"
         try Data("{ not a record".utf8).write(to: store.layout.archiveDirectory.appendingPathComponent(damaged))
         try Data("{}".utf8).write(to: store.layout.archiveDirectory.appendingPathComponent(stray))
         let off = gateSuite(false)
@@ -634,6 +646,7 @@ enum AgentRecordArchiveChecks {
         try expect(first.records[good.id] != nil, "control: the readable archived record is restored")
         try expect(mentions(firstWarnings, damaged) == 1 && mentions(firstWarnings, stray) == 1,
                    "first boot warns once per damaged file: \(firstWarnings.lines)")
+        try expect(mentions(firstWarnings, lockedName) == 1, "first boot warns about the unreadable file: \(firstWarnings.lines)")
         first.stopAll()
         withExtendedLifetime(firstApp) {}
 
@@ -641,8 +654,8 @@ enum AgentRecordArchiveChecks {
         let (second, secondApp, _, _) = try boot(store, settings: off, warnings: secondWarnings)
         try expect(mentions(secondWarnings, damaged) == 0 && mentions(secondWarnings, stray) == 0,
                    "the next boot neither retries nor warns about a damaged archived file: \(secondWarnings.lines)")
-        try expect(archivedFiles(store).isEmpty, "the archive holds no damaged file, holds \(archivedFiles(store))")
-        let quarantine = store.layout.archiveQuarantineDirectory
+        try expect(archivedFiles(store) == [lockedName] && !exists(quarantine.appendingPathComponent(lockedName)),
+                   "a file whose bytes cannot be read stays archived, not quarantined: archive \(archivedFiles(store))")
         try expect(exists(quarantine.appendingPathComponent(damaged)) && exists(quarantine.appendingPathComponent(stray)),
                    "quarantine moves the damaged files, never deletes them")
         try expect(store.ownershipPresence(id: damagedID) == .present, "a quarantined agent still owns its checkout")
@@ -652,7 +665,49 @@ enum AgentRecordArchiveChecks {
         } catch is AgentSupervisor.CleanupRefusal {}
         second.stopAll()
         withExtendedLifetime(secondApp) {}
-        print("PASS agent record archive: a damaged archived file is quarantined once, warned about once, kept, and still closes worktree repair")
+
+        // The unreadable file reads now; the same agent is damaged a second time.
+        try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: store.layout.archivedAgentFile(id: locked.id).path)
+        try Data("{ damaged again".utf8).write(to: store.layout.archiveDirectory.appendingPathComponent(damaged))
+        let (third, thirdApp, _, _) = try boot(store, settings: off)
+        try expect(third.records[locked.id] != nil, "a file that stayed archived is restored once it reads")
+        let held = (try? fm.contentsOfDirectory(atPath: quarantine.path)) ?? []
+        try expect(held.filter { $0.hasPrefix(damaged) }.count == 2, "a second quarantine of one name keeps both copies: \(held)")
+
+        // Gate on, by id: a damaged file is quarantined with one warning, and
+        // comes back from the quarantine by id once it decodes.
+        let adoptWarnings = Warnings()
+        let on = gateSuite(true)
+        defer { on.removePersistentDomain(forName: on.suiteDomainName) }
+        let (adopting, adoptingApp, _, _) = try boot(store, settings: on, warnings: adoptWarnings)
+        let later = idleRecord("Damaged then repaired", cwd: root.path, idleFor: 30)
+        let laterName = "\(later.id.rawValue.uuidString).json"
+        try Data("{ not yet".utf8).write(to: store.layout.archivedAgentFile(id: later.id))
+        try expect(!adopting.adoptArchivedAgent(later.id) && exists(quarantine.appendingPathComponent(laterName))
+                   && mentions(adoptWarnings, laterName) == 1, "a damaged file named by id is quarantined with one warning: \(adoptWarnings.lines)")
+        try JSONCodec.makeEncoder().encode(later).write(to: quarantine.appendingPathComponent(laterName))
+        try expect(adopting.adoptArchivedAgent(later.id) && !exists(quarantine.appendingPathComponent(laterName))
+                   && exists(store.layout.agentFile(id: later.id)), "a quarantined record that decodes comes back by id")
+
+        // Repair is fail-closed on the quarantine listing itself: an empty,
+        // readable quarantine lets it run (control); an unlistable one refuses.
+        try fm.removeItem(at: quarantine)
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try fm.createDirectory(at: repo, withIntermediateDirectories: true)
+        try git(["init", "-q"], in: repo)
+        do { _ = try adopting.orphanWorktrees(repo: repo) } catch {
+            throw Failure(message: "control: worktree repair with no quarantine refused: \(error)")
+        }
+        try fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: quarantine.path)
+        var refused = false
+        do { _ = try adopting.orphanWorktrees(repo: repo) } catch { refused = true }
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: quarantine.path)
+        try expect(refused, "worktree repair ran with an unlistable quarantine")
+        adopting.stopAll()
+        third.stopAll()
+        withExtendedLifetime((thirdApp, adoptingApp)) {}
+        print("PASS agent record archive: a damaged archived file is quarantined once, warned about once and kept; an unreadable one stays archived; a quarantined record comes back by id; worktree repair stays closed")
     }
 
     static func archivedFiles(_ store: AgentStore) -> [String] {

@@ -3343,11 +3343,12 @@ final class AgentSupervisor {
     @discardableResult
     func adoptArchivedAgent(_ id: AgentID, fileManager: FileManager = .default) -> Bool {
         if records[id] != nil { return true }
-        // Most ids asked about are simply unknown: answer those with one stat.
-        guard fileManager.fileExists(atPath: store.layout.archivedAgentFile(id: id).path) else { return false }
+        // Most ids asked about are simply unknown: answer those with two stats.
+        let archived = fileManager.fileExists(atPath: store.layout.archivedAgentFile(id: id).path)
+        guard archived || fileManager.fileExists(atPath: store.quarantinedAgentFile(id: id).path) else { return false }
         let record: AgentRecord?
         do {
-            record = try withAgentStoreLock { try store.unarchive(id: id) }
+            record = try withAgentStoreLock { archived ? try store.unarchive(id: id) : try store.unquarantine(id: id) }
         } catch {
             warn("AgentSupervisor: could not bring back archived agent \(id.rawValue.uuidString): \(error)")
             return false
@@ -7968,11 +7969,18 @@ final class AgentSupervisor {
         // Archived agents own their checkouts too; `loadArchived` is strict. A
         // quarantined archived file names no checkout we can read, so it
         // refuses exactly as an unreadable archived file did before it moved.
-        let quarantined = ((try? FileManager.default.contentsOfDirectory(atPath: store.layout.archiveQuarantineDirectory.path)) ?? [])
-            .filter { !$0.hasPrefix(".") }
+        // Only ENOENT proves it empty; any other listing failure refuses.
+        let quarantine = store.layout.archiveQuarantineDirectory
+        var quarantined: [String] = []
+        var info = stat()
+        if lstat(quarantine.path, &info) == 0 {
+            quarantined = try FileManager.default.contentsOfDirectory(atPath: quarantine.path).filter { !$0.hasPrefix(".") }
+        } else if errno != ENOENT {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         guard quarantined.isEmpty else {
             throw CleanupRefusal.unreadableAgentStore(
-                "\(quarantined.count) archived record file(s) in \(store.layout.archiveQuarantineDirectory.path) could not be read, so an agent could be mistaken for an orphan"
+                "\(quarantined.count) quarantined archive file(s) in \(quarantine.path) could not be read or are not named for an agent, so an agent could be mistaken for an orphan"
             )
         }
         return Set(records.values.map(\.cwd)).union(stored.map(\.cwd)).union(try store.loadArchived().map(\.cwd))
