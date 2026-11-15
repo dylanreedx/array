@@ -991,6 +991,7 @@ if [[ "$RESTORE_SCALING_ONLY" -eq 1 ]]; then
   run swift build --product Array -j 2
   run swift build --product ContinuumRevivedCoreChecks -j 2
   run_app_check .build/debug/Array --restore-scaling-check
+  run_app_check .build/debug/Array --agent-record-archive-check
   run_app_check .build/debug/Array --agent-restore-check
   run_app_check .build/debug/Array --workspace-scene-owner-check
   run_app_check .build/debug/Array --workspace-api-delegation-check
@@ -1656,6 +1657,10 @@ run_app_check .build/debug/Array --agent-display-name-check
 # carrying a previous-session notice — and a prompt is what starts them again.
 run_app_check .build/debug/Array --restore-scaling-check
 run_app_check .build/debug/Array --agent-restore-check
+# Performance at scale, item 4: with agents.recordArchive.enabled (off in code),
+# old finished tile-less records move to agents/archive/ and the next boot skips
+# them; any lookup by id brings one back; repair still treats them as owners.
+run_app_check .build/debug/Array --agent-record-archive-check
 # P2D.6: selecting N queue rows starts one isolated agent per row. Three rows in a
 # real temp repo get three worktrees, three branches and their own prompts;
 # completing one checks off exactly its row; six items past the cap start four and

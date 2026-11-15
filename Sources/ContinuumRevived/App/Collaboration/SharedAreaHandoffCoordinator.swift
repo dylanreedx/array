@@ -40,7 +40,7 @@ final class SharedAreaHandoffCoordinator {
             },
             execute: { [weak supervisor] binding, command in
                 guard lifetime.active, lifetime.dispatchGeneration == lifetime.generation, !Task.isCancelled,
-                      let supervisor, let agentID = binding.agentID,
+                      let supervisor, let agentID = binding.agentID, supervisor.adoptArchivedAgent(agentID),
                       let record = supervisor.records[agentID], record.projectId == binding.projectID else { return .refused(.unknownAgent) }
                 return await supervisor.acceptSharedAgentPrompt(command, for: agentID,
                     scope: model.areaDirectory.path + "/" + binding.object.rawValue.uuidString)
@@ -68,7 +68,8 @@ final class SharedAreaHandoffCoordinator {
         catch { return } // Existing gates remain fail-closed through disconnect.
         guard lifetime.admits(ticket) else { return }
         let owned = bindings().filter { binding in
-            guard let supervisor, let agentID = binding.agentID, let record = supervisor.records[agentID] else { return false }
+            guard let supervisor, let agentID = binding.agentID, supervisor.adoptArchivedAgent(agentID),
+                  let record = supervisor.records[agentID] else { return false }
             guard record.projectId == binding.projectID,
                   let source = snapshot.document.items.first(where: { $0.id == binding.object && $0.kind == .agentObservation })?.source else { return false }
             return source.owner == model.identity.person && source.host == binding.host && source.binding == binding.binding

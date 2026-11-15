@@ -75,7 +75,7 @@ final class SharedAgentProjector {
          object: SharedArea.ID<SharedArea.Object>, generation: UInt64, history: Projection.History = .excluded,
          owner: SharedArea.ID<SharedArea.Person>? = nil, sink: SharedAgentProjectionSink) throws {
         guard supervisor.hasTranscriptSnapshotBoundary else { throw Unavailable.noSnapshotBoundary }
-        guard supervisor.records[agent] != nil else { throw Unavailable.unknownAgent }
+        guard supervisor.adoptArchivedAgent(agent) else { throw Unavailable.unknownAgent }
         self.supervisor = supervisor; self.agent = agent; self.host = host; self.object = object
         self.generation = generation; self.owner = owner; self.sink = sink
         // One main-actor step: snapshot and tail registration cannot interleave a

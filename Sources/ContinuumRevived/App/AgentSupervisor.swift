@@ -2981,7 +2981,23 @@ final class AgentSupervisor {
         var stale: [AgentID] = []
         /// Already live in this session, so the in-memory copy was left alone.
         var skipped: [AgentID] = []
+        /// Moved to `agents/archive/` by this restore (gate on only): read this
+        /// once, never again at boot, and adopted back by id on demand.
+        var archived: [AgentID] = []
     }
+
+    /// The settings suite the archive gate is read from. nil (every check that
+    /// does not set it) is off, like the code default.
+    var recordArchiveDefaults: UserDefaults?
+    /// Clock for the archive's idle threshold; checks pin it.
+    var recordArchiveNow: () -> Date = { Date() }
+    /// An archived agent came back because something asked for it by id.
+    var onArchivedAgentAdopted: ((AgentID) -> Void)?
+    /// Agents a shared area binds by id (`SharedAreaLocalSourceBinding.agentID`).
+    /// A peer's prompt and the host's projection look those up by id, so they
+    /// stay live. Throwing skips the archive pass: an unread binding could name
+    /// any agent.
+    var recordArchiveSharedAgents: (() throws -> Set<AgentID>)?
 
     /// The agents this supervisor adopted from a previous launch. Read by
     /// `wireManagedAgentTile`, which shows a "previous session" notice for them: the
@@ -3019,6 +3035,9 @@ final class AgentSupervisor {
     @discardableResult
     func restore(fileManager: FileManager = .default) -> RestoreReport {
         var report = RestoreReport()
+        if !AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
+            unarchiveAllBeforeRestore()
+        }
         let stored: [AgentRecord]
         do {
             stored = try store.loadAll()
@@ -3169,6 +3188,9 @@ final class AgentSupervisor {
         reconcileManagedMode()
         restoreHelperMessageSubscriptions()
         settleHelpersCutOffByRestart()
+        if AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
+            archiveIdleRecordsAfterRestore(stored: stored, report: &report)
+        }
         for root in Set(records.values.map(\.checkoutRoot)) {
             ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
         }
@@ -3177,6 +3199,134 @@ final class AgentSupervisor {
         Task { @MainActor [weak self] in await self?.flushHelperCompletions() }
         publishCharacterPacks()
         return report
+    }
+
+    /// Performance at scale, item 4. Runs at the END of restore, once
+    /// everything that can tie a record to this session is known — the
+    /// reconciled runs, the helper subscriptions, the queues — and before any
+    /// tile, sidebar row or flush has seen the records. A record leaves the
+    /// live set only if it says it may (`AgentRecordArchivePolicy`) AND nothing
+    /// here still holds it: a process, a queue, an event this restore
+    /// delivered, a durable wakeup, a shared-area binding, a parent's
+    /// subscription or undelivered completion, or a child that stays.
+    private func archiveIdleRecordsAfterRestore(stored: [AgentRecord], report: inout RestoreReport) {
+        let now = recordArchiveNow()
+        let shared: Set<AgentID>
+        do { shared = try recordArchiveSharedAgents?() ?? [] } catch {
+            warn("AgentSupervisor.restore: archive skipped, shared-area bindings are unreadable: \(error)")
+            return
+        }
+        // A durable wakeup finds its agent by id when it fires.
+        let scheduled = Set(wakeupScheduler?.store.entries.map(\.agent) ?? [])
+        let skipped = Set(report.skipped)
+        var current: [AgentID: AgentRecord] = [:]
+        for record in stored where !skipped.contains(record.id) {
+            current[record.id] = records[record.id] ?? record
+        }
+        var eligible = Set(current.values.filter { record in
+            let id = record.id
+            return AgentRecordArchivePolicy.recordAllowsArchive(record, now: now)
+                && !shared.contains(id) && !scheduled.contains(id)
+                && !isRunning(id) && !isQueuePaused(for: id)
+                && !companionQueueHydrationPending.contains(id)
+                && (history[id]?.isEmpty ?? true)
+                && !observedRunsReconciled.contains(id)
+                && (helperMessageSubscriptions[id] ?? []).isEmpty
+                && heldHelperCompletions[id] == nil && helperCompletionBatches[id] == nil
+        }.map(\.id))
+        // A parent's journal row not yet delivered still names its helper. One
+        // read per parent; an unreadable journal keeps all of its helpers.
+        let parents = Set(eligible.compactMap { current[$0]?.parentAgentID })
+        for parent in parents {
+            guard let cwd = current[parent]?.cwd else { continue }
+            let pending: Set<UUID>?
+            do {
+                pending = Set(try SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue)
+                    .filter { $0.phase != .delivered }.map(\.helper))
+            } catch { pending = nil }
+            for id in eligible where current[id]?.parentAgentID == parent {
+                if pending?.contains(id.rawValue) ?? true { eligible.remove(id) }
+            }
+        }
+        // Never strand a child that stays: its parent stays too, up the tree.
+        var changed = true
+        while changed {
+            changed = false
+            for record in current.values where !eligible.contains(record.id) {
+                if let parent = record.parentAgentID, eligible.remove(parent) != nil { changed = true }
+            }
+        }
+        var moved: [AgentID] = []
+        do {
+            try withAgentStoreLock {
+                for id in eligible.sorted(by: { $0.rawValue.uuidString < $1.rawValue.uuidString }) {
+                    do { try store.archive(id: id); moved.append(id) } catch {
+                        warn("AgentSupervisor.restore: could not archive agent \(id.rawValue.uuidString): \(error)")
+                    }
+                }
+            }
+        } catch {
+            warn("AgentSupervisor.restore: archive skipped, the store lock is unavailable: \(error)")
+        }
+        for id in moved {
+            records[id] = nil
+            restoredIDs.remove(id)
+            staleIDs.remove(id)
+            pendingModeRestarts.remove(id)
+            report.archived.append(id)
+        }
+        let archived = Set(report.archived)
+        report.restored.removeAll { archived.contains($0) }
+    }
+
+    /// Turning the gate off reverts it: what an earlier launch archived is
+    /// live again before this restore decodes the store, so nothing depends on
+    /// adoption by id while the feature is off.
+    private func unarchiveAllBeforeRestore() {
+        // Absent or empty: one directory listing, no lock.
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: store.layout.archiveDirectory.path),
+              names.contains(where: { $0.hasSuffix(".json") }) else { return }
+        do {
+            let result = try withAgentStoreLock { store.unarchiveAll() }
+            for (file, error) in result.unreadable {
+                warn("AgentSupervisor.restore: archived agent \(file.lastPathComponent) stays archived, it could not be read: \(error)")
+            }
+        } catch {
+            warn("AgentSupervisor.restore: archived agents stay archived, the store lock is unavailable: \(error)")
+        }
+    }
+
+    /// Brings an archived agent back into this session — the lazy load on miss
+    /// for anything that names an agent by id. True when the agent is live
+    /// afterwards. Works with the gate off: turning archiving off must never
+    /// strand what it already moved.
+    @discardableResult
+    func adoptArchivedAgent(_ id: AgentID, fileManager: FileManager = .default) -> Bool {
+        if records[id] != nil { return true }
+        // Most ids asked about are simply unknown: answer those with one stat.
+        guard fileManager.fileExists(atPath: store.layout.archivedAgentFile(id: id).path) else { return false }
+        let record: AgentRecord?
+        do {
+            record = try withAgentStoreLock { try store.unarchive(id: id) }
+        } catch {
+            warn("AgentSupervisor: could not bring back archived agent \(id.rawValue.uuidString): \(error)")
+            return false
+        }
+        guard let record else { return false }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: record.cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
+            // Back in the live store, unavailable exactly as restore marks it.
+            staleIDs.insert(record.id)
+            return false
+        }
+        records[id] = record
+        restoredIDs.insert(id)
+        if record.capabilities.locallyManaged {
+            setMode(targetMode(harness: record.harness, parent: record.parentAgentID), for: id)
+        }
+        scheduleCharacterPacks()
+        onArchivedAgentAdopted?(id)
+        return true
     }
 
     /// True for an agent that came back from a previous launch rather than being
@@ -7768,7 +7918,8 @@ final class AgentSupervisor {
                 "\(files.count) record file(s) in \(directory.lastPathComponent)/ but only \(stored.count) could be read, so an agent could be mistaken for an orphan"
             )
         }
-        return Set(records.values.map(\.cwd)).union(stored.map(\.cwd))
+        // Archived agents own their checkouts too; `loadArchived` is strict.
+        return Set(records.values.map(\.cwd)).union(stored.map(\.cwd)).union(try store.loadArchived().map(\.cwd))
     }
 
     // MARK: - View binding (P2A.5)
@@ -9971,7 +10122,7 @@ final class AgentSupervisor {
         // The composer entry point neutralizes typed envelopes. Shared prompts
         // and helper completions arrive here with host-authored attribution;
         // retain it while applying the same admission and queue behavior.
-        guard records[agentID] != nil else { return .refused(.unknownAgent) }
+        guard records[agentID] != nil || adoptArchivedAgent(agentID) else { return .refused(.unknownAgent) }
         if case .stop = intent {} else {
             guard await permitsSharedAgentInput(agentID, admission: sharedAdmission) else { return .refused(.sharedAgentControlRequired) }
         }

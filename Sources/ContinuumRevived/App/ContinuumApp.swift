@@ -2268,6 +2268,15 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        if CommandLine.arguments.contains("--agent-record-archive-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await AgentRecordArchiveChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            CFRunLoopRun()
+            return
+        }
         if CommandLine.arguments.contains("--restore-scaling-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -13978,14 +13987,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
+    /// Store constructors add their channel directory. A QA override is
+    /// already isolated app support, so nest a parent under that root.
+    var collaborationSupportRoot: URL {
+        Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
+            .map { $0.appendingPathComponent("collaboration-support", isDirectory: true) }
+            ?? RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
+    }
+
     func collaborationAccountModel() throws -> CollaborationAccountController {
         if let collaborationHub { return collaborationHub.content.model }
         if let collaborationAccount { return collaborationAccount }
-        // Store constructors add their channel directory. A QA override is
-        // already isolated app support, so nest a parent under that root.
-        let parent = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
-            .map { $0.appendingPathComponent("collaboration-support", isDirectory: true) }
-            ?? RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
+        let parent = collaborationSupportRoot
         // A multiplayer preview keeps its credential in a file, never the Keychain.
         let vault: any CollaborationCredentialVault = try MultiplayerPreview.current
             .map { try MultiplayerPreviewCredentialVault($0.rootURL.appendingPathComponent("vault", isDirectory: true)) }
@@ -16498,6 +16511,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return revealTileFromInbox(tile)
         }
         let agentId = AgentID(rawValue: rowId)
+        // A helper chip in an old transcript can name an archived agent.
+        agentSupervisor.adoptArchivedAgent(agentId)
         guard let record = agentSupervisor.records[agentId] else {
             // A terminal-session agent: the row's id IS its tile. `focusTile` resolves
             // to no managed agent and therefore disarms the read-mark rather than
@@ -24844,6 +24859,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
         agentSupervisor.configureManagedMode(defaults: settingsDefaults)
+        // Performance at scale, item 4: off unless `agents.recordArchive.enabled`.
+        agentSupervisor.recordArchiveDefaults = settingsDefaults
+        agentSupervisor.onArchivedAgentAdopted = { [weak self] _ in
+            self?.scheduleAgentSurfacePush(debounce: 0.05)
+        }
+        let collaborationRoot = collaborationSupportRoot
+        agentSupervisor.recordArchiveSharedAgents = {
+            try SharedAreaLocalStore.boundAgentIDs(applicationSupportRoot: collaborationRoot)
+        }
         workspaceAPI.shortReportsEnabled = { [weak self] in
             AgentShortReportConfig.enabled(defaults: self?.settingsDefaults ?? .standard)
         }
