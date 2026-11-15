@@ -171,6 +171,65 @@ enum AgentRecordArchiveChecks {
             Double(result.mallocBytes) / 1_048_576, Double(result.footprint) / 1_048_576, result.rows, result.rowBuildMs))
     }
 
+    /// `--agent-record-archive-measure-store=off|on`: one production boot over
+    /// the store `CONTINUUM_APP_SUPPORT` names — a COPY of a real one, never
+    /// the original — with the gate as given. Prints the mount's time and the
+    /// footprint it left, then the archive pass's moves. One process per run.
+    /// Never stops the agents it restored: they may name real processes.
+    static func measureStore(gate: Bool) async throws {
+        guard let root = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"],
+              !root.hasPrefix(RegistryStore.defaultApplicationSupportDirectory().path) else {
+            throw Failure(message: "measure-store needs CONTINUUM_APP_SUPPORT pointing at a copy of a store")
+        }
+        let store = AgentStore()
+        store.waitForBackupMigration()
+        func jsonCount(_ dir: URL) -> Int {
+            ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".json") }.count
+        }
+        let liveBefore = jsonCount(store.layout.agentsDirectory), archivedBefore = jsonCount(store.layout.archiveDirectory)
+        let settings = gateSuite(gate)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
+            warn: { _ in }, nameTitlerCommand: { _ in nil })
+        supervisor.codexRestoreHomeForQA = URL(fileURLWithPath: root).appendingPathComponent("codex-empty")
+        let app = AppDelegate()
+        app.agentSupervisor = supervisor
+        app.qaSettingsDefaults = settings
+        let canvas = CanvasNSView(canvasState: emptyCanvas)
+        let footprintBefore = footprintBytes(), mallocBefore = mallocInUse(), decodedBefore = AgentStore.recordsDecodedForQA
+        let start = ContinuousClock.now
+        try app.mountWorkspaceSceneAtBoot(canvasView: canvas, spawner: nil, projectStore: nil,
+            canvasState: emptyCanvas, installsGlobalEventMonitors: false)
+        func ms(_ d: Duration) -> Double { (Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18) * 1000 }
+        let mountMs = ms(ContinuousClock.now - start)
+        let decoded = AgentStore.recordsDecodedForQA - decodedBefore
+        let adopted = supervisor.records.count
+        let footprintMount = footprintBytes(), mallocMount = mallocInUse()
+        let passStart = ContinuousClock.now
+        await supervisor.recordArchivePassForQA?.value
+        let passMs = ms(ContinuousClock.now - passStart)
+        // Both gates settle alike: the boot's other main-actor work (helper
+        // flushes, rehydration) runs here whether or not a pass was awaited.
+        let settle = Double(ProcessInfo.processInfo.environment["ARCHIVE_MEASURE_SETTLE_SECONDS"] ?? "") ?? 0
+        if settle > 0 { try await Task.sleep(for: .seconds(settle)) }
+        let cost = supervisor.recordArchivePassCostForQA
+        var rowTimes: [Double] = []
+        var rows = 0
+        for _ in 0..<7 {
+            let rowStart = ContinuousClock.now
+            rows = app.agentInboxRowsForQA().count
+            rowTimes.append(ms(ContinuousClock.now - rowStart))
+        }
+        let mb = 1_048_576.0
+        print(String(format: "METRIC agent-record-archive-store gate=%@ liveFilesBefore=%d archivedFilesBefore=%d decoded=%d adopted=%d mountMs=%.1f passMs=%.1f moved=%d liveAfter=%d archivedFilesAfter=%d footprintMB=%.1f footprintMountDeltaMB=%.1f mallocMountDeltaMB=%.1f footprintAfterPassMB=%.1f inboxRows=%d inboxRowBuildMedianMs=%.2f passScanMs=%.1f passMainMs=%.1f settleS=%.0f footprintSettledMB=%.1f",
+            gate ? "on" : "off", liveBefore, archivedBefore, decoded, adopted, mountMs, passMs,
+            adopted - supervisor.records.count, supervisor.records.count, jsonCount(store.layout.archiveDirectory),
+            Double(footprintMount) / mb, (Double(footprintMount) - Double(footprintBefore)) / mb,
+            Double(mallocMount - mallocBefore) / mb, Double(footprintBytes()) / mb, rows, rowTimes.sorted()[3],
+            cost?.scanMs ?? -1, cost?.mainMs ?? -1, settle, Double(footprintBytes()) / mb))
+        withExtendedLifetime((app, canvas, supervisor)) {}
+    }
+
     // MARK: - Witness
 
     struct Edges {
@@ -888,6 +947,10 @@ enum AgentRecordArchiveChecks {
     static func run() async throws {
         if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--agent-record-archive-measure=") }) {
             try measure(variant: String(arg.dropFirst("--agent-record-archive-measure=".count)))
+            return
+        }
+        if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--agent-record-archive-measure-store=") }) {
+            try await measureStore(gate: arg.hasSuffix("=on"))
             return
         }
         guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil,

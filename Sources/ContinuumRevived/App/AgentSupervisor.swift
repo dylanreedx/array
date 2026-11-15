@@ -2999,6 +2999,9 @@ final class AgentSupervisor {
     var recordArchiveSharedAgents: (@Sendable () throws -> Set<AgentID>)?
     /// The pass the last gate-on restore scheduled; checks await it.
     private(set) var recordArchivePassForQA: Task<Void, Never>?
+    /// What the last pass cost: the binding scan (off main) and the pass
+    /// itself (main), in milliseconds.
+    private(set) var recordArchivePassCostForQA: (scanMs: Double, mainMs: Double)?
 
     /// The agents this supervisor adopted from a previous launch. Read by
     /// `wireManagedAgentTile`, which shows a "previous session" notice for them: the
@@ -3214,17 +3217,25 @@ final class AgentSupervisor {
         let scan = recordArchiveSharedAgents
         recordArchivePassForQA?.cancel()
         recordArchivePassForQA = Task { @MainActor [weak self] in
-            let shared = await Task.detached(priority: .utility) { () -> Result<Set<AgentID>, Error> in
-                Result { try scan?() ?? [] }
+            let (shared, scanMs) = await Task.detached(priority: .utility) { () -> (Result<Set<AgentID>, Error>, Double) in
+                let start = ContinuousClock.now
+                let result = Result { try scan?() ?? [] }
+                return (result, Self.milliseconds(ContinuousClock.now - start))
             }.value
             guard let self, !Task.isCancelled else { return }
             switch shared {
             case let .success(shared):
+                let start = ContinuousClock.now
                 self.archiveIdleRecords(shared: shared, stored: stored, skipped: skipped)
+                self.recordArchivePassCostForQA = (scanMs, Self.milliseconds(ContinuousClock.now - start))
             case let .failure(error):
                 self.warn("AgentSupervisor.restore: archive skipped, shared-area bindings are unreadable: \(error)")
             }
         }
+    }
+
+    nonisolated private static func milliseconds(_ d: Duration) -> Double {
+        (Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18) * 1000
     }
 
     /// A record leaves the live set only if it says it may
