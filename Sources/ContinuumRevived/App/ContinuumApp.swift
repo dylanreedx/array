@@ -4624,6 +4624,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--app-switch-cost-check") {
+            do {
+                _ = NSApplication.shared
+                print(try AppDelegate.runAppSwitchCostChecks())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--sidebar-event-cost-check") {
             do {
                 _ = NSApplication.shared
@@ -8319,6 +8330,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// stream; those move on a scale of minutes, and chatter used to refresh them
     /// every 0.5 s only incidentally.
     static let chatterPatchMaxAge: TimeInterval = 5
+    /// `inboxTimeDerivedDeadline` for the last full row build.
+    private var inboxRowsTimeDerivedDeadline: Date?
     /// Full inbox row builds (`buildAgentInboxRows`), for the push-cost witness.
     private(set) var qaInboxRowBuildCount = 0
     private var sidebarTurnObserverToken: UUID?
@@ -11295,8 +11308,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// P2B.7: the FULL recomputation — every project's registry, canvas and session
     /// store read from disk. Reserved for a STRUCTURAL change, i.e. one this process
     /// cannot describe as an event on a known agent: a workspace switch, a project
-    /// open, a tile added or deleted, an observer sweep, app activation. An agent's
-    /// own activity takes the incremental path below instead.
+    /// open, a tile added or deleted, an observer sweep. An agent's own activity
+    /// takes the incremental path below instead, and app activation takes
+    /// `refreshAgentSurfacesForActivationChange`.
     private func refreshAgentSurfaces(notify: Bool = true) {
         rebuildAgentActivitySnapshot()
         pushAgentSurfaces(notify: notify, reloadsTopBar: true)
@@ -17498,7 +17512,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let inputs = inputs ?? currentSidebarModelInputs()
         let rows = buildAgentInboxRows(now: now, inputs: inputs) + sharedAgentSidebarRows(inputs: inputs, now: now)
         lastInboxRows = (rows, ProcessInfo.processInfo.systemUptime)
+        inboxRowsTimeDerivedDeadline = Self.inboxTimeDerivedDeadline(
+            records: agentSupervisor.records.values,
+            externalSessions: externalSessionMonitor.snapshot.sessions,
+            autoSettleAfter: AgentAutoSettleConfig.resolvedFromDefaults().window,
+            now: now)
         return rows
+    }
+
+    /// The earliest moment a row built at `now` would come out differently with
+    /// nothing but the clock having moved, or nil when no row depends on the clock.
+    ///
+    /// Elapsed times are not here: the inbox ticks those itself. What IS here is
+    /// what only a row build re-derives — an auto-settle crossing, a snooze ending,
+    /// and an unknown external session's "· 4m ago". App activation reads this
+    /// instead of rebuilding every row on every switch. Conservative by
+    /// construction: an instant counted that changes nothing costs one row build,
+    /// one missed would leave a row stale.
+    static func inboxTimeDerivedDeadline(
+        records: some Sequence<AgentRecord>,
+        externalSessions: [ExternalAgentSession],
+        autoSettleAfter: TimeInterval?,
+        now: Date
+    ) -> Date? {
+        var deadline: Date?
+        func consider(_ instant: Date?) {
+            guard let instant, instant > now, instant < (deadline ?? .distantFuture) else { return }
+            deadline = instant
+        }
+        for record in records where record.archivedAt == nil {
+            consider(record.snoozedUntil)
+            // `AgentRecord.lifecycle` settles on `realActivityAt`, or on a wake
+            // signal while a snooze holds, after the strict (`nextUp`) window.
+            if let window = autoSettleAfter?.nextUp, record.settledOverride == .neutral {
+                consider(record.realActivityAt?.addingTimeInterval(window))
+                consider(record.wakeSignalAt?.addingTimeInterval(window))
+            }
+        }
+        for session in externalSessions where session.status == .unknown {
+            guard case .app = session.host, let last = session.lastActivity else { continue }
+            // `AgentBackgroundJobText.uptime`: seconds under a minute, minutes
+            // under a day, then days.
+            let age = max(0, now.timeIntervalSince(last))
+            let step: TimeInterval = age < 60 ? 1 : age < 86_400 ? 60 : 86_400
+            consider(last.addingTimeInterval((age / step).rounded(.down) * step + step))
+        }
+        return deadline
     }
 
     /// One lead row per `.sharedAgent` tile in any project's canvas, whether or
@@ -25545,7 +25604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty_app_set_focus(app, true)
         }
         focusBroker.applicationDidBecomeActive()
-        refreshAgentSurfaces()
+        refreshAgentSurfacesForActivationChange()
         // A login changed in a terminal while Array was in the background, or
         // the 5-hour window rolled over: re-read on the way back in.
         agentSupervisor.refreshAccountUsageForAgents(minimumInterval: 60)
@@ -25560,7 +25619,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             ghostty_app_set_focus(app, false)
         }
         focusBroker.applicationDidResignActive()
-        refreshAgentSurfaces()
+        refreshAgentSurfacesForActivationChange()
+    }
+
+    /// What switching apps can change on the agent surfaces, and only that.
+    ///
+    /// This used to be `refreshAgentSurfaces()`: every project's registry, canvas
+    /// and session store read from disk and every sidebar row rebuilt, on every
+    /// app switch — 24.5% of the main thread in a live sample at ~2,400 agents.
+    /// None of that is an activation fact. Every writer of those files is this
+    /// process, and each one pushes the surfaces itself; the awareness flag is
+    /// read live by `activeViewFacts`; the dock count and the needs-attention
+    /// notification move only when the snapshot does. What activation CAN
+    /// change: the clock has moved (a row whose lifecycle or label derives from
+    /// it — `inboxRowsTimeDerivedDeadline`), and a branch may have been checked
+    /// out in another app (the off-main branch warm). Before the first
+    /// reconciliation there is no held snapshot to keep, so it still rebuilds.
+    private func refreshAgentSurfacesForActivationChange() {
+        guard agentActivity.isReconciled else {
+            refreshAgentSurfaces()
+            return
+        }
+        if let deadline = inboxRowsTimeDerivedDeadline, AgentElapsedClock.now() >= deadline {
+            reloadWorkspaceSidebar(rebuildAgentActivity: false)
+        }
+        warmCheckedOutBranchesIfNeeded()
     }
 
     /// Full screen moves the traffic lights into the auto-hiding overlay, so the
@@ -45620,6 +45703,291 @@ extension AppDelegate {
             throw Failure(description: "SidebarEventCost RED:\n  " + failures.joined(separator: "\n  "))
         }
         return "SidebarEventCost: " + report.joined(separator: "; ")
+    }
+}
+
+// Live-usage sample (2026-11-14): an app switch ran `refreshAgentSurfaces()` from
+// both activation delegate methods — every project's registry, canvas and session
+// store read from disk and every sidebar row rebuilt — 24.5% of the main thread in
+// normal work at ~2,400 agents. Gated on `--app-switch-cost-check`. Driven through
+// production: the REAL `applicationDidResignActive` / `applicationDidBecomeActive`
+// delegate methods, records restored by `AgentSupervisor.restore()` from a real
+// `AgentStore`, events through `AgentSupervisor.qaDeliver`, and the real
+// `WorkspaceSidebarView` in an off-screen window. Counts per switch:
+// `activitySnapshotRebuilds` (the disk pass), `AtomicWriter.readCount` (store
+// reads) and `qaInboxRowBuildCount` (whole-sidebar row builds).
+//
+// Positive control: after the switches, everything a person can see — every inbox
+// row, every canvas badge, the dock badge and the attention count the
+// notification gate reads — must equal what a fresh full rebuild produces. And
+// what the clock alone moves (an auto-settle crossing while away) must still move
+// the row on the next switch.
+extension AppDelegate {
+    static func runAppSwitchCostChecks() throws -> String {
+        struct Failure: Error, CustomStringConvertible { let description: String }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) throws {
+            if !condition() { throw Failure(description: message()) }
+        }
+        var failures: [String] = []
+        func witness(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String) {
+            if !condition() { failures.append(message()) }
+        }
+        func spin(_ seconds: TimeInterval) {
+            RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory
+            .appendingPathComponent("continuum-app-switch-cost-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+        for dir in [appSupport, agentsSupport, projectRoot] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let now = Date()
+        let day: TimeInterval = 86_400
+        let workspaceId = UUID()
+        let projectId = UUID()
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Switch", projectIds: [projectId], createdAt: now, updatedAt: now)]
+        registry.projects = [ProjectEntry(id: projectId, name: "Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        // Dylan's shape: ~2,300 agents, nearly all finished and tile-less. A mix of
+        // settled, auto-settled, recently finished, unread and failed. Section 3
+        // brings record 0 back to within seconds of auto-settling.
+        let agentStore = AgentStore(applicationSupportDirectory: agentsSupport)
+        let restoredCount = 2_290
+        let crossingId = AgentID(rawValue: UUID())
+        guard let settleWindow = AgentAutoSettleConfig.resolvedFromDefaults().window else {
+            throw Failure(description: "fixture: auto-settle is off in this defaults domain")
+        }
+        for index in 0..<restoredCount {
+            let id = index == 0 ? crossingId : AgentID(rawValue: UUID())
+            let age: TimeInterval
+            switch index % 10 {
+            case 1: age = 3_600                      // finished an hour ago, unread
+            case 2: age = day                         // finished yesterday, read
+            default: age = Double(10 + index % 90) * day  // long finished
+            }
+            let ended = now.addingTimeInterval(-age)
+            var record = AgentRecord(
+                id: id, displayName: "Agent \(index)", model: "anthropic/claude-opus-5-5", thinking: "medium",
+                cwd: projectRoot.path, projectRoot: projectRoot.path, projectId: projectId,
+                createdAt: ended.addingTimeInterval(-600), lastActivityAt: ended,
+                latestPromptAt: ended.addingTimeInterval(-300), latestTurnAt: ended,
+                runCompletedAt: ended,
+                lastVisitedAt: index % 10 == 1 ? ended.addingTimeInterval(-60) : ended.addingTimeInterval(60))
+            if index % 10 == 3 { record.failedAt = ended }
+            if index % 10 == 4 { record.settledOverride = .settled; record.settledAt = ended }
+            try agentStore.upsert(record)
+        }
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+        let supervisor = AgentSupervisor(store: agentStore, makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        supervisor.accountUsageReader = { _ in nil }
+        _ = supervisor.restore()
+        app.agentSupervisor = supervisor
+        try expect(supervisor.records.count == restoredCount, "fixture: restored \(supervisor.records.count) of \(restoredCount) records")
+
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        canvas.delegate = app
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] tileId in canvas?.markActive(tileId: tileId) }
+        app.installAcceptedTileFocusHook()
+        func spawn(_ name: String, tile: UUID? = nil) -> AgentID {
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                projectId: projectId, parentAgentID: nil, tileId: tile)
+            _ = supervisor.rename(agentID: id, to: name)
+            return id
+        }
+        let tiles = (0..<3).map { index -> Tile in
+            let tile = Tile(
+                id: UUID(), kind: .managedAgent, title: "Agent · \(index)",
+                frame: TileFrame(x: Double(index) * 320, y: 0, width: 300, height: 200),
+                zPosition: .fromLegacyRank(index + 1), runtimeRef: nil, metadata: TileMetadata())
+            canvas.install(tileView: TileNSView(tile: tile), for: tile)
+            return tile
+        }
+        let tiled = tiles.enumerated().map { spawn("Tiled \($0.offset)", tile: $0.element.id) }
+        let live = (0..<7).map { spawn("Live \($0)") }
+        let agentCount = supervisor.records.count
+
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 4000))
+        let window = NSWindow(contentRect: sidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = sidebar
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
+        app.workspaceSidebarView = sidebar
+        let restoreShelves = WorkspaceSidebarConfig.qaIsolateShelves()
+        defer { restoreShelves() }
+        app.configureWorkspaceSidebar(sidebar)
+        sidebar.configureInboxScope(.all) { _ in }
+        app.refreshAgentSurfaces(notify: false)
+        sidebar.layoutSubtreeIfNeeded()
+        let inbox = sidebar.inboxForQA
+        spin(0.7)
+        func thread(_ id: AgentID) -> String { AgentSupervisor.threadId(for: id) }
+        // Events come from a runner in flight, and the supervisor clears it when the
+        // turn ends (`clearRunner`). A full rebuild counts a running agent as
+        // observed and every other one as unobserved (P2B.8), so the fixture binds
+        // and clears runners the same way, or it would compare a state production
+        // never reaches.
+        func bindRunner(_ id: AgentID) { supervisor.qaBindRunnerForCapabilities(ScriptedAgentRunner(script: []), for: id) }
+        func clearRunner(_ id: AgentID) { supervisor.qaBindRunnerForCapabilities(nil, for: id) }
+        // Two agents mid-turn, so the badges and rows carry working state.
+        for agent in [tiled[0], live[0]] {
+            bindRunner(agent)
+            supervisor.qaDeliver(.turnStarted(threadId: thread(agent), turnId: "w"), to: agent)
+        }
+        spin(0.7)
+
+        func resign() {
+            app.applicationDidResignActive(
+                Notification(name: NSApplication.didResignActiveNotification, object: NSApplication.shared))
+        }
+        func activate() {
+            app.applicationDidBecomeActive(
+                Notification(name: NSApplication.didBecomeActiveNotification, object: NSApplication.shared))
+        }
+        struct Cost { var rebuilds = 0, reads = 0, rowBuilds = 0, ms = 0.0 }
+        func measure(_ body: () -> Void) -> Cost {
+            let rebuilds = WorkspaceSwitchCounters.activitySnapshotRebuilds
+            let reads = AtomicWriter.readCount
+            let rowBuilds = app.qaInboxRowBuildCount
+            let start = DispatchTime.now().uptimeNanoseconds
+            body()
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+            return Cost(rebuilds: WorkspaceSwitchCounters.activitySnapshotRebuilds - rebuilds,
+                        reads: AtomicWriter.readCount - reads,
+                        rowBuilds: app.qaInboxRowBuildCount - rowBuilds, ms: ms)
+        }
+
+        // 1 · Three round trips away and back. Nothing changed meanwhile.
+        var switches: [Cost] = []
+        for _ in 0..<3 {
+            switches.append(measure(resign))
+            switches.append(measure(activate))
+        }
+        // While away, agents keep working: the event path keeps the surfaces true.
+        resign()
+        supervisor.qaDeliver(.turnCompleted(threadId: thread(live[0]), turnId: "w", outcome: .completed, errorMessage: nil), to: live[0])
+        clearRunner(live[0])
+        bindRunner(live[1])
+        supervisor.qaDeliver(.turnStarted(threadId: thread(live[1]), turnId: "w2"), to: live[1])
+        spin(0.7)
+        switches.append(measure(activate))
+        let rebuilds = switches.map(\.rebuilds).reduce(0, +)
+        let reads = switches.map(\.reads).reduce(0, +)
+        let rowBuilds = switches.map(\.rowBuilds).reduce(0, +)
+        let worstMs = switches.map(\.ms).max() ?? 0
+        witness(rebuilds == 0, "1: \(switches.count) app switches ran \(rebuilds) disk rebuilds of the agent snapshot")
+        witness(reads == 0, "1: \(switches.count) app switches made \(reads) store reads")
+        witness(rowBuilds == 0, "1: \(switches.count) app switches built every sidebar row \(rowBuilds) times")
+        let costLine = String(format: "%d switches at %d agents: %d disk rebuilds, %d store reads, %d row builds, worst %.1f ms",
+                              switches.count, agentCount, rebuilds, reads, rowBuilds, worstMs)
+
+        // 2 · Positive control: what is on screen equals a fresh full rebuild.
+        //
+        // One deliberate asymmetry, and only for an agent that spoke and whose turn
+        // has since ended: its own event un-marks it unobserved
+        // (`recordManagedActivity`), and a full rebuild marks it unobserved again
+        // because nothing is running. That is the P2B.8 rule, not an activation
+        // fact; activation used to re-apply it on every switch only because it ran
+        // the full rebuild. For those agents alone the two observation fields
+        // (`isUnconfirmed`, and the `elapsedStartedAt` it clears) are compared
+        // normalised; everything else on their rows still has to match.
+        var turnEnded: Set<UUID> = [live[0].rawValue]
+        func comparable(_ row: AgentInboxRow) -> AgentInboxRow {
+            let row = turnEnded.contains(row.id) ? row.withUnconfirmed(true) : row
+            return row.refreshingActivity(lastActiveAt: row.lastActiveAt, characterActivity: row.characterActivity, elapsed: nil)
+        }
+        func surfaces() -> (rows: [UUID: AgentInboxRow], badges: [UUID: AgentStatus?], dock: String?, attention: Int, board: [UUID: String]) {
+            var rows: [UUID: AgentInboxRow] = [:]
+            for row in inbox.qaAllRowsForQA { rows[row.id] = comparable(row) }
+            var badges: [UUID: AgentStatus?] = [:]
+            for tile in tiles { badges[tile.id] = canvas.tileView(for: tile.id)?.agentStatus }
+            var board: [UUID: String] = [:]
+            for row in AgentsBoardProjection.rows(from: app.agentActivity.snapshot) {
+                board[row.agentId] = "\(row.status) \(row.lastSummary) \(row.updatedAt.timeIntervalSinceReferenceDate) \(String(describing: row.tileId))"
+            }
+            return (rows, badges, NSApplication.shared.dockTile.badgeLabel,
+                    AgentsBoardProjection.attentionCount(from: app.agentActivity.snapshot), board)
+        }
+        func diff(_ held: [UUID: AgentInboxRow], _ fresh: [UUID: AgentInboxRow]) -> [String] {
+            Set(held.keys).union(fresh.keys).compactMap { id in
+                guard held[id] != fresh[id] else { return nil }
+                guard let h = held[id], let f = fresh[id] else {
+                    return "\(held[id]?.title ?? fresh[id]?.title ?? id.uuidString): present \(held[id] != nil) vs \(fresh[id] != nil)"
+                }
+                let fields = zip(Mirror(reflecting: h).children, Mirror(reflecting: f).children).compactMap { pair -> String? in
+                    let (a, b) = pair
+                    let left = String(describing: a.value), right = String(describing: b.value)
+                    return left == right ? nil : "\(a.label ?? "?"): \(left) vs \(right)"
+                }
+                return "\(h.title): \(fields.joined(separator: "; "))"
+            }
+        }
+        let held = surfaces()
+        try expect(held.rows.count >= agentCount, "2: fixture: the inbox holds \(held.rows.count) rows for \(agentCount) agents")
+        try expect(held.rows[live[1].rawValue]?.state == .working && held.rows[live[0].rawValue]?.state != .working,
+                   "2: fixture: the events delivered while away must reach the rows")
+        app.refreshAgentSurfaces(notify: false)
+        spin(0.2)
+        let fresh = surfaces()
+        let rowDiff = diff(held.rows, fresh.rows)
+        witness(rowDiff.isEmpty, "2: \(rowDiff.count) rows differ from a full rebuild: \(rowDiff.prefix(5))")
+        witness(held.badges == fresh.badges, "2: canvas badges \(held.badges) vs a full rebuild \(fresh.badges)")
+        witness(held.dock == fresh.dock && held.attention == fresh.attention,
+                "2: dock \(String(describing: held.dock))/\(held.attention) vs a full rebuild \(String(describing: fresh.dock))/\(fresh.attention)")
+        witness(held.board == fresh.board, "2: the activity snapshot's rows differ from a full rebuild's")
+
+        // 3 · The clock alone moves a row: an agent auto-settles while Array is in
+        // the background, and the next switch must settle its row as a full rebuild
+        // would, without reading disk. (A snooze ending is not this case: the inbox
+        // wakes those rows on its own timer.) Fixture setup takes tens of seconds
+        // on a loaded machine, so the crossing is armed here, by the production
+        // event path: record 0's turn ran a settle window ago, minus three seconds.
+        func lifecycle() -> InboxLifecycle? { inbox.pushedRowForQA(id: crossingId.rawValue)?.lifecycle }
+        let crossAt = Date().addingTimeInterval(3)
+        let turnAt = crossAt.addingTimeInterval(-settleWindow)
+        bindRunner(crossingId)
+        supervisor.qaDeliver(.turnStarted(threadId: thread(crossingId), turnId: "c"), to: crossingId, now: turnAt)
+        supervisor.qaDeliver(.turnCompleted(threadId: thread(crossingId), turnId: "c", outcome: .completed, errorMessage: nil),
+                             to: crossingId, now: turnAt)
+        clearRunner(crossingId)
+        turnEnded.insert(crossingId.rawValue)
+        spin(0.7)
+        try expect(Date() < crossAt, "3: fixture: arming the crossing took past the crossing itself")
+        try expect(lifecycle() == .active, "3: fixture: the crossing record must start active, was \(String(describing: lifecycle()))")
+        resign()
+        spin(crossAt.timeIntervalSinceNow + 0.5)
+        let crossing = measure(activate)
+        let settled: Bool
+        if case .settled = lifecycle() { settled = true } else { settled = false }
+        witness(settled, "3: an auto-settle crossing while away did not reach the row on return (\(String(describing: lifecycle())))")
+        witness(crossing.rebuilds == 0 && crossing.reads == 0,
+                "3: the crossing's switch read disk (\(crossing.rebuilds) rebuilds, \(crossing.reads) reads)")
+        witness(crossing.rowBuilds >= 1, "3: control: the crossing's switch built no rows (\(crossing.rowBuilds))")
+        let afterCrossing = surfaces()
+        app.refreshAgentSurfaces(notify: false)
+        spin(0.2)
+        let crossingDiff = diff(afterCrossing.rows, surfaces().rows)
+        witness(crossingDiff.isEmpty, "3: after the crossing \(crossingDiff.count) rows differ from a full rebuild: \(crossingDiff.prefix(5))")
+
+        if !failures.isEmpty {
+            throw Failure(description: "AppSwitchCost RED (\(costLine)):\n  " + failures.joined(separator: "\n  "))
+        }
+        return "AppSwitchCost: \(costLine); rows, badges, dock and attention match a full rebuild; an auto-settle crossing while away still settles its row with \(crossing.rowBuilds) row build and no disk read"
     }
 }
 
