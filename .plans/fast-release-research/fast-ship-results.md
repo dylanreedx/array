@@ -44,7 +44,7 @@ Not run:
 - a real gate (the LaunchAgent is not installed, so installing it is Dylan's call);
 - a real signed release.
 
-The new legs have not yet been seen in a real matrix summary.
+The new legs print in a real matrix summary: see the real gate proof below.
 
 ## Left open (minor, from the review)
 
@@ -94,7 +94,7 @@ Machine cost, run 4. These are 15-second samples of the gate's process tree.
 It was 02:05–02:45, so Dylan was not working.
 - Matrix: median 0.4 cores, p90 2.1, peak 7.4. RSS median 354 MB, p90 1.4 GB, peak 12 GB during the build. Above one core for 29% of the time.
 - Candidate: median 1 core (one whole-module compile), short peak of 14. RSS 8–9.8 GB for 16 minutes.
-- Free memory never fell below 54% (64 GB Mac).
+- Free memory never fell below 54% on this 24 GB Mac. The 8–10 GB release compile is about 40% of RAM.
 - Run 1 (cold, with other agents building): peak 10 cores and 10 GB, load 72.
 
 Screen and tmux:
