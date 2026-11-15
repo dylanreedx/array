@@ -129,12 +129,7 @@ public enum ExternalSessionRows {
     ) -> InboxWhereMarker {
         switch session.host {
         case let .app(name):
-            var text = name
-            if session.status == .unknown, let last = session.lastActivity {
-                text += " · \(AgentBackgroundJobText.uptime(since: last, now: now)) ago"
-            }
-            return InboxWhereMarker(
-                symbol: ExternalSessionHost.terminalApps.contains(name) ? "terminal" : "macwindow", text: text)
+            return appMarker(name: name, session: session, now: now)
         case .tmux:
             return InboxWhereMarker(symbol: "terminal", text: "tmux")
         case let .arrayShellTile(tileId):
@@ -145,6 +140,23 @@ public enum ExternalSessionRows {
         case .unknown:
             return InboxWhereMarker(symbol: "questionmark.square.dashed", text: "elsewhere")
         }
+    }
+
+    /// The marker of a session whose label reads the clock (`Codex app · 4m ago`),
+    /// or nil when its marker never changes with time. The same text `marker`
+    /// gives, so relabelling a pushed row cannot drift from a full build.
+    public static func ageLabelMarker(for session: ExternalAgentSession, now: Date) -> InboxWhereMarker? {
+        guard case let .app(name) = session.host, session.status == .unknown, session.lastActivity != nil else { return nil }
+        return appMarker(name: name, session: session, now: now)
+    }
+
+    private static func appMarker(name: String, session: ExternalAgentSession, now: Date) -> InboxWhereMarker {
+        var text = name
+        if session.status == .unknown, let last = session.lastActivity {
+            text += " · \(AgentBackgroundJobText.uptime(since: last, now: now)) ago"
+        }
+        return InboxWhereMarker(
+            symbol: ExternalSessionHost.terminalApps.contains(name) ? "terminal" : "macwindow", text: text)
     }
 
     /// The marker an Array agent's own row carries while its tile shows the
