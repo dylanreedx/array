@@ -68,6 +68,21 @@ if [[ $1 == release && ( $2 == create || $2 == upload ) ]]; then
   [[ $2 == upload && -f "$SHIP_PLAN/gh-upload-inert" ]] && exit 0  # reports success, uploads nothing
   touch "$release"; for asset in "${@: -2}"; do basename "$asset" >> "$release"; done; fi
 '''
+def next_release():
+    """The next version and build after the real feed this fixture copies, so the
+    witness never collides with a release that has already shipped."""
+    import re
+    import xml.etree.ElementTree as ET
+    sp = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
+    items = ET.parse(HERE.parent / "website/public/appcast.xml").findall("./channel/item")
+    builds = [int(i.findtext(sp + "version")) for i in items if (i.findtext(sp + "version") or "").isdigit()]
+    versions = [tuple(map(int, v.split("."))) for v in (i.findtext(sp + "shortVersionString") or "" for i in items)
+                if re.fullmatch(r"\d+\.\d+\.\d+", v)]
+    major, minor, patch = max(versions)
+    return f"{major}.{minor}.{patch + 1}", f"{major}.{minor}.{patch + 2}", max(builds) + 1
+
+
+VERSION, OTHER_VERSION, BUILD = next_release()
 LEDGER = "# Versioning\n\n| Version | Build | Date | Tag | Notes |\n|---|---|---|---|---|\n| 0.7.50 | 101 | 2026-11-14 | `v0.7.50` | fixture |\n"
 
 
@@ -252,36 +267,36 @@ def ship_cases(fx, gated, head):
     before = (fx.repo / "website/public/appcast.xml").read_bytes()
     with open(fx.root / "matrix.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        result = fx.run("ship-release.sh", "--version", "0.7.51", "--notes", str(notes))
+        result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
     expect(result.returncode != 0 and "awake group" in result.stderr
            and not any(line.startswith("sign ") for line in fx.log()), "a skipped awake group stops prepare", result)
-    shutil.rmtree(fx.repo / "qa-runs/ship-0.7.51")
+    shutil.rmtree(fx.repo / f"qa-runs/ship-{VERSION}")
     print("PASS prepare-refuses-skipped-awake")
-    result = fx.run("ship-release.sh", "--version", "0.7.51", "--notes", str(notes))
+    result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
     events = fx.log()
     expect(result.returncode == 0, "prepare succeeds", result)
     expect(any(line == f"matrix --awake-only {gated} owner=" + line.split("owner=")[-1] and "owner=none" not in line
                for line in events), f"awake group ran at the gated commit: {events}")
     sign = next(line for line in events if line.startswith("sign "))
-    expect(f"--bundle {fx.summary(gated)['candidate']}" in sign and "--set-build 102" in sign and "--set-version 0.7.51" in sign,
-           f"signs the gate's candidate as build 102: {sign}")
+    expect(f"--bundle {fx.summary(gated)['candidate']}" in sign and f"--set-build {BUILD}" in sign and f"--set-version {VERSION}" in sign,
+           f"signs the gate's candidate as build {BUILD}: {sign}")
     expect(any(line.startswith("audit --configuration release --channel prod") for line in events), "bundle audit ran")
     expect(not any(line.startswith(("bundle", "gh release create")) for line in events[2:]), f"prepare compiles and uploads nothing: {events}")
     after = (fx.repo / "website/public/appcast.xml").read_bytes()
     index = after.find(before[:before.find(b"<item>")])
     expect(after.startswith(before[:before.find(b"<item>")]) and after.endswith(before[before.find(b"<item>"):])
-           and b"<sparkle:version>102</sparkle:version>" in after, "feed gains one item, old bytes intact")
+           and f"<sparkle:version>{BUILD}</sparkle:version>".encode() in after, "feed gains one item, old bytes intact")
     ledger = (fx.repo / "docs/VERSIONING.md").read_text().splitlines()[-1]
-    expect(ledger.startswith("| 0.7.51 | 102 |") and "Faster shipping \\| fixture." in ledger and gated[:8] in ledger,
+    expect(ledger.startswith(f"| {VERSION} | {BUILD} |") and "Faster shipping \\| fixture." in ledger and gated[:8] in ledger,
            f"ledger row: {ledger}")
     subject = sh("git", "-C", str(fx.repo), "log", "-1", "--format=%s%n%b").stdout.strip()
     parent = sh("git", "-C", str(fx.repo), "rev-parse", "HEAD^").stdout.strip()
-    expect(subject == "chore(release): ship Array 0.7.51 (build 102)" and parent == head, f"one local commit: {subject!r}")
+    expect(subject == f"chore(release): ship Array {VERSION} (build {BUILD})" and parent == head, f"one local commit: {subject!r}")
     remote = sh("git", "--git-dir", str(fx.origin), "rev-parse", "array/integration").stdout.strip()
     expect(remote == head, "prepare pushes nothing")
     print("PASS prepare-signs-candidate-and-commits")
 
-    result = fx.run("ship-release.sh", "--version", "0.7.52", "--notes", str(notes))
+    result = fx.run("ship-release.sh", "--version", OTHER_VERSION, "--notes", str(notes))
     expect(result.returncode != 0 and "origin/array/integration" in result.stderr, "prepare refuses off the integration head", result)
     print("PASS prepare-refuses-off-head")
 
@@ -290,29 +305,29 @@ def ship_cases(fx, gated, head):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
     publish_env = dict(ARRAY_SHIP_FEED_URL=f"http://127.0.0.1:{port}/appcast.xml",
-                       ARRAY_SHIP_DOWNLOAD_BASE=f"http://127.0.0.1:{port}/download/v0.7.51/")
-    (fx.plan / "gh-v0.7.51").write_text("Array.dmg\n")  # an earlier publish died mid-upload
+                       ARRAY_SHIP_DOWNLOAD_BASE=f"http://127.0.0.1:{port}/download/v{VERSION}/")
+    (fx.plan / f"gh-v{VERSION}").write_text("Array.dmg\n")  # an earlier publish died mid-upload
     (fx.plan / "gh-upload-inert").write_text("")
-    result = fx.run("ship-release.sh", "--version", "0.7.51", "--publish", env=publish_env)
+    result = fx.run("ship-release.sh", "--version", VERSION, "--publish", env=publish_env)
     pushed = sh("git", "--git-dir", str(fx.origin), "rev-parse", "array/integration").stdout.strip()
-    expect(result.returncode != 0 and "lacks Array-0.7.51.dmg" in result.stderr and pushed == head,
+    expect(result.returncode != 0 and f"lacks Array-{VERSION}.dmg" in result.stderr and pushed == head,
            "a release missing an asset is never pushed", result)
-    expect(any(line.startswith("gh release upload v0.7.51") and "--clobber" in line for line in fx.log()),
+    expect(any(line.startswith(f"gh release upload v{VERSION}") and "--clobber" in line for line in fx.log()),
            "a partial release is re-uploaded", result)
-    (fx.plan / "gh-v0.7.51").unlink()
+    (fx.plan / f"gh-v{VERSION}").unlink()
     (fx.plan / "gh-upload-inert").unlink()
     print("PASS publish-refuses-missing-asset")
     try:
-        result = fx.run("ship-release.sh", "--version", "0.7.51", "--publish", env=publish_env)
+        result = fx.run("ship-release.sh", "--version", VERSION, "--publish", env=publish_env)
     finally:
         server.shutdown()
     local = sh("git", "-C", str(fx.repo), "rev-parse", "HEAD").stdout.strip()
     branches = [sh("git", "--git-dir", str(fx.origin), "rev-parse", ref).stdout.strip() for ref in ("array/integration", "main")]
-    create = [line for line in fx.log() if line.startswith("gh release create v0.7.51")]
+    create = [line for line in fx.log() if line.startswith(f"gh release create v{VERSION}")]
     expect(result.returncode == 0 and branches == [local, local] and len(create) == 1, "publish pushes and uploads", result)
-    expect(create[0].endswith("release/Array.dmg " + str(fx.repo / "qa-runs/ship-0.7.51/release/Array-0.7.51.dmg")),
+    expect(create[0].endswith("release/Array.dmg " + str(fx.repo / f"qa-runs/ship-{VERSION}/release/Array-{VERSION}.dmg")),
            f"both assets uploaded: {create}")
-    expect("is live" in result.stdout and Feed.polls > Feed.lag and "has not deployed build 102" in result.stdout,
+    expect("is live" in result.stdout and Feed.polls > Feed.lag and f"has not deployed build {BUILD}" in result.stdout,
            f"publish waits through the deploy lag, then returns ({Feed.polls} feed polls)", result)
     print("PASS publish-waits-for-live-feed")
 
