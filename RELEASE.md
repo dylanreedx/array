@@ -124,6 +124,10 @@ exits in seconds); `--uninstall` removes the job.
 The Mac must be awake to start it; caffeinate prevents idle system sleep during
 the run. The installed wrapper is copied to `~/array-scratch/nightly-gate`;
 rerun install after wrapper changes. Installation only sets up the scheduled job.
+Install records your shell's PATH for the job, so legs find claude, codex and pi;
+reinstall after moving those CLIs. The checkout runs on the local branch
+`gate/nightly-checkout`. To gate a branch before it lands, run it by hand with
+`ARRAY_NIGHTLY_REF=<branch> scripts/nightly-gate.sh`.
 
 Run `scripts/nightly-gate.sh --latest-green` to print the newest integration
 ancestor with a green nightly result. Inspect `~/array-scratch/nightly-gate/latest.json`
