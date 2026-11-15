@@ -1072,6 +1072,7 @@ if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --hide-external-rows-check
   run_app_check .build/debug/Array --sidebar-truth-check
   run_app_check .build/debug/Array --subagent-sidebar-open-check
+  run_app_check .build/debug/Array --sidebar-row-reveal-check
   matrix_report 'Sidebar refinements matrix (targeted)'
   exit $?
 fi
@@ -2349,6 +2350,12 @@ run_app_check .build/debug/Array --subagent-tile-zone-check
 # a helper in another project. A real row click must open the subagent's tile
 # in each, with tmux off and with a failing tmux shim that must never be called.
 run_app_check .build/debug/Array --subagent-sidebar-open-check
+# 0.7.51: a row highlighted and the canvas stayed put. A push that re-rendered
+# the inbox between mouse-down and mouse-up left `clickedRow` naming the old
+# slot, so the click opened the neighbour. A real click in a key window must
+# put the camera on the agent's tile and focus it, in the armed zone, another
+# zone, after an app switch, while agents stream and with a row arriving mid-click.
+run_app_check .build/debug/Array --sidebar-row-reveal-check
 # With auto-layout OFF, a zone's automatic placement clamped only the camera, so
 # a tile could be framed past the zone's edge; auto-layout's settle grew the zone
 # over it and hid that. Toolbar spawns into one zone until it is full, asserting
