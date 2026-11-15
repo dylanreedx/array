@@ -24904,6 +24904,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.onArchivedAgentAdopted = { [weak self] _ in
             self?.scheduleAgentSurfacePush(debounce: 0.05)
         }
+        agentSupervisor.onRecordsArchived = { [weak self] _ in
+            self?.scheduleAgentSurfacePush(debounce: 0.05)
+        }
         let collaborationRoot = collaborationSupportRoot
         agentSupervisor.recordArchiveSharedAgents = {
             try SharedAreaLocalStore.boundAgentIDs(applicationSupportRoot: collaborationRoot)

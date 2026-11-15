@@ -2981,9 +2981,6 @@ final class AgentSupervisor {
         var stale: [AgentID] = []
         /// Already live in this session, so the in-memory copy was left alone.
         var skipped: [AgentID] = []
-        /// Moved to `agents/archive/` by this restore (gate on only): read this
-        /// once, never again at boot, and adopted back by id on demand.
-        var archived: [AgentID] = []
     }
 
     /// The settings suite the archive gate is read from. nil (every check that
@@ -2993,11 +2990,15 @@ final class AgentSupervisor {
     var recordArchiveNow: () -> Date = { Date() }
     /// An archived agent came back because something asked for it by id.
     var onArchivedAgentAdopted: ((AgentID) -> Void)?
+    /// The archive pass moved agents out of the live set after the UI saw them.
+    var onRecordsArchived: (([AgentID]) -> Void)?
     /// Agents a shared area binds by id (`SharedAreaLocalSourceBinding.agentID`).
     /// A peer's prompt and the host's projection look those up by id, so they
     /// stay live. Throwing skips the archive pass: an unread binding could name
-    /// any agent.
-    var recordArchiveSharedAgents: (() throws -> Set<AgentID>)?
+    /// any agent. It reads files, so it is called off the main thread.
+    var recordArchiveSharedAgents: (@Sendable () throws -> Set<AgentID>)?
+    /// The pass the last gate-on restore scheduled; checks await it.
+    private(set) var recordArchivePassForQA: Task<Void, Never>?
 
     /// The agents this supervisor adopted from a previous launch. Read by
     /// `wireManagedAgentTile`, which shows a "previous session" notice for them: the
@@ -3190,7 +3191,7 @@ final class AgentSupervisor {
         settleHelpersCutOffByRestart()
         if AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
             archiveMayHoldRecords = true
-            archiveIdleRecordsAfterRestore(stored: stored, report: &report)
+            scheduleRecordArchivePass(stored: stored, skipped: Set(report.skipped))
         }
         for root in Set(records.values.map(\.checkoutRoot)) {
             ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
@@ -3202,27 +3203,47 @@ final class AgentSupervisor {
         return report
     }
 
-    /// Performance at scale, item 4. Runs at the END of restore, once
+    /// Performance at scale, item 4. Scheduled at the END of restore, once
     /// everything that can tie a record to this session is known — the
-    /// reconciled runs, the helper subscriptions, the queues — and before any
-    /// tile, sidebar row or flush has seen the records. A record leaves the
-    /// live set only if it says it may (`AgentRecordArchivePolicy`) AND nothing
-    /// here still holds it: a process, a queue, an event this restore
-    /// delivered, a durable wakeup, a shared-area binding, a parent's
-    /// subscription or undelivered completion, or a child that stays.
-    private func archiveIdleRecordsAfterRestore(stored: [AgentRecord], report: inout RestoreReport) {
-        let now = recordArchiveNow()
-        let shared: Set<AgentID>
-        do { shared = try recordArchiveSharedAgents?() ?? [] } catch {
-            warn("AgentSupervisor.restore: archive skipped, shared-area bindings are unreadable: \(error)")
-            return
+    /// reconciled runs, the helper subscriptions, the queues. The shared-area
+    /// bindings are read off the main thread (one `state.json` per cached
+    /// area), so the pass itself runs once they are in, on the main thread,
+    /// against the live state of that moment. The boot does not wait for it:
+    /// the records it moves leave a sidebar that has already drawn them.
+    private func scheduleRecordArchivePass(stored: [AgentRecord], skipped: Set<AgentID>) {
+        let scan = recordArchiveSharedAgents
+        recordArchivePassForQA?.cancel()
+        recordArchivePassForQA = Task { @MainActor [weak self] in
+            let shared = await Task.detached(priority: .utility) { () -> Result<Set<AgentID>, Error> in
+                Result { try scan?() ?? [] }
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            switch shared {
+            case let .success(shared):
+                self.archiveIdleRecords(shared: shared, stored: stored, skipped: skipped)
+            case let .failure(error):
+                self.warn("AgentSupervisor.restore: archive skipped, shared-area bindings are unreadable: \(error)")
+            }
         }
+    }
+
+    /// A record leaves the live set only if it says it may
+    /// (`AgentRecordArchivePolicy`) AND nothing here still holds it: a
+    /// process, a queue, an event this session delivered, a durable wakeup, a
+    /// shared-area binding, a parent's subscription or undelivered completion,
+    /// or a child that stays.
+    private func archiveIdleRecords(shared: Set<AgentID>, stored: [AgentRecord], skipped: Set<AgentID>) {
+        // The gate may have gone off while the bindings were read.
+        guard AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) else { return }
+        let now = recordArchiveNow()
         // A durable wakeup finds its agent by id when it fires.
         let scheduled = Set(wakeupScheduler?.store.entries.map(\.agent) ?? [])
-        let skipped = Set(report.skipped)
+        // What restore read, as it is now: adopted records in their live
+        // state, stale ones as stored. One deleted since is gone from both.
         var current: [AgentID: AgentRecord] = [:]
         for record in stored where !skipped.contains(record.id) {
-            current[record.id] = records[record.id] ?? record
+            if let live = records[record.id] { current[record.id] = live }
+            else if staleIDs.contains(record.id) { current[record.id] = record }
         }
         var eligible = Set(current.values.filter { record in
             let id = record.id
@@ -3274,10 +3295,10 @@ final class AgentSupervisor {
             restoredIDs.remove(id)
             staleIDs.remove(id)
             pendingModeRestarts.remove(id)
-            report.archived.append(id)
         }
-        let archived = Set(report.archived)
-        report.restored.removeAll { archived.contains($0) }
+        guard !moved.isEmpty else { return }
+        scheduleCharacterPacks()
+        onRecordsArchived?(moved)
     }
 
     /// Turning the gate off reverts it: what an earlier launch archived is

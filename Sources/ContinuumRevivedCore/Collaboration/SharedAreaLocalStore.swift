@@ -334,21 +334,46 @@ extension SharedAreaLocalStore {
 }
 
 extension SharedAreaLocalStore {
+    /// Every `boundAgentIDs` call, and those made on the main thread: the
+    /// record-archive witness asserts the boot never reads them there.
+    public static var bindingScansForQA: (total: Int, onMain: Int) { (bindingScans.value, bindingScansOnMain.value) }
+    fileprivate static let bindingScans = QACounter()
+    fileprivate static let bindingScansOnMain = QACounter()
+}
+
+/// `SharedAreaLocalStore.boundAgentIDs` could not read one path; the warning
+/// that reports it names the path.
+public struct SharedAreaBindingScanError: Error, CustomStringConvertible {
+    public let path: String
+    public let underlying: Error
+    public var description: String { "\(path): \(underlying)" }
+}
+
+extension SharedAreaLocalStore {
     /// Every agent a cached shared area binds by id, over every endpoint,
     /// person and area of one channel (the directories `init` builds). Throws
     /// on any area it cannot read, including one awaiting recovery from
     /// backups, so a caller that must not lose a bound agent can fail closed.
+    /// The error names the path (`SharedAreaBindingScanError`). Reads files:
+    /// call it off the main thread.
     public static func boundAgentIDs(applicationSupportRoot: URL,
                                      bundleIdentifier: String? = Bundle.main.bundleIdentifier) throws -> Set<AgentID> {
+        bindingScans.increment()
+        if Thread.isMainThread { bindingScansOnMain.increment() }
         struct Bindings: Decodable { let sourceBindings: [SharedAreaLocalSourceBinding] }
         let collaboration = applicationSupportRoot.standardizedFileURL.resolvingSymlinksInPath()
             .appendingPathComponent(AppChannel.applicationSupportDirectoryName(bundleIdentifier: bundleIdentifier), isDirectory: true)
             .appendingPathComponent("collaboration", isDirectory: true)
         let fm = FileManager.default
+        func named<T>(_ url: URL, _ body: () throws -> T) throws -> T {
+            do { return try body() } catch let error as SharedAreaBindingScanError { throw error } catch {
+                throw SharedAreaBindingScanError(path: url.path, underlying: error)
+            }
+        }
         func directories(in url: URL) throws -> [URL] {
             var isDirectory: ObjCBool = false
             guard fm.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else { return [] }
-            return try fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            return try named(url) { try fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) }
         }
         let decoder = JSONCodec.makeDecoder()
         var ids: Set<AgentID> = []
@@ -358,11 +383,13 @@ extension SharedAreaLocalStore {
                     let state = area.appendingPathComponent("state.json")
                     guard fm.fileExists(atPath: state.path) else {
                         if try !directories(in: area.appendingPathComponent("backups", isDirectory: true)).isEmpty {
-                            throw SharedAreaLocalStoreError.recoveryRequired
+                            throw SharedAreaBindingScanError(path: area.path, underlying: SharedAreaLocalStoreError.recoveryRequired)
                         }
                         continue
                     }
-                    ids.formUnion(try decoder.decode(Bindings.self, from: Data(contentsOf: state)).sourceBindings.compactMap(\.agentID))
+                    ids.formUnion(try named(state) {
+                        try decoder.decode(Bindings.self, from: Data(contentsOf: state)).sourceBindings.compactMap(\.agentID)
+                    })
                 }
             }
         }
