@@ -1375,6 +1375,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--sidebar-row-reveal-check") {
+            do {
+                _ = NSApplication.shared
+                print(try SidebarRowRevealChecks.run())
+                print("ContinuumRevivedSidebarRowRevealChecks passed: a sidebar row click puts the camera on the agent's tile and focuses it")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--subagent-sidebar-open-check") {
             do {
                 _ = NSApplication.shared
