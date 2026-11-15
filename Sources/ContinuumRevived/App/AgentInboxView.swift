@@ -6884,6 +6884,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Program 96/P0.1 reads these so a corpus can prove what the PRODUCTION join
     /// produced, then render those exact values in a deterministic probe host.
     var qaAllRowsForQA: [AgentInboxRow] { allRows }
+    /// The agents the table has selected, in row order.
+    var qaSelectedAgentIdsForQA: [UUID] { selectedRows.map(\.id) }
     /// The live table index for an agent id, including the section rows that
     /// precede it. Native virtual AX children expose this same index even when
     /// the corresponding cell is outside the viewport.

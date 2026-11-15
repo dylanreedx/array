@@ -190,12 +190,14 @@ enum SidebarRowRevealChecks {
         // list re-renders under the pointer. The default sort re-selects the
         // pressed row by id, so it stays highlighted — the 0.7.51 report.
         var lateArrived = false
+        var lateAgent: AgentID?
         variant("push mid-click, a row arrives", agent: armedAgent, tile: armedTile, midClick: {
             let late = supervisor.spawn(
                 role: nil, prompt: nil, cwd: f.paRoot, harness: .pi,
                 model: WorkspaceAgentReportChecks.model, thinking: "high",
                 projectId: f.projectPa, projectRoot: f.paRoot)
             _ = supervisor.rename(agentID: late, to: "Late agent")
+            lateAgent = late
             delegate.qaRefreshAgentSurfaces()
             lateArrived = sidebar.agentInbox.qaAllRowsForQA.contains { $0.id == late.rawValue }
         })
@@ -219,6 +221,83 @@ enum SidebarRowRevealChecks {
         // release row is the one the action opens, as it was before the fix.
         // Last: it leaves a multi-row selection behind it.
         variant("pressed on one row, released on another", agent: f.agentId, tile: f.agentTileB, pressOn: armedAgent)
+
+        // Several rows selected by a drag, then a PLAIN click on one of them: as
+        // in Finder and Mail, the selection collapses to that row and it opens.
+        // AppKit sent no action for this click at all, so the row stayed lit in
+        // the selection and the canvas never moved.
+        let inbox = sidebar.agentInbox
+        func dragSelect(_ label: String) -> Set<UUID>? {
+            do { try click(row: f.agentId.rawValue, in: sidebar, window: window, pressedRow: armedAgent.rawValue) } catch {
+                failures.append("[\(label)] precondition: \(error)"); return nil
+            }
+            spin(0.2)
+            let selected = Set(inbox.qaSelectedAgentIdsForQA)
+            guard selected.count >= 2, selected.contains(armedAgent.rawValue) else {
+                failures.append("[\(label)] precondition: the drag selected \(selected.count) row(s), not several"); return nil
+            }
+            return selected
+        }
+        do {
+            let label = "plain click inside a multi-selection"
+            if dragSelect(label) != nil {
+                f.canvas.navigationFlightOverrideForQA = false
+                f.canvas.setViewport(away)
+                _ = delegate.qaFocusBroker.enterScope(.canvas, reason: .userClick)
+                // Every reveal the click asks the host for, through the production hook.
+                let host = inbox.onRevealRow
+                var reveals: [UUID] = []
+                inbox.onRevealRow = { reveals.append($0); host?($0) }
+                defer { inbox.onRevealRow = host }
+                let target = f.canvas.framedViewportForTileJump(armedTile)
+                do { try click(row: armedAgent.rawValue, in: sidebar, window: window) } catch {
+                    failures.append("[\(label)] \(error)")
+                }
+                spin(0.2)
+                let prompt = reveals.count
+                let promptSelection = inbox.qaSelectedAgentIdsForQA
+                let camera = f.canvas.viewport
+                let landed = target.map { abs(camera.x - $0.x) < 1 && abs(camera.y - $0.y) < 1 } ?? false
+                // AppKit can act on this click later, once the double-click
+                // interval has passed: wait it out and count again.
+                spin(NSEvent.doubleClickInterval + 0.5)
+                if prompt != 1 || promptSelection != [armedAgent.rawValue] || !landed
+                    || delegate.qaFocusBroker.activeSurface != .tile(armedTile) {
+                    failures.append("[\(label)] within 0.2 s of release: \(prompt) reveal(s), \(promptSelection.count) row(s) selected, camera on the tile \(landed), focus \(String(describing: delegate.qaFocusBroker.activeSurface)); \(reveals.count) reveal(s) by \(String(format: "%.1f", NSEvent.doubleClickInterval + 0.7)) s")
+                } else if reveals.count != 1 {
+                    failures.append("[\(label)] one click opened the row \(reveals.count) times (the extra after the double-click interval)")
+                } else if inbox.qaSelectedAgentIdsForQA != [armedAgent.rawValue] {
+                    failures.append("[\(label)] the selection changed after the click: \(inbox.qaSelectedAgentIdsForQA.count) row(s)")
+                } else {
+                    report.append("  \(label): collapsed to the row, opened once, camera on the tile")
+                }
+            }
+        }
+
+        // ⌘- and ⇧-clicks stay AppKit's selection gestures: they change the
+        // selection the way NSTableView does and never move the camera.
+        for (label, modifiers) in [("⌘-click inside a multi-selection", NSEvent.ModifierFlags.command),
+                                   ("⇧-click inside a multi-selection", NSEvent.ModifierFlags.shift)] {
+            guard let target = lateAgent else { failures.append("[\(label)] precondition: no third row"); continue }
+            guard let before = dragSelect(label) else { continue }
+            f.canvas.setViewport(away)
+            do { try click(row: target.rawValue, in: sidebar, window: window, modifiers: modifiers) } catch {
+                failures.append("[\(label)] \(error)"); continue
+            }
+            spin(0.2)
+            let after = Set(inbox.qaSelectedAgentIdsForQA)
+            let expected = modifiers == .command
+                ? before.symmetricDifference([target.rawValue]) : nil
+            if f.canvas.viewport != away {
+                failures.append("[\(label)] the camera moved: \(f.canvas.viewport)")
+            } else if let expected, after != expected {
+                failures.append("[\(label)] the selection is \(after.count) row(s), expected \(expected.count): ⌘ toggles the row")
+            } else if modifiers == .shift, !(after.contains(target.rawValue) && after.count >= 2) {
+                failures.append("[\(label)] the selection is \(after.count) row(s): ⇧ extends a range to the row")
+            } else {
+                report.append("  \(label): selection \(before.count) → \(after.count) rows, camera stayed")
+            }
+        }
         return (report, failures)
     }
 
@@ -230,7 +309,8 @@ enum SidebarRowRevealChecks {
     /// first so the table's tracking loop ends, then mouse-down sent.
     /// `pressedRow` presses there and drags to `id` before releasing.
     private static func click(row id: UUID, in sidebar: WorkspaceSidebarView, window: NSWindow,
-                              betweenDownAndUp: (() -> Void)? = nil, pressedRow: UUID? = nil) throws {
+                              betweenDownAndUp: (() -> Void)? = nil, pressedRow: UUID? = nil,
+                              modifiers: NSEvent.ModifierFlags = []) throws {
         let inbox = sidebar.agentInbox
         sidebar.layoutSubtreeIfNeeded()
         inbox.layoutForQA()
@@ -246,7 +326,7 @@ enum SidebarRowRevealChecks {
         let pressPoint = try pressedRow.map(titlePoint) ?? releasePoint
         func mouse(_ type: NSEvent.EventType) throws -> NSEvent {
             guard let event = NSEvent.mouseEvent(
-                with: type, location: type == .leftMouseDown ? pressPoint : releasePoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                with: type, location: type == .leftMouseDown ? pressPoint : releasePoint, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
                 pressure: type == .leftMouseUp ? 0 : 1) else { throw Failure(description: "could not synthesise \(type)") }
             return event
