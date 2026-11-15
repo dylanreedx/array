@@ -3316,7 +3316,10 @@ final class AgentSupervisor {
     /// so what this session's restore archived would answer not_found until
     /// the next launch's restore brought it back. The workspace API calls this
     /// on every request: one Bool while there is nothing to do, and the whole
-    /// archive brought back once, the first time the gate reads off.
+    /// archive brought back once, the first time the gate reads off. Tried
+    /// once: the lock fails only when the store directory cannot be created or
+    /// opened, which a retry per request would only warn about again, and the
+    /// next launch's restore brings the archive back with the gate off.
     func restoreArchivedRecordsIfGateOff() {
         guard archiveMayHoldRecords, !AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) else { return }
         archiveMayHoldRecords = false
@@ -3324,8 +3327,7 @@ final class AgentSupervisor {
         do {
             result = try withAgentStoreLock { store.unarchiveAll() }
         } catch {
-            archiveMayHoldRecords = true
-            warn("AgentSupervisor: archived agents stay archived, the store lock is unavailable: \(error)")
+            warn("AgentSupervisor: archived agents stay archived until the next launch, the store lock is unavailable: \(error)")
             return
         }
         warnUnarchiveFailures(result.unreadable, from: "AgentSupervisor")

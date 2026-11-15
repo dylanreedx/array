@@ -339,6 +339,18 @@ enum AgentRecordArchiveChecks {
         _ = secondApp.revealAgentFromInbox(edges.archivedClosed.rawValue)
         try expect(second.records[edges.archivedClosed] != nil, "a reveal by id brings an archived agent back")
         let liveAfterAdoption = second.records.count
+        try expect(liveAfterAdoption < all.count, "fixture: the archive holds records before the gate goes off")
+        // Follow-up (a) at scale: the gate goes off while this session runs.
+        // What the first workspace API request after it pays, on the main thread.
+        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
+        let restoreStart = ContinuousClock.now
+        second.restoreArchivedRecordsIfGateOff()
+        let restoreElapsed = ContinuousClock.now - restoreStart
+        let restoreMs = (Double(restoreElapsed.components.seconds) + Double(restoreElapsed.components.attoseconds) / 1e18) * 1000
+        try expect(Set(second.records.keys) == all && archivedFiles(store).isEmpty,
+                   "gate off at runtime: the whole archive is live again, live \(second.records.count)/\(all.count), archive \(archivedFiles(store).count)")
+        print(String(format: "METRIC agent-record-archive runtime-gate-off restored=%d restoredMs=%.1f",
+            second.records.count - liveAfterAdoption, restoreMs))
         second.stopAll()
         // Turning the gate off reverts it: the next boot decodes every record.
         let off = gateSuite(false)
@@ -584,6 +596,12 @@ enum AgentRecordArchiveChecks {
         }
         try expect(archivedFiles(store).isEmpty, "gate turned off at runtime: the archive is empty, holds \(archivedFiles(store))")
         try expect(WorkspaceAPIService.archivedAgentScansForQA == scans, "gate turned off at runtime: the workspace API walked a payload")
+        // Done once: a record archived since stays put through the next request.
+        try store.archive(id: helpers[1])
+        _ = f.api.dispatch(agentId: f.agentId, requestId: "runtime-off-again", op: "agent.inspect",
+            payload: ["agentId": helpers[0].rawValue.uuidString])
+        try expect(exists(store.layout.archivedAgentFile(id: helpers[1])), "gate off at runtime: the archive is restored once, not on every request")
+        _ = try store.unarchive(id: helpers[1])
         print("PASS agent record archive: the gate turned off while Array runs brings every archived agent back on the next workspace API request, without walking its payload")
     }
 
@@ -705,6 +723,13 @@ enum AgentRecordArchiveChecks {
             try expect("\(reply)".lowercased().contains(id.rawValue.uuidString.lowercased()), "gate off: inspect answers for \(id.rawValue)")
         }
         try expect(WorkspaceAPIService.archivedAgentScansForQA == scans, "gate off: the workspace API scanned a payload")
+        // A session that never ran with the gate on never restores the archive
+        // at runtime: its boot already did.
+        try store.archive(id: helpers[0])
+        _ = f.api.dispatch(agentId: f.agentId, requestId: "revert-never-on", op: "agent.inspect",
+            payload: ["agentId": helpers[1].rawValue.uuidString])
+        try expect(exists(store.layout.archivedAgentFile(id: helpers[0])), "gate never on this session: a request restored the archive")
+        _ = try store.unarchive(id: helpers[0])
         try? FileManager.default.removeItem(at: store.layout.archiveQuarantineDirectory)
         print("PASS agent record archive: gate off restores every archived record at boot (live copy wins, a corrupt file is quarantined without blocking boot) and agent.inspect answers for them")
     }
