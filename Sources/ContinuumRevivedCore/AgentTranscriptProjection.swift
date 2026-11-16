@@ -171,6 +171,7 @@ public struct AgentTranscriptProjection: Sendable {
         var copy = self
         copy.threadId = threadId
         copy.events = events.map { $0.withThreadId(threadId) }
+        copy.statusNeedsDerivation = true
         return copy
     }
 
@@ -540,6 +541,20 @@ public struct AgentTranscriptProjection: Sendable {
 
     private var touched = TouchedNodes()
 
+    /// True until the window has been derived once, and after a rebind.
+    private var statusNeedsDerivation = true
+
+    /// The event kinds `deriveStatusSignals` reads; every other kind leaves it unchanged.
+    private static func feedsStatusSignals(_ event: AgentRuntimeEvent) -> Bool {
+        switch event {
+        case .sessionStateChanged, .turnStarted, .turnCompleted, .requestOpened, .requestResolved,
+             .userInputRequested, .userInputResolved:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Hands over everything touched since the last call and starts a new
     /// accumulation. Draining is destructive on purpose: two consumers cannot
     /// both be told "you have not seen this yet".
@@ -550,10 +565,22 @@ public struct AgentTranscriptProjection: Sendable {
 
     public mutating func ingest(_ event: AgentRuntimeEvent) {
         events.append(event)
-        if events.count > Self.eventWindow { events.removeFirst(events.count - Self.eventWindow) }
-        currentStatus = deriveAgentStatus(
-            signals: deriveStatusSignals(from: events, threadId: threadId, engineStatus: .idle)
-        )
+        var changesStatus = statusNeedsDerivation || Self.feedsStatusSignals(event)
+        if events.count > Self.eventWindow {
+            let overflow = events.count - Self.eventWindow
+            changesStatus = changesStatus || events.prefix(overflow).contains(where: Self.feedsStatusSignals)
+            events.removeFirst(overflow)
+        }
+        // `deriveStatusSignals` walks the whole window and reads only the event
+        // kinds below. A streamed chunk is none of them, so re-walking 400 events
+        // per chunk recomputed the same status (5% of the main thread at 24
+        // streaming agents). Recompute when a status event arrives or leaves.
+        if changesStatus {
+            statusNeedsDerivation = false
+            currentStatus = deriveAgentStatus(
+                signals: deriveStatusSignals(from: events, threadId: threadId, engineStatus: .idle)
+            )
+        }
         for mutation in mutations(for: event) {
             do { record(try reducer.apply(mutation)) }
             catch {
