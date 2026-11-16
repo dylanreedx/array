@@ -132,15 +132,20 @@ public enum SidebarRecovery {
         guard let detail, !detail.isEmpty else { return nil }
         let text = detail.lowercased()
         func has(_ markers: [String]) -> Bool { markers.contains(where: text.contains) }
-        if has(["usage limit", "rate limit", "rate_limit", "ratelimit", "5-hour limit", "weekly limit",
-                "session limit", "hit your limit", "limit reached", "out of usage", "quota",
-                "credit balance"]) { return .usageLimit }
-        if has(["oauth", "authenticate", "authentication", "/login", "unauthorized", "not logged in",
-                "logged out", "token expired", "token has expired", "sign in again", "sign-in"]) {
+        // The CLIs' own words (failure census), not topic words: a task error
+        // that merely mentions a file, a login or a quota must stay Failed, or
+        // Clear would refuse it as a blocker.
+        if has(["hit your usage limit", "usage limit reached", "rate_limit", "rate limit reached",
+                "rate limit exceeded", "5-hour limit", "weekly limit", "session limit", "hit your limit",
+                "out of usage", "insufficient_quota", "quota exceeded", "credit balance is too low"]) {
+            return .usageLimit
+        }
+        if has(["failed to authenticate", "authentication_error", "authentication failed",
+                "oauth session expired", "oauth token has expired", "invalid api key",
+                "please run /login", "not logged in", "token has expired", "sign in again"]) {
             return .signInExpired
         }
-        if has(["could not start", "could not launch", "couldn't start", "no such file",
-                "executable", "launchfailed", "failed to launch", "command not found"]) {
+        if has(["could not start:", "could not launch", "couldn't start:", "failed to launch"]) {
             return .couldNotStart
         }
         if has(["overloaded", "serveroverloaded", "at capacity", "server is busy", " 529", " 503",

@@ -78,6 +78,16 @@ func runSidebarLedgerCoreChecks() {
         ("Array restarted while this helper was working, so its turn did not finish.", .interruptedByRestart),
         ("This child was still running when the previous session ended.", .interruptedByRestart),
         ("Claude Code reported an error without details.", nil),
+        ("You've hit your usage limit. Try again at 3:00 AM.", .usageLimit),
+        ("Invalid API key · Please run /login", .signInExpired),
+        ("Not logged in, please run /login", .signInExpired),
+        ("API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token has expired.\"}}", .signInExpired),
+        ("Claude Code could not start: could not launch claude: No such file or directory (2)", .couldNotStart),
+        // Task errors that only mention a topic stay plain failures.
+        ("Tests failed: no such file or directory: fixtures/run.json", nil),
+        ("Build failed: executable target 'Array' has errors", nil),
+        ("Fix the authentication middleware: 2 tests failed", nil),
+        ("Add per-team quota display; snapshot mismatch", nil),
         ("The Codex session ended before this child finished.", nil),
         ("The Claude parent ended before this mirrored child reported a result.", nil),
         (nil, nil),
@@ -96,6 +106,10 @@ func runSidebarLedgerCoreChecks() {
     let generic = F.row(90, "x", outcome: .failed, detail: "Claude Code reported an error without details.")
     expect(SidebarRecovery.cause(for: generic) == .taskError && SidebarRecovery.state(for: generic) == .failed,
            "unexplained failure is Failed with Open")
+    let fileError = F.row(92, "z", outcome: .failed, detail: "Tests failed: no such file or directory: fixtures/run.json")
+    expect(SidebarRecovery.cause(for: fileError) == .taskError && SidebarRecovery.state(for: fileError) == .failed
+           && SidebarRecovery.cause(for: fileError)?.isBlocking == false,
+           "a task error mentioning 'no such file' is a plain, clearable Failed")
     let stopped = F.row(91, "y", outcome: .interrupted)
     expect(SidebarRecovery.cause(for: stopped) == nil && SidebarRecovery.state(for: stopped) == .stopped,
            "a bare interruption is Stopped, not a failure")
@@ -204,7 +218,7 @@ func runSidebarLedgerCoreChecks() {
     // event after Clear. It must reappear without waiting for another turn.
     let unknown = F.row(300, "Initially unknown", outcome: .failed, detail: "No details")
     let unknownMarks = [unknown.id: SidebarClearMarks.mark(for: unknown, now: F.now)]
-    for detail in [F.usage, "OAuth session expired", "could not start executable"] {
+    for detail in [F.usage, "OAuth session expired", "Codex could not start: could not launch codex: No such file or directory (2)"] {
         var revealed = unknown
         revealed.failureDetail = detail
         let applied = SidebarClearMarks.apply(unknownMarks, to: [revealed])
@@ -219,7 +233,7 @@ func runSidebarLedgerCoreChecks() {
     // A subsuming root mark must release when old descendant facts become known.
     let oldChild = F.row(201, "Unknown child", parent: 200, outcome: .failed)
     let rootMark = [F.id(200): marks[F.id(200)]!]
-    for detail in [F.usage, "OAuth session expired", "could not start executable"] {
+    for detail in [F.usage, "OAuth session expired", "Codex could not start: could not launch codex: No such file or directory (2)"] {
         var child = oldChild
         child.failureDetail = detail
         let restored = SidebarClearMarks.apply(rootMark, to: [finished[0], child])
