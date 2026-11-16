@@ -1164,6 +1164,12 @@ final class AgentSupervisor {
     private let claudeSessionTitle: @Sendable (String, String) -> String?
     private let attachmentStore: AgentComposerAttachmentStore
     private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
+    /// Quota readings belong to accounts, not harnesses or agent records. The
+    /// index is rebuilt only when an observed agent's account binding can move;
+    /// routine quota events visit just the observers spending that account.
+    private var quotaObservationAgentsByAccount: [String: Set<AgentID>] = [:]
+    private var quotaObservationIndexDirty = true
+    private(set) var qaQuotaLastRoutingInspections = 0
     private var sharedTranscriptDetails: [AgentID: AgentTranscriptCanvasToolDetail] = [:]
     private var sharedTranscriptDetailRevisions: [AgentID: UInt64] = [:]
     private var sharedTranscriptDetailObservers: [AgentID: [UUID: () -> Void]] = [:]
@@ -1232,6 +1238,10 @@ final class AgentSupervisor {
     /// message card reads avoids capturing/copying the complete dictionary on
     /// every agent event while still covering restore, removal and retargeting.
     private func setRecord(_ record: AgentRecord?, for id: AgentID) {
+        if runtimeObservationObservers[id] != nil,
+           (records[id] == nil) != (record == nil) || records[id]?.harness != record?.harness {
+            quotaObservationIndexDirty = true
+        }
         guard let observers = messageSenderObservers[id], !observers.isEmpty else {
             recordStorage[id] = record
             notifyReferenceStatusIfChanged(id)
@@ -1404,7 +1414,9 @@ final class AgentSupervisor {
     /// sidebar row draws them from the record, so the host re-pushes the rows.
     var onSelfReportChanged: ((AgentID) -> Void)?
     /// The runner for the prompt currently in flight, if any.
-    private var runners: [AgentID: AgentRunning] = [:]
+    private var runners: [AgentID: AgentRunning] = [:] {
+        didSet { quotaObservationIndexDirty = true }
+    }
     private var sharedAgentControlGates: [AgentID: [String: SharedAgentControlGate]] = [:]
     private struct SharedInputPermit {
         let agentID: AgentID
@@ -1450,7 +1462,9 @@ final class AgentSupervisor {
     /// Provider sessions which are alive but have no turn in flight. Keeping
     /// these separate preserves `runners` as the truthful busy/Stop capability
     /// while avoiding a fresh Pi/Node/resource-loader startup on every message.
-    private var idleSessionRunners: [AgentID: AgentRunning] = [:]
+    private var idleSessionRunners: [AgentID: AgentRunning] = [:] {
+        didSet { quotaObservationIndexDirty = true }
+    }
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
     /// How many events each agent's tails have been sent. A local notice is
     /// stamped with it, so a tile still reading its tail can place the notice
@@ -2410,6 +2424,7 @@ final class AgentSupervisor {
         _ observer: @escaping (AgentRuntimeObservation) -> Void
     ) -> UUID {
         let token = UUID()
+        if runtimeObservationObservers[id] == nil { quotaObservationIndexDirty = true }
         runtimeObservationObservers[id, default: [:]][token] = observer
         return token
     }
@@ -2418,6 +2433,34 @@ final class AgentSupervisor {
         runtimeObservationObservers[id]?[token] = nil
         if runtimeObservationObservers[id]?.isEmpty == true {
             runtimeObservationObservers[id] = nil
+            quotaObservationIndexDirty = true
+        }
+    }
+
+    /// The quota is stored before this call so each recipient reads the new
+    /// value from its own account. Live and pooled runners retain the account
+    /// they actually launched on, including while a switch is in progress.
+    private func notifyQuotaObservers(_ observation: AgentRuntimeObservation, accountId: String, source: AgentID) {
+        var inspected = 0
+        if quotaObservationIndexDirty {
+            var grouped: [String: Set<AgentID>] = [:]
+            for id in runtimeObservationObservers.keys {
+                inspected += 1
+                guard let harness = records[id]?.harness else { continue }
+                let current = account(forAgent: id)?.id ?? AgentAccount.defaultAccountId(for: harness)
+                grouped[current, default: []].insert(id)
+            }
+            quotaObservationAgentsByAccount = grouped
+            quotaObservationIndexDirty = false
+        }
+        var recipients = quotaObservationAgentsByAccount[accountId] ?? []
+        // A provider can report quota before its agent has an account mapping.
+        // Its own observers must still receive the originating observation.
+        if runtimeObservationObservers[source] != nil { recipients.insert(source) }
+        inspected += recipients.count
+        qaQuotaLastRoutingInspections = inspected
+        for id in recipients {
+            runtimeObservationObservers[id]?.values.forEach { $0(observation) }
         }
     }
 
@@ -2522,9 +2565,7 @@ final class AgentSupervisor {
             let accountId = account(forAgent: id)?.id ?? AgentAccount.defaultAccountId(for: snapshot.harness)
             accountQuotas[accountId] = snapshot
             accountQuotaStore?.save(accountQuotas)
-            runtimeObservationObservers.values.forEach { observers in
-                observers.values.forEach { $0(observation) }
-            }
+            notifyQuotaObservers(observation, accountId: accountId, source: id)
             return
         }
         // S3: a provider retry is turn presence ("Retrying (2/5)"), then the
@@ -2600,7 +2641,9 @@ final class AgentSupervisor {
     /// channel-split, and a check's temp store gets its own).
     private lazy var accountStore = AgentAccountStore(
         applicationSupportDirectory: store.layout.applicationSupportDirectory)
-    private lazy var accountState: AgentAccountStore.State = accountStore.load()
+    private lazy var accountState: AgentAccountStore.State = accountStore.load() {
+        didSet { quotaObservationIndexDirty = true }
+    }
 
     /// Where Personal's settings live, for a new account to share. A check
     /// points these at temp folders so nothing links to the real ones.
@@ -2610,7 +2653,9 @@ final class AgentSupervisor {
     /// The account the agent's LIVE runner signed in as — a running turn or a
     /// pooled idle session. A switch never touches it; the next runner is built
     /// for the account in use instead.
-    private var runnerAccounts: [AgentID: AgentAccount] = [:]
+    private var runnerAccounts: [AgentID: AgentAccount] = [:] {
+        didSet { quotaObservationIndexDirty = true }
+    }
 
     /// Every account: each CLI's own login, then the ones Array added.
     var accounts: [AgentAccount] {
