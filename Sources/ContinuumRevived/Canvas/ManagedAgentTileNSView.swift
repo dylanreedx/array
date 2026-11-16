@@ -5059,6 +5059,15 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// T5b — the installed composer itself, so a check drives its real rail,
     /// key path and hint line rather than a copy.
     var qaComposerForChecks: AgentComposerView? { v2Composer }
+
+    /// Something typed or attached in the composer and not sent. A tile holding
+    /// the person's unsent words is never tidied away.
+    var hasUnsentDraft: Bool {
+        guard let draft = v2Composer?.draft else { return false }
+        return !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !draft.imageAttachments.isEmpty || !draft.fileReferences.isEmpty
+            || !draft.agentReferences.isEmpty || !draft.boardReferences.isEmpty
+    }
     /// Drives the composer's real draft-apply path, so clearing a draft in a
     /// check runs the same observer production runs.
     func qaSetComposerDraftForChecks(_ text: String) {

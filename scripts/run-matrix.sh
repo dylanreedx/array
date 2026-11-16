@@ -2211,6 +2211,11 @@ run_app_check .build/debug/Array --helper-wait-input-check
 run_leg python3 scripts/check-interruptible-helper-waits.py
 run_leg node --experimental-strip-types --no-warnings scripts/check-pi-helper-waits.mjs
 run_app_check .build/debug/Array --workspace-api-cross-harness-delegation-check
+# Tidy finished helper tiles: a helper delegated over the real API, finished
+# and delivered to its lead, has its tile closed to History by Array after the
+# grace period; failed, looked-at, typed-into, resized and user-started agents,
+# and every agent with the setting off, keep their tiles.
+run_app_check .build/debug/Array --helper-tile-tidy-check
 # .plans/79: a parent delegates and messages a child over the real API and pi
 # bridge. The child draws both as cards from the parent (name, colour, a reveal
 # that works), never as user prompts; the parent's row reads "Messaged …"; a

@@ -8110,6 +8110,56 @@ final class AgentSupervisor {
         }
     }
 
+    // MARK: - Tidy finished helper tiles
+
+    /// When each helper first finished a turn, this launch. A look at the tile
+    /// after this (focus, hover dwell, typing, which all mark it visited) makes
+    /// the tile the person's, and Array leaves it alone.
+    private(set) var helperFirstFinishedAt: [AgentID: Date] = [:]
+    /// When each helper's latest result reached the agent that delegated it,
+    /// this launch: the moment its delivery journal row is marked delivered.
+    private(set) var helperResultDeliveredAt: [AgentID: Date] = [:]
+    /// Fired on the main actor each time a helper's result is delivered to the
+    /// agent that delegated it. The app closes the tile after a grace period.
+    var onHelperResultDelivered: ((AgentID) -> Void)?
+
+    private func noteHelperResultDelivered(_ id: AgentID, to recipient: AgentID) {
+        guard records[id]?.parentAgentID == recipient else { return }
+        helperResultDeliveredAt[id] = helperCompletionNow()
+        onHelperResultDelivered?(id)
+    }
+
+    /// The record's half of "Tidy finished helper tiles": nil when nothing the
+    /// supervisor knows keeps this helper's tile, otherwise why it stays. The
+    /// canvas half (selected, hovered, moved, a draft) is the app's.
+    ///
+    /// Only a helper another agent delegated, whose latest turn succeeded, that
+    /// asks nothing of anyone, whose result has reached that agent, that has no
+    /// helper of its own still on the canvas or at work, and that nobody has
+    /// looked at since it first finished.
+    func helperTileTidyRefusal(_ id: AgentID, now: Date) -> String? {
+        guard let record = records[id] else { return "no record" }
+        guard let parent = record.parentAgentID, records[parent] != nil,
+              record.delegationContext != nil, record.capabilities.locallyManaged else { return "not a delegated helper" }
+        guard record.tileId != nil else { return "no tile" }
+        guard record.archivedAt == nil, record.closeRequestedAt == nil else { return "already closed" }
+        // A Managed lead's popped-out helper folds back by its own rule.
+        guard record.helperTileOpenedAt == nil, !record.pinned else { return "pinned or popped out" }
+        guard !isRunning(id) else { return "running" }
+        guard let terminal = record.latestTerminalEvent, terminal.outcome == .succeeded else { return "did not succeed" }
+        guard terminal.endedAt >= (record.latestPromptAt ?? record.createdAt) else { return "a turn is pending" }
+        guard record.declaredStatus?.needsYou == nil, record.helperWatchdogNeedsYou == nil,
+              !helperIsBlocked(record) else { return "needs someone" }
+        guard !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) else { return "still busy" }
+        guard let delivered = helperResultDeliveredAt[id], delivered >= terminal.endedAt else { return "result not delivered" }
+        guard !hasPendingArrayHelpers(id),
+              !records.values.contains(where: { $0.parentAgentID == id && ($0.tileId != nil || isRunning($0.id)) })
+        else { return "has live helpers" }
+        guard let finished = helperFirstFinishedAt[id] else { return "not finished this launch" }
+        if let visited = record.lastVisitedAt, visited > finished { return "looked at since finishing" }
+        return nil
+    }
+
     private func foldHelpers(of lead: AgentID) {
         var pending = children(of: lead)
         var seen: Set<AgentID> = [lead]
@@ -9088,6 +9138,7 @@ final class AgentSupervisor {
         guard let child = records[id], child.capabilities.locallyManaged,
               helperCompletionTurns[id] != identity else { return }
         helperCompletionTurns[id] = identity
+        if helperFirstFinishedAt[id] == nil { helperFirstFinishedAt[id] = helperCompletionNow() }
         let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let text = helperCompletionText(id, child: child, outcome: outcome, error: error, statusOverride: statusOverride).text
         let parents = Set([child.parentAgentID].compactMap { $0 }
@@ -9260,6 +9311,7 @@ final class AgentSupervisor {
                             state.phase = .delivered; state.via = "wake"; state.leaseUntil = nil
                             try SpawnResultFile.saveDelivery(state, parentCwd: cwd)
                             SpawnResultFile.markDelivered(state, parentCwd: cwd)
+                            noteHelperResultDelivered(AgentID(rawValue: state.helper), to: parent)
                         }
                         finishScheduledAdmission(queueID)
                         await releaseScheduledWakeups(for: parent, knownIDs: [queueID])
