@@ -4549,6 +4549,7 @@ final class CanvasNSView: NSView, TokenThemed {
         //   constant zoom every visible tile is a no-op and `pan.chromeRedraws`
         //   and `pan.tileLayoutPasses` both stay at 0 — which the budgets assert.
         for view in visibleTileViews { view.refreshZoomDependentChrome() }
+        updateStickyTileHeads()
         // Sharpness is enforced HERE, per step, and not once per gesture.
         //
         // A tile admitted as sharp-enough at zoom 1.0 is not sharp enough two steps
@@ -6662,8 +6663,15 @@ final class CanvasNSView: NSView, TokenThemed {
         guard let snapshot = navigationTileSnapshot(for: tileId) else { return nil }
         let frame = snapshot.worldFrame
         let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+        if snapshot.kind == .managedAgent, AgentJumpConfig.composerFirst(defaults: agentJumpDefaults) {
+            return framedWorkViewport(for: rect, kind: snapshot.kind, composerFirst: true)
+        }
         return framedWorkViewport(for: rect, kind: snapshot.kind)
     }
+
+    /// Where `AgentJumpConfig` is read: Settings writes `.standard`; a check
+    /// points this at its own suite.
+    var agentJumpDefaults: UserDefaults = .standard
 
     /// Frames the tile as a readable jump target. This first T07 slice snaps to
     /// the computed camera target; animation remains out of scope until a
@@ -6730,13 +6738,16 @@ final class CanvasNSView: NSView, TokenThemed {
         return CanvasEngine.screenToWorld(CGPoint(x: usable.midX, y: usable.midY), viewport: navigationViewport)
     }
 
-    func framedWorkViewport(for rect: CGRect, kind: TileKind) -> CanvasViewport {
+    func framedWorkViewport(for rect: CGRect, kind: TileKind, composerFirst: Bool = false) -> CanvasViewport {
         let usable = usableVisibleScreenRect
         var current = navigationViewport
         current.x += Double(usable.minX) / current.zoom
         current.y += Double(usable.minY) / current.zoom
-        var target = CameraFraming.revealWorkViewport(for: rect, kind: kind,
-            currentViewport: current, viewportSize: usable.size)
+        var target = composerFirst
+            ? CameraFraming.revealComposerViewport(for: rect, kind: kind,
+                currentViewport: current, viewportSize: usable.size)
+            : CameraFraming.revealWorkViewport(for: rect, kind: kind,
+                currentViewport: current, viewportSize: usable.size)
         target.x -= Double(usable.minX) / target.zoom
         target.y -= Double(usable.minY) / target.zoom
         return target
@@ -7097,6 +7108,58 @@ final class CanvasNSView: NSView, TokenThemed {
             qaCameraLayoutStats.boundsWrites += 1
             view.bounds = logical
         }
+        // A moved or resized tile may start or stop crossing the top edge.
+        // O(1): this tile only, and only an agent tile or one showing a head.
+        if view.tile.kind == .managedAgent || stickyHeadTiles[ObjectIdentifier(view)] != nil {
+            refreshStickyHead(for: view)
+        }
+    }
+
+    // MARK: - Sticky tile heads
+
+    /// The agent tiles currently showing a pinned copy of their header.
+    private var stickyHeadTiles: [ObjectIdentifier: TileNSView] = [:]
+
+    /// Per camera step: pin the head of every agent tile whose header has gone
+    /// above the top edge while its body is still on screen, and unpin the rest.
+    ///
+    /// O(crossing), never O(tiles): the candidates come from the world plane's
+    /// visibility index for a one-unit strip along the top edge, the same index
+    /// `visibleTileViews` answers from.
+    private func updateStickyTileHeads() {
+        var next: [ObjectIdentifier: TileNSView] = [:]
+        if AgentJumpConfig.composerFirst(defaults: agentJumpDefaults) {
+            let visible = worldPlane.bounds
+            let strip = CGRect(x: visible.minX, y: visible.minY, width: visible.width, height: 1)
+            for view in worldPlane.tileViews(intersecting: strip) where view.tile.kind == .managedAgent {
+                if let top = stickyHeadTop(for: view) {
+                    view.setStickyHeadTop(top)
+                    next[ObjectIdentifier(view)] = view
+                }
+            }
+        }
+        for (id, view) in stickyHeadTiles where next[id] == nil { view.setStickyHeadTop(nil) }
+        stickyHeadTiles = next
+    }
+
+    private func refreshStickyHead(for view: TileNSView) {
+        let id = ObjectIdentifier(view)
+        let top = view.tile.kind == .managedAgent && AgentJumpConfig.composerFirst(defaults: agentJumpDefaults)
+            ? stickyHeadTop(for: view) : nil
+        view.setStickyHeadTop(top)
+        stickyHeadTiles[id] = top == nil ? nil : view
+    }
+
+    /// The tile-local y the pinned head sits at — the top of the visible part of
+    /// the tile — or nil when the tile's own header is on screen, the tile is not
+    /// on screen, or too little of its body is left to carry a head.
+    private func stickyHeadTop(for view: TileNSView) -> CGFloat? {
+        guard view.superview === worldPlane, !view.isHidden else { return nil }
+        let top = worldPlane.bounds.minY - view.frame.minY
+        let bar = view.chromeBarHeight
+        guard top > 0, top + 2 * bar <= view.bounds.height,
+              view.frame.maxX > worldPlane.bounds.minX, view.frame.minX < worldPlane.bounds.maxX else { return nil }
+        return top
     }
 
     /// Geometry equality for layout short-circuits. The tolerance is far below

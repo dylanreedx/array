@@ -96,6 +96,29 @@ public enum CameraFraming {
         return revealWorkComposition(for: worldRect, viewportSize: viewportSize, zoom: targetZoom)
     }
 
+    /// The reveal/work camera for an AGENT tile when jumps land on its composer
+    /// (`AgentJumpConfig`). Same zoom rule as `revealWorkViewport` — the kind's
+    /// working zoom, never zooming out — and a tile that fits at that zoom is
+    /// framed exactly as `revealWorkViewport` frames it. A tile TALLER than the
+    /// screen is the difference: instead of its top, its BOTTOM is framed, so the
+    /// composer sits fully in view `tilePaddingScreenPx` above the screen's
+    /// bottom edge and the latest transcript fills the screen above it. The
+    /// screen is not zoomed out to fit the rest: the tile's head is pinned at the
+    /// top edge instead (the canvas's sticky head).
+    public static func revealComposerViewport(
+        for worldRect: CGRect,
+        kind: TileKind,
+        currentViewport: CanvasViewport,
+        viewportSize: CGSize
+    ) -> CanvasViewport {
+        let work = revealWorkViewport(for: worldRect, kind: kind,
+                                      currentViewport: currentViewport, viewportSize: viewportSize)
+        guard Double(worldRect.height) * work.zoom > Double(viewportSize.height) else { return work }
+        var framed = work
+        framed.y = Double(worldRect.maxY) + tilePaddingScreenPx / work.zoom - Double(viewportSize.height) / work.zoom
+        return framed
+    }
+
     /// True when the tile's screen frame sits entirely inside the viewport inset
     /// by `contextGutterScreenPx` — the composition reveal/work aims for. A tile
     /// that is merely "mostly visible" is NOT composed for work.

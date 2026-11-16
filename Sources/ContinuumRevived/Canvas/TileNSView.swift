@@ -997,6 +997,11 @@ class TileNSView: NSView, TokenThemed {
         if let titleBar {
             addSubview(titleBar, positioned: .above, relativeTo: view)
         }
+        // The pinned head stays over everything the tile draws, the bar included:
+        // in the band where it takes over from the real header the two overlap.
+        if let stickyHead {
+            addSubview(stickyHead, positioned: .above, relativeTo: nil)
+        }
         layoutContentView()
     }
 
@@ -1043,6 +1048,7 @@ class TileNSView: NSView, TokenThemed {
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
         titleBar?.applyOverflowGlyphWidth(overflowGlyphWorldWidth)
+        layoutStickyHead()
         layoutUnderBar()
         // Repair the bar-above-body z-order only when it is actually wrong.
         // `addSubview(_:positioned:)` is a remove+insert that reorders the
@@ -1088,6 +1094,57 @@ class TileNSView: NSView, TokenThemed {
     func sync(tile: Tile) {
         self.tile = tile
     }
+
+    // MARK: - Sticky head
+
+    /// A pinned copy of this tile's header, shown while the real one is above the
+    /// top of the screen and the body is still on it (`CanvasNSView`'s sticky
+    /// heads). Built on first use, so a tile that never crosses the top edge
+    /// carries nothing.
+    private var stickyHead: TileStickyHeadView?
+    private var stickyHeadTop: CGFloat?
+
+    /// `top` is the tile-local y of the top of the tile's visible part; nil hides
+    /// the head. Writes nothing when nothing moved.
+    func setStickyHeadTop(_ top: CGFloat?) {
+        guard top != stickyHeadTop else { return }
+        stickyHeadTop = top
+        if top != nil, stickyHead == nil, let titleBar {
+            let head = TileStickyHeadView(tile: self, bar: titleBar)
+            head.isHidden = true
+            addSubview(head, positioned: .above, relativeTo: nil)
+            titleBar.stickyMirror = head
+            stickyHead = head
+        }
+        layoutStickyHead()
+    }
+
+    private func layoutStickyHead() {
+        guard let stickyHead else { return }
+        guard let top = stickyHeadTop, let titleBar else {
+            if !stickyHead.isHidden { stickyHead.isHidden = true }
+            return
+        }
+        let frame = NSRect(x: titleBar.frame.minX, y: top, width: titleBar.frame.width, height: titleBar.frame.height)
+        if stickyHead.frame.size != frame.size { stickyHead.needsDisplay = true }
+        if stickyHead.frame != frame { stickyHead.frame = frame }
+        if stickyHead.isHidden {
+            stickyHead.isHidden = false
+            stickyHead.needsDisplay = true
+        }
+    }
+
+    /// QA: the pinned head as shown — nil while hidden.
+    var qaStickyHead: (frame: NSRect, title: String)? {
+        guard let stickyHead, !stickyHead.isHidden, let titleBar else { return nil }
+        return (stickyHead.frame, titleBar.snapshot.title)
+    }
+    var qaStickyHeadView: NSView? { stickyHead.flatMap { $0.isHidden ? nil : $0 } }
+
+    /// The header's own press handling, for the pinned head: what a press on the
+    /// title bar does — focus on a click, move on a drag — without a subclass's
+    /// redelivery of presses meant for its drawn controls.
+    fileprivate func stickyHeadMouseDown(with event: NSEvent) { tilePress(with: event) }
 
     func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
@@ -1255,6 +1312,10 @@ class TileNSView: NSView, TokenThemed {
             }
             return self
         }
+        // The pinned head is a header: its press is the header's press.
+        if let stickyHead, !stickyHead.isHidden, stickyHead.frame.contains(local) {
+            return stickyHead
+        }
         // Floored move-grab strip. At low zoom the title bar is visually enlarged,
         // but body content can still be stacked above it in AppKit's subview order.
         // Claim the entire post-resize grab strip before `super.hitTest` so terminal
@@ -1277,6 +1338,10 @@ class TileNSView: NSView, TokenThemed {
     // MARK: - Mouse handling for drag and resize
 
     override func mouseDown(with event: NSEvent) {
+        tilePress(with: event)
+    }
+
+    private func tilePress(with event: NSEvent) {
         agentReferenceDrag?.end()
         agentReferenceDrag = nil
         canvas?.tileSelection.preparePointerDown()
@@ -2396,7 +2461,10 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     func invalidateChrome() {
         qaRedrawInvalidationCount += 1
         needsDisplay = true
+        if let stickyMirror, !stickyMirror.isHidden { stickyMirror.needsDisplay = true }
     }
+    /// The tile's pinned head, which draws what this bar draws.
+    weak var stickyMirror: NSView?
     var onCloseRequested: (() -> Void)?
     var onStopRunRequested: (() -> Void)?
     var additionalMenuItemsProvider: (() -> [NSMenuItem])?
@@ -3548,20 +3616,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         }
         let scale = chromeScale
         let theme = effectiveTokenTheme
-        let attrs = titleAttributes(theme: theme)
-        let title = NSMutableAttributedString(string: displayedTitle, attributes: attrs)
-        if let whereMarker {
-            var quiet = attrs
-            quiet[.foregroundColor] = TextToken.textSecondary.color.nsColor(for: theme)
-            quiet[.font] = NSFont.systemFont(ofSize: titleFontWorldSize * 11 / 12, weight: .regular)
-            title.append(NSAttributedString(string: "  ·  \(whereMarker)", attributes: quiet))
-        }
-        title.draw(in: titleRect(theme: theme))
-
-        if let agentStatus {
-            drawAgentStatus(agentStatus)
-        }
-        drawSessionLabel(theme: theme)
+        drawHeadline(theme: theme)
 
         // Three-dot drag handle indicator, left of the × close button. Sizes +
         // gap scale with the chrome; positioned relative to the floored button.
@@ -3589,6 +3644,44 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
                 NativeViewVectorRenderer.draw(control, in: context, parentIsFlipped: isFlipped)
             }
         }
+    }
+
+    /// What a reader of the header reads: the title (with its where marker), the
+    /// status pill and the session label. Shared by `draw` and the tile's pinned
+    /// head, so the two cannot drift apart.
+    private func drawHeadline(theme: TokenTheme) {
+        let attrs = titleAttributes(theme: theme)
+        let title = NSMutableAttributedString(string: displayedTitle, attributes: attrs)
+        if let whereMarker {
+            var quiet = attrs
+            quiet[.foregroundColor] = TextToken.textSecondary.color.nsColor(for: theme)
+            quiet[.font] = NSFont.systemFont(ofSize: titleFontWorldSize * 11 / 12, weight: .regular)
+            title.append(NSAttributedString(string: "  ·  \(whereMarker)", attributes: quiet))
+        }
+        title.draw(in: titleRect(theme: theme))
+
+        if let agentStatus {
+            drawAgentStatus(agentStatus)
+        }
+        drawSessionLabel(theme: theme)
+    }
+
+    /// The pinned head's picture of this bar, drawn live in the head's own
+    /// `draw` at this bar's size: its fill and identity tint, the provider mark
+    /// (the harness), and the headline. Not the drag dots, the controls, the
+    /// character or the bottom hairline — the head is a label to read and a
+    /// handle to press, nothing more.
+    fileprivate func drawStickyHead(in context: CGContext, theme: TokenTheme) {
+        SurfaceToken.tileChrome.color.nsColor(for: theme).setFill()
+        bounds.fill()
+        if let identityTint {
+            identityTint.setFill()
+            bounds.fill(using: .sourceOver)
+        }
+        if !providerMarkView.isHidden {
+            NativeViewVectorRenderer.draw(providerMarkView, in: context, parentIsFlipped: isFlipped)
+        }
+        drawHeadline(theme: theme)
     }
 
     // MARK: - Status pill geometry (P1.11)
@@ -4213,5 +4306,78 @@ final class TileOwnershipOutlineView: NSView {
         if dashed { path.setLineDash([6, 4], count: 2, phase: 0) }
         colour.withAlphaComponent(0.9).setStroke()
         path.stroke()
+    }
+}
+
+
+/// The pinned copy of a tile's header (`TileNSView.setStickyHeadTop`). A real
+/// view that draws live from the title bar it mirrors — never a picture of it —
+/// at the bar's own size, so it is the header's typography and scale at every
+/// zoom. A press on it is a press on the header: it is forwarded, shifted onto
+/// the real header, to the tile's own press handling, so a click focuses the
+/// tile and a drag moves it. A double-click does not rename: the title it would
+/// edit is off screen.
+@MainActor
+private final class TileStickyHeadView: NSView {
+    private weak var tile: TileNSView?
+    private weak var bar: TitleBarView?
+    /// Window-space shift from this head onto the real header, fixed for one press.
+    private var pressShift: NSPoint?
+
+    init(tile: TileNSView, bar: TitleBarView) {
+        self.tile = tile
+        self.bar = bar
+        super.init(frame: .zero)
+        wantsLayer = true
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let bar, let context = NSGraphicsContext.current?.cgContext else { return }
+        bar.drawStickyHead(in: context, theme: effectiveTokenTheme)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let tile else { return }
+        // This head's top-left and the real header's, both in window space.
+        let head = tile.convert(NSPoint(x: frame.minX, y: frame.minY), to: nil)
+        let header = tile.convert(NSPoint(x: frame.minX, y: 0), to: nil)
+        let shift = NSPoint(x: header.x - head.x, y: header.y - head.y)
+        pressShift = shift
+        guard let shifted = Self.shifted(event, by: shift) else { return }
+        tile.stickyHeadMouseDown(with: shifted)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let tile, let shift = pressShift, let shifted = Self.shifted(event, by: shift) else { return }
+        tile.mouseDragged(with: shifted)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { pressShift = nil }
+        guard let tile, let shift = pressShift, let shifted = Self.shifted(event, by: shift) else { return }
+        tile.mouseUp(with: shifted)
+    }
+
+    private static func shifted(_ event: NSEvent, by shift: NSPoint) -> NSEvent? {
+        NSEvent.mouseEvent(
+            with: event.type,
+            location: NSPoint(x: event.locationInWindow.x + shift.x, y: event.locationInWindow.y + shift.y),
+            modifierFlags: event.modifierFlags, timestamp: event.timestamp,
+            windowNumber: event.windowNumber, context: nil, eventNumber: event.eventNumber,
+            clickCount: 1, pressure: event.pressure)
     }
 }
