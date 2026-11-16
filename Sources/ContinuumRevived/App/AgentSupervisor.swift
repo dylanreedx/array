@@ -10882,7 +10882,7 @@ final class AgentSupervisor {
     /// Closing an agent's TILE (confidence pass, sidebar stream). Unlike `close`,
     /// this never refuses: the close INTENT is stamped at once, whatever the agent
     /// is doing, and the agent is parked in History immediately only when nothing
-    /// blocks it. A busy agent keeps running (P2A.5) and its row reads "Finishing"
+    /// blocks it. A busy agent keeps running (P2A.5) in its normal sidebar row
     /// until the turn ends — then `AgentRecord.lifecycle` derives History from the
     /// stamp, with no completion hook to forget.
     ///

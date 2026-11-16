@@ -1018,9 +1018,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     public let checkedOutBranch: String?
     public let terminalEvent: AgentTerminalEvent?
     public let terminalIsUnread: Bool
-    /// When this agent's tile was closed while it was still busy — the row reads
-    /// "Background" and draws slim until its turn ends, when the builder derives it
-    /// into History by itself. nil for every agent that is not closing.
+    /// When this agent's tile was closed while it was still busy. The row keeps
+    /// its lifecycle presentation until the turn ends and it moves into History.
+    /// This fact controls tile actions, never the agent's status or turn clock.
     public let closingSince: Date?
     /// Whether the supervisor currently owns a runner for this agent. This is
     /// distinct from the last status sample and remains the authoritative Stop
@@ -1199,10 +1199,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.depth = depth
         // Derive this at the model boundary so even a legacy caller that passes
         // the wrong compatibility value cannot make settled/snoozed work render
-        // as a card (or active work collapse as a slim row). A closing agent is
-        // the one live row that collapses: its window is gone, it is only
-        // finishing what it started.
-        self.variant = closingSince == nil ? RowVariant.forLifecycle(lifecycle) : .slim
+        // as a card (or active work collapse as a slim row). Closing the tile
+        // changes its affordances, not the kind of agent or row.
+        self.variant = RowVariant.forLifecycle(lifecycle)
         self.createdAt = createdAt
         self.parentId = parentId
         self.isUnconfirmed = isUnconfirmed
@@ -1365,7 +1364,6 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         // of ignorance into wallpaper — which is exactly what it had become when
         // every closed tile left one of these rows behind.
         if case .archived = lifecycle { return AgentStatusVocabulary.closed }
-        if closingSince != nil { return AgentStatusVocabulary.background }
         return isUnconfirmed ? AgentStatusVocabulary.unconfirmed : label
     }
 

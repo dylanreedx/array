@@ -62,7 +62,7 @@ enum SidebarIconAlignmentChecks {
                 identity: "blue", lifecycle: .snoozed(until: now.addingTimeInterval(600))),
             row(11, "Closed review", state: .ready, model: nil, branch: nil,
                 identity: "purple", lifecycle: .archived(at: now.addingTimeInterval(-60))),
-            row(12, "Background review", state: .working, model: nil, branch: nil,
+            row(12, "Closed tile review", state: .working, model: nil, branch: nil,
                 identity: "green", closing: now.addingTimeInterval(-30)),
         ]
     }
@@ -78,7 +78,7 @@ enum SidebarIconAlignmentChecks {
             "hover snooze", "hover settle", "settle nudge icon", "identity dot", "branch",
             "provider mark", "copy icon", "move icon", "hover hide", "hover show",
             "slim identity dot", "slim status",
-            "slim disclosure", "hover slim restore", "hover slim stop",
+            "slim disclosure", "hover slim restore",
         ]
         if SidebarDensityProposal.production.isTwoLine {
             expected.subtract(["status hand.raised.fill", "status checkmark.circle.fill"])
