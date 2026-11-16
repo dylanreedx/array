@@ -940,6 +940,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var ledger: LedgerFacts?
     /// Both layouts expose the same complete count partition to VoiceOver.
     var sidebarTally: SidebarLeadTally?
+    private var renderedTally: SidebarLeadTally? { sidebarTally ?? ledger?.tally }
     var ledgerChipTextForQA: String? { ledger?.tally?.countLine }
     var ledgerStatusSymbolForQA: String? { statusGlyph.isHidden ? nil : statusGlyph.symbol }
     var stateTextForQA: String { stateLabel.isHidden ? "" : stateLabel.stringValue }
@@ -1546,9 +1547,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let hidden: Bool
         if proposal.isTwoLine {
             let sub = row.depth > 0 || row.parentId != nil
-            if ledger != nil, !sub, let cause = SidebarRecovery.cause(for: row) {
-                // Ledger: a lead says WHY, in the cause's own word.
-                text = cause == .taskError && (ledger?.tally?.count(.failed) ?? 0) > 0
+            if let cause = SidebarRecovery.cause(for: row),
+               !sub || (ledger == nil && cause == .usageLimit) {
+                // Both layouts call known usage a pause. Ledger helpers keep
+                // their compact icon/age column; Quiet keeps its status word.
+                text = cause == .taskError && (renderedTally?.count(.failed) ?? 0) > 0
                     ? (Self.ledgerClock(row, now: now) ?? "") : cause.label(harness: row.harness)
             } else {
                 text = (ledger != nil && sub ? Self.ledgerClock(row, now: now)
@@ -1680,6 +1683,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
            !cause.isBlocking || cause == .usageLimit, cause != .taskError, cause != .providerBusy {
             // A pause or an interruption is not a failure: quiet ink.
             stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        }
+        if SidebarRecovery.cause(for: row) == .usageLimit {
+            stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+            statusGlyph.colour = TextToken.textSecondary.color.nsColor(in: self)
         }
         if ledger != nil, row.depth > 0 || row.parentId != nil {
             switch SidebarRecovery.state(for: row) {
@@ -1945,6 +1952,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let symbol = Self.attentionSymbol(row, now: now)
         statusGlyph.symbol = symbol == "exclamationmark.triangle.fill" && !sub ? symbol : nil
         if ledger != nil, sub { statusGlyph.symbol = Self.ledgerSymbol(row) }
+        if !sub, SidebarRecovery.cause(for: row) == .usageLimit { statusGlyph.symbol = "pause.circle" }
         // VoiceOver hears the same reconciled numbers the chip draws.
         setAccessibilityHelp((sidebarTally ?? ledger?.tally).map(\.accessibilityLabel))
         // A subagent works under three dots, never the gyro.
@@ -1986,7 +1994,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         var facts: [NSAttributedString] = []
         // Ledger: ONE count chip carries every family number, and says "failed"
         // once. The ask stays first: it is the lead's own question.
-        if let tally = ledger?.tally, tally.total > 0 {
+        if let tally = renderedTally, tally.total > 0 {
             if let ask = ownership.raisedAsk ?? Self.ask(row) {
                 facts.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
             }

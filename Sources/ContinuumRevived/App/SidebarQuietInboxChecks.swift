@@ -230,6 +230,28 @@ enum SidebarQuietInboxChecks {
                    "the release family's ONE chip is its usage pause — got \(leadChip?.detailForQA ?? "nil")")
         try expect(familyChip?.detailForQA == "1 failed · \(taskWords)" && familyChip?.actionButton.title == "Open",
                    "the failed family's chip names its reason and one action — got \(familyChip?.detailForQA ?? "nil")")
+        var spoken: [String] = []
+        inbox.accessibilityAnnouncementSink = { _, message in spoken.append(message) }
+        finish(paused1)
+        delegate.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
+        finish(paused1, failed: usageWords)
+        delegate.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
+        try expect(spoken.contains { $0.hasPrefix("Overnight helper:") && $0.hasSuffix("Paused · usage") },
+                   "known usage announcement must say Paused · usage, got \(spoken)")
+        inbox.accessibilityAnnouncementSink = nil
+        for id in [paused1, paused2] {
+            guard let cell = inbox.cellForQA(id: id.rawValue) else {
+                throw Failure(description: "usage helper is not a normal rendered row")
+            }
+            try expect(cell.qaStateLabel == "Paused · usage",
+                       "known usage row must say Paused · usage, got '\(cell.qaStateLabel)'")
+            try expect(cell.accessibilityLabel()?.contains("Paused · usage") == true,
+                       "known usage row's AX must also say Paused · usage")
+        }
+        try expect(inbox.cellForQA(id: lead.rawValue)?.branchLaneTextForQA.contains("4 helpers · 2 paused · 1 failed") == true,
+                   "Quiet's rendered lead must reconcile paused and failed in one count line")
         Q.photograph(sidebar, "quiet-1-head")
 
         // 3. Counts add up, read from what is drawn.

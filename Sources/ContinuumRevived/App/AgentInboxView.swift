@@ -2126,11 +2126,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// deliberately does not enter this snapshot, so re-rendering a ticking row
     /// can update its aggregate label without posting a second live-region event.
     private func statusAccessibilitySummary(for row: AgentInboxRow) -> String {
+        let pause = SidebarRecovery.cause(for: row) == .usageLimit
+            ? SidebarFailureCause.usageLimit.label(harness: row.harness) : nil
         if row.isUnconfirmed {
-            let lastKnown = row.label ?? "Ready"
+            let lastKnown = pause ?? row.label ?? "Ready"
             return "Unconfirmed: no live agent snapshot; last known status \(lastKnown)"
         }
-        return row.presentationLabel ?? "Ready"
+        return pause ?? row.presentationLabel ?? "Ready"
     }
 
     /// Compare status at the row-model boundary, before cell materialization. The
