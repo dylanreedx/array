@@ -8130,11 +8130,17 @@ final class AgentSupervisor {
     /// agent that delegated it. The app closes the tile after a grace period.
     var onHelperResultDelivered: ((AgentID) -> Void)?
 
-    /// The helpers whose results ride this queue item, now in the lead's runner.
+    /// Each staged wake's (helper, completed turn) pairs, until the lead's
+    /// runner has the item: the lead's next turn STARTED with it, or a running
+    /// turn consumed it as a steer. Both settle the item `.consumed`, once.
+    private var helperReceiptsAwaiting: [UUID: [(helper: AgentID, turn: String)]] = [:]
+    /// The completed turn whose result each helper's lead last received.
+    private var helperResultReceivedTurn: [AgentID: String] = [:]
+
     private func noteHelperResultsReceived(queueItem: UUID, by lead: AgentID) {
-        for raw in helperWakeSenders[queueItem] ?? [] {
-            let helper = AgentID(rawValue: raw)
+        for (helper, turn) in helperReceiptsAwaiting.removeValue(forKey: queueItem) ?? [] {
             guard records[helper]?.parentAgentID == lead else { continue }
+            helperResultReceivedTurn[helper] = turn
             helperResultDeliveredAt[helper] = helperCompletionNow()
             onHelperResultDelivered?(helper)
         }
@@ -8164,7 +8170,9 @@ final class AgentSupervisor {
         guard !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) else { return "still busy" }
         // This turn's result, received: a receipt older than the latest turn's
         // end belongs to an earlier turn.
-        guard let received = helperResultDeliveredAt[id], received >= terminal.endedAt else { return "result not received" }
+        guard let received = helperResultDeliveredAt[id], received >= terminal.endedAt,
+              let receivedTurn = helperResultReceivedTurn[id], receivedTurn == helperCompletionTurns[id]
+        else { return "result not received" }
         // Array's own helpers, a harness's native subagents (observed children
         // with a turn still open, whatever the runner reports) or shell jobs.
         guard !helperHasBackgroundWork(id), !records.values.contains(where: { child in
@@ -9323,6 +9331,7 @@ final class AgentSupervisor {
                                 senderName: records[AgentID(rawValue: state.helper)]?.humanDisplayName ?? "Agent") }
                         })
                         helperWakeSenders[queueID] = group.map(\.helper)
+                        helperReceiptsAwaiting[queueID] = group.map { (AgentID(rawValue: $0.helper), $0.turn) }
                         try qaBeforeHelperWakeAdmission?()
                         // Always a helper item, idle lead or busy: it queues after
                         // user input and drains with every other pending result.
@@ -12012,10 +12021,7 @@ final class AgentSupervisor {
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
-            for member in [message] + merged {
-                self.noteHelperResultsReceived(queueItem: member.id, by: id)
-                self.helperWakeSenders[member.id] = nil
-            }
+            for member in [message] + merged { self.helperWakeSenders[member.id] = nil }
             // Helper fallback remains in durable custody until the runner starts
             // its next turn. Other queue entries keep their existing echo path.
             if !message.helperCompletion { self.echoPrompt(prompt, for: id) }

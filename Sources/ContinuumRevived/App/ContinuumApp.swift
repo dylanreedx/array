@@ -17469,6 +17469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasView.removeTile(id: tileId)
             recoverFocusAfterTileRemoval(deletedTileId: tileId, in: canvasView)
         }
+        helperTileClosed(agentId: id)
         let sessions = owner?.managedSessionStore ?? ManagedAgentSessionStore(projectRoot: URL(fileURLWithPath: root))
         try sessions.delete(tileId: tileId)
         reconciledManagedSessionSource.invalidateCache()
