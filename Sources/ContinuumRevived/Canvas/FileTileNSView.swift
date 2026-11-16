@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
+import Darwin
 import Foundation
 
 /// Tile view for a single file: source files are readable agent-change
@@ -33,6 +34,13 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private var loadGeneration = UUID()
     private var fileLoadTask: Task<Void, Never>?
     private var contentRequest: FileContentRequest?
+    private var richRefreshTask: Task<Void, Never>?
+    private var richRetryTask: Task<Void, Never>?
+    private var richRefreshInFlight = false
+    private var richNeedsRetry = false
+    var qaRichNeedsRetry: Bool { richNeedsRetry }
+    private var richRefreshGeneration = UUID()
+    var qaDidScheduleRichBudgetRetry: (() -> Void)?
     private var renderer: (any FileTileRenderer)?
     private weak var lastRetiredRenderer: (any FileTileRenderer)?
     var qaRetiredRendererAlive: Bool { lastRetiredRenderer != nil }
@@ -43,9 +51,13 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private var sourceModeOverride = false
     private var dataModeChoice: ChoiceButton?
     private var contentObserver: UUID?
+    private weak var richMessageBody: NSView?
     private var observedStamp: FileContentObservation.Stamp?
     var qaRenderer: (any FileTileRenderer)? { renderer }
     var qaRichLoading: Bool { contentRequest != nil }
+    private(set) var qaRichRefreshStartCount = 0
+    private(set) var qaRichRefreshFinishCount = 0
+    var qaRichRefreshPending: Bool { richRefreshTask != nil || richRefreshInFlight }
     private let initialLoader: @Sendable (String) -> FileDocumentInitialLoad
     private let asynchronousLoadOverride: Bool?
     var qaHasDocumentSession: Bool { documentSession != nil }
@@ -63,6 +75,9 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     /// The document itself, inside the editor shell (and beside the sidebar
     /// when it is open): what a teammate's copy of this file is compared with.
     var qaDocumentBody: NSView { currentDocumentBody() }
+    var qaActiveBody: NSView? { activeBody }
+    var qaDirtyIndicatorText: String { dirtyLabel.stringValue }
+    var qaDirtyIndicatorAccessibilityLabel: String? { dirtyLabel.accessibilityLabel() }
     var qaDocumentID: String { bridgeDocumentID }
     var qaDraftText: String? { documentSession?.draftText }
     var qaSidebarRoot: String? { fileBrowser == nil ? nil : tile.metadata.documentLocation?.checkoutRootPath }
@@ -102,6 +117,14 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private var savedText: String?
     private var loadedFileSignature: FileSignature?
     private var externalChangeTimer: Timer?
+    private(set) var qaExternalPollCount = 0
+    // Keep repeated polling failures from replacing the same visible actions.
+    private weak var missingFileActionsBody: NSView?
+    private var missingFileActionsCanRestore = false
+    private var showingMissingFileActions: Bool {
+        guard let body = missingFileActionsBody else { return false }
+        return activeBody === body
+    }
     private var recoverySaveTimer: Timer?
     private var editorStateSaveTimer: Timer?
     var onSaveFailure: ((String) -> Void)?
@@ -198,6 +221,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         renderer?.setVisible(window != nil)
         if window == nil {
             FileContentObservation.shared.remove(contentObserver); contentObserver = nil
+            cancelRichRefresh()
             externalChangeTimer?.invalidate()
             externalChangeTimer = nil
         } else if richSuspended {
@@ -205,6 +229,9 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             loadFile()
         } else if richKind != nil {
             observeRichContent()
+            // A transient failure may have occurred or had its timer canceled
+            // while detached; the same file stamp is not evidence of recovery.
+            if richNeedsRetry { scheduleRichRefresh() }
         } else if loadedText != nil {
             startExternalChangeMonitoring()
         }
@@ -621,7 +648,16 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             ? [fileBrowser, documentContainer].compactMap { $0 }
             : [documentContainer]
         if documentBody.superview === documentContainer,
-           editorSplitView.subviews == expectedSubviews { return }
+           editorSplitView.subviews == expectedSubviews {
+            // The shell can remain assembled while a missing-file action body
+            // is on screen. Reattach it when the file becomes available again.
+            if activeBody !== editorSplitView {
+                promoteForIncomingFocus()
+                setContentView(editorSplitView)
+                activeBody = editorSplitView
+            }
+            return
+        }
         rebuildingEditorShell = true
         defer { rebuildingEditorShell = false }
         promoteForIncomingFocus()
@@ -856,11 +892,14 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     }
 
     private func showMissingFileActions(_ message: String) {
+        let canRestore = trashedItemURL != nil
+        if showingMissingFileActions, messageLabel?.stringValue == message,
+           missingFileActionsCanRestore == canRestore { return }
         let label = NSTextField(labelWithString: message)
         label.alignment = .center
         label.maximumNumberOfLines = 0
         let restore = NSButton(title: "Restore", target: self, action: #selector(restoreTrashedFile(_:)))
-        restore.isEnabled = trashedItemURL != nil
+        restore.isEnabled = canRestore
         let saveAs = NSButton(title: "Save As…", target: self, action: #selector(saveMissingDraftAs(_:)))
         let buttons = NSStackView(views: [restore, saveAs])
         buttons.orientation = .horizontal
@@ -880,6 +919,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         ])
         messageLabel = label
         messageContainer = container
+        missingFileActionsBody = container
+        missingFileActionsCanRestore = canRestore
         setContentView(container)
         activeBody = container
         applyTokens()
@@ -1050,16 +1091,38 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         }
         guard let filePath, let session = documentSession else { return }
         let signature = Self.fileSignature(for: filePath)
-        guard force || signature != loadedFileSignature else { return }
+        // A moved-away file can return with its original inode, timestamp and
+        // bytes. Even then, the missing-actions body must reconcile with disk.
+        let wasShowingMissingActions = showingMissingFileActions
+        guard force || signature != loadedFileSignature || wasShowingMissingActions else { return }
         let result = session.refreshFromDisk()
         switch result {
         case .unchanged:
             loadedFileSignature = signature
+            if wasShowingMissingActions {
+                trashedOriginalURL = nil
+                trashedItemURL = nil
+                hasExternalConflict = false
+                setDirty(session.isDirty)
+                showBody()
+            }
         case .conflict:
             hasExternalConflict = true
             dirtyLabel.stringValue = "!"
             dirtyLabel.toolTip = "The file changed on disk"
+            dirtyLabel.setAccessibilityLabel("File changed on disk; unsaved changes")
+            if wasShowingMissingActions {
+                trashedOriginalURL = nil
+                trashedItemURL = nil
+                showBody()
+            }
         case .reloaded:
+            if wasShowingMissingActions {
+                trashedOriginalURL = nil
+                trashedItemURL = nil
+                hasExternalConflict = false
+                setDirty(session.isDirty)
+            }
             savedText = session.baselineText
             loadedText = session.draftText
             loadedFileSignature = signature
@@ -1074,6 +1137,12 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             }
             showBody()
         case let .unavailable(reason):
+            // A Trash operation supplies a real restore destination. Polling a
+            // still-missing source must not discard that action or rebuild it.
+            if reason == .missing, trashedItemURL != nil {
+                showMissingFileActions("File moved to Trash. Your editor draft is preserved.")
+                return
+            }
             let message = Self.unavailableMessage(reason)
             showSaveFailure(message)
             trashedOriginalURL = URL(fileURLWithPath: filePath)
@@ -1247,6 +1316,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     /// Installs the body for the current mode from the loaded snapshot.
     private func showBody() {
         guard let loadedText else { return }
+        missingFileActionsBody = nil
         // A mode switch arrives via a click, so `hitTest` has already promoted —
         // but this must hold even for a programmatic switch (`reveal(line:)`),
         // because `setContentView` below would replace the surface host and strand
@@ -1520,6 +1590,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     }
 
     private func cancelFileLoad() {
+        cancelRichRefresh()
+        richNeedsRetry = false
         contentRequest?.cancel(); contentRequest = nil
         FileContentObservation.shared.remove(contentObserver); contentObserver = nil
         if let renderer { lastRetiredRenderer = renderer }
@@ -1528,6 +1600,16 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         loadGeneration = UUID()
         fileLoadTask?.cancel()
         fileLoadTask = nil
+    }
+
+    private func cancelRichRefresh() {
+        richRefreshGeneration = UUID()
+        richRefreshTask?.cancel(); richRefreshTask = nil
+        richRetryTask?.cancel(); richRetryTask = nil
+        if richRefreshInFlight {
+            contentRequest?.cancel(); contentRequest = nil
+            richRefreshInFlight = false
+        }
     }
 
     private func loadFile() {
@@ -1684,38 +1766,38 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             self.contentRequest = nil
             switch result {
             case let .success(load):
-                self.contentLoad = load
-                do {
-                let body: any FileTileRenderer
-                switch load.payload {
-                case let .image(document): body = FileImageRenderer(document: document)
-                case let .table(document):
-                    let viewerLease = try FileContentBudget.shared.reserve(32 * 1_024 * 1_024)
-                    let grid = DelimitedGridRenderer(source: RetainedDelimitedSource(document: document, owner: load, viewerLease: viewerLease),
-                                                     title: "Data", allowsHeaderChoice: true, delimiter: document.delimiter)
-                    grid.onDelimiterChange = { [weak self] delimiter in
-                        self?.delimiterOverride = delimiter; self?.loadFile()
-                    }
-                    self.installDataModeChoice(canEdit: document.encodingName == "UTF-8" && load.byteCount <= FilePreview.maxReadBytes)
-                    body = grid
-                case let .workbook(document):
-                    let viewerLease = try FileContentBudget.shared.reserve(32 * 1_024 * 1_024)
-                    body = WorkbookGridRenderer(workbook: document, owner: load, viewerLease: viewerLease)
-                }
-                body.onRevisionChange = { [weak self] in self?.bumpSurfaceEpoch() }
-                self.renderer = body
-                self.promoteForIncomingFocus()
-                self.rebuildEditorShell(documentBody: body.view)
-                body.setVisible(self.window != nil)
-                self.bumpSurfaceEpoch()
-                } catch {
-                    self.contentLoad = nil
-                    self.showRichMessage(error.localizedDescription)
-                }
-            case let .failure(error): self.showRichMessage(error.localizedDescription)
+                do { try self.presentRichLoad(load); self.richNeedsRetry = false }
+                catch { self.finishRichFailure(error, generation: self.richRefreshGeneration) }
+            case let .failure(error): self.finishRichFailure(error, generation: self.richRefreshGeneration)
             }
             self.observeRichContent()
         }
+    }
+
+    private func presentRichLoad(_ load: FileContentLoad) throws {
+            let body: any FileTileRenderer
+            switch load.payload {
+            case let .image(document): body = FileImageRenderer(document: document)
+            case let .table(document):
+                let viewerLease = try FileContentBudget.shared.reserve(32 * 1_024 * 1_024)
+                let grid = DelimitedGridRenderer(source: RetainedDelimitedSource(document: document, owner: load, viewerLease: viewerLease),
+                                                 title: "Data", allowsHeaderChoice: true, delimiter: document.delimiter)
+                grid.onDelimiterChange = { [weak self] delimiter in
+                    self?.delimiterOverride = delimiter; self?.loadFile()
+                }
+                installDataModeChoice(canEdit: document.encodingName == "UTF-8" && load.byteCount <= FilePreview.maxReadBytes)
+                body = grid
+            case let .workbook(document):
+                let viewerLease = try FileContentBudget.shared.reserve(32 * 1_024 * 1_024)
+                body = WorkbookGridRenderer(workbook: document, owner: load, viewerLease: viewerLease)
+            }
+            body.onRevisionChange = { [weak self] in self?.bumpSurfaceEpoch() }
+            contentLoad = load
+            renderer = body
+            promoteForIncomingFocus()
+            rebuildEditorShell(documentBody: body.view)
+            body.setVisible(window != nil)
+            bumpSurfaceEpoch()
     }
 
     private func installDataModeChoice(canEdit: Bool) {
@@ -1753,12 +1835,156 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private func observeRichContent() {
         guard window != nil, richKind != nil, contentObserver == nil, let filePath else { return }
         contentObserver = FileContentObservation.shared.observe(
-            path: filePath, stamp: observedStamp ?? .init(path: filePath)) { [weak self] in self?.loadFile() }
+            path: filePath, stamp: observedStamp ?? .init(path: filePath)) { [weak self] in
+                self?.scheduleRichRefresh()
+            }
+    }
+
+    /// One burst of observed metadata changes produces one secure snapshot. The
+    /// current real renderer remains mounted until those bytes are compared.
+    private func scheduleRichRefresh() {
+        guard window != nil, !richSuspended, richKind != nil else { return }
+        cancelRichRefresh()
+        let generation = richRefreshGeneration
+        richRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self, self.richRefreshGeneration == generation else { return }
+            self.richRefreshTask = nil
+            self.startRichRefresh(generation: generation, budgetRetries: 6, retiredForBudget: false)
+        }
+    }
+
+    private func retireRichRenderer() {
+        if let renderer { lastRetiredRenderer = renderer }
+        renderer?.dispose()
+        renderer?.view.removeFromSuperview()
+        renderer = nil
+        contentLoad = nil
+    }
+
+    private func startRichRefresh(generation: UUID, budgetRetries: Int, retiredForBudget: Bool) {
+        guard let path = filePath, let kind = richKind,
+              richRefreshGeneration == generation, window != nil, !richSuspended else { return }
+        qaRichRefreshStartCount += 1
+        let stamp = FileContentObservation.Stamp(path: path)
+        if case .external = kind {
+            observedStamp = stamp
+            qaRichRefreshFinishCount += 1
+            return
+        }
+        // Match the fixed system aliases used by the initial load. The secure
+        // snapshot reader still rejects other newly introduced symlinks.
+        let readPath = path.hasPrefix("/var/") || path.hasPrefix("/tmp/") ? "/private" + path : path
+        richRefreshInFlight = true
+        contentRequest = FileContentCoordinator.shared.load(path: readPath, kind: kind, reusing: contentLoad) { [weak self] result in
+            guard let self, self.richRefreshGeneration == generation, self.filePath == path,
+                  self.richKind == kind else { return }
+            self.contentRequest = nil
+            self.richRefreshInFlight = false
+            // Writes can arrive during capture/decode, even between observation
+            // ticks. Retry instead of installing or retaining a stale revision.
+            guard FileContentObservation.Stamp(path: path) == stamp else {
+                self.scheduleRichRefresh()
+                return
+            }
+            self.observedStamp = stamp
+            switch result {
+            case let .success(load):
+                if self.contentLoad !== load {
+                    // Until a replacement is installed, a detach must retain a
+                    // retry obligation even when the observed stamp is current.
+                    self.richNeedsRetry = true
+                    self.retireRichRenderer()
+                    self.presentChangedRichLoad(load, generation: generation, path: path,
+                                                stamp: stamp, budgetRetries: budgetRetries)
+                    return
+                }
+                self.richNeedsRetry = false
+            case let .failure(error):
+                if budgetRetries > 0, (retiredForBudget || self.contentLoad != nil),
+                   let failure = error as? FileContentFailure, case .memoryLimit = failure {
+                    // Pending grid work can briefly retain old leases after the
+                    // renderer is disposed. Retry boundedly while it releases.
+                    self.richNeedsRetry = true
+                    self.retireRichRenderer()
+                    self.richRefreshTask = Task { @MainActor [weak self] in
+                        try? await Task.sleep(for: .milliseconds(100))
+                        guard !Task.isCancelled, let self,
+                              self.richRefreshGeneration == generation else { return }
+                        self.richRefreshTask = nil
+                        self.startRichRefresh(generation: generation, budgetRetries: budgetRetries - 1,
+                                              retiredForBudget: true)
+                    }
+                    self.qaDidScheduleRichBudgetRetry?()
+                    return
+                }
+                self.finishRichFailure(error, generation: generation)
+                return
+            }
+            self.qaRichRefreshFinishCount += 1
+        }
+    }
+
+    private func presentChangedRichLoad(_ load: FileContentLoad, generation: UUID, path: String,
+                                        stamp: FileContentObservation.Stamp, budgetRetries: Int) {
+        guard richRefreshGeneration == generation, filePath == path, window != nil, !richSuspended else { return }
+        guard FileContentObservation.Stamp(path: path) == stamp else { scheduleRichRefresh(); return }
+        do {
+            try presentRichLoad(load)
+            richNeedsRetry = false
+            qaRichRefreshFinishCount += 1
+        } catch {
+            if budgetRetries > 0, let failure = error as? FileContentFailure, case .memoryLimit = failure {
+                richRefreshTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(100))
+                    guard !Task.isCancelled, let self, self.richRefreshGeneration == generation else { return }
+                    self.richRefreshTask = nil
+                    self.presentChangedRichLoad(load, generation: generation, path: path, stamp: stamp,
+                                                budgetRetries: budgetRetries - 1)
+                }
+                qaDidScheduleRichBudgetRetry?()
+                return
+            }
+            finishRichFailure(error, generation: generation)
+        }
+    }
+
+    private func finishRichFailure(_ error: Error, generation: UUID) {
+        retireRichRenderer()
+        showRichMessage(error.localizedDescription)
+        qaRichRefreshFinishCount += 1
+        let retry: Bool
+        if let capture = error as? SecureFileSnapshot.CaptureError {
+            switch capture {
+            case let .cannotOpen(code): retry = code != ENOENT && code != ENOTDIR
+            case .changedDuringCapture, .stagingFailed: retry = true
+            default: retry = false
+            }
+        } else if let failure = error as? FileContentFailure {
+            switch failure {
+            case .memoryLimit, .snapshotComparisonFailed: retry = true
+            default: retry = false
+            }
+        } else {
+            retry = false
+        }
+        richNeedsRetry = retry
+        guard retry else { return }
+        // Transient permission, staging, or budget failures may resolve without
+        // a metadata event. Retry at a bounded cadence until state changes.
+        richRetryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self, self.richRefreshGeneration == generation else { return }
+            self.richRetryTask = nil
+            self.scheduleRichRefresh()
+        }
     }
 
     private func showRichMessage(_ message: String) {
+        if let body = richMessageBody, activeBody === body, messageLabel?.stringValue == message { return }
         showMessage(message)
         guard let container = messageContainer else { return }
+        richMessageBody = container
         let open = NSButton(title: "Open Externally", target: self, action: #selector(openRichExternally))
         let reload = NSButton(title: "Reload", target: self, action: #selector(reloadRichContent))
         let buttons = NSStackView(views: [open, reload])
@@ -2099,7 +2325,11 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private func startExternalChangeMonitoring() {
         guard window != nil, externalChangeTimer == nil else { return }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshFromDisk() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.qaExternalPollCount += 1
+                self.refreshFromDisk()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         externalChangeTimer = timer

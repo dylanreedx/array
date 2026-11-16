@@ -263,13 +263,103 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
             try JSONCodec.makeDecoder().decode(Delivery.self, from: Data(contentsOf: $0))
         }.filter { $0.recipient == recipient }
     }
-    public static func markDelivered(_ delivery: Delivery, parentCwd: String) {
+    public static func markDelivered(_ delivery: Delivery, parentCwd: String,
+                                     onCourierRead: ((String) -> Void)? = nil) {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory(parentCwd: parentCwd), includingPropertiesForKeys: nil)) ?? []
         for url in files where url.pathExtension == "json" {
-            guard var file = read(parentCwd: parentCwd, handle: url.deletingPathExtension().lastPathComponent),
+            let handle = url.deletingPathExtension().lastPathComponent
+            onCourierRead?(handle)
+            guard var file = read(parentCwd: parentCwd, handle: handle),
                   file.agentId == delivery.helper, file.turnIdentity == delivery.turn, file.recipientId == delivery.recipient else { continue }
             file.deliveredVia = delivery.via; file.deliveryReceipt = delivery.receipt
             write(file, parentCwd: parentCwd)
+        }
+    }
+    /// Identity of one durable recipient/turn, shared by every matching courier.
+    fileprivate struct DeliveryMarkKey: Hashable {
+        let helper: UUID
+        let turn: String
+        let recipient: UUID
+        init(_ delivery: Delivery) {
+            helper = delivery.helper; turn = delivery.turn; recipient = delivery.recipient
+        }
+        init?(_ file: SpawnResultFile) {
+            guard let helper = file.agentId, let turn = file.turnIdentity,
+                  let recipient = file.recipientId else { return nil }
+            self.helper = helper; self.turn = turn; self.recipient = recipient
+        }
+    }
+
+    /// Marks one committed occurrence from a snapshot of matching handles.
+    /// The supervisor prepares this after staging and uses it synchronously,
+    /// without an await, while the main actor owns all courier mutations.
+    fileprivate struct PreparedDeliveryMarks {
+        fileprivate let parentCwd: String
+        fileprivate let handles: [DeliveryMarkKey: [String]]?
+        fileprivate let onCourierRead: ((String) -> Void)?
+
+        fileprivate func mark(_ delivery: Delivery) {
+            guard let handles else {
+                // Preserve the old best-effort scan if enumeration failed.
+                SpawnResultFile.markDelivered(delivery, parentCwd: parentCwd, onCourierRead: onCourierRead)
+                return
+            }
+            let key = DeliveryMarkKey(delivery)
+            for handle in handles[key] ?? [] {
+                // Read again so a replaced courier cannot be overwritten or
+                // marked for a different helper, turn, or recipient.
+                onCourierRead?(handle)
+                guard var file = SpawnResultFile.read(parentCwd: parentCwd, handle: handle),
+                      DeliveryMarkKey(file) == key else { continue }
+                file.deliveredVia = delivery.via
+                file.deliveryReceipt = delivery.receipt
+                SpawnResultFile.write(file, parentCwd: parentCwd)
+            }
+        }
+    }
+
+    /// Read each courier at most once to find all matches for one admitted
+    /// group, then re-read a match at commit. Legacy courier files work without
+    /// an index or migration. The caller must not suspend between preparation
+    /// and marking, otherwise a new courier could arrive after enumeration.
+    fileprivate static func prepareDeliveryMarks(_ deliveries: [Delivery], parentCwd: String,
+                                            onCourierRead: ((String) -> Void)? = nil) -> PreparedDeliveryMarks {
+        let keys = Set(deliveries.map(DeliveryMarkKey.init))
+        guard !keys.isEmpty else {
+            return PreparedDeliveryMarks(parentCwd: parentCwd, handles: [:], onCourierRead: onCourierRead)
+        }
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory(parentCwd: parentCwd), includingPropertiesForKeys: nil) else {
+            return PreparedDeliveryMarks(parentCwd: parentCwd, handles: nil, onCourierRead: onCourierRead)
+        }
+        var handles: [DeliveryMarkKey: [String]] = [:]
+        for url in files where url.pathExtension == "json" {
+            let handle = url.deletingPathExtension().lastPathComponent
+            onCourierRead?(handle)
+            guard let file = read(parentCwd: parentCwd, handle: handle) else {
+                // A transient read/decode failure may clear before a delivery
+                // commits. Keep the old per-delivery scan in that case so a
+                // newly readable courier is not silently omitted.
+                return PreparedDeliveryMarks(parentCwd: parentCwd, handles: nil, onCourierRead: onCourierRead)
+            }
+            guard let key = DeliveryMarkKey(file), keys.contains(key) else { continue }
+            handles[key, default: []].append(handle)
+        }
+        return PreparedDeliveryMarks(parentCwd: parentCwd, handles: handles, onCourierRead: onCourierRead)
+    }
+    /// Commit each occurrence and mark its couriers before the next commit.
+    /// Preparation and marking cannot span an async suspension; the workspace
+    /// host's single main-actor owner serializes its courier writes.
+    public static func commitAndMarkDeliveries(_ deliveries: [Delivery], parentCwd: String,
+                                               onCourierRead: ((String) -> Void)? = nil,
+                                               qaOnPrepared: (() -> Void)? = nil,
+                                               qaBeforeCommit: ((Delivery) throws -> Void)? = nil) throws {
+        let prepared = prepareDeliveryMarks(deliveries, parentCwd: parentCwd, onCourierRead: onCourierRead)
+        qaOnPrepared?()
+        for delivery in deliveries {
+            try qaBeforeCommit?(delivery)
+            try saveDelivery(delivery, parentCwd: parentCwd)
+            prepared.mark(delivery)
         }
     }
     public func compactDeliveryResult(_ delivery: Delivery, pending: Bool = false, pushed: Bool = false) -> SpawnResultFile {

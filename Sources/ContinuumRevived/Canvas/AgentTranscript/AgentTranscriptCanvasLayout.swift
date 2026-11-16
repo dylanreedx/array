@@ -1000,27 +1000,48 @@ extension AgentTranscriptCanvasView {
     /// shown at; there is no downscaled copy.
     func requestImageSource(_ attachment: AgentImageAttachmentMetadata, snapshot: AgentImageResourceSnapshot, blockID: AgentNodeID) {
         let id = attachment.id
-        if imageObservations[id] == nil {
-            imageObservations[id] = renderContext.imageResources.observe(id: id) { [weak self] _ in
-                guard let self else { return }
-                self.imageSources[id] = nil
-                self.imageRequests[id]?.cancel()
-                self.imageRequests[id] = nil
-                self.invalidatePresentation(of: blockID)
-            }
-        }
+        imageDependents[id, default: []].insert(blockID)
+        blockImageSources[blockID, default: []].insert(id)
+        observeImageSource(id)
         guard snapshot.state == .available, imageSources[id]?.revision != snapshot.revision, imageRequests[id] == nil else { return }
         let full = snapshot.pixelSize
             ?? attachment.pixelWidth.flatMap { w in attachment.pixelHeight.map { NSSize(width: CGFloat(w), height: CGFloat($0)) } }
             ?? NSSize(width: 4096, height: 4096)
         let revision = snapshot.revision
-        imageRequests[id] = renderContext.imageResources.requestThumbnail(id: id, targetPixelSize: full, revision: revision) { [weak self] result in
-            guard let self else { return }
+        let providerGeneration = imageProviderGeneration
+        imageNextRequestGeneration &+= 1
+        let requestGeneration = imageNextRequestGeneration
+        imageRequestGeneration[id] = requestGeneration
+        var completed = false
+        let request = renderContext.imageResources.requestThumbnail(id: id, targetPixelSize: full, revision: revision) { [weak self] result in
+            completed = true
+            guard let self, self.imageProviderGeneration == providerGeneration,
+                  self.imageRequestGeneration[id] == requestGeneration else { return }
             self.imageRequests[id] = nil
             if case let .success(source) = result, source.attachmentID == id, source.revision == revision {
                 self.imageSources[id] = (revision, source.image)
                 self.needsDisplay = true
             }
+        }
+        // Providers may complete synchronously; do not retain a finished request.
+        if !completed, imageProviderGeneration == providerGeneration,
+           imageRequestGeneration[id] == requestGeneration {
+            imageRequests[id] = request
+        } else {
+            request.cancel()
+        }
+    }
+
+    func observeImageSource(_ id: AgentImageAttachmentID) {
+        guard imageObservations[id] == nil else { return }
+        let providerGeneration = imageProviderGeneration
+        imageObservations[id] = renderContext.imageResources.observe(id: id) { [weak self] _ in
+            guard let self, self.imageProviderGeneration == providerGeneration else { return }
+            self.imageSources[id] = nil
+            self.imageRequestGeneration[id] = nil
+            self.imageRequests[id]?.cancel()
+            self.imageRequests[id] = nil
+            self.invalidatePresentations(of: self.imageDependents[id] ?? [])
         }
     }
 
@@ -1083,12 +1104,78 @@ extension AgentTranscriptCanvasView {
     }
 
     private func subscribeStatus(_ agentID: UUID, blockID: AgentNodeID) {
+        statusDependents[agentID, default: []].insert(blockID)
+        blockStatusSources[blockID, default: []].insert(agentID)
+        subscribeStatusSource(agentID)
+    }
+
+    func subscribeStatusSource(_ agentID: UUID) {
         guard statusSubscriptions[agentID] == nil else { return }
         if let token = renderContext.agentStatus.subscribe(agentID, { [weak self] _ in
-            Task { @MainActor [weak self] in self?.invalidatePresentation(of: blockID) }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.invalidatePresentations(of: self.statusDependents[agentID] ?? [])
+            }
         }) {
             statusSubscriptions[agentID] = token
         }
+    }
+
+    private func subscribeSender(_ agentID: UUID, blockID: AgentNodeID) {
+        senderDependents[agentID, default: []].insert(blockID)
+        blockSenderSources[blockID, default: []].insert(agentID)
+        subscribeSenderSource(agentID)
+    }
+
+    func subscribeSenderSource(_ agentID: UUID) {
+        guard senderSubscriptions[agentID] == nil else { return }
+        if let token = renderContext.agentMessageSenders.subscribe(agentID, { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.invalidatePresentations(of: self.senderDependents[agentID] ?? [])
+            }
+        }) {
+            senderSubscriptions[agentID] = token
+        }
+    }
+
+    /// Forget only the changed blocks, keeping work proportional to the suffix.
+    func removeDependencies(blockIDs: Set<AgentNodeID>) {
+        for blockID in blockIDs {
+            for id in blockStatusSources.removeValue(forKey: blockID) ?? [] {
+                statusDependents[id]?.remove(blockID)
+                if statusDependents[id]?.isEmpty == true {
+                    statusDependents[id] = nil
+                    if let token = statusSubscriptions.removeValue(forKey: id) { renderContext.agentStatus.unsubscribe(token) }
+                }
+            }
+            for id in blockSenderSources.removeValue(forKey: blockID) ?? [] {
+                senderDependents[id]?.remove(blockID)
+                if senderDependents[id]?.isEmpty == true {
+                    senderDependents[id] = nil
+                    if let token = senderSubscriptions.removeValue(forKey: id) { renderContext.agentMessageSenders.unsubscribe(token) }
+                }
+            }
+            for id in blockImageSources.removeValue(forKey: blockID) ?? [] {
+                imageDependents[id]?.remove(blockID)
+                if imageDependents[id]?.isEmpty == true {
+                    imageDependents[id] = nil
+                    imageObservations.removeValue(forKey: id)?.cancel()
+                    imageRequestGeneration[id] = nil
+                    imageRequests.removeValue(forKey: id)?.cancel()
+                    imageSources[id] = nil
+                }
+            }
+        }
+    }
+
+    /// Full rebuilds can replace arbitrary nodes. Reconcile subscriptions after
+    /// laying out their survivors, including dependencies shared by many blocks.
+    func reconcileDependencies(liveBlockIDs: Set<AgentNodeID>) {
+        var registered = Set(blockStatusSources.keys)
+        registered.formUnion(blockSenderSources.keys)
+        registered.formUnion(blockImageSources.keys)
+        removeDependencies(blockIDs: registered.subtracting(liveBlockIDs))
     }
 
     // MARK: Task references (TaskReferenceRenderer)
@@ -1131,6 +1218,7 @@ extension AgentTranscriptCanvasView {
     func messageBody(_ block: AgentBlock, message: AgentMessagePayload, width: CGFloat) -> Body {
         let rowInset = S(7), padding = S(Space.m), accentWidth = S(3)
         let cardWidth = min(width, S(640))
+        if let senderID = message.senderAgentID { subscribeSender(senderID, blockID: block.id) }
         let sender = message.senderAgentID.flatMap { renderContext.agentMessageSenders.current($0) }
         let accent = sender?.identityColorName.map { ZoneChromeNSView.color(named: $0) }
         let label = NSFont.token(.label, zoom: zoom)

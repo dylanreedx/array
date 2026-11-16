@@ -88,6 +88,7 @@ final class SharedAgentHelperRoster {
     /// False until a host that publishes helpers has answered.
     private(set) var known = false
     private var subscribers: [UUID: (agent: UUID, callback: (InboxState?) -> Void)] = [:]
+    private var senderSubscribers: [UUID: (agent: UUID, callback: () -> Void)] = [:]
     private var observers: [UUID: () -> Void] = [:]
 
     var rollup: Wire.HelperRollup { .init(helpers) }
@@ -104,6 +105,11 @@ final class SharedAgentHelperRoster {
         for subscriber in subscribers.values where before[subscriber.agent]?.state != after[subscriber.agent]?.state
             || (before[subscriber.agent] == nil) != (after[subscriber.agent] == nil) {
             subscriber.callback(state(subscriber.agent))
+        }
+        for subscriber in senderSubscribers.values where
+            before[subscriber.agent]?.identityColor != after[subscriber.agent]?.identityColor
+            || (before[subscriber.agent] == nil) != (after[subscriber.agent] == nil) {
+            subscriber.callback()
         }
         for observer in observers.values { observer() }
     }
@@ -134,18 +140,33 @@ final class SharedAgentHelperRoster {
                     return token
                 }
             },
-            unsubscribe: { [weak self] token in MainActor.assumeIsolated { self?.subscribers[token] = nil } }
+            unsubscribe: { [weak self] token in MainActor.assumeIsolated { self?.subscribers[token] = nil } },
+            hasReliableNotifications: true
         )
     }
 
     /// The guest's `AgentRenderContext.agentMessageSenders`: a helper's colour,
     /// and no tile to open here, because its tile lives on the host.
     var senderSource: AgentMessageSenderSource {
-        AgentMessageSenderSource(current: { [weak self] id in
-            MainActor.assumeIsolated {
-                self?.helper(id).map { .init(identityColorName: $0.identityColor, hasTile: false) }
-            }
-        })
+        AgentMessageSenderSource(
+            current: { [weak self] id in
+                MainActor.assumeIsolated {
+                    self?.helper(id).map { .init(identityColorName: $0.identityColor, hasTile: false) }
+                }
+            },
+            subscribe: { [weak self] id, callback in
+                MainActor.assumeIsolated {
+                    guard let self else { return nil }
+                    let token = UUID()
+                    self.senderSubscribers[token] = (id, callback)
+                    return token
+                }
+            },
+            unsubscribe: { [weak self] token in
+                MainActor.assumeIsolated { self?.senderSubscribers[token] = nil }
+            },
+            hasReliableNotifications: true
+        )
     }
 
     /// The host's assignment for each helper becomes this Mac's, but only in the

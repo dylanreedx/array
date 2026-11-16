@@ -326,6 +326,10 @@ func runAgentAccountSwitchChecks() async throws {
     let idle = supervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .claudeCode, model: claudeModel, thinking: "low")
     let codexAgent = supervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .codex,
                                       model: "openai-codex/gpt-5.6-sol", thinking: "low")
+    let quotaFanout = AgentQuotaFanoutProbe(supervisor: supervisor, agents: [busy, idle, codexAgent])
+    defer { quotaFanout.stop() }
+    let quota = AgentAccountQuotaSnapshot(harness: .claudeCode,
+        windows: [.init(kind: .fiveHour, utilization: 0.2)], observedAt: Date(), source: .claudeUsageRequest)
     func dirs() -> [String] { AgentSteeringQAFakes.configDirectories(in: claudeBin) }
     func spawns() -> Int { AgentSteeringQAFakes.spawnCount(in: claudeBin) }
 
@@ -345,6 +349,8 @@ func runAgentAccountSwitchChecks() async throws {
     try require(!supervisor.qaHasIdleSession(idle), "an idle Personal session must stop at once")
     try require(supervisor.account(forAgent: busy)?.id == personal.id && supervisor.account(forAgent: idle)?.id == work.id,
                 "mid-turn the busy agent still spends Personal and the idle one is on Work")
+    try quotaFanout.verify(source: busy, snapshot: quota, expected: [busy], label: "busy old account during switch")
+    try quotaFanout.verify(source: idle, snapshot: quota, expected: [idle], label: "idle new account during switch")
     let rows = AgentAccountSwitchSettingsProbe.rows(supervisor)
     try require(rows.first(where: { $0.id == work.id })?.switchingDetail == "1 agent finishes its turn on Personal, then moves here"
                     && rows.first(where: { $0.id == personal.id })?.isActive == true,
@@ -352,6 +358,7 @@ func runAgentAccountSwitchChecks() async throws {
     try await waitFor("the busy turn must finish on its own process") { !supervisor.isRunning(busy) }
     try require(spawns() == 2 && !supervisor.qaHasIdleSession(busy),
                 "the running turn finishes on the process it started with, then retires instead of pooling (spawns \(spawns()))")
+    try quotaFanout.verify(source: idle, snapshot: quota, expected: [busy, idle], label: "old runner retired")
 
     // Next turns: both agents on Work, each resuming its own conversation.
     try require(supervisor.send("PLAIN busy second", to: busy), "busy second turn refused")

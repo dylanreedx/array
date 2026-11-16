@@ -1164,6 +1164,12 @@ final class AgentSupervisor {
     private let claudeSessionTitle: @Sendable (String, String) -> String?
     private let attachmentStore: AgentComposerAttachmentStore
     private var runtimeObservationObservers: [AgentID: [UUID: (AgentRuntimeObservation) -> Void]] = [:]
+    /// Quota readings belong to accounts, not harnesses or agent records. The
+    /// index is rebuilt only when an observed agent's account binding can move;
+    /// routine quota events visit just the observers spending that account.
+    private var quotaObservationAgentsByAccount: [String: Set<AgentID>] = [:]
+    private var quotaObservationIndexDirty = true
+    private(set) var qaQuotaLastRoutingInspections = 0
     private var sharedTranscriptDetails: [AgentID: AgentTranscriptCanvasToolDetail] = [:]
     private var sharedTranscriptDetailRevisions: [AgentID: UInt64] = [:]
     private var sharedTranscriptDetailObservers: [AgentID: [UUID: () -> Void]] = [:]
@@ -1194,6 +1200,14 @@ final class AgentSupervisor {
     /// Live views of an agent's identity colour, for the same reason as names:
     /// it is record state, so no runtime event carries it to an attached tile.
     private var identityColorObservers: [AgentID: [UUID: (String?) -> Void]] = [:]
+    /// A message card reads record existence, identity colour and tile binding.
+    /// Key observers by sender so changing one record does not scan transcripts.
+    private var messageSenderObservers: [AgentID: [UUID: () -> Void]] = [:]
+    private var messageSenderObserverOwners: [UUID: AgentID] = [:]
+    private struct ReferenceStatusValue { var value: InboxState? }
+    private var referenceStatusObservers: [AgentID: [UUID: (InboxState?) -> Void]] = [:]
+    private var referenceStatusObserverOwners: [UUID: AgentID] = [:]
+    private var referenceStatusValues: [AgentID: ReferenceStatusValue] = [:]
     /// App-lifetime recovery owner. This is deliberately independent of tile
     /// subscriptions so launch failures and provider rejection restore drafts
     /// even when no tile remains bound.
@@ -1210,14 +1224,90 @@ final class AgentSupervisor {
 
     /// The records this supervisor owns, in memory. `AgentStore` is the durable
     /// copy; this is the live one.
-    private(set) var records: [AgentID: AgentRecord] = [:] {
+    private var recordStorage: [AgentID: AgentRecord] = [:] {
         // Plan 110 › lead: a spawn or an archive changes the packs. O(1) here
         // (no `oldValue`, so the dictionary is still mutated in place); the walk
         // over the records runs once per run-loop turn, and only when one did.
-        didSet { if records.count != characterPackRecordCount { scheduleCharacterPacks() } }
+        didSet { if recordStorage.count != characterPackRecordCount { scheduleCharacterPacks() } }
     }
+    var records: [AgentID: AgentRecord] { recordStorage }
     private var characterPackRecordCount = 0
     private var characterPacksScheduled = false
+
+    /// The single write boundary for records. Comparing just the three facts a
+    /// message card reads avoids capturing/copying the complete dictionary on
+    /// every agent event while still covering restore, removal and retargeting.
+    private func setRecord(_ record: AgentRecord?, for id: AgentID) {
+        if runtimeObservationObservers[id] != nil,
+           (records[id] == nil) != (record == nil) || records[id]?.harness != record?.harness {
+            quotaObservationIndexDirty = true
+        }
+        guard let observers = messageSenderObservers[id], !observers.isEmpty else {
+            recordStorage[id] = record
+            notifyReferenceStatusIfChanged(id)
+            return
+        }
+        let previous = records[id]
+        recordStorage[id] = record
+        notifyReferenceStatusIfChanged(id)
+        let changed = (previous == nil) != (record == nil)
+            || previous?.identityColor != record?.identityColor
+            || (previous?.tileId != nil) != (record?.tileId != nil)
+        guard changed else { return }
+        for observer in observers.values { observer() }
+    }
+
+    @discardableResult
+    func addMessageSenderObserver(for id: AgentID, _ observer: @escaping () -> Void) -> UUID {
+        let token = UUID()
+        messageSenderObservers[id, default: [:]][token] = observer
+        messageSenderObserverOwners[token] = id
+        return token
+    }
+
+    func removeMessageSenderObserver(_ token: UUID) {
+        guard let id = messageSenderObserverOwners.removeValue(forKey: token) else { return }
+        messageSenderObservers[id]?[token] = nil
+        if messageSenderObservers[id]?.isEmpty == true { messageSenderObservers[id] = nil }
+    }
+
+    private func referenceStatus(for id: AgentID) -> InboxState? {
+        turnSnapshot(for: id).map { InboxState.state(forSnapshot: $0) }
+    }
+
+    @discardableResult
+    func addReferenceStatusObserver(for id: AgentID, _ observer: @escaping (InboxState?) -> Void) -> UUID {
+        let token = UUID()
+        if referenceStatusObservers[id] == nil {
+            referenceStatusValues[id] = ReferenceStatusValue(value: referenceStatus(for: id))
+        }
+        referenceStatusObservers[id, default: [:]][token] = observer
+        referenceStatusObserverOwners[token] = id
+        return token
+    }
+
+    func removeReferenceStatusObserver(_ token: UUID) {
+        guard let id = referenceStatusObserverOwners.removeValue(forKey: token) else { return }
+        referenceStatusObservers[id]?[token] = nil
+        if referenceStatusObservers[id]?.isEmpty == true {
+            referenceStatusObservers[id] = nil
+            referenceStatusValues[id] = nil
+        }
+    }
+
+    private func notifyReferenceStatusIfChanged(_ id: AgentID) {
+        guard let observers = referenceStatusObservers[id], !observers.isEmpty else { return }
+        let value = referenceStatus(for: id)
+        guard referenceStatusValues[id]?.value != value else { return }
+        referenceStatusValues[id] = ReferenceStatusValue(value: value)
+        for observer in observers.values { observer(value) }
+    }
+
+    private func setWatchdogNeedsYou(_ value: String?, for id: AgentID) {
+        guard var record = records[id] else { return }
+        record.helperWatchdogNeedsYou = value
+        setRecord(record, for: id)
+    }
 
     private func scheduleCharacterPacks() {
         characterPackRecordCount = records.count
@@ -1255,7 +1345,7 @@ final class AgentSupervisor {
             guard var record = records[id], record.parentAgentID == nil,
                   record.automaticCharacterIndex == nil else { continue }
             assignAutomaticCharacter(to: &record)
-            records[id] = record
+            setRecord(record, for: id)
             persist(record)
         }
         let indices = Dictionary(uniqueKeysWithValues: records.values.compactMap { record -> (UUID, Int)? in
@@ -1324,7 +1414,9 @@ final class AgentSupervisor {
     /// sidebar row draws them from the record, so the host re-pushes the rows.
     var onSelfReportChanged: ((AgentID) -> Void)?
     /// The runner for the prompt currently in flight, if any.
-    private var runners: [AgentID: AgentRunning] = [:]
+    private var runners: [AgentID: AgentRunning] = [:] {
+        didSet { quotaObservationIndexDirty = true }
+    }
     private var sharedAgentControlGates: [AgentID: [String: SharedAgentControlGate]] = [:]
     private struct SharedInputPermit {
         let agentID: AgentID
@@ -1370,7 +1462,9 @@ final class AgentSupervisor {
     /// Provider sessions which are alive but have no turn in flight. Keeping
     /// these separate preserves `runners` as the truthful busy/Stop capability
     /// while avoiding a fresh Pi/Node/resource-loader startup on every message.
-    private var idleSessionRunners: [AgentID: AgentRunning] = [:]
+    private var idleSessionRunners: [AgentID: AgentRunning] = [:] {
+        didSet { quotaObservationIndexDirty = true }
+    }
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
     /// How many events each agent's tails have been sent. A local notice is
     /// stamped with it, so a tile still reading its tail can place the notice
@@ -1536,7 +1630,7 @@ final class AgentSupervisor {
         let providerName = record.harness?.rawValue ?? "agent"
         record.inFlightCompaction = AgentCompactionJournal(
             operationID: request.operationID, phase: .requested, startedAt: now)
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         let runnerGeneration = RunnerGenerationToken()
         piConversationLossNotices.remove(id)
@@ -1697,7 +1791,7 @@ final class AgentSupervisor {
                     startedAt: record.inFlightCompaction?.startedAt ?? Date(),
                     errorMessage: terminal?.errorMessage)
             }
-            records[id] = record
+            setRecord(record, for: id)
             persist(record)
         }
         if phase != .succeeded, let terminal {
@@ -2403,6 +2497,7 @@ final class AgentSupervisor {
         _ observer: @escaping (AgentRuntimeObservation) -> Void
     ) -> UUID {
         let token = UUID()
+        if runtimeObservationObservers[id] == nil { quotaObservationIndexDirty = true }
         runtimeObservationObservers[id, default: [:]][token] = observer
         return token
     }
@@ -2411,6 +2506,34 @@ final class AgentSupervisor {
         runtimeObservationObservers[id]?[token] = nil
         if runtimeObservationObservers[id]?.isEmpty == true {
             runtimeObservationObservers[id] = nil
+            quotaObservationIndexDirty = true
+        }
+    }
+
+    /// The quota is stored before this call so each recipient reads the new
+    /// value from its own account. Live and pooled runners retain the account
+    /// they actually launched on, including while a switch is in progress.
+    private func notifyQuotaObservers(_ observation: AgentRuntimeObservation, accountId: String, source: AgentID) {
+        var inspected = 0
+        if quotaObservationIndexDirty {
+            var grouped: [String: Set<AgentID>] = [:]
+            for id in runtimeObservationObservers.keys {
+                inspected += 1
+                guard let harness = records[id]?.harness else { continue }
+                let current = account(forAgent: id)?.id ?? AgentAccount.defaultAccountId(for: harness)
+                grouped[current, default: []].insert(id)
+            }
+            quotaObservationAgentsByAccount = grouped
+            quotaObservationIndexDirty = false
+        }
+        var recipients = quotaObservationAgentsByAccount[accountId] ?? []
+        // A provider can report quota before its agent has an account mapping.
+        // Its own observers must still receive the originating observation.
+        if runtimeObservationObservers[source] != nil { recipients.insert(source) }
+        inspected += recipients.count
+        qaQuotaLastRoutingInspections = inspected
+        for id in recipients {
+            runtimeObservationObservers[id]?.values.forEach { $0(observation) }
         }
     }
 
@@ -2469,7 +2592,7 @@ final class AgentSupervisor {
             guard record.codexThreadId != value else { return }
             var updated = record
             updated.codexThreadId = value
-            records[id] = updated
+            setRecord(updated, for: id)
             persist(updated)
             return
         }
@@ -2485,7 +2608,7 @@ final class AgentSupervisor {
             var updated = record
             updated.providerSessionId = value
             updated.pendingSessionForkFrom = nil
-            records[id] = updated
+            setRecord(updated, for: id)
             persist(updated)
             return
         }
@@ -2496,7 +2619,7 @@ final class AgentSupervisor {
             guard record.resolvedModelId != value else { return }
             var updated = record
             updated.resolvedModelId = value
-            records[id] = updated
+            setRecord(updated, for: id)
             persist(updated)
             return
         }
@@ -2515,9 +2638,7 @@ final class AgentSupervisor {
             let accountId = account(forAgent: id)?.id ?? AgentAccount.defaultAccountId(for: snapshot.harness)
             accountQuotas[accountId] = snapshot
             accountQuotaStore?.save(accountQuotas)
-            runtimeObservationObservers.values.forEach { observers in
-                observers.values.forEach { $0(observation) }
-            }
+            notifyQuotaObservers(observation, accountId: accountId, source: id)
             return
         }
         // S3: a provider retry is turn presence ("Retrying (2/5)"), then the
@@ -2593,7 +2714,9 @@ final class AgentSupervisor {
     /// channel-split, and a check's temp store gets its own).
     private lazy var accountStore = AgentAccountStore(
         applicationSupportDirectory: store.layout.applicationSupportDirectory)
-    private lazy var accountState: AgentAccountStore.State = accountStore.load()
+    private lazy var accountState: AgentAccountStore.State = accountStore.load() {
+        didSet { quotaObservationIndexDirty = true }
+    }
 
     /// Where Personal's settings live, for a new account to share. A check
     /// points these at temp folders so nothing links to the real ones.
@@ -2603,7 +2726,9 @@ final class AgentSupervisor {
     /// The account the agent's LIVE runner signed in as — a running turn or a
     /// pooled idle session. A switch never touches it; the next runner is built
     /// for the account in use instead.
-    private var runnerAccounts: [AgentID: AgentAccount] = [:]
+    private var runnerAccounts: [AgentID: AgentAccount] = [:] {
+        didSet { quotaObservationIndexDirty = true }
+    }
 
     /// Every account: each CLI's own login, then the ones Array added.
     var accounts: [AgentAccount] {
@@ -2773,7 +2898,7 @@ final class AgentSupervisor {
             managedHookStates[id] = nil
             if var current = records[id] {
                 current.managedBriefedSessions = []
-                records[id] = current
+                setRecord(current, for: id)
                 _ = persist(current)
             }
         }
@@ -3034,7 +3159,7 @@ final class AgentSupervisor {
             warn("AgentSupervisor.reassignProvisionalHome: could not persist Home for \(id.rawValue.uuidString): \(error)")
             return false
         }
-        records[id] = record
+        setRecord(record, for: id)
         locationProjectors[id] = nil
         ensureLocationProjector(for: record)
         return true
@@ -3235,7 +3360,7 @@ final class AgentSupervisor {
                 warn("AgentSupervisor.restore: skipping agent \(record.id.rawValue.uuidString) — its project root \(record.cwd) no longer exists")
                 continue
             }
-            records[record.id] = record
+            setRecord(record, for: record.id)
             if record.inFlightCompaction?.phase == .indeterminate
                 || record.inFlightCompaction?.phase == .failed
                 || record.inFlightCompaction?.phase == .cancelled {
@@ -3398,7 +3523,7 @@ final class AgentSupervisor {
             warn("AgentSupervisor.restore: archive skipped, the store lock is unavailable: \(error)")
         }
         for id in moved {
-            records[id] = nil
+            setRecord(nil, for: id)
             restoredIDs.remove(id)
             staleIDs.remove(id)
             pendingModeRestarts.remove(id)
@@ -3508,7 +3633,7 @@ final class AgentSupervisor {
             staleIDs.insert(record.id)
             return false
         }
-        records[id] = record
+        setRecord(record, for: id)
         restoredIDs.insert(id)
         if record.capabilities.locallyManaged {
             setMode(targetMode(harness: record.harness, parent: record.parentAgentID), for: id)
@@ -3579,7 +3704,7 @@ final class AgentSupervisor {
             contextWindowSnapshots[id] = nil
         }
         record.inFlightCompaction = nil
-        records[id] = record
+        setRecord(record, for: id)
         seenCompactionBoundaryIDs[id, default: []].insert(expectedBoundaryID)
         persist(record)
         // Keep the queue paused. Reconciliation resolves the outcome, but only
@@ -3601,7 +3726,7 @@ final class AgentSupervisor {
     func markSessionFork(_ id: AgentID, from sessionId: String) {
         guard var record = records[id], record.harness == .claudeCode else { return }
         record.pendingSessionForkFrom = sessionId
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
     }
 
@@ -3820,11 +3945,11 @@ final class AgentSupervisor {
                 warn("AgentSupervisor.makeAgent: child \(id.rawValue.uuidString) was not persisted; no ordinal was committed")
                 return id
             }
-            records[id] = child
+            setRecord(child, for: id)
             if WorkspaceToolsConfig.enabledForNewAgents(workspaceToolsPermission()), !child.workspaceToolsEnabled {
                 var enabled = child
                 enabled.workspaceToolsEnabled = true
-                records[id] = enabled
+                setRecord(enabled, for: id)
                 persist(enabled)
             }
         } else {
@@ -3868,7 +3993,7 @@ final class AgentSupervisor {
             // CX-01 (§14.1): the Settings default seeds NEW agents only.
             record.workspaceToolsEnabled = WorkspaceToolsConfig.enabledForNewAgents(workspaceToolsPermission())
             assignAutomaticCharacter(to: &record)
-            records[id] = record
+            setRecord(record, for: id)
             persist(record)
         }
         if let request = chooserPendingChildRequests.removeValue(forKey: id), let parent = parentAgentID, var child = records[id] {
@@ -3876,7 +4001,7 @@ final class AgentSupervisor {
                 retryOf: nil, createdWorktree: worktreeId != nil, checkoutNotice: nil,
                 chooserWriteRequest: request, chooserWriteInProgress: true,
                 contextDietRequested: child.delegationContext?.contextDietRequested)
-            records[id] = child
+            setRecord(child, for: id)
             guard persist(child) else { return id } // do not start a writer without its recovery marker
             chooserChildRequests[id] = (parent, request)
         }
@@ -4039,7 +4164,7 @@ final class AgentSupervisor {
                     requiredNextOrdinal: ordinal + 1,
                     childID: id
                 )
-                records[parentAgentID] = durableParent
+                setRecord(durableParent, for: parentAgentID)
                 return committedChild
             }
         } catch {
@@ -4171,7 +4296,7 @@ final class AgentSupervisor {
         }
         record.displayName = proposal.name
         record.displayNameSource = proposal.source
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
     }
 
@@ -4302,7 +4427,7 @@ final class AgentSupervisor {
         // same one `persist` below carries — the clear must not wait for the first
         // event to come back.
         clearSettleOnActivity(&record)
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
 
         // C4: the user's own words, echoed into the same durable transcript the
@@ -5436,7 +5561,7 @@ final class AgentSupervisor {
                 changed = true
             }
             if changed {
-                records[id] = record
+                setRecord(record, for: id)
                 persist(record)
             }
         }
@@ -5484,7 +5609,7 @@ final class AgentSupervisor {
         guard externalHolds.removeValue(forKey: id) != nil else { return }
         if tookTurns, var record = records[id] {
             record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, Date())
-            records[id] = record
+            setRecord(record, for: id)
             persist(record)
         }
         notifyTurnCapabilitiesChanged(id)
@@ -5494,7 +5619,7 @@ final class AgentSupervisor {
     func linkExternalSession(_ id: AgentID, _ link: AgentExternalSessionLink?) {
         guard var record = records[id], record.externalSession != link else { return }
         record.externalSession = link
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         notifyTurnCapabilitiesChanged(id)
     }
@@ -5511,7 +5636,7 @@ final class AgentSupervisor {
         record.externalSession = nil
         // There is a conversation to resume: claude's resume-first gate.
         record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, Date())
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         notifyTurnCapabilitiesChanged(id)
     }
@@ -6020,7 +6145,7 @@ final class AgentSupervisor {
         // `reconcileObservedRunsAfterRestore`.
         if var child = records[childID], child.providerSessionId != handle.runId {
             child.providerSessionId = handle.runId
-            records[childID] = child
+            setRecord(child, for: childID)
             try? upsertRecord(child)
         }
         startObservedRunWatcher(for: parent, parentRecord: parentRecord)
@@ -6450,7 +6575,7 @@ final class AgentSupervisor {
         if var existing = records[childID] {
             if let boundRunID, existing.providerSessionId != boundRunID {
                 existing.providerSessionId = boundRunID
-                records[childID] = existing
+                setRecord(existing, for: childID)
                 persist(existing)
             }
             bindCompanionObservedChild(childID, parentID: parentId, sourceID: toolUseID)
@@ -6497,7 +6622,7 @@ final class AgentSupervisor {
         // main actor. Persist the binding's run identity in either order so a
         // restored supervisor can reconcile terminal run.json.
         child.providerSessionId = boundRunID ?? child.providerSessionId
-        records[childID] = child
+        setRecord(child, for: childID)
         persist(child)
         bindCompanionObservedChild(childID, parentID: parentId, sourceID: toolUseID)
         // `.plans/116` gap 6: the harness started this child, so Array never saw
@@ -6875,7 +7000,7 @@ final class AgentSupervisor {
                 chooserWriteRequest: spawned.delegationContext?.chooserWriteRequest,
                 chooserWriteInProgress: spawned.delegationContext?.chooserWriteInProgress,
                 contextDietRequested: spawned.delegationContext?.contextDietRequested)
-            records[childID] = spawned
+            setRecord(spawned, for: childID)
             persist(spawned)
             // The child record remembers the tool call that asked for it, so its
             // terminal `.turnCompleted` in `deliver` can rewrite the result file
@@ -6884,7 +7009,7 @@ final class AgentSupervisor {
             if let handle = SpawnResultFile.validatedHandle(request.sourceItemID),
                var child = records[childID] {
                 child.spawnResultHandle = handle
-                records[childID] = child
+                setRecord(child, for: childID)
                 persist(child)
                 SpawnResultFile.write(
                     SpawnResultFile(
@@ -7096,7 +7221,7 @@ final class AgentSupervisor {
                              openToolCalls: fact?.openToolCalls ?? 0, subHelpers: fact?.subHelpers ?? 0,
                              detail: state == .busy ? turn.busy : nil, now: now)
         if records[id]?.helperWatchdogNeedsYou != nil {
-            records[id]?.helperWatchdogNeedsYou = nil
+            setWatchdogNeedsYou(nil, for: id)
             notifyLeadPlanChanged(id)
             onSelfReportChanged?(id)
         }
@@ -7149,7 +7274,7 @@ final class AgentSupervisor {
                 // the legacy no-progress alert when stall alerts are disabled.
                 withdrawQueuedHelperAlert(id)
                 if records[id]?.helperWatchdogNeedsYou != nil {
-                    records[id]?.helperWatchdogNeedsYou = nil
+                    setWatchdogNeedsYou(nil, for: id)
                     notifyLeadPlanChanged(id)
                     onSelfReportChanged?(id)
                 }
@@ -7215,10 +7340,10 @@ final class AgentSupervisor {
             let process = fact?.state == .waitingOnChild
             let waitedOn = (process ? "a process it started" : "a tool call") + (fact?.detail.map { " (\($0))" } ?? "")
             switch kind {
-            case .noProgress: records[id]?.helperWatchdogNeedsYou = "no progress for \(minutes) min"
-            case .stalled: records[id]?.helperWatchdogNeedsYou = "stalled, no progress for \(quietMinutes) min"
+            case .noProgress: setWatchdogNeedsYou("no progress for \(minutes) min", for: id)
+            case .stalled: setWatchdogNeedsYou("stalled, no progress for \(quietMinutes) min", for: id)
             case .stillWaiting:
-                records[id]?.helperWatchdogNeedsYou = "still waiting on \(process ? "a process" : "a tool call") for \(quietMinutes) min"
+                setWatchdogNeedsYou("still waiting on \(process ? "a process" : "a tool call") for \(quietMinutes) min", for: id)
             }
             notifyLeadPlanChanged(id)
             onSelfReportChanged?(id)
@@ -7617,6 +7742,7 @@ final class AgentSupervisor {
             try ledger.reconcileQueued(agentID: id.rawValue, itemIDs: (queuedWorkItemsCache[id] ?? []).map(\.id))
         }
         for observe in turnCapabilityObservers.values { observe(id) }
+        notifyReferenceStatusIfChanged(id)
     }
 
     private func updateCompanionTasks(_ body: (CompanionTaskLedger) throws -> Void) {
@@ -7905,7 +8031,7 @@ final class AgentSupervisor {
         chooserAtLaunch.remove(id)
         chooserRequests[id] = nil
         chooserWriteFences[id] = nil
-        records.removeValue(forKey: id)
+        setRecord(nil, for: id)
         pendingModeRestarts.remove(id)
         runningModes.removeValue(forKey: id)
         managedHookStates.removeValue(forKey: id)
@@ -8150,12 +8276,12 @@ final class AgentSupervisor {
             displaced.tileId = nil
             displaced.pinned = false
             displaced.helperTileOpenedAt = nil
-            records[otherId] = displaced
+            setRecord(displaced, for: otherId)
             persist(displaced)
         }
         guard record.tileId != tileId else { return }
         record.tileId = tileId
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
     }
 
@@ -8173,7 +8299,7 @@ final class AgentSupervisor {
         record.tileId = nil
         record.pinned = false
         record.helperTileOpenedAt = nil
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
     }
 
@@ -8549,7 +8675,7 @@ final class AgentSupervisor {
         }
         guard record.workspaceToolsEnabled != enabled else { return false }
         record.workspaceToolsEnabled = enabled
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         onWorkspaceToolsChanged?(id, enabled)
         return true
@@ -8683,7 +8809,7 @@ final class AgentSupervisor {
             return
         }
         guard record.adoptAutomaticName(title, source: .harness) else { return }
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
     }
 
@@ -8734,7 +8860,7 @@ final class AgentSupervisor {
             return nil
         }
         let request = record.beginNamingRequest()
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return request
     }
@@ -8754,7 +8880,7 @@ final class AgentSupervisor {
             // The request was current but its result was unusable. Consume the
             // marker without changing the existing title; failure is best-effort.
             record.namingRequest = nil
-            records[id] = record
+            setRecord(record, for: id)
             persist(record)
             return false
         }
@@ -8762,12 +8888,12 @@ final class AgentSupervisor {
             // `AgentRecord` also validates identifier-shaped output. Persist only
             // when it consumed this current request, never for a stale completion.
             if record.namingRequest == nil {
-                records[id] = record
+                setRecord(record, for: id)
                 persist(record)
             }
             return false
         }
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -9532,6 +9658,7 @@ final class AgentSupervisor {
 
     /// Witness counters: flushes run and steer handoff passes begun.
     private(set) var qaHelperFlushCount = 0
+    var qaHelperCompletionCourierRead: ((String) -> Void)?
     private(set) var qaSteerHandoffPasses = 0
 
     func flushHelperCompletions() async {
@@ -9610,11 +9737,15 @@ final class AgentSupervisor {
                         // user input and drains with every other pending result.
                         try await stageScheduledWakeup(queueID, text: text, for: parent, helperSteer: true)
                         try qaAfterHelperWakeStage?()
-                        for var state in group {
+                        let committed = group.map { state in
+                            var state = state
                             state.phase = .delivered; state.via = "wake"; state.leaseUntil = nil
-                            try SpawnResultFile.saveDelivery(state, parentCwd: cwd)
-                            SpawnResultFile.markDelivered(state, parentCwd: cwd)
+                            return state
                         }
+                        // One directory scan for the whole group. Each durable
+                        // commit is still marked before the next one begins.
+                        try SpawnResultFile.commitAndMarkDeliveries(committed, parentCwd: cwd,
+                            onCourierRead: qaHelperCompletionCourierRead)
                         finishScheduledAdmission(queueID)
                         await releaseScheduledWakeups(for: parent, knownIDs: [queueID])
                     }
@@ -9852,7 +9983,7 @@ final class AgentSupervisor {
         chooserChildTurns[id] = nil // an old terminal cannot finish this new turn
         if var record = records[id], record.delegationContext != nil {
             record.delegationContext?.chooserWriteInProgress = true
-            records[id] = record
+            setRecord(record, for: id)
             _ = persist(record)
         }
         chooserWriteFences[binding.parent, default: []].insert(id.rawValue)
@@ -9866,7 +9997,7 @@ final class AgentSupervisor {
         guard let binding = chooserChildRequests[id] else { return }
         if var record = records[id], record.delegationContext?.chooserWriteInProgress == true {
             record.delegationContext?.chooserWriteInProgress = false
-            records[id] = record
+            setRecord(record, for: id)
             _ = persist(record)
         }
         chooserWriteFences[binding.parent]?.remove(id.rawValue)
@@ -9984,7 +10115,7 @@ final class AgentSupervisor {
         record.managedBriefedSessions = []
         managedHookStates.removeValue(forKey: id)
         guard persist(record) else { return false }
-        records[id] = record
+        setRecord(record, for: id)
         if record.harness == .claudeCode || record.harness == .codex { pendingModeRestarts.insert(id) }
         // Codex already starts a fresh app-server and resumes codexThreadId on
         // every submitted turn. send snapshots the new policy in runningModes;
@@ -10013,7 +10144,7 @@ final class AgentSupervisor {
         let reply = state.reply(payload: payload, harness: harness, chooser: choosing)
         if var current = records[record.id], current.managedBriefedSessions != state.briefedSessions {
             current.managedBriefedSessions = state.briefedSessions
-            records[record.id] = current
+            setRecord(current, for: record.id)
             _ = persist(current)
         }
         managedHookStates[record.id] = state
@@ -10083,7 +10214,7 @@ final class AgentSupervisor {
             idle.stop()
             interruptWorkingClaudeMirroredChildren(of: id)
         }
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -10235,7 +10366,7 @@ final class AgentSupervisor {
         if resolution.source == .provider, let value = resolution.tokens,
            record.providerContextWindows[model] != value {
             record.providerContextWindows[model] = value
-            records[id] = record
+            setRecord(record, for: id)
             persist(record)
         }
         if resolution.source == .unknown,
@@ -10959,7 +11090,7 @@ final class AgentSupervisor {
             record.acknowledgedTerminalSequence = max(
                 record.acknowledgedTerminalSequence, terminal.sequence)
         }
-        records[id] = record
+        setRecord(record, for: id)
         let elapsed = lastVisitedPersistAt[id].map { now.timeIntervalSince($0) } ?? .infinity
         let shouldPersist = wasUnread || previous == nil || elapsed >= Self.lastVisitedPersistThrottle
         guard shouldPersist else { return }
@@ -11115,7 +11246,7 @@ final class AgentSupervisor {
         }
         record.settledOverride = .settled
         record.settledAt = now
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -11138,7 +11269,7 @@ final class AgentSupervisor {
         record.settledAt = settledAt
         record.snoozedUntil = snoozedUntil
         record.snoozedAt = snoozedAt
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -11155,7 +11286,7 @@ final class AgentSupervisor {
         guard record.settledOverride != .active else { return false }
         record.settledOverride = .active
         settledOverrideClearReasons[id] = nil
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -11179,7 +11310,7 @@ final class AgentSupervisor {
         }
         record.snoozedUntil = until
         record.snoozedAt = now
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -11195,7 +11326,7 @@ final class AgentSupervisor {
         guard record.snoozedUntil != nil || record.snoozedAt != nil else { return false }
         record.snoozedUntil = nil
         record.snoozedAt = nil
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -11229,7 +11360,7 @@ final class AgentSupervisor {
         }
         foldHelpers(of: id)
         record.archivedAt = now
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         runLedger.retired(agent: id.rawValue)
         return true
@@ -11261,7 +11392,7 @@ final class AgentSupervisor {
             record.archivedAt = now
             runLedger.retired(agent: id.rawValue)
         }
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return record.archivedAt != nil
     }
@@ -11279,7 +11410,7 @@ final class AgentSupervisor {
         guard record.archivedAt != nil || record.closeRequestedAt != nil else { return false }
         record.archivedAt = nil
         record.closeRequestedAt = nil
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -11301,7 +11432,7 @@ final class AgentSupervisor {
             record.acknowledgedTerminalSequence = terminal.sequence &- 1
         }
         lastVisitedPersistAt[id] = now
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -11384,7 +11515,7 @@ final class AgentSupervisor {
         record.settledOverride = .neutral
         settledOverrideClearReasons[id] = .user
         logSettleCleared(id, reason: .user)
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
         return true
     }
@@ -11770,7 +11901,7 @@ final class AgentSupervisor {
         record.displayNameSource = .sentinel
         record.namingRequest = nil
 
-        records[id] = record
+        setRecord(record, for: id)
         persist(record)
 
         // 4. Drop subagent chips: sever the parent link for every child
@@ -11780,7 +11911,7 @@ final class AgentSupervisor {
         for childID in children(of: id) {
             guard var child = records[childID] else { continue }
             child.parentAgentID = nil
-            records[childID] = child
+            setRecord(child, for: childID)
             persist(child)
         }
 
@@ -12183,7 +12314,7 @@ final class AgentSupervisor {
                 guard var record = self.records[id] else { return }
                 record.inFlightCompaction = AgentCompactionJournal(
                     operationID: compact.operationID, phase: .requested, startedAt: Date())
-                self.records[id] = record
+                self.setRecord(record, for: id)
                 self.persist(record)
             }
             let selected: AgentComposerQueuedWorkItem?
@@ -12193,7 +12324,7 @@ final class AgentSupervisor {
             guard let workItem = selected else {
                 if case .compaction = next, var record = self.records[id] {
                     record.inFlightCompaction = nil
-                    self.records[id] = record
+                    self.setRecord(record, for: id)
                     self.persist(record)
                 }
                 self.pauseQueue(id, .held)
@@ -12354,7 +12485,7 @@ final class AgentSupervisor {
     private func restoreDrainedWorkItem(_ item: AgentComposerQueuedWorkItem, for id: AgentID, store: AgentComposerDraftStore) async {
         if case .compaction = item, var record = records[id] {
             record.inFlightCompaction = nil
-            records[id] = record
+            setRecord(record, for: id)
             persist(record)
         }
         if case .prompt(let message) = item, message.helperCompletion {
@@ -13150,7 +13281,7 @@ final class AgentSupervisor {
                         phase: lifecycle.phase,
                         startedAt: record.inFlightCompaction?.startedAt ?? lifecycle.observedAt)
                 }
-                records[id] = record
+                setRecord(record, for: id)
                 persist(record)
             }
         }
@@ -13307,7 +13438,7 @@ final class AgentSupervisor {
                 && clearSettleOnActivity(
                     &record,
                     clearKeepActivePin: Self.isRealActivity(event))
-            records[id] = record
+            setRecord(record, for: id)
             // Only lifecycle-shaped events reach the disk. `contentDelta` arrives
             // per token and every write is an AtomicWriter write (temp file +
             // fsync + read-back), so persisting all of them would put a synchronous
@@ -13328,6 +13459,7 @@ final class AgentSupervisor {
         }
 
         tailEventCount[id, default: 0] &+= 1
+        notifyReferenceStatusIfChanged(id)
         for continuation in (subscribers[id] ?? [:]).values {
             continuation.yield(event)
         }
@@ -13345,7 +13477,7 @@ final class AgentSupervisor {
             compactingAgents.remove(id)
             if var record = records[id], record.inFlightCompaction?.phase == .running {
                 record.inFlightCompaction = nil
-                records[id] = record
+                setRecord(record, for: id)
                 persist(record)
             }
             if publishedMeter == nil, var meter = contextWindowSnapshot(for: id), meter.compacting == true {
@@ -13514,7 +13646,7 @@ final class AgentSupervisor {
                 // P6.2: a turn start is real activity; the surrounding event
                 // delivery may still update metadata for non-activity events.
                 record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, now)
-                records[id] = record
+                setRecord(record, for: id)
             }
         case let .turnCompleted(_, turnID, outcome, _):
             if var record = records[id] {
@@ -13537,14 +13669,14 @@ final class AgentSupervisor {
                         sequence: (record.latestTerminalEvent?.sequence ?? 0) &+ 1,
                         turnID: turnID, outcome: terminalOutcome, endedAt: now)
                 }
-                records[id] = record
+                setRecord(record, for: id)
             }
         case let .sessionStateChanged(state):
             // `.running`/`.ready` are session/process state, not proof of an
             // active or finished turn; the presence owner decides what they mean.
             if state == .error, var record = records[id] {
                 record.failedAt = max(record.failedAt ?? .distantPast, now)
-                records[id] = record
+                setRecord(record, for: id)
             }
         case let .requestOpened(_, requestID, kind):
             let request = AgentPendingRequest(
@@ -13587,7 +13719,7 @@ final class AgentSupervisor {
                         sequence: (record.latestTerminalEvent?.sequence ?? 0) &+ 1,
                         turnID: eventID, outcome: .runtimeError, endedAt: now)
                 }
-                records[id] = record
+                setRecord(record, for: id)
             }
         case .itemStarted, .itemCompleted, .contentDelta, .tokenUsageUpdated,
              .contextWindowUpdated, .childAgentSpawned, .semanticSignal:
@@ -13802,7 +13934,7 @@ final class AgentSupervisor {
             }
             // Keep the live copy coherent too: a stale parent write that was
             // merged upward must not leave this supervisor holding the old value.
-            records[record.id] = persisted.record
+            setRecord(persisted.record, for: record.id)
             notifyLeadPlanChanged(record.id)
             if persisted.previousDisplayName != persisted.record.displayName {
                 notifyDisplayNameChanged(for: persisted.record)
