@@ -892,6 +892,23 @@ enum ContinuumApp {
                 }
             }
         }
+        // Sidebar round: the Ledger layout's counts, causes, Clear/Undo, layout
+        // switch and tile-less rows, through real events on the production list.
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-ledger-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    let next = CommandLine.arguments.index(after: index)
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("-")
+                        ? URL(fileURLWithPath: CommandLine.arguments[next]) : nil
+                    print(try SidebarLedgerChecks.run(outputDirectory: dir))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // .plans/113: sort the sidebar by activity or project.
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-sort-check") {
             _ = NSApplication.shared
@@ -16036,6 +16053,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.onFailureDetailsLoaded = { [weak self] in
             self?.pushExternalSessionRows()
         }
+        // Sidebar round: each incident's one action reaches an existing entry
+        // point. Accounts, sign-in (the CLI's own login) and setup live in
+        // Settings > Agents. Retry and Resume open the owning agent rather than
+        // sending a prompt on the user's behalf: unattended resend stays off
+        // until account switching lands (array/usage-fallback).
+        sidebar.agentInbox.onIncidentAction = { [weak self] incident in
+            self?.performSidebarIncident(incident)
+        }
         // P3.15: the row menu and the bulk bar reach the supervisor. Until this call
         // existed the shipped app assigned neither callback, so every destructive item
         // was greyed and a stale agent could not be removed by any route.
@@ -16540,6 +16565,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
+    /// What an incident's action did, for the witness.
+    enum SidebarIncidentOutcome: Equatable {
+        case openedSettings(String)
+        case revealed(UUID)
+        case none
+    }
+    private(set) var lastSidebarIncidentOutcomeForQA: SidebarIncidentOutcome = .none
+
+    @discardableResult
+    func performSidebarIncident(_ incident: SidebarIncident) -> SidebarIncidentOutcome {
+        let outcome: SidebarIncidentOutcome
+        switch incident.kind {
+        case .cause(.usageLimit), .cause(.signInExpired), .cause(.couldNotStart):
+            openSettings(paneID: "agents")
+            outcome = .openedSettings("agents")
+        case .needsYou, .cause(.providerBusy), .cause(.interruptedByRestart), .cause(.taskError):
+            if let target = incident.ownerIDs.first ?? incident.agentIDs.first, revealAgentFromInbox(target) {
+                outcome = .revealed(target)
+            } else {
+                outcome = .none
+            }
+        }
+        lastSidebarIncidentOutcomeForQA = outcome
+        return outcome
+    }
+
     /// Clicking an inbox row takes you to that agent, wherever it is — another
     /// workspace, or no tile at all.
     ///

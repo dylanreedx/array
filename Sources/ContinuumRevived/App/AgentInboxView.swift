@@ -4281,6 +4281,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let rowDisclosure = disclosure(for: model)
         let rowRollup = rollupsByParent[model.id]
         let renderNow = clock()
+        // Sidebar round: the Ledger's facts, set before `apply` reads them.
+        (cell as? AgentInbox96CellView)?.ledger = sidebarLayout == .ledger
+            ? AgentInbox96CellView.LedgerFacts(tally: model.depth == 0 ? sidebarTallies[model.id] : nil) : nil
         // .plans/113: only a lead in the live block is drawn under a project heading.
         (cell as? AgentInbox96CellView)?.placementRepeatsHeading = sortMode == .byProject
             && model.depth == 0 && InboxSort.section(for: model.lifecycle, now: renderNow) == .active
@@ -7198,6 +7201,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
     }
     var isSortHoldPendingForQA: Bool { sortHoldPending }
+    /// Sidebar round: the drawn list, materialised, for the ledger witness.
+    var itemsForQA: [InboxListItem] { items }
+    var allRowsForQA: [AgentInboxRow] { allRows }
+    func cellForQA(atItem index: Int) -> NSView? {
+        tableView.view(atColumn: 0, row: index, makeIfNecessary: true)
+    }
+    func scrollItemToVisibleForQA(_ index: Int) { tableView.scrollRowToVisible(index) }
     func drawnRowMinYForQA(id: UUID) -> CGFloat? { drawnRowMinYs()[id] }
     /// Press the sort button the way a click does: its menu hook, which is what
     /// `ChromeIconButton.mouseDown` calls.
@@ -8775,6 +8785,8 @@ final class AgentInboxRemainderView: NSTableCellView {
     /// Sidebar round, Ledger: the fold names only what the lead's chip does
     /// not ("5 folded · includes 3 stopped"), so a failure is said once.
     var ledgerTitle: String?
+    var titleForQA: String { label.stringValue }
+    var buttonForQA: NSView { button }
 
     func apply(remainder: FanoutRemainder) {
         self.remainder = remainder
