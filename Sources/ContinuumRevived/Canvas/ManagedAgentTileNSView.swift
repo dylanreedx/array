@@ -3789,7 +3789,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         composeBackdrop.setContentCompressionResistancePriority(.required, for: .vertical)
         composer.layer?.borderColor = AgentLineRole.controlBoundary.color.cgColor(for: effectiveTokenTheme)
         if let slot {
-            let chrome = AgentTileChromeCanvasView(body: root, transcript: transcript, transcriptSlot: slot)
+            let chrome = AgentTileChromeCanvasView(body: root, transcript: transcript, transcriptSlot: slot,
+                                                   restingHost: restingHost)
             chrome.onRestingPress = { [weak self] event in self?.redeliverRestingPress(event) }
             chromeCanvas = chrome
             return chrome
