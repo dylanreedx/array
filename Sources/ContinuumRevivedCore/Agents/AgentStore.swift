@@ -296,9 +296,11 @@ public final class AgentStore: @unchecked Sendable {
     }
 
     public func delete(id: AgentID) throws {
-        let archived = layout.archivedAgentFile(id: id)
-        if FileManager.default.fileExists(atPath: archived.path) {
-            try FileManager.default.removeItem(at: archived)
+        // Every copy: a quarantined one left behind would bring a deleted
+        // agent back on the next lookup by id.
+        for copy in [layout.archivedAgentFile(id: id)] + quarantinedCopies(id: id)
+            where FileManager.default.fileExists(atPath: copy.path) {
+            try FileManager.default.removeItem(at: copy)
         }
         let url = layout.agentFile(id: id)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
@@ -386,7 +388,7 @@ public final class AgentStore: @unchecked Sendable {
         public let underlying: Error
         public var description: String {
             "\(file.lastPathComponent) held no readable record (\(underlying)); moved to \(quarantinedAt.path) and kept. "
-                + "Asking for its agent by id reads it again; moving it back into agents/ restores it at the next launch"
+                + "Asking for its agent by id reads it again; moving it back into agents/ as <agent id>.json restores it at the next launch"
         }
     }
 
@@ -399,17 +401,38 @@ public final class AgentStore: @unchecked Sendable {
     /// before it moves; a file that still holds no record stays and throws.
     /// nil when the quarantine does not hold `id`; a live copy wins.
     public func unquarantine(id: AgentID) throws -> AgentRecord? {
-        let quarantined = quarantinedAgentFile(id: id)
+        let copies = quarantinedCopies(id: id)
+        guard !copies.isEmpty else { return nil }
         var info = stat()
-        guard lstat(quarantined.path, &info) == 0 else { return nil }
         let live = layout.agentFile(id: id)
         if lstat(live.path, &info) == 0 { return try load(id: id) }
-        let record = try JSONCodec.makeDecoder().decode(AgentRecord.self, from: Data(contentsOf: quarantined))
-        guard record.id == id else { throw CocoaError(.fileReadCorruptFile) }
-        guard Darwin.rename(quarantined.path, live.path) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        // The first copy that decodes wins: a damaged first copy must not mask
+        // a readable later one. It returns under the canonical name.
+        var failure: Error = CocoaError(.fileReadCorruptFile)
+        for copy in copies {
+            do {
+                let record = try JSONCodec.makeDecoder().decode(AgentRecord.self, from: Data(contentsOf: copy))
+                guard record.id == id else { throw CocoaError(.fileReadCorruptFile) }
+                guard Darwin.rename(copy.path, live.path) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                return record
+            } catch { failure = error }
         }
-        return record
+        throw failure
+    }
+
+    /// Every quarantined copy of `id`: `<id>.json`, then the suffixed copies
+    /// `quarantine` makes when that name is taken.
+    public func quarantinedCopies(id: AgentID) -> [URL] {
+        let canonical = quarantinedAgentFile(id: id)
+        var info = stat()
+        var copies = lstat(canonical.path, &info) == 0 ? [canonical] : []
+        let prefix = canonical.lastPathComponent + "."
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: layout.archiveQuarantineDirectory.path)) ?? []
+        copies += names.filter { $0.hasPrefix(prefix) }.sorted()
+            .map { layout.archiveQuarantineDirectory.appendingPathComponent($0, isDirectory: false) }
+        return copies
     }
 
     /// Damaged, not unreachable: a file whose bytes cannot be read at all

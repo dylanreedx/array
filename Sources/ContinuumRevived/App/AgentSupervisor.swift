@@ -3297,6 +3297,11 @@ final class AgentSupervisor {
         do {
             try withAgentStoreLock {
                 for id in eligible.sorted(by: { $0.rawValue.uuidString < $1.rawValue.uuidString }) {
+                    // Judged again on the durable copy, under the lock: another
+                    // instance on this store may have changed it since restore
+                    // (marked it active, prompted it, gave it a tile).
+                    guard let durable = try? store.load(id: id),
+                          AgentRecordArchivePolicy.recordAllowsArchive(durable, now: now) else { continue }
                     do { try store.archive(id: id); moved.append(id) } catch {
                         warn("AgentSupervisor.restore: could not archive agent \(id.rawValue.uuidString): \(error)")
                     }
@@ -3400,6 +3405,10 @@ final class AgentSupervisor {
     @discardableResult
     private func adoptUnarchived(_ record: AgentRecord, fileManager: FileManager = .default) -> Bool {
         let id = record.id
+        // Its parent first: one archived on a later launch than the child would
+        // otherwise leave it live with no parent record, and parent lookups do
+        // not adopt. Ends at a live or unknown id, so a cycle cannot loop.
+        if let parent = record.parentAgentID { adoptArchivedAgent(parent, fileManager: fileManager) }
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: record.cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
             // Back in the live store, unavailable exactly as restore marks it.
