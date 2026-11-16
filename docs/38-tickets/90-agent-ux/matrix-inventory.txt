@@ -216,6 +216,7 @@ check --leader-snap-check
 check --leader-zone-jump-check
 check --live-compaction-replay-check
 check --location-action-surface-check
+check --long-transcript-performance-check
 check --managed-agent-model-spawn-check
 check --managed-agent-page-zoom-check
 check --managed-codex-hooks-check
@@ -725,6 +726,7 @@ leg run_app_check .build/debug/Array --leader-snap-check
 leg run_app_check .build/debug/Array --leader-zone-jump-check
 leg run_app_check .build/debug/Array --live-compaction-replay-check
 leg run_app_check .build/debug/Array --location-action-surface-check
+leg run_app_check .build/debug/Array --long-transcript-performance-check
 leg run_app_check .build/debug/Array --managed-agent-model-spawn-check
 leg run_app_check .build/debug/Array --managed-agent-page-zoom-check
 leg run_app_check .build/debug/Array --managed-codex-hooks-check
