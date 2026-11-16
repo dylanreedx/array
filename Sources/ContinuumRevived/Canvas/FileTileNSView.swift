@@ -63,6 +63,9 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     /// The document itself, inside the editor shell (and beside the sidebar
     /// when it is open): what a teammate's copy of this file is compared with.
     var qaDocumentBody: NSView { currentDocumentBody() }
+    var qaActiveBody: NSView? { activeBody }
+    var qaDirtyIndicatorText: String { dirtyLabel.stringValue }
+    var qaDirtyIndicatorAccessibilityLabel: String? { dirtyLabel.accessibilityLabel() }
     var qaDocumentID: String { bridgeDocumentID }
     var qaDraftText: String? { documentSession?.draftText }
     var qaSidebarRoot: String? { fileBrowser == nil ? nil : tile.metadata.documentLocation?.checkoutRootPath }
@@ -102,6 +105,14 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private var savedText: String?
     private var loadedFileSignature: FileSignature?
     private var externalChangeTimer: Timer?
+    private(set) var qaExternalPollCount = 0
+    // Keep repeated polling failures from replacing the same visible actions.
+    private weak var missingFileActionsBody: NSView?
+    private var missingFileActionsCanRestore = false
+    private var showingMissingFileActions: Bool {
+        guard let body = missingFileActionsBody else { return false }
+        return activeBody === body
+    }
     private var recoverySaveTimer: Timer?
     private var editorStateSaveTimer: Timer?
     var onSaveFailure: ((String) -> Void)?
@@ -621,7 +632,16 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             ? [fileBrowser, documentContainer].compactMap { $0 }
             : [documentContainer]
         if documentBody.superview === documentContainer,
-           editorSplitView.subviews == expectedSubviews { return }
+           editorSplitView.subviews == expectedSubviews {
+            // The shell can remain assembled while a missing-file action body
+            // is on screen. Reattach it when the file becomes available again.
+            if activeBody !== editorSplitView {
+                promoteForIncomingFocus()
+                setContentView(editorSplitView)
+                activeBody = editorSplitView
+            }
+            return
+        }
         rebuildingEditorShell = true
         defer { rebuildingEditorShell = false }
         promoteForIncomingFocus()
@@ -856,11 +876,14 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     }
 
     private func showMissingFileActions(_ message: String) {
+        let canRestore = trashedItemURL != nil
+        if showingMissingFileActions, messageLabel?.stringValue == message,
+           missingFileActionsCanRestore == canRestore { return }
         let label = NSTextField(labelWithString: message)
         label.alignment = .center
         label.maximumNumberOfLines = 0
         let restore = NSButton(title: "Restore", target: self, action: #selector(restoreTrashedFile(_:)))
-        restore.isEnabled = trashedItemURL != nil
+        restore.isEnabled = canRestore
         let saveAs = NSButton(title: "Save As…", target: self, action: #selector(saveMissingDraftAs(_:)))
         let buttons = NSStackView(views: [restore, saveAs])
         buttons.orientation = .horizontal
@@ -880,6 +903,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         ])
         messageLabel = label
         messageContainer = container
+        missingFileActionsBody = container
+        missingFileActionsCanRestore = canRestore
         setContentView(container)
         activeBody = container
         applyTokens()
@@ -1050,16 +1075,38 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         }
         guard let filePath, let session = documentSession else { return }
         let signature = Self.fileSignature(for: filePath)
-        guard force || signature != loadedFileSignature else { return }
+        // A moved-away file can return with its original inode, timestamp and
+        // bytes. Even then, the missing-actions body must reconcile with disk.
+        let wasShowingMissingActions = showingMissingFileActions
+        guard force || signature != loadedFileSignature || wasShowingMissingActions else { return }
         let result = session.refreshFromDisk()
         switch result {
         case .unchanged:
             loadedFileSignature = signature
+            if wasShowingMissingActions {
+                trashedOriginalURL = nil
+                trashedItemURL = nil
+                hasExternalConflict = false
+                setDirty(session.isDirty)
+                showBody()
+            }
         case .conflict:
             hasExternalConflict = true
             dirtyLabel.stringValue = "!"
             dirtyLabel.toolTip = "The file changed on disk"
+            dirtyLabel.setAccessibilityLabel("File changed on disk; unsaved changes")
+            if wasShowingMissingActions {
+                trashedOriginalURL = nil
+                trashedItemURL = nil
+                showBody()
+            }
         case .reloaded:
+            if wasShowingMissingActions {
+                trashedOriginalURL = nil
+                trashedItemURL = nil
+                hasExternalConflict = false
+                setDirty(session.isDirty)
+            }
             savedText = session.baselineText
             loadedText = session.draftText
             loadedFileSignature = signature
@@ -1074,6 +1121,12 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             }
             showBody()
         case let .unavailable(reason):
+            // A Trash operation supplies a real restore destination. Polling a
+            // still-missing source must not discard that action or rebuild it.
+            if reason == .missing, trashedItemURL != nil {
+                showMissingFileActions("File moved to Trash. Your editor draft is preserved.")
+                return
+            }
             let message = Self.unavailableMessage(reason)
             showSaveFailure(message)
             trashedOriginalURL = URL(fileURLWithPath: filePath)
@@ -1247,6 +1300,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     /// Installs the body for the current mode from the loaded snapshot.
     private func showBody() {
         guard let loadedText else { return }
+        missingFileActionsBody = nil
         // A mode switch arrives via a click, so `hitTest` has already promoted —
         // but this must hold even for a programmatic switch (`reveal(line:)`),
         // because `setContentView` below would replace the surface host and strand
@@ -2099,7 +2153,11 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private func startExternalChangeMonitoring() {
         guard window != nil, externalChangeTimer == nil else { return }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshFromDisk() }
+            Task { @MainActor in
+                guard let self else { return }
+                self.qaExternalPollCount += 1
+                self.refreshFromDisk()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         externalChangeTimer = timer

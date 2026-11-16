@@ -1916,6 +1916,144 @@ enum FileOpenChecks {
         try expect(markdownTile.save(overwriteExternalChanges: true) && !markdownTile.isDirty,
                    "an explicit overwrite must save the local draft and clear the conflict")
 
+        // A missing file continues to be polled: its missing signature differs
+        // from the last loaded signature. Repeated failures must retain the
+        // actual action view, and restoration must recover even when the very
+        // same inode and bytes return (so the original signature is unchanged).
+        let missingURL = tempRoot.appendingPathComponent("TEMPORARILY-MISSING.md")
+        let heldURL = tempRoot.appendingPathComponent("TEMPORARILY-MISSING.held")
+        let missingText = "# Temporarily missing\n\nKeep this draft.\n"
+        try missingText.write(to: missingURL, atomically: true, encoding: .utf8)
+        let missingTile = makeTile(path: missingURL.path)
+        let editorBody = missingTile.qaActiveBody
+        guard let unchangedDocument = missingTile.qaMarkdownDocument else {
+            throw Failure(message: "fixture must render its Markdown document")
+        }
+        let unchangedBlocks = unchangedDocument.qaBlockViews
+        let unchangedThemeCount = unchangedDocument.qaThemeApplicationCount
+        let unchangedRenderCount = unchangedDocument.qaMarkdownApplyCount
+        try fileManager.setAttributes([.modificationDate: Date().addingTimeInterval(10)],
+                                      ofItemAtPath: missingURL.path)
+        missingTile.refreshFromDisk()
+        try expect(missingTile.qaMarkdownDocument === unchangedDocument
+                   && unchangedDocument.qaBlockViews.count == unchangedBlocks.count
+                   && zip(unchangedDocument.qaBlockViews, unchangedBlocks).allSatisfy { $0.0 === $0.1 }
+                   && unchangedDocument.qaThemeApplicationCount == unchangedThemeCount
+                   && unchangedDocument.qaMarkdownApplyCount == unchangedRenderCount,
+                   "metadata-only changes with unchanged bytes must retain rendered blocks")
+        try fileManager.moveItem(at: missingURL, to: heldURL)
+        missingTile.refreshFromDisk()
+        guard let firstMissingBody = missingTile.qaActiveBody else {
+            throw Failure(message: "missing file must present an action body")
+        }
+        try expect(firstMissingBody !== editorBody, "missing file must replace the editor body with actions")
+        let missingThemeCount = unchangedDocument.qaThemeApplicationCount
+        let missingRenderCount = unchangedDocument.qaMarkdownApplyCount
+        var replacements = 0
+        for _ in 0..<8 {
+            missingTile.refreshFromDisk()
+            if missingTile.qaActiveBody !== firstMissingBody { replacements += 1 }
+        }
+        print("file missing refresh: \(replacements) action-body replacements, " +
+              "\(unchangedDocument.qaThemeApplicationCount - missingThemeCount) theme applications and " +
+              "\(unchangedDocument.qaMarkdownApplyCount - missingRenderCount) full renders across 8 repeated polls")
+        try expect(replacements == 0 && unchangedDocument.qaThemeApplicationCount == missingThemeCount
+                   && unchangedDocument.qaMarkdownApplyCount == missingRenderCount,
+                   "unchanged missing-file polls must retain their action body and avoid Markdown re-rendering")
+        try expect(missingTile.qaExternalChangeMonitoringActive,
+                   "the mounted missing-file fixture must keep its production monitor")
+        let priorPolls = missingTile.qaExternalPollCount
+        let missingTimerDeadline = Date().addingTimeInterval(3)
+        while missingTile.qaExternalPollCount == priorPolls, Date() < missingTimerDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(missingTile.qaExternalPollCount > priorPolls,
+                   "the production missing-file timer must actually poll")
+        try expect(missingTile.qaActiveBody === firstMissingBody
+                   && unchangedDocument.qaThemeApplicationCount == missingThemeCount
+                   && unchangedDocument.qaMarkdownApplyCount == missingRenderCount,
+                   "the mounted production timer must retain the same missing action body")
+
+        // A different failure must update the visible explanation, and a
+        // subsequent missing result must be retryable rather than cached away.
+        try fileManager.createDirectory(at: missingURL, withIntermediateDirectories: false)
+        missingTile.refreshFromDisk()
+        try expect(missingTile.qaActiveBody !== firstMissingBody,
+                   "a new unavailable reason must update the missing-file actions")
+        let directoryFailureBody = missingTile.qaActiveBody
+        try fileManager.removeItem(at: missingURL)
+        missingTile.refreshFromDisk()
+        try expect(missingTile.qaActiveBody !== directoryFailureBody,
+                   "the missing reason must be shown again after a retry")
+        let lastMissingBody = missingTile.qaActiveBody
+        let park = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 420))
+        host.addSubview(park)
+        try expect(missingTile.parkBodyFarOffscreen(park: park)
+                   && missingTile.qaParkedBody === lastMissingBody,
+                   "the missing action body must be parkable before recovery")
+        try fileManager.moveItem(at: heldURL, to: missingURL)
+        missingTile.refreshFromDisk()
+        try expect(missingTile.qaActiveBody === editorBody && missingTile.loadedText == missingText
+                   && missingTile.surfaceResidency == .native && missingTile.qaParkedBody == nil,
+                   "restoring the original file must promote and reattach its unchanged editor")
+
+        // A clean file restored with new bytes becomes the new editor contents,
+        // and the missing-file save-failure badge must clear.
+        try fileManager.removeItem(at: missingURL)
+        missingTile.refreshFromDisk()
+        let cleanChangedText = missingText + "external clean change\n"
+        try cleanChangedText.write(to: missingURL, atomically: true, encoding: .utf8)
+        missingTile.refreshFromDisk()
+        try expect(missingTile.qaActiveBody === editorBody && missingTile.loadedText == cleanChangedText && !missingTile.isDirty
+                   && !missingTile.hasExternalConflict && missingTile.qaDirtyIndicatorText.isEmpty,
+                   "a clean changed restoration must reload and clear the missing-file failure badge")
+
+        // A dirty draft must be preserved and made visible when a different
+        // on-disk file returns. The replacement is a conflict, not a reload.
+        missingTile.setMode(.edit)
+        let missingProtectedDraft = cleanChangedText + "local unsaved work\n"
+        missingTile.textView.string = missingProtectedDraft
+        missingTile.textView.didChangeText()
+        try fileManager.removeItem(at: missingURL)
+        missingTile.refreshFromDisk()
+        let secondMissingBody = missingTile.qaActiveBody
+        try (cleanChangedText + "external change\n").write(to: missingURL, atomically: true, encoding: .utf8)
+        missingTile.refreshFromDisk()
+        try expect(missingTile.qaActiveBody === editorBody && missingTile.qaActiveBody !== secondMissingBody
+                   && missingTile.hasExternalConflict
+                   && missingTile.isDirty && missingTile.qaDraftText == missingProtectedDraft,
+                   "a changed restored file must reveal and preserve the conflicted draft")
+        try expect(missingTile.qaDirtyIndicatorAccessibilityLabel == "File changed on disk; unsaved changes",
+                   "restored conflict must announce the conflict instead of the prior missing-file failure")
+
+        // A trash notification carries a real restore target. Continued polling
+        // must not discard that target or disable the existing restore button.
+        let trashSource = tempRoot.appendingPathComponent("TEMPORARY-TRASH.md")
+        let trashDestination = tempRoot.appendingPathComponent("TEMPORARY-TRASH.held")
+        try missingText.write(to: trashSource, atomically: true, encoding: .utf8)
+        let trashTile = makeTile(path: trashSource.path)
+        let trashEditorBody = trashTile.qaActiveBody
+        try fileManager.moveItem(at: trashSource, to: trashDestination)
+        NotificationCenter.default.post(name: .arrayProjectFileTrashed, object: nil,
+                                        userInfo: ["source": trashSource.path, "trash": trashDestination.path])
+        guard let trashBody = trashTile.qaActiveBody else {
+            throw Failure(message: "Trash must present restore actions")
+        }
+        func restoreButton(in view: NSView) -> NSButton? {
+            if let button = view as? NSButton, button.title == "Restore" { return button }
+            return view.subviews.lazy.compactMap { restoreButton(in: $0) }.first
+        }
+        guard let restore = restoreButton(in: trashBody) else {
+            throw Failure(message: "Trash must provide a restore button")
+        }
+        try expect(restore.isEnabled, "Trash restore must start enabled")
+        trashTile.refreshFromDisk()
+        try expect(trashTile.qaActiveBody === trashBody && restore.isEnabled,
+                   "missing-file polling must retain the enabled Trash restore action")
+        restore.performClick(nil)
+        try expect(fileManager.fileExists(atPath: trashSource.path) && trashTile.qaActiveBody === trashEditorBody,
+                   "the retained Trash action must restore the file and editor")
+
         // The control exists only for Markdown.
         try expect(markdownTile.qaModeControl != nil, "a markdown tile must offer a Preview/Edit control")
         let swiftTile = makeTile(path: swiftURL.path)
