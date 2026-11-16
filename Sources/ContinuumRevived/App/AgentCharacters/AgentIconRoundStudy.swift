@@ -9,6 +9,10 @@ enum AgentIconRoundStudy {
     static func render(canvas: CanvasNSView, window: NSWindow, defaults: UserDefaults,
                        views: [ManagedAgentTileNSView], directory: URL) throws -> String {
         typealias Check = TileAgentBubbleChecks
+        if let mode = ProcessInfo.processInfo.environment["ARRAY_AGENT_ICON_ROUND_MODE"], mode.hasPrefix("lens") {
+            return try renderLens(clip: mode == "lens-clip", canvas: canvas, window: window, defaults: defaults,
+                                  views: views, directory: directory)
+        }
         if let mode = ProcessInfo.processInfo.environment["ARRAY_AGENT_ICON_ROUND_MODE"], !mode.isEmpty {
             return try renderInside(clips: mode == "clips", canvas: canvas, window: window, defaults: defaults,
                                     views: views, directory: directory)
@@ -248,6 +252,178 @@ enum AgentIconRoundStudy {
         TileAgentBubbleLayer.qaRoundSizeMultiplier = 1
         let summary = (["PASS agent icon round 2 (\(clips ? "clips" : "inside"))"] + report).joined(separator: "\n")
         try summary.write(to: directory.appendingPathComponent(clips ? "clips-checks.txt" : "inside-checks.txt"), atomically: true, encoding: .utf8)
+        return summary
+    }
+
+    // MARK: Round 3: a glass lens baked into the atlas once
+
+    /// A copy of the atlas picture with every frame seen through a glass sphere
+    /// centred on the character's body: the middle magnified, the edge
+    /// compressed (source radius = r (a + (1 - a) r^2), a = 1 / centre magnification). Done once, off the render path, so
+    /// a pose animation only steps through already-warped frames. `supersample`
+    /// 1 samples nearest at the atlas's native scale; n > 1 samples n x n nearest
+    /// points per pixel and box-averages them.
+    static func warpedAtlas(_ sprite: AgentCharacterSpriteAtlas, magnification: Double, supersample: Int) -> CGImage? {
+        let atlas = sprite.atlas
+        let src = atlas.pixels
+        var dst = src
+        let radius = 0.63 * Double(sprite.typicalInkSide)
+        let n = max(1, supersample)
+        let a = 1 / magnification
+        for frame in atlas.frames {
+            let cx = Double(frame.x) + Double(sprite.bodyCentre.x)
+            let cy = Double(frame.y) + Double(sprite.bodyCentre.y)
+            let x0 = Int(cx - radius) - 1, x1 = Int(cx + radius) + 1
+            let y0 = Int(cy - radius) - 1, y1 = Int(cy + radius) + 1
+            for y in max(frame.y, y0)..<min(frame.y + frame.height, y1 + 1) {
+                for x in max(frame.x, x0)..<min(frame.x + frame.width, x1 + 1) {
+                    var acc = [Double](repeating: 0, count: 4)
+                    for j in 0..<n {
+                        for i in 0..<n {
+                            let px = Double(x) + (Double(i) + 0.5) / Double(n)
+                            let py = Double(y) + (Double(j) + 0.5) / Double(n)
+                            var ox = px - cx, oy = py - cy
+                            let rr = (ox * ox + oy * oy).squareRoot() / radius
+                            if rr > 0, rr < 1 {
+                                let k = a + (1 - a) * rr * rr
+                                ox *= k; oy *= k
+                            }
+                            let sx = Int((cx + ox).rounded(.down)), sy = Int((cy + oy).rounded(.down))
+                            guard sx >= frame.x, sx < frame.x + frame.width, sy >= frame.y, sy < frame.y + frame.height else { continue }
+                            let at = (sy * atlas.width + sx) * 4
+                            for c in 0..<4 { acc[c] += Double(src[at + c]) }
+                        }
+                    }
+                    let out = (y * atlas.width + x) * 4
+                    for c in 0..<4 { dst[out + c] = UInt8(min(255, (acc[c] / Double(n * n)).rounded())) }
+                }
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(dst) as CFData),
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        return CGImage(width: atlas.width, height: atlas.height, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: atlas.width * 4, space: space,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    static func renderLens(clip: Bool, canvas: CanvasNSView, window: NSWindow, defaults: UserDefaults,
+                           views: [ManagedAgentTileNSView], directory: URL) throws -> String {
+        typealias Check = TileAgentBubbleChecks
+        let fm = FileManager.default
+        let out = directory.appendingPathComponent(clip ? "lens-clip-frames" : "lens")
+        try fm.createDirectory(at: out, withIntermediateDirectories: true)
+        let subject = views[0]
+        let world = canvas.allTilesInWorldFrames().first { $0.id == subject.tile.id }!.frame
+        let rect = NSRect(x: 0, y: 0, width: 820, height: 460)
+        var report: [String] = []
+        func setting(_ key: String, _ value: Any) {
+            defaults.set(value, forKey: key)
+            SettingChangeEvent.post(SettingID(rawValue: key))
+        }
+        func study(inside: String?, zoom: Double) {
+            let taper = min(1, CGFloat(zoom / 0.8).squareRoot())
+            TileAgentBubbleLayer.qaRoundSizeMultiplier = taper
+            setting(AgentCharacterConfig.bubbleStyleKey, "orb")
+            canvas.setViewport(CanvasViewport(x: world.x - 70 / zoom, y: world.y - 70 / zoom, zoom: zoom))
+            Check.pump(0.15)
+            for view in views {
+                view.qaAgentBubble?.qaRoundStudy = inside == nil ? nil : "orb-rim"
+                view.qaAgentBubble?.qaInside = inside
+                view.needsLayout = true
+                view.qaTitleBarView?.needsLayout = true
+                view.layoutSubtreeIfNeeded()
+                view.placeAgentBubble()
+                view.qaAgentBubble?.layoutIfNeeded()
+            }
+            canvas.layoutSubtreeIfNeeded()
+            Check.pump(0.15)
+        }
+        var cache: [String: CGImage] = [:]
+        var originals: [ObjectIdentifier: CGImage] = [:]
+        func picture(_ view: ManagedAgentTileNSView, _ variant: String) -> CGImage? {
+            guard let layer = view.qaAgentBubble?.sprite, let atlas = layer.sprite else { return nil }
+            if originals[ObjectIdentifier(atlas)] == nil { originals[ObjectIdentifier(atlas)] = atlas.image }
+            guard variant != "plain" else { return atlas.image }
+            let key = "\(ObjectIdentifier(atlas).hashValue)-\(variant)"
+            if let hit = cache[key] { return hit }
+            let magnification = (Double(variant.dropFirst(1)) ?? 130) / 100
+            let started = CACurrentMediaTime()
+            let image = warpedAtlas(atlas, magnification: magnification, supersample: variant.hasPrefix("s") ? 3 : 1)
+            report.append("bake \(variant): \(Int((CACurrentMediaTime() - started) * 1000)) ms once per atlas (\(atlas.atlas.width)x\(atlas.atlas.height))")
+            if let image { cache[key] = image }
+            return image
+        }
+        func apply(_ variant: String) throws {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for view in views {
+                guard let image = picture(view, variant) else { throw Check.Failure(description: "no atlas for \(variant)") }
+                view.qaAgentBubble?.sprite.contents = image
+            }
+            CATransaction.commit()
+            Check.pump(0.1)
+        }
+        func mark(dark: Bool) -> CGImage? { nil }
+        func appearance(_ name: NSAppearance.Name) {
+            window.appearance = NSAppearance(named: name)
+            Check.pump(0.2)
+        }
+        _ = mark
+        setting(AgentCharacterConfig.sizeKey, "small")
+        setting(SidebarActiveIndicatorStyle.defaultsKey, "classic")
+        Check.pump(0.2)
+        let themes: [(String, NSAppearance.Name)] = [("dark", .darkAqua), ("light", .aqua)]
+        if !clip {
+            let variants: [(String, String?, String)] = [
+                ("today", nil, "plain"), ("a", "a", "plain"),
+                ("n125", "a", "n125"), ("n150", "a", "n150"), ("n190", "a", "n190"),
+                ("s125", "a", "s125"), ("s150", "a", "s150"), ("s190", "a", "s190")]
+            for (theme, app) in themes {
+                appearance(app)
+                for (name, inside, variant) in variants {
+                    for (zn, z) in [("80", 0.8), ("125", 1.25)] {
+                        study(inside: inside, zoom: z)
+                        try apply(variant)
+                        for view in views {
+                            // Every variant shows the same still pose.
+                            guard let sprite = view.qaAgentBubble?.sprite, let plan = sprite.plan, let atlas = sprite.sprite else { continue }
+                            sprite.removeAnimation(forKey: CharacterSpriteLayer.animationKey)
+                            CATransaction.begin()
+                            CATransaction.setDisableActions(true)
+                            sprite.contentsRect = sprite.rect(of: atlas.atlas.frameIndex(of: plan.still))
+                            CATransaction.commit()
+                        }
+                        subject.qaAgentBubble?.setWorking(false, style: "classic", phase: 0)
+                        Check.pump(0.1)
+                        try Check.write(Check.capture(canvas, window, rect: rect), to: out.appendingPathComponent("lens-\(name)-\(theme)-\(zn).png"))
+                    }
+                }
+                report.append("PASS stills \(theme)")
+            }
+        } else {
+            let variant = ProcessInfo.processInfo.environment["ARRAY_AGENT_ICON_ROUND_VARIANT"] ?? "n150"
+            let clipRect = NSRect(x: 30, y: 30, width: 120, height: 80)
+            for (theme, app) in themes {
+                appearance(app)
+                study(inside: "a", zoom: 1.25)
+                try apply(variant)
+                let bubble = subject.qaAgentBubble!
+                bubble.setWorking(true, style: "classic", phase: 0)
+                let dir = out.appendingPathComponent(theme)
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                for frame in 0..<180 {
+                    bubble.qaSeekMotion(Double(frame) / 30)
+                    Check.pump(0.02)
+                    try Check.write(Check.capture(canvas, window, rect: clipRect), to: dir.appendingPathComponent(String(format: "%03d.png", frame)))
+                }
+                bubble.qaSeekMotion(nil)
+                report.append("PASS clip \(theme): 180 frames, variant \(variant)")
+            }
+        }
+        TileAgentBubbleLayer.qaRoundSizeMultiplier = 1
+        let summary = (["PASS agent icon round 3 (\(clip ? "clip" : "stills"))"] + report).joined(separator: "\n")
+        try summary.write(to: directory.appendingPathComponent(clip ? "lens-clip-checks.txt" : "lens-checks.txt"), atomically: true, encoding: .utf8)
         return summary
     }
 }
