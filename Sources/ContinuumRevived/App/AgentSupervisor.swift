@@ -8134,13 +8134,19 @@ final class AgentSupervisor {
     /// runner has the item: the lead's next turn STARTED with it, or a running
     /// turn consumed it as a steer. Both settle the item `.consumed`, once.
     private var helperReceiptsAwaiting: [UUID: [(helper: AgentID, turn: String)]] = [:]
-    /// The completed turn whose result each helper's lead last received.
-    private var helperResultReceivedTurn: [AgentID: String] = [:]
+    /// How many turns each helper has finished, this launch, counted at every
+    /// turn end — held, de-duplicated or delivered alike.
+    private var helperTurnsFinished: [AgentID: Int] = [:]
+    /// The finished-turn count each delivered completion carries.
+    private var helperCompletionGeneration: [String: Int] = [:]
+    /// The finished-turn count of the result each helper's lead last received.
+    private var helperResultReceivedGeneration: [AgentID: Int] = [:]
 
     private func noteHelperResultsReceived(queueItem: UUID, by lead: AgentID) {
         for (helper, turn) in helperReceiptsAwaiting.removeValue(forKey: queueItem) ?? [] {
             guard records[helper]?.parentAgentID == lead else { continue }
-            helperResultReceivedTurn[helper] = turn
+            guard let generation = helperCompletionGeneration[turn] else { continue }
+            helperResultReceivedGeneration[helper] = generation
             helperResultDeliveredAt[helper] = helperCompletionNow()
             onHelperResultDelivered?(helper)
         }
@@ -8170,8 +8176,11 @@ final class AgentSupervisor {
         guard !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) else { return "still busy" }
         // This turn's result, received: a receipt older than the latest turn's
         // end belongs to an earlier turn.
+        // The lead received the result of the helper's LAST finished turn: none
+        // has finished since (held, de-duplicated or still on its way).
         guard let received = helperResultDeliveredAt[id], received >= terminal.endedAt,
-              let receivedTurn = helperResultReceivedTurn[id], receivedTurn == helperCompletionTurns[id]
+              heldHelperCompletions[id] == nil,
+              let generation = helperResultReceivedGeneration[id], generation == helperTurnsFinished[id]
         else { return "result not received" }
         // Array's own helpers, a harness's native subagents (observed children
         // with a turn still open, whatever the runner reports) or shell jobs.
@@ -8866,6 +8875,7 @@ final class AgentSupervisor {
     }
 
     private func helperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {
+        helperTurnsFinished[id, default: 0] += 1
         let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
         let previous = heldHelperCompletions[id]
         if let previous, previous.identity != identity { removeHeldRecords(previous, helper: id) }
@@ -9167,6 +9177,7 @@ final class AgentSupervisor {
         guard let child = records[id], child.capabilities.locallyManaged,
               helperCompletionTurns[id] != identity else { return }
         helperCompletionTurns[id] = identity
+        helperCompletionGeneration[identity] = helperTurnsFinished[id, default: 0]
         if helperFirstFinishedAt[id] == nil { helperFirstFinishedAt[id] = helperCompletionNow() }
         let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let text = helperCompletionText(id, child: child, outcome: outcome, error: error, statusOverride: statusOverride).text
