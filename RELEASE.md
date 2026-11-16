@@ -6,6 +6,13 @@ that candidate, and only then does it ship.
 
 ## Per-feature gate
 
+The release board ("Next release X.Y.Z" in Array) is the release's single
+source of truth. Every feature in the release has a card on it. The feature's
+owner assigns themselves to the card, comments at each stage (built, witness
+RED and GREEN, gate run, each review and what it changed), and moves the card
+to Done only when its tier's gate below has passed and the release lead has
+written PASS in its record. A feature with no card is not in the release.
+
 Pick the tier by what the feature can break, not by how big the diff is. When
 unsure, take the higher tier.
 
@@ -48,7 +55,8 @@ change to the branch after a PASS needs a new run and a new verdict.
 ## Combined candidate
 
 1. Cut one candidate branch from `origin/array/integration`
-   (`array/candidate-X.Y.Z`) and merge every feature whose record says PASS.
+   (`array/candidate-X.Y.Z`) and merge every feature whose card is Done and
+   whose record says PASS.
    A merge conflict resolved by hand reopens that feature's verdict.
 2. Build the combined preview, `scripts/dev-app.sh` from the candidate bench
    (it rebuilds `~/Desktop/Array Dev.app`), and give Dylan that preview. Nothing
