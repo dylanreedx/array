@@ -74,7 +74,87 @@ func runInboxSortChecks() {
     runInboxPartitionCheck()
     runInboxSettledPagingCheck()
     runInboxFanoutCheck()
+    runInboxFoldCountReconciliationCheck()
     print("InboxSort checks: frozen under activity (200 trials, status-sorted witness fails), parent/child nesting, lifecycle relocation, history by end time, tie determinism, cycle termination, depth assignment (orphan promoted, chain capped at \(AgentInboxRow.maxDepth)), subtree collapse, transitive child rollup, the three-section partition (exhaustive, disjoint, woken rejoins active), settled tail paging (\(InboxSort.settledPageSize) then \(InboxSort.settledPageStep) more, open agent always in the page), and P6.5 bounded fan-out (need priority, complete remainder accounting, and live expansion model) passed")
+}
+
+// A lead counts descendants, including helpers of sub-leads. Its fold must use
+// that same unit: failures describe some of the hidden agents, not extra agents.
+private func runInboxFoldCountReconciliationCheck() {
+    func id(_ value: Int) -> UUID {
+        UUID(uuidString: String(format: "3B420000-0000-4000-8000-%012X", value))!
+    }
+    let leadID = id(0)
+    let subleadID = id(1)
+    let now = sortEpoch.addingTimeInterval(4_000)
+    let lead = AgentInboxRow(id: leadID, title: "Lead", state: .ready, createdAt: sortEpoch)
+    let children = (1...16).map { index in
+        AgentInboxRow(id: id(index), title: "Child \(index)",
+                      state: index == 2 ? .failed : .ready,
+                      createdAt: sortEpoch, parentId: leadID)
+    }
+    func grandchild(_ index: Int) -> AgentInboxRow {
+        AgentInboxRow(id: id(index), title: "Nested helper \(index)", state: .ready,
+                      createdAt: sortEpoch, parentId: subleadID)
+    }
+    let sorted = InboxSort.sortForInbox(rows: [lead] + children + [grandchild(17), grandchild(18)])
+    let bounded = InboxSort.boundedForInbox(rows: sorted, now: now)
+    guard let fold = bounded.remainderByParent[leadID],
+          let rollup = InboxSort.rollups(in: sorted)[leadID] else {
+        expect(false, "fold count fixture must produce a lead rollup and remainder")
+        return
+    }
+    expect(rollup.children == 18 && bounded.rows.map(\.id) == [leadID]
+        && fold.hiddenChildCount == 16 && fold.hiddenDescendantCount == 18 && fold.hiddenFailed == 1,
+           "fold count fixture must reproduce 18 total, 16 direct children, two nested helpers, one included failure, and no visible helpers")
+    expect(fold.title == "18 more · 1 failed",
+           "fold count reconciliation: lead has \(rollup.children) descendants, visible helpers 0, fold says '\(fold.title)'; expected '18 more · 1 failed' (failure is included)")
+    expect(fold.accessibilityTitle == "18 more agents · 1 failed",
+           "VoiceOver must count the same hidden descendants as the fold: '\(fold.accessibilityTitle)'")
+    expect(bounded.accountedIDs(for: sorted) == Set(sorted.map(\.id)),
+           "every descendant remains accounted by the fold")
+
+    // A new quiet grandchild changes no direct-child IDs or attention buckets.
+    // The non-agent row's identity must still change so incremental rendering
+    // refreshes its words instead of leaving the old count on screen.
+    let larger = InboxSort.boundedForInbox(
+        rows: InboxSort.sortForInbox(rows: sorted + [grandchild(19)]), now: now)
+    let largerFold = larger.remainderByParent[leadID]!
+    expect(largerFold.hiddenChildIDs == fold.hiddenChildIDs
+        && largerFold.hiddenFailed == fold.hiddenFailed && largerFold.hiddenWorking == fold.hiddenWorking
+        && largerFold.hiddenNeedsYou == fold.hiddenNeedsYou,
+           "quiet nested arrival changes only the hidden descendant count")
+    expect(largerFold.title == "19 more · 1 failed" && largerFold.identity != fold.identity,
+           "quiet nested arrival must refresh the fold's count and render identity")
+
+    let flat = InboxSort.boundedForInbox(rows: InboxSort.sortForInbox(rows: [lead] + children), now: now)
+    expect(flat.remainderByParent[leadID]?.title == "16 more · 1 failed"
+        && flat.remainderByParent[leadID]?.accessibilityTitle == "16 more agents · 1 failed",
+           "flat groups keep their existing count and failure subset")
+    let successful = InboxSort.boundedForInbox(
+        rows: InboxSort.sortForInbox(rows: [lead, children[0], grandchild(17), grandchild(18)]), now: now)
+    expect(successful.remainderByParent[leadID]?.title == "3 more, all done",
+           "an all-done fold counts nested helpers too")
+    let single = InboxSort.boundedForInbox(
+        rows: InboxSort.sortForInbox(rows: [lead, children[0]]), now: now)
+    expect(single.remainderByParent[leadID]?.accessibilityTitle == "1 more agent",
+           "a one-agent fold retains singular accessibility copy")
+
+    // One recent child stays visible; only the remaining 18 belong in N more.
+    let recent = AgentInboxRow(id: id(20), title: "Visible helper", state: .ready,
+                               createdAt: now.addingTimeInterval(-10), parentId: leadID)
+    let mixedSorted = InboxSort.sortForInbox(rows: sorted + [recent])
+    let mixed = InboxSort.boundedForInbox(rows: mixedSorted, now: now)
+    expect(mixed.rows.map(\.id) == [leadID, recent.id]
+        && mixed.remainderByParent[leadID]?.title == "18 more · 1 failed"
+        && InboxSort.rollups(in: mixedSorted)[leadID]?.children == 1 + fold.hiddenDescendantCount,
+           "19 total reconciles as 1 visible + 18 hidden; the included failure adds nothing")
+
+    let expanded = InboxSort.boundedForInbox(rows: sorted, expandedParents: [leadID, subleadID], now: now)
+    expect(expanded.rows.count == 19 && expanded.remainders.allSatisfy { $0.title == "Show less" }
+        && Set(expanded.rows.map(\.id)) == Set(sorted.map(\.id)),
+           "expanding both levels reveals all 18 descendants once and keeps Show less")
+    print("Fold count reconciliation passed: 18 total = 0 visible + 18 hidden (16 direct + 2 nested; 1 failed included); quiet arrival updates 18 to 19; 19 total = 1 visible + 18 hidden; flat, all-done, singular, accessibility and expansion passed")
 }
 
 // MARK: - Fixture

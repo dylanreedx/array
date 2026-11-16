@@ -75,9 +75,71 @@ extension SidebarOwnershipChecks {
         var report: [String] = []
         for dark in [true, false] {
             report.append(try checkFoldExpansion(dark: dark, outputDirectory: outputDirectory))
+            report.append(try checkNestedFoldAccessibility(dark: dark, outputDirectory: outputDirectory))
             report.append(try checkHistoryFooter(dark: dark))
         }
         return "SidebarFoldExpandChecks passed:\n" + report.joined(separator: "\n")
+    }
+
+    /// The real fold button counts the complete hidden subtree, including while
+    /// expanded as Show less. Its target/action must fold that same subtree.
+    static func checkNestedFoldAccessibility(dark: Bool, outputDirectory: URL?) throws -> String {
+        let lead = uuid(0xD80), sublead = uuid(0xD81)
+        func row(_ id: UUID, parent: UUID? = nil, failed: Bool = false) -> AgentInboxRow {
+            AgentInboxRow(
+                id: id, title: parent == nil ? "Nested fold accessibility" : "Helper \(id.uuidString.suffix(3))",
+                state: failed ? .failed : .ready,
+                createdAt: now.addingTimeInterval(-3_600), parentId: parent)
+        }
+        let children = (1...16).map { row(uuid(0xD80 + $0), parent: lead, failed: $0 == 2) }
+        let fixture = [row(lead)] + children
+            + [row(uuid(0xDA1), parent: sublead), row(uuid(0xDA2), parent: sublead)]
+        let (inbox, window) = build(
+            dark: dark, height: 720, rows: fixture, folds: [lead: true, sublead: true]) { _, _ in }
+        defer { window.orderOut(nil) }
+        inbox.prefersReducedMotion = { true }
+        (window as? KeyWindow)?.reportsKey = true
+        func fold() throws -> AgentInboxRemainderView {
+            guard inbox.scrollToFanoutRemainderForQA(parentId: lead),
+                  let line = inbox.ownershipRemaindersForQA.first(where: { $0.qaParentID == lead }) else {
+                throw Failure(description: "nested fold AX: lead remainder is not visible")
+            }
+            line.layoutSubtreeIfNeeded()
+            return line
+        }
+        func click(_ line: AgentInboxRemainderView) throws {
+            let words = line.qaLabelFrameInWindow
+            let point = NSPoint(x: words.midX, y: words.midY)
+            guard let hit = window.contentView?.hitTest(point), hit === line || hit.isDescendant(of: line) else {
+                throw Failure(description: "nested fold AX: the words do not reach the real button")
+            }
+            NSApp.postEvent(try mouse(.leftMouseUp, at: point, window: window), atStart: false)
+            NSApp.sendEvent(try mouse(.leftMouseDown, at: point, window: window))
+            while let up = NSApp.nextEvent(matching: [.leftMouseUp], until: Date(), inMode: .default, dequeue: true) {
+                NSApp.sendEvent(up)
+            }
+            inbox.layoutViewportForQA()
+        }
+        let collapsed = try fold()
+        guard collapsed.qaTitle == "18 more · 1 failed",
+              collapsed.qaAccessibilityLabel == "Show 18 more agents · 1 failed" else {
+            throw Failure(description: "nested fold AX: collapsed label \(collapsed.qaAccessibilityLabel ?? "nil")")
+        }
+        try click(collapsed)
+        let expanded = try fold()
+        guard expanded.qaTitle == "Show less", expanded.qaAccessibilityLabel == "Hide 18 agents" else {
+            throw Failure(description: "nested fold AX: Show less must expose Hide 18 agents, got \(expanded.qaAccessibilityLabel ?? "nil")")
+        }
+        if let outputDirectory {
+            try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+            try write(inbox, to: outputDirectory.appendingPathComponent("nested-fold-ax-\(dark ? "dark" : "light").png"))
+        }
+        try click(expanded)
+        let closed = try fold()
+        guard inbox.rowIdsForQA == [lead], closed.qaAccessibilityLabel == "Show 18 more agents · 1 failed" else {
+            throw Failure(description: "nested fold AX: pressing Show less did not fold the nested subtree")
+        }
+        return "\(dark ? "dark" : "light") nested fold AX: 16 direct + 2 nested; Show 18 more agents · 1 failed → Hide 18 agents on Show less → collapsed through the real button"
     }
 
     static let historyLead = 0xC00
