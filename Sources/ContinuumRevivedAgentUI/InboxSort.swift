@@ -157,6 +157,7 @@ public enum InboxSort {
             let isQuiet = family.allSatisfy { row in
                 guard row.id != openAgentId, !row.hasLiveRunner,
                       !row.settlementBlocked, !row.isPinned,
+                      row.attention == .none,
                       !isUnopenedFailure(row) else { return false }
                 switch row.state {
                 case .working, .approval, .input: return false

@@ -10,12 +10,13 @@ func runSidebarHistoryScopeChecks() throws {
     let absentParent = UUID(), orphan = UUID(), orphanChild = UUID()
     let workspace = UUID(), otherWorkspace = UUID()
     func row(_ id: UUID, parent: UUID? = nil, state: InboxState = .ready,
+             attention: InboxAttention = .none,
              lifecycle: InboxLifecycle = .active, outcome: AgentTerminalOutcome? = .succeeded,
              unread: Bool = false, liveRunner: Bool = false,
              blocked: Bool = false, pinned: Bool = false, whereAt: UUID? = nil) -> AgentInboxRow {
         AgentInboxRow(
             id: id, title: "agent", workspaceName: "workspace", workspaceId: whereAt ?? workspace,
-            state: state, lifecycle: lifecycle, createdAt: now,
+            state: state, attention: attention, lifecycle: lifecycle, createdAt: now,
             parentId: parent, settlementBlocked: blocked,
             terminalEvent: outcome.map {
                 AgentTerminalEvent(sequence: 1, turnID: "turn", outcome: $0, endedAt: now)
@@ -68,22 +69,57 @@ func runSidebarHistoryScopeChecks() throws {
 
     // Exercise durable record → context → snapshot → row as well, with the
     // absent-parent input produced when restore skips a lead's missing cwd.
-    let record = AgentRecord(
+    var record = AgentRecord(
         id: AgentID(rawValue: orphan), displayName: "Finished helper", model: "fixture/model",
         thinking: "medium", cwd: "/tmp/sidebar-history-fixture", parentAgentID: AgentID(rawValue: absentParent),
         createdAt: now, lastActivityAt: now,
         latestTerminalEvent: AgentTerminalEvent(sequence: 1, turnID: "turn", outcome: .succeeded, endedAt: now),
         archivedAt: now)
-    let restored = try JSONDecoder().decode(AgentRecord.self, from: JSONEncoder().encode(record))
-    let context = AgentContextIndex.build(
-        registry: .empty(), documents: [:], projectCanvases: [:], terminalDescriptors: [], agents: [restored])
-    let snapshot = AgentInventory.snapshot(
-        terminalDescriptors: [], liveStatuses: [:], agents: [restored], activityByAgent: [:],
-        replicaId: lead, now: now)
-    let built = AgentInboxRowBuilder.rows(
-        from: snapshot, context: context, records: [orphan: restored], now: now)
+    record.acknowledgedTerminalSequence = 1
+    func fromRecords(_ input: [AgentRecord]) throws -> [AgentInboxRow] {
+        let restored = try JSONDecoder().decode([AgentRecord].self, from: JSONEncoder().encode(input))
+        let context = AgentContextIndex.build(
+            registry: .empty(), documents: [:], projectCanvases: [:], terminalDescriptors: [], agents: restored)
+        let snapshot = AgentInventory.snapshot(
+            terminalDescriptors: [], liveStatuses: [:], agents: restored, activityByAgent: [:],
+            replicaId: lead, now: now)
+        return AgentInboxRowBuilder.rows(
+            from: snapshot, context: context,
+            records: Dictionary(uniqueKeysWithValues: restored.map { ($0.id.rawValue, $0) }), now: now)
+    }
+    let built = try fromRecords([record])
     expect(built.count == 1 && built[0].parentId == absentParent && filtered(built).isEmpty,
            "a persisted orphan helper is omitted through the production row builder")
+
+    // A successful completion can still raise a snoozed helper's hand. Its
+    // terminal event is acknowledged here so only the durable wake supplies it.
+    var wokeRecord = record
+    wokeRecord.archivedAt = nil
+    wokeRecord.snoozedAt = now.addingTimeInterval(-120)
+    wokeRecord.snoozedUntil = now.addingTimeInterval(3_600)
+    wokeRecord.lastVisitedAt = now.addingTimeInterval(-180)
+    wokeRecord.runCompletedAt = now.addingTimeInterval(-60)
+    let wokeRows = try fromRecords([wokeRecord])
+    expect(wokeRows.count == 1 && wokeRows[0].attention == .woke
+           && wokeRows[0].state == .ready && wokeRows[0].lifecycle == .active,
+           "successful post-snooze completion must produce an active, ready, woke row")
+    expect(filtered(wokeRows) == wokeRows,
+           "sidebar history must preserve a successful orphan's raised hand")
+    var quietParent = AgentRecord(
+        id: AgentID(rawValue: orphanChild), displayName: "Quiet orphan lead", model: "fixture/model",
+        thinking: "medium", cwd: record.cwd, parentAgentID: AgentID(rawValue: absentParent),
+        createdAt: now, lastActivityAt: now, latestTerminalEvent: record.latestTerminalEvent, archivedAt: now)
+    quietParent.acknowledgedTerminalSequence = 1
+    wokeRecord.parentAgentID = quietParent.id
+    let wokeFamily = try fromRecords([quietParent, wokeRecord])
+    expect(filtered(wokeFamily) == wokeFamily,
+           "a successful woke helper must preserve its orphan family as context")
+    for attention in [InboxAttention.unread, .woke] {
+        let family = AgentInboxRowBuilder.placingChildrenWithParents([
+            orphanFamily[0], row(orphanChild, parent: orphan, attention: attention)])
+        expect(filtered(family) == family, "any helper attention must preserve its orphan family")
+    }
+    print("SidebarHistoryAttention: record-backed successful wake and unread/woke family context preserved")
     print("SidebarHistoryScope: quiet orphan families omitted; standing leads retain helpers/sub-leads; open, running, blocked, unread-failed and unknown work preserved; cycles safe; workspace scope preserved")
 }
 
