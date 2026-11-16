@@ -105,6 +105,14 @@ enum RestoreOnlyTranscriptRetentionChecks {
         try await transcriptStore.saveSnapshot(agentID: id, sessionID: sessionID, document: existing.document)
         let original = try await transcriptStore.load(agentID: id, sessionID: sessionID)
         guard original != nil else { throw Failure(description: "existing-archive fixture was empty") }
+        let existingRoot = fixtureRoot.appendingPathComponent("transcripts").appendingPathComponent(id.rawValue.uuidString)
+        guard let existingEnumerator = FileManager.default.enumerator(at: existingRoot, includingPropertiesForKeys: nil) else {
+            throw Failure(description: "could not find the existing-archive fixture")
+        }
+        let existingFiles = existingEnumerator.allObjects.compactMap { $0 as? URL }
+            .filter { $0.lastPathComponent == "snapshot.json" || $0.lastPathComponent == "journal.json" }
+        guard existingFiles.count == 2 else { throw Failure(description: "existing-archive fixture has no snapshot and journal") }
+        let existingBytes = try existingFiles.map { try Data(contentsOf: $0) }
         let corruptSession = AgentTranscriptStore.canonicalSessionID(for: corruptID)
         try await transcriptStore.saveSnapshot(agentID: corruptID, sessionID: corruptSession, document: existing.document)
         let corruptRoot = fixtureRoot.appendingPathComponent("transcripts").appendingPathComponent(corruptID.rawValue.uuidString)
@@ -137,6 +145,51 @@ enum RestoreOnlyTranscriptRetentionChecks {
         for url in corruptFiles {
             guard try Data(contentsOf: url) == corruptBytes else {
                 throw Failure(description: "idle restore overwrote an unreadable Array archive")
+            }
+        }
+
+        // A later headless write creates a projection from the bounded provider
+        // restore. Wait for the save attempt to finish: neither a richer Array
+        // archive nor an unreadable one proves this projection is safe to save.
+        AgentModelCatalog.shared.resetForQA(options: AgentCatalogQAFixture.pi)
+        for agent in [id, corruptID] {
+            let prompt = "RESTORE_ONLY_HEADLESS_\(agent.rawValue.uuidString)"
+            guard supervisor.send(prompt, to: agent) else {
+                throw Failure(description: "restore-only headless prompt was refused: \(supervisor.sendRefusal(for: agent) ?? "unknown")")
+            }
+            await supervisor.qaSaveTranscript(for: agent)
+            let stopDeadline = ContinuousClock.now + .seconds(20)
+            while supervisor.isRunning(agent), ContinuousClock.now < stopDeadline {
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+            guard !supervisor.isRunning(agent), supervisor.qaTranscriptPersistenceIsBlocked(agent) else {
+                throw Failure(description: "headless write did not finish and refuse its unconfirmed archive")
+            }
+            supervisor.qaReleaseTranscriptIfDormant(agent)
+            guard !supervisor.isTranscriptReleased(agent), supervisor.rehydratedTranscript(for: agent) == restored else {
+                throw Failure(description: "idle release discarded an unsaved restore after a headless write")
+            }
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "restore after headless write",
+                frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil,
+                metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+            tile.attach(agentID: agent, supervisor: supervisor)
+            let text = tile.qaTranscriptText
+            tile.detach()
+            guard text.contains("BOUNDED_PROVIDER_RESTORE"), text.contains(prompt) else {
+                throw Failure(description: "reopened tile omitted the provider restore or headless prompt: \(text)")
+            }
+        }
+        for (url, bytes) in zip(existingFiles, existingBytes) {
+            guard try Data(contentsOf: url) == bytes else {
+                throw Failure(description: "headless write changed the existing Array archive")
+            }
+        }
+        for url in corruptFiles {
+            guard try Data(contentsOf: url) == corruptBytes else {
+                throw Failure(description: "headless write changed the unreadable Array archive")
             }
         }
     }
