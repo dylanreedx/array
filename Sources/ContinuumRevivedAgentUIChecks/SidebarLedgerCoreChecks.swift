@@ -78,6 +78,8 @@ func runSidebarLedgerCoreChecks() {
         ("Array restarted while this helper was working, so its turn did not finish.", .interruptedByRestart),
         ("This child was still running when the previous session ended.", .interruptedByRestart),
         ("Claude Code reported an error without details.", nil),
+        ("The Codex session ended before this child finished.", nil),
+        ("The Claude parent ended before this mirrored child reported a result.", nil),
         (nil, nil),
     ]
     for (text, expected) in classes {
@@ -213,6 +215,40 @@ func runSidebarLedgerCoreChecks() {
         createdAt: unknown.createdAt, settlementBlocked: true, terminalEvent: unknown.terminalEvent)
     expect(SidebarClearMarks.apply(unknownMarks, to: [queued]).released.contains(unknown.id),
            "new blocked work releases an existing Clear mark")
+
+    // A subsuming root mark must release when old descendant facts become known.
+    let oldChild = F.row(201, "Unknown child", parent: 200, outcome: .failed)
+    let rootMark = [F.id(200): marks[F.id(200)]!]
+    for detail in [F.usage, "OAuth session expired", "could not start executable"] {
+        var child = oldChild
+        child.failureDetail = detail
+        let restored = SidebarClearMarks.apply(rootMark, to: [finished[0], child])
+        expect(restored.released.contains(F.id(200)) && restored.rows.allSatisfy { $0.lifecycle == .active },
+               "same-event descendant blocker releases a subsuming root Clear mark")
+    }
+    expect(markedRoot.lifecycle.endedAt == finished[0].terminalEvent?.endedAt,
+           "Clear preserves the work's actual History date")
+    expect(markedChild.lifecycle.endedAt == finished.first { $0.id == F.id(201) }?.terminalEvent?.endedAt,
+           "Clear preserves each descendant's actual History date")
+
+    let settledFamily = finished.map { row in
+        row.followingParent(lifecycle: .settled(at: F.now.addingTimeInterval(-3600)),
+            closingSince: row.closingSince, workspaceName: row.workspaceName, workspaceId: row.workspaceId)
+    }
+    let standing = SidebarStandingLeads.apply([F.id(200)], to: settledFamily)
+    expect(standing.allSatisfy { $0.lifecycle == .active } && standing[0].isStanding,
+           "Standing retains a settled lead and its family")
+    let archived = settledFamily.map { row in
+        row.followingParent(lifecycle: .archived(at: F.now), closingSince: row.closingSince,
+            workspaceName: row.workspaceName, workspaceId: row.workspaceId)
+    }
+    expect(SidebarStandingLeads.apply([F.id(200)], to: archived).allSatisfy { $0.lifecycle == .archived(at: F.now) },
+           "Standing honors explicit archive")
+    let snoozed = settledFamily.map { row in
+        row.followingParent(lifecycle: .snoozed(until: F.now.addingTimeInterval(3600)), closingSince: row.closingSince,
+            workspaceName: row.workspaceName, workspaceId: row.workspaceId)
+    }
+    expect(SidebarStandingLeads.apply([F.id(200)], to: snoozed) == snoozed, "Standing honors explicit snooze")
 
     // 5. Layout setting.
     let suite = "array.sidebar-ledger-core-check.\(UUID().uuidString)"

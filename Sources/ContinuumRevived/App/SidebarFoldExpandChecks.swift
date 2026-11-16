@@ -427,12 +427,19 @@ extension SidebarOwnershipChecks {
         // the whole list.
         let failReloads = inbox.qaFullReloadCount
         let failBuilt = inbox.cellBuildCountForQA
+        let readerBeforeFailure = try readerY()
+        var rebuilt: [UUID] = []
+        inbox.onCellBuildForQA = { rebuilt.append($0) }
         push(foldRows(foldedFailure: true), updated: [foldFolded[20]])
+        inbox.onCellBuildForQA = nil
         let failedBuilt = inbox.cellBuildCountForQA - failBuilt
+        guard abs(try readerY() - readerBeforeFailure) <= 0.5 else {
+            throw fail("an incident appearing moved the row being read")
+        }
         guard helpers() == open, lineTitles() == ["Show less"],
               inbox.qaFullReloadCount == failReloads, failedBuilt <= 1 else {
             throw fail("a folded subagent failing rebuilt the open card (\(inbox.qaFullReloadCount - failReloads) "
-                + "full reloads, \(failedBuilt) rows built, line \(lineTitles()))")
+                + "full reloads, \(failedBuilt) rows built \(rebuilt.map(name)), line \(lineTitles()))")
         }
 
         // 5b. A new live subagent at the top of the card: still open, the row

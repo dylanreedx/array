@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
@@ -88,7 +89,7 @@ enum SidebarLedgerChecks {
                        cleared: cleared.contains(20)))
         // Top-level agents, one per remaining class.
         out.append(row(30, "Review canvas changes", lifecycle: life(30)))
-        out.append(row(31, "Canvas review helper", parent: 30))
+        out.append(row(31, "Canvas review helper", parent: 30, outcome: .failed))
         out.append(row(32, "Fix CRLF check in release script", outcome: .failed,
                        detail: "Failed to authenticate: OAuth session expired and could not be refreshed"))
         out.append(row(33, "Audit collaborator access", outcome: .failed, detail: "serverOverloaded",
@@ -587,8 +588,117 @@ extension AgentInboxRow {
 // The combined branch's shared contract, driven through the real controls in
 // both layouts. The Quiet fixture is intentionally the same nested 18 as Ledger.
 extension SidebarLedgerChecks {
+    /// Real Clear, mixed History restore, and Pin on settled work in both layouts.
+    static func checkHistoryAndStanding(_ layout: SidebarLayout) throws {
+        let defaults = Self.defaults(layout)
+        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 494, height: 1200), indicatorDefaults: defaults)
+        inbox.clock = { now }
+        inbox.foldsUntouchedGroups = false
+        inbox.prefersReducedMotion = { true }
+        inbox.presentsPopoversOffscreenForQA = true
+        inbox.wiredRowActions = AppDelegate.wiredInboxRowActions
+        let old = row(130, "Yesterday's acknowledged work")
+        var ordinaryActive = false
+        var forwarded: [UUID] = []
+        func input() -> [AgentInboxRow] {
+            [old, row(131, "Recent settled work", lifecycle: ordinaryActive ? .active : .settled(at: now.addingTimeInterval(-600)), minutesAgo: 10)]
+        }
+        inbox.onRowAction = { action, ids in
+            if action == .unsettle {
+                forwarded = ids
+                ordinaryActive = true
+                inbox.reload(rows: input())
+            }
+        }
+        let window = SidebarOwnershipChecks.KeyWindow(contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = inbox
+        window.orderFrontOffscreenForChecks()
+        window.makeKey()
+        defer { window.orderOut(nil) }
+        inbox.setScope(.all)
+        inbox.reload(rows: input())
+        inbox.layoutForQA()
+        guard let index = inbox.itemsForQA.firstIndex(where: {
+            if case .sectionLabel(let label) = $0 { return label.clearCount > 0 }; return false
+        }), let heading = inbox.cellForQA(atItem: index) as? SidebarSectionLabelView else {
+            throw Failure(description: "History witness has no Clear control")
+        }
+        try press(heading.clearButton, in: window, "Clear old work")
+        inbox.layoutForQA()
+        inbox.expandHistoryShelfForQA()
+        inbox.layoutForQA()
+        let history = inbox.itemsForQA.compactMap(\.agentRow)
+        let expectedAge = (AgentInboxCellView.elapsedText(now.timeIntervalSince(old.terminalEvent!.endedAt)) ?? "") + " ago"
+        guard history.map(\.id) == [uuid(131), uuid(130)],
+              let oldCell = inbox.cellForQA(id: uuid(130)) as? AgentInboxSlimCellView,
+              oldCell.qaElapsed == expectedAge else {
+            throw Failure(description: "Clear fabricated rendered History recency or order")
+        }
+        guard inbox.selectRowsForQA(ids: [uuid(130), uuid(131)]),
+              inbox.openRowMenuForQA(clickedRowId: uuid(130)),
+              let item = inbox.rowMenuListForQA?.rowView(id: InboxRowAction.unsettle.rawValue),
+              let panel = item.window else {
+            throw Failure(description: "mixed History selection has no Un-settle control")
+        }
+        panel.makeKey()
+        try press(item, in: panel, "Un-settle mixed History selection")
+        inbox.layoutForQA()
+        guard forwarded == [uuid(131)], inbox.clearMarks[uuid(130)] == nil,
+              inbox.itemsForQA.compactMap(\.agentRow).allSatisfy({ $0.lifecycle == .active }) else {
+            throw Failure(description: "mixed restore did not unmark Clear and forward only ordinary settlement")
+        }
+        let loaded = AgentInboxView(frame: inbox.frame, indicatorDefaults: defaults)
+        loaded.clock = { now }; loaded.setScope(.all); loaded.reload(rows: input())
+        guard loaded.clearMarks.isEmpty,
+              loaded.itemsForQA.compactMap(\.agentRow).allSatisfy({ $0.lifecycle == .active }) else {
+            throw Failure(description: "mixed History restore did not survive a store reload")
+        }
+        ordinaryActive = false
+        inbox.reload(rows: input()); inbox.layoutForQA()
+        inbox.expandHistoryShelfForQA(); inbox.layoutForQA()
+        guard inbox.selectRowForQA(id: uuid(131)), inbox.openRowMenuForQA(clickedRowId: uuid(131)),
+              let pin = inbox.rowMenuListForQA?.rowView(id: InboxRowAction.pin.rawValue), let pinPanel = pin.window else {
+            throw Failure(description: "settled lead has no Pin control")
+        }
+        pinPanel.makeKey()
+        try press(pin, in: pinPanel, "Pin settled lead")
+        inbox.layoutForQA()
+        // Another settled push represents the next automatic-settlement tick.
+        inbox.reload(rows: input()); inbox.layoutForQA()
+        guard let standing = inbox.itemsForQA.compactMap(\.agentRow).first(where: { $0.id == uuid(131) }),
+              standing.isStanding, standing.lifecycle == .active,
+              inbox.itemsForQA.contains(where: { if case .sectionLabel(let label) = $0 { return label.title == "Standing" }; return false }) else {
+            throw Failure(description: "a pinned settled lead lost its Standing home on the next settlement push")
+        }
+    }
+
+    static func checkFailureCorrelation() throws {
+        let old = now.addingTimeInterval(-600)
+        let error = AgentEntry(id: AgentNodeID(rawValue: "quota")!, role: .system,
+            provenance: .providerItem(provider: "runtime", itemID: "old-turn"),
+            blocks: [AgentBlock(id: AgentNodeID(rawValue: "error")!, kind: .error, payload: .error(.init(message: usage)))],
+            createdAt: old)
+        let nextPrompt = AgentEntry(id: AgentNodeID(rawValue: "next-prompt")!, role: .user,
+            provenance: .localPrompt(promptID: "next"), createdAt: now.addingTimeInterval(-10))
+        let failed = AgentTerminalEvent(sequence: 2, turnID: "new-turn", outcome: .failed, endedAt: now)
+        let document = AgentDocument(entries: [error, nextPrompt])
+        guard AgentSupervisor.lastErrorMessage(in: document, for: failed, since: nextPrompt.createdAt) == nil,
+              AgentSupervisor.lastErrorMessage(in: AgentDocument(entries: [error]), for: failed, since: nextPrompt.createdAt) == nil,
+              AgentSupervisor.lastErrorMessage(in: AgentDocument(entries: [error]), for: failed, since: nil) == nil else {
+            throw Failure(description: "a diagnostic-free new failure borrowed an old quota error")
+        }
+        var current = error
+        current.createdAt = now.addingTimeInterval(-1)
+        current.provenance = .providerItem(provider: "runtime", itemID: "new-turn")
+        guard AgentSupervisor.lastErrorMessage(in: AgentDocument(entries: [error, nextPrompt, current]),
+                  for: failed, since: nextPrompt.createdAt) == usage else {
+            throw Failure(description: "a correlated current-turn quota error was lost")
+        }
+    }
+
     static func runLayouts() throws -> String {
         QuickHideChecks.acceptFirstMouseEverywhere()
+        try checkFailureCorrelation()
         var reports: [String] = []
         for layout in layoutsUnderTest {
             let name = "array.sidebar-layouts.\(UUID().uuidString)"
@@ -640,6 +750,7 @@ extension SidebarLedgerChecks {
                               let number = Int(line.titleForQA.prefix(while: { $0.isNumber })) else {
                             throw Failure(description: "\(layout.title): no rendered fold number")
                         }
+                        try expect(!line.titleForQA.contains("failed"), "fold repeats or misclassifies failed helpers: \(line.titleForQA)")
                         folded += number
                     default: return (shown, folded)
                     }
@@ -726,6 +837,8 @@ extension SidebarLedgerChecks {
             try press(inbox.undoButtonForQA, in: window, "Undo")
             inbox.layoutForQA()
             try expect(liveIDs().isSuperset(of: before), "Undo did not restore the live rows")
+            inbox.reload(rows: rows())
+            inbox.layoutForQA()
             // A lazy detail reveals that the acknowledged failure was a
             // blocker all along, without changing its event sequence or time.
             inbox.scrollToTopForQA()
@@ -737,17 +850,24 @@ extension SidebarLedgerChecks {
             }
             try press(clear.clearButton, in: window, "Clear before detail load")
             try expect(inbox.clearMarks[uuid(36)] != nil, "unknown failure was not cleared")
+            try expect(inbox.clearMarks[uuid(30)] != nil && inbox.clearMarks[uuid(31)] == nil,
+                       "precondition: the root must hold the only family Clear mark")
             let revealed = rows().map { r -> AgentInboxRow in
                 var next = r
-                if r.id == uuid(36) { next.failureDetail = usage }
+                if r.id == uuid(36) || r.id == uuid(31) { next.failureDetail = usage }
                 return next
             }
             inbox.reload(rows: revealed)
             inbox.layoutForQA()
             try expect(inbox.clearMarks[uuid(36)] == nil && liveIDs().contains(uuid(36)),
                        "same-event usage detail left a blocker hidden by Clear")
+            try expect(inbox.clearMarks[uuid(30)] == nil && liveIDs().contains(uuid(30)),
+                       "same-event descendant blocker left its root hidden by Clear")
+            try expect(inbox.sidebarIncidents.contains { $0.kind == .cause(.usageLimit) && $0.agentIDs.contains(uuid(31)) },
+                       "late descendant blocker did not reach the rendered incident list")
             try press(inbox.undoButtonForQA, in: window, "Undo repeated Clear")
             inbox.layoutForQA()
+            try checkHistoryAndStanding(layout)
             reports.append("\(layout.title): 18 = 12 paused + 1 failed + 2 stopped + 3 done = \(count.shown) shown + \(count.folded) folded from rendered rows/AX; fold, Settings Layout, Clear and Undo used NSApp.sendEvent; blockers stayed, marks reloaded, helper activity restored its family")
         }
         return "SidebarLayoutsChecks passed:\n" + reports.joined(separator: "\n")
@@ -771,7 +891,9 @@ extension SidebarLedgerChecks {
                   [.failed, .runtimeError, .interrupted].contains(outcome) else { continue }
             if let document = try? await transcripts.load(
                 agentID: record.id, sessionID: AgentTranscriptStore.canonicalSessionID(for: record.id)),
-               let message = AgentSupervisor.lastErrorMessage(in: document) {
+               let event = record.latestTerminalEvent,
+               let message = AgentSupervisor.lastErrorMessage(in: document, for: event,
+                   since: [record.latestPromptAt, record.latestTurnAt].compactMap { $0 }.max()) {
                 details[record.id.rawValue] = message
             }
         }

@@ -1950,7 +1950,7 @@ final class AgentSupervisor {
     var onFailureDetailsLoaded: (() -> Void)?
 
     /// The latest turn's failure words: the live turn's when it has some,
-    /// otherwise the transcript's last error, loaded lazily. nil until known.
+    /// otherwise a correlated error from that turn, loaded lazily. nil until known.
     func sidebarFailureDetail(for id: AgentID) -> String? {
         if let live = turnFacts[id]?.failureMessage { return live }
         guard let record = records[id], let event = record.latestTerminalEvent else { return nil }
@@ -1961,10 +1961,11 @@ final class AgentSupervisor {
         if let cached = failureDetailCache[id], cached.sequence == event.sequence { return cached.text }
         guard let transcriptStore, failureDetailLoads.insert(id).inserted else { return nil }
         let sequence = event.sequence
+        let startedAt = [record.latestPromptAt, record.latestTurnAt].compactMap { $0 }.max()
         Task { [weak self] in
             let document = try? await transcriptStore.load(
                 agentID: id, sessionID: AgentTranscriptStore.canonicalSessionID(for: id))
-            let text = document.flatMap(Self.lastErrorMessage(in:))
+            let text = document.flatMap { Self.lastErrorMessage(in: $0, for: event, since: startedAt) }
             guard let self else { return }
             self.failureDetailLoads.remove(id)
             self.failureDetailCache[id] = (sequence, text)
@@ -1979,8 +1980,22 @@ final class AgentSupervisor {
         return nil
     }
 
-    nonisolated static func lastErrorMessage(in document: AgentDocument) -> String? {
-        for entry in document.entries.reversed() {
+    /// Error words belong to this terminal turn only. Old transcripts without
+    /// a correlated turn identity or dated activity retain the generic failure.
+    nonisolated static func lastErrorMessage(
+        in document: AgentDocument, for event: AgentTerminalEvent, since startedAt: Date?
+    ) -> String? {
+        let lower = document.entries.lastIndex { $0.role == .user }.map { $0 + 1 } ?? 0
+        for entry in document.entries[lower...].reversed() {
+            let matchesTurn: Bool
+            if case .providerItem(_, let itemID) = entry.provenance,
+               let turnID = event.turnID, !turnID.hasPrefix("runtime:") {
+                matchesTurn = itemID == turnID
+            } else { matchesTurn = false }
+            let matchesTime = startedAt.flatMap { start in
+                entry.createdAt.map { $0 >= start && $0 <= event.endedAt.addingTimeInterval(2) }
+            } ?? false
+            guard matchesTurn || matchesTime else { continue }
             for block in entry.blocks.reversed() {
                 if case let .error(payload) = block.payload, !payload.message.isEmpty { return payload.message }
             }

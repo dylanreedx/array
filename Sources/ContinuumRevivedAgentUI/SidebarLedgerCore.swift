@@ -145,7 +145,7 @@ public enum SidebarRecovery {
         }
         if has(["overloaded", "serveroverloaded", "at capacity", "server is busy", " 529", " 503",
                 "temporarily unavailable"]) { return .providerBusy }
-        if has(["array restarted", "previous session", "parent ended", "session ended before"]) {
+        if has(["array restarted", "previous session"]) {
             return .interruptedByRestart
         }
         return nil
@@ -529,6 +529,33 @@ public enum SidebarStandingLeads {
     public static func save(_ ids: Set<UUID>, to defaults: UserDefaults) {
         defaults.set(ids.map(\.uuidString).sorted(), forKey: defaultsKey)
     }
+
+    /// A standing home survives automatic settlement. Explicit snooze and
+    /// archive still win; no lifecycle is written back to the agent store.
+    public static func apply(_ ids: Set<UUID>, to rows: [AgentInboxRow]) -> [AgentInboxRow] {
+        let roots = Set(rows.filter { row in
+            guard row.parentId == nil, ids.contains(row.id) else { return false }
+            switch row.lifecycle {
+            case .active, .settled: return true
+            case .archived, .snoozed: return false
+            }
+        }.map(\.id))
+        let parentOf = Dictionary(rows.compactMap { row in row.parentId.map { (row.id, $0) } },
+                                  uniquingKeysWith: { first, _ in first })
+        return rows.map { row in
+            var top = row.id
+            var seen: Set<UUID> = [top]
+            while let parent = parentOf[top], seen.insert(parent).inserted { top = parent }
+            guard roots.contains(top) else { return row }
+            var result = row
+            if row.id == top { result.isStanding = true }
+            if case .settled = row.lifecycle {
+                result = result.followingParent(lifecycle: .active, closingSince: row.closingSince,
+                    workspaceName: row.workspaceName, workspaceId: row.workspaceId)
+            }
+            return result
+        }
+    }
 }
 
 /// Clear's record: an acknowledgement in the sidebar only. It moves no agent
@@ -609,7 +636,8 @@ public enum SidebarClearMarks {
                     }
                     let activity = max(row.lastActiveAt ?? row.createdAt,
                                        row.terminalEvent?.endedAt ?? row.createdAt)
-                    if busy || activity >= mark.clearedAt { released.insert(id) }
+                    if busy || row.settlementBlocked || SidebarRecovery.cause(for: row)?.isBlocking == true
+                        || activity >= mark.clearedAt { released.insert(id) }
                 }
                 ancestor = parentOf[id]
             }
@@ -620,9 +648,9 @@ public enum SidebarClearMarks {
             guard !released.contains(row.id), holds(mark, for: row) else { released.insert(row.id); return row }
             var cleared = row
             if row.parentId.map(present.contains) != true, row.lifecycle == .active {
-                cleared = row.followingParent(lifecycle: .settled(at: mark.clearedAt), closingSince: row.closingSince,
+                cleared = row.followingParent(lifecycle: .settled(at: row.terminalEvent?.endedAt ?? row.lastActiveAt ?? row.createdAt), closingSince: row.closingSince,
                                               workspaceName: row.workspaceName, workspaceId: row.workspaceId)
-                clearedRoots[row.id] = mark.clearedAt
+                clearedRoots[row.id] = row.terminalEvent?.endedAt ?? row.lastActiveAt ?? row.createdAt
             }
             cleared.isCleared = true
             return cleared
@@ -636,7 +664,8 @@ public enum SidebarClearMarks {
             return current == id ? nil : current
         }
         out = out.map { row in
-            guard let top = root(row.id), let at = clearedRoots[top], row.lifecycle == .active else { return row }
+            guard let top = root(row.id), clearedRoots[top] != nil, row.lifecycle == .active else { return row }
+            let at = row.terminalEvent?.endedAt ?? row.lastActiveAt ?? row.createdAt
             return row.followingParent(lifecycle: .settled(at: at), closingSince: row.closingSince,
                                        workspaceName: row.workspaceName, workspaceId: row.workspaceId)
         }

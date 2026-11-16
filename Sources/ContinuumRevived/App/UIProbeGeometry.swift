@@ -1949,8 +1949,8 @@ enum UIProbeGeometry {
               probe.inbox.rowIdsForQA == collapsedDefaultRows.map(\.id),
               probe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [rootID],
               probe.inbox.fanoutRemainderRowsForQA.first?.hiddenChildIDs == [directIDs[8]],
-              probe.inbox.tableRowCountForQA == collapsedDefaultRows.count + 1,
-              probe.inbox.nonAgentTableRowCountForQA == 1 else {
+              probe.inbox.tableRowCountForQA == collapsedDefaultRows.count + 1 + nestedHeadRows,
+              probe.inbox.nonAgentTableRowCountForQA == 1 + nestedHeadRows else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): folding the nested child lost or retargeted the root remainder")
         }
 
@@ -1969,8 +1969,8 @@ enum UIProbeGeometry {
               probe.inbox.rowIdsForQA.contains(directIDs[8]),
               probe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [rootID],
               probe.inbox.fanoutRemainderTitlesForQA == ["Show less"],
-              probe.inbox.tableRowCountForQA == collapsedRootExpandedRows.count + 1,
-              probe.inbox.nonAgentTableRowCountForQA == 1 else {
+              probe.inbox.tableRowCountForQA == collapsedRootExpandedRows.count + 1 + nestedHeadRows,
+              probe.inbox.nonAgentTableRowCountForQA == 1 + nestedHeadRows else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): re-anchored root expansion did not materialize its ninth child while preserving the nested fold")
         }
 

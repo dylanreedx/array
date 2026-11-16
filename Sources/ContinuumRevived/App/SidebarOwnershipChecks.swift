@@ -213,8 +213,9 @@ enum SidebarOwnershipChecks {
                 throw Failure(description: "\(label): the folded lead does not speak for its subagents: \(folded.tailTextForQA ?? "nil")")
             }
             let open = try cell(verify)
-            guard open.tailTextForQA == nil, open.visibleTextForQA.contains("array/integration") else {
-                throw Failure(description: "\(label): the open running lead should show its branch: \(open.visibleTextForQA)")
+            guard open.tailTextForQA?.contains("5 helpers · 2 working") == true,
+                  open.accessibilityLabel()?.contains("branch array/integration") == true else {
+                throw Failure(description: "\(label): the open lead must keep its shared count and expose its branch to AX: \(open.visibleTextForQA)")
             }
             guard try cell(reporter).reportPillForQA == "1/6 failed" else {
                 throw Failure(description: "\(label): the report result is not the small pill")
@@ -535,11 +536,11 @@ enum SidebarOwnershipChecks {
 
         // 1. Needs you, working, then finished in the last 30 minutes, newest first.
         try expectRows(visible, "at rest")
-        try expectFold(busyLead, "3 more · 1 failed", "at rest")
+        try expectFold(busyLead, "3 more", "at rest")
         try expectFold(quietLead, "2 more, all done", "at rest")
         let restTail = try leadTail("at rest")
-        guard restTail.contains("1 failed") else {
-            throw Failure(description: "\(label): the lead does not say its subagent failed: \(restTail)")
+        guard restTail.contains("2 failed") else {
+            throw Failure(description: "\(label): the lead does not count both failed subagents: \(restTail)")
         }
         if let outputDirectory {
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
@@ -556,7 +557,7 @@ enum SidebarOwnershipChecks {
         }
         try click(busyLead, "collapsing")
         try expectRows(visible, "collapsed again")
-        try expectFold(busyLead, "3 more · 1 failed", "collapsed again")
+        try expectFold(busyLead, "3 more", "collapsed again")
 
         // 3. Ageing out runs on one timer, set for the first finished subagent to
         // pass 30 minutes (12 minutes ago, so 18 from now).

@@ -1014,7 +1014,7 @@ enum ContinuumApp {
                 }
             }
         }
-        if CommandLine.arguments.contains(SidebarQuietInboxChecks.flag) {
+        if CommandLine.arguments.contains("--sidebar-quiet-inbox-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {
                 do {
