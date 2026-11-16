@@ -255,12 +255,10 @@ enum SidebarQuietInboxChecks {
         }
         try Q.click(liveBox.lines[0].actionButton)
         try Q.click(liveFamilyChip.actionButton)
-        try expect(pressed.count == 2, "each press reaches the host once — got \(pressed.count)")
+        try expect(pressed.count == 1 && !liveFamilyChip.actionButton.isEnabled,
+                   "only usage acts; Open stays disabled — got \(pressed.count) calls")
         try expect(Set(pressed[0].agentIDs) == [paused1.rawValue, paused2.rawValue] && pressed[0].kind == .cause(.usageLimit),
                    "the box's usage action carries the paused agents")
-        try expect(pressed[1].agentIDs == [familyHelper.rawValue] && pressed[1].familyIDs == [family.rawValue]
-                   && pressed[1].kind == .cause(.taskError),
-                   "the family chip's Open carries that family only")
 
         // 5. Clear through the drawn control, refusing the paused; ⌘Z returns them.
         guard let clearButton = sectionCell("Inbox")?.clearButton else { throw Failure(description: "no Clear") }

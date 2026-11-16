@@ -440,6 +440,10 @@ extension SidebarLedgerChecks {
     /// tile stays on the canvas, no record is settled, the lead leaves the
     /// live list, and Undo brings it back.
     static func runClearTiles() throws -> String {
+        try SidebarLayout.allCases.map { try checkClearTiles(layout: $0) }.joined(separator: "\n")
+    }
+
+    static func checkClearTiles(layout: SidebarLayout) throws -> String {
         guard let settings = QAIsolatedDefaults(isolatedSuiteName: "array.qa.sidebar-clear-tiles.\(UUID().uuidString)") else {
             throw Failure(description: "no isolated defaults suite")
         }
@@ -472,7 +476,7 @@ extension SidebarLedgerChecks {
         f.delegate.wireCanvasCallbacks(f.canvas)
         try f.delegate.reconciledManagedSessionSource.reconcile(
             registry: f.delegate.registryStore!.loadOrEmpty(), reason: .continuumRestarted, now: Date())
-        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 360, height: 1_000))
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 360, height: 1_000), inboxDefaults: settings)
         let window = SidebarOwnershipChecks.KeyWindow(contentRect: sidebar.frame, styleMask: [.borderless],
                                                       backing: .buffered, defer: false)
         window.contentView = sidebar
@@ -481,7 +485,7 @@ extension SidebarLedgerChecks {
         defer { window.orderOut(nil) }
         f.delegate.qaInstallWorkspaceSidebar(sidebar)
         let inbox = sidebar.agentInbox
-        inbox.setSidebarLayoutForQA(.ledger)
+        inbox.setSidebarLayoutForQA(layout)
         inbox.setScope(.all)
         f.delegate.qaRefreshAgentSurfaces()
         inbox.layoutForQA()
@@ -551,7 +555,7 @@ extension SidebarLedgerChecks {
         guard let modal = f.delegate.qaSettingsModal, modal.isVisible, modal.model.selectedPaneID == "agents" else {
             throw Failure(description: "Switch & resume did not open Settings > Agents (modal \(f.delegate.qaSettingsModal?.isVisible == true), pane \(f.delegate.qaSettingsModal?.model.selectedPaneID ?? "nil"))")
         }
-        return "SidebarClearTilesChecks passed: Switch & resume… pressed through the window opened Settings > Agents (accounts); Clear through the real button left all \(tilesBefore.count) tiles on the canvas, settled no record, moved the lead out of the live list, and Undo brought it back"
+        return "SidebarClearTilesChecks passed (\(layout.title)): Switch & resume… pressed through the window opened Settings > Agents (accounts); Clear through the real button left all \(tilesBefore.count) tiles on the canvas, settled no record, moved the lead out of the live list, and Undo brought it back"
     }
 }
 

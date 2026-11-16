@@ -159,7 +159,7 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
         }
         while lines.count > incidents.count { lines.removeLast().removeFromSuperview() }
         for (line, incident) in zip(lines, incidents) {
-            line.apply(incident, actionEnabled: actionEnabled)
+            line.apply(incident, actionEnabled: actionEnabled && incident.kind == .cause(.usageLimit))
             line.onAction = { [weak self] in self?.onAction?(incident) }
         }
         setAccessibilityLabel("Needs you, \(incidents.count)")
