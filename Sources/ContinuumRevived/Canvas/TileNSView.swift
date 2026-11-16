@@ -265,6 +265,7 @@ class TileNSView: NSView, TokenThemed {
         return titleBar.convert(NSPoint(x: 0, y: y), to: self).y
     }
     var qaProviderMarkRect: NSRect? { titleBar?.qaProviderMarkRect }
+    func qaRoundProviderMarkInPlate(_ enabled: Bool) { titleBar?.qaRoundProviderMarkInPlate(enabled) }
     func qaTitleRectInBar() -> NSRect? { titleBar?.qaTitleRect() }
     func qaStatusPillRectInBar() -> NSRect? { agentStatus.flatMap { titleBar?.qaStatusPillRect(for: $0) } }
     var titleBarActionsFrameForQA: NSRect? { titleBar?.actionsFrameForQA.map { titleBar!.convert($0, to: self) } }
@@ -2888,7 +2889,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let height = bounds.height > 0 ? bounds.height : 24 * sizeScale
         if TileAgentBubbleLayer.Plate.hangs(bubble.bubbleStyle) {
             let side = snap(min(titleFontWorldSize * TileAgentBubbleLayer.Plate.hangRatio,
-                                height * TileAgentBubbleLayer.Plate.hangMaxBarRatio))
+                                height * TileAgentBubbleLayer.Plate.hangMaxBarRatio) * TileAgentBubbleLayer.qaRoundSizeMultiplier)
             let inset = CGFloat(Space.m) * chromeScale
             // Its inside part stops short of the title's start (`leadingInset`).
             let reach = max(side * TileAgentBubbleLayer.Plate.hangOverflow, side - inset * 1.2)
@@ -2969,6 +2970,11 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// the bar has laid it out or shown it: its view is placed from this.
     var bubbleRectInBar: NSRect? { bubbleRect }
     var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
+    func qaRoundProviderMarkInPlate(_ enabled: Bool) {
+        providerMarkView.isHidden = enabled || providerMarkView.image == nil
+        needsLayout = true
+        invalidateChrome()
+    }
 
     func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String?,
                       shared: (set: SharedAgentCharacterSet, assignment: AgentCharacterAssignment)? = nil, now: Date) {
@@ -3325,7 +3331,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
                 onBubbleChange?()
             }
             if characterLayer.frame != local { characterLayer.frame = local }
-            if characterLayer.isHidden { characterLayer.isHidden = false }
+            if characterLayer.isHidden && bubble.qaRoundStudy?.hasPrefix("minimal-") != true { characterLayer.isHidden = false }
             CATransaction.commit()
             bubble.setShown(true)
             characterLayer.refreshOrientation()

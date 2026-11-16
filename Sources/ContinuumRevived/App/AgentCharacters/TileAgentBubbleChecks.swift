@@ -211,6 +211,11 @@ enum TileAgentBubbleChecks {
             throw Failure(description: "the tiles are not in the world plane")
         }
 
+        if let path = ProcessInfo.processInfo.environment["ARRAY_AGENT_ICON_ROUND_DIR"], !path.isEmpty {
+            return try AgentIconRoundStudy.render(canvas: canvas, window: window, defaults: defaults,
+                                                 views: views, directory: URL(fileURLWithPath: path))
+        }
+
         // 1. State: the working light follows the status; the colour follows the record.
         try expect(pump(until: {
             zip(views, specs).allSatisfy { view, spec in view.qaAgentBubble?.isWorking == spec.working }

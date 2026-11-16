@@ -125,6 +125,15 @@ final class TileAgentBubbleLayer: CALayer {
     /// plate at rest).
     nonisolated(unsafe) static var orbGlassAtRest = true
 
+    // Design-round only. Set by the opt-in real-window capture harness; no
+    // persisted setting or normal app path enables these studies.
+    nonisolated(unsafe) static var qaRoundSizeMultiplier: CGFloat = 1
+    var qaRoundStudy: String? {
+        didSet { repaint(); setNeedsLayout(); reconcileMotion(force: true) }
+    }
+    private let studyMark = CALayer()
+    var qaRoundMark: CGImage? { didSet { studyMark.contents = qaRoundMark } }
+
     /// The tokens the bubble paints from, resolved by its host for the current
     /// appearance (the layer itself never reads an appearance).
     struct Palette: Equatable {
@@ -223,6 +232,9 @@ final class TileAgentBubbleLayer: CALayer {
         clip.addSublayer(sheen)
         addSublayer(artClip)
         artClip.addSublayer(sprite)
+        artClip.addSublayer(studyMark)
+        studyMark.actions = Self.still
+        studyMark.contentsGravity = .resizeAspect
         addSublayer(glass)
         glass.addSublayer(lens)
         glass.addSublayer(rim)
@@ -342,7 +354,12 @@ final class TileAgentBubbleLayer: CALayer {
 
     /// The plate's outline in this layer's (flipped) coordinates.
     var platePath: CGPath {
-        Plate.path(bubbleStyle, in: CGRect(origin: .zero, size: bounds.size), tileRadius: tileRadius)
+        let box = CGRect(origin: .zero, size: bounds.size)
+        if qaRoundStudy == "minimal-circle" { return CGPath(ellipseIn: box, transform: nil) }
+        if qaRoundStudy == "minimal-square" {
+            return CGPath(roundedRect: box, cornerWidth: box.width * 0.22, cornerHeight: box.height * 0.22, transform: nil)
+        }
+        return Plate.path(bubbleStyle, in: box, tileRadius: tileRadius)
     }
 
     override func layoutSublayers() {
@@ -386,6 +403,21 @@ final class TileAgentBubbleLayer: CALayer {
         orbit.frame = CGRect(x: box.midX - diagonal / 2, y: box.midY - diagonal / 2, width: diagonal, height: diagonal)
         orbitMask.path = shape
         orbitMask.lineWidth = max(1.25, side * 0.08) * 2
+        if qaRoundStudy != nil {
+            studyMark.frame = box.insetBy(dx: side * 0.23, dy: side * 0.23)
+            let width = max(0.65, side / 28)
+            let inset = box.insetBy(dx: width / 2, dy: width / 2)
+            let path: CGPath
+            if qaRoundStudy == "minimal-circle" || bubbleStyle == .orb {
+                path = CGPath(ellipseIn: inset, transform: nil)
+            } else if qaRoundStudy == "minimal-square" {
+                path = CGPath(roundedRect: inset, cornerWidth: inset.width * 0.22, cornerHeight: inset.height * 0.22, transform: nil)
+            } else { path = Plate.path(bubbleStyle, in: inset, tileRadius: tileRadius) }
+            ringMask.path = path
+            orbitMask.path = path
+            ringMask.lineWidth = width
+            orbitMask.lineWidth = width * 1.4
+        }
         if workingStyle == "sheen" { reconcileMotion(force: true) }
     }
 
@@ -495,6 +527,37 @@ final class TileAgentBubbleLayer: CALayer {
                 sheen.colors = [hue.withAlphaComponent(dark ? 0.6 : 0.45).cgColor, hue.withAlphaComponent(0).cgColor]
             }
         }
+        if let study = qaRoundStudy {
+            let minimal = study.hasPrefix("minimal-")
+            sprite.isHidden = minimal
+            studyMark.isHidden = !minimal
+            wash.isHidden = true
+            sheen.isHidden = true
+            shadowCaster.isHidden = minimal
+            glass.isHidden = minimal
+            ring.isHidden = false
+            ring.opacity = 1
+            ring.colors = flat(palette.textSecondary.withAlphaComponent(dark ? 0.60 : 0.65))
+            if minimal { plate.colors = flat(palette.tileBody.withAlphaComponent(1)) }
+            orbitHost.isHidden = !working || study == "minimal-circle" || study == "orb-breath"
+            orbit.startPoint = CGPoint(x: 0.5, y: 0.5)
+            orbit.endPoint = CGPoint(x: 0.5, y: 0)
+            let light = tint ?? palette.textPrimary
+            orbit.colors = [light.withAlphaComponent(0.15).cgColor, light.withAlphaComponent(0.25).cgColor,
+                            light.withAlphaComponent(0.95).cgColor, light.withAlphaComponent(0.25).cgColor,
+                            light.withAlphaComponent(0.15).cgColor]
+            orbit.locations = [0, 0.45, 0.68, 0.9, 1]
+            if study == "orb-current" {
+                orbitHost.isHidden = true
+                wash.isHidden = !working
+                wash.type = .conic
+                wash.startPoint = CGPoint(x: 0.5, y: 0.5)
+                wash.endPoint = CGPoint(x: 0.5, y: 0)
+                wash.colors = [light.withAlphaComponent(0.04).cgColor, light.withAlphaComponent(0.34).cgColor,
+                               light.withAlphaComponent(0.04).cgColor, light.withAlphaComponent(0.22).cgColor,
+                               light.withAlphaComponent(0.04).cgColor]
+            }
+        } else { studyMark.isHidden = true }
         setNeedsLayout()
         reconcileMotion(force: false)
     }
@@ -564,11 +627,31 @@ final class TileAgentBubbleLayer: CALayer {
 
     private func reconcileMotion(force: Bool) {
         let moving = isWorking && !isPaused && !isHidden && !reduceMotion()
-        let signature = moving ? "\(workingStyle):\(bubbleStyle):\(bounds.size)" : nil
+        let signature = moving ? "\(workingStyle):\(bubbleStyle):\(bounds.size):\(qaRoundStudy ?? "normal")" : nil
         guard force || signature != motionSignature else { return }
-        for layer in [wash, sheen, orbit] { layer.removeAllAnimations() }
+        for layer in [wash, sheen, orbit, ring] { layer.removeAllAnimations() }
         motionSignature = signature
         guard moving else { return }
+        if let study = qaRoundStudy {
+            if study == "minimal-circle" || study == "orb-breath" {
+                let pulse = CAKeyframeAnimation(keyPath: "opacity")
+                pulse.values = [0.35, 1, 0.35]
+                pulse.keyTimes = [0, 0.5, 1]
+                pulse.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut), CAMediaTimingFunction(name: .easeInEaseOut)]
+                pulse.duration = 4
+                pulse.repeatCount = .infinity
+                ring.add(pulse, forKey: Self.motionKeyPrefix + "study.breath")
+            } else {
+                let turn = CABasicAnimation(keyPath: "transform.rotation.z")
+                turn.fromValue = 0
+                turn.toValue = 2 * Double.pi
+                turn.duration = study == "orb-current" ? 7 : 5
+                turn.repeatCount = .infinity
+                (study == "orb-current" ? wash : orbit).add(turn, forKey: Self.motionKeyPrefix + "study.drift")
+            }
+            Self.motionInstallCount += 1
+            return
+        }
         let inner = clip.bounds
         switch workingStyle {
         case "gradient":
@@ -624,7 +707,7 @@ final class TileAgentBubbleLayer: CALayer {
         (!plate.isHidden, !ring.isHidden, !glass.isHidden && glass.opacity > 0, !orbitHost.isHidden, !sheen.isHidden)
     }
     var qaAnimationKeys: [String] {
-        [wash, sheen, orbit].flatMap { $0.animationKeys() ?? [] }
+        [wash, sheen, orbit, ring].flatMap { $0.animationKeys() ?? [] }
     }
     /// QA: whether the art is clipped to the plate.
     var qaArtClippedToPlate: Bool { artClip.mask === artMask && artMask.path != nil }
