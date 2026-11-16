@@ -1014,6 +1014,18 @@ enum ContinuumApp {
                 }
             }
         }
+        if CommandLine.arguments.contains(SidebarQuietInboxChecks.flag) {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarQuietInboxChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-bulk-hide-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {

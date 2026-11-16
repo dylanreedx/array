@@ -332,12 +332,14 @@ check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
 check --sidebar-history-scope-check
 check --sidebar-indicator-settings-check
+check --sidebar-layouts-check
 check --sidebar-ledger-check
 check --sidebar-liveness-check
 check --sidebar-ownership-check
 check --sidebar-pills-check
 check --sidebar-production-corpus-check
 check --sidebar-push-coalescing-check
+check --sidebar-quiet-inbox-check
 check --sidebar-row-presentation-check
 check --sidebar-row-reveal-check
 check --sidebar-scope-popover-check
@@ -510,10 +512,6 @@ leg run swift build --configuration debug --product array-workspace-mcp -j 2
 leg run swift build --disable-sandbox --skip-update
 leg run swift build --disable-sandbox --skip-update --product Array
 leg run swift build --disable-sandbox --skip-update --product Array -j 4
-leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
-leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp -j 4
-leg run swift build --disable-sandbox --skip-update --product continuum-relay
-leg run swift build --disable-sandbox --skip-update --product continuum-relay-legacy
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCollaborationServiceChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
@@ -522,11 +520,15 @@ leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRe
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayCoreChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedRelayIntegrationChecks
 leg run swift build --disable-sandbox --skip-update --product ContinuumRevivedSyncChecks
+leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp
+leg run swift build --disable-sandbox --skip-update --product array-workspace-mcp -j 4
+leg run swift build --disable-sandbox --skip-update --product continuum-relay
+leg run swift build --disable-sandbox --skip-update --product continuum-relay-legacy
 leg run swift build --product Array
 leg run swift build --product Array -j 2
-leg run swift build --product array-workspace-mcp -j 2
 leg run swift build --product ContinuumRevivedCoreChecks
 leg run swift build --product ContinuumRevivedCoreChecks -j 2
+leg run swift build --product array-workspace-mcp -j 2
 leg run_app_check .build/debug/Array --add-zone-check
 leg run_app_check .build/debug/Array --agent-account-manage-check
 leg run_app_check .build/debug/Array --agent-account-usage-check
@@ -833,12 +835,14 @@ leg run_app_check .build/debug/Array --sidebar-helper-hover-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
 leg run_app_check .build/debug/Array --sidebar-indicator-settings-check
+leg run_app_check .build/debug/Array --sidebar-layouts-check
 leg run_app_check .build/debug/Array --sidebar-ledger-check
 leg run_app_check .build/debug/Array --sidebar-liveness-check
 leg run_app_check .build/debug/Array --sidebar-ownership-check
 leg run_app_check .build/debug/Array --sidebar-pills-check
 leg run_app_check .build/debug/Array --sidebar-production-corpus-check
 leg run_app_check .build/debug/Array --sidebar-push-coalescing-check
+leg run_app_check .build/debug/Array --sidebar-quiet-inbox-check
 leg run_app_check .build/debug/Array --sidebar-row-presentation-check
 leg run_app_check .build/debug/Array --sidebar-row-reveal-check
 leg run_app_check .build/debug/Array --sidebar-scope-popover-check
@@ -1052,11 +1056,12 @@ leg run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 leg run_leg npm --prefix Tools/TaskEditor test
 leg run_leg npm ci --offline --no-audit --no-fund --prefix Tools/TaskEditor
 leg run_leg npm test --prefix Tools/TaskEditor
-leg run_leg python3 benchmarks/replay/check_live_temp.py
+leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg python3 benchmarks/replay/check.py --replay-containment-check
 leg run_leg python3 benchmarks/replay/check.py --replay-grader-check
 leg run_leg python3 benchmarks/replay/check.py --replay-isolation-check
 leg run_leg python3 benchmarks/replay/check.py --replay-scoring-check
+leg run_leg python3 benchmarks/replay/check_live_temp.py
 leg run_leg python3 scripts/check-appcast-append.py
 leg run_leg python3 scripts/check-candidate-prepass-bundle.py
 leg run_leg python3 scripts/check-collaboration-pair-features.py
@@ -1080,7 +1085,6 @@ leg run_leg python3 scripts/check-prepass-source-patterns.py
 leg run_leg python3 scripts/check-prepass-source-patterns.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
 leg run_leg python3 scripts/check-ship-release.py
 leg run_leg python3 scripts/check-wait-live-release.py
-leg run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
 leg run_leg scripts/capture-cli-fixtures.sh check
 leg run_leg scripts/check-app-bundle.sh --configuration debug --bundle "$MATRIX_RESULTS/Array.app"
 leg run_leg scripts/check-candidate-prepass.sh
@@ -1106,7 +1110,7 @@ bundle-check --palette-duplicate-root-check
 bundle-check --terminal-theme-fidelity-check
 bundle-check --tool-path-bootstrap-check
 count ContinuumRevivedAgentContentChecks 24
-count ContinuumRevivedAgentUIChecks 23
+count ContinuumRevivedAgentUIChecks 24
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
 count ContinuumRevivedCoreChecks 210

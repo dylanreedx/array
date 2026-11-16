@@ -277,7 +277,13 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     var onRenameWorkspace: ((UUID) -> Void)?
     var onDeleteWorkspace: ((UUID) -> Void)?
 
-    override init(frame frameRect: NSRect) {
+    override convenience init(frame frameRect: NSRect) {
+        self.init(frame: frameRect, inboxDefaults: .standard)
+    }
+
+    /// Sidebar round: a check hands the inbox a throwaway suite so the Layout
+    /// setting is read and written there, never in the standard domain.
+    init(frame frameRect: NSRect, inboxDefaults: UserDefaults) {
         // Ticket: docs/38-tickets/90-agent-ux/P3.14-preserve-workspace-management.md
         //
         // "Agents", and now nothing else in the header: the three workspace buttons
@@ -315,7 +321,7 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
         scrollView.documentView = outlineView
         scrollView.isHidden = true
 
-        inboxView = AgentInboxView(frame: .zero)
+        inboxView = AgentInboxView(frame: .zero, indicatorDefaults: inboxDefaults)
         inboxView.translatesAutoresizingMaskIntoConstraints = false
 
         super.init(frame: frameRect)

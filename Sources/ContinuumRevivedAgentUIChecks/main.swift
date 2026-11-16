@@ -96,6 +96,7 @@ runSidebarDefectCorpusChecks()
 
 // Sidebar round (array/sidebar-next): counts, causes, incidents, Clear.
 runSidebarLedgerCoreChecks()
+runSidebarQuietInboxChecks()
 
 print("ContinuumRevivedAgentUIChecks passed")
 

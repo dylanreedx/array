@@ -11,7 +11,7 @@ import ContinuumRevivedCore
 
 /// A heading inside the list: "For you", "Other updates", "Standing".
 struct SidebarSectionLabel: Equatable {
-    enum Kind: String, Equatable { case forYou, otherUpdates, standing }
+    enum Kind: String, Equatable { case forYou, otherUpdates, standing, inbox, historyNote }
     let kind: Kind
     let title: String
     let count: Int?

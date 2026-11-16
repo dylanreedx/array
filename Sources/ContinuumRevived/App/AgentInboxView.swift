@@ -1406,6 +1406,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private(set) var sidebarIncidents: [SidebarIncident] = []
     /// Each lead's reconciled tally, keyed by lead id.
     private(set) var sidebarTallies: [UUID: SidebarLeadTally] = [:]
+    /// Quiet inbox: one cause chip per family.
+    private(set) var sidebarFamilyChips: [SidebarQuietInbox.FamilyChip] = []
+    private var quietNeedsYouCell: SidebarQuietNeedsYouView?
     /// Pressed incident actions reach the host here (account sheet, sign-in,
     /// repair, retry/resume, open). nil: the action button is disabled.
     var onIncidentAction: ((SidebarIncident) -> Void)?
@@ -1871,8 +1874,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return result
     }
 
-    /// The Quiet inbox's head. Built on its own branch from this core.
-    private func quietInboxHeadItems() -> [InboxListItem] { [] }
+    /// The Quiet inbox's head (SidebarQuietInboxViews.swift).
+    private func quietInboxHeadItems() -> [InboxListItem] { quietInboxHead(familyChips: sidebarFamilyChips) }
 
     /// Recompute the shared core over the rows the list is drawing.
     private func updateSidebarCore(liveRows: [AgentInboxRow], shownIDs: Set<UUID>) {
@@ -1884,6 +1887,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             tallies[lead.id] = SidebarLeadTally.tally(leadId: lead.id, rows: liveRows, shownIDs: shownIDs)
         }
         sidebarTallies = tallies
+        sidebarFamilyChips = sidebarLayout == .quietInbox ? SidebarQuietInbox.familyChips(rows: liveRows) : []
     }
 
     @objc private func headerBackgroundDidChange() {
@@ -2400,6 +2404,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         projectHeadingCells.removeAll()
         sectionLabelCells.removeAll()
         incidentCells.removeAll()
+        quietNeedsYouCell = nil
         settledMoreCell = nil
         fanoutRemainderCellsByParent.removeAll()
         updateShelfSpacerHeight()
@@ -2765,6 +2770,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if foldsHistoryIntoShelf, let firstShelf = built.firstIndex(where: \.isShelfHeading) {
             built.insert(.shelfSpacer, at: firstShelf)
         }
+        // Quiet inbox: the History footnote, under the shelf Clear fills.
+        if sidebarLayout == .quietInbox, parts.historyCount > 0 || !sidebarClearIDs.isEmpty {
+            built.append(.sectionLabel(SidebarSectionLabel(
+                kind: .historyNote, title: Self.quietHistoryNote, count: nil, clearCount: 0)))
+        }
         return built
     }
 
@@ -2931,7 +2941,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 depths.append(min((depthByAgent[remainder.parentId] ?? 0) + 1,
                                   AgentInboxRow.maxDepth))
             case .shelfHeader, .historyHeader, .shelfSpacer, .settledMore, .projectHeading,
-                 .sectionLabel, .incident:
+                 .sectionLabel, .incident, .quietNeedsYou:
                 depths.append(0)
             }
         }
@@ -4166,6 +4176,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 return SidebarSectionLabelView.height
             case .incident:
                 return SidebarIncidentCellView.height
+            case .quietNeedsYou(let incidents):
+                return SidebarQuietNeedsYouView.height(lines: incidents.count)
             case .shelfSpacer:
                 return max(1, shelfSpacerHeight)
             case .agent: return AgentInboxView.shelfHeaderHeight
@@ -4249,6 +4261,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 // Agents > Accounts); the other actions draw disabled.
                 cell.apply(incident, actionEnabled: onIncidentAction != nil && incident.kind == .cause(.usageLimit))
                 incidentCells[incident.id] = cell
+                return cell
+            case .quietNeedsYou(let incidents):
+                let cell = quietNeedsYouCell ?? SidebarQuietNeedsYouView()
+                cell.onAction = { [weak self] incident in self?.pressIncident(incident) }
+                cell.apply(incidents, actionEnabled: onIncidentAction != nil)
+                quietNeedsYouCell = cell
                 return cell
             // P4.8
             case .settledMore(let hidden):
@@ -7278,6 +7296,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.view(atColumn: 0, row: index, makeIfNecessary: true)
     }
     func scrollItemToVisibleForQA(_ index: Int) { tableView.scrollRowToVisible(index) }
+    /// Sidebar round, Quiet inbox witness: the drawn list and the rows it was built from.
+    var itemsForQuietCheck: [InboxListItem] { items }
+    var allRowsForQuietCheck: [AgentInboxRow] { allRows }
     func drawnRowMinYForQA(id: UUID) -> CGFloat? { drawnRowMinYs()[id] }
     /// Press the sort button the way a click does: its menu hook, which is what
     /// `ChromeIconButton.mouseDown` calls.
@@ -8427,12 +8448,15 @@ enum InboxListItem {
     case sectionLabel(SidebarSectionLabel)
     /// Sidebar round: one incident with its one action.
     case incident(SidebarIncident)
+    /// Sidebar round, Quiet inbox: the "Needs you" box, never empty.
+    case quietNeedsYou([SidebarIncident])
 
     /// One of the two counted, collapsible headings.
     var isShelfHeading: Bool {
         switch self {
         case .shelfHeader, .historyHeader: return true
-        case .agent, .fanoutRemainder, .settledMore, .shelfSpacer, .projectHeading, .sectionLabel, .incident: return false
+        case .agent, .fanoutRemainder, .settledMore, .shelfSpacer, .projectHeading, .sectionLabel, .incident,
+             .quietNeedsYou: return false
         }
     }
 
@@ -8466,6 +8490,9 @@ enum InboxListItem {
         case .sectionLabel(let label): return label.identity
         case .incident(let incident):
             return "incident:\(incident.id):\(incident.title):\(incident.detail):\(incident.actionTitle)"
+        case .quietNeedsYou(let incidents):
+            return "needs-you:" + incidents.map { "\($0.id):\($0.title):\($0.detail):\($0.actionTitle)" }
+                .joined(separator: "|")
         }
     }
 }
