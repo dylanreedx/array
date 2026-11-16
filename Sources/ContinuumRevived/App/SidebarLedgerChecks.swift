@@ -23,6 +23,14 @@ import ContinuumRevivedCore
 enum SidebarLedgerChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
 
+    /// Focus a negative-control run on one layout; the registered legs run both.
+    static var layoutsUnderTest: [SidebarLayout] {
+        let args = CommandLine.arguments
+        if let index = args.firstIndex(of: "--sidebar-check-layout"), args.indices.contains(index + 1),
+           let layout = SidebarLayout(rawValue: args[index + 1]) { return [layout] }
+        return SidebarLayout.allCases
+    }
+
     static let now = Date(timeIntervalSinceReferenceDate: 806_400_000)
     static let workspaceId = uuid(0x900)
     static func uuid(_ n: Int) -> UUID {
@@ -440,7 +448,7 @@ extension SidebarLedgerChecks {
     /// tile stays on the canvas, no record is settled, the lead leaves the
     /// live list, and Undo brings it back.
     static func runClearTiles() throws -> String {
-        try SidebarLayout.allCases.map { try checkClearTiles(layout: $0) }.joined(separator: "\n")
+        try layoutsUnderTest.map { try checkClearTiles(layout: $0) }.joined(separator: "\n")
     }
 
     static func checkClearTiles(layout: SidebarLayout) throws -> String {
@@ -581,7 +589,7 @@ extension SidebarLedgerChecks {
     static func runLayouts() throws -> String {
         QuickHideChecks.acceptFirstMouseEverywhere()
         var reports: [String] = []
-        for layout in SidebarLayout.allCases {
+        for layout in layoutsUnderTest {
             let name = "array.sidebar-layouts.\(UUID().uuidString)"
             let defaults = QAIsolatedDefaults(isolatedSuiteName: name)!
             defer { defaults.removePersistentDomain(forName: name) }
@@ -652,6 +660,8 @@ extension SidebarLedgerChecks {
             }
             let count = try familyCounts()
             try expect(count.shown + count.folded == 18, "rendered \(count.shown) shown + \(count.folded) folded != 18")
+            let countAX = inbox.cellForQA(id: uuid(lead))?.accessibilityHelp() ?? ""
+            try expect(countAX.contains("\(count.shown) shown, \(count.folded) folded"), "rendered rows and AX disagree: \(countAX)")
 
             // Settings' real ChoiceButton -> defaults -> event -> existing list.
             let model = SettingsModel(defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }), initialPaneID: "appearance")

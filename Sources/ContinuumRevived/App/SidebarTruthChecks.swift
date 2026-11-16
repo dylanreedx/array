@@ -78,7 +78,7 @@ enum SidebarTruthChecks {
     static func run() async throws {
         try historyScopeVisibility()
         if CommandLine.arguments.contains("--history-scope-only") { return }
-        for layout in SidebarLayout.allCases { try await closedTileHelperStyle(layout: layout) }
+        for layout in SidebarLedgerChecks.layoutsUnderTest { try await closedTileHelperStyle(layout: layout) }
         if CommandLine.arguments.contains("--closed-tile-only") { return }
         let world = try makeWorld()
         defer { tearDown(world) }

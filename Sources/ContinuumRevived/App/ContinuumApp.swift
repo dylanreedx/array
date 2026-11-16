@@ -43062,8 +43062,9 @@ extension AppDelegate {
                "…and so is an active one, with Wake greyed rather than absent — got \(activeItems.map(\.baseTitle))")
     try expect(InboxRowAction.snooze.isAvailable(for: snoozedRow),
                "snoozing a snoozed agent is a real action: it moves the preset (P4.5)")
-    // Plan 106: the four subagent tile verbs appear only over subagents.
-    let subagentVerbs = [InboxRowAction.popOut, .foldBack, .pin, .unpin]
+    // Pop-out/Fold-back remain helper verbs. A lead's Pin now means Standing.
+    let subagentVerbs = [InboxRowAction.popOut, .foldBack, .unpin]
+    try expect(activeItems.contains(.pin) && settledItems.contains(.pin), "a lead offers Pin for Standing")
     try expect(!activeItems.contains(where: subagentVerbs.contains) && !settledItems.contains(where: subagentVerbs.contains),
                "a lead's menu offers subagent tile verbs — got \(activeItems.map(\.baseTitle))")
     try expect(activeItems.count == InboxRowAction.allCases.count - 2 - subagentVerbs.count
