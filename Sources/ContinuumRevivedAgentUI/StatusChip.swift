@@ -171,4 +171,14 @@ public enum StatusChipPresenter {
                 accent: TextToken.textSecondary.color)
         }
     }
+
+    /// The Ledger's status-column ink for a helper row: only the two states a
+    /// person must act on are coloured; every other state recedes.
+    public static func helperGlyphColour(for state: SidebarTallyState) -> TokenColor {
+        switch state {
+        case .failed: return AccentToken.accentFailed.color
+        case .needsYou: return AccentToken.accentApproval.color
+        case .working, .paused, .stopped, .done: return TextToken.textSecondary.color
+        }
+    }
 }

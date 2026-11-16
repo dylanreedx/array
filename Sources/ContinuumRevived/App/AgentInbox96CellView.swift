@@ -1689,12 +1689,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             statusGlyph.colour = TextToken.textSecondary.color.nsColor(in: self)
         }
         if ledger != nil, row.depth > 0 || row.parentId != nil {
-            switch SidebarRecovery.state(for: row) {
-            case .failed: statusGlyph.colour = AccentToken.accentFailed.color.nsColor(in: self)
-            case .needsYou: statusGlyph.colour = AccentToken.accentApproval.color.nsColor(in: self)
-            case .working, .paused, .stopped, .done:
-                statusGlyph.colour = TextToken.textSecondary.color.nsColor(in: self)
-            }
+            statusGlyph.colour = StatusChipPresenter.helperGlyphColour(for: SidebarRecovery.state(for: row))
+                .nsColor(in: self)
             stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         }
         decorations.muted = TextToken.textSecondary.color.nsColor(in: self)
