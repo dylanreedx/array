@@ -38,6 +38,9 @@ enum AgentFileIndexMemoryChecks {
     /// (2e280397) over this fixture; every later build must match it.
     static let goldenSuggestionDigest = "60dfeb4fe7aadd05"
 
+    /// Malloc bytes the first index may cost per fixture file.
+    static let maxBytesPerIndexedFile = 1_000
+
     static func mallocBytesInUse() -> Int {
         var stats = malloc_statistics_t()
         malloc_zone_statistics(nil, &stats)
@@ -258,6 +261,14 @@ enum AgentFileIndexMemoryChecks {
         // checkout must cost about one index, however many tiles use it.
         try expect(allMalloc < oneMalloc * 2,
                    "\(tileCount) tiles on one checkout hold one index, not \(tileCount): \(report)")
+        // The one index must be lean per file, too. An entry that kept its
+        // file URL kept the resource-value cache the content-type lookup
+        // attached to it (`_FileCache`, `URLParseInfo`, `NSURL`): about
+        // 1.7 KB a file before the fix. An entry keeps a path string.
+        let bytesPerFile = oneMalloc / fileCount
+        print("file-index memory: first index \(bytesPerFile) bytes/file")
+        try expect(bytesPerFile < maxBytesPerIndexedFile,
+                   "one index holds a path per file, not a URL with cached resource values: \(bytesPerFile) bytes/file, limit \(maxBytesPerIndexedFile)")
 
         // Release. Every tile but one closes the way its ✕ does. The survivor
         // still holds the listing and answers exactly from it; when it closes

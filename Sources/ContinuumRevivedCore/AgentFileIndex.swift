@@ -2,13 +2,22 @@ import Foundation
 
 public struct AgentFileIndexEntry: Equatable, Sendable {
     public let relativePath: String
-    public let fileURL: URL
+    /// The file's path, not its URL. A listing holds one entry per file of a
+    /// checkout for as long as a tile completes against it, and a held URL
+    /// keeps the resource-value cache its content-type lookup attached: 1.3M
+    /// `_FileCache` and 1.6M `NSURL` in the 0.7.47 heap. A path is one string.
+    public let path: String
     public let isDirectory: Bool
+    private let urlIsDirectory: Bool
+
+    /// Built on demand from `path`, the same URL the entry was listed from.
+    public var fileURL: URL { URL(fileURLWithPath: path, isDirectory: urlIsDirectory) }
 
     public init(relativePath: String, fileURL: URL, isDirectory: Bool) {
         self.relativePath = relativePath
-        self.fileURL = fileURL
+        self.path = fileURL.path
         self.isDirectory = isDirectory
+        self.urlIsDirectory = fileURL.hasDirectoryPath
     }
 }
 
@@ -253,7 +262,7 @@ public actor AgentFileIndex {
         // Only the rows that will be shown pay for checking.
         var results: [AgentCompletion] = []
         for ranked in selected.sorted(by: rankedBefore) where results.count < resultLimit {
-            guard FileManager.default.fileExists(atPath: ranked.entry.fileURL.path),
+            guard FileManager.default.fileExists(atPath: ranked.entry.path),
                   let completion = completion(for: ranked, context: context, root: indexRoot, scope: scope)
             else { continue }
             results.append(completion)
@@ -284,6 +293,8 @@ public actor AgentFileIndex {
 
     /// Nil for a file no prompt can reference, so no query has to ask again.
     private func indexedEntry(relativePath: String, fileURL: URL, isDirectory: Bool) -> Indexed? {
+        // The lookup caches resource values on `fileURL`; the entry keeps only
+        // its path, so that cache goes when the URL does.
         guard isDirectory || AgentFileReferenceRules.referenceableContentType(for: fileURL) != nil else { return nil }
         return Indexed(
             entry: AgentFileIndexEntry(
