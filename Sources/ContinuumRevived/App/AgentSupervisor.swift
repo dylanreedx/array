@@ -9305,6 +9305,7 @@ final class AgentSupervisor {
 
     /// Witness counters: flushes run and steer handoff passes begun.
     private(set) var qaHelperFlushCount = 0
+    var qaHelperCompletionCourierRead: ((String) -> Void)?
     private(set) var qaSteerHandoffPasses = 0
 
     func flushHelperCompletions() async {
@@ -9382,11 +9383,15 @@ final class AgentSupervisor {
                         // user input and drains with every other pending result.
                         try await stageScheduledWakeup(queueID, text: text, for: parent, helperSteer: true)
                         try qaAfterHelperWakeStage?()
-                        for var state in group {
+                        let committed = group.map { state in
+                            var state = state
                             state.phase = .delivered; state.via = "wake"; state.leaseUntil = nil
-                            try SpawnResultFile.saveDelivery(state, parentCwd: cwd)
-                            SpawnResultFile.markDelivered(state, parentCwd: cwd)
+                            return state
                         }
+                        // One directory scan for the whole group. Each durable
+                        // commit is still marked before the next one begins.
+                        try SpawnResultFile.commitAndMarkDeliveries(committed, parentCwd: cwd,
+                            onCourierRead: qaHelperCompletionCourierRead)
                         finishScheduledAdmission(queueID)
                         await releaseScheduledWakeups(for: parent, knownIDs: [queueID])
                     }
