@@ -10841,12 +10841,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// How soon a sweep held back by something passing (a hover, a selection, a
     /// gesture, focus) looks again.
     var helperTileTidyRetry: TimeInterval = 15
+    /// How long after delivery a held-back tile is still looked at. Past it the
+    /// tile is left alone, so no retry outlives its reason.
+    var helperTileTidyGiveUp: TimeInterval = 30 * 60
     var helperTileTidyNow: () -> Date = Date.init
     private var helperTileTidyTimer: Timer?
     /// Helpers whose result was delivered and whose tile may still be tidied.
     private var helperTileTidyPending: Set<AgentID> = []
-    /// Tiles the person moved, resized or docked, and when.
+    /// Tiles the person moved, resized, docked, undid or redid a change to, or
+    /// typed in, and when.
     private var helperTilesHandledAt: [UUID: Date] = [:]
+    /// When the lead was first seen holding nothing of this helper's after it
+    /// had been seen holding it: the grace period runs from receipt.
+    private var helperResultTakenAt: [AgentID: Date] = [:]
+    private var helperResultHeldByLead: Set<AgentID> = []
     /// Witness: why each helper's tile was kept at the last sweep that saw it.
     private(set) var qaHelperTileTidyRefusals: [AgentID: String] = [:]
 
@@ -10856,7 +10864,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         armHelperTileTidy(in: helperTileTidyGrace)
     }
 
-    private func noteUserTileGeometry(_ tileIds: Set<UUID>) {
+    private func noteUserHandledTiles(_ tileIds: Set<UUID>) {
         let now = helperTileTidyNow()
         for id in tileIds { helperTilesHandledAt[id] = now }
     }
@@ -10920,24 +10928,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
 
     private func helperTileTidyDecision(_ id: AgentID, now: Date) -> HelperTileTidyDecision {
         guard let record = agentSupervisor.records[id], let tileId = record.tileId else { return .keep("no tile") }
+        let delivered = agentSupervisor.helperResultDeliveredAt[id]
+        if let delivered, now.timeIntervalSince(delivered) > helperTileTidyGrace + helperTileTidyGiveUp {
+            return .keep("held back too long")
+        }
         if let refusal = agentSupervisor.helperTileTidyRefusal(id, now: now) {
-            // A helper of its own still at work, or a turn still settling, can
-            // pass; everything else is final until a new result is delivered.
-            return ["has live helpers", "still busy"].contains(refusal)
-                ? .wait(refusal, helperTileTidyRetry) : .keep(refusal)
+            switch refusal {
+            // Passing states: a helper of its own still at work, a turn settling.
+            case "has running helpers", "still busy":
+                return .wait(refusal, helperTileTidyRetry)
+            case "lead has not taken the result":
+                helperResultHeldByLead.insert(id)
+                helperResultTakenAt[id] = nil
+                return .wait(refusal, helperTileTidyRetry)
+            // Its own helper's tile may still be tidied; once none of them can
+            // be, neither can this one.
+            case "a helper still has its tile":
+                let waiting = agentSupervisor.children(of: id).contains { helperTileTidyPending.contains($0) }
+                return waiting ? .wait(refusal, helperTileTidyRetry) : .keep(refusal)
+            default:
+                // Final until a new result is delivered.
+                return .keep(refusal)
+            }
         }
         if let handled = helperTilesHandledAt[tileId], let finished = agentSupervisor.helperFirstFinishedAt[id],
-           handled > finished { return .keep("moved or resized since finishing") }
+           handled > finished { return .keep("handled since finishing") }
+        // Not mounted (another workspace, a dehydrated zone): look again later.
         guard let canvasView, let tile = canvasView.tileRecord(for: tileId), tile.kind == .managedAgent,
               let view = canvasView.tileView(for: tileId) as? ManagedAgentTileNSView
-        else { return .keep("tile not on the canvas") }
+        else { return .wait("tile not mounted", helperTileTidyRetry) }
         if view.hasUnsentDraft { return .keep("typed into") }
-        if let delivered = agentSupervisor.helperResultDeliveredAt[id] {
-            let due = delivered.addingTimeInterval(helperTileTidyGrace)
+        if helperResultHeldByLead.contains(id), helperResultTakenAt[id] == nil { helperResultTakenAt[id] = now }
+        if let start = helperResultTakenAt[id] ?? delivered {
+            let due = start.addingTimeInterval(helperTileTidyGrace)
             if due > now { return .wait("grace", due.timeIntervalSince(now)) }
         }
+        // Focus seen after it finished is a look, even one held across the
+        // finish that never moved the read watermark.
         if focusBroker.activeSurface == .tile(tileId)
-            || agentSupervisor.focusedAgentID == id { return .wait("focused", helperTileTidyRetry) }
+            || agentSupervisor.focusedAgentID == id { return .keep("focused since finishing") }
         if canvasView.tileSelection.ids.contains(tileId) { return .wait("selected", helperTileTidyRetry) }
         if hoveredCompletionTileID == tileId { return .wait("hovered", helperTileTidyRetry) }
         if canvasView.tileSelection.ownsPointer || canvasView.isGeometryGestureActive {
@@ -21401,6 +21430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         view.onShareRequested = { [weak self] tile in self?.shareAgentTile(tile) }
+        view.onUserDraftEdited = { [weak self] in self?.noteUserHandledTiles([tileId]) }
         view.setTitleBarShareAction(true)
         // A rebuilt view of an agent this Mac shares keeps its "Yours · shared" tab.
         if hostedAgentArea(forTile: view.tile.id) != nil {
@@ -25076,7 +25106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.helperResultDelivered(id)
         }
         canvasView.onUserTileGeometryCommitted = { [weak self] tileIds in
-            self?.noteUserTileGeometry(tileIds)
+            self?.noteUserHandledTiles(tileIds)
         }
         // WS2 F2: wired HERE for the same reason `onZoneActivated` is. This is the
         // ONLY production route from a committed canvas gesture to durable

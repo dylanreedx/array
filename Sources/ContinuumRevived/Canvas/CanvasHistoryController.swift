@@ -60,6 +60,11 @@ final class CanvasHistoryController: NSObject {
             invalidateAfterReplay()
             return
         }
+        // Undo and Redo are the person's own geometry changes too.
+        let replayed = Set(destination.tiles.filter { tile in
+            expected.tiles.first { $0.tileId == tile.tileId } != tile
+        }.map(\.tileId))
+        if !replayed.isEmpty { canvas.onUserTileGeometryCommitted?(replayed) }
         // The canvas may install a corrected geometry rather than the requested
         // one. Re-register the side that actually landed, so the next replay's
         // exact-equality guard describes the canvas instead of invalidating the

@@ -6678,6 +6678,7 @@ final class AgentSupervisor {
                 contextDietRequested: retryOf.map { records[$0]?.delegationContext?.contextDietRequested ?? false }
             )
             guard var spawned = records[childID] else { return nil }
+            delegatedHelperIDs.insert(childID)
             spawned.delegationContext = AgentDelegationContext(
                 brief: originalBrief ?? request.prompt, baseHead: resolved.baseHead, retryOf: retryOf,
                 createdWorktree: overlapping && resolved.isolate, checkoutNotice: resolved.notice, contract: contract,
@@ -8116,12 +8117,28 @@ final class AgentSupervisor {
     /// after this (focus, hover dwell, typing, which all mark it visited) makes
     /// the tile the person's, and Array leaves it alone.
     private(set) var helperFirstFinishedAt: [AgentID: Date] = [:]
+    /// Helpers another agent created this launch (`agent.delegate`, pi
+    /// `spawn_agent`): stamped where the delegation commits. Parentage alone is
+    /// not enough — "New session with summary" makes a user-started child.
+    private var delegatedHelperIDs: Set<AgentID> = []
     /// When each helper's latest result reached the agent that delegated it,
     /// this launch: the moment its delivery journal row is marked delivered.
     private(set) var helperResultDeliveredAt: [AgentID: Date] = [:]
     /// Fired on the main actor each time a helper's result is delivered to the
     /// agent that delegated it. The app closes the tile after a grace period.
     var onHelperResultDelivered: ((AgentID) -> Void)?
+
+    /// A helper result still waiting in the lead's hands: batched, queued,
+    /// mid-delivery, or behind a paused queue.
+    private func leadHoldsHelperResults(_ lead: AgentID) -> Bool {
+        if isQueuePaused(for: lead) { return true }
+        if helperCompletionBatches[lead]?.updates.isEmpty == false { return true }
+        if (deliveringSteers[lead] ?? []).contains(where: { $0.message.helperCompletion }) { return true }
+        return (queuedWorkItemsCache[lead] ?? []).contains { item in
+            if case .prompt(let message) = item { return message.helperCompletion }
+            return false
+        }
+    }
 
     private func noteHelperResultDelivered(_ id: AgentID, to recipient: AgentID) {
         guard records[id]?.parentAgentID == recipient else { return }
@@ -8139,8 +8156,8 @@ final class AgentSupervisor {
     /// looked at since it first finished.
     func helperTileTidyRefusal(_ id: AgentID, now: Date) -> String? {
         guard let record = records[id] else { return "no record" }
-        guard let parent = record.parentAgentID, records[parent] != nil,
-              record.delegationContext != nil, record.capabilities.locallyManaged else { return "not a delegated helper" }
+        guard let parent = record.parentAgentID, records[parent] != nil, delegatedHelperIDs.contains(id),
+              record.capabilities.locallyManaged else { return "not a delegated helper" }
         guard record.tileId != nil else { return "no tile" }
         guard record.archivedAt == nil, record.closeRequestedAt == nil else { return "already closed" }
         // A Managed lead's popped-out helper folds back by its own rule.
@@ -8152,9 +8169,16 @@ final class AgentSupervisor {
               !helperIsBlocked(record) else { return "needs someone" }
         guard !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) else { return "still busy" }
         guard let delivered = helperResultDeliveredAt[id], delivered >= terminal.endedAt else { return "result not delivered" }
-        guard !hasPendingArrayHelpers(id),
-              !records.values.contains(where: { $0.parentAgentID == id && ($0.tileId != nil || isRunning($0.id)) })
-        else { return "has live helpers" }
+        // Admitted to the lead's queue is not received: a stopped lead's queue
+        // stays paused, and a busy lead's holds the result until its turn ends.
+        guard !leadHoldsHelperResults(parent) else { return "lead has not taken the result" }
+        // Array's own helpers, and a harness's native subagents or shell jobs.
+        guard !helperHasBackgroundWork(id),
+              !records.values.contains(where: { $0.parentAgentID == id && isRunning($0.id) })
+        else { return "has running helpers" }
+        // A helper of its own still on the canvas keeps this one's tile too.
+        guard !records.values.contains(where: { $0.parentAgentID == id && $0.tileId != nil })
+        else { return "a helper still has its tile" }
         guard let finished = helperFirstFinishedAt[id] else { return "not finished this launch" }
         if let visited = record.lastVisitedAt, visited > finished { return "looked at since finishing" }
         return nil

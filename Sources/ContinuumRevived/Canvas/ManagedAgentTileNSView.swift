@@ -508,7 +508,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             guard let self, let id = self.projectedAgentID else { return }
             self.agentSource?.refreshAccountUsage(for: id, minimumInterval: 30)
         }
-        v2Composer?.onDraftChange = { [weak self] _ in self?.updateV2ComposerPresentation() }
+        v2Composer?.onDraftChange = { [weak self] _ in
+            self?.updateV2ComposerPresentation()
+            self?.onUserDraftEdited?()
+        }
         v2Composer?.onDraftApplied = { [weak self] in self?.updateV2ComposerPresentation() }
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
         v2Composer?.onSubmissionStarted = { [weak self] prompt in
@@ -5059,6 +5062,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// T5b — the installed composer itself, so a check drives its real rail,
     /// key path and hint line rather than a copy.
     var qaComposerForChecks: AgentComposerView? { v2Composer }
+
+    /// The person edited the composer draft (model applies never echo here).
+    var onUserDraftEdited: (() -> Void)?
 
     /// Something typed or attached in the composer and not sent. A tile holding
     /// the person's unsent words is never tidied away.
