@@ -1,31 +1,30 @@
 # Transcript retention gate — 2026-11-16
 
-**STOP: the machine is out of memory. Do not restart builds or checks until
-the requesting agent says the machine has recovered.** The last build and
-retention check finished before the stop instruction; no Swift build or
-retention check started by this agent was running when checked.
+**Update 2026-11-16 evening (commit `5e3ae66c`).** Both retention failures are
+resolved; design in `.plans/transcript-retention-reattach.md`.
 
-**Not gated. Keep the card in Doing; do not ship this branch.** Checkout:
-`.worktrees/transcript-retention`, branch `array/transcript-retention`, base
-`4c9d7495`. No push. Committed through `36b21050`: retention/recovery, render
-A/B evidence, archive guard, restore-only witness and deterministic tail fence.
+- Case 1 (mid-drain provider seed) is unreachable in production: every seed
+  path either refuses a released agent or holds a pin that keeps it resident
+  (traced per caller in the note). `seedRehydratedTranscript` now refuses a
+  released transcript; the reload's provider-merge branch is gone. The
+  late-restore and reconciliation witnesses assert that refusal.
+- Case 2 (`/status` then provider read): the seed merges into a notice-only
+  projection; `sharedTranscriptDocument` filters those entry ids.
+- `--transcript-retention-check` RED on the old code (both cases), GREEN on
+  `5e3ae66c`: 3 held, 2,197 released, heap -14.6 MB. Pin RED control
+  (dormancy ignoring pins) failed "two pending provider reads did not retain
+  live history" as intended.
+- Save-perf is not a branch regression: interleaved A/B 5+5 twice against the
+  `4c9d7495` binary; branch at or below base. The old 4.4-13.1 ms numbers
+  were taken under memory pressure. The 4 ms budget flakes on base too.
+- Neighbours green on `5e3ae66c`: shared transcript parity, publisher perf,
+  turn cards, zone tile detach sweep, agent tile binding, strict agent
+  harness, share under load.
+- Open: `TranscriptPreflightReplayChecks` timing (4 ms p95) failed in 2 of 4
+  retention runs today (4.4-4.8 ms) and passed in the other 2; noise on a
+  busy host, unchanged by this fix.
 
-The valid-restart, bounded reload, provider-read pins and related witnesses
-in local draft commit `253730e8` are unfinished and must not ship. The latest
-targeted retention leg failed: a provider history seeded during a yielding reload was missing or duplicated in the
-reattached tile. That test calls the seed API directly; a slow Copy-here read
-plus notice-only work is source-reachable but has not been witnessed through the
-production entry. Pins under development aim to prevent current production
-callers from entering that state, but do not fix arbitrary direct mid-drain
-seeding. The latest draft and strengthened witnesses built successfully with
-71% free memory and zero other Swift builds. The latest retention run failed
-(108.0 s): the late-restore check above and a separate inherited `/status`
-notice-only reattachment case both lost or duplicated provider history. Isolated
-pin checks and the new isolated production Copy-here handoff witness reported
-no failures in that run. The latter proves combined adoption/read retention,
-not each guard independently; their RED controls have not been run. The
-prioritized release preview build reported complete with exit 0. After the
-stop is lifted, use the 120-second resource loop below.
+The text below is the earlier state, kept for history.
 
 ## Evidence
 
