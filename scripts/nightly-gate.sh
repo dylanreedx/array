@@ -130,12 +130,35 @@ if not (args in ([], ['--latest-green']) or (args[:1] == ['--ship-base'] and len
     sys.exit(USAGE)
 base.mkdir(parents=True, exist_ok=True)
 
+# ship-release.sh prepare holds the shared lock from finding a candidate until
+# it is signed and runs --ship-base and --awake beneath it; only its direct
+# child trusts that hold. No leg inherits the marker.
+PARENT_HOLDS_LOCK = env.pop('ARRAY_SHIP_LOCK_OWNER', None) == str(os.getppid())
+LOCK = None  # held until exit
+
+def take_lock():
+    """The same regular-file lock as matrix/release. False when another holds it."""
+    global LOCK
+    if PARENT_HOLDS_LOCK:
+        return True
+    LOCK = open(env.get('ARRAY_MATRIX_LOCK', '/tmp/array-matrix.lock'), 'a+')
+    if not stat.S_ISREG(os.fstat(LOCK.fileno()).st_mode):
+        sys.exit('Matrix lock must be a regular file')
+    try:
+        fcntl.flock(LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
 def load(sha):
     path = results / sha / 'summary.json'
     return json.loads(path.read_text()) if path.exists() else None
 
 if args[:1] == ['--ship-base']:
     # Read-only: which green gate, with its release candidate, covers REF?
+    # Under the lock, because a gate run prunes old candidates while holding it.
+    if not take_lock():
+        sys.exit('Matrix/release lock held: a gate may be building or pruning candidates. Try again when it finishes.')
     git('fetch', 'origin')
     head = git('rev-parse', '--verify', (args[1] if len(args) > 1 else 'origin/array/integration') + '^{commit}')
     for sha in git('rev-list', '--max-count=500', head).splitlines():
@@ -235,12 +258,7 @@ if args == [] or args[:1] == ['--awake']:
         PRE_CONTENTION = wait_until_quiet(sys.stderr)
 
 # The same regular-file lock as matrix/release; held through fetch and checkout.
-lock = open(env.get('ARRAY_MATRIX_LOCK', '/tmp/array-matrix.lock'), 'a+')
-if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
-    sys.exit('Matrix lock must be a regular file')
-try:
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
+if not take_lock():
     print('Skipped: matrix/release lock held', file=sys.stderr)
     # Only the scheduled run treats contention as a quiet skip; a caller waiting
     # on --awake or --latest-green must never read a skip as success.

@@ -54,7 +54,12 @@ echo "bundle $* owner=${ARRAY_RELEASE_LOCK_OWNER:-none}" >> "$SHIP_EVENTS"
 out=${@: -1}; mkdir -p "$out/Contents"; git rev-parse HEAD > "$out/Contents/source"
 ''',
     "release-app.sh": r'''#!/bin/bash
-echo "sign $*" >> "$SHIP_EVENTS"
+# Whether the shared lock is held while the candidate is read and signed.
+lock=$(python3 -c 'import fcntl, os
+f = open(os.environ["ARRAY_MATRIX_LOCK"], "a")
+try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print("free")
+except BlockingIOError: print("held")')
+echo "sign lock=$lock $*" >> "$SHIP_EVENTS"
 while [[ $# -gt 0 ]]; do case $1 in --bundle) b=$2;; --output-dir) o=$2;; --set-version) v=$2;; esac; shift 2; done
 mkdir -p "$o"; cp -R "$b" "$o/Array.app"; head -c 4096 /dev/urandom > "$o/Array-$v.dmg"
 ''',
@@ -65,8 +70,12 @@ GH = r'''#!/bin/bash
 # Each release is a file listing its uploaded asset names.
 echo "gh $*" >> "$SHIP_EVENTS"
 release="$SHIP_PLAN/gh-$3"
+if [[ -f "$SHIP_PLAN/gh-offline" ]]; then echo "error connecting to api.github.com" >&2; exit 1; fi
+if [[ $1 == release && $2 == list ]]; then
+  for f in "$SHIP_PLAN"/gh-v*; do [[ -e $f ]] && basename "$f" | sed 's/^gh-//'; done; exit 0; fi
 if [[ $1 == release && $2 == view ]]; then
-  [[ -f $release ]] || exit 1; [[ " $* " == *" --json assets "* ]] && cat "$release"; exit 0; fi
+  [[ -f $release ]] || { echo "release not found" >&2; exit 1; }
+  [[ " $* " == *" --json assets "* ]] && cat "$release"; exit 0; fi
 if [[ $1 == release && ( $2 == create || $2 == upload ) ]]; then
   for asset in "${@: -2}"; do [[ -s $asset ]] || exit 9; done
   [[ $2 == upload && -f "$SHIP_PLAN/gh-upload-inert" ]] && exit 0  # reports success, uploads nothing
@@ -261,6 +270,12 @@ def gate_cases(fx):
     expect(result.returncode == 1 and "diff --check" in result.stderr, "whitespace errors refuse the gate", result)
     sh("git", "-C", str(fx.repo), "reset", "-q", "--hard", gated)
     head = fx.commit("docs(release): prepare notes", {".plans/notes.md": "release notes\n"}, push=True)
+    with open(fx.root / "matrix.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # a gate run, which prunes old candidates under this lock
+        result = fx.run("nightly-gate.sh", "--ship-base", head)
+    expect(result.returncode == 1 and "lock held" in result.stderr and not result.stdout.strip(),
+           "--ship-base waits out a lock holder instead of naming a candidate it may prune", result)
+    print("PASS ship-base-takes-lock")
     result = fx.run("nightly-gate.sh", "--ship-base", head)
     base = json.loads(result.stdout or "{}")
     expect(result.returncode == 0 and base.get("gate") == gated and base.get("inert_changes") == [".plans/notes.md"],
@@ -273,19 +288,38 @@ def ship_cases(fx, gated, head):
     notes = fx.root / "notes.md"
     notes.write_text("Faster shipping | fixture.\n\nMore words.\n")
     before = (fx.repo / "website/public/appcast.xml").read_bytes()
+    signed = lambda: any(line.startswith("sign ") for line in fx.log())
     with open(fx.root / "matrix.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
-    expect(result.returncode != 0 and "awake group" in result.stderr
-           and not any(line.startswith("sign ") for line in fx.log()), "a skipped awake group stops prepare", result)
+    expect(result.returncode != 0 and "holds" in result.stderr and not signed(), "a held lock stops prepare", result)
+    print("PASS prepare-refuses-held-lock")
+    (fx.plan / "matrix--awake-only").write_text("fail")
+    result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
+    (fx.plan / "matrix--awake-only").unlink()
+    expect(result.returncode != 0 and "awake group" in result.stderr and not signed(), "a red awake group stops prepare", result)
     shutil.rmtree(fx.repo / f"qa-runs/ship-{VERSION}")
-    print("PASS prepare-refuses-skipped-awake")
+    print("PASS prepare-refuses-red-awake")
+    (fx.plan / "gh-offline").write_text("")
+    result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
+    (fx.plan / "gh-offline").unlink()
+    expect(result.returncode != 0 and "cannot tell whether" in result.stderr and not signed(),
+           "a gh network error stops prepare instead of reading as not published", result)
+    print("PASS prepare-refuses-gh-error")
+    orphan = fx.plan / f"gh-v{OTHER_VERSION}"
+    orphan.write_text("Array.dmg\n")  # uploaded by a publish that died before its push
+    result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
+    orphan.unlink()
+    expect(result.returncode != 0 and f"v{OTHER_VERSION}" in result.stderr and "build numbers are unknown" in result.stderr
+           and not signed(), "a GitHub-only upload stops build allocation", result)
+    print("PASS prepare-counts-github-uploads")
     result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
     events = fx.log()
     expect(result.returncode == 0, "prepare succeeds", result)
     expect(any(line == f"matrix --awake-only {gated} owner=" + line.split("owner=")[-1] and "owner=none" not in line
                for line in events), f"awake group ran at the gated commit: {events}")
     sign = next(line for line in events if line.startswith("sign "))
+    expect(sign.startswith("sign lock=held "), f"the candidate is signed under the shared lock: {sign}")
     expect(f"--bundle {fx.summary(gated)['candidate']}" in sign and f"--set-build {BUILD}" in sign and f"--set-version {VERSION}" in sign,
            f"signs the gate's candidate as build {BUILD}: {sign}")
     expect(any(line.startswith("audit --configuration release --channel prod") for line in events), "bundle audit ran")

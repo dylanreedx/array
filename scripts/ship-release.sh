@@ -18,6 +18,7 @@ set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT_DIR"
+ORIGINAL_ARGS=("$@")
 VERSION="" NOTES="" SUMMARY="" PUBLISH=0
 usage() { echo "Usage: ship-release.sh --version X.Y.Z (--notes FILE [--summary TEXT] | --publish)" >&2; exit 2; }
 while [[ $# -gt 0 ]]; do
@@ -31,6 +32,27 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
 
+# Prepare holds the shared matrix/release lock from finding the gate's candidate
+# until it is signed, so a gate run cannot prune that candidate mid-signing.
+# nightly-gate.sh --ship-base and --awake trust a lock held by their parent here.
+if [[ "$PUBLISH" == 0 && "${ARRAY_SHIP_LOCK_OWNER:-}" != "$$" ]]; then
+  exec python3 - "$0" "${ORIGINAL_ARGS[@]}" <<'SHIP_LOCK_PY'
+import fcntl, os, stat, sys
+path = os.environ.get("ARRAY_MATRIX_LOCK", "/tmp/array-matrix.lock")
+try:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise OSError("lock path must be a regular file")
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(f"ship-release: a gate, matrix or release build holds {path}; prepare again when it finishes")
+except OSError as error:
+    sys.exit(f"ship-release: cannot lock {path}: {error}")
+os.set_inheritable(fd, True)
+os.execvpe("bash", ["bash", sys.argv[1], *sys.argv[2:]], dict(os.environ, ARRAY_SHIP_LOCK_OWNER=str(os.getpid())))
+SHIP_LOCK_PY
+fi
+
 RELEASES_REPO=dylanreedx/array-releases
 GH=${ARRAY_SHIP_GH:-gh}
 STATE_DIR="$ROOT_DIR/qa-runs/ship-$VERSION"
@@ -38,6 +60,14 @@ STATE="$STATE_DIR/state.json"
 STARTED=$SECONDS
 step() { printf '\n==> [%dm%02ds] %s\n' $(((SECONDS - STARTED) / 60)) $(((SECONDS - STARTED) % 60)) "$*"; }
 die() { printf 'ship-release: %s\n' "$*" >&2; exit 1; }
+# 0: the release exists. 1: GitHub says it does not. Anything else (no network,
+# no auth, an outage) stops the ship: it must never read as "not published".
+release_exists() {
+  local err
+  if err=$("$GH" release view "$1" --repo "$RELEASES_REPO" 2>&1 >/dev/null); then return 0; fi
+  [[ "$err" == *"release not found"* ]] && return 1
+  die "cannot tell whether $1 is on GitHub (gh: ${err:-no output}); fix the network or gh auth and rerun"
+}
 state() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$STATE" "$1"; }
 
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || die "the working tree has uncommitted changes"
@@ -52,7 +82,7 @@ if [[ "$PUBLISH" == 1 ]]; then
     die "origin/main has commits HEAD lacks; merge origin/main, then prepare again (never force)"
   step "GitHub release v$VERSION (both assets)"
   ASSETS=("$STATE_DIR/release/Array.dmg" "$STATE_DIR/release/Array-$VERSION.dmg")
-  if "$GH" release view "v$VERSION" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+  if release_exists "v$VERSION"; then
     # A rerun after a partial upload: replace both assets before anything is pushed.
     echo "v$VERSION already exists; uploading both assets again."
     "$GH" release upload "v$VERSION" --repo "$RELEASES_REPO" --clobber "${ASSETS[@]}"
@@ -100,17 +130,28 @@ if [[ "$(gate "bool(awake and awake.get('green'))")" != True ]]; then
 fi
 
 step "Allocate the build number"
-BUILD=$(python3 - <<'PY'
-import pathlib, re, xml.etree.ElementTree as E
+if grep -qE "^\| *${VERSION//./\\.} *\|" docs/VERSIONING.md; then die "$VERSION is already in the ledger"; fi
+if release_exists "v$VERSION"; then die "v$VERSION is already published"; fi
+# A GitHub upload whose ledger row and feed item never landed (a publish that
+# died before its push) may hold the next build number, and Array.dmg serves it.
+GH_TAGS=$("$GH" release list --repo "$RELEASES_REPO" --limit 1000 --json tagName --jq '.[].tagName') ||
+  die "cannot list GitHub releases; build numbers must account for every upload"
+BUILD=$(GH_TAGS="$GH_TAGS" python3 - <<'PY'
+import os, pathlib, re, sys, xml.etree.ElementTree as E
 ns = '{http://www.andymatuschak.org/xml-namespaces/sparkle}'
-nums = [int(n) for n in re.findall(r'^\|[^|]+\|\s*(\d+)\s*\|', pathlib.Path('docs/VERSIONING.md').read_text(), re.M)]
-nums += [int(i.findtext(ns + 'version')) for i in E.parse('website/public/appcast.xml').findall('./channel/item')
-         if (i.findtext(ns + 'version') or '').isdigit()]
+ledger = pathlib.Path('docs/VERSIONING.md').read_text()
+items = E.parse('website/public/appcast.xml').findall('./channel/item')
+nums = [int(n) for n in re.findall(r'^\|[^|]+\|\s*(\d+)\s*\|', ledger, re.M)]
+nums += [int(i.findtext(ns + 'version')) for i in items if (i.findtext(ns + 'version') or '').isdigit()]
+known = set(re.findall(r'^\|\s*(\d+\.\d+\.\d+)\s*\|', ledger, re.M))
+known |= {i.findtext(ns + 'shortVersionString') for i in items}
+orphans = [t for t in os.environ['GH_TAGS'].split() if re.fullmatch(r'v\d+\.\d+\.\d+', t) and t[1:] not in known]
+if orphans:
+    sys.exit('ship-release: on GitHub but in neither the ledger nor the feed, so their build numbers are unknown: '
+             + ', '.join(orphans) + '. Land the ledger row and feed item (or delete the release), then prepare again.')
 print(max(nums) + 1)
 PY
-)
-if grep -qE "^\| *${VERSION//./\\.} *\|" docs/VERSIONING.md; then die "$VERSION is already in the ledger"; fi
-if "$GH" release view "v$VERSION" --repo "$RELEASES_REPO" >/dev/null 2>&1; then die "v$VERSION is already published"; fi
+) || exit 1
 echo "Array $VERSION = build $BUILD"
 
 step "Sign, notarize and staple the gate's candidate (no compile)"
