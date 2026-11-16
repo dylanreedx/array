@@ -23,6 +23,9 @@ public struct AgentTranscriptProjection: Sendable {
     /// from parsing. Assistant deltas must keep this at zero even when a long
     /// answer is waiting for the next coalesced parse.
     public private(set) var streamingSeparatorSourceReadCount = 0
+    /// Counts full walks of the event window to derive status. A streamed chunk
+    /// carries no status, so it must not add one.
+    public private(set) var statusDerivationCount = 0
 
     private struct OpenStream: Equatable, Sendable {
         var turnID: String
@@ -577,6 +580,7 @@ public struct AgentTranscriptProjection: Sendable {
         // streaming agents). Recompute when a status event arrives or leaves.
         if changesStatus {
             statusNeedsDerivation = false
+            statusDerivationCount += 1
             currentStatus = deriveAgentStatus(
                 signals: deriveStatusSignals(from: events, threadId: threadId, engineStatus: .idle)
             )

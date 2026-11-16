@@ -4595,6 +4595,21 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        if CommandLine.arguments.contains("--agent-streaming-chunk-work-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let summary = try AgentStreamingChunkWorkChecks.run()
+                    print("AgentStreamingChunkWorkChecks passed: \(summary)")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL --agent-streaming-chunk-work-check: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+            return
+        }
         if CommandLine.arguments.contains("--agent-file-index-memory-check") {
             _ = NSApplication.shared
             Task { @MainActor in

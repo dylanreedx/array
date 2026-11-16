@@ -1,4 +1,5 @@
 import ContinuumRevivedAgentContent
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -131,7 +132,14 @@ private func checkStatusSkipMatchesFullDerivation() {
         step(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "asking \(index) "))
     }
     step(.requestResolved(threadId: thread, requestId: "r1", decision: "approve"))
-    for index in 0..<450 {
+    // 300 chunks keep every status event inside the 400-event window: none of
+    // them may re-walk it.
+    let derivationsBeforeChunks = projection.statusDerivationCount
+    for index in 0..<300 {
+        step(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "chunk \(index) "))
+    }
+    let chunkDerivations = projection.statusDerivationCount - derivationsBeforeChunks
+    for index in 300..<450 {
         step(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "chunk \(index) "))
     }
     step(.turnCompleted(threadId: thread, turnId: "t1", outcome: .completed, errorMessage: nil))
@@ -143,6 +151,9 @@ private func checkStatusSkipMatchesFullDerivation() {
            "projection status must equal a full window derivation after every streamed chunk (mismatches \(mismatches), states \(seen.sorted()))")
     expect(rebound.currentStatus == projection.currentStatus,
            "a rebound projection must keep its status")
+    expect(chunkDerivations == 0,
+           "300 streamed chunks with every status event still in the window must not re-derive status (got \(chunkDerivations))")
+    print("Status window checks passed: \(seen.count) states, 0 mismatches after every step, \(chunkDerivations) derivations across 300 in-window chunks")
 }
 
 func runAgentTranscriptProjectionChecks() {
