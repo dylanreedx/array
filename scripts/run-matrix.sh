@@ -1225,6 +1225,9 @@ if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --sidebar-scope-popover-check
   run_app_check .build/debug/Array --sidebar-ownership-check
   run_app_check .build/debug/Array --sidebar-fold-expand-check
+  run_app_check .build/debug/Array --sidebar-ledger-check
+  run_app_check .build/debug/Array --sidebar-layouts-check
+  run_app_check .build/debug/Array --sidebar-clear-tiles-check
   run_app_check .build/debug/Array --hide-external-rows-check
   run_app_check .build/debug/Array --sidebar-truth-check
   run_app_check .build/debug/Array --subagent-sidebar-open-check
