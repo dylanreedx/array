@@ -235,6 +235,16 @@ enum TranscriptRetentionChecks {
         } catch {
             failures.append("restore-only existing archive: \(error)")
         }
+        do {
+            try await ReleasedTranscriptRecoveryChecks.run(root: root)
+        } catch {
+            failures.append("released transcript recovery: \(error)")
+        }
+        do {
+            try await TranscriptSaveGuardChecks.run(root: root)
+        } catch {
+            failures.append("transcript save guard: \(error)")
+        }
 
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "\nFAIL: ")) }
         print("PASS: idle agents with no view release their transcripts, reopen with the same transcript, and keep their history across a later turn")

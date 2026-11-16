@@ -1,6 +1,11 @@
 # Transcript retention gate — 2026-11-16
 
 **Not gated. Keep the release card in Doing; do not ship this branch.**
+
+The guarded-save draft prevents overwriting unverified archives but currently blocks
+new persistence for all valid archives inherited from a previous process. It warns
+and retains new history only in memory. This is a release-blocking regression; a
+verified archive must be resumed without losing provider-only display history.
 Checkout: `.worktrees/transcript-retention`, branch `array/transcript-retention`.
 Base: `4c9d7495`. Retention commit: `f573ac7f`. Recovery and tile fence commit:
 `474de68e` (`fix(agents): preserve transcripts through recovery and reattachment`).
@@ -41,6 +46,11 @@ The strict read does not solve the following blockers:
    a behavioral witness.
 
 ## Evidence
+
+- Guard RED with temporary bypass: `--transcript-retention-check` failed as
+  intended on write after restart. GREEN build passed and the check passed:
+  3 held, 2,197 released, heap delta -15.2 MB. Strict-recovery and stale-tail
+  witnesses passed in that GREEN run, but their own RED controls remain unrun.
 
 - Earlier post-rebase build and retention witness passed: 3 transcripts held,
   2,197 released, 2,269 events, heap delta -15.4 MB. Previous RED controls

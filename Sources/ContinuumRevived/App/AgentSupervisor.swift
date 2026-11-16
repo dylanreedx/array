@@ -7765,6 +7765,9 @@ final class AgentSupervisor {
         releasedTranscripts.removeValue(forKey: id)
         transcriptReloadObservers.removeValue(forKey: id)
         savedTranscriptVersions.removeValue(forKey: id)
+        savedTranscriptGenerations.removeValue(forKey: id)
+        transcriptSaveProofs.removeValue(forKey: id)
+        transcriptPersistenceBlocked.remove(id)
         transcriptReadAt.removeValue(forKey: id)
         transcriptReleaseTimers.removeValue(forKey: id)?.cancel()
         writesAwaitingTranscriptReload.removeValue(forKey: id)
@@ -11673,7 +11676,7 @@ final class AgentSupervisor {
     /// whole document: every later event copied the transcript again, and the
     /// copies were freed on the main thread as the saves ended.
     private func saveTranscript(for id: AgentID) {
-        guard let store = transcriptStore else { return }
+        guard let store = transcriptStore, !transcriptPersistenceBlocked.contains(id) else { return }
         transcriptSaveWanted.insert(id)
         guard transcriptPersistenceTasks[id] == nil else { return }
         let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
@@ -11682,11 +11685,30 @@ final class AgentSupervisor {
                   self.transcriptProjections[id] != nil {
                 // The detached task owns the copy and frees it, off the main thread.
                 let version = self.transcriptProjections[id]?.document.version
-                let saved = await Task.detached(priority: .utility) { [document = self.transcriptProjections[id]?.document] in
-                    guard let document else { return false }
-                    return (try? await store.saveSnapshot(agentID: id, sessionID: sessionID, document: document)) != nil
+                let proof = self.transcriptSaveProofs[id]
+                // A failed save may already have replaced the snapshot before
+                // its journal write failed. The previous generation is no
+                // longer proof that this version is safely on disk.
+                self.savedTranscriptVersions[id] = nil
+                self.savedTranscriptGenerations[id] = nil
+                let result = await Task.detached(priority: .utility) { [document = self.transcriptProjections[id]?.document] in
+                    guard let document else { return Result<UUID, Error>.failure(AgentTranscriptStoreError.unownedArchive) }
+                    do {
+                        return .success(try await store.saveGuardedSnapshot(agentID: id, sessionID: sessionID, document: document,
+                                                                            expectedVersion: proof?.version, expectedGeneration: proof?.generation))
+                    } catch { return .failure(error) }
                 }.value
-                if saved { self.savedTranscriptVersions[id] = version }
+                guard !Task.isCancelled, self.records[id] != nil else { return }
+                if case .success(let generation) = result, let version {
+                    self.savedTranscriptVersions[id] = version
+                    self.savedTranscriptGenerations[id] = generation
+                    self.transcriptSaveProofs[id] = (version, generation)
+                } else {
+                    self.transcriptPersistenceTasks[id] = nil
+                    self.transcriptSaveWanted.remove(id)
+                    self.blockTranscriptPersistence(for: id)
+                    return
+                }
             }
             self?.transcriptPersistenceTasks[id] = nil
             self?.scheduleTranscriptRelease(for: id)
@@ -11706,6 +11728,8 @@ final class AgentSupervisor {
     struct ReleasedTranscript {
         var status: AgentStatus
         var finalAssistantText: String?
+        var savedVersion: UInt64
+        var saveGeneration: UUID
         /// The last user prompt and the last reply, so finding or inspecting an
         /// idle agent still has evidence without the whole transcript.
         var evidence: AgentDocument
@@ -11721,6 +11745,12 @@ final class AgentSupervisor {
     private var writesAwaitingTranscriptReload: [AgentID: [() -> Void]] = [:]
     /// The document version each agent's last completed save wrote.
     private var savedTranscriptVersions: [AgentID: UInt64] = [:]
+    private var savedTranscriptGenerations: [AgentID: UUID] = [:]
+    /// The last complete archive this process wrote, even if a subsequent save
+    /// failed. Unlike this ownership proof, the release receipt is invalidated
+    /// before each attempted save.
+    private var transcriptSaveProofs: [AgentID: (version: UInt64, generation: UUID)] = [:]
+    private var transcriptPersistenceBlocked: Set<AgentID> = []
     /// When a shared agent's publisher last read its transcript.
     private var transcriptReadAt: [AgentID: ContinuousClock.Instant] = [:]
 
@@ -11732,6 +11762,22 @@ final class AgentSupervisor {
 
     /// Run the same idle-release decision without waiting for the timer in QA.
     func qaReleaseTranscriptIfDormant(_ id: AgentID) { releaseTranscriptIfDormant(id) }
+
+    /// Exercise a save of the current projection, including its completion.
+    func qaSaveTranscript(for id: AgentID) async {
+        saveTranscript(for: id)
+        await transcriptPersistenceTasks[id]?.value
+    }
+
+    func qaTranscriptPersistenceIsBlocked(_ id: AgentID) -> Bool { transcriptPersistenceBlocked.contains(id) }
+
+    private func blockTranscriptPersistence(for id: AgentID) {
+        guard transcriptPersistenceBlocked.insert(id).inserted else { return }
+        transcriptReleaseTimers.removeValue(forKey: id)?.cancel()
+        let message = "The saved transcript could not be safely updated. Earlier history was kept; new transcript content may be lost when Array quits."
+        warn("Agent \(id.rawValue.uuidString): \(message)")
+        appendLocalNotice(id: id, key: "transcript-save-blocked", title: "Transcript not saved", body: message)
+    }
 
     /// An attached tile that could not read its history waits for any later
     /// successful reload, including one started by a headless write.
@@ -11771,7 +11817,8 @@ final class AgentSupervisor {
     }
 
     private func scheduleTranscriptRelease(for id: AgentID) {
-        guard transcriptProjections[id] != nil || sharedTranscriptDetails[id] != nil,
+        guard !transcriptPersistenceBlocked.contains(id),
+              transcriptProjections[id] != nil || sharedTranscriptDetails[id] != nil,
               transcriptIsDormant(id) else { return }
         transcriptReleaseTimers[id]?.cancel()
         let delay = Self.transcriptReleaseDelay
@@ -11790,7 +11837,7 @@ final class AgentSupervisor {
     /// Saves the agent's transcript, then drops it once the save has landed and
     /// nothing has touched the transcript since.
     private func releaseTranscriptIfDormant(_ id: AgentID) {
-        guard transcriptIsDormant(id), let store = transcriptStore else { return }
+        guard !transcriptPersistenceBlocked.contains(id), transcriptIsDormant(id), let store = transcriptStore else { return }
         guard var projection = transcriptProjections[id] else {
             // A provider restore has no Array projection yet. Keep it for a
             // later headless write; replacing an existing saved transcript with
@@ -11800,36 +11847,52 @@ final class AgentSupervisor {
             return
         }
         if projection.flushPendingStreamingMarkup() { transcriptProjections[id] = projection }
-        if savedTranscriptVersions[id] == projection.document.version {
-            dropTranscript(id, releasing: projection)
+        if savedTranscriptVersions[id] == projection.document.version, let generation = savedTranscriptGenerations[id] {
+            dropTranscript(id, releasing: projection, generation: generation)
             return
         }
         let document = projection.document
         let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+        let proof = transcriptSaveProofs[id]
+        savedTranscriptVersions[id] = nil
+        savedTranscriptGenerations[id] = nil
         // Held as the persistence task, so no other save interleaves and the
         // agent is not dormant again until this one is done.
         transcriptPersistenceTasks[id] = Task { [weak self] in
-            let saved = await Task.detached(priority: .utility) {
-                (try? await store.saveSnapshot(agentID: id, sessionID: sessionID, document: document)) != nil
+            let result = await Task.detached(priority: .utility) {
+                do {
+                    return Result<UUID, Error>.success(try await store.saveGuardedSnapshot(
+                        agentID: id, sessionID: sessionID, document: document,
+                        expectedVersion: proof?.version, expectedGeneration: proof?.generation))
+                } catch { return .failure(error) }
             }.value
-            guard let self else { return }
+            guard let self, !Task.isCancelled, self.records[id] != nil else { return }
             self.transcriptPersistenceTasks[id] = nil
+            guard case .success(let generation) = result else {
+                self.transcriptSaveWanted.remove(id)
+                self.blockTranscriptPersistence(for: id)
+                return
+            }
+            self.transcriptSaveProofs[id] = (document.version, generation)
             // A save asked for meanwhile runs now; its end tries again.
             if self.transcriptSaveWanted.contains(id) { self.saveTranscript(for: id); return }
-            guard saved, let current = self.transcriptProjections[id], current.document.version == document.version,
+            guard let current = self.transcriptProjections[id], current.document.version == document.version,
                   self.transcriptIsDormant(id) else {
                 self.scheduleTranscriptRelease(for: id)
                 return
             }
             self.savedTranscriptVersions[id] = document.version
-            self.dropTranscript(id, releasing: current)
+            self.savedTranscriptGenerations[id] = generation
+            self.dropTranscript(id, releasing: current, generation: generation)
         }
     }
 
-    private func dropTranscript(_ id: AgentID, releasing projection: ManagedAgentTranscriptModel) {
+    private func dropTranscript(_ id: AgentID, releasing projection: ManagedAgentTranscriptModel, generation: UUID) {
         releasedTranscripts[id] = ReleasedTranscript(
             status: projection.currentStatus,
             finalAssistantText: projection.finalAssistantText,
+            savedVersion: projection.document.version,
+            saveGeneration: generation,
             evidence: Self.transcriptEvidence(projection.document))
         transcriptProjections[id] = nil
         rehydratedTranscripts[id] = nil
@@ -11871,7 +11934,14 @@ final class AgentSupervisor {
         let task = Task { [weak self] in
             let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
             let loaded: Result<AgentDocument?, Error>
-            do { loaded = .success(try await store?.load(agentID: id, sessionID: sessionID) ?? nil) }
+            do {
+                guard let store, let released = self?.releasedTranscripts[id] else {
+                    loaded = .success(nil)
+                    self?.finishTranscriptReload(id, loaded: loaded)
+                    return
+                }
+                loaded = .success(try await store.loadReleased(agentID: id, sessionID: sessionID, expectedVersion: released.savedVersion, expectedGeneration: released.saveGeneration))
+            }
             catch { loaded = .failure(error) }
             self?.finishTranscriptReload(id, loaded: loaded)
         }

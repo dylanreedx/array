@@ -4,6 +4,8 @@ import Foundation
 public enum AgentTranscriptStoreError: Error, Equatable, Sendable {
     case identityMismatch
     case versionMismatch(expected: UInt64, actual: UInt64)
+    case incompleteReleasedSnapshot
+    case unownedArchive
 }
 
 public struct AgentTranscriptArchive: Codable, Equatable, Sendable {
@@ -13,13 +15,17 @@ public struct AgentTranscriptArchive: Codable, Equatable, Sendable {
     public var sessionID: String
     public var document: AgentDocument
     public var savedAt: Date
+    /// Identifies one completed snapshot save, including across equal versions.
+    /// Older archives predate this field and decode it as nil.
+    public var saveGeneration: UUID?
 
-    public init(agentID: AgentID, sessionID: String, document: AgentDocument, savedAt: Date = Date()) {
+    public init(agentID: AgentID, sessionID: String, document: AgentDocument, savedAt: Date = Date(), saveGeneration: UUID? = nil) {
         schemaVersion = Self.currentSchemaVersion
         self.agentID = agentID
         self.sessionID = sessionID
         self.document = document
         self.savedAt = savedAt
+        self.saveGeneration = saveGeneration
     }
 }
 
@@ -49,10 +55,13 @@ public actor AgentTranscriptStore {
 
     private let root: URL
     private let compactionMutationCount: Int
+    private let afterSnapshotWriteForQA: (@Sendable () throws -> Void)?
 
-    public init(root: URL, compactionMutationCount: Int = defaultCompactionMutationCount) {
+    public init(root: URL, compactionMutationCount: Int = defaultCompactionMutationCount,
+                afterSnapshotWriteForQA: (@Sendable () throws -> Void)? = nil) {
         self.root = root
         self.compactionMutationCount = max(1, compactionMutationCount)
+        self.afterSnapshotWriteForQA = afterSnapshotWriteForQA
     }
 
     /// The ONE storage key for an agent's transcript.
@@ -71,22 +80,57 @@ public actor AgentTranscriptStore {
         "array-agent-\(agentID.rawValue.uuidString)"
     }
 
+    @discardableResult
     public func saveSnapshot(
         agentID: AgentID,
         sessionID: String,
         document: AgentDocument,
         at date: Date = Date()
-    ) throws {
+    ) throws -> UUID {
         let writer = writer(agentID: agentID, sessionID: sessionID)
+        let generation = UUID()
         try document.validateIdentityInvariants()
         try writer.write(
-            AgentTranscriptArchive(agentID: agentID, sessionID: sessionID, document: document, savedAt: date),
+            AgentTranscriptArchive(agentID: agentID, sessionID: sessionID, document: document, savedAt: date, saveGeneration: generation),
             to: snapshotURL(agentID: agentID, sessionID: sessionID)
         )
+        try afterSnapshotWriteForQA?()
         try writer.write(
             AgentTranscriptJournal(agentID: agentID, sessionID: sessionID, baseVersion: document.version),
             to: journalURL(agentID: agentID, sessionID: sessionID)
         )
+        return generation
+    }
+
+    /// Save a supervisor projection only if this process can prove which
+    /// archive it is extending. A restored provider transcript may be bounded
+    /// and must never replace a richer or unreadable canonical archive.
+    public func saveGuardedSnapshot(
+        agentID: AgentID, sessionID: String, document: AgentDocument,
+        expectedVersion: UInt64?, expectedGeneration: UUID?
+    ) throws -> UUID {
+        switch (expectedVersion, expectedGeneration) {
+        case let (version?, generation?):
+            _ = try loadReleased(agentID: agentID, sessionID: sessionID,
+                                 expectedVersion: version, expectedGeneration: generation)
+        case (nil, nil):
+            // Check the agent directory, not just the canonical session: an
+            // older session directory may still be awaiting startup migration.
+            let url = root.appendingPathComponent(agentID.rawValue.uuidString, isDirectory: true)
+            do {
+                // Backups and unrecognized files count too: absence cannot be
+                // inferred from an unreadable snapshot or journal.
+                guard try FileManager.default.contentsOfDirectory(atPath: url.path).isEmpty else {
+                    throw AgentTranscriptStoreError.unownedArchive
+                }
+            } catch let error as NSError where error.domain == NSCocoaErrorDomain
+                && error.code == NSFileReadNoSuchFileError {
+                // No agent directory: this is the first archive.
+            }
+        default:
+            throw AgentTranscriptStoreError.unownedArchive
+        }
+        return try saveSnapshot(agentID: agentID, sessionID: sessionID, document: document)
     }
 
     /// Append one semantic mutation after validating it against recovered truth.
@@ -149,6 +193,34 @@ public actor AgentTranscriptStore {
             catch { break }
         }
         return reducer.document
+    }
+
+    /// Reload a document released by this process only when its complete saved
+    /// snapshot is still recoverable. Unlike a general archive read, release
+    /// follows a successful `saveSnapshot`: its snapshot and empty journal must
+    /// both name the exact version released. A journal without its snapshot is
+    /// not a replacement for that snapshot, even if it decodes successfully.
+    public func loadReleased(agentID: AgentID, sessionID: String, expectedVersion: UInt64, expectedGeneration: UUID) throws -> AgentDocument {
+        // The normal reader may recover an older backup after a primary read
+        // fails. That is useful for display but cannot prove that replacing the
+        // primary preserves its newest history.
+        let decoder = JSONCodec.makeDecoder()
+        guard let snapshot = try? Data(contentsOf: snapshotURL(agentID: agentID, sessionID: sessionID)),
+              let journalData = try? Data(contentsOf: journalURL(agentID: agentID, sessionID: sessionID)),
+              let archive = try? decoder.decode(AgentTranscriptArchive.self, from: snapshot),
+              let journal = try? decoder.decode(AgentTranscriptJournal.self, from: journalData) else {
+            throw AgentTranscriptStoreError.incompleteReleasedSnapshot
+        }
+        guard archive.agentID == agentID, archive.sessionID == sessionID,
+              journal.agentID == agentID, journal.sessionID == sessionID else {
+            throw AgentTranscriptStoreError.identityMismatch
+        }
+        guard archive.saveGeneration == expectedGeneration, archive.document.version == expectedVersion, journal.baseVersion == expectedVersion,
+              journal.mutations.isEmpty else {
+            throw AgentTranscriptStoreError.incompleteReleasedSnapshot
+        }
+        try archive.document.validateIdentityInvariants()
+        return archive.document
     }
 
     public func remove(agentID: AgentID, sessionID: String) throws {
