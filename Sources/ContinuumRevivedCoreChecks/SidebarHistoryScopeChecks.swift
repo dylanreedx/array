@@ -1,0 +1,195 @@
+import ContinuumRevivedAgentUI
+import ContinuumRevivedCore
+import Foundation
+
+/// The default sidebar is a history of the user's agents, with helpers under
+/// their lead. A missing/deleted/unrestorable parent is not a new user agent.
+func runSidebarHistoryScopeChecks() throws {
+    let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    let lead = UUID(), helper = UUID(), sublead = UUID(), grandchild = UUID()
+    let absentParent = UUID(), orphan = UUID(), orphanChild = UUID()
+    let workspace = UUID(), otherWorkspace = UUID()
+    func row(_ id: UUID, parent: UUID? = nil, state: InboxState = .ready,
+             attention: InboxAttention = .none,
+             lifecycle: InboxLifecycle = .active, outcome: AgentTerminalOutcome? = .succeeded,
+             unread: Bool = false, liveRunner: Bool = false,
+             blocked: Bool = false, pinned: Bool = false, whereAt: UUID? = nil) -> AgentInboxRow {
+        AgentInboxRow(
+            id: id, title: "agent", workspaceName: "workspace", workspaceId: whereAt ?? workspace,
+            state: state, attention: attention, lifecycle: lifecycle, createdAt: now,
+            parentId: parent, settlementBlocked: blocked,
+            terminalEvent: outcome.map {
+                AgentTerminalEvent(sequence: 1, turnID: "turn", outcome: $0, endedAt: now)
+            }, terminalIsUnread: unread, hasLiveRunner: liveRunner, isPinned: pinned)
+    }
+    let normal = AgentInboxRowBuilder.placingChildrenWithParents([
+        row(lead), row(helper, parent: lead, lifecycle: .archived(at: now)),
+        row(sublead, parent: lead, lifecycle: .archived(at: now)),
+        row(grandchild, parent: sublead, lifecycle: .settled(at: now)),
+        row(UUID(), whereAt: otherWorkspace),
+    ])
+    let orphanFamily = [row(orphan, parent: absentParent, lifecycle: .archived(at: now)),
+                        row(orphanChild, parent: orphan, lifecycle: .archived(at: now))]
+    let input = normal + orphanFamily
+    func filtered(_ rows: [AgentInboxRow], open: UUID? = nil) -> [AgentInboxRow] {
+        InboxSort.excludingQuietOrphanedHelpers(rows: rows, openAgentId: open)
+    }
+    let actual = filtered(input)
+    expect(actual.map(\.id) == normal.map(\.id),
+           "sidebar history must omit a finished helper family whose parent is absent; got \(actual.count) rows, expected \(normal.count)")
+    expect(filtered(normal) == normal, "a standing lead keeps its helpers and sub-leads")
+    expect(InboxSort.excludingQuietOrphanedHelpers(rows: input, searching: true) == input,
+           "search can still find every finished orphan helper")
+    expect(filtered(input, open: orphanChild).map(\.id) == input.map(\.id),
+           "opening an orphan keeps its family as context")
+    for state in [InboxState.working, .approval, .input] {
+        let family = [orphanFamily[0], row(orphanChild, parent: orphan, state: state)]
+        expect(filtered(family) == family, "a \(state) descendant keeps the orphan family visible")
+    }
+    for survivor in [row(orphan, parent: absentParent, outcome: nil),
+                     row(orphan, parent: absentParent, liveRunner: true),
+                     row(orphan, parent: absentParent, blocked: true),
+                     row(orphan, parent: absentParent, pinned: true),
+                     row(orphan, parent: absentParent, lifecycle: .snoozed(until: now.addingTimeInterval(60))),
+                     row(orphan, parent: absentParent, state: .failed, outcome: .failed, unread: true)] {
+        expect(filtered([survivor]) == [survivor], "unknown or actionable orphan work must remain visible")
+    }
+    expect(filtered([row(orphan, parent: absentParent, state: .failed, outcome: .failed)]).isEmpty,
+           "an acknowledged orphan failure is finished history")
+    expect(filtered([row(orphan, parent: absentParent)]).isEmpty,
+           "a successful orphan must not return as a live recent after restart")
+    let cycle = [row(orphan, parent: orphanChild), row(orphanChild, parent: orphan)]
+    expect(filtered(cycle) == cycle, "corrupt cycles terminate without discarding agents")
+    let sorted = InboxSort.sortForInbox(rows: actual)
+    expect(sorted.first(where: { $0.id == sublead })?.depth == 1
+           && sorted.first(where: { $0.id == grandchild })?.depth == 2,
+           "a sub-lead and its helper stay under the standing lead")
+    let scoped = InboxScope.filter(rows: actual, scope: .workspaceID(workspace, "workspace"))
+    expect(scoped.count == 4, "the workspace filter still excludes other workspaces")
+
+    // Exercise durable record → context → snapshot → row as well, with the
+    // absent-parent input produced when restore skips a lead's missing cwd.
+    var record = AgentRecord(
+        id: AgentID(rawValue: orphan), displayName: "Finished helper", model: "fixture/model",
+        thinking: "medium", cwd: "/tmp/sidebar-history-fixture", parentAgentID: AgentID(rawValue: absentParent),
+        createdAt: now, lastActivityAt: now,
+        latestTerminalEvent: AgentTerminalEvent(sequence: 1, turnID: "turn", outcome: .succeeded, endedAt: now),
+        archivedAt: now)
+    record.acknowledgedTerminalSequence = 1
+    func fromRecords(_ input: [AgentRecord]) throws -> [AgentInboxRow] {
+        let restored = try JSONDecoder().decode([AgentRecord].self, from: JSONEncoder().encode(input))
+        let context = AgentContextIndex.build(
+            registry: .empty(), documents: [:], projectCanvases: [:], terminalDescriptors: [], agents: restored)
+        let snapshot = AgentInventory.snapshot(
+            terminalDescriptors: [], liveStatuses: [:], agents: restored, activityByAgent: [:],
+            replicaId: lead, now: now)
+        return AgentInboxRowBuilder.rows(
+            from: snapshot, context: context,
+            records: Dictionary(uniqueKeysWithValues: restored.map { ($0.id.rawValue, $0) }), now: now)
+    }
+    let built = try fromRecords([record])
+    expect(built.count == 1 && built[0].parentId == absentParent && filtered(built).isEmpty,
+           "a persisted orphan helper is omitted through the production row builder")
+
+    // A successful completion can still raise a snoozed helper's hand. Its
+    // terminal event is acknowledged here so only the durable wake supplies it.
+    var wokeRecord = record
+    wokeRecord.archivedAt = nil
+    wokeRecord.snoozedAt = now.addingTimeInterval(-120)
+    wokeRecord.snoozedUntil = now.addingTimeInterval(3_600)
+    wokeRecord.lastVisitedAt = now.addingTimeInterval(-180)
+    wokeRecord.runCompletedAt = now.addingTimeInterval(-60)
+    let wokeRows = try fromRecords([wokeRecord])
+    expect(wokeRows.count == 1 && wokeRows[0].attention == .woke
+           && wokeRows[0].state == .ready && wokeRows[0].lifecycle == .active,
+           "successful post-snooze completion must produce an active, ready, woke row")
+    expect(filtered(wokeRows) == wokeRows,
+           "sidebar history must preserve a successful orphan's raised hand")
+    var quietParent = AgentRecord(
+        id: AgentID(rawValue: orphanChild), displayName: "Quiet orphan lead", model: "fixture/model",
+        thinking: "medium", cwd: record.cwd, parentAgentID: AgentID(rawValue: absentParent),
+        createdAt: now, lastActivityAt: now, latestTerminalEvent: record.latestTerminalEvent, archivedAt: now)
+    quietParent.acknowledgedTerminalSequence = 1
+    wokeRecord.parentAgentID = quietParent.id
+    let wokeFamily = try fromRecords([quietParent, wokeRecord])
+    expect(filtered(wokeFamily) == wokeFamily,
+           "a successful woke helper must preserve its orphan family as context")
+    for attention in [InboxAttention.unread, .woke] {
+        let family = AgentInboxRowBuilder.placingChildrenWithParents([
+            orphanFamily[0], row(orphanChild, parent: orphan, attention: attention)])
+        expect(filtered(family) == family, "any helper attention must preserve its orphan family")
+    }
+    print("SidebarHistoryAttention: record-backed successful wake and unread/woke family context preserved")
+
+    // Placement deliberately follows an archived parent. It must not turn the
+    // child's own snooze or missing terminal outcome into proof of completion.
+    for snoozed in [true, false] {
+        var protectedChild = record
+        protectedChild.parentAgentID = quietParent.id
+        protectedChild.archivedAt = nil
+        protectedChild.snoozedAt = snoozed ? now.addingTimeInterval(-120) : nil
+        protectedChild.snoozedUntil = snoozed ? now.addingTimeInterval(3_600) : nil
+        protectedChild.runCompletedAt = snoozed ? now.addingTimeInterval(-300) : nil
+        protectedChild.latestTerminalEvent = snoozed ? AgentTerminalEvent(
+            sequence: 1, turnID: "earlier", outcome: .succeeded,
+            endedAt: now.addingTimeInterval(-300)) : nil
+        let own = try fromRecords([protectedChild])
+        if snoozed {
+            expect(own[0].lifecycle == .snoozed(until: now.addingTimeInterval(3_600)),
+                   "history fixture must carry the child's own snooze")
+        } else {
+            expect(own[0].lifecycle == .active && own[0].terminalEvent == nil,
+                   "history fixture must carry the child's unresolved outcome")
+        }
+        let family = try fromRecords([quietParent, protectedChild])
+        expect(family.count == 2 && family.allSatisfy { $0.lifecycle == .archived(at: now) },
+               "production placement must still draw the family under its archived lead")
+        expect(filtered(family) == family,
+               "sidebar history must preserve an orphan family with a \(snoozed ? "snoozed" : "unknown-outcome") helper after production placement")
+        let frozen = family.map { $0.withUnconfirmed() }
+        expect(filtered(frozen) == frozen,
+               "observation freezing must preserve the helper's own lifecycle facts")
+    }
+    var archivedUnknown = record
+    archivedUnknown.latestTerminalEvent = nil
+    let unknownRows = try fromRecords([archivedUnknown])
+    expect(filtered(unknownRows) == unknownRows,
+           "archival is placement, not evidence of a resolved orphan outcome")
+    print("SidebarHistoryLifecycle: production-placed snoozed/unknown helpers and frozen copies preserve their families; unknown archived outcomes retained")
+    print("SidebarHistoryScope: quiet orphan families omitted; standing leads retain helpers/sub-leads; open, running, blocked, unread-failed and unknown work preserved; cycles safe; workspace scope preserved")
+}
+
+/// Optional audit of an explicit COPY. Avoid AgentStore: recovery can write.
+/// This reconstructs a fresh, idle restore, not the live app's runtime state.
+func runSidebarHistoryRecordsAudit(copy: URL) throws {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let registry = try decoder.decode(Registry.self, from: Data(contentsOf: copy.appendingPathComponent("registry.json")))
+    let files = try FileManager.default.contentsOfDirectory(
+        at: copy.appendingPathComponent("agents"), includingPropertiesForKeys: nil)
+    let records = try files.filter {
+        $0.pathExtension == "json" && UUID(uuidString: $0.deletingPathExtension().lastPathComponent) != nil
+    }
+        .map { try decoder.decode(AgentRecord.self, from: Data(contentsOf: $0)) }
+    let adopted = records.filter { record in
+        var directory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: record.cwd, isDirectory: &directory) && directory.boolValue
+    }
+    let now = records.map(\.lastActivityAt).max() ?? .distantPast
+    let context = AgentContextIndex.build(
+        registry: registry, documents: [:], projectCanvases: [:], terminalDescriptors: [], agents: adopted)
+    let snapshot = AgentInventory.snapshot(
+        terminalDescriptors: [], liveStatuses: [:], agents: adopted, activityByAgent: [:],
+        replicaId: UUID(), now: now)
+    let rows = AgentInboxRowBuilder.rows(
+        from: snapshot, context: context,
+        records: Dictionary(uniqueKeysWithValues: adopted.map { ($0.id.rawValue, $0) }), now: now)
+    let present = Set(rows.map(\.id))
+    let candidates = rows.filter { row in row.parentId.map { !present.contains($0) } ?? false }
+    let filtered = InboxSort.excludingQuietOrphanedHelpers(rows: rows)
+    let retained = Set(filtered.map(\.id))
+    print("Copied-record idle restore: \(records.count) stored, \(adopted.count) adopted, \(candidates.count) orphan helpers; \(rows.count - filtered.count) omitted")
+    for row in candidates.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+        print("\(retained.contains(row.id) ? "KEPT" : "OMITTED") \(row.id.uuidString) \(row.title)")
+    }
+}

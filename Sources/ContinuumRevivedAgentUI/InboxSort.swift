@@ -127,6 +127,53 @@ public struct BoundedInbox: Equatable, Sendable {
 }
 
 public enum InboxSort {
+    /// The default list omits finished helper families whose parent is absent.
+    /// Search can still find them, and an open agent must remain visible.
+    public static func excludingQuietOrphanedHelpers(
+        rows: [AgentInboxRow], openAgentId: UUID? = nil, searching: Bool = false
+    ) -> [AgentInboxRow] {
+        guard !searching else { return rows }
+        let present = Set(rows.map(\.id))
+        let orphans = rows.filter { row in
+            row.parentId.map { !present.contains($0) } ?? false
+        }
+        guard !orphans.isEmpty else { return rows }
+        var children: [UUID: [AgentInboxRow]] = [:]
+        for row in rows {
+            if let parent = row.parentId { children[parent, default: []].append(row) }
+        }
+        var omitted: Set<UUID> = []
+        for orphan in orphans {
+            var family: [AgentInboxRow] = []
+            var pending = [orphan]
+            var visited: Set<UUID> = []
+            while let row = pending.popLast() {
+                guard visited.insert(row.id).inserted else { continue }
+                family.append(row)
+                pending.append(contentsOf: children[row.id] ?? [])
+            }
+            // Keep the whole family as context when any member still matters.
+            // A restored ready state alone does not establish a finished turn.
+            let isQuiet = family.allSatisfy { row in
+                guard row.id != openAgentId, !row.hasLiveRunner,
+                      !row.settlementBlocked, !row.isPinned,
+                      row.attention == .none,
+                      !isUnopenedFailure(row) else { return false }
+                switch row.state {
+                case .working, .approval, .input: return false
+                case .ready, .failed: break
+                }
+                switch row.ownLifecycle {
+                case .snoozed: return false
+                case .active, .settled, .archived:
+                    return row.terminalEvent != nil
+                }
+            }
+            if isQuiet { omitted.formUnion(visited) }
+        }
+        return rows.filter { !omitted.contains($0.id) }
+    }
+
     /// The maximum number of direct children shown inline for one parent. This is
     /// a presentation cap, deliberately separate from the supervisor's spawn cap:
     /// old stores and fixture corpora can contain more children than a new spawn
@@ -342,6 +389,8 @@ public enum InboxSort {
         case .approval, .input: return (0, at)
         case .working: return (1, at)
         case .ready, .failed:
+            // A cleared outcome folds: Clear acknowledges it, the count keeps it.
+            if row.isCleared { return (3, at) }
             if endedInFailure(row), !isUnopenedFailure(row) { return (3, at) }
             return (now.timeIntervalSince(at) < recentSubagentWindow ? 2 : 3, at)
         }

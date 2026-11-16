@@ -1064,12 +1064,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The settled tail's footer, kept out of `cellsByRow` for the same reason the
     /// heading is. At most one exists — the tail is one section.
     private var settledMoreCell: AgentInboxSettledMoreView?
+    private var sectionLabelCells: [SidebarSectionLabel.Kind: SidebarSectionLabelView] = [:]
+    private var incidentCells: [String: SidebarIncidentCellView] = [:]
+    static let ledgerHorizontalInset: CGFloat = 12
     /// The viewport height the spacer was last sized against; a resize re-sizes it.
     private var lastSpacerViewportHeight: CGFloat?
     private var fanoutRemainderCellsByParent: [UUID: AgentInboxRemainderView] = [:]
     /// The parent whose fold line the pointer is over.
     private var hoveredFanoutParentId: UUID?
     private(set) var cellBuildCountForQA = 0
+    var onCellBuildForQA: ((UUID) -> Void)?
+    private var retainedCellsDuringUpdate: [UUID: AgentInboxRowCell] = [:]
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.3-content-derived-row-height.md
     /// `NSTableView` caches delegate heights independently of the cell's layout.
@@ -1388,6 +1393,27 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     private let indicatorDefaults: UserDefaults
     private var activeIndicatorStyle: SidebarActiveIndicatorStyle
+    // Sidebar round (array/sidebar-next): the layout and the shared core's
+    // per-render facts. Recomputed in `display(from:)` from the same rows the
+    // list draws, so the count chip, fold line, incidents and Clear agree.
+    private(set) var sidebarLayout: SidebarLayout
+    private(set) var standingLeadIDs: Set<UUID>
+    /// Clear's acknowledgements: sidebar-only, persisted in the same defaults.
+    private(set) var clearMarks: [UUID: SidebarClearMark]
+    /// The ids the toast's Undo would un-clear.
+    private var pendingClearUndo: [UUID]?
+    /// What Clear N acts on right now.
+    private(set) var sidebarClearIDs: [UUID] = []
+    /// The incident list ("For you") over the live rows.
+    private(set) var sidebarIncidents: [SidebarIncident] = []
+    /// Each lead's reconciled tally, keyed by lead id.
+    private(set) var sidebarTallies: [UUID: SidebarLeadTally] = [:]
+    /// Quiet inbox: one cause chip per family.
+    private(set) var sidebarFamilyChips: [SidebarQuietInbox.FamilyChip] = []
+    private var quietNeedsYouCell: SidebarQuietNeedsYouView?
+    /// Pressed incident actions reach the host here (account sheet, sign-in,
+    /// repair, retry/resume, open). nil: the action button is disabled.
+    var onIncidentAction: ((SidebarIncident) -> Void)?
 
     override convenience init(frame frameRect: NSRect) {
         self.init(frame: frameRect, indicatorDefaults: .standard)
@@ -1396,6 +1422,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     init(frame frameRect: NSRect, indicatorDefaults: UserDefaults) {
         self.indicatorDefaults = indicatorDefaults
         self.activeIndicatorStyle = SidebarActiveIndicatorStyle.resolve(in: indicatorDefaults)
+        self.sidebarLayout = SidebarLayout.resolve(in: indicatorDefaults)
+        self.standingLeadIDs = SidebarStandingLeads.load(from: indicatorDefaults)
+        self.clearMarks = SidebarClearMarks.load(from: indicatorDefaults)
         // The scope is a fixed-width ChoiceButton: project names can never resize the band.
         scopeButton = ChoiceButton(title: InboxScope.allTitle)
         scopeButton.translatesAutoresizingMaskIntoConstraints = false
@@ -1733,6 +1762,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorStyle.defaultsKey)), object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(headerBackgroundDidChange),
             name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarHeaderBackground.defaultsKey)), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(sidebarLayoutDidChange),
+            name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarLayout.defaultsKey)), object: nil)
         NotificationCenter.default.addObserver(
             self, selector: #selector(activeIndicatorSettingDidChange),
             name: SettingChangeEvent.name(for: SettingID(rawValue: SidebarActiveIndicatorScope.defaultsKey)), object: nil)
@@ -1744,6 +1775,124 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         NotificationCenter.default.addObserver(
             self, selector: #selector(agentCharacterVisibilityDidChange),
             name: AgentCharacterController.visibilityDidChangeNotification, object: nil)
+    }
+
+    /// Switching the layout re-renders the list live: same rows, new drawing.
+    @objc private func sidebarLayoutDidChange() {
+        let next = SidebarLayout.resolve(in: indicatorDefaults)
+        guard next != sidebarLayout else { return }
+        sidebarLayout = next
+        sidebarLayoutRenderCountForQA += 1
+        render(display(from: allRows))
+    }
+    private(set) var sidebarLayoutRenderCountForQA = 0
+    /// Checks pick a layout without writing any defaults domain.
+    func setSidebarLayoutForQA(_ layout: SidebarLayout) {
+        sidebarLayout = layout
+        render(display(from: allRows))
+    }
+
+    // MARK: - Sidebar round: Clear, standing leads, incidents
+
+    static let clearedVerb = "Cleared"
+
+    /// Clear N: acknowledge every clearable outcome IN THE SIDEBAR ONLY. No
+    /// agent lifecycle moves, no tile closes, nothing is settled or archived:
+    /// the rows leave the live list (a lead to History, a helper into its
+    /// lead's fold), the marks persist, Undo or any new activity brings them
+    /// back. Tile cleanup is tidy-helper-tiles' job, not Clear's.
+    @discardableResult
+    func performSidebarClear() -> Int {
+        let ids = sidebarClearIDs
+        guard !ids.isEmpty else { return 0 }
+        let byId = Dictionary(allRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let now = clock()
+        for id in ids {
+            guard let row = byId[id] else { continue }
+            clearMarks[id] = SidebarClearMarks.mark(for: row, now: now)
+        }
+        SidebarClearMarks.save(clearMarks, to: indicatorDefaults)
+        dismissUndoToast()
+        pendingClearUndo = ids
+        undoToast.show(InboxUndoToast.message(verb: Self.clearedVerb, count: ids.count, snoozedUntil: nil))
+        updateBottomStack()
+        restartUndoToastTimer()
+        render(display(from: allRows))
+        return ids.count
+    }
+
+    /// Bring cleared rows back: Undo, or Un-settle on a cleared History row.
+    func unclear(_ ids: [UUID]) {
+        var changed = false
+        for id in ids where clearMarks.removeValue(forKey: id) != nil { changed = true }
+        guard changed else { return }
+        SidebarClearMarks.save(clearMarks, to: indicatorDefaults)
+        render(display(from: allRows))
+    }
+
+    /// Pin or unpin a lead in Standing. Persisted per agent.
+    func toggleStanding(_ id: UUID) {
+        if standingLeadIDs.contains(id) { standingLeadIDs.remove(id) } else { standingLeadIDs.insert(id) }
+        SidebarStandingLeads.save(standingLeadIDs, to: indicatorDefaults)
+        if standingLeadIDs.contains(id), clearMarks.removeValue(forKey: id) != nil {
+            SidebarClearMarks.save(clearMarks, to: indicatorDefaults)
+        }
+        render(display(from: allRows))
+    }
+
+    func pressIncident(_ incident: SidebarIncident) {
+        onIncidentAction?(incident)
+    }
+
+    /// "N folded · includes K stopped", over the remainder's own hidden ids.
+    func ledgerFoldTitle(_ remainder: FanoutRemainder) -> String {
+        let byId = Dictionary(allRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let stopped = remainder.hiddenDescendantIDs.filter { id in
+            byId[id].map { SidebarRecovery.state(for: $0) == .stopped } ?? false
+        }.count
+        var title = "\(remainder.hiddenDescendantCount) folded"
+        if stopped > 0 { title += " · includes \(stopped) stopped" }
+        return title
+    }
+
+    /// The Ledger's head: "For you" (blocking incidents, one line each) and
+    /// "Other updates" grouped by cause, with Clear N on the first heading. No
+    /// heading is drawn for nothing; the Quiet inbox draws its own head.
+    private func sidebarHeadItems() -> [InboxListItem] {
+        guard sidebarLayout == .ledger else { return quietInboxHeadItems() }
+        let blocking = sidebarIncidents.filter(\.isBlocking)
+        let updates = sidebarIncidents.filter { !$0.isBlocking }
+        var clear = sidebarClearIDs.count
+        var result: [InboxListItem] = []
+        if !blocking.isEmpty {
+            result.append(.sectionLabel(SidebarSectionLabel(
+                kind: .forYou, title: "For you", count: blocking.count, clearCount: clear)))
+            clear = 0
+            result.append(contentsOf: blocking.map(InboxListItem.incident))
+        }
+        if !updates.isEmpty || clear > 0 {
+            result.append(.sectionLabel(SidebarSectionLabel(
+                kind: .otherUpdates, title: updates.isEmpty ? "Updates" : "Other updates",
+                count: nil, clearCount: clear)))
+            result.append(contentsOf: updates.map(InboxListItem.incident))
+        }
+        return result
+    }
+
+    /// The Quiet inbox's head (SidebarQuietInboxViews.swift).
+    private func quietInboxHeadItems() -> [InboxListItem] { quietInboxHead(familyChips: sidebarFamilyChips) }
+
+    /// Recompute the shared core over the rows the list is drawing.
+    private func updateSidebarCore(liveRows: [AgentInboxRow], shownIDs: Set<UUID>) {
+        let standing = standingLeadIDs
+        sidebarClearIDs = SidebarClear.eligibleIDs(rows: liveRows, standing: standing)
+        sidebarIncidents = SidebarIncidents.build(rows: liveRows)
+        var tallies: [UUID: SidebarLeadTally] = [:]
+        for lead in liveRows where lead.depth == 0 && parentsWithChildren.contains(lead.id) {
+            tallies[lead.id] = SidebarLeadTally.tally(leadId: lead.id, rows: liveRows, shownIDs: shownIDs)
+        }
+        sidebarTallies = tallies
+        sidebarFamilyChips = sidebarLayout == .quietInbox ? SidebarQuietInbox.familyChips(rows: liveRows) : []
     }
 
     @objc private func headerBackgroundDidChange() {
@@ -1982,11 +2131,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// deliberately does not enter this snapshot, so re-rendering a ticking row
     /// can update its aggregate label without posting a second live-region event.
     private func statusAccessibilitySummary(for row: AgentInboxRow) -> String {
+        let pause = SidebarRecovery.cause(for: row) == .usageLimit
+            ? SidebarFailureCause.usageLimit.label(harness: row.harness) : nil
         if row.isUnconfirmed {
-            let lastKnown = row.label ?? "Ready"
+            let lastKnown = pause ?? row.label ?? "Ready"
             return "Unconfirmed: no live agent snapshot; last known status \(lastKnown)"
         }
-        return row.presentationLabel ?? "Ready"
+        return pause ?? row.presentationLabel ?? "Ready"
     }
 
     /// Compare status at the row-model boundary, before cell materialization. The
@@ -2258,6 +2409,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         shelfHeaderCell = nil
         historyHeaderCell = nil
         projectHeadingCells.removeAll()
+        sectionLabelCells.removeAll()
+        incidentCells.removeAll()
+        quietNeedsYouCell = nil
         settledMoreCell = nil
         fanoutRemainderCellsByParent.removeAll()
         updateShelfSpacerHeight()
@@ -2359,12 +2513,27 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // control appeared or vanished are stale too. (Found in cross-review.)
         let previousParents = parentsWithChildren
         let previousRollups = rollupsByParent
+        let previousTallies = sidebarTallies
+        let previousByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let next = display(from: newRows)
         // P4.7: the identity sequence is compared over the DRAWN items, not over the
         // agent rows — the shelf header is a row in this table, and a snooze that
         // changed the count in it (or brought the header into existence at all) has
         // changed the list even when every agent row is where it was.
         guard next.map(\.identity) == items.map(\.identity) else {
+            // Incident/head changes keep the same agents in the same order.
+            // Insert/remove their chrome in place, preserving every unrelated
+            // agent cell, rather than rebuilding the list for one new ask.
+            if next.compactMap(\.agentRow).map(\.id) == rows.map(\.id) {
+                let changedValues = Set(next.compactMap(\.agentRow).filter { row in
+                    previousByID[row.id].map { !row.matchesIgnoringLiveElapsed($0) } ?? true
+                }.map(\.id))
+                if applyScopeIncrementally(next, previousRollups: previousRollups,
+                    changedAgentIDs: changed.touched.union(changedValues), previousTallies: previousTallies,
+                    preservingAgentRows: true) {
+                    return
+                }
+            }
             // A list longer than the viewport keeps the row being read where it
             // is: a subagent arriving at the top of an open 40-row group otherwise
             // pushed everything under the pointer down a row. (`render` does not
@@ -2411,6 +2580,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             changed.touched.contains(rows[$0].id) || !rows[$0].matchesIgnoringLiveElapsed(previous[$0])
                 || disclosureMoved.contains(rows[$0].id)
                 || previousRollups[rows[$0].id] != rollupsByParent[rows[$0].id]
+                || previousTallies[rows[$0].id] != sidebarTallies[rows[$0].id]
         }.compactMap(tableRow(forRowIndex:)))
         guard !indexes.isEmpty else { return }
         // P3.7: a lifecycle move changes the row's VARIANT, and a variant is a
@@ -2443,12 +2613,27 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// (P2D.4). A shelf count taken before them would report a snoozed child that is
     /// already hidden under its parent, and the header would say it is holding a row
     /// that unfolding it does not produce.
-    private func display(from newRows: [AgentInboxRow]) -> [InboxListItem] {
+    private func display(from incomingRows: [AgentInboxRow]) -> [InboxListItem] {
+        // Sidebar round: Clear's marks, then Standing, both sidebar preferences
+        // stamped on the rows. A mark new activity released is dropped.
+        let cleared = SidebarClearMarks.apply(clearMarks, to: incomingRows)
+        if !cleared.released.isEmpty {
+            for id in cleared.released { clearMarks[id] = nil }
+            SidebarClearMarks.save(clearMarks, to: indicatorDefaults)
+        }
+        let unmarkedRows = cleared.rows
+        let newRows = SidebarStandingLeads.apply(standingLeadIDs, to: unmarkedRows)
         let hiddenKeys = externalSessionHiding?.hiddenKeys ?? []
         func isHidden(_ row: AgentInboxRow) -> Bool {
             row.externalSession.map { hiddenKeys.contains($0.sessionKey) } ?? false
         }
-        let sourced = newRows.filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        // Decide orphanhood against the full input, before scope/search can
+        // temporarily remove a real parent. Search remains the way to find a
+        // finished helper whose lead was deleted or cannot be restored.
+        let historyRows = InboxSort.excludingQuietOrphanedHelpers(
+            rows: newRows, openAgentId: openAgentId, searching: !query.isEmpty)
+        let sourced = historyRows.filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
         let scopedWithHidden = InboxScope.filter(
             rows: sourced, scope: effectiveScope, openAgentId: openAgentId,
             currentWorkspace: currentWorkspaceName,
@@ -2461,7 +2646,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         revealedHiddenIds = hiddenRevealed ? Set(hiddenHere.map(\.id)) : []
         updateHiddenFooter()
         let scoped = hiddenRevealed || hiddenHere.isEmpty ? scopedWithHidden : scopedWithHidden.filter { !isHidden($0) }
-        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         let searched = query.isEmpty ? scoped : scoped.filter { row in
             [row.title, row.projectName, row.workspaceName, row.model, row.branch, row.whereMarker?.text]
                 .compactMap { $0?.localizedLowercase }
@@ -2506,6 +2690,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         collapsedParents = Set(parentsWithChildren.filter(isFolded))
         let visible = InboxSort.visibleRows(bounded.rows, collapsed: collapsedParents)
         let visibleIDs = Set(visible.map(\.id))
+        updateSidebarCore(
+            liveRows: sorted.filter { $0.lifecycle == .active }, shownIDs: visibleIDs)
         // A fold can remove the model's original after-row without removing the
         // ancestor remainder it anchored. Re-anchor each still-visible parent's
         // affordance to the last row that remains visible in that parent's bounded
@@ -2533,7 +2719,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // "in 25m" is read from, so a card whose snooze expires between two renders
         // cannot make a committed baseline flap.
         let parts = InboxSort.partition(rows: visible, now: clock())
-        var built = sortMode == .byProject ? projectGroupedItems(for: parts.active) : agentItems(for: parts.active)
+        // Sidebar round: the layout's head (incidents), then Standing leads with
+        // their families, then everything else in the sort's order.
+        var standingRows: [AgentInboxRow] = []
+        var otherRows: [AgentInboxRow] = []
+        var inStanding = false
+        for row in parts.active {
+            if row.depth == 0 { inStanding = row.isStanding }
+            if inStanding { standingRows.append(row) } else { otherRows.append(row) }
+        }
+        var built = sidebarHeadItems()
+        if !standingRows.isEmpty {
+            built.append(.sectionLabel(SidebarSectionLabel(kind: .standing, title: "Standing", count: nil, clearCount: 0)))
+            built.append(contentsOf: agentItems(for: standingRows))
+        }
+        built.append(contentsOf: sortMode == .byProject ? projectGroupedItems(for: otherRows) : agentItems(for: otherRows))
         // NO HEADER FOR AN EMPTY SHELF: "Snoozed (0)" is a line of chrome about
         // nothing, and it would take a row's worth of a 320pt sidebar to say it.
         if parts.shelfCount > 0 {
@@ -2572,6 +2772,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         if foldsHistoryIntoShelf, let firstShelf = built.firstIndex(where: \.isShelfHeading) {
             built.insert(.shelfSpacer, at: firstShelf)
+        }
+        // Quiet inbox: the History footnote, under the shelf Clear fills.
+        if sidebarLayout == .quietInbox, parts.historyCount > 0 || !sidebarClearIDs.isEmpty {
+            built.append(.sectionLabel(SidebarSectionLabel(
+                kind: .historyNote, title: Self.quietHistoryNote, count: nil, clearCount: 0)))
         }
         return built
     }
@@ -2738,7 +2943,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .fanoutRemainder(let remainder):
                 depths.append(min((depthByAgent[remainder.parentId] ?? 0) + 1,
                                   AgentInboxRow.maxDepth))
-            case .shelfHeader, .historyHeader, .shelfSpacer, .settledMore, .projectHeading:
+            case .shelfHeader, .historyHeader, .shelfSpacer, .settledMore, .projectHeading,
+                 .sectionLabel, .incident, .quietNeedsYou:
                 depths.append(0)
             }
         }
@@ -2886,6 +3092,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     private func setItems(_ next: [InboxListItem]) {
         items = next
+        if !next.contains(where: { if case .historyHeader = $0 { return true }; return false }) { historyHeaderCell = nil }
+        if !next.contains(where: { if case .shelfHeader = $0 { return true }; return false }) { shelfHeaderCell = nil }
         rows = next.compactMap(\.agentRow)
         if updatingFold { foldRenderNudge = settleNudgeTargetID(now: clock()) }
         nestingByTableRow = AgentInboxView.nestings(for: next)
@@ -3065,6 +3273,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 card.setOwnership(ownership(atTableRow: index))
             }
         }
+        // Surviving fold lines share the resized card too; they are not in cellsByRow.
+        refreshVisibleOwnership()
         let nudges: Set<UUID> = Set([oldNudge, settleNudgeTargetID(now: renderNow)].compactMap { $0 })
         var stale = IndexSet(new.indices.filter { row in
             guard !inserted.contains(row) else { return false }
@@ -3094,7 +3304,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     ///
     /// The checklist made this matter: one pick used to change the scope, and now a
     /// person clicks three boxes in a row, each of which rebuilt every card.
-    private func applyScopeIncrementally(_ next: [InboxListItem], previousRollups: [UUID: ChildRollup]) -> Bool {
+    private func applyScopeIncrementally(
+        _ next: [InboxListItem], previousRollups: [UUID: ChildRollup],
+        changedAgentIDs: Set<UUID> = [], previousTallies: [UUID: SidebarLeadTally]? = nil,
+        preservingAgentRows: Bool = false
+    ) -> Bool {
         let old = items.map(\.identity), new = next.map(\.identity)
         let oldSet = Set(old), newSet = Set(new)
         guard oldSet.count == old.count, newSet.count == new.count,
@@ -3104,7 +3318,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let oldNesting = Dictionary(zip(old, nestingByTableRow)) { first, _ in first }
         let renderNow = clock()
         let oldNudge = settleNudgeTargetID(now: renderNow)
-        endRename(commit: true)
+        let anchor = preservingAgentRows ? visibleScrollAnchor(excluding: changedAgentIDs) : nil
+        if !preservingAgentRows { endRename(commit: true) }
         cancelCrossfades()
         let previousCells = Dictionary(cellsByRow.compactMap { index, cell in
             items.indices.contains(index) ? (items[index].identity, cell) : nil
@@ -3113,15 +3328,32 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cellsByRow = Dictionary(uniqueKeysWithValues: next.enumerated().compactMap { index, item in
             previousCells[item.identity].map { (index, $0) }
         })
+        if preservingAgentRows {
+            retainedCellsDuringUpdate = Dictionary(uniqueKeysWithValues: next.enumerated().compactMap { index, item in
+                guard let model = item.agentRow, !changedAgentIDs.contains(model.id),
+                      ![oldNudge, settleNudgeTargetID(now: renderNow)].contains(model.id),
+                      previousRollups[model.id] == rollupsByParent[model.id],
+                      previousTallies?[model.id] == sidebarTallies[model.id],
+                      oldNesting[item.identity] == nestingByTableRow[index],
+                      let cell = previousCells[item.identity] else { return nil }
+                return (model.id, cell)
+            })
+        }
+        defer { retainedCellsDuringUpdate.removeAll() }
         tableView.beginUpdates()
         if !removed.isEmpty { tableView.removeRows(at: removed, withAnimation: []) }
         if !inserted.isEmpty { tableView.insertRows(at: inserted, withAnimation: []) }
+        // Restore before AppKit materializes the newly exposed viewport; an
+        // incident above the reader must not scroll or rebuild unrelated rows.
+        restoreScrollAnchor(anchor)
         tableView.endUpdates()
         for (index, cell) in cellsByRow {
             if let card = cell as? AgentInbox96CellView, ownsSubagents {
                 card.setOwnership(ownership(atTableRow: index))
             }
         }
+        // A fold line's identity can survive while its lead's card changes height.
+        refreshVisibleOwnership()
         // A survivor is redrawn when what it draws from its neighbours changed: its
         // place in the tree, its rollup (a child in another workspace left), or the
         // settle nudge moving to or from it.
@@ -3129,7 +3361,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         var stale = IndexSet(new.indices.filter { row in
             guard !inserted.contains(row) else { return false }
             if let id = next[row].agentRow?.id {
-                if nudges.contains(id) || previousRollups[id] != rollupsByParent[id] { return true }
+                if nudges.contains(id) || changedAgentIDs.contains(id)
+                    || previousRollups[id] != rollupsByParent[id] { return true }
+                if let previousTallies, previousTallies[id] != sidebarTallies[id] { return true }
             }
             return oldNesting[new[row]] != nestingByTableRow[row]
         })
@@ -3143,6 +3377,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         updateEmptyState()
         updateBulkBar()
         updateAccessibilityHierarchy()
+        restoreScrollAnchor(anchor)
+        if preservingAgentRows { repositionRenameField() }
         refreshHoverFromPointer()
         scheduleWakeRerender()
         return true
@@ -3958,6 +4194,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 return (ownsSubagents ? InboxOwnershipChrome.subagentHeight : AgentInboxView.slimRowHeight) + groupEndGap
             case .shelfHeader, .historyHeader, .settledMore, .projectHeading:
                 return AgentInboxView.shelfHeaderHeight
+            case .sectionLabel:
+                return SidebarSectionLabelView.height
+            case .incident:
+                return SidebarIncidentCellView.height
+            case .quietNeedsYou(let incidents):
+                return SidebarQuietNeedsYouView.height(lines: incidents.count)
             case .shelfSpacer:
                 return max(1, shelfSpacerHeight)
             case .agent: return AgentInboxView.shelfHeaderHeight
@@ -4027,6 +4269,27 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 header.apply(section: .project(title), count: count, isExpanded: true)
                 projectHeadingCells[title] = header
                 return header
+            // Sidebar round.
+            case .sectionLabel(let label):
+                let cell = sectionLabelCells[label.kind] ?? SidebarSectionLabelView()
+                cell.onClear = { [weak self] in self?.performSidebarClear() }
+                cell.apply(label)
+                sectionLabelCells[label.kind] = cell
+                return cell
+            case .incident(let incident):
+                let cell = incidentCells[incident.id] ?? SidebarIncidentCellView()
+                cell.onAction = { [weak self] in self?.pressIncident(incident) }
+                // This release: only "Switch & resume…" acts (it opens Settings >
+                // Agents > Accounts); the other actions draw disabled.
+                cell.apply(incident, actionEnabled: onIncidentAction != nil && incident.kind == .cause(.usageLimit))
+                incidentCells[incident.id] = cell
+                return cell
+            case .quietNeedsYou(let incidents):
+                let cell = quietNeedsYouCell ?? SidebarQuietNeedsYouView()
+                cell.onAction = { [weak self] incident in self?.pressIncident(incident) }
+                cell.apply(incidents, actionEnabled: onIncidentAction != nil)
+                quietNeedsYouCell = cell
+                return cell
             // P4.8
             case .settledMore(let hidden):
                 let footer = settledMoreCell ?? AgentInboxSettledMoreView()
@@ -4042,6 +4305,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 cell.onExpand = { [weak self] in self?.toggleFanout(parentId: remainder.parentId) }
                 cell.setNesting(nesting(atTableRow: row))
                 if ownsSubagents { cell.setOwnership(ownership(atTableRow: row)) }
+                cell.ledgerTitle = sidebarLayout == .ledger ? ledgerFoldTitle(remainder)
+                    : (remainder.hiddenFailed > 0 ? "\(remainder.hiddenDescendantCount) more" : nil)
                 cell.apply(remainder: remainder)
                 cell.isHovered = hoveredFanoutParentId == remainder.parentId
                 fanoutRemainderCellsByParent[remainder.parentId] = cell
@@ -4057,7 +4322,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // an empty row is a thing the blankness floor can see, where a hint pill
         // quietly drawn on the wrong row is not. (Raised in cross-review.)
         guard let index = rowIndex(forTableRow: row) else { return nil }
+        if let retained = retainedCellsDuringUpdate[model.id] {
+            cellsByRow[row] = retained
+            return retained
+        }
         cellBuildCountForQA += 1
+        onCellBuildForQA?(model.id)
         let interacting = isInteracting(row: row)
         let reuseID = NSUserInterfaceItemIdentifier(Self.accessibilityIdentifier(for: model))
         // A newly visible helper can use a cached helper that just left the
@@ -4127,6 +4397,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let rowDisclosure = disclosure(for: model)
         let rowRollup = rollupsByParent[model.id]
         let renderNow = clock()
+        // Sidebar round: the Ledger's facts, set before `apply` reads them.
+        (cell as? AgentInbox96CellView)?.sidebarTally = model.depth == 0 ? sidebarTallies[model.id] : nil
+        (cell as? AgentInbox96CellView)?.ledger = sidebarLayout == .ledger
+            ? AgentInbox96CellView.LedgerFacts(tally: model.depth == 0 ? sidebarTallies[model.id] : nil) : nil
         // .plans/113: only a lead in the live block is drawn under a project heading.
         (cell as? AgentInbox96CellView)?.placementRepeatsHeading = sortMode == .byProject
             && model.depth == 0 && InboxSort.section(for: model.lifecycle, now: renderNow) == .active
@@ -5354,7 +5628,30 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         case .share:
             // The share popover is the host's; no lifecycle moves, so no undo.
             onRowAction?(action, targets.map(\.id))
-        case .settle, .unsettle, .snooze, .wake, .markUnread, .generateName, .stopAgent,
+        case .unsettle:
+            // Clear is sidebar state; an ordinary settlement belongs to the host.
+            // A mixed selection must restore both through their respective owners.
+            let acknowledged = targets.filter { clearMarks[$0.id] != nil }.map(\.id)
+            let ordinary = targets.filter { clearMarks[$0.id] == nil }.map(\.id)
+            let captured = captureLifecycle(ordinary)
+            unclear(acknowledged)
+            if !ordinary.isEmpty {
+                onRowAction?(action, ordinary)
+                offerUndo(action.undoVerb, capturedInOrder: captured)
+            }
+        case .pin where targets.allSatisfy({ $0.parentId == nil }),
+             .unpin where targets.allSatisfy({ $0.parentId == nil }):
+            // Sidebar round: a lead's Pin is Standing, a sidebar preference.
+            for target in targets where (action == .pin) != standingLeadIDs.contains(target.id) {
+                if action == .pin { standingLeadIDs.insert(target.id) } else { standingLeadIDs.remove(target.id) }
+            }
+            SidebarStandingLeads.save(standingLeadIDs, to: indicatorDefaults)
+            if action == .pin {
+                for target in targets { clearMarks[target.id] = nil }
+                SidebarClearMarks.save(clearMarks, to: indicatorDefaults)
+            }
+            render(display(from: allRows))
+        case .settle, .snooze, .wake, .markUnread, .generateName, .stopAgent,
              .archive, .delete, .popOut, .foldBack, .pin, .unpin:
             // P4.10: armed before the host runs, for the reason `performBulkAction`
             // records — a synchronous host has already re-pushed by the time it returns.
@@ -5743,7 +6040,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// ⌘Z on the list presses the toast's Undo while it is up.
     fileprivate func undoFromKeyboard() -> Bool {
-        guard !undoToast.isHidden, pendingHideUndo != nil || pendingUndo != nil else { return false }
+        guard !undoToast.isHidden, pendingHideUndo != nil || pendingUndo != nil || pendingClearUndo != nil else { return false }
         performUndo()
         return true
     }
@@ -5762,6 +6059,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         undoToastTimer = nil
         pendingUndo = nil
         pendingHideUndo = nil
+        pendingClearUndo = nil
         undoToast.hide()
         updateBottomStack()
     }
@@ -5775,11 +6073,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// back.
     private func performUndo() {
         // One press puts back the whole batch: the hidden sessions and the snoozes.
-        let keys = pendingHideUndo, restoring = pendingUndo
-        guard keys != nil || restoring != nil else { return }
+        let keys = pendingHideUndo, restoring = pendingUndo, cleared = pendingClearUndo
+        guard keys != nil || restoring != nil || cleared != nil else { return }
         dismissUndoToast()
         if let keys { showHiddenExternalSessions(keys) }
         if let restoring { onUndoLifecycle?(restoring) }
+        if let cleared { unclear(cleared) }
     }
 
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two
@@ -7030,6 +7329,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
     }
     var isSortHoldPendingForQA: Bool { sortHoldPending }
+    /// Sidebar round: the drawn list, materialised, for the ledger witness.
+    var itemsForQA: [InboxListItem] { items }
+    var allRowsForQA: [AgentInboxRow] { allRows }
+    func cellForQA(atItem index: Int) -> NSView? {
+        tableView.view(atColumn: 0, row: index, makeIfNecessary: true)
+    }
+    func scrollItemToVisibleForQA(_ index: Int) { tableView.scrollRowToVisible(index) }
+    /// Sidebar round, Quiet inbox witness: the drawn list and the rows it was built from.
+    var itemsForQuietCheck: [InboxListItem] { items }
+    var allRowsForQuietCheck: [AgentInboxRow] { allRows }
     func drawnRowMinYForQA(id: UUID) -> CGFloat? { drawnRowMinYs()[id] }
     /// Press the sort button the way a click does: its menu hook, which is what
     /// `ChromeIconButton.mouseDown` calls.
@@ -7690,6 +7999,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
     /// The toast as RENDERED — empty when it is down.
     var undoToastTextForQA: String { undoToast.qaText }
+    var undoButtonForQA: NSView { undoToast.buttonForQA }
     /// Where it is, so a check can assert it clears the bulk bar rather than assuming
     /// the constraint does.
     var undoToastFrameForQA: NSRect { undoToast.frame }
@@ -8174,12 +8484,19 @@ enum InboxListItem {
     /// .plans/113: a project's name over its agents in `By project`. Not
     /// collapsible and not an agent; drawn by the shelf heading's view.
     case projectHeading(title: String, count: Int)
+    /// Sidebar round: "For you", "Other updates", "Standing", with Clear N.
+    case sectionLabel(SidebarSectionLabel)
+    /// Sidebar round: one incident with its one action.
+    case incident(SidebarIncident)
+    /// Sidebar round, Quiet inbox: the "Needs you" box, never empty.
+    case quietNeedsYou([SidebarIncident])
 
     /// One of the two counted, collapsible headings.
     var isShelfHeading: Bool {
         switch self {
         case .shelfHeader, .historyHeader: return true
-        case .agent, .fanoutRemainder, .settledMore, .shelfSpacer, .projectHeading: return false
+        case .agent, .fanoutRemainder, .settledMore, .shelfSpacer, .projectHeading, .sectionLabel, .incident,
+             .quietNeedsYou: return false
         }
     }
 
@@ -8210,6 +8527,12 @@ enum InboxListItem {
         case .settledMore(let hidden): return "more:\(hidden)"
         case .shelfSpacer: return "spacer"
         case .projectHeading(let title, let count): return "project:\(count):\(title)"
+        case .sectionLabel(let label): return label.identity
+        case .incident(let incident):
+            return "incident:\(incident.id):\(incident.title):\(incident.detail):\(incident.actionTitle)"
+        case .quietNeedsYou(let incidents):
+            return "needs-you:" + incidents.map { "\($0.id):\($0.title):\($0.detail):\($0.actionTitle)" }
+                .joined(separator: "|")
         }
     }
 }
@@ -8597,12 +8920,18 @@ final class AgentInboxRemainderView: NSTableCellView {
 
     required init?(coder: NSCoder) { return nil }
 
+    /// Sidebar round, Ledger: the fold names only what the lead's chip does
+    /// not ("5 folded · includes 3 stopped"), so a failure is said once.
+    var ledgerTitle: String?
+    var titleForQA: String { label.stringValue }
+    var buttonForQA: NSView { button }
+
     func apply(remainder: FanoutRemainder) {
         self.remainder = remainder
-        label.stringValue = remainder.title
+        label.stringValue = remainder.isExpanded ? remainder.title : (ledgerTitle ?? remainder.title)
         button.setAccessibilityLabel(remainder.isExpanded
             ? "Hide \(remainder.hiddenDescendantCount) \(remainder.hiddenDescendantCount == 1 ? "agent" : "agents")"
-            : "Show \(remainder.accessibilityTitle)")
+            : "Show \(ledgerTitle ?? remainder.accessibilityTitle)")
         button.setAccessibilityHelp(remainder.isExpanded
             ? "Folds the extra child agents back" : "Shows the hidden child agents")
         button.setAccessibilityValue(remainder.accessibilityTitle)
@@ -8615,7 +8944,7 @@ final class AgentInboxRemainderView: NSTableCellView {
     private func applyTokens() {
         let secondary = TextToken.textSecondary.color.nsColor(in: self)
         label.textColor = secondary
-        guard let remainder, !remainder.isExpanded, remainder.hiddenFailed > 0 else { return }
+        guard ledgerTitle == nil, let remainder, !remainder.isExpanded, remainder.hiddenFailed > 0 else { return }
         let text = NSMutableAttributedString(string: remainder.title, attributes: [
             .font: label.font ?? .token(.label), .foregroundColor: secondary])
         let failed = (remainder.title as NSString).range(of: "\(remainder.hiddenFailed) failed")
@@ -9391,8 +9720,9 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         case .share: return !InboxBulkAction.isArchived(row) && row.externalSession == nil
         case .popOut: return row.parentId != nil && !row.hasTile
         case .foldBack: return row.parentId != nil && row.hasTile
-        case .pin: return row.parentId != nil && row.hasTile && !row.isPinned
-        case .unpin: return row.parentId != nil && row.hasTile && row.isPinned
+        // A lead's Pin is Standing (sidebar round); a helper's keeps its tile.
+        case .pin: return row.parentId == nil ? !row.isStanding : (row.hasTile && !row.isPinned)
+        case .unpin: return row.parentId == nil ? row.isStanding : (row.hasTile && row.isPinned)
         case .settle: return InboxBulkAction.settle.isAvailable(for: row, rollups: rollups)
         case .unsettle: return InboxBulkAction.isSettled(row)
         case .snooze: return InboxBulkAction.snooze.isAvailable(for: row)
@@ -9444,8 +9774,12 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         // that apply: Pop Out while it has no tile, Pin and Fold Back once it has.
         case .popOut: return rows.allSatisfy { $0.parentId != nil && !$0.hasTile }
         case .foldBack: return rows.allSatisfy { $0.parentId != nil && $0.hasTile }
-        case .pin: return rows.allSatisfy { $0.parentId != nil && $0.hasTile } && !rows.allSatisfy(\.isPinned)
-        case .unpin: return rows.allSatisfy { $0.parentId != nil && $0.hasTile && $0.isPinned }
+        case .pin:
+            if rows.allSatisfy({ $0.parentId == nil }) { return !rows.allSatisfy(\.isStanding) }
+            return rows.allSatisfy { $0.parentId != nil && $0.hasTile } && !rows.allSatisfy(\.isPinned)
+        case .unpin:
+            if rows.allSatisfy({ $0.parentId == nil }) { return rows.allSatisfy(\.isStanding) }
+            return rows.allSatisfy { $0.parentId != nil && $0.hasTile && $0.isPinned }
         case .openInTile, .share, .snooze, .wake, .markUnread, .rename, .generateName, .color, .stopAgent,
              .archive, .delete:
             return true
@@ -9889,7 +10223,9 @@ final class InboxUndoToast: NSView, TokenThemed {
         return "\(messageLabel.stringValue) \(undoButton.attributedTitle.string)"
     }
 
-    /// Press it the way the user does, through the button's own target/action.
+    var buttonForQA: NSView { undoButton }
+
+    /// Press it through the button's own target/action (legacy checks).
     @discardableResult
     func clickUndoForQA() -> Bool {
         guard !isHidden else { return false }

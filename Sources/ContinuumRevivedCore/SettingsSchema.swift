@@ -79,6 +79,12 @@ public enum SettingsSchema {
                                     titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorStyle.allCases.map { ($0.rawValue, $0.title) })),
                             help: "How the open agent is highlighted. Changes apply immediately; Reduce Motion keeps it still.",
                             keywords: ["sidebar", "duplex", "gradient", "sheen", "classic", "selection", "motion"]),
+                SettingsRow(.choice(key: SidebarLayout.defaultsKey, label: "Layout",
+                                    options: SidebarLayout.allCases.map(\.rawValue),
+                                    default: SidebarLayout.defaultLayout.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: SidebarLayout.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Ledger: one-line helpers, one count per lead, and what needs you on top. Quiet inbox: today's rows with a small Needs you box.",
+                            keywords: ["sidebar", "layout", "ledger", "quiet", "inbox", "density"]),
             ]),
             SettingsGroup(id: "appearance.canvasBackground", title: "Canvas background", rows: [
                 SettingsRow(.custom(id: "canvasBackground", label: "Canvas background")),

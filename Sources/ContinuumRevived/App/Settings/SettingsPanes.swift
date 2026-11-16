@@ -360,7 +360,7 @@ struct SettingsFieldRow: View {
             NeutralThemePickerRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == SidebarHeaderBackground.defaultsKey:
             SidebarHeaderBackgroundSettingsRow(model: model, row: row)
-        case let .choice(key, _, _, _, _) where key == SidebarActiveIndicatorStyle.defaultsKey || key == SidebarActiveIndicatorScope.defaultsKey:
+        case let .choice(key, _, _, _, _) where key == SidebarActiveIndicatorStyle.defaultsKey || key == SidebarActiveIndicatorScope.defaultsKey || key == SidebarLayout.defaultsKey:
             SidebarActiveIndicatorSettingsRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == AgentCharacterConfig.bubbleStyleKey:
             TileAgentIconSettingsRow(model: model, row: row)

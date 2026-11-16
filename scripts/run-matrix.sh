@@ -85,6 +85,7 @@ COMPOSER_SEND_ONLY=0
 EFFORT_CATALOG_ONLY=0
 CROSS_HARNESS_DELEGATION_ONLY=0
 SIDEBAR_REFINEMENTS_ONLY=0
+SIDEBAR_FOLD_BAND_ONLY=0
 FAST=0
 CODEX_PERMISSIONS_ONLY=0
 TILE_SELECTION_ONLY=0
@@ -158,6 +159,7 @@ if [[ $# -gt 0 ]]; then
       SIDEBAR_REFINEMENTS_ONLY=1
       shift
       ;;
+    --sidebar-fold-band) SIDEBAR_FOLD_BAND_ONLY=1; shift ;;
     --workspace-selector)
       WORKSPACE_SELECTOR_ONLY=1
       shift
@@ -240,7 +242,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context | --helper-context-diet]
+Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --sidebar-fold-band | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context | --helper-context-diet]
 
 
 --focus-safe-input runs only the browser input witnesses and their contract/catalog neighbors.
@@ -1202,6 +1204,13 @@ if [[ "$CODEX_PERMISSIONS_ONLY" -eq 1 ]]; then
   matrix_report 'Codex permissions matrix (targeted)'
   exit $?
 fi
+if [[ "$SIDEBAR_FOLD_BAND_ONLY" -eq 1 ]]; then
+  run swift build --product Array -j 2
+  run_app_check .build/debug/Array --sidebar-fold-expand-check
+  run_app_check .build/debug/Array --sidebar-truth-check
+  matrix_report 'Sidebar fold band matrix (targeted)'
+  exit $?
+fi
 if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_leg scripts/check-color-hygiene.sh
   run swift build --disable-sandbox --skip-update --product Array
@@ -1212,9 +1221,13 @@ if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --sidebar-hide-any-row-check
   run_app_check .build/debug/Array --sidebar-hidden-footer-check
   run_app_check .build/debug/Array --sidebar-bulk-hide-check
+  run_app_check .build/debug/Array --sidebar-quiet-inbox-check
   run_app_check .build/debug/Array --sidebar-scope-popover-check
   run_app_check .build/debug/Array --sidebar-ownership-check
   run_app_check .build/debug/Array --sidebar-fold-expand-check
+  run_app_check .build/debug/Array --sidebar-ledger-check
+  run_app_check .build/debug/Array --sidebar-layouts-check
+  run_app_check .build/debug/Array --sidebar-clear-tiles-check
   run_app_check .build/debug/Array --hide-external-rows-check
   run_app_check .build/debug/Array --sidebar-truth-check
   run_app_check .build/debug/Array --subagent-sidebar-open-check
@@ -1592,6 +1605,7 @@ run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check
 run_leg .build/debug/ContinuumRevivedCoreChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-history-scope-check
 # Live-usage profile 2026-11-12: the activity fold copied every agent entry per
 # event (a rebuild went quadratic in agents). Scaling ratio at 575 vs 2,300 agents.
 run_leg .build/debug/ContinuumRevivedCoreChecks --activity-snapshot-scaling-check
@@ -2394,6 +2408,8 @@ run_app_check .build/debug/Array --sidebar-hide-any-row-check
 run_app_check .build/debug/Array --sidebar-hidden-footer-check
 run_app_check .build/debug/Array --sidebar-bulk-hide-check
 run_app_check .build/debug/Array --sidebar-scope-popover-check
+# Sidebar round, Quiet inbox layout: live Layout switch, the Needs you box (never empty), one chip per family, Clear/Undo, through real events.
+run_app_check .build/debug/Array --sidebar-quiet-inbox-check
 # .plans/106: who owns whom. Subagents are one-line rows in their lead's card:
 # each count drawn once, no repeated project or branch, a subagent's ask raised
 # on its lead, the stem's lanes, the card's light, and Pop out / Stop on hover
@@ -2407,6 +2423,17 @@ run_app_check .build/debug/Array --sidebar-ownership-check
 # of the Snoozed and History headings and History's "Show 25 more" footer, and
 # asserts each opens or pages its rows.
 run_app_check .build/debug/Array --sidebar-fold-expand-check
+# Sidebar round: the Ledger layout on the production list, through real events
+# in both appearances: one reconciled count per lead (shown + folded = total,
+# failed said once), one action per failure class, Clear N leaving blockers and
+# returning on Undo and after a reload, a live layout switch, tile-less helpers
+# drawn like their siblings.
+run_app_check .build/debug/Array --sidebar-ledger-check
+run_app_check .build/debug/Array --sidebar-layouts-check
+# Sidebar round: Clear is sidebar-only. Through the real app, Clear leaves
+# every tile on the canvas and settles nothing, and Switch & resume opens
+# Settings > Agents.
+run_app_check .build/debug/Array --sidebar-clear-tiles-check
 # Presentation-layer sampling across helper completion, arrival, reload and unfold.
 run_app_check .build/debug/Array --sidebar-row-presentation-check
 # .plans/113: the header's sort list (Most active, By project, Newest first)

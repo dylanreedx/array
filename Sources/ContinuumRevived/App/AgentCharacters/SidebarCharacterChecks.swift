@@ -171,6 +171,11 @@ enum SidebarCharacterChecks {
         // 3. Occlusion holds every visible character still; visibility restores them.
         onInbox.scrollViewForQA.contentView.scroll(to: .zero)
         onInbox.scrollViewForQA.reflectScrolledClipView(onInbox.scrollViewForQA.contentView)
+        // The layout's head (the Ledger's For you list) can sit above the first
+        // card; bring the first agent card into view.
+        if let firstAgent = onInbox.itemsForQA.firstIndex(where: { $0.agentRow != nil }) {
+            onInbox.scrollItemToVisibleForQA(firstAgent)
+        }
         onInbox.layoutForQA()
         try expect(onInbox.visibleCharacterCellsForQA.contains { $0.characterLayerForQA.isAnimating },
                    "the top of the list has moving characters before the window is covered")

@@ -910,6 +910,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     public var state: InboxState
     public let attention: InboxAttention
     public let lifecycle: InboxLifecycle
+    /// This agent's lifecycle before a parent supplies its display placement.
+    /// A parent's History section cannot establish that this helper finished.
+    public let ownLifecycle: InboxLifecycle
     public let model: String?
     /// A `.pi/agents/<role>.md` id (P2D.3), never shown as a title.
     public let role: String?
@@ -1044,6 +1047,19 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// Set on a row that is someone else's shared agent or one of its helpers.
     /// Such a row opens its tile and offers none of an agent's verbs.
     public var sharedAgent: InboxSharedAgent?
+    // Sidebar round (array/sidebar-next): the facts the shared tally reads.
+    /// The latest turn's failure words as the supervisor holds them, when it
+    /// holds any. `SidebarRecovery.cause(for:)` classifies them; nothing draws
+    /// them raw.
+    public var failureDetail: String?
+    /// A provider-mirrored child cannot take a prompt of its own: it recovers
+    /// through its lead. False for every managed agent.
+    public var resumesThroughLead: Bool = false
+    /// The user cleared this agent's outcome (sidebar Clear, which is Settle).
+    /// A cleared helper folds inside its lead; new activity un-clears it.
+    public var isCleared: Bool = false
+    /// The user pinned this lead in Standing (a sidebar preference, per agent).
+    public var isStanding: Bool = false
     /// Whether the agent has a canvas tile. A tile-less helper is drawn only as
     /// its row inside its lead's card; popping it out gives it one.
     public let hasTile: Bool
@@ -1177,7 +1193,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         hasTile: Bool = true,
         isPinned: Bool = false,
         characterActivity: AgentCharacterActivity? = nil,
-        characterName: String? = nil
+        characterName: String? = nil,
+        ownLifecycle: InboxLifecycle? = nil
     ) {
         self.id = id
         self.title = title
@@ -1189,6 +1206,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.state = state
         self.attention = attention
         self.lifecycle = lifecycle
+        self.ownLifecycle = ownLifecycle ?? lifecycle
         self.model = model
         self.role = role
         self.branch = branch
@@ -1248,13 +1266,19 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
             identityColor: identityColor, selfReport: selfReport, whereMarker: whereMarker,
             externalSession: externalSession, hasTile: hasTile, isPinned: isPinned,
-            characterActivity: characterActivity, characterName: characterName)
-            .carryingSharedAgent(sharedAgent)
+            characterActivity: characterActivity, characterName: characterName,
+            ownLifecycle: ownLifecycle)
+            .carryingOverlays(from: self)
     }
 
-    private func carryingSharedAgent(_ value: InboxSharedAgent?) -> AgentInboxRow {
+    /// The `var` overlays an initializer copy would otherwise drop.
+    private func carryingOverlays(from source: AgentInboxRow) -> AgentInboxRow {
         var row = self
-        row.sharedAgent = value
+        row.sharedAgent = source.sharedAgent
+        row.failureDetail = source.failureDetail
+        row.resumesThroughLead = source.resumesThroughLead
+        row.isCleared = source.isCleared
+        row.isStanding = source.isStanding
         return row
     }
 
@@ -1320,8 +1344,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
             identityColor: identityColor, selfReport: selfReport,
             hasTile: hasTile, isPinned: isPinned, characterActivity: characterActivity,
-            characterName: characterName)
-            .carryingSharedAgent(sharedAgent)
+            characterName: characterName, ownLifecycle: ownLifecycle)
+            .carryingOverlays(from: self)
     }
 
     /// The same row with the three fields tool chatter moves inside a turn

@@ -610,6 +610,10 @@ private struct SidebarActiveIndicatorChoice: NSViewRepresentable {
             button.setAccessibilityLabel("Apply active style to")
             button.setAccessibilityIdentifier("settings.activeAgentScope")
             button.items = SidebarActiveIndicatorScope.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
+        } else if field.key == SidebarLayout.defaultsKey {
+            button.setAccessibilityLabel("Sidebar layout")
+            button.setAccessibilityIdentifier("settings.sidebarLayout")
+            button.items = SidebarLayout.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
         } else {
             button.items = SidebarActiveIndicatorStyle.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
         }

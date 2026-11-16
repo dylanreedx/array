@@ -1938,6 +1938,70 @@ final class AgentSupervisor {
         var submittedAt: Date? { presence.isLive ? presence.submittedAt : nil }
     }
     private var turnFacts: [AgentID: TurnFacts] = [:]
+
+    // Sidebar round (array/sidebar-next): the words a failed turn left, so the
+    // sidebar can say WHY (usage, sign-in, busy, restart) after a relaunch, when
+    // only the semantic transcript still holds them. Read once per terminal
+    // event, off the main thread, never on a render's critical path.
+    private var failureDetailCache: [AgentID: (sequence: UInt64, text: String?)] = [:]
+    private var failureDetailLoads: Set<AgentID> = []
+    private var failureDetailPushPending = false
+    /// Called once per batch of loaded details; the app re-pushes the rows.
+    var onFailureDetailsLoaded: (() -> Void)?
+
+    /// The latest turn's failure words: the live turn's when it has some,
+    /// otherwise a correlated error from that turn, loaded lazily. nil until known.
+    func sidebarFailureDetail(for id: AgentID) -> String? {
+        if let live = turnFacts[id]?.failureMessage { return live }
+        guard let record = records[id], let event = record.latestTerminalEvent else { return nil }
+        switch event.outcome {
+        case .failed, .runtimeError, .interrupted: break
+        case .succeeded, .cancelled: return nil
+        }
+        if let cached = failureDetailCache[id], cached.sequence == event.sequence { return cached.text }
+        guard let transcriptStore, failureDetailLoads.insert(id).inserted else { return nil }
+        let sequence = event.sequence
+        let startedAt = [record.latestPromptAt, record.latestTurnAt].compactMap { $0 }.max()
+        Task { [weak self] in
+            let document = try? await transcriptStore.load(
+                agentID: id, sessionID: AgentTranscriptStore.canonicalSessionID(for: id))
+            let text = document.flatMap { Self.lastErrorMessage(in: $0, for: event, since: startedAt) }
+            guard let self else { return }
+            self.failureDetailLoads.remove(id)
+            self.failureDetailCache[id] = (sequence, text)
+            guard text != nil, !self.failureDetailPushPending else { return }
+            self.failureDetailPushPending = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.failureDetailPushPending = false
+                self.onFailureDetailsLoaded?()
+            }
+        }
+        return nil
+    }
+
+    /// Error words belong to this terminal turn only. Old transcripts without
+    /// a correlated turn identity or dated activity retain the generic failure.
+    nonisolated static func lastErrorMessage(
+        in document: AgentDocument, for event: AgentTerminalEvent, since startedAt: Date?
+    ) -> String? {
+        let lower = document.entries.lastIndex { $0.role == .user }.map { $0 + 1 } ?? 0
+        for entry in document.entries[lower...].reversed() {
+            let matchesTurn: Bool
+            if case .providerItem(_, let itemID) = entry.provenance,
+               let turnID = event.turnID, !turnID.hasPrefix("runtime:") {
+                matchesTurn = itemID == turnID
+            } else { matchesTurn = false }
+            let matchesTime = startedAt.flatMap { start in
+                entry.createdAt.map { $0 >= start && $0 <= event.endedAt.addingTimeInterval(2) }
+            } ?? false
+            guard matchesTurn || matchesTime else { continue }
+            for block in entry.blocks.reversed() {
+                if case let .error(payload) = block.payload, !payload.message.isEmpty { return payload.message }
+            }
+        }
+        return nil
+    }
     private var liveActivityAt: [AgentID: Date] = [:]
     /// Return, as the composer saw it, for a prompt not yet accepted.
     private var pendingReturnStamps: [AgentID: Date] = [:]

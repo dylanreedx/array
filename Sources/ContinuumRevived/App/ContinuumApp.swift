@@ -892,6 +892,65 @@ enum ContinuumApp {
                 }
             }
         }
+        // Sidebar round: the Ledger layout's counts, causes, Clear/Undo, layout
+        // switch and tile-less rows, through real events on the production list.
+        if CommandLine.arguments.contains("--sidebar-layouts-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarLedgerChecks.runLayouts())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
+        // Sidebar round: stills of a COPIED store, both layouts and appearances.
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-real-stills-check"),
+           CommandLine.arguments.count > index + 2 {
+            _ = NSApplication.shared
+            let store = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+            let output = URL(fileURLWithPath: CommandLine.arguments[index + 2], isDirectory: true)
+            Task { @MainActor in
+                do {
+                    print(try await SidebarLedgerChecks.runRealStills(store: store, output: output))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
+        // Sidebar round: Clear acknowledges in the sidebar only; every tile stays.
+        if CommandLine.arguments.contains("--sidebar-clear-tiles-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarLedgerChecks.runClearTiles())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-ledger-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    let next = CommandLine.arguments.index(after: index)
+                    let dir = next < CommandLine.arguments.endIndex && !CommandLine.arguments[next].hasPrefix("-")
+                        ? URL(fileURLWithPath: CommandLine.arguments[next]) : nil
+                    print(try SidebarLedgerChecks.run(outputDirectory: dir))
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // .plans/113: sort the sidebar by activity or project.
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-sort-check") {
             _ = NSApplication.shared
@@ -948,6 +1007,18 @@ enum ContinuumApp {
             MainActor.assumeIsolated {
                 do {
                     print(try QuickHideChecks.runScopePopover())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
+        if CommandLine.arguments.contains("--sidebar-quiet-inbox-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarQuietInboxChecks.run())
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -16036,6 +16107,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.onDisplayNameRenamed = { [weak self] _ in
             self?.reloadWorkspaceSidebar()
         }
+        // Sidebar round: a restored failure's cause arrives after its transcript
+        // is read; one push per batch.
+        agentSupervisor.onFailureDetailsLoaded = { [weak self] in
+            self?.pushExternalSessionRows()
+        }
+        // Sidebar round: "Switch & resume…" opens Settings > Agents, where the
+        // accounts live; the CLI keeps its own login. The other incident
+        // actions draw disabled this release.
+        sidebar.agentInbox.onIncidentAction = { [weak self] incident in
+            self?.performSidebarIncident(incident)
+        }
         // P3.15: the row menu and the bulk bar reach the supervisor. Until this call
         // existed the shipped app assigned neither callback, so every destructive item
         // was greyed and a stale agent could not be removed by any route.
@@ -16294,9 +16376,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var turnSnapshots: [UUID: AgentTileTurnSnapshot] = [:]
         var lifecycleFacts: [UUID: AgentLifecycleFacts] = [:]
         var lastActivity: [UUID: Date] = [:]
+        var failureDetails: [UUID: String] = [:]
         for record in records {
             if let stamp = agentSupervisor.lastActivity(for: record.id) {
                 lastActivity[record.id.rawValue] = stamp
+            }
+            if let detail = agentSupervisor.sidebarFailureDetail(for: record.id) {
+                failureDetails[record.id.rawValue] = detail
             }
             if let branch = agentSupervisor.branchContextCachedOnly(for: record.id)?.checkedOutBranch {
                 checkedOutBranches[record.id.rawValue] = branch
@@ -16328,6 +16414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             lifecycleFacts: lifecycleFacts,
             autoSettleAfter: autoSettle.window,
             lastActivity: lastActivity,
+            failureDetails: failureDetails,
             now: now
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
@@ -16535,6 +16622,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.9-reveal-on-click.md
+    /// What an incident's action did, for the witness.
+    enum SidebarIncidentOutcome: Equatable {
+        case openedSettings(String)
+        case none
+    }
+    private(set) var lastSidebarIncidentOutcomeForQA: SidebarIncidentOutcome = .none
+
+    @discardableResult
+    func performSidebarIncident(_ incident: SidebarIncident) -> SidebarIncidentOutcome {
+        let outcome: SidebarIncidentOutcome
+        switch incident.kind {
+        case .cause(.usageLimit):
+            openSettings(paneID: "agents")
+            outcome = .openedSettings("agents")
+        case .needsYou, .cause:
+            outcome = .none
+        }
+        lastSidebarIncidentOutcomeForQA = outcome
+        return outcome
+    }
+
     /// Clicking an inbox row takes you to that agent, wherever it is — another
     /// workspace, or no tile at all.
     ///
@@ -39892,6 +40000,7 @@ extension AppDelegate {
     // Handed in REVERSED, so "the view is in the model's order" cannot be
     // satisfied by the view simply keeping what it was given.
     let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    inbox.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     let inboxCheckNow = Date()
     inbox.clock = { inboxCheckNow }
     inbox.reload(rows: fixture.reversed())
@@ -39916,6 +40025,7 @@ extension AppDelegate {
         elapsed: 59, elapsedStartedAt: clockStart,
         createdAt: inboxCheckNow.addingTimeInterval(-120))
     let clockInbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
+    clockInbox.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     let clockWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
         styleMask: [.borderless], backing: .buffered, defer: false)
@@ -40117,6 +40227,7 @@ extension AppDelegate {
     // MARK: A3 · P3.8 · the scope filters the list, and flipping it clears selection
 
     let scoped = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    scoped.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     scoped.clock = { LabFixtures.inboxNow }
     scoped.reload(rows: fixture)
     let scopedWindow = NSWindow(
@@ -40233,6 +40344,7 @@ extension AppDelegate {
             variant: row.variant, createdAt: row.createdAt, parentId: row.parentId)
     }
     let collides = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    collides.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     collides.reload(rows: sameName)
     try expect(collides.scopeTitlesForQA == menuTitles(InboxScope.entries(for: sameName), rows: sameName),
                "a shared name must still be two entries — got \(collides.scopeTitlesForQA)")
@@ -40299,6 +40411,7 @@ extension AppDelegate {
                "an unreadable stored scope falls back to the default rather than emptying the list")
     // …and the restore path is the one the app uses, with no write-back.
     let restored = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    restored.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     var restoreWrites = 0
     restored.onScopeChange = { _ in restoreWrites += 1 }
     restored.setScope(.project("continuum"))
@@ -40315,6 +40428,7 @@ extension AppDelegate {
     // pushes rows, and a push rebuilds the menu — which re-selects the scope for its
     // own reasons and would mask the restore below.
     let verbs = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    verbs.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     verbs.reload(rows: fixture)
     verbs.layoutForQA()
     var verbsPicked: [AgentInboxView.WorkspaceManagementAction] = []
@@ -40388,6 +40502,7 @@ extension AppDelegate {
                "the parked fixture must include a collapsed row whose glyph carries an accent")
 
     let parked = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    parked.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     parked.clock = { LabFixtures.inboxNow }
     parked.reload(rows: parkedFixture)
     let parkedWindow = NSWindow(
@@ -40421,8 +40536,11 @@ extension AppDelegate {
         if case .settled = $0.lifecycle { return true } else { return false }
     }.map(\.id))
     let headerRow = parked.shelfHeaderTableRowForQA
-    try expect(headerRow == parked.rowIdsForQA.filter { !settledIds.contains($0) }.count,
-               "the heading sits between the active block and the settled tail — row \(String(describing: headerRow)) of \(parked.rowCountForQA + 1)")
+    let activeTableRows = parked.rowIdsForQA.filter { !settledIds.contains($0) }.compactMap { parked.tableRowIndexForQA(id: $0) }
+    let settledTableRows = parked.rowIdsForQA.filter { settledIds.contains($0) }.compactMap { parked.tableRowIndexForQA(id: $0) }
+    try expect(headerRow.map { heading in activeTableRows.allSatisfy { $0 < heading }
+                && settledTableRows.allSatisfy { $0 > heading } } == true,
+               "the heading sits between every active and settled row — heading \(String(describing: headerRow)), active \(activeTableRows), settled \(settledTableRows)")
     // A heading is one line, the same room a row it is holding would have taken.
     try expect(abs((parked.shelfHeaderHeightForQA ?? 0) - AgentInboxView.slimRowHeight) < 0.5,
                "the heading is one slim line — laid out at \(String(describing: parked.shelfHeaderHeightForQA))pt")
@@ -40430,8 +40548,8 @@ extension AppDelegate {
     // a programmatic `selectRowIndexes` does not consult it: exactly one table row
     // refuses selection, and it is the heading's.
     let selectable = parked.selectableTableRowsForQA
-    try expect(selectable.indices.filter { !selectable[$0] } == [headerRow],
-               "the heading is the one row that refuses selection — refusing rows \(selectable.indices.filter { !selectable[$0] }), heading at \(String(describing: headerRow))")
+    try expect(selectable == parked.itemsForQA.map { $0.agentRow != nil },
+               "every agent selects and every heading/incident refuses — \(selectable)")
     // …and selecting every agent really does leave it out of the selection.
     _ = parked.selectRowsForQA(ids: parked.rowIdsForQA)
     try expect(parked.selectedRowCountForQA == parked.rowCountForQA
@@ -40446,8 +40564,9 @@ extension AppDelegate {
     // cross-review.)
     let belowHeader = parkedSorted.last { settledIds.contains($0.id) }!
     let belowIndex = parked.rowIdsForQA.firstIndex(of: belowHeader.id)!
-    try expect(headerRow.map { belowIndex < $0 } == false,
-               "setup: the row under test must be below the heading — agent index \(belowIndex), heading at \(String(describing: headerRow))")
+    let belowTableIndex = parked.tableRowIndexForQA(id: belowHeader.id) ?? -1
+    try expect(headerRow.map { belowTableIndex > $0 } == true && belowTableIndex > belowIndex,
+               "setup: the row under test is below the heading in a distinct index space — agent \(belowIndex), table \(belowTableIndex), heading \(String(describing: headerRow))")
     var revealedBelow: [UUID] = []
     parked.onRevealRow = { revealedBelow.append($0) }
     try expect(parked.clickRowForQA(id: belowHeader.id) && revealedBelow == [belowHeader.id],
@@ -40590,6 +40709,7 @@ extension AppDelegate {
     // `apply(rows:changed:)` takes its incremental path — which re-asks for the
     // row's view but NOT for its height unless it is told to.
     let live = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    live.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     live.clock = { LabFixtures.inboxNow }
     live.reload(rows: fixture)
     let liveWindow = NSWindow(
@@ -40679,6 +40799,7 @@ extension AppDelegate {
         pagedRow(91, lifecycle: .snoozed(until: pagedNow.addingTimeInterval(3_600))),
     ]
     let paged = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    paged.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     paged.clock = { pagedNow }
     let pagedWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
@@ -40704,7 +40825,7 @@ extension AppDelegate {
     let pagedFooterTitle = paged.settledMoreTitleForQA ?? "<none>"
     // LAST ROW IN THE TABLE, and below the shelf's heading: a footer anywhere but
     // under the tail is pointing at the wrong section.
-    try expect(paged.settledMoreTableRowForQA == paged.rowCountForQA + 1,
+    try expect(paged.settledMoreTableRowForQA == (paged.rowIdsForQA.compactMap { paged.tableRowIndexForQA(id: $0) }.max() ?? -1) + 1,
                "the footer is the last row, under the tail — row \(String(describing: paged.settledMoreTableRowForQA)) of \(paged.rowCountForQA + 2)")
     try expect((paged.shelfHeaderTableRowForQA ?? -1) < (paged.settledMoreTableRowForQA ?? -1),
                "…and the heading is still its own row, above it — heading \(String(describing: paged.shelfHeaderTableRowForQA)), footer \(String(describing: paged.settledMoreTableRowForQA))")
@@ -40713,8 +40834,7 @@ extension AppDelegate {
     // NOT A ROW YOU CAN ACT ON, for the reason the heading is not: exactly two table
     // rows refuse selection, and they are the two that are not agents.
     let pagedSelectable = paged.selectableTableRowsForQA
-    try expect(pagedSelectable.indices.filter { !pagedSelectable[$0] }
-                == [paged.shelfHeaderTableRowForQA, paged.settledMoreTableRowForQA].compactMap { $0 },
+    try expect(pagedSelectable == paged.itemsForQA.map { $0.agentRow != nil },
                "the heading and the footer are the rows that refuse selection — refusing \(pagedSelectable.indices.filter { !pagedSelectable[$0] })")
     // The last settled row sits BELOW the heading, where the two index spaces differ.
     var pagedRevealed: [UUID] = []
@@ -40739,6 +40859,7 @@ extension AppDelegate {
     // and it arrives as a row that clicks and selects like any other.
     let deepId = pagedSettled[26].id
     let openPaged = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    openPaged.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     openPaged.clock = { pagedNow }
     let openPagedWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
@@ -40813,6 +40934,7 @@ extension AppDelegate {
                "the inbox's indent cap and the spawn cap are the same number — inbox \(AgentInboxRow.maxDepth), spawn \(AgentSupervisor.maxSpawnDepth)")
 
     let nested = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    nested.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     nested.clock = { LabFixtures.inboxNow }
     nested.reload(rows: fixture)
     let nestedWindow = NSWindow(
@@ -40909,6 +41031,7 @@ extension AppDelegate {
     let grandchild = descendant("01", of: childRow, minutesAfter: 1)
     let greatGrandchild = descendant("02", of: grandchild, minutesAfter: 2)
     let deep = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    deep.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     deep.clock = { LabFixtures.inboxNow }
     deep.reload(rows: fixture + [grandchild, greatGrandchild])
     let deepWindow = NSWindow(
@@ -41002,6 +41125,7 @@ extension AppDelegate {
         workspaceName: grandchild.workspaceName, state: .approval, model: grandchild.model,
         role: grandchild.role, createdAt: grandchild.createdAt, parentId: grandchild.parentId)
     let waiting = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    waiting.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     waiting.clock = { LabFixtures.inboxNow }
     waiting.reload(rows: fixture + [waitingGrandchild])
     let waitingWindow = NSWindow(
@@ -41133,6 +41257,7 @@ extension AppDelegate {
     // the model changes no VISIBLE row at all — same ids, same values — and the
     // parent would keep a triangle that now folds nothing and cannot be got rid of.
     let folding = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    folding.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     folding.clock = { LabFixtures.inboxNow }
     folding.reload(rows: fixture)
     let foldingWindow = NSWindow(
@@ -41200,6 +41325,7 @@ extension AppDelegate {
         title: "unrelated root", state: .working,
         createdAt: LabFixtures.inboxNow.addingTimeInterval(-600), parentId: nil)
     let tree = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
+    tree.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     tree.clock = { LabFixtures.inboxNow }
     let treeWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
@@ -41406,6 +41532,7 @@ extension AppDelegate {
             parentId: cappedParent.id))
     }
     let capped = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 1200))
+    capped.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     capped.clock = { LabFixtures.inboxNow }
     let cappedWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 1200),
@@ -41439,6 +41566,7 @@ extension AppDelegate {
     }
 
     let empty = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 200))
+    empty.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
     empty.reload(rows: [])
     try expect(empty.isEmptyMessageVisibleForQA && empty.rowCountForQA == 0,
                "an inbox with no agents says so rather than rendering as a blank rectangle")
@@ -42942,8 +43070,9 @@ extension AppDelegate {
                "…and so is an active one, with Wake greyed rather than absent — got \(activeItems.map(\.baseTitle))")
     try expect(InboxRowAction.snooze.isAvailable(for: snoozedRow),
                "snoozing a snoozed agent is a real action: it moves the preset (P4.5)")
-    // Plan 106: the four subagent tile verbs appear only over subagents.
-    let subagentVerbs = [InboxRowAction.popOut, .foldBack, .pin, .unpin]
+    // Pop-out/Fold-back remain helper verbs. A lead's Pin now means Standing.
+    let subagentVerbs = [InboxRowAction.popOut, .foldBack, .unpin]
+    try expect(activeItems.contains(.pin) && settledItems.contains(.pin), "a lead offers Pin for Standing")
     try expect(!activeItems.contains(where: subagentVerbs.contains) && !settledItems.contains(where: subagentVerbs.contains),
                "a lead's menu offers subagent tile verbs — got \(activeItems.map(\.baseTitle))")
     try expect(activeItems.count == InboxRowAction.allCases.count - 2 - subagentVerbs.count

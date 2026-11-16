@@ -76,7 +76,9 @@ enum SidebarTruthChecks {
     static let otherTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000F1")!
 
     static func run() async throws {
-        try await closedTileHelperStyle()
+        try historyScopeVisibility()
+        if CommandLine.arguments.contains("--history-scope-only") { return }
+        for layout in SidebarLedgerChecks.layoutsUnderTest { try await closedTileHelperStyle(layout: layout) }
         if CommandLine.arguments.contains("--closed-tile-only") { return }
         let world = try makeWorld()
         defer { tearDown(world) }
@@ -104,11 +106,13 @@ enum SidebarTruthChecks {
     /// Keep this in the matrix's existing sidebar-truth leg. Mount the production
     /// scene, pop out a helper, then close its tile through the canvas callback.
     /// Its working, tile-less sibling is the presentation control.
-    static func closedTileHelperStyle() async throws {
+    static func closedTileHelperStyle(layout: SidebarLayout = .ledger) async throws {
+        QuickHideChecks.acceptFirstMouseEverywhere()
         let world = try makeWorld()
         defer { tearDown(world) }
         world.window.orderFrontOffscreenForChecks()
         let inbox = world.inbox
+        inbox.setSidebarLayoutForQA(layout)
         inbox.prefersReducedMotion = { true }
         for id in [childOne, childTwo] {
             try expect(world.supervisor.send("keep working", to: id), "closed-helper setup: send")
@@ -133,7 +137,19 @@ enum SidebarTruthChecks {
             throw Failure(message: "closed-helper setup: Pop out did not bind a tile")
         }
         let turnStart = inbox.drawnRowForQA(id: childOne.rawValue)?.elapsedStartedAt
-        world.canvas.onTileCloseRequested?(tile)
+        let canvasWindow = SidebarOwnershipChecks.KeyWindow(contentRect: world.canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        canvasWindow.contentView = world.canvas
+        canvasWindow.orderFrontOffscreenForChecks()
+        canvasWindow.makeKey()
+        defer { canvasWindow.orderOut(nil); canvasWindow.contentView = nil }
+        if let viewport = world.canvas.framedViewportForTileJump(tile) { world.canvas.setViewport(viewport) }
+        world.canvas.layoutSubtreeIfNeeded()
+        guard let tileView = world.canvas.tileView(for: tile) else {
+            throw Failure(message: "closed-helper: no rendered tile before closing")
+        }
+        tileView.layoutSubtreeIfNeeded()
+        let close = tileView.qaCloseButtonFrame
+        try QuickHideChecks.click(tileView, at: NSPoint(x: close.midX, y: close.midY))
         _ = inbox.hoverRowForQA(id: nil)
         try expect(world.canvas.tileRecord(for: tile) == nil
                    && world.supervisor.records[childOne]?.closeRequestedAt != nil
@@ -146,7 +162,7 @@ enum SidebarTruthChecks {
         try expect(closed.parentId == parentAgent.rawValue && sibling.parentId == parentAgent.rawValue
                    && !closed.hasTile && !sibling.hasTile,
                    "closed-helper: both working helpers are tile-less children of the same lead")
-        print("closed-helper: closeRequestedAt set; tile removed; runner live; variants \(closed.variant)/\(sibling.variant); labels \(closed.presentationLabel ?? "nil")/\(sibling.presentationLabel ?? "nil")")
+        print("closed-helper (\(layout.title), NSApp.sendEvent): closeRequestedAt set; tile removed; runner live; variants \(closed.variant)/\(sibling.variant); labels \(closed.presentationLabel ?? "nil")/\(sibling.presentationLabel ?? "nil")")
         try expect(closed.variant == sibling.variant && closed.variant == .card,
                    "closed-helper: closing a tile changed its helper's variant: \(closed.variant) vs sibling \(sibling.variant)")
         try expect(closed.presentationLabel == sibling.presentationLabel && closed.presentationLabel == "Working",
@@ -196,6 +212,110 @@ enum SidebarTruthChecks {
                     to: renderDirectory.appendingPathComponent("closed-helper-\(dark ? "dark" : "light").png"))
             }
             print("closed-helper \(dark ? "dark" : "light"): nested AgentInbox96CellView/card for both; status and turn duration \(a.qaStateLabel)/\(b.qaStateLabel)")
+        }
+    }
+
+    /// Exercise the production list, after the record builder has inherited
+    /// placement. Removing its history filter must change visible IDs/counts.
+    static func historyScopeVisibility() throws {
+        let now = SidebarOwnershipChecks.now
+        func id(_ n: Int) -> UUID { SidebarOwnershipChecks.uuid(n) }
+        func record(_ n: Int, _ title: String, parent: Int? = nil,
+                    archived: Bool = false, known: Bool = true) -> AgentRecord {
+            var value = AgentRecord(
+                id: AgentID(rawValue: id(n)), displayName: title, model: "fixture/model",
+                thinking: "medium", cwd: "/tmp/sidebar-history-fixture",
+                parentAgentID: parent.map { AgentID(rawValue: id($0)) },
+                createdAt: now.addingTimeInterval(-3_600), lastActivityAt: now.addingTimeInterval(-300),
+                latestTerminalEvent: known ? AgentTerminalEvent(
+                    sequence: 1, turnID: "finished", outcome: .succeeded,
+                    endedAt: now.addingTimeInterval(-300)) : nil,
+                archivedAt: archived ? now.addingTimeInterval(-30) : nil)
+            value.acknowledgedTerminalSequence = known ? 1 : 0
+            return value
+        }
+        var woke = record(0xE04, "Successful raised hand", parent: 0xEFF)
+        woke.snoozedAt = now.addingTimeInterval(-120)
+        woke.snoozedUntil = now.addingTimeInterval(3_600)
+        woke.runCompletedAt = now.addingTimeInterval(-60)
+        woke.lastVisitedAt = now.addingTimeInterval(-180)
+        var snoozed = record(0xE06, "Own snoozed helper", parent: 0xE05)
+        snoozed.snoozedAt = now.addingTimeInterval(-120)
+        snoozed.snoozedUntil = now.addingTimeInterval(3_600)
+        snoozed.runCompletedAt = now.addingTimeInterval(-300)
+        let records = [
+            record(0xE00, "Standing lead"), record(0xE01, "Standing helper", parent: 0xE00),
+            record(0xE02, "Hidden quiet orphan", parent: 0xEFF, archived: true),
+            record(0xE03, "Hidden quiet helper", parent: 0xE02, archived: true), woke,
+            record(0xE05, "Snoozed family context", parent: 0xEFF, archived: true), snoozed,
+            record(0xE07, "Unknown family context", parent: 0xEFF, archived: true),
+            record(0xE08, "Own unknown outcome", parent: 0xE07, known: false),
+        ]
+        let context = AgentContextIndex.build(
+            registry: .empty(), documents: [:], projectCanvases: [:], terminalDescriptors: [], agents: records)
+        let snapshot = AgentInventory.snapshot(
+            terminalDescriptors: [], liveStatuses: [:], agents: records, activityByAgent: [:],
+            replicaId: id(0xEFA), now: now)
+        let rows = AgentInboxRowBuilder.rows(
+            from: snapshot, context: context,
+            records: Dictionary(uniqueKeysWithValues: records.map { ($0.id.rawValue, $0) }), now: now)
+        let expected = Set([0xE00, 0xE01, 0xE04, 0xE05, 0xE06, 0xE07, 0xE08].map(id))
+        for dark in [false, true] {
+            let (inbox, window) = SidebarOwnershipChecks.build(
+                dark: dark, height: 700, rows: rows, folds: [id(0xE00): true, id(0xE05): true, id(0xE07): true],
+                clock: { now }) { _, _ in }
+            defer { window.orderOut(nil) }
+            inbox.prefersReducedMotion = { true }
+            inbox.foldsHistoryIntoShelf = true
+            inbox.layoutForQA()
+            try expect(inbox.historyHeaderTitleForQA == "History (4)",
+                       "history visibility: expected History (4), got \(inbox.historyHeaderTitleForQA ?? "none")")
+            if !inbox.isHistoryExpandedForQA { _ = inbox.clickHistoryDisclosureForQA() }
+            inbox.layoutForQA()
+            try expect(Set(inbox.rowIdsForQA) == expected,
+                       "history visibility: omit quiet orphans, retain raised hand and own snoozed/unknown families")
+            let args = CommandLine.arguments
+            if let flag = args.firstIndex(of: "--render-dir"), args.indices.contains(flag + 1) {
+                let directory = URL(fileURLWithPath: args[flag + 1], isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try SidebarHelperHoverChecks.write(
+                    SidebarHelperHoverChecks.capture(inbox, crop: inbox.bounds),
+                    to: directory.appendingPathComponent("history-scope-\(dark ? "dark" : "light").png"))
+            }
+            inbox.setSearchForQA("Hidden quiet")
+            inbox.layoutForQA()
+            try expect(Set(inbox.rowIdsForQA) == Set([id(0xE02), id(0xE03)])
+                       && inbox.historyHeaderTitleForQA == "History (2)",
+                       "history visibility: search must recover both quiet orphan records")
+            inbox.setSearchForQA("")
+            inbox.layoutForQA()
+            try expect(Set(inbox.rowIdsForQA) == expected,
+                       "history visibility: clearing search must restore the protected default list")
+
+            let workspace = id(0xEFC), otherWorkspace = id(0xEFD)
+            let parent = AgentInboxRow(
+                id: id(0xE20), title: "Scoped parent", workspaceId: otherWorkspace,
+                state: .ready, createdAt: now)
+            let child = AgentInboxRow(
+                id: id(0xE21), title: "Scoped child", workspaceId: workspace,
+                state: .ready, createdAt: now, parentId: parent.id,
+                terminalEvent: records[0].latestTerminalEvent)
+            inbox.reload(rows: [parent, child])
+            inbox.setScope(.workspaceID(workspace, "Scoped workspace"))
+            inbox.layoutForQA()
+            try expect(inbox.rowIdsForQA == [child.id],
+                       "history visibility: a scope-hidden present parent must not make its child an orphan")
+            var sourceParent = parent
+            sourceParent.externalSession = InboxExternalSession(
+                sessionKey: "history-source-fixture", isProminent: true,
+                canMoveHere: false, canCopy: false, source: "Terminal")
+            inbox.setScope(.all)
+            inbox.reload(rows: [sourceParent, child])
+            inbox.setHiddenSources(["Terminal"])
+            inbox.layoutForQA()
+            try expect(inbox.rowIdsForQA == [child.id],
+                       "history visibility: a source-hidden present parent must not make its child an orphan")
+            print("SidebarHistoryView \(dark ? "dark" : "light"): 7 protected/default rows, History (4); quiet family searchable as History (2); scope/source-hidden parents retain children")
         }
     }
 

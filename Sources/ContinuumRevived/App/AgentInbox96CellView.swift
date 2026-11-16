@@ -931,6 +931,47 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The leading status glyph. A VIEW, not a painted decoration, for one reason:
     /// it is the only thing on the row that can animate.
     private let statusGlyph = StatusGlyphView()
+    // Sidebar round (array/sidebar-next): the Ledger layout. nil draws today's
+    // row. Set by the list before `apply`.
+    struct LedgerFacts: Equatable {
+        /// The lead's reconciled tally; nil on a helper or a lead with none.
+        var tally: SidebarLeadTally?
+    }
+    var ledger: LedgerFacts?
+    /// Both layouts expose the same complete count partition to VoiceOver.
+    var sidebarTally: SidebarLeadTally?
+    private var renderedTally: SidebarLeadTally? { sidebarTally ?? ledger?.tally }
+    var ledgerChipTextForQA: String? { ledger?.tally?.countLine }
+    var ledgerStatusSymbolForQA: String? { statusGlyph.isHidden ? nil : statusGlyph.symbol }
+    var stateTextForQA: String { stateLabel.isHidden ? "" : stateLabel.stringValue }
+
+    /// The Ledger helper's status icon: one per tally state, quiet but for a
+    /// failure or a raised hand. Working shows its dots instead.
+    static func ledgerSymbol(_ row: AgentInboxRow) -> String? {
+        switch SidebarRecovery.state(for: row) {
+        case .working: return nil
+        case .needsYou: return "hand.raised.fill"
+        case .paused: return "pause.circle"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .stopped: return "stop.circle"
+        case .done: return "checkmark.circle"
+        }
+    }
+
+    /// The Ledger helper's trailing column: the clock while it works, otherwise
+    /// the age of its last outcome. The icon beside it says what happened.
+    static func ledgerClock(_ row: AgentInboxRow, now: Date) -> String? {
+        if ask(row) != nil { return "waiting" }
+        if row.state == .working { return AgentInboxCellView.elapsedText(stateAge(row, now: now)) }
+        let at = row.terminalEvent?.endedAt ?? row.lastActiveAt
+        guard let at else { return nil }
+        let age = max(0, now.timeIntervalSince(at))
+        if age < 60 { return "now" }
+        let minutes = Int(age / 60)
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        return hours < 24 ? "\(hours)h ago" : "\(hours / 24)d ago"
+    }
     /// The agent's own throbber — the tile's gyro — added only while the row is
     /// working. Its phase is the AGENT's timeline (wall-clock `beginTime` plus
     /// `phaseOffset(for:)`), never the view's age, so a reload, a hover, a
@@ -1505,7 +1546,17 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let text: String
         let hidden: Bool
         if proposal.isTwoLine {
-            text = Self.ownershipClock(row, isSubagent: row.depth > 0 || row.parentId != nil, now: now) ?? ""
+            let sub = row.depth > 0 || row.parentId != nil
+            if let cause = SidebarRecovery.cause(for: row),
+               !sub || (ledger == nil && cause == .usageLimit) {
+                // Both layouts call known usage a pause. Ledger helpers keep
+                // their compact icon/age column; Quiet keeps its status word.
+                text = cause == .taskError && (renderedTally?.count(.failed) ?? 0) > 0
+                    ? (Self.ledgerClock(row, now: now) ?? "") : cause.label(harness: row.harness)
+            } else {
+                text = (ledger != nil && sub ? Self.ledgerClock(row, now: now)
+                        : Self.ownershipClock(row, isSubagent: sub, now: now)) ?? ""
+            }
             hidden = text.isEmpty || reportPillText != nil
         } else {
             let word = Self.stateWord(row, now: now)
@@ -1628,6 +1679,24 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if proposal.isTwoLine { applyOwnershipColours(row) }
         decorations.accent = accent
         statusGlyph.colour = accent
+        if ledger != nil, row.depth == 0, row.parentId == nil, let cause = SidebarRecovery.cause(for: row),
+           !cause.isBlocking || cause == .usageLimit, cause != .taskError, cause != .providerBusy {
+            // A pause or an interruption is not a failure: quiet ink.
+            stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        }
+        if SidebarRecovery.cause(for: row) == .usageLimit {
+            stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+            statusGlyph.colour = TextToken.textSecondary.color.nsColor(in: self)
+        }
+        if ledger != nil, row.depth > 0 || row.parentId != nil {
+            switch SidebarRecovery.state(for: row) {
+            case .failed: statusGlyph.colour = AccentToken.accentFailed.color.nsColor(in: self)
+            case .needsYou: statusGlyph.colour = AccentToken.accentApproval.color.nsColor(in: self)
+            case .working, .paused, .stopped, .done:
+                statusGlyph.colour = TextToken.textSecondary.color.nsColor(in: self)
+            }
+            stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        }
         decorations.muted = TextToken.textSecondary.color.nsColor(in: self)
         // Provider marks are silhouettes, not metadata text. Full-strength
         // Opaque black in Aqua and white in Dark Aqua gives the tiny 14pt artwork
@@ -1882,6 +1951,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // Colour is for attention only: no check, no hand. Failure keeps its mark.
         let symbol = Self.attentionSymbol(row, now: now)
         statusGlyph.symbol = symbol == "exclamationmark.triangle.fill" && !sub ? symbol : nil
+        if ledger != nil, sub { statusGlyph.symbol = Self.ledgerSymbol(row) }
+        if !sub, SidebarRecovery.cause(for: row) == .usageLimit { statusGlyph.symbol = "pause.circle" }
+        // VoiceOver hears the same reconciled numbers the chip draws.
+        setAccessibilityHelp((sidebarTally ?? ledger?.tally).map(\.accessibilityLabel))
         // A subagent works under three dots, never the gyro.
         if sub { applyThrobber(isWorking: false) }
         // The self-report line and the rollup words are folded into the tail.
@@ -1919,6 +1992,26 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let separator = run("  ·  ", secondary.withAlphaComponent(0.6))
         let failedInk = AccentToken.accentFailed.color.nsColor(in: self)
         var facts: [NSAttributedString] = []
+        // Ledger: ONE count chip carries every family number, and says "failed"
+        // once. The ask stays first: it is the lead's own question.
+        if let tally = renderedTally, tally.total > 0 {
+            if let ask = ownership.raisedAsk ?? Self.ask(row) {
+                facts.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
+            }
+            let chip = NSMutableAttributedString()
+            for (index, part) in tally.countLine.components(separatedBy: " · ").enumerated() {
+                if index > 0 { chip.append(run(" · ", secondary.withAlphaComponent(0.6))) }
+                chip.append(run(part, part.hasSuffix(" failed") ? failedInk : secondary))
+            }
+            chip.addAttribute(.toolTip, value: tally.fullLine, range: NSRange(location: 0, length: chip.length))
+            facts.append(chip)
+            if placementLabel.stringValue.isEmpty, whereLabel.isHidden { text.setAttributedString(NSAttributedString()) }
+            for (index, fact) in facts.enumerated() {
+                if index > 0 { text.append(separator) }
+                text.append(fact)
+            }
+            return text
+        }
         if let ask = ownership.raisedAsk ?? Self.ask(row) {
             facts.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
         } else {
@@ -2327,6 +2420,16 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             restingWidth = width
         }
         stateLabel.alphaValue = showsResting ? CGFloat(shown?.emphasis.accentOpacity ?? 1) : 0
+        // Ledger: a fixed status column, the icon left of the age.
+        if ledger != nil, showsResting, reportPillText == nil, statusGlyph.symbol != nil {
+            let side: CGFloat = 12
+            let column: CGFloat = 52
+            let clockLeft = right - max(restingWidth, column)
+            statusGlyph.isHidden = false
+            if statusGlyph.superview == nil { card.addSubview(statusGlyph) }
+            statusGlyph.frame = inCard(NSRect(x: clockLeft - 6 - side, y: snapped(mid - side / 2), width: side, height: side))
+            restingWidth = max(restingWidth, column) + 6 + side
+        }
         let markSide: CGFloat = 11
         if decorations.mark != nil, showsResting {
             decorations.markSlot = NSRect(x: right - restingWidth - 7 - markSide, y: snapped(mid - markSide / 2),
