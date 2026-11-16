@@ -208,6 +208,7 @@ check --inbox-parent-fold-check
 check --inbox-reveal-project-check
 check --input-gate-check
 check --ios-preview-live-tile-check
+check --ios-preview-reclaim-check
 check --ios-preview-tile-check
 check --jelly-auto-layout-check
 check --keybind-edit-check
@@ -741,6 +742,7 @@ leg run_app_check .build/debug/Array --hide-external-rows-check
 leg run_app_check .build/debug/Array --inbox-parent-fold-check
 leg run_app_check .build/debug/Array --inbox-reveal-project-check
 leg run_app_check .build/debug/Array --input-gate-check
+leg run_app_check .build/debug/Array --ios-preview-reclaim-check
 leg run_app_check .build/debug/Array --ios-preview-tile-check
 leg run_app_check .build/debug/Array --jelly-auto-layout-check
 leg run_app_check .build/debug/Array --keybind-edit-check

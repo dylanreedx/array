@@ -503,6 +503,9 @@ public enum SettingsSchema {
                             keywords: ["hydration", "budget", "max"]),
                 SettingsRow(.toggle(key: ZoneRuntimeBudgetConfig.closeOnZeroKey, label: "Close a project's runtime when it has no zones on the canvas", default: ZoneRuntimeBudgetConfig.defaultCloseOnZero),
                             keywords: ["memory", "unused"]),
+                SettingsRow(.toggle(key: IOSPreviewReclaimConfig.enabledKey, label: "Shut down simulators no preview is showing", default: IOSPreviewReclaimConfig.defaultEnabled),
+                            help: "Only simulators Array started. Each one holds 2–3 GB. After 2 minutes with its preview off screen or closed, Array shuts it down, and starts it again when the preview comes back.",
+                            keywords: ["ios", "simulator", "memory", "shutdown", "preview"]),
             ]),
         ])
     }

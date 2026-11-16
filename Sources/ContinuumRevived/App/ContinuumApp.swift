@@ -1846,6 +1846,16 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--ios-preview-reclaim-check") {
+            do {
+                _ = NSApplication.shared
+                try IOSPreviewReclaimChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--ios-preview-tile-check") {
             do {
                 _ = NSApplication.shared

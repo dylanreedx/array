@@ -43,6 +43,17 @@ final class IOSPreviewRuntime {
     private static var owners: [String: UUID] = [:]
     private static var retiringDevices: Set<String> = []
     private static var retirementWaiters: [String: [@MainActor () -> Void]] = [:]
+    /// Devices this process booted (`simctl boot`), and devices it later shut
+    /// down because nothing viewed them. Memory only: after a restart Array
+    /// cannot prove it booted a running simulator, so it leaves it alone.
+    private(set) static var arrayBootedDevices: Set<String> = []
+    private(set) static var reclaimedDevices: Set<String> = []
+    private static var reclaimTokens: [String: UUID] = [:]
+    static var reclaimEnabled: () -> Bool = { IOSPreviewReclaimConfig.isEnabled() }
+    static var reclaimGraceSeconds = IOSPreviewReclaimConfig.graceSeconds
+    static var shutdownSimulator: (String) async throws -> Void = { deviceID in
+        _ = try await IOSPreviewCommands.run(["/usr/bin/xcrun", "simctl", "shutdown", deviceID])
+    }
     let id = UUID()
     let tileID: UUID
     var helperPID: Int32? { session?.helperPID }
@@ -76,6 +87,36 @@ final class IOSPreviewRuntime {
             else { continuation.resume() }
         }
     }
+    static func noteArrayBooted(_ deviceID: String) {
+        arrayBootedDevices.insert(deviceID); reclaimedDevices.remove(deviceID)
+        // The viewer may have let go while `simctl boot` ran; its disconnect
+        // could not schedule a reclaim for a device not yet known as Array's.
+        scheduleReclaimIfUnviewed(deviceID)
+    }
+
+    /// Called when a viewer lets go of a device. After the grace period, a
+    /// device Array booted that still has no viewer, no pending connection and
+    /// no retirement in flight is shut down. Shutdown goes through the
+    /// retirement queue, so a tile returning mid-shutdown waits, then boots it.
+    private static func scheduleReclaimIfUnviewed(_ deviceID: String) {
+        guard reclaimEnabled(), arrayBootedDevices.contains(deviceID), owners[deviceID] == nil else { return }
+        let token = UUID()
+        reclaimTokens[deviceID] = token
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(reclaimGraceSeconds))
+            guard reclaimTokens[deviceID] == token else { return }
+            reclaimTokens[deviceID] = nil
+            guard reclaimEnabled(), arrayBootedDevices.contains(deviceID), owners[deviceID] == nil,
+                  !retiringDevices.contains(deviceID), retirementWaiters[deviceID]?.isEmpty ?? true else { return }
+            arrayBootedDevices.remove(deviceID)
+            retiringDevices.insert(deviceID)
+            do { try await shutdownSimulator(deviceID); reclaimedDevices.insert(deviceID) }
+            catch { /* State unknown: a returning tile keeps today's "Simulator stopped" path. */ }
+            retiringDevices.remove(deviceID)
+            for waiter in retirementWaiters.removeValue(forKey: deviceID) ?? [] { waiter() }
+        }
+    }
+
     func select(_ deviceID: String?) {
         disconnect(); self.deviceID = deviceID; orientation = 1; onChange?()
     }
@@ -103,6 +144,9 @@ final class IOSPreviewRuntime {
             state = .failed("This simulator is connected to another preview. Disconnect it there first."); return
         }
         Self.owners[deviceID] = id
+        Self.reclaimTokens[deviceID] = nil
+        // A tile returning to a device Array shut down for memory boots it again.
+        let allowBoot = allowBoot || Self.reclaimedDevices.contains(deviceID)
         let connection = Self.sessionFactory()
         session = connection
         connection.onFrame = { [weak self] frame in
@@ -145,6 +189,7 @@ final class IOSPreviewRuntime {
             Self.retiringDevices.remove(deviceID)
             let waiters = Self.retirementWaiters.removeValue(forKey: deviceID) ?? []
             for waiter in waiters { waiter() }
+            Self.scheduleReclaimIfUnviewed(deviceID)
         }
     }
     func suspend() {
@@ -284,6 +329,7 @@ final class IOSPreviewProcessSession: NSObject, IOSPreviewSession {
         if !device.isBooted {
             guard allowBoot else { throw IOSPreviewError.unavailable("Simulator stopped. Connect to start it again.") }
             _ = try await IOSPreviewCommands.run(["/usr/bin/xcrun", "simctl", "boot", deviceID])
+            IOSPreviewRuntime.noteArrayBooted(deviceID)
         }
         _ = try await IOSPreviewCommands.run(["/usr/bin/xcrun", "simctl", "bootstatus", deviceID, "-b"])
         try Task.checkCancellation()
