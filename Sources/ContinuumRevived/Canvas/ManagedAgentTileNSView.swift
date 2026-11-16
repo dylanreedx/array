@@ -297,6 +297,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// these are the whole of the tile's side of the relationship.
     private(set) var attachedAgentID: AgentID?
     private var eventSubscription: Task<Void, Never>?
+    private var eventSubscriptionGeneration: UUID?
+    private var transcriptReloadObserverToken: UUID?
+    private var transcriptReloadGeneration: UUID?
     /// Whoever owns the agent's RECORD: the tile asks it for the branch state
     /// (P2C.4) and for the agent's model/thinking, and tells it when the user picks
     /// new ones (P6.1). WEAK — the tile is a view of an agent the supervisor owns,
@@ -934,19 +937,20 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self.synchronizeV2Transcript(final: true)
         }
         let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
-        if let reload = attachment.reload {
-            // Released while idle and unwatched: attach again once it is back, so
-            // the snapshot and tail are taken together as on any attach.
-            let projectName = locationProjectName
-            Task { @MainActor [weak self, weak supervisor] in
-                await reload.value
-                // Still released means the saved file could not be read: stop
-                // here rather than retry in a loop. The next write tries again.
-                guard let self, let supervisor, self.attachedAgentID == agentID,
-                      !supervisor.isTranscriptReleased(agentID) else { return }
-                self.eventSubscription?.cancel()
-                self.eventSubscription = nil
-                self.attach(agentID: agentID, supervisor: supervisor, projectName: projectName)
+        if attachment.reload != nil {
+            // Keep listening after a failed read. A later write can retry it;
+            // once that succeeds, install a fresh snapshot and tail together.
+            let generation = UUID()
+            transcriptReloadGeneration = generation
+            transcriptReloadObserverToken = supervisor.addTranscriptReloadObserver(for: agentID) { [weak self, weak supervisor] in
+                Task { @MainActor [weak self, weak supervisor] in
+                    guard let self, let supervisor, self.attachedAgentID == agentID,
+                          self.transcriptReloadGeneration == generation else { return }
+                    let projectName = self.locationProjectName
+                    self.eventSubscription?.cancel()
+                    self.eventSubscription = nil
+                    self.attach(agentID: agentID, supervisor: supervisor, projectName: projectName)
+                }
             }
         }
         if let snapshot = attachment.snapshot {
@@ -957,9 +961,14 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let stream = attachment.tail
         tailEventsRead = attachment.tailBase
         noticesAheadOfTail.removeAll()
+        let subscriptionGeneration = UUID()
+        eventSubscriptionGeneration = subscriptionGeneration
         eventSubscription = Task { @MainActor [weak self] in
             for await event in stream {
-                guard let self else { break }
+                // A cancelled stream may still yield a buffered event. Never
+                // apply it after a replacement snapshot has been installed.
+                guard !Task.isCancelled, let self,
+                      self.eventSubscriptionGeneration == subscriptionGeneration else { break }
                 // The transcript model filters on THIS tile's thread id, so events
                 // carrying the agent's thread are rebound on the way in — the same
                 // rebinding the app did at this boundary before the tile owned it.
@@ -2110,8 +2119,14 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         settleLocationForDetach()
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
+        eventSubscriptionGeneration = nil
         eventSubscription?.cancel()
         eventSubscription = nil
+        if let transcriptReloadObserverToken, let agentID = attachedAgentID {
+            agentSource?.removeTranscriptReloadObserver(transcriptReloadObserverToken, for: agentID)
+        }
+        transcriptReloadObserverToken = nil
+        transcriptReloadGeneration = nil
         if let capabilityObserverToken {
             agentSource?.removeTurnCapabilitiesObserver(capabilityObserverToken)
             self.capabilityObserverToken = nil

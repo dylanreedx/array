@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
@@ -157,25 +158,83 @@ enum TranscriptRetentionChecks {
             .appendingPathComponent(faulted.rawValue.uuidString, isDirectory: true)
         let aside = root.appendingPathComponent("aside-\(faulted.rawValue.uuidString)", isDirectory: true)
         try FileManager.default.moveItem(at: faultedDir, to: aside)
+        let faultedTile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "faulted-reload",
+            frame: TileFrame(x: 0, y: 0, width: 520, height: 320),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        faultedTile.frame = NSRect(x: 0, y: 0, width: 520, height: 320)
+        faultedTile.attach(agentID: faulted, supervisor: supervisor)
+        // This shares the tile's in-flight reload: neither call has yielded the
+        // main actor yet. Wait for failure before triggering any other retry.
+        let failedReload = supervisor.transcriptAttachment(for: faulted, reboundTo: "fault-probe")
+        let probeView = Task { for await _ in failedReload.tail {} }
+        if let reload = failedReload.reload { await reload.value }
+        if !supervisor.isTranscriptReleased(faulted) {
+            failures.append("the tile's unreadable transcript unexpectedly loaded")
+        }
+        probeView.cancel()
         deliverTurn(supervisor, faulted, 3)
-        try? await Task.sleep(for: .milliseconds(500))
+        let failedWriteReload = supervisor.transcriptAttachment(for: faulted, reboundTo: "fault-write-probe")
+        let writeProbeView = Task { for await _ in failedWriteReload.tail {} }
+        if let reload = failedWriteReload.reload { await reload.value }
+        writeProbeView.cancel()
+        if !supervisor.isTranscriptReleased(faulted) {
+            // The RED control resumes from the summary and saves asynchronously.
+            let saveDeadline = ContinuousClock.now + .seconds(10)
+            while !FileManager.default.fileExists(atPath: faultedDir.path), ContinuousClock.now < saveDeadline {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        if !supervisor.isTranscriptReleased(faulted) {
+            failures.append("an unreadable saved transcript did not stay released")
+        }
         if FileManager.default.fileExists(atPath: faultedDir.path) {
             let overwritten = try await transcriptStore.load(agentID: faulted, sessionID: faultedSession)?.entries.count ?? 0
             failures.append("an unreadable saved transcript was replaced by \(overwritten) entries; it had \(faultedBefore.count)")
             try? FileManager.default.removeItem(at: faultedDir)
         }
         try FileManager.default.moveItem(at: aside, to: faultedDir)
-        let retry = supervisor.transcriptAttachment(for: faulted, reboundTo: "view-faulted")
-        let retryView = Task { for await _ in retry.tail {} }
-        if let reload = retry.reload { await reload.value }
+        // Retry from a write, keeping the same tile attached. It must install
+        // the recovered snapshot as well as the queued and subsequent turns.
+        deliverTurn(supervisor, faulted, 4)
+        let oldMarker = "Turn 1 of \(faulted.rawValue.uuidString) is done."
+        let queuedMarker = "Turn 3 of \(faulted.rawValue.uuidString) is done."
+        let newMarker = "Turn 4 of \(faulted.rawValue.uuidString) is done."
+        await settle {
+            let text = faultedTile.qaTranscriptText
+            return text.contains(oldMarker) && text.contains(queuedMarker) && text.contains(newMarker)
+        }
+        let tileText = faultedTile.qaTranscriptText
+        for marker in [oldMarker, queuedMarker, newMarker] {
+            let count = tileText.components(separatedBy: marker).count - 1
+            if count != 1 { failures.append("the faulted tile showed marker \(marker) \(count) times after the retry") }
+        }
         let recovered = supervisor.transcriptDocument(for: faulted)?.entries ?? []
+        let recoveredText = recovered.map { AgentTranscriptCopyController.plainText(for: $0.blocks) }.joined(separator: "\n")
+        for marker in [oldMarker, queuedMarker, newMarker] {
+            let count = recoveredText.components(separatedBy: marker).count - 1
+            if count != 1 { failures.append("the recovered supervisor transcript showed marker \(marker) \(count) times") }
+        }
         if faultedBefore.count < 3 || recovered.count <= faultedBefore.count
             || Array(recovered.prefix(faultedBefore.count)).map(\.id) != faultedBefore.map(\.id) {
             failures.append("after its file read again, a faulted agent showed \(recovered.count) entries; expected the \(faultedBefore.count) saved and the turn held meanwhile")
         }
-        retryView.cancel()
+        faultedTile.detach()
 
         for view in views.values { view.cancel() }
+
+        do {
+            try await RestoreOnlyTranscriptRetentionChecks.run(
+                supervisor: supervisor, id: ids[transcriptCount], transcriptStore: transcriptStore)
+        } catch {
+            failures.append("restore-only retention: \(error)")
+        }
+        do {
+            try await RestoreOnlyTranscriptRetentionChecks.runPreservingExisting(root: root)
+        } catch {
+            failures.append("restore-only existing archive: \(error)")
+        }
 
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "\nFAIL: ")) }
         print("PASS: idle agents with no view release their transcripts, reopen with the same transcript, and keep their history across a later turn")

@@ -3361,6 +3361,8 @@ final class AgentSupervisor {
     /// shown, and lets any tile that later attaches rehydrate the same content.
     func seedRehydratedTranscript(_ transcript: RehydratedTranscript, for id: AgentID) {
         rehydratedTranscripts[id] = transcript
+        // A provider read may finish after its tile has detached.
+        defer { scheduleTranscriptRelease(for: id) }
         guard var record = records[id],
               let journal = record.inFlightCompaction,
               journal.phase == .indeterminate,
@@ -7761,6 +7763,7 @@ final class AgentSupervisor {
         transcriptPersistenceTasks.removeValue(forKey: id)
         transcriptProjections.removeValue(forKey: id)
         releasedTranscripts.removeValue(forKey: id)
+        transcriptReloadObservers.removeValue(forKey: id)
         savedTranscriptVersions.removeValue(forKey: id)
         transcriptReadAt.removeValue(forKey: id)
         transcriptReleaseTimers.removeValue(forKey: id)?.cancel()
@@ -11714,6 +11717,7 @@ final class AgentSupervisor {
     private var releasedTranscripts: [AgentID: ReleasedTranscript] = [:]
     private var transcriptReleaseTimers: [AgentID: Task<Void, Never>] = [:]
     private var transcriptReloads: [AgentID: Task<Void, Never>] = [:]
+    private var transcriptReloadObservers: [AgentID: [UUID: () -> Void]] = [:]
     private var writesAwaitingTranscriptReload: [AgentID: [() -> Void]] = [:]
     /// The document version each agent's last completed save wrote.
     private var savedTranscriptVersions: [AgentID: UInt64] = [:]
@@ -11725,6 +11729,22 @@ final class AgentSupervisor {
     }
 
     func isTranscriptReleased(_ id: AgentID) -> Bool { releasedTranscripts[id] != nil }
+
+    /// Run the same idle-release decision without waiting for the timer in QA.
+    func qaReleaseTranscriptIfDormant(_ id: AgentID) { releaseTranscriptIfDormant(id) }
+
+    /// An attached tile that could not read its history waits for any later
+    /// successful reload, including one started by a headless write.
+    func addTranscriptReloadObserver(for id: AgentID, _ observer: @escaping () -> Void) -> UUID {
+        let token = UUID()
+        transcriptReloadObservers[id, default: [:]][token] = observer
+        return token
+    }
+
+    func removeTranscriptReloadObserver(_ token: UUID, for id: AgentID) {
+        transcriptReloadObservers[id]?[token] = nil
+        if transcriptReloadObservers[id]?.isEmpty == true { transcriptReloadObservers[id] = nil }
+    }
 
     /// What a shared agent's publisher reads each tick. Polling holds no
     /// observer, so a read keeps the transcript resident for one release delay,
@@ -11751,7 +11771,7 @@ final class AgentSupervisor {
     }
 
     private func scheduleTranscriptRelease(for id: AgentID) {
-        guard transcriptProjections[id] != nil || rehydratedTranscripts[id] != nil || sharedTranscriptDetails[id] != nil,
+        guard transcriptProjections[id] != nil || sharedTranscriptDetails[id] != nil,
               transcriptIsDormant(id) else { return }
         transcriptReleaseTimers[id]?.cancel()
         let delay = Self.transcriptReleaseDelay
@@ -11772,9 +11792,9 @@ final class AgentSupervisor {
     private func releaseTranscriptIfDormant(_ id: AgentID) {
         guard transcriptIsDormant(id), let store = transcriptStore else { return }
         guard var projection = transcriptProjections[id] else {
-            // A restore-only agent: the provider's session file is read again
-            // when a view next opens it.
-            rehydratedTranscripts[id] = nil
+            // A provider restore has no Array projection yet. Keep it for a
+            // later headless write; replacing an existing saved transcript with
+            // this potentially bounded history would risk losing older data.
             sharedTranscriptDetails[id] = nil
             trimHistoryToSummary(id)
             return
@@ -11881,6 +11901,9 @@ final class AgentSupervisor {
             transcriptProjections[id] = model
         }
         writes.forEach { $0() }
+        if document != nil, records[id] != nil {
+            for observer in Array((transcriptReloadObservers[id] ?? [:]).values) { observer() }
+        }
         scheduleTranscriptRelease(for: id)
     }
 
