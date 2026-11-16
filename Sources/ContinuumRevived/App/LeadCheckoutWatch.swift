@@ -72,6 +72,8 @@ final class LeadCheckoutWatch: @unchecked Sendable {
     private final class Stream {
         let root: String
         var stream: FSEventStreamRef?
+        /// Absolute folders FSEvents never delivers for this stream.
+        var excluded: [String] = []
         let lock = NSLock()
         var pending: [Event] = []          // lock
         var keepFrom: Date?                // lock: earliest open call's start less the slack
@@ -303,14 +305,63 @@ final class LeadCheckoutWatch: @unchecked Sendable {
                                                Unmanaged<Stream>.fromOpaque(info).release()
                                            },
                                            copyDescription: nil)
+        let excluded = Self.exclusions(root)
         let created = FSEventStreamCreate(nil, Self.callback, &context, [root] as CFArray,
                                           FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.05,
                                           FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer
                                                                    | kFSEventStreamCreateFlagUseCFTypes))
         guard let created else { return }
+        if FSEventStreamSetExclusionPaths(created, excluded as CFArray) { holder.excluded = excluded }
         FSEventStreamSetDispatchQueue(created, deliveries)
         guard FSEventStreamStart(created) else { FSEventStreamInvalidate(created); FSEventStreamRelease(created); return }
         holder.stream = created
+    }
+
+    /// Folders under a checkout that hold build output. A lead on a repository
+    /// root otherwise receives, file by file, every build of every bench under
+    /// `.worktrees/` for as long as its turn is open, and fseventsd queues each
+    /// of those events for this process.
+    static let buildOutputs = [".build", ".worktrees", "qa-runs", "node_modules", ".build-film", "DerivedData"]
+
+    /// What the stream on `root` never needs: each of `buildOutputs` git
+    /// ignores there (an ignored file never counts). A folder git does not
+    /// ignore stays watched. FSEvents matches an exclusion as a plain path
+    /// prefix, so `.git` would also hide `.github/` and `.gitignore`: a folder
+    /// is excluded only when no other entry in the root starts with its name
+    /// when the stream opens (one created later under such a name is missed).
+    /// Each root asks git once per app run (a later `.gitignore` edit is not
+    /// seen until relaunch), and a root with no `.gitignore` and none of
+    /// these folders never asks.
+    static func exclusions(_ root: String) -> [String] {
+        if let known = exclusionCache.withLock({ $0[root] }) { return known }
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
+        guard entries.contains(".gitignore") || buildOutputs.contains(where: entries.contains) else { return [] }
+        let ignored = (try? ignoredPaths(buildOutputs.map { $0 + "/" }, root: root).get()) ?? []
+        let candidates = buildOutputs.filter { ignored.contains($0 + "/") }
+        let result = candidates.filter { name in
+            !entries.contains { $0 != name && $0.hasPrefix(name) && !candidates.contains($0) }
+        }.map { root + "/" + $0 }
+        exclusionCache.withLock { $0[root] = result }
+        return result
+    }
+    private static let exclusionCache = Locked<[String: [String]]>([:])
+
+    /// Checks only: every path FSEvents delivers, while non-nil.
+    static let qaDelivered = Locked<[(root: String, path: String, flags: FSEventStreamEventFlags)]?>(nil)
+    /// Checks only: each open stream's watched and excluded paths, after
+    /// FSEvents has delivered everything written so far.
+    func qaStreams() -> [String: (watched: [String], excluded: [String])] {
+        queue.sync {
+            var result: [String: (watched: [String], excluded: [String])] = [:]
+            for (root, holder) in streams {
+                guard let ref = holder.stream else { continue }
+                FSEventStreamFlushSync(ref)
+                let watched = FSEventStreamCopyPathsBeingWatched(ref) as? [String] ?? []
+                result[root] = (watched, holder.excluded)
+            }
+            deliveries.sync {}
+            return result
+        }
     }
 
     /// Checks only: simulate a busy FSEvents delivery queue.
@@ -324,7 +375,10 @@ final class LeadCheckoutWatch: @unchecked Sendable {
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         callbackCount.withLock { $0 += 1 }
         let list = Unmanaged<CFArray>.fromOpaque(paths).takeUnretainedValue() as? [String] ?? []
-        Unmanaged<Stream>.fromOpaque(info).takeUnretainedValue().received(list, Array(UnsafeBufferPointer(start: flags, count: count)))
+        let holder = Unmanaged<Stream>.fromOpaque(info).takeUnretainedValue()
+        let flagList = Array(UnsafeBufferPointer(start: flags, count: count))
+        qaDelivered.withLock { if $0 != nil { $0! += zip(list, flagList).map { (holder.root, $0, $1) } } }
+        holder.received(list, flagList)
     }
 
     /// Deterministic ownership witness: keep the native stream alive after

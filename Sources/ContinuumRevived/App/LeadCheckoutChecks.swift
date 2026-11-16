@@ -59,6 +59,7 @@ enum LeadCheckoutChecks {
         let section = ProcessInfo.processInfo.environment["CONTINUUM_LEAD_CHECKOUT_CASE"]
         if section == nil || section == "teardown" { try teardown() }
         if section == nil || section == "release" { try releaseUnderLoad() }
+        if section == nil || section == "exclusions" { try exclusions() }
         if section == nil || section == "lifetime" { try await lifetime() }
         if section == nil || section == "seen" { try await seen() }
         if section == nil || section == "hooks" { try await hooks() }
@@ -185,6 +186,116 @@ enum LeadCheckoutChecks {
         try expect(LeadCheckoutWatch.qaLiveHolders == holdersBefore,
                    "\(LeadCheckoutWatch.qaLiveHolders - holdersBefore) stream holders leaked after the watch went")
         print("lead checkout release: \(rounds) rounds of \(dirs.count) parallel lead turns on changing checkouts left no stream open and no holder alive")
+    }
+
+    /// fseventsd at 3 GB: a lead on a repository root watched, file by file,
+    /// every build in every bench under `.worktrees/` and every `qa-runs/`
+    /// for as long as its turn was open. A repository with twelve worktrees,
+    /// three leads on its root and one in each worktree: one stream per
+    /// checkout, each watching only its root; build output and `.worktrees/`
+    /// never delivered; a file beside them (`.gitignore`, `.github/`, a
+    /// tracked file, a folder git does not ignore) still delivered; and no
+    /// stream left once the turns end.
+    static func exclusions() throws {
+        let fm = FileManager.default
+        let made = fm.temporaryDirectory.appendingPathComponent("lead-watch-exclusions-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: made, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: made) }
+        // FSEvents reports `/private/var/...`; so does the watch.
+        guard let real = realpath(made.path, nil) else { throw WorkspaceAgentReportChecks.Failure(description: "lead-checkout: no realpath") }
+        let base = URL(fileURLWithPath: String(cString: real), isDirectory: true); free(real)
+        func write(_ url: URL, _ text: String = "x") throws {
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: url)
+        }
+        // Repository-local ignores only: the user's global excludes file must not decide the outcome.
+        try HelperEvidenceChecks.git(["init", "-q"], base)
+        try HelperEvidenceChecks.git(["config", "core.excludesFile", "/dev/null"], base)
+        try write(base.appendingPathComponent(".gitignore"), ".build/\nqa-runs/\n.worktrees/\n")
+        try write(base.appendingPathComponent("src.txt"))
+        try write(base.appendingPathComponent("node_modules/tracked.js"))
+        try HelperEvidenceChecks.git(["add", "-A"], base)
+        try HelperEvidenceChecks.git(["-c", "user.name=f", "-c", "user.email=f@invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "base"], base)
+        let worktrees = (0..<12).map { base.appendingPathComponent(".worktrees/w\($0)", isDirectory: true) }
+        for (index, dir) in worktrees.enumerated() {
+            try HelperEvidenceChecks.git(["worktree", "add", "-q", "-b", "w\(index)", dir.path], base)
+        }
+        LeadCheckoutWatch.qaDelivered.withLock { $0 = [] }
+        defer { LeadCheckoutWatch.qaDelivered.withLock { $0 = nil } }
+        let watch = LeadCheckoutWatch()
+        var leads: [UUID] = []
+        for root in [base, base, base] + worktrees {
+            let lead = UUID(); leads.append(lead)
+            watch.turnStarted(agent: lead, root: root.path, lead: true)
+        }
+        let opened = watch.qaStreams()
+        let roots = Set(([base] + worktrees).map(\.path))
+        try expect(Set(opened.keys) == roots, "\(opened.count) streams for \(roots.count) checkouts")
+        for (root, stream) in opened {
+            try expect(stream.watched == [root], "the stream on \(root) watches \(stream.watched)")
+        }
+        var delivered: [(root: String, path: String, flags: FSEventStreamEventFlags)] = []
+        // Under load FSEvents may coalesce a folder's events into one "rescan
+        // this folder" event: that still reached the stream, so it counts.
+        let rescan = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)
+        func has(_ root: URL, _ relative: String) -> Bool {
+            let path = root.path + "/" + relative
+            return delivered.contains { $0.root == root.path
+                && ($0.path == path || ($0.flags & rescan != 0 && (path + "/").hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/"))) }
+        }
+        // fseventsd under load can take seconds: wait for what must arrive, bounded.
+        // fseventsd under load can lose an event outright; each wait rewrites
+        // its files every 2 s so one lost event cannot decide the outcome.
+        func waitFor(_ expected: [(URL, String)]) throws {
+            let deadline = Date().addingTimeInterval(45)
+            var touched = Date.distantPast
+            repeat {
+                if Date().timeIntervalSince(touched) > 2 {
+                    for (root, relative) in expected where !has(root, relative) {
+                        try write(root.appendingPathComponent(relative), "\(Date().timeIntervalSince1970)")
+                    }
+                    touched = Date()
+                }
+                _ = watch.qaStreams()
+                delivered = LeadCheckoutWatch.qaDelivered.withLock { $0 ?? [] }
+                if expected.allSatisfy({ has($0.0, $0.1) }) { return }
+                usleep(100_000)
+            } while Date() < deadline
+        }
+        // Files beside the excluded folders, which must still arrive.
+        let beside = ["src.txt", ".gitignore", ".github/ci.yml", "node_modules/tracked.js"]
+        try waitFor(beside.map { (base, $0) } + worktrees.map { ($0, "src.txt") })
+        for relative in beside {
+            try expect(has(base, relative), "the root stream never delivered \(relative); it delivered "
+                       + "\(Set(delivered.filter { $0.root == base.path }.map { String($0.path.dropFirst(base.path.count + 1)) }).sorted().prefix(12))")
+        }
+        for dir in worktrees {
+            try expect(has(dir, "src.txt"), "the stream on \(dir.lastPathComponent) never delivered its own src.txt; it delivered "
+                       + "\(delivered.filter { $0.root == dir.path }.prefix(8).map { "\($0.path) 0x\(String($0.flags, radix: 16))" })")
+        }
+        // A build in every bench and the root, and QA runs: what fseventsd queued
+        // before. Then a marker in each checkout: FSEvents delivers a stream's
+        // events in order, so once it arrives every build event had its chance.
+        for dir in [base] + worktrees {
+            for n in 0..<100 { try write(dir.appendingPathComponent(".build/debug/obj\(n).o")) }
+        }
+        for n in 0..<100 { try write(base.appendingPathComponent("qa-runs/run\(n)/log.txt")) }
+        try waitFor(([base] + worktrees).map { ($0, "after.txt") })
+        for dir in [base] + worktrees {
+            try expect(has(dir, "after.txt"), "the stream on \(dir.lastPathComponent) never delivered after.txt, so the build check proves nothing")
+        }
+        let build = delivered.filter { $0.path.contains("/.build/") || $0.path.contains("/qa-runs/") }
+        try expect(build.isEmpty, "\(build.count) build-output events delivered, e.g. \(build.prefix(3).map(\.path))")
+        let nested = delivered.filter { $0.root == base.path && $0.path.hasPrefix(base.path + "/.worktrees/") }
+        try expect(nested.isEmpty, "the root stream delivered \(nested.count) events from its worktrees, e.g. \(nested.prefix(3).map(\.path))")
+        let excluded = Set(opened[base.path]?.excluded ?? [])
+        try expect(excluded == Set([".build", ".worktrees", "qa-runs"].map { base.path + "/" + $0 }),
+                   "the root stream excludes \(excluded.sorted()); expected .build, .worktrees and qa-runs only")
+        for lead in leads { watch.turnEnded(agent: lead) }
+        watch.drain()
+        try expect(watch.qaStreamCount == 0, "\(watch.qaStreamCount) streams outlived their leads' turns")
+        print("lead checkout exclusions: \(opened.count) streams for 15 leads on \(roots.count) checkouts, each watching its root; "
+              + "\(delivered.count) events delivered, none from .build/, qa-runs/ or nested worktrees; all streams stopped")
     }
 
     /// Review finding 1, through the supervisor: a Managed lead's checkout is
