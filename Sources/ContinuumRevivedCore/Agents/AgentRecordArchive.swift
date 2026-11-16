@@ -8,7 +8,9 @@ import Foundation
 // record lives in `agents/archive/` instead — `loadAll` lists one level, so
 // boot never reads it — and comes back, by id, the moment anything asks for it.
 
-/// The gate. Off in code: archiving runs only once someone turns it on.
+/// The gate. On by default: a person who never wrote the setting archives.
+/// Writing `false` turns it off and brings every archived record back. A
+/// supervisor with no settings wired (a bare one in a check) stays off.
 public enum AgentRecordArchiveConfig {
     public static let enabledKey = "agents.recordArchive.enabled"
     /// Seven days: past the week a delivered helper-completion row is kept
@@ -16,7 +18,8 @@ public enum AgentRecordArchiveConfig {
     public static let idleThreshold: TimeInterval = 7 * 86_400
 
     public static func enabled(defaults: UserDefaults?) -> Bool {
-        defaults?.object(forKey: enabledKey) as? Bool ?? false
+        guard let defaults else { return false }
+        return defaults.object(forKey: enabledKey) as? Bool ?? true
     }
 }
 

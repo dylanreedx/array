@@ -199,12 +199,12 @@ enum AgentRecordArchiveChecks {
         try expect(isOutsideRealStores(tmp.appendingPathComponent("copy").path), "measure-store guard refused a copy outside Application Support")
     }
 
-    /// `--agent-record-archive-measure-store=off|on`: one production boot over
+    /// `--agent-record-archive-measure-store=off|on|default` (default writes no setting): one production boot over
     /// the store `CONTINUUM_APP_SUPPORT` names — a COPY of a real one, never
     /// the original — with the gate as given. Prints the mount's time and the
     /// footprint it left, then the archive pass's moves. One process per run.
     /// Never stops the agents it restored: they may name real processes.
-    static func measureStore(gate: Bool) async throws {
+    static func measureStore(gate: Bool?) async throws {
         guard let root = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"],
               isOutsideRealStores(root) else {
             throw Failure(message: "measure-store needs CONTINUUM_APP_SUPPORT pointing at a copy of a store, outside ~/Library/Application Support")
@@ -250,7 +250,7 @@ enum AgentRecordArchiveChecks {
         }
         let mb = 1_048_576.0
         print(String(format: "METRIC agent-record-archive-store gate=%@ liveFilesBefore=%d archivedFilesBefore=%d decoded=%d adopted=%d mountMs=%.1f passMs=%.1f moved=%d liveAfter=%d archivedFilesAfter=%d footprintMB=%.1f footprintMountDeltaMB=%.1f mallocMountDeltaMB=%.1f footprintAfterPassMB=%.1f inboxRows=%d inboxRowBuildMedianMs=%.2f passScanMs=%.1f passMainMs=%.1f settleS=%.0f footprintSettledMB=%.1f",
-            gate ? "on" : "off", liveBefore, archivedBefore, decoded, adopted, mountMs, passMs,
+            gate.map { $0 ? "on" : "off" } ?? "default", liveBefore, archivedBefore, decoded, adopted, mountMs, passMs,
             adopted - supervisor.records.count, supervisor.records.count, jsonCount(store.layout.archiveDirectory),
             Double(footprintMount) / mb, (Double(footprintMount) - Double(footprintBefore)) / mb,
             Double(mallocMount - mallocBefore) / mb, Double(footprintBytes()) / mb, rows, rowTimes.sorted()[3],
@@ -368,7 +368,10 @@ enum AgentRecordArchiveChecks {
         await supervisor.recordArchivePassForQA?.value
     }
 
-    static func bootWitness(gate: Bool) async throws {
+    /// `gate` is the setting the boot sees: false/true written explicitly, nil
+    /// for a person who never touched it — the production default.
+    static func bootWitness(gate setting: Bool?) async throws {
+        let gate = setting ?? true
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-\(UUID())")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -380,7 +383,7 @@ enum AgentRecordArchiveChecks {
         store.waitForBackupMigration()
         let all = Set(fixture.records.map(\.id))
         let kept = all.subtracting(fixture.archivable)
-        let settings = gateSuite(gate ? true : nil)
+        let settings = gateSuite(setting)
         defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
 
         let (first, firstApp, firstDecoded, firstSeconds) = try await boot(store, settings: settings)
@@ -401,7 +404,7 @@ enum AgentRecordArchiveChecks {
         for id in [edges.keptRecentChild, edges.keptParentOfRecentChild, edges.keptUnfinishedTurn, edges.keptUndelivered, edges.keptSnoozed] {
             try expect(live.contains(id), "kept edge \(fixture.records.first { $0.id == id }!.displayName) must stay live")
         }
-        try expect(live == kept, "gate on: live set is the \(kept.count) kept records, got \(live.count)")
+        try expect(live == kept, "gate \(setting == nil ? "default" : "on"): live set is the \(kept.count) kept records, got \(live.count)")
         // Crash-safe: every record is in exactly one place.
         for id in all {
             let inLive = exists(store.layout.agentFile(id: id)), inArchive = exists(store.layout.archivedAgentFile(id: id))
@@ -420,8 +423,8 @@ enum AgentRecordArchiveChecks {
         try expect(secondDecoded == kept.count, "second boot decodes \(kept.count) records, decoded \(secondDecoded)")
         // A boot may archive more (a completion delivered since), never bring one back.
         try expect(Set(second.records.keys).isSubset(of: kept) && !second.records.isEmpty, "second boot adopts within the kept set")
-        print(String(format: "METRIC agent-record-archive gate=on records=%d archived=%d boot1=%.3fs boot2=%.3fs decoded2=%d",
-            all.count, fixture.archivable.count, firstSeconds, secondSeconds, secondDecoded))
+        print(String(format: "METRIC agent-record-archive gate=%@ records=%d archived=%d boot1=%.3fs boot2=%.3fs decoded2=%d",
+            setting == nil ? "default" : "on", all.count, fixture.archivable.count, firstSeconds, secondSeconds, secondDecoded))
 
         // Lazy load on miss through a production entry: the phone's Stop.
         let outcome = await CompanionCommandActions.stop(edges.archivedChild.rawValue, supervisor: second)
@@ -978,7 +981,8 @@ enum AgentRecordArchiveChecks {
             return
         }
         if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--agent-record-archive-measure-store=") }) {
-            try await measureStore(gate: arg.hasSuffix("=on"))
+            let value = arg.dropFirst("--agent-record-archive-measure-store=".count)
+            try await measureStore(gate: value == "default" ? nil : value == "on")
             return
         }
         guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil,
@@ -988,6 +992,8 @@ enum AgentRecordArchiveChecks {
         try measureStoreGuardWitness()
         try await bootWitness(gate: false)
         try await bootWitness(gate: true)
+        // The production default: a setting nobody wrote archives at boot.
+        try await bootWitness(gate: nil)
         try await sharedScanOffMainWitness()
         try await windowWitness()
         try await wakeupWitness()
@@ -997,6 +1003,6 @@ enum AgentRecordArchiveChecks {
         try await runtimeGateOffWitness()
         try await quarantineWitness()
         print("PASS agent record archive: gate off unchanged; gate on archives only old finished tile-less records nothing holds, next boot skips them, and id lookups bring them back")
-        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; the shared-area scan runs off the main thread and a skip names the file; gate off scans no API payload and restores every archived record at boot, or on the next API request when it goes off at runtime; a damaged archived file is quarantined once; worktree repair and checkout cleanup treat archived agents as owners; the real-store measure mode refuses every store under Application Support.")
+        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on — and the default, with no setting written — archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; the shared-area scan runs off the main thread and a skip names the file; gate off scans no API payload and restores every archived record at boot, or on the next API request when it goes off at runtime; a damaged archived file is quarantined once; worktree repair and checkout cleanup treat archived agents as owners; the real-store measure mode refuses every store under Application Support.")
     }
 }
