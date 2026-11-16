@@ -16031,6 +16031,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.onDisplayNameRenamed = { [weak self] _ in
             self?.reloadWorkspaceSidebar()
         }
+        // Sidebar round: a restored failure's cause arrives after its transcript
+        // is read; one push per batch.
+        agentSupervisor.onFailureDetailsLoaded = { [weak self] in
+            self?.pushExternalSessionRows()
+        }
         // P3.15: the row menu and the bulk bar reach the supervisor. Until this call
         // existed the shipped app assigned neither callback, so every destructive item
         // was greyed and a stale agent could not be removed by any route.
@@ -16289,9 +16294,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         var turnSnapshots: [UUID: AgentTileTurnSnapshot] = [:]
         var lifecycleFacts: [UUID: AgentLifecycleFacts] = [:]
         var lastActivity: [UUID: Date] = [:]
+        var failureDetails: [UUID: String] = [:]
         for record in records {
             if let stamp = agentSupervisor.lastActivity(for: record.id) {
                 lastActivity[record.id.rawValue] = stamp
+            }
+            if let detail = agentSupervisor.sidebarFailureDetail(for: record.id) {
+                failureDetails[record.id.rawValue] = detail
             }
             if let branch = agentSupervisor.branchContextCachedOnly(for: record.id)?.checkedOutBranch {
                 checkedOutBranches[record.id.rawValue] = branch
@@ -16323,6 +16332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             lifecycleFacts: lifecycleFacts,
             autoSettleAfter: autoSettle.window,
             lastActivity: lastActivity,
+            failureDetails: failureDetails,
             now: now
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }

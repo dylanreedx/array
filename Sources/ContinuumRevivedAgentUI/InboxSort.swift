@@ -342,6 +342,8 @@ public enum InboxSort {
         case .approval, .input: return (0, at)
         case .working: return (1, at)
         case .ready, .failed:
+            // A cleared outcome folds: Clear acknowledges it, the count keeps it.
+            if row.isCleared { return (3, at) }
             if endedInFailure(row), !isUnopenedFailure(row) { return (3, at) }
             return (now.timeIntervalSince(at) < recentSubagentWindow ? 2 : 3, at)
         }

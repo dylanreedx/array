@@ -102,6 +102,7 @@ public enum AgentInboxRowBuilder {
         lifecycleFacts: [UUID: AgentLifecycleFacts] = [:],
         autoSettleAfter: TimeInterval? = nil,
         lastActivity: [UUID: Date] = [:],
+        failureDetails: [UUID: String] = [:],
         now: Date
     ) -> [AgentInboxRow] {
         let boardRows = AgentsBoardProjection.rows(from: snapshot, context: context)
@@ -130,6 +131,7 @@ public enum AgentInboxRowBuilder {
                 lifecycleFacts: facts,
                 autoSettleAfter: autoSettleAfter,
                 lastActivity: lastActivity[boardRow.agentId],
+                failureDetail: failureDetails[boardRow.agentId],
                 now: now
             )
         }
@@ -186,6 +188,7 @@ public enum AgentInboxRowBuilder {
         lifecycleFacts: AgentLifecycleFacts = AgentLifecycleFacts(),
         autoSettleAfter: TimeInterval? = nil,
         lastActivity: Date? = nil,
+        failureDetail: String? = nil,
         now: Date
     ) -> AgentInboxRow {
         let context = boardRow.context
@@ -245,7 +248,7 @@ public enum AgentInboxRowBuilder {
             now: now
         ) ?? .active
         let closingSince = record?.closingSince(facts: observedFacts, now: now)
-        return AgentInboxRow(
+        var built = AgentInboxRow(
             id: boardRow.agentId,
             title: title(for: context),
             projectName: context?.projectName,
@@ -320,6 +323,17 @@ public enum AgentInboxRowBuilder {
                 : nil,
             characterName: record?.characterName
         )
+        // Sidebar round: the facts the shared tally reads (SidebarLedgerCore).
+        if let turnSnapshot, case let .failed(message) = turnSnapshot.state {
+            built.failureDetail = message ?? failureDetail
+        } else {
+            built.failureDetail = failureDetail
+        }
+        if let record {
+            built.resumesThroughLead = record.parentAgentID != nil && !record.capabilities.locallyManaged
+            built.isCleared = record.parentAgentID != nil && record.settledOverride == .settled
+        }
+        return built
     }
 
     /// Tool chatter — a step starting or finishing inside a turn — moves three

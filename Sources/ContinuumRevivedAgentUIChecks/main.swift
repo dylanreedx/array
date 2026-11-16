@@ -94,6 +94,9 @@ runComposerActionPresentationChecks()
 // Ticket: docs/38-tickets/94-sidebar-native-ux/P0.3-row-fixture-corpus.md
 runSidebarDefectCorpusChecks()
 
+// Sidebar round (array/sidebar-next): counts, causes, incidents, Clear.
+runSidebarLedgerCoreChecks()
+
 print("ContinuumRevivedAgentUIChecks passed")
 
 // MARK: - Selected Dual-Plane Gyro — pure iOS companion contract
