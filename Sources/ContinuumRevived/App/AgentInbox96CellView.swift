@@ -2836,9 +2836,30 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Which hover actions this row offers; nil hides one. Set by the list, which
     /// owns the action predicates, after every `apply`.
     func configureHoverActions(snooze: (() -> Void)?, settle: (() -> Void)?, share: (() -> Void)? = nil) {
+        configureHoverButton(hoverSnooze, symbol: "clock", label: "Snooze")
+        configureHoverButton(hoverSettle, symbol: "tray.and.arrow.down", label: "Settle")
         onHoverSnooze = snooze
         onHoverSettle = settle
         onHoverShare = share
+    }
+
+    /// A closed tile retains the normal row and its existing action controls.
+    /// Helpers already have Pop out/Stop; a lead uses these two card buttons.
+    func configureClosedTileActions(bringBack: (() -> Void)?, stop: (() -> Void)?) {
+        onHoverSnooze = stop
+        onHoverSettle = bringBack
+        onHoverShare = nil
+        configureHoverButton(hoverSnooze, symbol: "stop.fill", label: "Stop")
+        configureHoverButton(hoverSettle, symbol: "arrow.uturn.backward", label: "Bring back to canvas")
+    }
+
+    private func configureHoverButton(_ button: InboxRowHoverActionButton, symbol: String, label: String) {
+        guard button.toolTip != label else { return }
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(pointSize: Typography.style(for: .label).size - 2, weight: .semibold))
+        button.image?.isTemplate = true
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
     }
 
     /// Cross-fade the status slot and the actions over 150ms (instant under Reduce
@@ -3242,6 +3263,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 "state": labels[2].frame,
                 "branch": labels[3].frame,
                 "model": labels[4].frame,
+                "bringBackAction": hoverSettle.convert(hoverSettle.bounds, to: self),
+                "stopAction": hoverSnooze.convert(hoverSnooze.bounds, to: self),
                 // Painted, so their frames come off the decoration layer rather
                 // than off a view that does not exist.
                 "statusGlyph": statusGlyph.isHidden
