@@ -938,6 +938,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         var tally: SidebarLeadTally?
     }
     var ledger: LedgerFacts?
+    /// Both layouts expose the same complete count partition to VoiceOver.
+    var sidebarTally: SidebarLeadTally?
     var ledgerChipTextForQA: String? { ledger?.tally?.countLine }
     var ledgerStatusSymbolForQA: String? { statusGlyph.isHidden ? nil : statusGlyph.symbol }
     var stateTextForQA: String { stateLabel.isHidden ? "" : stateLabel.stringValue }
@@ -1546,7 +1548,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             let sub = row.depth > 0 || row.parentId != nil
             if ledger != nil, !sub, let cause = SidebarRecovery.cause(for: row) {
                 // Ledger: a lead says WHY, in the cause's own word.
-                text = cause.label(harness: row.harness)
+                text = cause == .taskError && (ledger?.tally?.count(.failed) ?? 0) > 0
+                    ? (Self.ledgerClock(row, now: now) ?? "") : cause.label(harness: row.harness)
             } else {
                 text = (ledger != nil && sub ? Self.ledgerClock(row, now: now)
                         : Self.ownershipClock(row, isSubagent: sub, now: now)) ?? ""
@@ -1943,7 +1946,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         statusGlyph.symbol = symbol == "exclamationmark.triangle.fill" && !sub ? symbol : nil
         if ledger != nil, sub { statusGlyph.symbol = Self.ledgerSymbol(row) }
         // VoiceOver hears the same reconciled numbers the chip draws.
-        setAccessibilityHelp(ledger?.tally.map(\.accessibilityLabel))
+        setAccessibilityHelp((sidebarTally ?? ledger?.tally).map(\.accessibilityLabel))
         // A subagent works under three dots, never the gyro.
         if sub { applyThrobber(isWorking: false) }
         // The self-report line and the rollup words are folded into the tail.

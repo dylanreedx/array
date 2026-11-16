@@ -2501,12 +2501,26 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // control appeared or vanished are stale too. (Found in cross-review.)
         let previousParents = parentsWithChildren
         let previousRollups = rollupsByParent
+        let previousTallies = sidebarTallies
+        let previousByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let next = display(from: newRows)
         // P4.7: the identity sequence is compared over the DRAWN items, not over the
         // agent rows — the shelf header is a row in this table, and a snooze that
         // changed the count in it (or brought the header into existence at all) has
         // changed the list even when every agent row is where it was.
         guard next.map(\.identity) == items.map(\.identity) else {
+            // Incident/head changes keep the same agents in the same order.
+            // Insert/remove their chrome in place, preserving every unrelated
+            // agent cell, rather than rebuilding the list for one new ask.
+            if next.compactMap(\.agentRow).map(\.id) == rows.map(\.id) {
+                let changedValues = Set(next.compactMap(\.agentRow).filter { row in
+                    previousByID[row.id].map { !row.matchesIgnoringLiveElapsed($0) } ?? true
+                }.map(\.id))
+                if applyScopeIncrementally(next, previousRollups: previousRollups,
+                    changedAgentIDs: changed.touched.union(changedValues), previousTallies: previousTallies) {
+                    return
+                }
+            }
             // A list longer than the viewport keeps the row being read where it
             // is: a subagent arriving at the top of an open 40-row group otherwise
             // pushed everything under the pointer down a row. (`render` does not
@@ -2553,6 +2567,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             changed.touched.contains(rows[$0].id) || !rows[$0].matchesIgnoringLiveElapsed(previous[$0])
                 || disclosureMoved.contains(rows[$0].id)
                 || previousRollups[rows[$0].id] != rollupsByParent[rows[$0].id]
+                || previousTallies[rows[$0].id] != sidebarTallies[rows[$0].id]
         }.compactMap(tableRow(forRowIndex:)))
         guard !indexes.isEmpty else { return }
         // P3.7: a lifecycle move changes the row's VARIANT, and a variant is a
@@ -3064,6 +3079,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     private func setItems(_ next: [InboxListItem]) {
         items = next
+        if !next.contains(where: { if case .historyHeader = $0 { return true }; return false }) { historyHeaderCell = nil }
+        if !next.contains(where: { if case .shelfHeader = $0 { return true }; return false }) { shelfHeaderCell = nil }
         rows = next.compactMap(\.agentRow)
         if updatingFold { foldRenderNudge = settleNudgeTargetID(now: clock()) }
         nestingByTableRow = AgentInboxView.nestings(for: next)
@@ -3274,7 +3291,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     ///
     /// The checklist made this matter: one pick used to change the scope, and now a
     /// person clicks three boxes in a row, each of which rebuilt every card.
-    private func applyScopeIncrementally(_ next: [InboxListItem], previousRollups: [UUID: ChildRollup]) -> Bool {
+    private func applyScopeIncrementally(
+        _ next: [InboxListItem], previousRollups: [UUID: ChildRollup],
+        changedAgentIDs: Set<UUID> = [], previousTallies: [UUID: SidebarLeadTally]? = nil
+    ) -> Bool {
         let old = items.map(\.identity), new = next.map(\.identity)
         let oldSet = Set(old), newSet = Set(new)
         guard oldSet.count == old.count, newSet.count == new.count,
@@ -3311,7 +3331,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         var stale = IndexSet(new.indices.filter { row in
             guard !inserted.contains(row) else { return false }
             if let id = next[row].agentRow?.id {
-                if nudges.contains(id) || previousRollups[id] != rollupsByParent[id] { return true }
+                if nudges.contains(id) || changedAgentIDs.contains(id)
+                    || previousRollups[id] != rollupsByParent[id] { return true }
+                if let previousTallies, previousTallies[id] != sidebarTallies[id] { return true }
             }
             return oldNesting[new[row]] != nestingByTableRow[row]
         })
@@ -4330,6 +4352,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let rowRollup = rollupsByParent[model.id]
         let renderNow = clock()
         // Sidebar round: the Ledger's facts, set before `apply` reads them.
+        (cell as? AgentInbox96CellView)?.sidebarTally = model.depth == 0 ? sidebarTallies[model.id] : nil
         (cell as? AgentInbox96CellView)?.ledger = sidebarLayout == .ledger
             ? AgentInbox96CellView.LedgerFacts(tally: model.depth == 0 ? sidebarTallies[model.id] : nil) : nil
         // .plans/113: only a lead in the live block is drawn under a project heading.
@@ -7915,6 +7938,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // Ticket: docs/38-tickets/90-agent-ux/P4.11-undo-toast.md
     /// The toast as RENDERED — empty when it is down.
     var undoToastTextForQA: String { undoToast.qaText }
+    var undoButtonForQA: NSView { undoToast.buttonForQA }
     /// Where it is, so a check can assert it clears the bulk bar rather than assuming
     /// the constraint does.
     var undoToastFrameForQA: NSRect { undoToast.frame }
@@ -10132,7 +10156,9 @@ final class InboxUndoToast: NSView, TokenThemed {
         return "\(messageLabel.stringValue) \(undoButton.attributedTitle.string)"
     }
 
-    /// Press it the way the user does, through the button's own target/action.
+    var buttonForQA: NSView { undoButton }
+
+    /// Press it through the button's own target/action (legacy checks).
     @discardableResult
     func clickUndoForQA() -> Bool {
         guard !isHidden else { return false }

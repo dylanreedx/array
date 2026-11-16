@@ -374,7 +374,7 @@ enum SidebarLedgerChecks {
         guard toast.hasPrefix("Cleared \(expectedClear.count)"), toast.contains("Undo") else {
             throw fail("toast reads '\(toast)'")
         }
-        guard inbox.clickUndoForQA() else { throw fail("Undo did not press") }
+        try press(inbox.undoButtonForQA, in: window, "Undo")
         settle()
         let restored = Set(inbox.itemsForQA.compactMap(\.agentRow).filter { $0.lifecycle == .active }.map { number($0.id) })
         for back in [18, 19, 20, 30, 33, 34, 36] where !restored.contains(back) {
@@ -403,6 +403,19 @@ enum SidebarLedgerChecks {
         guard inbox.sidebarLayout == .ledger, inbox.sidebarLayoutRenderCountForQA == renders + 2,
               inbox.itemsForQA.contains(where: { if case .incident = $0 { return true } else { return false } }) else {
             throw fail("switching back to Ledger did not re-render")
+        }
+        // A lead whose own turn also failed still says the failure word
+        // once on its card. Its icon/age retain the lead's own outcome.
+        let failedLead = rows().map { r -> AgentInboxRow in
+            guard r.id == uuid(lead) else { return r }
+            return row(lead, "Array release lead", outcome: .failed, detail: "Task exited with an error")
+        }
+        inbox.reload(rows: failedLead)
+        settle()
+        guard let failedCard = inbox.cellForQA(id: uuid(lead)) else { throw fail("failed lead has no card") }
+        let said = failedCard.visibleTextForQA.joined(separator: " ").lowercased()
+        guard said.components(separatedBy: "failed").count == 2 else {
+            throw fail("failed is repeated on the lead card: '\(said)'")
         }
         return "  \(label): chip '18 helpers · 12 paused · 1 failed', \(familyRows) drawn + folds \(foldNumbers) = 18 (\(foldTitles.joined(separator: " / "))); "
             + "\(expected.count) incidents drawn with their actions, Switch & resume pressed to the host and the rest disabled; Clear \(expectedClear.count) left blockers, Undo restored; layout switch re-rendered twice; tile-less helper drawn like its sibling"
@@ -502,9 +515,10 @@ extension SidebarLedgerChecks {
         guard !live().contains(leadID.rawValue) else {
             throw Failure(description: "the cleared lead is still in the live list")
         }
-        guard inbox.undoToastTextForQA.hasPrefix("Cleared"), inbox.clickUndoForQA() else {
+        guard inbox.undoToastTextForQA.hasPrefix("Cleared") else {
             throw Failure(description: "no Undo after Clear ('\(inbox.undoToastTextForQA)')")
         }
+        try press(inbox.undoButtonForQA, in: window, "Undo")
         f.delegate.qaRefreshAgentSurfaces()
         inbox.layoutForQA()
         guard live().contains(leadID.rawValue), f.canvas.tileView(for: tileID) != nil else {
@@ -554,6 +568,152 @@ extension AgentInboxRow {
             terminalIsUnread: true, identityColor: identityColor, hasTile: hasTile, isPinned: isPinned)
         row.failureDetail = failureDetail
         return row
+    }
+}
+
+// The combined branch's shared contract, driven through the real controls in
+// both layouts. The Quiet fixture is intentionally the same nested 18 as Ledger.
+extension SidebarLedgerChecks {
+    static func runLayouts() throws -> String {
+        QuickHideChecks.acceptFirstMouseEverywhere()
+        var reports: [String] = []
+        for layout in SidebarLayout.allCases {
+            let name = "array.sidebar-layouts.\(UUID().uuidString)"
+            let defaults = QAIsolatedDefaults(isolatedSuiteName: name)!
+            defer { defaults.removePersistentDomain(forName: name) }
+            defaults.set(layout.rawValue, forKey: SidebarLayout.defaultsKey)
+            let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 494, height: 2600), indicatorDefaults: defaults)
+            inbox.clock = { now }
+            inbox.foldsUntouchedGroups = false
+            inbox.prefersReducedMotion = { true }
+            inbox.hoverCardEnabled = false
+            inbox.onIncidentAction = { _ in }
+            var hostActions = 0
+            inbox.onRowAction = { _, _ in hostActions += 1 }
+            inbox.wiredRowActions = AppDelegate.wiredInboxRowActions
+            let window = SidebarOwnershipChecks.KeyWindow(contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = inbox
+            window.orderFrontOffscreenForChecks()
+            window.makeKey()
+            defer { window.orderOut(nil) }
+            inbox.setScope(.all)
+            inbox.restoreParentFolds([uuid(lead): true, uuid(7): true, uuid(2): true])
+            inbox.reload(rows: rows())
+            inbox.layoutForQA()
+
+            func expect(_ value: Bool, _ message: String) throws {
+                if !value { throw Failure(description: "\(layout.title): \(message)") }
+            }
+            func liveIDs() -> Set<UUID> {
+                Set(inbox.itemsForQA.compactMap(\.agentRow).filter { $0.lifecycle == .active }.map(\.id))
+            }
+            func familyCounts() throws -> (shown: Int, folded: Int) {
+                guard let start = inbox.itemsForQA.firstIndex(where: { $0.agentRow?.id == uuid(lead) }),
+                      let card = inbox.cellForQA(atItem: start) as? AgentInbox96CellView else {
+                    throw Failure(description: "\(layout.title): no rendered lead")
+                }
+                let ax = card.accessibilityHelp() ?? ""
+                try expect(ax.contains("18 helpers · 12 paused · 1 failed · 2 stopped · 3 done"), "rendered AX partition: '\(ax)'")
+                try expect(card.visibleTextForQA.contains("18"), "rendered disclosure does not count 18: \(card.visibleTextForQA)")
+                var shown = 0, folded = 0
+                for index in (start + 1)..<inbox.itemsForQA.count {
+                    switch inbox.itemsForQA[index] {
+                    case .agent(let row):
+                        if row.depth == 0 { return (shown, folded) }
+                        try expect(inbox.cellForQA(atItem: index) is AgentInbox96CellView, "helper is not a normal rendered row")
+                        shown += 1
+                    case .fanoutRemainder:
+                        guard let line = inbox.cellForQA(atItem: index) as? AgentInboxRemainderView,
+                              let number = Int(line.titleForQA.prefix(while: { $0.isNumber })) else {
+                            throw Failure(description: "\(layout.title): no rendered fold number")
+                        }
+                        folded += number
+                    default: return (shown, folded)
+                    }
+                }
+                return (shown, folded)
+            }
+            // Open and re-fold the actual remainder control before reading the
+            // drawn rows and AX; this is the production event/render path.
+            for _ in 0..<2 {
+                guard let index = inbox.itemsForQA.firstIndex(where: {
+                    if case .fanoutRemainder(let r) = $0 { return r.parentId == uuid(lead) }; return false
+                }), let line = inbox.cellForQA(atItem: index) as? AgentInboxRemainderView else {
+                    throw Failure(description: "\(layout.title): missing lead fold control")
+                }
+                inbox.scrollItemToVisibleForQA(index)
+                inbox.layoutForQA()
+                try press(line.buttonForQA, in: window, "fold")
+                inbox.layoutForQA()
+            }
+            let count = try familyCounts()
+            try expect(count.shown + count.folded == 18, "rendered \(count.shown) shown + \(count.folded) folded != 18")
+
+            // Settings' real ChoiceButton -> defaults -> event -> existing list.
+            let model = SettingsModel(defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }), initialPaneID: "appearance")
+            let settings = SettingsFixtureWindow(model: model, size: NSSize(width: 1100, height: 1100), appearance: NSAppearance(named: .darkAqua))
+            defer { settings.tearDown() }
+            settings.show(paneID: "appearance")
+            if let entry = model.entries().first(where: { $0.field?.key == SidebarLayout.defaultsKey }) {
+                model.reveal(entry)
+                settings.settle()
+            }
+            let renderCount = inbox.sidebarLayoutRenderCountForQA
+            for next in [layout == .ledger ? SidebarLayout.quietInbox : .ledger, layout] {
+                guard let button = settings.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Layout" }) else {
+                    throw Failure(description: "Settings has no Layout choice")
+                }
+                button.presentsOffscreenForQA = true
+                button.scrollToVisible(button.bounds.insetBy(dx: 0, dy: -80))
+                settings.settle()
+                try QuickHideChecks.click(button)
+                settings.settle()
+                guard let option = button.qaPresentedList?.rowView(id: next.rawValue) else {
+                    throw Failure(description: "Layout choice has no \(next.title)")
+                }
+                button.qaPresentedPanel?.makeKey()
+                try QuickHideChecks.click(option)
+                settings.settle()
+                inbox.layoutForQA()
+                try expect(inbox.sidebarLayout == next, "real Settings choice did not reach the live list")
+                let hasLedger = inbox.itemsForQA.contains { if case .sectionLabel(let s) = $0 { return s.kind == .forYou }; return false }
+                try expect(hasLedger == (next == .ledger), "real Settings choice left the previous rendered head")
+            }
+            try expect(inbox.sidebarLayoutRenderCountForQA == renderCount + 2, "Layout did not re-render twice")
+
+            // Clear and its actual Undo button; blockers refuse, marks reload,
+            // and a newly working helper releases its cleared family's mark.
+            window.makeKey()
+            inbox.scrollToTopForQA()
+            inbox.layoutForQA()
+            guard let index = inbox.itemsForQA.firstIndex(where: {
+                if case .sectionLabel(let s) = $0 { return s.clearCount > 0 }; return false
+            }), let heading = inbox.cellForQA(atItem: index) as? SidebarSectionLabelView else {
+                throw Failure(description: "\(layout.title): missing Clear control")
+            }
+            let before = liveIDs()
+            try press(heading.clearButton, in: window, "Clear")
+            inbox.layoutForQA()
+            try expect(hostActions == 0, "Clear called a host lifecycle action")
+            try expect(!liveIDs().contains(uuid(30)) && !liveIDs().contains(uuid(19)), "Clear left clearable rows drawn")
+            try expect(liveIDs().contains(uuid(32)) && liveIDs().contains(uuid(35)), "Clear hid a blocker")
+            let loaded = AgentInboxView(frame: inbox.frame, indicatorDefaults: defaults)
+            loaded.clock = { now }
+            loaded.setScope(.all)
+            loaded.reload(rows: rows())
+            try expect(loaded.clearMarks == inbox.clearMarks && loaded.clearMarks[uuid(30)] != nil, "Clear marks did not survive store reload")
+            let activeChild = rows().map { r in
+                r.id == uuid(31) ? row(31, "Canvas review helper", parent: 30, state: .working, outcome: nil) : r
+            }
+            inbox.reload(rows: activeChild)
+            inbox.layoutForQA()
+            try expect(liveIDs().contains(uuid(30)) && inbox.clearMarks[uuid(30)] == nil, "helper activity left its cleared family in History")
+            try press(inbox.undoButtonForQA, in: window, "Undo")
+            inbox.layoutForQA()
+            try expect(liveIDs().isSuperset(of: before), "Undo did not restore the live rows")
+            reports.append("\(layout.title): 18 = 12 paused + 1 failed + 2 stopped + 3 done = \(count.shown) shown + \(count.folded) folded from rendered rows/AX; fold, Settings Layout, Clear and Undo used NSApp.sendEvent; blockers stayed, marks reloaded, helper activity restored its family")
+        }
+        return "SidebarLayoutsChecks passed:\n" + reports.joined(separator: "\n")
     }
 }
 

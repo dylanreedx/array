@@ -2421,6 +2421,7 @@ run_app_check .build/debug/Array --sidebar-fold-expand-check
 # returning on Undo and after a reload, a live layout switch, tile-less helpers
 # drawn like their siblings.
 run_app_check .build/debug/Array --sidebar-ledger-check
+run_app_check .build/debug/Array --sidebar-layouts-check
 # Sidebar round: Clear is sidebar-only. Through the real app, Clear leaves
 # every tile on the canvas and settles nothing, and Switch & resume opens
 # Settings > Agents.

@@ -894,6 +894,18 @@ enum ContinuumApp {
         }
         // Sidebar round: the Ledger layout's counts, causes, Clear/Undo, layout
         // switch and tile-less rows, through real events on the production list.
+        if CommandLine.arguments.contains("--sidebar-layouts-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarLedgerChecks.runLayouts())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // Sidebar round: stills of a COPIED store, both layouts and appearances.
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-real-stills-check"),
            CommandLine.arguments.count > index + 2 {
