@@ -5042,7 +5042,7 @@ final class AgentSupervisor {
         }
         runners[id]?.stop()
         runners[id] = nil
-        settleHelperReceipts(lead: id, stopped: true)
+        if let run = runnerGenerationTokens[id] { settleHelperReceipts(lead: id, run: run, stopped: true) }
         chooserChildFinished(id)
         if let task = chooserRequests[id] {
             chooserRequestEnded(id, request: task.id)
@@ -8147,6 +8147,11 @@ final class AgentSupervisor {
     /// successfully (confirmed, with its end), or it failed or was stopped.
     private var helperReceiptConfirmedAt: [AgentID: Date] = [:]
     private(set) var helperReceiptFailed: Set<AgentID> = []
+    /// The lead run each wake item was sent to, or handed to as a steer. A
+    /// settle in any other run (a replacement consuming a stale fallback) is
+    /// not a receipt, and only the owning run's end decides one.
+    private var helperReceiptOwner: [UUID: RunnerGenerationToken] = [:]
+    private var helperReceiptRun: [AgentID: RunnerGenerationToken] = [:]
 
     /// When the lead's run that took this helper's latest received result
     /// ended successfully; nil until then.
@@ -8155,11 +8160,11 @@ final class AgentSupervisor {
     /// The lead's run ended: decide every receipt it took. The run returns only
     /// after the prompt's own turn (a buffered unsolicited turn comes first), so
     /// its outcome is the one that carried the result.
-    private func settleHelperReceipts(lead: AgentID, stopped: Bool = false) {
+    private func settleHelperReceipts(lead: AgentID, run: RunnerGenerationToken, stopped: Bool = false) {
         let ended = records[lead]?.latestTerminalEvent
         for (helper, received) in helperResultDeliveredAt
         where records[helper]?.parentAgentID == lead && helperReceiptConfirmedAt[helper] == nil
-            && !helperReceiptFailed.contains(helper) {
+            && !helperReceiptFailed.contains(helper) && helperReceiptRun[helper] == run {
             if !stopped, let ended, ended.outcome == .succeeded, ended.endedAt >= received {
                 helperReceiptConfirmedAt[helper] = ended.endedAt
             } else {
@@ -8169,11 +8174,19 @@ final class AgentSupervisor {
     }
 
     private func noteHelperResultsReceived(queueItem: UUID, by lead: AgentID) {
+        let owner = helperReceiptOwner.removeValue(forKey: queueItem)
+        guard let run = runnerGenerationTokens[lead], owner == run else {
+            // Settled outside the run it was given to: drop it; a requeued
+            // item is re-owned when it is sent again.
+            if owner != nil { helperReceiptsAwaiting[queueItem] = nil }
+            return
+        }
         for (helper, turn) in helperReceiptsAwaiting.removeValue(forKey: queueItem) ?? [] {
             guard records[helper]?.parentAgentID == lead else { continue }
             guard let generation = helperCompletionGeneration[turn] else { continue }
             helperResultReceivedGeneration[helper] = generation
             helperResultDeliveredAt[helper] = helperCompletionNow()
+            helperReceiptRun[helper] = run
             helperReceiptConfirmedAt[helper] = nil
             helperReceiptFailed.remove(helper)
             onHelperResultDelivered?(helper)
@@ -12067,7 +12080,10 @@ final class AgentSupervisor {
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
-            for member in [message] + merged { self.helperWakeSenders[member.id] = nil }
+            for member in [message] + merged {
+                self.helperWakeSenders[member.id] = nil
+                self.helperReceiptOwner[member.id] = self.runnerGenerationTokens[id]
+            }
             // Helper fallback remains in durable custody until the runner starts
             // its next turn. Other queue entries keep their existing echo path.
             if !message.helperCompletion { self.echoPrompt(prompt, for: id) }
@@ -12504,6 +12520,7 @@ final class AgentSupervisor {
                 }
                 self.helperWaitSteerTools[id, default: []].formUnion(self.openToolItems[id] ?? [])
                 self.deliveringSteers[id, default: []].append((message.id, message, prompt))
+                self.helperReceiptOwner[message.id] = self.runnerGenerationTokens[id]
                 self.notifyTurnCapabilitiesChanged(id)
                 let accepted = await Task.detached(priority: .userInitiated) {
                     (try? runner.steer(prompt, id: message.id)) != nil
@@ -13391,7 +13408,7 @@ final class AgentSupervisor {
         // finishing must not have its runner cleared by the old one's completion.
         if runnerGenerationTokens[id] == generation, runners[id] === runner {
             runners[id] = nil
-            settleHelperReceipts(lead: id)
+            settleHelperReceipts(lead: id, run: generation)
             markOwnClaudeTurn(for: id)
             interruptingAgents.remove(id)
             openToolItems[id] = nil
