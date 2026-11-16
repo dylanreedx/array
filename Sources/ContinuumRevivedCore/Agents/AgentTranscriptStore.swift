@@ -1,4 +1,5 @@
 import ContinuumRevivedAgentContent
+import CryptoKit
 import Foundation
 
 public enum AgentTranscriptStoreError: Error, Equatable, Sendable {
@@ -44,6 +45,19 @@ public struct AgentTranscriptJournal: Codable, Equatable, Sendable {
         self.baseVersion = baseVersion
         self.mutations = mutations
     }
+}
+
+/// Proof of the exact primary files read during a guarded preflight. Unlike a
+/// save generation this also identifies archives written before generations
+/// existed, and does not require changing those archives merely to inspect them.
+public struct AgentTranscriptArchiveProof: Equatable, Sendable {
+    fileprivate let snapshotDigest: Data
+    fileprivate let journalDigest: Data
+}
+
+public enum AgentTranscriptArchivePreflight: Sendable {
+    case absent
+    case present(document: AgentDocument, proof: AgentTranscriptArchiveProof)
 }
 
 /// Durable semantic transcript storage. The snapshot and journal are written
@@ -107,13 +121,43 @@ public actor AgentTranscriptStore {
     /// and must never replace a richer or unreadable canonical archive.
     public func saveGuardedSnapshot(
         agentID: AgentID, sessionID: String, document: AgentDocument,
-        expectedVersion: UInt64?, expectedGeneration: UUID?
+        expectedVersion: UInt64?, expectedGeneration: UUID?,
+        expectedArchiveProof: AgentTranscriptArchiveProof? = nil,
+        protectedPrefixCount: Int? = nil
     ) throws -> UUID {
+        if let expectedArchiveProof {
+            guard expectedVersion == nil, expectedGeneration == nil,
+                  case let .present(prior, current) = try preflightGuardedArchive(agentID: agentID, sessionID: sessionID),
+                  current == expectedArchiveProof,
+                  protectedPrefixCount.map({ $0 >= 0 && $0 <= prior.entries.count }) ?? true,
+                  document.entries.count >= prior.entries.count,
+                  Array(document.entries.prefix(prior.entries.count)) == prior.entries else {
+                throw AgentTranscriptStoreError.unownedArchive
+            }
+            return try saveSnapshot(agentID: agentID, sessionID: sessionID, document: document)
+        }
         switch (expectedVersion, expectedGeneration) {
         case let (version?, generation?):
-            _ = try loadReleased(agentID: agentID, sessionID: sessionID,
-                                 expectedVersion: version, expectedGeneration: generation)
+            let prior = try loadReleased(agentID: agentID, sessionID: sessionID,
+                                         expectedVersion: version, expectedGeneration: generation)
+            // Compare at the same precision as the actual archive: JSONCodec
+            // round-trips dates to whole seconds, while the live model can
+            // retain subsecond dates (including dates inside block payloads).
+            let encoded = try JSONCodec.makeEncoder().encode(document)
+            let normalized = try JSONCodec.makeDecoder().decode(AgentDocument.self, from: encoded)
+            guard Self.preservesSavedEntries(prior, in: normalized) else {
+                throw AgentTranscriptStoreError.unownedArchive
+            }
+            if let count = protectedPrefixCount {
+                guard count >= 0, prior.entries.count >= count, document.entries.count >= count,
+                      prior.entries.prefix(count).elementsEqual(document.entries.prefix(count)) else {
+                    throw AgentTranscriptStoreError.unownedArchive
+                }
+            }
         case (nil, nil):
+            guard protectedPrefixCount == nil || protectedPrefixCount == 0 else {
+                throw AgentTranscriptStoreError.unownedArchive
+            }
             // Check the agent directory, not just the canonical session: an
             // older session directory may still be awaiting startup migration.
             let url = root.appendingPathComponent(agentID.rawValue.uuidString, isDirectory: true)
@@ -131,6 +175,118 @@ public actor AgentTranscriptStore {
             throw AgentTranscriptStoreError.unownedArchive
         }
         return try saveSnapshot(agentID: agentID, sessionID: sessionID, document: document)
+    }
+
+    /// The supervisor's canonical mutations append entries. Open entries may
+    /// be reparsed as a stream advances; finished entries may only gain the
+    /// enclosing turn's timing. Everything already written stays in order.
+    private static func preservesSavedEntries(_ prior: AgentDocument, in next: AgentDocument) -> Bool {
+        guard next.version >= prior.version, next.entries.count >= prior.entries.count else { return false }
+        for (old, new) in zip(prior.entries, next.entries) {
+            guard old.id == new.id, old.role == new.role, old.provenance == new.provenance,
+                  old.createdAt == new.createdAt, new.revision >= old.revision else { return false }
+            if old.lifecycle == .finished {
+                guard new.lifecycle == .finished,
+                      old.turnTiming == nil || old.turnTiming == new.turnTiming else { return false }
+                var normalized = new
+                normalized.revision = old.revision
+                if old.turnTiming == nil { normalized.turnTiming = nil }
+                guard normalized == old else { return false }
+            }
+        }
+        return true
+    }
+
+    /// Classify the canonical archive without backup fallback. A prior archive
+    /// may be extended only if both primary files decode and the *entire*
+    /// journal applies. A corrupt suffix or a legacy directory awaiting
+    /// migration is ambiguous and must not be converted into a shorter save.
+    public func preflightGuardedArchive(agentID: AgentID, sessionID: String) throws -> AgentTranscriptArchivePreflight {
+        let agentDirectory = root.appendingPathComponent(agentID.rawValue.uuidString, isDirectory: true)
+        let names: [String]
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: agentDirectory.path)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain
+            && error.code == NSFileReadNoSuchFileError {
+            return .absent
+        }
+        if names.isEmpty { return .absent }
+        let canonical = Self.sessionKey(sessionID)
+        guard names.contains(canonical), names.allSatisfy({ $0 == canonical || $0.hasPrefix("quarantine-") }) else {
+            throw AgentTranscriptStoreError.unownedArchive
+        }
+        let snapshot: Data
+        let journalData: Data
+        do {
+            snapshot = try Data(contentsOf: snapshotURL(agentID: agentID, sessionID: sessionID))
+            journalData = try Data(contentsOf: journalURL(agentID: agentID, sessionID: sessionID))
+        } catch {
+            throw AgentTranscriptStoreError.incompleteReleasedSnapshot
+        }
+        let decoder = JSONCodec.makeDecoder()
+        guard let archive = try? decoder.decode(AgentTranscriptArchive.self, from: snapshot),
+              let journal = try? decoder.decode(AgentTranscriptJournal.self, from: journalData),
+              archive.schemaVersion == AgentTranscriptArchive.currentSchemaVersion,
+              journal.schemaVersion == AgentTranscriptJournal.currentSchemaVersion else {
+            throw AgentTranscriptStoreError.incompleteReleasedSnapshot
+        }
+        guard archive.agentID == agentID, archive.sessionID == sessionID,
+              journal.agentID == agentID, journal.sessionID == sessionID else {
+            throw AgentTranscriptStoreError.identityMismatch
+        }
+        try archive.document.validateIdentityInvariants()
+        let document: AgentDocument
+        if journal.baseVersion == archive.document.version {
+            var reducer = AgentDocumentReducer(document: archive.document)
+            for mutation in journal.mutations { _ = try reducer.apply(mutation) }
+            try reducer.document.validateIdentityInvariants()
+            document = reducer.document
+        } else {
+            // A compaction writes the new snapshot before resetting its old
+            // journal. A version mismatch alone does not establish that this
+            // happened. Prove it by replaying the complete primary journal
+            // from every valid same-version snapshot backup; the result must
+            // match the primary snapshot exactly. Never substitute a backup for
+            // an unreadable primary, or accept a partially replayed journal.
+            guard journal.baseVersion < archive.document.version else {
+                throw AgentTranscriptStoreError.incompleteReleasedSnapshot
+            }
+            let snapshotURL = snapshotURL(agentID: agentID, sessionID: sessionID)
+            let backupDir = snapshotURL.deletingLastPathComponent().appendingPathComponent("backups", isDirectory: true)
+            let prefix = AtomicWriter.backupNamePrefix(forCanonicalIdentityPath: AtomicWriter.canonicalIdentityPath(for: snapshotURL))
+            let names: [String]
+            do { names = try FileManager.default.contentsOfDirectory(atPath: backupDir.path) }
+            catch { throw AgentTranscriptStoreError.incompleteReleasedSnapshot }
+            var base: AgentDocument?
+            for name in names where name.hasPrefix(prefix) {
+                guard let bytes = try? Data(contentsOf: backupDir.appendingPathComponent(name)),
+                      let candidate = try? decoder.decode(AgentTranscriptArchive.self, from: bytes),
+                      candidate.schemaVersion == AgentTranscriptArchive.currentSchemaVersion,
+                      candidate.agentID == agentID, candidate.sessionID == sessionID else {
+                    throw AgentTranscriptStoreError.incompleteReleasedSnapshot
+                }
+                guard candidate.document.version == journal.baseVersion else { continue }
+                try candidate.document.validateIdentityInvariants()
+                if let base, base != candidate.document {
+                    throw AgentTranscriptStoreError.incompleteReleasedSnapshot
+                }
+                base = candidate.document
+            }
+            guard let base else { throw AgentTranscriptStoreError.incompleteReleasedSnapshot }
+            var reducer = AgentDocumentReducer(document: base)
+            for mutation in journal.mutations { _ = try reducer.apply(mutation) }
+            try reducer.document.validateIdentityInvariants()
+            guard reducer.document == archive.document else {
+                throw AgentTranscriptStoreError.incompleteReleasedSnapshot
+            }
+            document = archive.document
+        }
+        // A resumed model does not reconstruct prior active streaming state.
+        // Treat every recovered entry (including an interrupted open entry) as
+        // frozen history; the first guarded save requires this exact prefix.
+        let proof = AgentTranscriptArchiveProof(snapshotDigest: Data(SHA256.hash(data: snapshot)),
+                                                journalDigest: Data(SHA256.hash(data: journalData)))
+        return .present(document: document, proof: proof)
     }
 
     /// Append one semantic mutation after validating it against recovered truth.

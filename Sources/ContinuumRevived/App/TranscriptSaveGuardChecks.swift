@@ -105,8 +105,9 @@ enum TranscriptSaveGuardChecks {
             throw Failure(description: "blocked transcript retried or was released")
         }
 
-        // A readable, richer archive is also unowned after restart. A bounded
-        // restore and a new headless turn must not replace that archive.
+        // Resume a readable, richer archive after restart. A bounded provider
+        // restore stays local while the canonical archive retains its prefix
+        // and gains the new turn exactly once.
         try originalBytes.write(to: snapshot)
         var restoredWarnings: [String] = []
         let third = supervisor { restoredWarnings.append($0) }
@@ -114,10 +115,99 @@ enum TranscriptSaveGuardChecks {
                                                            restoredMessageCount: 1, omittedEarlier: true), for: id)
         turn(third, "NEW_TURN_AFTER_RESTART")
         await third.qaSaveTranscript(for: id)
-        guard third.qaTranscriptPersistenceIsBlocked(id), !restoredWarnings.isEmpty,
-              try Data(contentsOf: snapshot) == originalBytes,
-              try await transcripts.load(agentID: id, sessionID: session) == original else {
-            throw Failure(description: "bounded restore plus new turn replaced existing canonical history")
+        guard let saved = try await transcripts.load(agentID: id, sessionID: session) else {
+            throw Failure(description: "bounded restore plus new turn did not save a canonical archive")
+        }
+        func plain(_ document: AgentDocument?) -> String {
+            (document?.entries ?? []).map { AgentTranscriptCopyController.plainText(for: $0.blocks) }.joined(separator: "\n")
+        }
+        let savedText = plain(saved)
+        let localText = plain(third.transcriptDocument(for: id))
+        guard !third.qaTranscriptPersistenceIsBlocked(id), restoredWarnings.isEmpty,
+              Array(saved.entries.prefix(original.entries.count)).map(\.id) == original.entries.map(\.id),
+              savedText.contains("ORIGINAL_DISK_HISTORY"),
+              savedText.components(separatedBy: "NEW_TURN_AFTER_RESTART").count - 1 == 1,
+              !savedText.contains("BOUNDED_RESTORE"),
+              localText.contains("BOUNDED_RESTORE"),
+              localText.components(separatedBy: "NEW_TURN_AFTER_RESTART").count - 1 == 1 else {
+            throw Failure(description: "restart failed to preserve canonical history, save the new turn, or keep the bounded restore local")
+        }
+
+        // A true older archive has no lifecycle field. Decoding it defaults to
+        // an open entry; that historical prefix must remain frozen while an
+        // unrelated new turn is appended after a restart.
+        let oldID = AgentID(rawValue: UUID())
+        try agents.upsert(AgentRecord(id: oldID, displayName: "Old archive", harness: .pi,
+                                     model: AgentCatalogQAFixture.pi[0], thinking: "none", cwd: root.path,
+                                     createdAt: Date(), lastActivityAt: Date()))
+        let oldSession = AgentTranscriptStore.canonicalSessionID(for: oldID)
+        var oldModel = ManagedAgentTranscriptModel(threadId: AgentSupervisor.threadId(for: oldID))
+        oldModel.appendUserPrompt("MISSING_LIFECYCLE_OLD_HISTORY")
+        try await transcripts.saveSnapshot(agentID: oldID, sessionID: oldSession, document: oldModel.document)
+        let oldRoot = transcriptRoot.appendingPathComponent(oldID.rawValue.uuidString)
+        guard let oldEnumerator = FileManager.default.enumerator(at: oldRoot, includingPropertiesForKeys: nil),
+              let oldSnapshot = oldEnumerator.allObjects.compactMap({ $0 as? URL }).first(where: { $0.lastPathComponent == "snapshot.json" }) else {
+            throw Failure(description: "old archive fixture has no snapshot")
+        }
+        guard var oldJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: oldSnapshot)) as? [String: Any],
+              var oldDocumentJSON = oldJSON["document"] as? [String: Any],
+              var oldEntriesJSON = oldDocumentJSON["entries"] as? [[String: Any]], !oldEntriesJSON.isEmpty else {
+            throw Failure(description: "old archive fixture has no document entries")
+        }
+        for index in oldEntriesJSON.indices { oldEntriesJSON[index].removeValue(forKey: "lifecycle") }
+        oldDocumentJSON["entries"] = oldEntriesJSON
+        oldJSON["document"] = oldDocumentJSON
+        oldJSON.removeValue(forKey: "saveGeneration")
+        let oldBytes = try JSONSerialization.data(withJSONObject: oldJSON, options: [.sortedKeys])
+        try oldBytes.write(to: oldSnapshot)
+        let oldArchive = try JSONCodec.makeDecoder().decode(AgentTranscriptArchive.self, from: oldBytes)
+        guard let oldEntry = oldArchive.document.entries.first, case .open = oldEntry.lifecycle else {
+            throw Failure(description: "missing-lifecycle fixture did not decode with an open entry")
+        }
+        let oldSupervisor = supervisor()
+        turn(oldSupervisor, "MISSING_LIFECYCLE_NEW_TURN", agent: oldID)
+        await oldSupervisor.qaSaveTranscript(for: oldID)
+        guard let oldSaved = try await transcripts.load(agentID: oldID, sessionID: oldSession),
+              !oldSupervisor.qaTranscriptPersistenceIsBlocked(oldID),
+              Array(oldSaved.entries.prefix(oldArchive.document.entries.count)) == oldArchive.document.entries,
+              plain(oldSaved).contains("MISSING_LIFECYCLE_OLD_HISTORY"),
+              plain(oldSaved).components(separatedBy: "MISSING_LIFECYCLE_NEW_TURN").count - 1 == 1 else {
+            throw Failure(description: "missing-lifecycle archive did not retain its exact old entries and append the new turn")
+        }
+
+        // A complete-looking snapshot whose journal names another base version
+        // is ambiguous. Do not treat its readable snapshot as proof that an
+        // attempted new turn may replace either primary file.
+        let mismatchID = AgentID(rawValue: UUID())
+        try agents.upsert(AgentRecord(id: mismatchID, displayName: "Mismatch", harness: .pi,
+                                     model: AgentCatalogQAFixture.pi[0], thinking: "none", cwd: root.path,
+                                     createdAt: Date(), lastActivityAt: Date()))
+        let mismatchSession = AgentTranscriptStore.canonicalSessionID(for: mismatchID)
+        var mismatchModel = ManagedAgentTranscriptModel(threadId: AgentSupervisor.threadId(for: mismatchID))
+        mismatchModel.appendUserPrompt("MISMATCH_OLD_HISTORY")
+        try await transcripts.saveSnapshot(agentID: mismatchID, sessionID: mismatchSession, document: mismatchModel.document)
+        let mismatchRoot = transcriptRoot.appendingPathComponent(mismatchID.rawValue.uuidString)
+        guard let mismatchEnumerator = FileManager.default.enumerator(at: mismatchRoot, includingPropertiesForKeys: nil) else {
+            throw Failure(description: "mismatched archive fixture is missing")
+        }
+        let mismatchFiles = mismatchEnumerator.allObjects.compactMap { $0 as? URL }
+        guard let mismatchSnapshot = mismatchFiles.first(where: { $0.lastPathComponent == "snapshot.json" }),
+              let mismatchJournal = mismatchFiles.first(where: { $0.lastPathComponent == "journal.json" }) else {
+            throw Failure(description: "mismatched archive fixture has no primary files")
+        }
+        var journal = try JSONCodec.makeDecoder().decode(AgentTranscriptJournal.self, from: Data(contentsOf: mismatchJournal))
+        journal.baseVersion += 1
+        try JSONCodec.makeEncoder().encode(journal).write(to: mismatchJournal)
+        let mismatchSnapshotBytes = try Data(contentsOf: mismatchSnapshot)
+        let mismatchJournalBytes = try Data(contentsOf: mismatchJournal)
+        var mismatchWarnings: [String] = []
+        let mismatchSupervisor = supervisor { mismatchWarnings.append($0) }
+        turn(mismatchSupervisor, "MISMATCH_NEW_TURN", agent: mismatchID)
+        await mismatchSupervisor.qaSaveTranscript(for: mismatchID)
+        guard mismatchSupervisor.qaTranscriptPersistenceIsBlocked(mismatchID), !mismatchWarnings.isEmpty,
+              try Data(contentsOf: mismatchSnapshot) == mismatchSnapshotBytes,
+              try Data(contentsOf: mismatchJournal) == mismatchJournalBytes else {
+            throw Failure(description: "mismatched snapshot and journal were overwritten or did not warn")
         }
 
         // Startup migration can still be pending when the first event arrives.

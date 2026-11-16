@@ -64,12 +64,19 @@ enum RestoreOnlyTranscriptRetentionChecks {
             }
             try? await Task.sleep(for: .milliseconds(50))
         }
-        guard let oldPromptRange = savedText.range(of: oldPrompt),
-              let oldReplyRange = savedText.range(of: oldReply),
-              let newPromptRange = savedText.range(of: newPrompt),
-              oldPromptRange.lowerBound < oldReplyRange.lowerBound,
-              oldReplyRange.lowerBound < newPromptRange.lowerBound else {
-            throw Failure(description: "headless prompt after restore-only detach did not save the prior prompt, reply, and new prompt in order: \(savedText)")
+        guard savedText.contains(newPrompt), !savedText.contains(oldPrompt), !savedText.contains(oldReply),
+              !supervisor.qaTranscriptPersistenceIsBlocked(id) else {
+            throw Failure(description: "canonical archive did not save the new prompt separately from provider-only history: \(savedText)")
+        }
+
+        let stopDeadline = ContinuousClock.now + .seconds(20)
+        while supervisor.isRunning(id), ContinuousClock.now < stopDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        guard !supervisor.isRunning(id) else { throw Failure(description: "restore-only headless turn did not finish") }
+        supervisor.qaReleaseTranscriptIfDormant(id)
+        guard !supervisor.isTranscriptReleased(id), supervisor.rehydratedTranscript(for: id) == restored else {
+            throw Failure(description: "idle release discarded provider-only history after creating a canonical archive")
         }
 
         let reopened = makeTile()
@@ -82,7 +89,10 @@ enum RestoreOnlyTranscriptRetentionChecks {
             try? await Task.sleep(for: .milliseconds(50))
         }
         let text = reopened.qaTranscriptText
-        guard text.contains(oldPrompt), text.contains(oldReply), text.contains(newPrompt) else {
+        guard let oldPromptRange = text.range(of: oldPrompt), let oldReplyRange = text.range(of: oldReply),
+              let newPromptRange = text.range(of: newPrompt),
+              oldPromptRange.lowerBound < oldReplyRange.lowerBound,
+              oldReplyRange.lowerBound < newPromptRange.lowerBound else {
             throw Failure(description: "reopened tile omitted history after restore-only detach and a headless prompt: \(text)")
         }
     }
@@ -104,7 +114,7 @@ enum RestoreOnlyTranscriptRetentionChecks {
         existing.appendUserPrompt("ARRAY_ONLY_EXISTING_HISTORY")
         try await transcriptStore.saveSnapshot(agentID: id, sessionID: sessionID, document: existing.document)
         let original = try await transcriptStore.load(agentID: id, sessionID: sessionID)
-        guard original != nil else { throw Failure(description: "existing-archive fixture was empty") }
+        guard let original, !original.entries.isEmpty else { throw Failure(description: "existing-archive fixture was empty") }
         let existingRoot = fixtureRoot.appendingPathComponent("transcripts").appendingPathComponent(id.rawValue.uuidString)
         guard let existingEnumerator = FileManager.default.enumerator(at: existingRoot, includingPropertiesForKeys: nil) else {
             throw Failure(description: "could not find the existing-archive fixture")
@@ -147,10 +157,15 @@ enum RestoreOnlyTranscriptRetentionChecks {
                 throw Failure(description: "idle restore overwrote an unreadable Array archive")
             }
         }
+        for (url, bytes) in zip(existingFiles, existingBytes) {
+            guard try Data(contentsOf: url) == bytes else {
+                throw Failure(description: "idle restore changed the existing Array archive")
+            }
+        }
 
-        // A later headless write creates a projection from the bounded provider
-        // restore. Wait for the save attempt to finish: neither a richer Array
-        // archive nor an unreadable one proves this projection is safe to save.
+        // A later headless write extends the confirmed archive; it must not
+        // replace its existing entries or publish the provider-only restore.
+        // An unreadable archive instead refuses the save and stays resident.
         AgentModelCatalog.shared.resetForQA(options: AgentCatalogQAFixture.pi)
         for agent in [id, corruptID] {
             let prompt = "RESTORE_ONLY_HEADLESS_\(agent.rawValue.uuidString)"
@@ -162,8 +177,32 @@ enum RestoreOnlyTranscriptRetentionChecks {
             while supervisor.isRunning(agent), ContinuousClock.now < stopDeadline {
                 try? await Task.sleep(for: .milliseconds(20))
             }
-            guard !supervisor.isRunning(agent), supervisor.qaTranscriptPersistenceIsBlocked(agent) else {
-                throw Failure(description: "headless write did not finish and refuse its unconfirmed archive")
+            guard !supervisor.isRunning(agent) else {
+                throw Failure(description: "restore-only headless turn did not finish")
+            }
+            if agent == corruptID {
+                guard supervisor.qaTranscriptPersistenceIsBlocked(agent) else {
+                    throw Failure(description: "unreadable archive did not refuse the headless save")
+                }
+            } else {
+                let deadline = ContinuousClock.now + .seconds(20)
+                var saved: AgentDocument?
+                while ContinuousClock.now < deadline {
+                    saved = try await transcriptStore.load(agentID: id, sessionID: sessionID)
+                    let text = (saved?.entries ?? []).map { AgentTranscriptCopyController.plainText(for: $0.blocks) }.joined(separator: "\n")
+                    if text.contains(prompt) { break }
+                    try? await Task.sleep(for: .milliseconds(20))
+                }
+                guard let saved, !supervisor.qaTranscriptPersistenceIsBlocked(agent),
+                      saved.entries.count >= original.entries.count,
+                      Array(saved.entries.prefix(original.entries.count)) == original.entries else {
+                    throw Failure(description: "headless save replaced or refused the existing canonical history")
+                }
+                let text = saved.entries.map { AgentTranscriptCopyController.plainText(for: $0.blocks) }.joined(separator: "\n")
+                guard text.contains("ARRAY_ONLY_EXISTING_HISTORY"), text.contains(prompt),
+                      !text.contains("BOUNDED_PROVIDER_RESTORE") else {
+                    throw Failure(description: "headless save omitted canonical or new history or included provider-only history: \(text)")
+                }
             }
             supervisor.qaReleaseTranscriptIfDormant(agent)
             guard !supervisor.isTranscriptReleased(agent), supervisor.rehydratedTranscript(for: agent) == restored else {
@@ -180,11 +219,6 @@ enum RestoreOnlyTranscriptRetentionChecks {
             tile.detach()
             guard text.contains("BOUNDED_PROVIDER_RESTORE"), text.contains(prompt) else {
                 throw Failure(description: "reopened tile omitted the provider restore or headless prompt: \(text)")
-            }
-        }
-        for (url, bytes) in zip(existingFiles, existingBytes) {
-            guard try Data(contentsOf: url) == bytes else {
-                throw Failure(description: "headless write changed the existing Array archive")
             }
         }
         for url in corruptFiles {

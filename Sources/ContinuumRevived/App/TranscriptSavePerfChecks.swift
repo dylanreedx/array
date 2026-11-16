@@ -16,7 +16,7 @@ import ContinuumRevivedCore
 ///   main in the rest of each frame under 4 ms at p95. The delivery itself is
 ///   the supervisor's transcript ingest; it is reported, not budgeted here.
 /// - Positive control: once settled, each agent's `snapshot.json` (wall-clock
-///   `savedAt` blanked) and `journal.json` are byte-identical to saving the
+///   `savedAt` and `saveGeneration` blanked) and `journal.json` match saving the
 ///   supervisor's final document directly through the same store, which is
 ///   what the old path's last save wrote.
 @MainActor
@@ -42,10 +42,20 @@ enum TranscriptSavePerfChecks {
         String(format: "n=%d median=%.3fms p95=%.3fms max=%.3fms total=%.1fms", xs.count, percentile(xs, 50), percentile(xs, 95),
                xs.max() ?? 0, xs.reduce(0, +))
     }
-    private static func idleFrame(_ length: Duration = .milliseconds(16)) async -> Double {
+    private static func idleFrame(_ length: Duration = .milliseconds(16), attribution: TranscriptSaveAttribution? = nil) async -> Double {
+        let wallBefore = attribution == nil ? 0 : DispatchTime.now().uptimeNanoseconds
         let before = mainThreadCPU()
         try? await Task.sleep(for: length)
-        return ms(mainThreadCPU() - before)
+        let after = mainThreadCPU()
+        if let attribution {
+            func nanoseconds(_ duration: Duration) -> UInt64 {
+                let parts = duration.components
+                return UInt64(parts.seconds) * 1_000_000_000 + UInt64(parts.attoseconds / 1_000_000_000)
+            }
+            attribution.recordWindow(wallStart: wallBefore, wallEnd: DispatchTime.now().uptimeNanoseconds,
+                                     cpuStart: nanoseconds(before), cpuEnd: nanoseconds(after))
+        }
+        return ms(after - before)
     }
 
     private static let base = Date(timeIntervalSinceReferenceDate: 800_000_000)
@@ -67,17 +77,19 @@ enum TranscriptSavePerfChecks {
     static func run() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("transcript-save-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let transcripts = root.appendingPathComponent("transcripts", isDirectory: true)
         let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents"))
         let project = UUID(uuidString: "6F1C3A52-0B8D-4E41-9C71-2D5A6B7E8F00")!
         for id in agentIDs {
             try store.upsert(AgentRecord(id: id, displayName: "Saves", harness: .pi, model: AgentCatalogQAFixture.pi[0],
-                                         thinking: "none", cwd: "/tmp/transcript-save", projectId: project, createdAt: base, lastActivityAt: base))
+                                         thinking: "none", cwd: root.path, projectId: project, createdAt: base, lastActivityAt: base))
         }
         let transcriptStore = AgentTranscriptStore(root: transcripts)
         let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
                                          warn: { _ in }, nameTitlerCommand: { _ in nil }, transcriptStore: transcriptStore)
-        _ = supervisor.restore()
+        let restored = supervisor.restore()
+        try expect(Set(restored.restored) == Set(agentIDs), "fixture did not restore all three agents")
         var failures: [String] = []
 
         // A burst: 220 finished turns per agent at once.
@@ -88,14 +100,26 @@ enum TranscriptSavePerfChecks {
         // run-loop turn frees its own in the app, not in the next measured frame.
         autoreleasepool { for turn in 1...runs { for id in agentIDs { deliverTurn(supervisor, id, turn) } } }
         print(String(format: "METRIC transcript-save agents=3 turns=%d burst delivery %.1fms", runs, ms(mainThreadCPU() - burstStart)))
+        // Install after the synchronous burst but before its first yield, so
+        // queued preflight continuations cannot overtake the diagnostic hook.
+        let attribution: TranscriptSaveAttribution? = ProcessInfo.processInfo.environment["CONTINUUM_TRANSCRIPT_SAVE_ATTRIBUTION"] == "1"
+            ? TranscriptSaveAttribution() : nil
+        if let attribution {
+            supervisor.qaSaveAttribution = { phase, agentID, wallStart, wallEnd, cpuStart, cpuEnd in
+                attribution.recordPhase(phase, agentID: agentID, wallStart: wallStart, wallEnd: wallEnd,
+                                        cpuStart: cpuStart, cpuEnd: cpuEnd)
+            }
+        }
         var fallout: [Double] = []
         var quiet = 0
         let started = ContinuousClock.now
         while quiet < 5, ContinuousClock.now - started < .seconds(30) {
-            let spent = await idleFrame()
+            let spent = await idleFrame(attribution: attribution)
             fallout.append(spent)
             quiet = spent < 0.25 ? quiet + 1 : 0
         }
+        supervisor.qaSaveAttribution = nil
+        attribution?.printReport()
         print("METRIC transcript-save agents=3 turns=\(runs) after-burst per-frame \(stats(fallout))")
         if (fallout.max() ?? 0) >= frameBudgetMilliseconds {
             failures.append(String(format: "after a burst one frame spent %.3f ms of main-thread time, over the %.1f ms budget",
@@ -134,7 +158,7 @@ enum TranscriptSavePerfChecks {
 
     /// Each agent's saved files are byte-identical to saving the supervisor's
     /// final document directly, through the same store writer, into a
-    /// reference root: `snapshot.json` (its wall-clock `savedAt` blanked) and
+    /// reference root: `snapshot.json` (its `savedAt` and `saveGeneration` blanked) and
     /// `journal.json`. The old path's last save was exactly that direct save.
     private static func savedMatchesSupervisor(_ supervisor: AgentSupervisor, _ store: AgentTranscriptStore, _ root: URL,
                                                _ label: String) async throws {
@@ -151,7 +175,12 @@ enum TranscriptSavePerfChecks {
             for _ in 0..<200 {
                 files = try? savedFiles(root, id)
                 expected = try savedFiles(referenceRoot, id)
-                if let files, let expected, files == expected { break }
+                if let files, let expected,
+                   let actualSnapshot = try? canonical(files.snapshot),
+                   let expectedSnapshot = try? canonical(expected.snapshot),
+                   let actualJournal = try? canonical(files.journal),
+                   let expectedJournal = try? canonical(expected.journal),
+                   actualSnapshot == expectedSnapshot, actualJournal == expectedJournal { break }
                 try await Task.sleep(for: .milliseconds(25))
             }
             guard let files, let expected else { throw Failure(description: "\(label): no saved transcript") }
@@ -172,7 +201,7 @@ enum TranscriptSavePerfChecks {
         try JSONSerialization.data(withJSONObject: try JSONSerialization.jsonObject(with: data), options: [.sortedKeys])
     }
 
-    /// An agent's snapshot (with `savedAt` blanked) and journal, as bytes.
+    /// An agent's snapshot (with nondeterministic metadata blanked) and journal, as bytes.
     private static func savedFiles(_ root: URL, _ id: AgentID) throws -> (snapshot: Data, journal: Data) {
         let directory = root.appendingPathComponent(id.rawValue.uuidString, isDirectory: true)
         guard let session = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
@@ -187,6 +216,11 @@ enum TranscriptSavePerfChecks {
         while end < snapshot.endIndex, snapshot[end] != UInt8(ascii: ","), snapshot[end] != UInt8(ascii: "}") { end += 1 }
         var blanked = snapshot
         blanked.replaceSubrange(saved.upperBound..<end, with: Data("0".utf8))
+        guard let generation = blanked.range(of: Data("\"saveGeneration\":\"".utf8)),
+              let generationEnd = blanked[generation.upperBound...].firstIndex(of: UInt8(ascii: "\"")) else {
+            throw Failure(description: "the snapshot has no saveGeneration")
+        }
+        blanked.replaceSubrange(generation.upperBound..<generationEnd, with: Data("0".utf8))
         return (blanked, journal)
     }
 }

@@ -250,6 +250,146 @@ enum TranscriptRetentionChecks {
         } catch {
             failures.append("transcript save guard: \(error)")
         }
+        do {
+            try await TranscriptArchiveReconciliationChecks.run(root: root)
+        } catch {
+            failures.append("transcript archive reconciliation: \(error)")
+        }
+        do {
+            try await TranscriptArchiveMutationChecks.run(root: root)
+        } catch {
+            failures.append("transcript archive mutations: \(error)")
+        }
+        do {
+            try await TranscriptArchiveRaceChecks.run(root: root)
+        } catch {
+            failures.append("transcript archive race: \(error)")
+        }
+        do {
+            try await TranscriptDualCensusChecks.run(root: root)
+        } catch {
+            failures.append("dual transcript census: \(error)")
+        }
+        do {
+            try await TranscriptGuardMonotonicityChecks.run(root: root)
+        } catch {
+            failures.append("transcript guard monotonicity: \(error)")
+        }
+        do {
+            try await TranscriptOpenArchiveChecks.run(root: root)
+        } catch {
+            failures.append("open transcript archive: \(error)")
+        }
+        do {
+            try await TranscriptReloadPrefixChecks.run(root: root)
+        } catch {
+            failures.append("transcript reload prefix: \(error)")
+        }
+        do {
+            try await TranscriptArchiveFlushRejectionChecks.run(root: root)
+        } catch {
+            failures.append("transcript archive flush rejection: \(error)")
+        }
+        do {
+            try await TranscriptInterruptedCompactionChecks.run(root: root)
+        } catch {
+            failures.append("transcript interrupted compaction: \(error)")
+        }
+        do {
+            try await TranscriptFrozenItemMetadataChecks.run(root: root)
+        } catch {
+            failures.append("frozen transcript item metadata: \(error)")
+        }
+        do {
+            try await TranscriptHighWaterChecks.run(root: root)
+        } catch {
+            failures.append("transcript resume high water: \(error)")
+        }
+        do {
+            try await TranscriptResumedStreamingPerfChecks.run(root: root)
+        } catch {
+            failures.append("resumed transcript streaming performance: \(error)")
+        }
+        do {
+            try await TranscriptMigrationRaceChecks.run(root: root)
+        } catch {
+            failures.append("transcript migration race: \(error)")
+        }
+        do {
+            try await TranscriptPreflightRetryChecks.run(root: root)
+        } catch {
+            failures.append("transcript preflight retry: \(error)")
+        }
+        do {
+            try await TranscriptMigrationFailureRecoveryChecks.run(root: root)
+        } catch {
+            failures.append("transcript migration failure recovery: \(error)")
+        }
+        do {
+            try await TranscriptPreflightReplayChecks.run(root: root)
+        } catch {
+            failures.append("transcript preflight replay: \(error)")
+        }
+        do {
+            try await TranscriptReaperOwnershipChecks.run(root: root)
+        } catch {
+            failures.append("transcript reaper ownership: \(error)")
+        }
+        do {
+            try await TranscriptOffMainConstructionChecks.run(root: root)
+        } catch {
+            failures.append("transcript off-main construction: \(error)")
+        }
+        do {
+            try await TranscriptReloadBurstChecks.run(root: root)
+        } catch {
+            failures.append("transcript reload burst: \(error)")
+        }
+        do {
+            try await TranscriptReloadChunkChecks.run(root: root)
+        } catch {
+            failures.append("transcript reload chunks: \(error)")
+        }
+        do {
+            try await TranscriptReloadChunkRetryChecks.run(root: root)
+        } catch {
+            failures.append("transcript reload chunk retry: \(error)")
+        }
+        do {
+            try await TranscriptSharedReadReleaseChecks.run(root: root)
+        } catch {
+            failures.append("transcript shared read release: \(error)")
+        }
+        do {
+            try await TranscriptReloadReaperOwnershipChecks.run(root: root)
+        } catch {
+            failures.append("transcript reload reaper ownership: \(error)")
+        }
+        do {
+            try await TranscriptLateRestoreReloadChecks.run(root: root)
+        } catch {
+            failures.append("transcript late restore reload: \(error)")
+        }
+        do {
+            try await TranscriptContextRecoveryReadFailureChecks.run(root: root)
+        } catch {
+            failures.append("transcript context recovery read failure: \(error)")
+        }
+        do {
+            try await ProviderHistoryPinChecks.run(root: root)
+        } catch {
+            failures.append("provider history pin: \(error)")
+        }
+        do {
+            try await TranscriptLinkedRetentionChecks.run(root: root)
+        } catch {
+            failures.append("transcript linked retention: \(error)")
+        }
+        do {
+            try await ProviderHistoryAfterStatusChecks.run(root: root)
+        } catch {
+            failures.append("provider history after status: \(error)")
+        }
 
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "\nFAIL: ")) }
         print("PASS: idle agents with no view release their transcripts, reopen with the same transcript, and keep their history across a later turn")

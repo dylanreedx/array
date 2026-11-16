@@ -91,10 +91,30 @@ public struct AgentTranscriptProjection: Sendable {
     /// does not keep.
     public init(threadId: String, resuming document: AgentDocument, status: AgentStatus, finalAssistantSource: String?) {
         self.init(threadId: threadId)
-        reducer = AgentDocumentReducer(document: document, createdAtProvider: wallClockNow)
+        reducer = AgentDocumentReducer(document: document, createdAtProvider: wallClockNow,
+                                       frozenEntryPrefixCount: document.entries.count)
         currentStatus = status
         localSequence = document.entries.count
         runtimeErrorSequence = document.entries.count
+        // Recover the per-turn sequence from actual saved run IDs. Long command
+        // streams can contain thousands of runs; do not rediscover them by
+        // repeatedly probing from one after every restart.
+        var turnPrefixes: [String: String] = [:]
+        for entry in document.entries {
+            guard case let .providerItem(provider, turnID?) = entry.provenance, provider == "runtime" else { continue }
+            guard entry.id.rawValue.hasPrefix("turn:") else { continue }
+            let parts = entry.id.rawValue.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count == 4, parts[0] == "turn", ["assistant", "reasoning", "output"].contains(String(parts[2])),
+                  let run = Int(parts[3]), run > 0 else { continue }
+            let prefix: String
+            if let cached = turnPrefixes[turnID] { prefix = cached }
+            else {
+                prefix = makeID(scope: "turn", providerID: turnID).rawValue
+                turnPrefixes[turnID] = prefix
+            }
+            guard entry.id.rawValue == "\(prefix):\(parts[2]):\(run)" else { continue }
+            runCountsByTurn[turnID] = max(runCountsByTurn[turnID] ?? 0, run)
+        }
         if let finalAssistantSource, let entry = document.entries.last(where: { $0.role == .assistant }) {
             rawMarkupSourcesByEntryID[entry.id] = finalAssistantSource
         }
@@ -178,7 +198,7 @@ public struct AgentTranscriptProjection: Sendable {
                 return markupMutations(turnID: turnID, kind: kind, delta: delta)
             case .commandOutput:
                 var result = closeStreamingRun()
-                let entryID = makeID(scope: "turn", providerID: turnID, suffix: "output:\(nextRun(in: turnID))")
+                guard let entryID = nextUnfrozenRunID(turnID: turnID, kind: "output") else { return result }
                 let blockID = childID(of: entryID, key: "command-output")
                 compatibilityIDs[entryID] = "output-\(document.entries.count + result.beginEntryCount + 1)"
                 result += [
@@ -219,8 +239,8 @@ public struct AgentTranscriptProjection: Sendable {
 
         case .itemCompleted(let tid, let itemID, _, let status) where tid == threadId:
             activeItemIDs.remove(itemID)
-            completedStatuses[itemID] = status
             guard let entryID = itemEntries[itemID] else { return [] }
+            completedStatuses[itemID] = status
             var result: [AgentDocumentMutation] = []
             if statusableItems.contains(itemID), let blockID = itemBlocks[itemID] {
                 result.append(.completeBlock(id: blockID, status: semanticStatus(status)))
@@ -479,7 +499,30 @@ public struct AgentTranscriptProjection: Sendable {
         )
         for mutation in mutations(for: event) {
             do { record(try reducer.apply(mutation)) }
-            catch { rejectedMutationCount += 1 }
+            catch {
+                rejectedMutationCount += 1
+                // `mutations(for:)` has already prepared the stream or item
+                // state. A duplicate begin against frozen history must not
+                // leave that state pointing at the old entry for this or the
+                // next event.
+                if case let AgentDocumentMutationError.duplicateBegin(entryID) = error,
+                   reducer.isFrozenNode(entryID) {
+                    if openStream?.entryID == entryID { openStream = nil }
+                    compatibilityIDs.removeValue(forKey: entryID)
+                    if case let .itemStarted(_, itemID, _, _) = event, itemEntries[itemID] == entryID {
+                        itemEntries[itemID] = nil
+                        itemBlocks[itemID] = nil
+                        activeItemIDs.remove(itemID)
+                        statusableItems.remove(itemID)
+                    }
+                    for requestID in requestEntries.compactMap({ $0.value == entryID ? $0.key : nil }) {
+                        requestEntries[requestID] = nil
+                        requestBlocks[requestID] = nil
+                    }
+                    return
+                }
+                if case AgentDocumentMutationError.frozenEntry = error { return }
+            }
         }
     }
 
@@ -766,7 +809,10 @@ public struct AgentTranscriptProjection: Sendable {
             return scheduledMarkupMutationsForOpenStream()
         }
         var result = closeStreamingRun()
-        let entryID = makeID(scope: "turn", providerID: turnID, suffix: "\(kind.rawValue):\(nextRun(in: turnID))")
+        // A resumed archive can hold an unfinished earlier run with the same
+        // provider turn ID. Keep that frozen entry and apply this very delta
+        // to a fresh run, rather than dropping it or editing prior history.
+        guard let entryID = nextUnfrozenRunID(turnID: turnID, kind: kind.rawValue) else { return result }
         compatibilityIDs[entryID] = "\(kind == .assistant ? "assistant" : "reasoning")-\(document.entries.count + result.beginEntryCount + 1)"
         var buffer = StreamingMarkupBuffer()
         buffer.append(delta)
@@ -821,11 +867,34 @@ public struct AgentTranscriptProjection: Sendable {
         return result
     }
 
-    private mutating func nextRun(in turnID: String) -> Int {
-        let next = (runCountsByTurn[turnID] ?? 0) + 1
+    private mutating func nextRun(in turnID: String) -> Int? {
+        let previous = runCountsByTurn[turnID] ?? 0
+        guard previous < .max else { return nil }
+        let next = previous + 1
         runCountsByTurn[turnID] = next
         return next
     }
+
+    private mutating func nextUnfrozenRunID(turnID: String, kind: String) -> AgentNodeID? {
+        // Bound adversarial or corrupted histories; exhaustion is a visible
+        // mutation rejection instead of an overflow or an unbounded loop.
+        for _ in 0...1_024 {
+            guard let run = nextRun(in: turnID) else { rejectedMutationCount += 1; return nil }
+            let id = makeID(scope: "turn", providerID: turnID, suffix: "\(kind):\(run)")
+            if !reducer.isFrozenNode(id) { return id }
+        }
+        rejectedMutationCount += 1
+        return nil
+    }
+
+    /// Whether an item belongs to this launch's accepted projection rather
+    /// than a rejected collision with a frozen historical node.
+    public func tracksCurrentItem(_ itemID: String) -> Bool {
+        guard let entry = itemEntries[itemID] else { return false }
+        return !reducer.isFrozenNode(entry)
+    }
+
+    public var currentItemEntryIDs: [String: AgentNodeID] { itemEntries }
 
     private func structuredBlock(id: AgentNodeID, kind: ItemKind, title: String?) -> AgentBlock {
         let label = title ?? kind.rawValue
@@ -1016,8 +1085,10 @@ extension AgentTranscriptProjection: AgentTranscriptProjecting {
 
     private func compatibilityStatus(_ entry: AgentEntry) -> ItemStatus? {
         guard case .providerItem(_, let itemID?) = entry.provenance else { return nil }
-        if let completed = completedStatuses[itemID] { return completed }
-        if itemEntries[itemID] == entry.id { return .inProgress }
+        if itemEntries[itemID] == entry.id {
+            if let completed = completedStatuses[itemID] { return completed }
+            return .inProgress
+        }
         if entry.blocks.first?.kind == .commandOutput { return .inProgress }
         return nil
     }

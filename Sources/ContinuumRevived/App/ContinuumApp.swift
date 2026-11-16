@@ -8238,6 +8238,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private lazy var agentComposerAttachmentStore = AgentComposerAttachmentStore(
         applicationSupportDirectory: Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
     )
+    /// Interactive startup owns this task. A lazily created supervisor reads
+    /// it at preflight time, without forcing supervisor creation at boot.
+    private var transcriptMigrationTask: Task<AgentTranscriptStore.MigrationReport, Error>?
     #if ARRAY_FILM
     lazy var agentSupervisor = AgentSupervisor(
         store: AgentStore(smokeTest: smokeTestEnabled),
@@ -8247,14 +8250,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         makeRunner: FilmAgentRunner.runner(for:),
         attachmentStore: agentComposerAttachmentStore,
         submissionRecoveryStore: agentComposerDraftStore,
-        transcriptStore: agentTranscriptStore
+        transcriptStore: agentTranscriptStore,
+        transcriptMigrationTaskProvider: { [weak self] in self?.transcriptMigrationTask }
     )
     #else
     lazy var agentSupervisor = AgentSupervisor(
         store: AgentStore(smokeTest: smokeTestEnabled),
         attachmentStore: agentComposerAttachmentStore,
         submissionRecoveryStore: agentComposerDraftStore,
-        transcriptStore: agentTranscriptStore
+        transcriptStore: agentTranscriptStore,
+        transcriptMigrationTaskProvider: { [weak self] in self?.transcriptMigrationTask }
     )
     #endif
     /// Agent CLI versions and in-app updates (Settings › Agents, ⌘K). `shared`
@@ -8649,12 +8654,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         wireCLIUpdateCenter()
         cliUpdateCenter.enableLive()
         // C3: adopt any pre-2026-08-24 per-tile transcript directory under the
-        // agent-stable key. Detached and non-blocking because it only ever moves
-        // history the app is not yet reading, and idempotent, so a crash halfway
-        // through costs the next launch one more pass and nothing else. Runs on
-        // the interactive path only, for the same reason motion does.
-        Task.detached { [store = agentTranscriptStore] in
-            _ = try? await store.migrateLegacySessionDirectories()
+        // agent-stable key. Migration remains detached and non-blocking at
+        // boot, but its retained task gates a later transcript preflight so an
+        // early write cannot race a still-pending migration. This is interactive
+        // only; self-checks do not launch the migration against real state.
+        transcriptMigrationTask = Task.detached { [store = agentTranscriptStore] in
+            try await store.migrateLegacySessionDirectories()
         }
         // C8's fourth blocker was that nothing ever installed the extension, so
         // the whole pi spawn path shipped unreachable. This is that call site,
@@ -15325,18 +15330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     )
                 })
             },
-            transcriptDocument: { rawAgentID in
-                let agentID = AgentID(rawValue: rawAgentID)
-                // C3: this asked for the literal "thread-main" while the writer
-                // used the TILE's thread id, so the companion never once found a
-                // transcript. Both ends now name the agent.
-                let sessionID = AgentTranscriptStore.canonicalSessionID(for: agentID)
-                guard let document = try? await transcriptStore.load(
-                    agentID: agentID,
-                    sessionID: sessionID
-                ) else { return nil }
-                return (sessionID: sessionID, document: document)
-            },
+            transcriptDocument: CompanionTranscriptDocumentProvider.make(store: transcriptStore),
             stopAgent: { rawAgentID in
                 await CompanionCommandActions.stop(rawAgentID, supervisor: supervisor)
             },
@@ -18017,14 +18011,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Show what it forked from, through the restore path. Read off the main
         // thread; a prompt sent meanwhile makes it moot.
         let threadId = "rehydrated-\(agentId.rawValue.uuidString)"
-        Task.detached(priority: .userInitiated) { [weak self] in
-            let transcript = ClaudeSessionTranscriptReader.read(sessionFileURL: transcriptURL, threadId: threadId)
-            await MainActor.run {
-                guard let self, let transcript,
-                      !self.agentSupervisor.hasUserWorkOrSessionHistory(agentId),
-                      let view = self.canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
-                self.agentSupervisor.seedRehydratedTranscript(transcript, for: agentId)
-                view.renderRehydratedPreviousSession(transcript)
+        let supervisor = agentSupervisor
+        if let readToken = supervisor.beginProviderHistoryRead(for: agentId) {
+            Task.detached(priority: .userInitiated) { [weak self] in
+                let transcript = ClaudeSessionTranscriptReader.read(sessionFileURL: transcriptURL, threadId: threadId)
+                await MainActor.run {
+                    defer { supervisor.endProviderHistoryRead(readToken, for: agentId) }
+                    guard let self, self.agentSupervisor === supervisor,
+                          supervisor.isProviderHistoryReadActive(readToken, for: agentId), let transcript,
+                          !supervisor.hasUserWorkOrSessionHistory(agentId),
+                          let view = self.canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView,
+                          view.attachedAgentID == agentId else { return }
+                    supervisor.seedRehydratedTranscript(transcript, for: agentId)
+                    view.renderRehydratedPreviousSession(transcript)
+                }
             }
         }
         scheduleCompanionSyncPublish(reason: .statusChanged, diagnosticsReason: "external-session-copy", debounce: 0.2)
@@ -21552,16 +21552,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             view.showPreviousSessionNotice()
             return
         }
+        let supervisor = agentSupervisor
+        guard let readToken = supervisor.beginProviderHistoryRead(for: agentId) else { return }
         Task.detached(priority: .userInitiated) { [weak self, weak view] in
             let transcript = ManagedTranscriptRehydrator.rehydrate(inputs)
             await MainActor.run {
-                guard let self, let view else { return }
+                defer { supervisor.endProviderHistoryRead(readToken, for: agentId) }
+                guard let self, self.agentSupervisor === supervisor,
+                      supervisor.isProviderHistoryReadActive(readToken, for: agentId), let view,
+                      view.attachedAgentID == agentId else { return }
                 // A live prompt during the read makes rehydration moot: the real
                 // transcript now replays, and the placeholder/rehydration would
                 // land underneath it.
-                guard self.agentSupervisor.needsPreviousSessionNotice(agentId) else { return }
+                guard supervisor.needsPreviousSessionNotice(agentId) else { return }
                 if let transcript {
-                    self.agentSupervisor.seedRehydratedTranscript(transcript, for: agentId)
+                    supervisor.seedRehydratedTranscript(transcript, for: agentId)
                     view.renderRehydratedPreviousSession(transcript)
                 } else {
                     view.showPreviousSessionNotice()
