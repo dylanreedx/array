@@ -4252,9 +4252,9 @@ final class AgentSupervisor {
         // P2D.2: an agent asking for another agent arrives here, out of band from
         // the event stream. Hopped to the main actor like the events are, and for
         // the same reason — the handler mutates supervisor state.
-        runner.observeSpawnRequests { [weak self] request in
+        runner.observeSpawnRequests { [weak self, weak runner] request in
             DispatchQueue.main.async {
-                guard let self,
+                guard let self, let runner,
                       self.runnerGenerationTokens[id] == runnerGeneration,
                       self.runners[id] === runner else { return }
                 self.handleSpawnRequest(request, from: id)
@@ -4263,9 +4263,9 @@ final class AgentSupervisor {
         // The runner emits private observations before the matching normalized
         // item event on one serial queue. Main-queue FIFO preserves that order, so
         // the generic event cannot overwrite the path-bearing local What value.
-        runner.observeRuntimeObservations { [weak self] observation in
+        runner.observeRuntimeObservations { [weak self, weak runner] observation in
             DispatchQueue.main.async {
-                guard let self,
+                guard let self, let runner,
                       self.runnerGenerationTokens[id] == runnerGeneration,
                       self.runners[id] === runner else { return }
                 self.ingestRuntimeObservation(observation, for: id)
@@ -4277,9 +4277,9 @@ final class AgentSupervisor {
         // Asked for as a capability so the one-shot and scripted runners stay
         // untouched.
         if let bridging = runner as? HostToolBridging {
-            bridging.observeHostToolRequests { [weak self] call in
+            bridging.observeHostToolRequests { [weak self, weak runner] call in
                 DispatchQueue.main.async {
-                    guard let self,
+                    guard let self, let runner,
                           self.runnerGenerationTokens[id] == runnerGeneration,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner else {
                         call.respond(.error("outcome_unknown", "The agent session that made this request has been replaced."))
@@ -4309,17 +4309,17 @@ final class AgentSupervisor {
             // the runner's identity, not the turn's generation: adopting that
             // next turn mints a new generation while this one's frames are
             // already queued behind it.
-            observing.observeSubagentEvents { [weak self] toolUseID, event in
+            observing.observeSubagentEvents { [weak self, weak runner] toolUseID, event in
                 DispatchQueue.main.async {
-                    guard let self,
+                    guard let self, let runner,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner
                     else { return }
                     self.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
                 }
             }
-            observing.observeSubagentProgress { [weak self] toolUseID in
+            observing.observeSubagentProgress { [weak self, weak runner] toolUseID in
                 DispatchQueue.main.async {
-                    guard let self,
+                    guard let self, let runner,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner
                     else { return }
                     let childID = AgentID(rawValue: AgentRecord.observedChildID(
@@ -4335,9 +4335,9 @@ final class AgentSupervisor {
         if let observing = runner as? ProviderSubagentActivityObserving {
             providerThreadAgentRoutes[id] = [:]
             pendingProviderThreadEvents[id] = [:]
-            observing.observeProviderSubagentActivity { [weak self] activity in
+            observing.observeProviderSubagentActivity { [weak self, weak runner] activity in
                 DispatchQueue.main.async {
-                    guard let self,
+                    guard let self, let runner,
                           self.runnerGenerationTokens[id] == runnerGeneration,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner else { return }
                     self.handleProviderSubagentActivity(activity, rootAgentID: id)
@@ -4361,9 +4361,9 @@ final class AgentSupervisor {
         // supervisor tails it. Different mechanism, same destination: the child's
         // own thread, through `deliverSubagentEvent`.
         if let reporting = runner as? ObservedRunReporting {
-            reporting.observeObservedRuns { [weak self] handle in
+            reporting.observeObservedRuns { [weak self, weak runner] handle in
                 DispatchQueue.main.async {
-                    guard let self,
+                    guard let self, let runner,
                           self.runnerGenerationTokens[id] == runnerGeneration,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner else { return }
                     self.bindObservedRun(handle, parent: id)
@@ -4391,23 +4391,27 @@ final class AgentSupervisor {
         // turns it starts on its own. Accepted while this runner is the agent's,
         // bound or idle: a promoted steer is confirmed after its turn ended.
         if let steering = runner as? AgentSteeringRunning {
-            steering.observeSteerDispositions { [weak self] steerID, disposition in
+            steering.observeSteerDispositions { [weak self, weak runner] steerID, disposition in
                 DispatchQueue.main.async {
-                    guard let self,
+                    guard let self, let runner,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner else { return }
                     self.settleDeliveringSteer(steerID, disposition: disposition, for: id)
                 }
             }
         }
         if let reporting = runner as? AgentUnsolicitedTurnReporting {
-            reporting.observeUnsolicitedTurns { [weak self] in
-                DispatchQueue.main.async { self?.adoptUnsolicitedTurn(from: reporting, for: id) }
+            reporting.observeUnsolicitedTurns { [weak self, weak reporting] in
+                DispatchQueue.main.async {
+                    guard let reporting else { return }
+                    self?.adoptUnsolicitedTurn(from: reporting, for: id)
+                }
             }
         }
         // S3 (N3): a session process that leaves between turns says so.
         if let reporting = runner as? AgentIdleExitReporting {
-            reporting.observeIdleExit { [weak self] code, tail, hadBackgroundWork in
+            reporting.observeIdleExit { [weak self, weak runner] code, tail, hadBackgroundWork in
                 DispatchQueue.main.async {
+                    guard let runner else { return }
                     self?.sessionProcessExitedWhileIdle(
                         runner, for: id, code: code, stderrTail: tail, hadBackgroundWork: hadBackgroundWork)
                 }
