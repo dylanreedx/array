@@ -66,6 +66,14 @@ QUIET = dict(build=env.pop('ARRAY_NIGHTLY_BUILD_PROCESS', 'swift-build'),
              # A build counts while it or its compiler children use this much CPU;
              # an idle or stuck swift-build process does not hold the gate.
              build_cpu=knob('ARRAY_NIGHTLY_BUILD_CPU_MIN', 5, 0, 100000))
+# Files every terminal leg's tmux and Ghostty open at start. Under launchd the
+# job has no ~/Documents access, so a config symlinked into ~/Documents blocks
+# open() forever: the 2026-11-16 hourly run hung 2.5 h at the matrix's first
+# tmux start, holding the shared lock. The gate reads each one under a timeout
+# first and fails red, naming the path, instead of hanging.
+CONFIG_PATHS = [os.path.expanduser(p) for p in env.pop(
+    'ARRAY_NIGHTLY_CONFIG_PATHS', '~/.tmux.conf:~/.config/ghostty/config').split(':') if p]
+CONFIG_READ_SECONDS = knob('ARRAY_NIGHTLY_CONFIG_READ_SECONDS', 15, 0.1, 600)
 # The checkout sits on this local branch, never a detached HEAD: legs that read
 # the checkout's branch (an agent tile's branch chip) must see what a bench sees.
 # The gate owns it; it never moves a branch that lives anywhere else.
@@ -303,7 +311,22 @@ if args[:1] == ['--awake'] and not (previous and previous.get('green')):
     sys.exit(f'No green gate for {commit[:12]}; the awake group only completes a green one.')
 out.mkdir(parents=True, exist_ok=True)
 
+def configs_readable():
+    for path in CONFIG_PATHS:
+        if not os.path.lexists(path):
+            continue
+        try:
+            read = sp.run(['/bin/cat', path], stdin=sp.DEVNULL, stdout=sp.DEVNULL, stderr=sp.PIPE,
+                          text=True, timeout=CONFIG_READ_SECONDS)
+        except sp.TimeoutExpired:
+            raise RuntimeError(f'{path} (-> {os.path.realpath(path)}) could not be read within '
+                               f'{CONFIG_READ_SECONDS:g} s; tmux and Ghostty legs would hang on it. Under launchd '
+                               'that is a folder this job has no access to: run the gate by hand, or move the file.')
+        if read.returncode:
+            raise RuntimeError(f'{path} (-> {os.path.realpath(path)}) is unreadable: {read.stderr.strip()}')
+
 def checkout_at(log):
+    configs_readable()
     if not checkout.exists():
         git('worktree', 'add', '--detach', str(checkout), commit)
     # Legs leave untracked output (caches, screenshots); only tracked edits are dirt.

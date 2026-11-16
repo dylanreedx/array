@@ -176,6 +176,7 @@ class Fixture:
                         GIT_AUTHOR_EMAIL="fixture@example.invalid", GIT_COMMITTER_NAME="Fixture",
                         GIT_COMMITTER_EMAIL="fixture@example.invalid",
                         # Inherited switches that would make the matrix a partial run.
+                        ARRAY_NIGHTLY_CONFIG_PATHS=str(self.root / "no-such-config"),
                         REPLAY_CHECKS_ONLY="1", CONTINUUM_SKIP_SURFACE_CHECKS="1",
                         CONTINUUM_SKIP_UI_BASELINES="1", CONTINUUM_UPDATE_BASELINES="1")
         for key in ("ARRAY_MATRIX_LOCK_OWNER", "ARRAY_RELEASE_LOCK_OWNER", "ARRAY_MATRIX_LEGS", "ARRAY_NIGHTLY_REF"):
@@ -502,6 +503,30 @@ def quiet_cases(fx):
     print("PASS gate-knobs-safe-and-private")
 
 
+def config_case(fx):
+    """A config the legs' tmux opens at start that blocks on open (under launchd,
+    a symlink into ~/Documents): the gate fails red naming it, runs no matrix and
+    frees the lock, instead of hanging while holding it."""
+    fifo = fx.root / "tmux.conf"
+    os.mkfifo(fifo)  # open() for read blocks until a writer comes, as the TCC-blocked open did
+    head = fx.commit("feat(app): change under an unreadable config", {"Sources/App.swift": "let app = 11\n"})
+    started = time.time()
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_CONFIG_PATHS=str(fifo),
+                                                ARRAY_NIGHTLY_CONFIG_READ_SECONDS="1"))
+    summary = fx.summary(head)
+    expect(result.returncode == 1 and time.time() - started < 60 and not summary["green"] and not summary["candidate"]
+           and str(fifo) in " ".join(summary["failed_legs"]) and not any(head in line for line in fx.legs_saw()),
+           f"an unreadable leg config fails the gate red, names it and runs no matrix: {summary.get('failed_legs')}", result)
+    with open(fx.root / "matrix.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            freed = True
+        except BlockingIOError:
+            freed = False
+    expect(freed, "the lock is free after the refused run")
+    print("PASS gate-refuses-unreadable-config")
+
+
 def feature_cases(fx):
     """The per-feature gate: tier picks the legs, nightly-gate.sh --feature runs
     them under the lock without touching anything a ship reads, and every run
@@ -607,6 +632,7 @@ with tempfile.TemporaryDirectory(prefix="array-ship-") as temp:
         ship_cases(fixture, *gate_cases(fixture))
         ref_case(fixture)
         quiet_cases(fixture)
+        config_case(fixture)
         feature_cases(fixture)
         schedule_case()
     except AssertionError as error:
