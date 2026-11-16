@@ -86,7 +86,15 @@ enum TileAgentBubbleChecks {
             // AppKit attaches a newly added view's layer on the next turn of the run loop.
             let attached = host.layer?.superlayer != nil && host.layer?.superlayer === host.superview?.layer
                 && host.bubble.superlayer === host.layer
-            return attached && host.superview === view.superview && frame.minX >= 0 && frame.maxY <= bar.frame.maxY + 0.5
+            // Laid out for this style: a hanging plate straddles the tile's
+            // corner, at least a third of it past each edge and the rest over
+            // the tile (never wholly inside or wholly off it); any other plate
+            // sits inside the bar.
+            let placed = TileAgentBubbleLayer.Plate.hangs(style)
+                ? frame.width > 0 && -frame.minX >= frame.width / 3 - 0.01 && -frame.minY >= frame.height / 3 - 0.01
+                    && frame.maxX > 0 && frame.maxY > 0
+                : frame.minX >= 0 && frame.maxY <= bar.frame.maxY + 0.5
+            return attached && host.superview === view.superview && placed
         }
     }
 
@@ -346,8 +354,9 @@ enum TileAgentBubbleChecks {
             defer { CATransaction.begin(); CATransaction.setDisableActions(true); bubble.opacity = 1; CATransaction.commit() }
             return try body()
         }
-        // No style paints outside its tile: around the tile's top-left corner,
-        // 40 pt each way, at 100% and 30%.
+        // Inline never paints outside its tile; the Orb and the Squircle hang
+        // off its corner, so they do: around the tile's top-left corner, 40 pt
+        // each way, at 100% and 30%.
         for style in Style.allCases {
             setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, style.rawValue)
             try expect(pump(until: { showsStyle(style, views, canvas) }), "\(style.title) for the paint")
@@ -365,8 +374,12 @@ enum TileAgentBubbleChecks {
                 func inPlane(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: region.minX + x * region.width, y: region.minY + y * region.height) }
                 let outside = try largestChannelChange(shown, faded) { x, y in !tileInPlane.contains(inPlane(x, y)) }
                 let inside = try largestChannelChange(shown, faded) { x, y in slotInPlane.contains(inPlane(x, y)) }
-                try expect(inside >= 48, "\(style.title) zoom \(zoom): the icon paints in the bar (largest channel change \(inside))")
-                try expect(outside == 0, "\(style.title) zoom \(zoom): the icon paints outside its tile (largest channel change \(outside))")
+                try expect(inside >= 48, "\(style.title) zoom \(zoom): the icon paints where it says (largest channel change \(inside))")
+                if TileAgentBubbleLayer.Plate.hangs(style) {
+                    try expect(outside >= 48, "\(style.title) zoom \(zoom): the icon does not hang past its tile (largest channel change \(outside))")
+                } else {
+                    try expect(outside == 0, "\(style.title) zoom \(zoom): the icon paints outside its tile (largest channel change \(outside))")
+                }
             }
         }
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
@@ -651,14 +664,20 @@ enum TileAgentBubbleChecks {
         // On the title's line: in the bar, a square sized from the title, its
         // middle on the title's capitals.
         let line = view.qaTitleFontWorldSize * TileAgentBubbleLayer.Plate.titleRatio
-        try expect(frame.minX >= 0 && frame.minY >= -pixel && frame.maxY <= view.chromeBarHeight + pixel,
-                   "\(label): the icon sits inside the bar \(frame) (bar \(view.chromeBarHeight))")
-        try expect(abs(frame.width - frame.height) <= pixel && frame.height <= line + pixel
-                   && frame.height >= min(line, view.chromeBarHeight - 4 * view.zoomChromeScale) - pixel,
-                   "\(label): a square plate the title's line tall (\(frame.size), line \(line))")
-        if let capMiddle = view.qaTitleCapMiddle {
-            try expect(abs(frame.midY - capMiddle) <= 2 * pixel,
-                       "\(label): the icon's middle \(frame.midY) sits on the title's capitals \(capMiddle)")
+        let hangs = TileAgentBubbleLayer.Plate.hangs(style)
+        if hangs {
+            // Off the tile's top-left corner instead (`TileAgentIconWitnesses`).
+            try TileAgentIconWitnesses.expectHanging(view, frame: frame, bar: view.chromeBarHeight, pixel: pixel, label: label)
+        } else {
+            try expect(frame.minX >= 0 && frame.minY >= -pixel && frame.maxY <= view.chromeBarHeight + pixel,
+                       "\(label): the icon sits inside the bar \(frame) (bar \(view.chromeBarHeight))")
+            try expect(abs(frame.width - frame.height) <= pixel && frame.height <= line + pixel
+                       && frame.height >= min(line, view.chromeBarHeight - 4 * view.zoomChromeScale) - pixel,
+                       "\(label): a square plate the title's line tall (\(frame.size), line \(line))")
+            if let capMiddle = view.qaTitleCapMiddle {
+                try expect(abs(frame.midY - capMiddle) <= 2 * pixel,
+                           "\(label): the icon's middle \(frame.midY) sits on the title's capitals \(capMiddle)")
+            }
         }
         // In the world plane, above every tile, unclipped, drawn where it says.
         guard let host = view.agentBubbleView, let plane = view.superview, host.superview === plane else {
@@ -695,19 +714,20 @@ enum TileAgentBubbleChecks {
         guard let body = view.qaCharacterBody else { throw Failure(description: "\(label): no art") }
         try expect(abs(body.body.x - body.target.x) <= pixel && abs(body.body.y - body.target.y) <= pixel,
                    "\(label): the art's body \(body.body) is centred on its plate \(body.target)")
-        // The title follows tightly: one identifier.
+        // The title follows tightly: one identifier. (A hanging plate reserves
+        // no gap: the title keeps its normal start, checked above.)
         let gap = CGFloat(Space.s) * max(1 + (view.titleBarScale - 1) / 2, view.zoomChromeScale)
-        if let mark = view.qaProviderMarkRect {
+        if !hangs, let mark = view.qaProviderMarkRect {
             let start = bar.convert(mark, to: view).minX
             try expect(start >= frame.maxX && start - frame.maxX <= gap + pixel,
                        "\(label): the provider mark follows the icon tightly (gap \(start - frame.maxX), at most \(gap))")
         }
         let close = view.qaCloseButtonFrame
         try expect(close.minX >= frame.maxX, "\(label): × stays clear of the icon (\(close.minX) vs \(frame.maxX))")
-        if let mark = view.qaProviderMarkRect {
+        if !hangs, let mark = view.qaProviderMarkRect {
             try expect(bar.convert(mark, to: view).minX >= frame.maxX, "\(label): the provider mark starts after the icon")
         }
-        if let title = view.qaTitleRectInBar(), title.width > 0 {
+        if !hangs, let title = view.qaTitleRectInBar(), title.width > 0 {
             try expect(bar.convert(title, to: view).minX >= frame.maxX, "\(label): the title starts after the icon")
         }
         if let pill = view.qaStatusPillRectInBar() {
@@ -938,10 +958,17 @@ enum TileAgentBubbleChecks {
                        "changing a hovered Orb to \(other.title) keeps its swell (scale \(bubble.transform.m11))")
             host.mouseExited(with: move(to: .zero, .mouseMoved))
             try expect(abs(bubble.transform.m11 - 1) < 0.001, "\(other.title) after leaving is at its size")
-            // And the reverse: a hovered plate becoming an Orb swells at once.
-            host.mouseMoved(with: move(to: NSPoint(x: icon.midX, y: icon.midY), .mouseMoved))
+            // And the reverse: a hovered plate becoming an Orb swells. The plate
+            // is hovered where it is now (Inline sits in the bar, the Orb hangs
+            // off the corner), and the pointer then finds the Orb: a plate that
+            // stayed hovered through the change must still swell.
+            guard let plate = view.agentBubbleFrame else { throw Failure(description: "no \(other.title) plate") }
+            host.mouseMoved(with: move(to: NSPoint(x: plate.midX, y: plate.midY), .mouseMoved))
+            try expect(bubble.isHovered, "fixture: the pointer on the \(other.title) plate hovers it")
             setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.orb.rawValue)
             try expect(pump(until: { showsStyle(.orb, views, canvas) }), "Orb while hovered")
+            guard let orb = view.agentBubbleFrame else { throw Failure(description: "no Orb plate") }
+            host.mouseMoved(with: move(to: NSPoint(x: orb.midX, y: orb.midY), .mouseMoved))
             try expect(bubble.isHovered && bubble.transform.m11 > 1.01,
                        "a hovered \(other.title) becoming an Orb swells (scale \(bubble.transform.m11))")
             host.mouseExited(with: move(to: .zero, .mouseMoved))
@@ -1192,10 +1219,13 @@ enum TileAgentBubbleChecks {
             && $0.options.contains(.cursorUpdate) }, "\(style.title): pointer and cursor tracking over the whole plate")
         // The plate overlaps the tile's top resize band: there, as a press
         // moves the tile, the cursor is the open hand.
-        let banded = NSPoint(x: icon.midX, y: icon.minY + 0.5)
+        let hangs = TileAgentBubbleLayer.Plate.hangs(style)
+        // (A hanging plate's middle is outside the tile: probe just inside it.)
+        let banded = hangs ? NSPoint(x: 2, y: 1) : NSPoint(x: icon.midX, y: icon.minY + 0.5)
         try expect(view.qaResizeEdge(at: banded) != nil, "fixture: \(style.title)'s top lies in the resize band")
         points.append(("on the plate, in the top resize band", banded, .openHand))
-        try expect(view.agentBubbleCursor(at: NSPoint(x: 0.1, y: icon.maxY - 0.1)) == .resizeLeftRight,
+        // (Below a hanging plate, past the top-left corner's diagonal zone.)
+        try expect(view.agentBubbleCursor(at: NSPoint(x: 0.1, y: hangs ? max(icon.maxY, 2 * TileNSView.cornerHoverSize) + 2 : icon.maxY - 0.1)) == .resizeLeftRight,
                    "\(style.title): the left edge beside the icon resizes")
         for (label, point, expected) in points {
             let event = NSEvent.mouseEvent(with: .mouseMoved, location: view.convert(point, to: nil),
@@ -1359,14 +1389,15 @@ enum TileAgentBubbleChecks {
         }
         let expectedHost = view.convert(again, to: plane)
         try expect(host.superview === plane && abs(host.frame.minX - expectedHost.minX) < 0.01
-                   && abs(host.frame.minY - expectedHost.minY) < 0.01 && again.minX >= 0 && again.minY >= -0.01,
+                   && abs(host.frame.minY - expectedHost.minY) < 0.01,
                    "\(label): the icon's view \(host.frame) followed its tile to \(expectedHost)")
 
         // 3. From the part of the icon that lies in the top edge's resize band.
         canvas.layoutSubtreeIfNeeded()
         guard let third = view.agentBubbleFrame else { throw Failure(description: "\(label): no icon") }
         // The plate's top sits just below the tile's edge, in the band.
-        let corner = NSPoint(x: third.midX, y: max(1 / zoom, third.minY + 0.5 / zoom))
+        // (A hanging plate's middle is outside the tile: probe just inside it.)
+        let corner = NSPoint(x: max(third.midX, 2 / zoom), y: max(1 / zoom, third.minY + 0.5 / zoom))
         try expect(view.qaResizeEdge(at: corner) != nil, "\(label): the probe point lies in the top edge's resize band")
         try expect(view.agentBubbleContains(corner), "\(label): the probe point lies on the icon")
         let banded = try drag(from: corner, by: CGSize(width: -40, height: 24), name: "corner")

@@ -4,9 +4,11 @@ import ContinuumRevivedCore
 
 /// Dylan's three rules for the tile icon, as witnesses over the real tiles of
 /// `--tile-agent-bubble-check`, in every style:
-/// 1. Sized from the title: inside the title bar, never taller than it, and no
-///    taller than the title's line (4/3 of its point size), at 125%, 50% and
-///    30%. The chrome floor may hold the title up; the icon may not outgrow it.
+/// 1. Sized from the title, at 125%, 50% and 30%. Inline: inside the title
+///    bar, never taller than it nor than the title's line (4/3 of its point
+///    size). Orb and Squircle: hanging off the tile's top-left corner, never
+///    over 1.3 bars, the title at its normal start (`expectHanging`). The
+///    chrome floor may hold the title up; the icon may not outgrow it.
 /// 2. Opaque: the plate's own layer tree, rendered over black and over white,
 ///    shows neither anywhere inside its installed outline, in both appearances.
 /// 3. On top: a neighbour stacked above the icon's tile, overlapping the plate,
@@ -73,6 +75,11 @@ enum TileAgentIconWitnesses {
                     guard let frame = view.agentBubbleFrame else { throw Failure(description: "\(label): no icon") }
                     let pixel = 1 / (window.backingScaleFactor * zoom) + 0.01
                     let bar = view.chromeBarHeight, line = view.qaTitleFontWorldSize * 4 / 3
+                    if TileAgentBubbleLayer.Plate.hangs(style) {
+                        try expectHanging(view, frame: frame, bar: bar, pixel: pixel, label: label)
+                        tallest = max(tallest, frame.height / bar)
+                        continue
+                    }
                     try expect(frame.minY >= -pixel && frame.maxY <= bar + pixel,
                                "\(label): the icon \(frame) leaves its \(bar) pt title bar")
                     try expect(frame.height <= bar + pixel,
@@ -98,6 +105,37 @@ enum TileAgentIconWitnesses {
             try expectOnTop(views: views, canvas: canvas, plane: plane, style: style)
         }
         return "tile icon witnesses: every style title-sized (at most \(Int((tallest * 100).rounded()))% of the bar), opaque, on top: PASS"
+    }
+
+    /// Dylan's corner: the Orb and the Squircle hang off the tile's top-left
+    /// corner, a third to just over half of the plate past each edge, their
+    /// centre within a fifth of the side of the corner; sized from the title
+    /// and never over 1.3 bars; and the title keeps its normal start, clear of
+    /// the plate's inside part.
+    static func expectHanging(_ view: ManagedAgentTileNSView, frame: NSRect, bar: CGFloat, pixel: CGFloat,
+                              label: String) throws {
+        let side = frame.height, title = view.qaTitleFontWorldSize
+        try expect(abs(frame.width - side) <= pixel, "\(label): a square plate (\(frame.size))")
+        try expect(side <= 1.3 * bar + pixel && side <= title * TileAgentBubbleLayer.Plate.hangRatio + pixel
+                   && side >= title * 4 / 3 - pixel,
+                   "\(label): the hanging plate is \(side) pt: title-sized (title \(title) pt), at most 1.3 of the \(bar) pt bar")
+        for (edge, past) in [("left", -frame.minX), ("top", -frame.minY)] {
+            try expect(past >= side / 3 - pixel && past <= side * 0.6 + pixel,
+                       "\(label): it hangs \(past) pt past the tile's \(edge) edge, side \(side) (a third to just over half)")
+        }
+        try expect(hypot(frame.midX, frame.midY) <= side / 5 + pixel,
+                   "\(label): its centre (\(frame.midX), \(frame.midY)) sits at the tile's corner")
+        guard let titleBar = view.qaTitleBarView else { return }
+        let inset = CGFloat(Space.m) * view.zoomChromeScale
+        if let mark = view.qaProviderMarkRect.map({ titleBar.convert($0, to: view) }) {
+            try expect(abs(mark.minX - inset) <= pixel, "\(label): the provider mark keeps its normal start \(inset) (at \(mark.minX))")
+            for point in [NSPoint(x: mark.minX, y: mark.midY), NSPoint(x: mark.midX, y: mark.minY)] {
+                try expect(!view.agentBubbleContains(point), "\(label): the plate runs into the provider mark at \(point)")
+            }
+        } else if let title = view.qaTitleRectInBar().map({ titleBar.convert($0, to: view) }), title.width > 0 {
+            try expect(abs(title.minX - inset) <= pixel, "\(label): the title keeps its normal start \(inset) (at \(title.minX))")
+            try expect(!view.agentBubbleContains(NSPoint(x: title.minX, y: title.midY)), "\(label): the plate runs into the title")
+        }
     }
 
     /// The plate's own layer tree over two backdrops: inside its outline, no

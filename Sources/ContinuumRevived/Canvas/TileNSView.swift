@@ -203,7 +203,7 @@ class TileNSView: NSView, TokenThemed {
     private(set) var agentBubbleView: TileAgentBubbleView?
 
     /// The bubble in this tile's coordinates, while it shows: on the title's
-    /// line, inside the bar.
+    /// line inside the bar (Inline), or hanging off the top-left corner.
     var agentBubbleFrame: NSRect? {
         guard let titleBar, let rect = titleBar.qaBubbleRect else { return nil }
         return titleBar.convert(rect, to: self)
@@ -2857,7 +2857,9 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// identifier.
     private var leadingInset: CGFloat {
         let inset = CGFloat(Space.m) * chromeScale
-        guard let bubble = bubbleRect else { return inset }
+        // A plate hanging off the corner reserves nothing: the title keeps its
+        // normal start.
+        guard let bubble = bubbleRect, !TileAgentBubbleLayer.Plate.hangs(self.bubble.bubbleStyle) else { return inset }
         return max(inset, bubble.maxX + CGFloat(Space.s) * titleScale)
     }
 
@@ -2872,11 +2874,27 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// sized from the title (`Plate.titleRatio` of its point size) so it grows
     /// and shrinks with the title and never outweighs it, and never taller than
     /// the bar. Centred on the title's capitals, so the two share a line.
+    ///
+    /// The Orb and the Squircle hang off the tile's top-left corner instead
+    /// (`Plate.hangs`): sized from the title too (`Plate.hangRatio`), never
+    /// more than `Plate.hangMaxBarRatio` of the bar, its centre just outside
+    /// the corner. When the title outgrows the bar's chrome (a Large
+    /// character), it hangs further out so its inside part never reaches the
+    /// title's start.
     private var bubbleRect: NSRect? {
         guard characterSize != nil else { return nil }
         let backing = backingScaleForCharacter
         func snap(_ value: CGFloat) -> CGFloat { (value * backing).rounded() / backing }
         let height = bounds.height > 0 ? bounds.height : 24 * sizeScale
+        if TileAgentBubbleLayer.Plate.hangs(bubble.bubbleStyle) {
+            let side = snap(min(titleFontWorldSize * TileAgentBubbleLayer.Plate.hangRatio,
+                                height * TileAgentBubbleLayer.Plate.hangMaxBarRatio))
+            let inset = CGFloat(Space.m) * chromeScale
+            // Its inside part stops short of the title's start (`leadingInset`).
+            let reach = max(side * TileAgentBubbleLayer.Plate.hangOverflow, side - inset * 1.2)
+            let origin = -snap(reach)
+            return NSRect(x: origin, y: origin, width: side, height: side)
+        }
         let font = NSFont.systemFont(ofSize: titleFontWorldSize, weight: .medium)
         let side = snap(min(titleFontWorldSize * TileAgentBubbleLayer.Plate.titleRatio,
                             height - 2 * TileAgentBubbleLayer.Plate.barInset * chromeScale))

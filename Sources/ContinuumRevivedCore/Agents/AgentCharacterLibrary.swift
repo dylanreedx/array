@@ -181,9 +181,9 @@ public enum AgentCharacterConfig {
     public enum BubbleStyle: String, CaseIterable, Sendable {
         /// A rounded square on the title's line (square at Sharp corners).
         case inline
-        /// A superellipse on the title's line, the app-icon shape.
+        /// A superellipse, the app-icon shape, hanging off the tile's top-left corner.
         case squircle
-        /// A circle in glass on the title's line.
+        /// A circle in glass, hanging off the tile's top-left corner.
         case orb
 
         public var title: String {
