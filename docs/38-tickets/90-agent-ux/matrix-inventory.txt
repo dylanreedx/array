@@ -1128,7 +1128,7 @@ count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 24
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 210
+count ContinuumRevivedCoreChecks 211
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

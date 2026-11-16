@@ -713,15 +713,41 @@ extension SidebarLedgerChecks {
         record.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "turn-1", outcome: .failed, endedAt: ended)
         try AgentStore(applicationSupportDirectory: support).upsert(record)
         let transcripts = AgentTranscriptStore(root: support.appendingPathComponent("agent-transcripts", isDirectory: true))
-        let error = AgentEntry(id: AgentNodeID(rawValue: "quota")!, role: .system,
-            provenance: .providerItem(provider: "runtime", itemID: "turn-1"),
-            blocks: [AgentBlock(id: AgentNodeID(rawValue: "error")!, kind: .error, payload: .error(.init(message: usage)))],
-            createdAt: ended)
+        // An incoming helper card held during the reply is placed after the
+        // failed turn's error. It is not a new human prompt boundary when the
+        // relaunched sidebar searches the persisted transcript for that error.
+        var projection = AgentTranscriptProjection(threadId: "failure-restore", monotonicNow: { 0 }, wallClockNow: { ended })
+        _ = try projection.appendUserPrompt(id: AgentNodeID(rawValue: "failure-human-prompt")!, prompt: AgentPrompt("Run the guard."))
+        projection.ingest(.turnStarted(threadId: "failure-restore", turnId: "turn-1"))
+        projection.ingest(.contentDelta(threadId: "failure-restore", turnId: "turn-1", streamKind: .assistant, delta: "Checking the guard."))
+        _ = try projection.appendUserPrompt(id: AgentNodeID(rawValue: "failure-helper-card")!, prompt: AgentPrompt(
+            AgentMessageEnvelope.wrap("The independent check finished.", senderID: UUID(), senderName: "Scout")))
+        _ = try projection.appendUserPrompt(id: AgentNodeID(rawValue: "failure-held-teammate")!,
+            prompt: AgentPrompt("From Sam\n\n---\nCheck the next guard too."))
+        projection.ingest(.turnCompleted(threadId: "failure-restore", turnId: "turn-1", outcome: .failed, errorMessage: usage))
+        let held = projection.document.entries.suffix(2).flatMap(\.blocks).compactMap { block -> AgentMessagePayload? in
+            if case let .agentMessage(message) = block.payload { return message }
+            return nil
+        }
+        guard held.map(\.origin) == [.array, .teammate], held.allSatisfy({ $0.receivedAt != nil }) else {
+            throw Failure(description: "the restore fixture must place both held agent and teammate cards after the error")
+        }
+        let snapshot = projection.document
+        // A person's shared-agent prompt is also a card, but must remain a
+        // boundary so a later human request never borrows this error.
+        var afterTeammate = projection
+        _ = try afterTeammate.appendUserPrompt(id: AgentNodeID(rawValue: "failure-teammate-prompt")!,
+            prompt: AgentPrompt("From Sam\n\n---\nRun a new check."))
+        guard case let .agentMessage(teammate)? = afterTeammate.document.entries.last?.blocks.first?.payload,
+              teammate.origin == .teammate, teammate.receivedAt == nil,
+              AgentSupervisor.lastErrorMessage(in: afterTeammate.document, for: record.latestTerminalEvent!, since: nil) == nil else {
+            throw Failure(description: "a teammate's human prompt must remain a failure-correlation boundary")
+        }
         var saved = false
         Task { @MainActor in
             try? await transcripts.saveSnapshot(agentID: record.id,
                 sessionID: AgentTranscriptStore.canonicalSessionID(for: record.id),
-                document: AgentDocument(entries: [error]))
+                document: snapshot)
             saved = true
         }
         while !saved { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }

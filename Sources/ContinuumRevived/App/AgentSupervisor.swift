@@ -1994,7 +1994,18 @@ final class AgentSupervisor {
     nonisolated static func lastErrorMessage(
         in document: AgentDocument, for event: AgentTerminalEvent, since startedAt: Date?
     ) -> String? {
-        let lower = document.entries.lastIndex { $0.role == .user }.map { $0 + 1 } ?? 0
+        // Agent cards can be released after this turn's error; only a real
+        // human prompt starts a new boundary. An immediate teammate prompt is
+        // human input too; a held teammate steer belongs to the streaming turn
+        // that received it, despite being placed after that turn's error.
+        let lower = document.entries.lastIndex { entry in
+            guard entry.role == .user else { return false }
+            let messages = entry.blocks.compactMap { block -> AgentMessagePayload? in
+                if case let .agentMessage(message) = block.payload { return message }
+                return nil
+            }
+            return messages.isEmpty || messages.contains { $0.origin == .teammate && $0.receivedAt == nil }
+        }.map { $0 + 1 } ?? 0
         for entry in document.entries[lower...].reversed() {
             let matchesTurn: Bool
             if case .providerItem(_, let itemID) = entry.provenance,
