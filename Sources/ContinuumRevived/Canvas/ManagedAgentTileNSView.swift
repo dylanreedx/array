@@ -1819,7 +1819,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// The title bar's wash over `tileChrome`. A zone tint at full strength is
     /// the loudest thing on a tile; this keeps the hue identifiable and quiet,
     /// and the title legible on it.
-    static let identityBarAlpha: CGFloat = 0.3
+    nonisolated static let identityBarAlpha: CGFloat = 0.3
     /// Full border mode: a stroke a muted tint still reads at, kept under
     /// `LineWidth.rule` (the state-bearing edge) and drawn under the canvas's
     /// focus and attention overlays, which therefore still win.

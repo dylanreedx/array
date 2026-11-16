@@ -133,7 +133,22 @@ enum CharacterSizeChecks {
             let band = NSRect(x: 0, y: 0, width: view.bounds.width, height: 60)
             guard let rep = view.bitmapImageRepForCachingDisplay(in: band) else { return nil }
             view.cacheDisplay(in: band, to: rep)
-            return rep.tiffRepresentation
+            guard var data = rep.tiffRepresentation else { return nil }
+            // The icon is the tile's sibling in the world plane, above it: its
+            // own layer tree, rendered, is part of the header's picture.
+            if let host = view.agentBubbleView, let layer = host.layer, !host.isHidden {
+                view.qaAgentBubble?.layoutIfNeeded()
+                let width = Int((host.bounds.width * 4).rounded(.up)), height = Int((host.bounds.height * 4).rounded(.up))
+                guard width > 0, height > 0, let context = CGContext(
+                    data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+                context.scaleBy(x: 4, y: 4)
+                layer.render(in: context)
+                guard let image = context.makeImage(), let icon = NSBitmapImageRep(cgImage: image).tiffRepresentation else { return nil }
+                data.append(icon)
+                data.append(contentsOf: Array("\(host.frame)".utf8))
+            }
+            return data
         }
         func row() -> Data? {
             guard let cell = inbox.cellForQA(id: rowID),
@@ -186,28 +201,27 @@ enum CharacterSizeChecks {
                       let barView = view.qaTitleBarView else {
                     throw Failure(description: "\(where_): no character or no mark in the header")
                 }
-                // Medium and Large at their own scale take the sidebar's whole-pixel
-                // rule; Small, and any size once the floor is larger, draw at the
-                // chrome scale exactly as Small always has.
-                let ownScale = factor > chrome
+                // The art is fitted to its plate (`--tile-agent-bubble-check`),
+                // never under a device pixel per art pixel, whatever the size.
                 let sizeScale = max(factor, chrome)
-                let art = ownScale ? perArt : sizeScale
-                try expect(abs(sprite.width - 20 * art) < 0.01 && abs(sprite.height - 12 * art) < 0.01,
-                           "\(where_): the header character is 20 x 12 art at \(art) pt each, got \(sprite.size)")
-                if ownScale {
-                    try expect(whole(art * CGFloat(zoom) * backing), "\(where_): \(art * backing) device px per art px is whole")
-                    // The tile sits on whole points (world 40, 40 at 1).
+                let art = sprite.width / 20
+                try expect(abs(sprite.height - 12 * art) < 0.01 && art * backing * CGFloat(zoom) >= 0.999,
+                           "\(where_): the header character is 20 x 12 art, at least a device pixel each on screen, got \(sprite.size)")
+                if zoom == 1 {
+                    // The tile sits on whole points (world 40, 40 at 1). The sprite's
+                    // origin is its top-left in the flipped bar: the window's maxY.
                     let inWindow = barView.convert(sprite, to: nil)
-                    try expect(whole(inWindow.minX * backing) && whole(inWindow.minY * backing),
-                               "\(where_): the header character starts on a device pixel (\(inWindow.origin) at \(backing)x)")
+                    try expect(whole(inWindow.minX * backing) && whole(inWindow.maxY * backing),
+                               "\(where_): the header character starts on a device pixel (\(inWindow.minX), \(inWindow.maxY) at \(backing)x)")
                 }
                 let markSide = (14 * factor).rounded() * sizeScale / factor
                 try expect(abs(mark.width - markSide) < 0.01, "\(where_): the mark is \(markSide) pt, got \(mark.width)")
-                // The character is centred in its bubble at the tile's top-left corner.
-                guard let bubble = view.agentBubbleFrame else { throw Failure(description: "\(where_): no bubble") }
-                let spriteInTile = barView.convert(sprite, to: view)
-                try expect(abs(spriteInTile.midY - bubble.midY) < tolerance && abs(spriteInTile.midX - bubble.midX) < tolerance,
-                           "\(where_): the character is centred in its bubble (\(spriteInTile) in \(bubble))")
+                // The character's body is centred on its plate.
+                guard view.agentBubbleFrame != nil, let body = view.qaCharacterBody else {
+                    throw Failure(description: "\(where_): no bubble")
+                }
+                try expect(abs(body.body.y - body.target.y) < tolerance && abs(body.body.x - body.target.x) < tolerance,
+                           "\(where_): the character is centred on its plate (\(body.body) at \(body.target))")
                 try expect(abs(mark.midY - bar / 2) < 0.01, "\(where_): the mark is centred in the bar (\(mark.midY))")
                 let close = view.qaCloseButtonFrame
                 try expect(abs(close.midY - bar / 2) < 0.01, "\(where_): × stays centred (\(close.midY))")

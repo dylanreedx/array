@@ -409,14 +409,44 @@ final class TileSelectionOverlay: NSView {
                             xRadius: radius, yRadius: radius)
     }
 
-    /// The same clipping area is used by drawing and the overlap witness.
+    /// The same clipping area is used by drawing and the overlap witness. A
+    /// ring stops short of every agent icon it passes, as the ants do. Built in
+    /// the ring's own coordinates and kept while nothing around it changes, so
+    /// a pan, which moves the ring with its plates, subtracts no paths.
     private func visibleArea(_ outline: TileOutlineGeometry.Result) -> CGPath {
-        var area = CGPath(rect: outline.rect, transform: nil)
-        for occluder in outline.occluders {
-            area = area.subtracting(CGPath(rect: occluder, transform: nil))
+        let origin = outline.rect.origin
+        var toCanvas = CGAffineTransform(translationX: origin.x, y: origin.y)
+        func q(_ v: CGFloat) -> CGFloat { (v * 64).rounded() / 64 }
+        let occluders = outline.occluders.map {
+            let r = $0.offsetBy(dx: -origin.x, dy: -origin.y)
+            return CGRect(x: q(r.minX), y: q(r.minY), width: q(r.width), height: q(r.height))
         }
-        return area
+        let cut = selection?.canvas?.agentBubbleRingCut(around: outline.rect)
+        let key = AreaKey(size: CGSize(width: q(outline.rect.width), height: q(outline.rect.height)), occluders: occluders, cut: cut)
+        let local: CGPath
+        if let cached = areaCache[outline.id], cached.key == key {
+            local = cached.area
+        } else {
+            var area = CGPath(rect: CGRect(origin: .zero, size: outline.rect.size), transform: nil)
+            for occluder in occluders {
+                area = area.subtracting(CGPath(rect: occluder, transform: nil))
+            }
+            if let cut { area = area.subtracting(cut.path) }
+            areaCache[outline.id] = (key, area)
+            qaAreaBuilds += 1
+            local = area
+        }
+        return local.copy(using: &toCanvas) ?? local
     }
+
+    private struct AreaKey: Equatable {
+        var size: CGSize
+        var occluders: [CGRect]
+        var cut: CanvasNSView.RingCut?
+    }
+    private var areaCache: [UUID: (key: AreaKey, area: CGPath)] = [:]
+    /// QA: how many member clipping areas were built (a pan reuses them).
+    private(set) var qaAreaBuilds = 0
 
     var qaVisibleStrokePaths: [CGPath] {
         guard !isHidden else { return [] }
@@ -439,6 +469,8 @@ final class TileSelectionOverlay: NSView {
         return edge(at: local) == nil ? nil : self
     }
     override func draw(_ dirtyRect: NSRect) {
+        let members = Set(outlines.map(\.id))
+        if areaCache.keys.contains(where: { !members.contains($0) }) { areaCache = areaCache.filter { members.contains($0.key) } }
         guard rects.count > (ringsOnly ? 0 : 1) else { return }
         let lineWidth = FocusBorderOverlayView.lineWidth
         let dash = FocusBorderOverlayView.dashPattern.map { CGFloat($0.doubleValue) }

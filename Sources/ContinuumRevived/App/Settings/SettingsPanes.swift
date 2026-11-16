@@ -362,6 +362,8 @@ struct SettingsFieldRow: View {
             SidebarHeaderBackgroundSettingsRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == SidebarActiveIndicatorStyle.defaultsKey || key == SidebarActiveIndicatorScope.defaultsKey:
             SidebarActiveIndicatorSettingsRow(model: model, row: row)
+        case let .choice(key, _, _, _, _) where key == AgentCharacterConfig.bubbleStyleKey:
+            TileAgentIconSettingsRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == CornerStyle.defaultsKey:
             PickerRow(row: row, model: model, segmented: true)
         case let .choice(key, _, _, _, _) where key == "array.updateChannel":

@@ -617,6 +617,45 @@ private struct SidebarActiveIndicatorChoice: NSViewRepresentable {
         button.onSelection = { item in model.write(.string(item.id), to: field) }
     }
 }
+/// Where an agent tile's icon sits (Inline, Squircle, Orb), on Array's shared
+/// choice surface.
+struct TileAgentIconSettingsRow: View {
+    let model: SettingsModel
+    let row: SettingsRow
+
+    var body: some View {
+        let _ = model.revision
+        HStack {
+            SettingsRowLabel(title: row.field.label, help: row.help)
+            Spacer()
+            TileAgentIconChoice(model: model, field: row.field)
+                .frame(width: 180, height: ChoiceButton.controlHeight)
+        }
+    }
+}
+
+private struct TileAgentIconChoice: NSViewRepresentable {
+    let model: SettingsModel
+    let field: SettingsField
+
+    func makeNSView(context: Context) -> ChoiceButton {
+        let button = ChoiceButton(title: AgentCharacterConfig.defaultBubbleStyle.title)
+        button.setAccessibilityLabel("Tile icon")
+        button.setAccessibilityIdentifier("settings.tileAgentIcon")
+        return button
+    }
+
+    func updateNSView(_ button: ChoiceButton, context: Context) {
+        button.items = AgentCharacterConfig.BubbleStyle.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
+        // A stored value from before this choice (0.7.50's Minimal) shows as
+        // what it draws: the default.
+        let stored = model.binding(for: field).string
+        button.selectedID = AgentCharacterConfig.BubbleStyle(rawValue: stored)?.rawValue
+            ?? AgentCharacterConfig.defaultBubbleStyle.rawValue
+        button.onSelection = { item in model.write(.string(item.id), to: field) }
+    }
+}
+
 struct SidebarHeaderBackgroundSettingsRow: View {
     let model: SettingsModel
     let row: SettingsRow

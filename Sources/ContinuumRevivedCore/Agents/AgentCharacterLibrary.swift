@@ -177,12 +177,28 @@ public enum AgentCharacterCopy {
 /// Settings › Agent Icons. Off by default.
 public enum AgentCharacterConfig {
     public static let bubbleStyleKey = "agentCharacters.bubbleStyle"
+    /// Where the icon sits on its agent's tile, and what holds it.
     public enum BubbleStyle: String, CaseIterable, Sendable {
-        case minimal, orb
-        public var title: String { self == .minimal ? "Minimal" : "Orb" }
+        /// A rounded square on the title's line (square at Sharp corners).
+        case inline
+        /// A superellipse on the title's line, the app-icon shape.
+        case squircle
+        /// A circle in glass on the title's line.
+        case orb
+
+        public var title: String {
+            switch self {
+            case .inline: return "Inline"
+            case .squircle: return "Squircle"
+            case .orb: return "Orb"
+            }
+        }
     }
+    public static let defaultBubbleStyle = BubbleStyle.inline
+    /// The stored style; anything else, including 0.7.50's `minimal` (its
+    /// circle is gone), reads as the default.
     public static func bubbleStyle(_ defaults: UserDefaults) -> BubbleStyle {
-        defaults.string(forKey: bubbleStyleKey).flatMap(BubbleStyle.init(rawValue:)) ?? .minimal
+        defaults.string(forKey: bubbleStyleKey).flatMap(BubbleStyle.init(rawValue:)) ?? defaultBubbleStyle
     }
     public static let enabledKey = "agentCharacters.enabled"
     public static let defaultEnabled = false
