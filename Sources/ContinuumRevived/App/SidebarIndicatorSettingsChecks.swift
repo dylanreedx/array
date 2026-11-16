@@ -238,6 +238,15 @@ enum SidebarIndicatorSettingsChecks {
 /// sweep/shimmer/fade. No preference writes and no fallback to an app domain.
 /// `scope` stands in for "Show style on"; nil reads as unset, so the shipped
 /// default (All working agents) applies. A check may change it and post the setting.
+extension SidebarLayout {
+    /// The layout the legacy sidebar legs exercise. Quiet unless the run asks
+    /// for the shipped default with `ARRAY_QA_SIDEBAR_LAYOUT=ledger`.
+    static var legacyLegLayoutForQA: SidebarLayout {
+        ProcessInfo.processInfo.environment["ARRAY_QA_SIDEBAR_LAYOUT"]
+            .flatMap(SidebarLayout.init(rawValue:)) ?? .quietInbox
+    }
+}
+
 final class ClassicSidebarDefaultsForChecks: UserDefaults, @unchecked Sendable {
     var scope: SidebarActiveIndicatorScope?
     static func make(scope: SidebarActiveIndicatorScope? = nil) -> ClassicSidebarDefaultsForChecks {
@@ -249,9 +258,9 @@ final class ClassicSidebarDefaultsForChecks: UserDefaults, @unchecked Sendable {
         switch key {
         case SidebarActiveIndicatorStyle.defaultsKey: return SidebarActiveIndicatorStyle.classic.rawValue
         case SidebarActiveIndicatorScope.defaultsKey: return scope?.rawValue
-        // Today's sidebar: the legacy legs witness today's rows, which the
-        // Quiet inbox keeps. The Ledger has its own legs.
-        case SidebarLayout.defaultsKey: return SidebarLayout.quietInbox.rawValue
+        // The legacy legs run on the Quiet inbox by default and again on the
+        // shipped Ledger with ARRAY_QA_SIDEBAR_LAYOUT=ledger.
+        case SidebarLayout.defaultsKey: return SidebarLayout.legacyLegLayoutForQA.rawValue
         default: return nil
         }
     }

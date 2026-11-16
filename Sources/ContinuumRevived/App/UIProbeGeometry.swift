@@ -1501,7 +1501,7 @@ enum UIProbeGeometry {
 
         let inbox = AgentInboxView(frame: framePinnedInbox ? host.bounds : .zero)
         // Fan-out and row accounting, not the Ledger's head: today's rows.
-        inbox.setSidebarLayoutForQA(.quietInbox)
+        inbox.setSidebarLayoutForQA(.legacyLegLayoutForQA)
         host.addSubview(inbox)
         if framePinnedInbox {
             // Conditional overlays change fitting size. A frame-pinned full inbox is
@@ -1841,13 +1841,9 @@ enum UIProbeGeometry {
             }
         }
 
-        // The layout's head (the Ledger's For you list and its headings).
-        let headRows = probe.inbox.itemsForQA.filter { item in
-            switch item {
-            case .sectionLabel, .incident, .quietNeedsYou: return true
-            default: return false
-            }
-        }.count
+        // The layout's head for this fixture, fixed rather than read back from
+        // the list: the Quiet inbox draws 4 head rows, the Ledger 5.
+        let headRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 5 : 4
         let expectedTableRows = expectedAgentCells + actualRemainders.count + expectedNonAgentRows + headRows
         guard probe.inbox.tableRowCountForQA == expectedTableRows,
               probe.inbox.nonAgentTableRowCountForQA == actualRemainders.count + expectedNonAgentRows + headRows else {
@@ -1917,12 +1913,8 @@ enum UIProbeGeometry {
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
 
-        let nestedHeadRows = probe.inbox.itemsForQA.filter { item in
-            switch item {
-            case .sectionLabel, .incident, .quietNeedsYou: return true
-            default: return false
-            }
-        }.count
+        // Fixed for this fixture: the Quiet inbox draws 2 head rows, the Ledger 1.
+        let nestedHeadRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 1 : 2
         guard probe.inbox.rowIdsForQA == bounded.rows.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == bounded.rows.count,
               probe.inbox.tableRowCountForQA == bounded.rows.count + 2 + nestedHeadRows,
