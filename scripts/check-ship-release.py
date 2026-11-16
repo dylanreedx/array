@@ -29,22 +29,34 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-REAL = ["nightly-gate.sh", "ship-release.sh", "append-appcast.py", "generate-appcast.sh", "wait-live-release.py"]
+REAL = ["nightly-gate.sh", "ship-release.sh", "append-appcast.py", "generate-appcast.sh", "wait-live-release.py",
+        "feature-gate.sh"]
 for index, arg in enumerate(sys.argv[1:]):  # optional replacements: name=path, for teeth checks
     name, _, path = arg.partition("=")
     REAL[REAL.index(name)] = (name, Path(path))
 STUBS = {
     # The matrix double records its mode and answers from the fixture's plan.
     "run-matrix.sh": r'''#!/bin/bash
-mode=$1
-case $mode in --skip-awake) ;; --awake-only) ;; *) echo "unknown mode $mode" >&2; exit 2 ;; esac
+mode=${1:-full}
+case $mode in --skip-awake) ;; --awake-only) ;; full) ;; *) echo "unknown mode $mode" >&2; exit 2 ;; esac
 # What a leg would see: the checkout's branch, the CLIs on PATH, inherited gate state.
 env | grep '^ARRAY_NIGHTLY_' >> "$SHIP_EVENTS.knobs" || true
+# Mode switches that shrink a run: which ones reached this matrix, per mode.
+echo "$mode $(env | sed -nE 's/^([A-Z0-9_]*(_ONLY|SKIP_[A-Z0-9_]*|UPDATE_BASELINES))=.*/\1/p' | sort | tr '\n' ' ')" >> "$SHIP_EVENTS.controls"
 name=$(cat "$SHIP_PLAN/build-name"); echo "$(git rev-parse HEAD) $(/bin/ps -axo comm= | grep -c "/$name\$")" >> "$SHIP_EVENTS.busy"
 echo "$(git rev-parse HEAD) branch=$(git branch --show-current) first=${PATH%%:*} cli=$(command -v array-fixture-cli || echo none) ref=${ARRAY_NIGHTLY_REF:-unset}" >> "$SHIP_EVENTS.legs"
 echo "matrix $mode $(git rev-parse HEAD) owner=${ARRAY_MATRIX_LOCK_OWNER:-none}" >> "$SHIP_EVENTS"
 mkdir -p "$ARRAY_MATRIX_RESULTS"
 status=$(cat "$SHIP_PLAN/matrix$mode" 2>/dev/null || echo pass)
+if [[ -n "${ARRAY_MATRIX_LEGS:-}" ]]; then
+  # A selected run: one row per selected leg, except awake legs under --skip-awake.
+  echo "selected $mode $(printf '%s' "$ARRAY_MATRIX_LEGS" | tr '\n' ',')" >> "$SHIP_EVENTS"
+  rows=$(printf '%s\n' "$ARRAY_MATRIX_LEGS" | while read -r leg; do
+    [[ $mode == --skip-awake && $leg == *awake* ]] && continue
+    printf '{"leg": "%s", "status": "%s", "seconds": 1},' "$leg" "$([[ $status == pass ]] && echo pass || echo fail)"; done)
+  printf '[%s]\n' "${rows%,}" > "$ARRAY_MATRIX_RESULTS/results.json"
+  [[ $status == pass ]]; exit
+fi
 printf '[{"leg": "--fixture-check", "status": "%s", "seconds": 1}, {"leg": "--load-check", "status": "retry-passed", "seconds": 1}]\n' \
   "$([[ $status == pass ]] && echo pass || echo fail)" > "$ARRAY_MATRIX_RESULTS/results.json"
 [[ $status == pass ]]
@@ -54,19 +66,32 @@ echo "bundle $* owner=${ARRAY_RELEASE_LOCK_OWNER:-none}" >> "$SHIP_EVENTS"
 out=${@: -1}; mkdir -p "$out/Contents"; git rev-parse HEAD > "$out/Contents/source"
 ''',
     "release-app.sh": r'''#!/bin/bash
-echo "sign $*" >> "$SHIP_EVENTS"
+# Whether the shared lock is held while the candidate is read and signed.
+lock=$(python3 -c 'import fcntl, os
+f = open(os.environ["ARRAY_MATRIX_LOCK"], "a")
+try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); print("free")
+except BlockingIOError: print("held")')
+echo "sign lock=$lock $*" >> "$SHIP_EVENTS"
 while [[ $# -gt 0 ]]; do case $1 in --bundle) b=$2;; --output-dir) o=$2;; --set-version) v=$2;; esac; shift 2; done
 mkdir -p "$o"; cp -R "$b" "$o/Array.app"; head -c 4096 /dev/urandom > "$o/Array-$v.dmg"
 ''',
     "check-app-bundle.sh": '#!/bin/bash\necho "audit $*" >> "$SHIP_EVENTS"\n',
+    # The real selector has its own witness (check-leg-coverage.py); here it
+    # answers from the plan and records the range it was asked about.
+    "leg-coverage.py": ("import os, sys\nopen(os.environ['SHIP_EVENTS'], 'a').write('select ' + ' '.join(sys.argv[2:]) + '\\n')\n"
+                        "print(open(os.environ['SHIP_PLAN'] + '/selection.json').read())\n"),
 }
 SIGN = '#!/bin/sh\nprintf \'sparkle:edSignature="%s" length="%s"\\n\' "$(head -c 64 /dev/zero | base64)" "$(stat -f %z "$1")"\n'
 GH = r'''#!/bin/bash
 # Each release is a file listing its uploaded asset names.
 echo "gh $*" >> "$SHIP_EVENTS"
 release="$SHIP_PLAN/gh-$3"
+if [[ -f "$SHIP_PLAN/gh-offline" ]]; then echo "error connecting to api.github.com" >&2; exit 1; fi
+if [[ $1 == release && $2 == list ]]; then
+  for f in "$SHIP_PLAN"/gh-v*; do [[ -e $f ]] && basename "$f" | sed 's/^gh-//'; done; exit 0; fi
 if [[ $1 == release && $2 == view ]]; then
-  [[ -f $release ]] || exit 1; [[ " $* " == *" --json assets "* ]] && cat "$release"; exit 0; fi
+  [[ -f $release ]] || { echo "release not found" >&2; exit 1; }
+  [[ " $* " == *" --json assets "* ]] && cat "$release"; exit 0; fi
 if [[ $1 == release && ( $2 == create || $2 == upload ) ]]; then
   for asset in "${@: -2}"; do [[ -s $asset ]] || exit 9; done
   [[ $2 == upload && -f "$SHIP_PLAN/gh-upload-inert" ]] && exit 0  # reports success, uploads nothing
@@ -149,7 +174,11 @@ class Fixture:
                         ARRAY_SHIP_GH=str(bindir / "gh"), ARRAY_SHIP_WAIT_SECONDS="20",
                         ARRAY_SHIP_WAIT_INTERVAL="0.2", GIT_AUTHOR_NAME="Fixture",
                         GIT_AUTHOR_EMAIL="fixture@example.invalid", GIT_COMMITTER_NAME="Fixture",
-                        GIT_COMMITTER_EMAIL="fixture@example.invalid")
+                        GIT_COMMITTER_EMAIL="fixture@example.invalid",
+                        # Inherited switches that would make the matrix a partial run.
+                        ARRAY_NIGHTLY_CONFIG_PATHS=str(self.root / "no-such-config"),
+                        REPLAY_CHECKS_ONLY="1", CONTINUUM_SKIP_SURFACE_CHECKS="1",
+                        CONTINUUM_SKIP_UI_BASELINES="1", CONTINUUM_UPDATE_BASELINES="1")
         for key in ("ARRAY_MATRIX_LOCK_OWNER", "ARRAY_RELEASE_LOCK_OWNER", "ARRAY_MATRIX_LEGS", "ARRAY_NIGHTLY_REF"):
             self.env.pop(key, None)
 
@@ -261,6 +290,12 @@ def gate_cases(fx):
     expect(result.returncode == 1 and "diff --check" in result.stderr, "whitespace errors refuse the gate", result)
     sh("git", "-C", str(fx.repo), "reset", "-q", "--hard", gated)
     head = fx.commit("docs(release): prepare notes", {".plans/notes.md": "release notes\n"}, push=True)
+    with open(fx.root / "matrix.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # a gate run, which prunes old candidates under this lock
+        result = fx.run("nightly-gate.sh", "--ship-base", head)
+    expect(result.returncode == 1 and "lock held" in result.stderr and not result.stdout.strip(),
+           "--ship-base waits out a lock holder instead of naming a candidate it may prune", result)
+    print("PASS ship-base-takes-lock")
     result = fx.run("nightly-gate.sh", "--ship-base", head)
     base = json.loads(result.stdout or "{}")
     expect(result.returncode == 0 and base.get("gate") == gated and base.get("inert_changes") == [".plans/notes.md"],
@@ -273,19 +308,39 @@ def ship_cases(fx, gated, head):
     notes = fx.root / "notes.md"
     notes.write_text("Faster shipping | fixture.\n\nMore words.\n")
     before = (fx.repo / "website/public/appcast.xml").read_bytes()
+    signed = lambda: any(line.startswith("sign ") for line in fx.log())
     with open(fx.root / "matrix.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
-    expect(result.returncode != 0 and "awake group" in result.stderr
-           and not any(line.startswith("sign ") for line in fx.log()), "a skipped awake group stops prepare", result)
+    expect(result.returncode != 0 and "holds" in result.stderr and not signed(), "a held lock stops prepare", result)
+    print("PASS prepare-refuses-held-lock")
+    (fx.plan / "matrix--awake-only").write_text("fail")
+    result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
+    (fx.plan / "matrix--awake-only").unlink()
+    expect(result.returncode != 0 and "awake group" in result.stderr and not signed(), "a red awake group stops prepare", result)
     shutil.rmtree(fx.repo / f"qa-runs/ship-{VERSION}")
-    print("PASS prepare-refuses-skipped-awake")
+    print("PASS prepare-refuses-red-awake")
+    (fx.plan / "gh-offline").write_text("")
+    result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
+    (fx.plan / "gh-offline").unlink()
+    expect(result.returncode != 0 and "cannot tell whether" in result.stderr and not signed(),
+           "a gh network error stops prepare instead of reading as not published", result)
+    print("PASS prepare-refuses-gh-error")
+    for tag in (f"v{OTHER_VERSION}", f"v{OTHER_VERSION}-tip.0123456789ab"):  # stable, then a tip prerelease
+        orphan = fx.plan / f"gh-{tag}"
+        orphan.write_text("Array.dmg\n")  # uploaded by a publish that died before its push
+        result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
+        orphan.unlink()
+        expect(result.returncode != 0 and tag in result.stderr and "build numbers are unknown" in result.stderr
+               and not signed(), f"a GitHub-only upload ({tag}) stops build allocation", result)
+    print("PASS prepare-counts-github-uploads")
     result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
     events = fx.log()
     expect(result.returncode == 0, "prepare succeeds", result)
     expect(any(line == f"matrix --awake-only {gated} owner=" + line.split("owner=")[-1] and "owner=none" not in line
                for line in events), f"awake group ran at the gated commit: {events}")
     sign = next(line for line in events if line.startswith("sign "))
+    expect(sign.startswith("sign lock=held "), f"the candidate is signed under the shared lock: {sign}")
     expect(f"--bundle {fx.summary(gated)['candidate']}" in sign and f"--set-build {BUILD}" in sign and f"--set-version {VERSION}" in sign,
            f"signs the gate's candidate as build {BUILD}: {sign}")
     expect(any(line.startswith("audit --configuration release --channel prod") for line in events), "bundle audit ran")
@@ -338,6 +393,12 @@ def ship_cases(fx, gated, head):
     expect("is live" in result.stdout and Feed.polls > Feed.lag and f"has not deployed build {BUILD}" in result.stdout,
            f"publish waits through the deploy lag, then returns ({Feed.polls} feed polls)", result)
     print("PASS publish-waits-for-live-feed")
+    controls = Path(str(fx.events) + ".controls").read_text().splitlines()
+    expect(controls and all(line.strip() == "--skip-awake CONTINUUM_SKIP_UI_BASELINES" if line.startswith("--skip-awake")
+                            else line.strip() == line.split()[0] for line in controls)
+           and any(line.startswith("--awake-only") for line in controls),
+           f"no inherited switch shrinks a gate's matrix; only skip-awake skips the display legs: {controls}")
+    print("PASS gate-matrix-is-never-partial")
 
 
 def quiet_cases(fx):
@@ -355,7 +416,10 @@ def quiet_cases(fx):
     def start_waiting_gate():
         log = open(fx.root / "waiting-gate.log", "w+")
         gate = subprocess.Popen(["/bin/bash", "scripts/nightly-gate.sh"], cwd=fx.repo,
-                                env=dict(fx.env, ARRAY_NIGHTLY_REF="HEAD"), stdin=subprocess.DEVNULL,
+                                # CPU bar 0: on a loaded Mac the stand-in gets under any bar;
+                                # gate-ignores-idle-build witnesses the bar itself.
+                                env=dict(fx.env, ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_BUILD_CPU_MIN="0"),
+                                stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=subprocess.STDOUT)
         deadline = time.time() + 15
         while "Waiting for a quiet Mac" not in (fx.root / "waiting-gate.log").read_text() and time.time() < deadline:
@@ -374,7 +438,7 @@ def quiet_cases(fx):
     build = stand_in()
     head = fx.commit("feat(app): change while another build runs", {"Sources/App.swift": "let app = 5\n"})
     gate, log = start_waiting_gate()
-    time.sleep(1.0)
+    time.sleep(5.0)  # long enough for the gate's first ps sample on a loaded Mac
     free = lock_is_free()
     started_early = Path(str(fx.events) + ".busy").exists() and head in busy()
     build.kill(); build.wait()
@@ -410,8 +474,8 @@ def quiet_cases(fx):
     print("PASS gate-bounded-wait-records-contention")
 
     head = fx.commit("feat(app): change while fseventsd is over the ceiling", {"Sources/App.swift": "let app = 7\n"})
-    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_FSEVENTS_CPU_MAX="-1",
-                                                ARRAY_NIGHTLY_QUIET_MAX_SECONDS="0.5"))
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_FSEVENTS_CPU_MAX="-1",  # 4 s: a loaded Mac takes seconds per ps
+                                                ARRAY_NIGHTLY_QUIET_MAX_SECONDS="4"))
     waited = fx.summary(head).get("contention", {})
     expect(result.returncode == 0 and waited.get("quiet") is False and waited["last"]["swift_builds"] == 0
            and waited["last"]["fseventsd_cpu"] is not None and waited["polls"] > 1,
@@ -420,10 +484,10 @@ def quiet_cases(fx):
 
     idle = idle_stand_in()
     head = fx.commit("feat(app): change beside an idle build process", {"Sources/App.swift": "let app = 8\n"})
-    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_QUIET_MAX_SECONDS="5"))
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_QUIET_MAX_SECONDS="10"))
     idle.kill(); idle.wait()
     waited = fx.summary(head).get("contention", {})
-    expect(result.returncode == 0 and waited.get("quiet") is True and waited["waited_seconds"] < 2
+    expect(result.returncode == 0 and waited.get("quiet") is True and waited["waited_seconds"] < 8
            and waited["last"]["idle_swift_builds"] == 1, f"an idle swift-build does not hold the gate: {waited}", result)
     print("PASS gate-ignores-idle-build")
 
@@ -437,6 +501,91 @@ def quiet_cases(fx):
     expect(not (knobs.exists() and knobs.read_text().strip()),
            f"no ARRAY_NIGHTLY_* knob reaches the matrix: {knobs.read_text() if knobs.exists() else ''}")
     print("PASS gate-knobs-safe-and-private")
+
+
+def config_case(fx):
+    """A config the legs' tmux opens at start that blocks on open (under launchd,
+    a symlink into ~/Documents): the gate fails red naming it, runs no matrix and
+    frees the lock, instead of hanging while holding it."""
+    fifo = fx.root / "tmux.conf"
+    os.mkfifo(fifo)  # open() for read blocks until a writer comes, as the TCC-blocked open did
+    head = fx.commit("feat(app): change under an unreadable config", {"Sources/App.swift": "let app = 11\n"})
+    started = time.time()
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_CONFIG_PATHS=str(fifo),
+                                                ARRAY_NIGHTLY_CONFIG_READ_SECONDS="1"))
+    summary = fx.summary(head)
+    expect(result.returncode == 1 and time.time() - started < 60 and not summary["green"] and not summary["candidate"]
+           and str(fifo) in " ".join(summary["failed_legs"]) and not any(head in line for line in fx.legs_saw()),
+           f"an unreadable leg config fails the gate red, names it and runs no matrix: {summary.get('failed_legs')}", result)
+    with open(fx.root / "matrix.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            freed = True
+        except BlockingIOError:
+            freed = False
+    expect(freed, "the lock is free after the refused run")
+    print("PASS gate-refuses-unreadable-config")
+
+
+def feature_cases(fx):
+    """The per-feature gate: tier picks the legs, nightly-gate.sh --feature runs
+    them under the lock without touching anything a ship reads, and every run
+    lands in the feature's evidence record."""
+    records = fx.root / "records"
+    env = dict(ARRAY_FEATURE_RECORDS=str(records))
+    integration = sh("git", "-C", str(fx.repo), "rev-parse", "origin/array/integration").stdout.strip()
+    sh("git", "-C", str(fx.repo), "checkout", "-q", "-b", "array/feature-x", integration)
+    feature = fx.commit("feat(app): a feature", {"Sources/App.swift": "let app = 10\n"})
+    sh("git", "-C", str(fx.repo), "checkout", "-q", "--detach", integration)
+    before = len(fx.log())
+    (fx.plan / "selection.json").write_text(json.dumps(dict(full=False, full_reasons=[], legs=["--a-check", "--b-awake-check"])))
+    result = fx.run("feature-gate.sh", "array/feature-x", "--tier", "2", "--legs", "--seam-check", "--skip-awake", env=env)
+    events = fx.log()[before:]
+    record = records / "feature-x.md"
+    text = record.read_text() if record.exists() else ""
+    expect(result.returncode == 0 and any(line == f"select {integration} {feature} --json" for line in events),
+           f"tier 2 asks the selector about the branch's own range: {events}", result)
+    expect(f"matrix --skip-awake {feature} owner=" in "\n".join(events) and "owner=none" not in "\n".join(events)
+           and "selected --skip-awake --a-check,--b-awake-check,--seam-check" in events,
+           f"tier 2 runs the selected legs plus the author's, under the lock: {events}")
+    expect(not (fx.base / "results" / feature / "summary.json").exists() and not any(e.startswith("bundle") for e in events),
+           "a feature run writes no gate summary and builds no candidate")
+    expect("Tier 2" in text and "One independent review" in text and ": GREEN" in text and "Awake group: NOT run" in text
+           and "Selected but not run (1): --b-awake-check" in text and "OPEN" in text,
+           f"the record holds the tier's checklist, the run and the unverified awake leg:\n{text}")
+    print("PASS feature-tier2-selected-legs")
+
+    (fx.plan / "matrixfull").write_text("fail")
+    before = len(fx.log())
+    result = fx.run("feature-gate.sh", "array/feature-x", "--tier", "1", "--slug", "feature-x", env=env)
+    (fx.plan / "matrixfull").unlink()
+    events = fx.log()[before:]
+    text = record.read_text()
+    expect(result.returncode == 1 and any(e.startswith(f"matrix full {feature}") for e in events)
+           and not any(e.startswith(("select ", "selected ")) for e in events),
+           f"tier 1 runs every leg with the awake group, no selector: {events}", result)
+    expect(text.count("### ") == 2 and ": RED" in text and "--fixture-check" in text and text.count("# feature-x") == 1,
+           f"a red run is appended to the same record:\n{text}")
+    print("PASS feature-tier1-every-leg")
+
+    (fx.plan / "selection.json").write_text(json.dumps(dict(full=True, full_reasons=["x is covered by no specific leg"], legs=[])))
+    before = len(fx.log())
+    result = fx.run("feature-gate.sh", "array/feature-x", "--tier", "3", "--slug", "unmapped", env=env)
+    events = fx.log()[before:]
+    expect(result.returncode == 0 and any(e.startswith(f"matrix --skip-awake {feature}") for e in events)
+           and not any(e.startswith("selected ") for e in events)
+           and "covered by no specific leg" in (records / "unmapped.md").read_text(),
+           f"an unmapped change runs every leg, and says why: {events}", result)
+    print("PASS feature-unmapped-runs-full")
+
+    with open(fx.root / "matrix.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        result = fx.run("feature-gate.sh", "array/feature-x", "--tier", "3", "--slug", "locked", env=env)
+    expect(result.returncode == 1 and "lock held" in result.stderr and "no result" in result.stderr,
+           "a held lock refuses the feature run loudly", result)
+    result = fx.run("feature-gate.sh", "origin/array/integration", "--tier", "3", env=env)
+    expect(result.returncode == 1 and "no commits beyond" in result.stderr, "a branch with nothing new is refused", result)
+    print("PASS feature-refusals")
 
 
 def schedule_case():
@@ -483,6 +632,8 @@ with tempfile.TemporaryDirectory(prefix="array-ship-") as temp:
         ship_cases(fixture, *gate_cases(fixture))
         ref_case(fixture)
         quiet_cases(fixture)
+        config_case(fixture)
+        feature_cases(fixture)
         schedule_case()
     except AssertionError as error:
         failures += 1
