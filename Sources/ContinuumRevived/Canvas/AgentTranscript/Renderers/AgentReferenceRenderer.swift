@@ -17,11 +17,23 @@ struct AgentReferenceStatusSource: @unchecked Sendable {
     let current: (UUID) -> InboxState?
     let subscribe: (UUID, @escaping (InboxState?) -> Void) -> UUID?
     let unsubscribe: (UUID) -> Void
+    let hasReliableNotifications: Bool
+
+    init(current: @escaping (UUID) -> InboxState?,
+         subscribe: @escaping (UUID, @escaping (InboxState?) -> Void) -> UUID?,
+         unsubscribe: @escaping (UUID) -> Void,
+         hasReliableNotifications: Bool = false) {
+        self.current = current
+        self.subscribe = subscribe
+        self.unsubscribe = unsubscribe
+        self.hasReliableNotifications = hasReliableNotifications
+    }
 
     static let unavailable = AgentReferenceStatusSource(
         current: { _ in nil },
         subscribe: { _, _ in nil },
-        unsubscribe: { _ in }
+        unsubscribe: { _ in },
+        hasReliableNotifications: true
     )
 }
 

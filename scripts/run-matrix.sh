@@ -2744,6 +2744,9 @@ run_app_check .build/debug/Array --streaming-ingest-check
 # through a real agent tile: a delta re-lays out only its block, tail follow,
 # selection + Cmd-C, link click, and a redraw at 2x/4x zoom with no layout.
 run_app_check .build/debug/Array --transcript-canvas-check
+# Long synthetic history: actual canvas append, update, and scroll drawing. A
+# private archive may be supplied explicitly for local performance investigation.
+run_app_check .build/debug/Array --long-transcript-performance-check
 # Pixels outside the transcript remain unchanged while prose, code and cards
 # scroll across either edge (screen composite, or offline production drawing).
 run_app_check .build/debug/Array --transcript-viewport-clipping-check
