@@ -168,6 +168,14 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
             threadId: threadId, monotonicNow: monotonicNow, wallClockNow: wallClockNow)
     }
 
+    /// A settled transcript resumed from its saved document (see
+    /// `AgentTranscriptProjection.init(threadId:resuming:status:finalAssistantSource:)`).
+    public init(threadId: String, resuming document: AgentDocument, status: AgentStatus, finalAssistantSource: String?) {
+        semanticProjection = AgentTranscriptProjection(
+            threadId: threadId, resuming: document, status: status, finalAssistantSource: finalAssistantSource)
+        hasSeenTurnStart = true
+    }
+
     public mutating func ingest(_ event: AgentRuntimeEvent) {
         switch event {
         case .itemStarted(let tid, let itemID, let kind, _) where tid == threadId:

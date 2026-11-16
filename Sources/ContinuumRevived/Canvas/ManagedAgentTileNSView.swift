@@ -727,8 +727,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             return
         }
         let replayingIntoAProjection = projectedAgentID != nil
+        // A parked tile returning to an agent whose transcript was released keeps
+        // what it shows until the reload lands, rather than blanking for it.
+        let keepsShownTranscript = projectedAgentID == agentID && supervisor.isTranscriptReleased(agentID)
         detach()
-        if replayingIntoAProjection { resetProjection() }
+        if replayingIntoAProjection && !keepsShownTranscript { resetProjection() }
         attachedAgentID = agentID
         projectedAgentID = agentID
         transcriptAttachmentOwnerAgentID = agentID
@@ -931,6 +934,21 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self.synchronizeV2Transcript(final: true)
         }
         let attachment = supervisor.transcriptAttachment(for: agentID, reboundTo: threadId)
+        if let reload = attachment.reload {
+            // Released while idle and unwatched: attach again once it is back, so
+            // the snapshot and tail are taken together as on any attach.
+            let projectName = locationProjectName
+            Task { @MainActor [weak self, weak supervisor] in
+                await reload.value
+                // Still released means the saved file could not be read: stop
+                // here rather than retry in a loop. The next write tries again.
+                guard let self, let supervisor, self.attachedAgentID == agentID,
+                      !supervisor.isTranscriptReleased(agentID) else { return }
+                self.eventSubscription?.cancel()
+                self.eventSubscription = nil
+                self.attach(agentID: agentID, supervisor: supervisor, projectName: projectName)
+            }
+        }
         if let snapshot = attachment.snapshot {
             installTranscriptSnapshot(snapshot)
             // The agent's transcript starts from its restore: it is drawn.

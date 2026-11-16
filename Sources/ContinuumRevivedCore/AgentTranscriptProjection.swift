@@ -83,6 +83,23 @@ public struct AgentTranscriptProjection: Sendable {
         self.wallClockNow = wallClockNow
     }
 
+    /// Resumes a settled transcript from its saved document, so a supervisor that
+    /// released an idle agent's copy can pick it back up. Only a settled one: no
+    /// open stream or item survives a save. The local sequences start past every
+    /// entry the document holds, so an id minted from them cannot repeat one.
+    /// `finalAssistantSource` is the last reply's raw Markdown, which the document
+    /// does not keep.
+    public init(threadId: String, resuming document: AgentDocument, status: AgentStatus, finalAssistantSource: String?) {
+        self.init(threadId: threadId)
+        reducer = AgentDocumentReducer(document: document, createdAtProvider: wallClockNow)
+        currentStatus = status
+        localSequence = document.entries.count
+        runtimeErrorSequence = document.entries.count
+        if let finalAssistantSource, let entry = document.entries.last(where: { $0.role == .assistant }) {
+            rawMarkupSourcesByEntryID[entry.id] = finalAssistantSource
+        }
+    }
+
     public var document: AgentDocument { reducer.document }
     public var activeToolCount: Int { activeItemIDs.count }
     public var compatibilityMarkupSourcesByEntryID: [AgentNodeID: String] {

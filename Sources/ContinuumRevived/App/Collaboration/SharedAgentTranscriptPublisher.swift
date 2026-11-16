@@ -119,7 +119,7 @@ final class SharedAgentTranscriptPublisher {
         }, imageData: { [weak supervisor] document in
             await supervisor?.sharedTranscriptImages(for: agent, document: document) ?? [:]
         }, chrome: chrome) { [weak supervisor] in
-            supervisor?.transcriptDocument(for: agent)
+            supervisor?.sharedTranscriptDocument(for: agent)
         }
     }
 
