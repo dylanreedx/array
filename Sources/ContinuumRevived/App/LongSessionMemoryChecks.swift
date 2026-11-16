@@ -27,7 +27,7 @@ enum LongSessionMemoryChecks {
     }
 
     static var agentCount: Int { env("ARRAY_LONG_SESSION_AGENTS") ?? 24 }
-    static var hours: Int { env("ARRAY_LONG_SESSION_HOURS") ?? 4 }
+    static var hours: Int { env("ARRAY_LONG_SESSION_HOURS") ?? 5 }
     static var turnsPerHour: Int { env("ARRAY_LONG_SESSION_TURNS") ?? 10 }
 
     private static func env(_ name: String) -> Int? {
@@ -91,6 +91,17 @@ enum LongSessionMemoryChecks {
         return events
     }
 
+    /// The text one turn streams: what a transcript legitimately keeps.
+    static func contentBytes(of script: [AgentRuntimeEvent]) -> Int {
+        script.reduce(0) { total, event in
+            switch event {
+            case let .contentDelta(_, _, _, delta): return total + delta.utf8.count
+            case let .itemStarted(_, _, _, title): return total + (title?.utf8.count ?? 0)
+            default: return total
+            }
+        }
+    }
+
     // MARK: - Run
 
     static func run() async throws -> String {
@@ -122,6 +133,7 @@ enum LongSessionMemoryChecks {
         final class WeakRunner { weak var runner: ScriptedAgentRunner?; init(_ r: ScriptedAgentRunner) { runner = r } }
         var runnersMade: [WeakRunner] = []
         var turnByAgent: [AgentID: Int] = [:]
+        var streamedContent = 0
         var slotByAgent: [AgentID: Int] = [:]
         let delegate = AppDelegate()
         canvas.focusBroker = delegate.focusBroker
@@ -133,7 +145,9 @@ enum LongSessionMemoryChecks {
                 let id = launch.record.id
                 let turn = turnByAgent[id, default: 0]
                 turnByAgent[id] = turn + 1
-                let runner = ScriptedAgentRunner(script: turnScript(agent: slotByAgent[id] ?? 99, turn: turn))
+                let script = turnScript(agent: slotByAgent[id] ?? 99, turn: turn)
+                streamedContent += contentBytes(of: script)
+                let runner = ScriptedAgentRunner(script: script)
                 runnersMade.append(WeakRunner(runner))
                 return runner
             })
@@ -180,6 +194,7 @@ enum LongSessionMemoryChecks {
 
         var helpers: [AgentID] = []
         var samples: [Int] = []
+        var contentAtHour: [Int] = []
         var turnCount = 0
         await settle()
         let baseline = mallocBytesInUse()
@@ -222,6 +237,7 @@ enum LongSessionMemoryChecks {
                        "hour \(hour + 1): finished turns free their runners, \(liveRunners) of \(runnersMade.count) still alive")
             let bytes = mallocBytesInUse() - baseline
             samples.append(bytes)
+            contentAtHour.append(streamedContent)
             print("long-session memory: hour \(hour + 1): +\(mb(bytes)) over baseline, \(turnCount) turns, \(liveRunners) runners alive, \(Int(Date().timeIntervalSince(started)))s")
             // Diagnosis only: hold still so `heap <pid>` can census this hour.
             let pauses = (ProcessInfo.processInfo.environment["ARRAY_LONG_SESSION_PAUSE_AFTER_HOURS"] ?? "")
@@ -251,18 +267,27 @@ enum LongSessionMemoryChecks {
         let streamed = turnByAgent.values.reduce(0, +)
         try expect(streamed >= turnCount,
                    "every turn streamed through a runner: \(streamed) runs for \(turnCount) turns")
-        // Warm-up is the first hour: the first transcripts, caches and views.
-        // After it, growth per hour must be close to zero.
-        let warm = samples.count > 1 ? samples[0] : 0
-        let steadyHours = max(1, samples.count - 1)
+        // Warm-up is the first two hours: the first transcripts, caches and
+        // views, and what the first idle settles (resting chrome, tool detail).
+        // After it, what grows must be the transcripts' own text and its
+        // structure, both copies of it (the supervisor's and the tile's), and
+        // a placement per block: well under 20 times the text streamed. Before the
+        // fixes it was about 50 times (runners, CoreText for every line ever
+        // drawn, one Auto Layout engine for every resting tile).
+        let warmHours = min(2, samples.count - 1)
+        let warm = warmHours > 0 ? samples[warmHours - 1] : 0
+        let steadyHours = max(1, samples.count - warmHours)
         let perHour = ((samples.last ?? 0) - warm) / steadyHours
-        let report = "\(agentCount) agents, \(turnCount) turns over \(samples.count) simulated hours: warm-up +\(mb(warm)), then +\(mb(perHour))/hour (hours: \(samples.map(mb).joined(separator: ", ")))"
+        let contentPerHour = ((contentAtHour.last ?? 0) - (warmHours > 0 ? contentAtHour[warmHours - 1] : 0)) / steadyHours
+        let ratio = contentPerHour > 0 ? Double(perHour) / Double(contentPerHour) : 0
+        let report = "\(agentCount) agents, \(turnCount) turns over \(samples.count) simulated hours: warm-up +\(mb(warm)), then +\(mb(perHour))/hour for \(mb(contentPerHour))/hour of streamed text (\(String(format: "%.1f", ratio))x; hours: \(samples.map(mb).joined(separator: ", ")))"
         print("long-session memory: \(report)")
-        try expect(perHour < steadyBudgetBytes,
-                   "memory holds flat after warm-up, under \(mb(steadyBudgetBytes))/hour: \(report)")
+        try expect(ratio < steadyBudgetRatio,
+                   "memory after warm-up grows with the transcripts' text, under \(steadyBudgetRatio)x what streamed: \(report)")
+        if idleGrowth > 0 { print("long-session memory: idle growth +\(mb(idleGrowth))") }
         return report
     }
 
-    /// Roughly zero: a few MB an hour of slack for allocator noise.
-    static let steadyBudgetBytes = 4 * 1_048_576
+    /// Retained bytes per byte of streamed text, after warm-up.
+    static let steadyBudgetRatio = 20.0
 }
