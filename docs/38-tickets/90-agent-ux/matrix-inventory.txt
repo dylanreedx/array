@@ -19,6 +19,7 @@ check --agent-inbox-check
 check --agent-incremental-refresh-check
 check --agent-input-check
 check --agent-inventory-wiring-check
+check --agent-jump-composer-check
 check --agent-local-file-link-check
 check --agent-message-bus-check
 check --agent-message-card-check
@@ -548,6 +549,7 @@ leg run_app_check .build/debug/Array --agent-inbox-check
 leg run_app_check .build/debug/Array --agent-incremental-refresh-check
 leg run_app_check .build/debug/Array --agent-input-check
 leg run_app_check .build/debug/Array --agent-inventory-wiring-check
+leg run_app_check .build/debug/Array --agent-jump-composer-check
 leg run_app_check .build/debug/Array --agent-local-file-link-check
 leg run_app_check .build/debug/Array --agent-message-bus-check
 leg run_app_check .build/debug/Array --agent-message-card-check

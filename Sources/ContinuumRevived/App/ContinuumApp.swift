@@ -1446,6 +1446,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--agent-jump-composer-check") {
+            do {
+                _ = NSApplication.shared
+                print(try AgentJumpComposerChecks.run())
+                print("ContinuumRevivedAgentJumpComposerChecks passed: a jump to an agent lands on its composer at a readable zoom with its head pinned, and the setting off restores the old jump")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--sidebar-row-reveal-check") {
             do {
                 _ = NSApplication.shared

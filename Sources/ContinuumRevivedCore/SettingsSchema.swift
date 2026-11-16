@@ -197,6 +197,11 @@ public enum SettingsSchema {
                             help: "Used when a zone is created. A colour you pick is never changed.",
                             keywords: ["color", "palette"]),
             ]),
+            SettingsGroup(id: "canvas.jump", title: "Jumping to agents", rows: [
+                SettingsRow(.toggle(key: AgentJumpConfig.composerFirstKey, label: "Jump to an agent's composer", default: AgentJumpConfig.defaultComposerFirst),
+                            help: "A jump keeps a readable zoom and lands on the composer. When the tile is taller than the screen, its header stays pinned at the top.",
+                            keywords: ["jump", "reveal", "focus", "composer", "sticky header", "zoom"]),
+            ]),
             SettingsGroup(id: "canvas.toolbar", title: "Toolbar and hints", rows: [
                 SettingsRow(.toggle(key: FloatingToolbarConfig.visibleKey, label: "Show the canvas toolbar", default: FloatingToolbarConfig.defaultVisible),
                             keywords: ["floating toolbar", "create"]),

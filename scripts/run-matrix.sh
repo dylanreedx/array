@@ -2539,6 +2539,12 @@ run_app_check .build/debug/Array --subagent-sidebar-open-check
 # put the camera on the agent's tile and focus it, in the armed zone, another
 # zone, after an app switch, while agents stream and with a row arriving mid-click.
 run_app_check .build/debug/Array --sidebar-row-reveal-check
+# A jump to an agent taller than the screen framed its top, leaving the
+# composer off screen. A real sidebar click and an API reveal must land the
+# composer on screen with its text view focused, never zoom out, and pin the
+# tile's head at the top edge; a click on the head focuses the tile; a tile that
+# fits is framed whole; the setting off restores the old jump.
+run_app_check .build/debug/Array --agent-jump-composer-check
 # With auto-layout OFF, a zone's automatic placement clamped only the camera, so
 # a tile could be framed past the zone's edge; auto-layout's settle grew the zone
 # over it and hid that. Toolbar spawns into one zone until it is full, asserting
