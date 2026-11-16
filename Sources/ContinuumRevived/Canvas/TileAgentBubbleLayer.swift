@@ -57,6 +57,18 @@ final class TileAgentBubbleLayer: CALayer {
         /// The squircle's superellipse exponent.
         static let squircleExponent: CGFloat = 3.6
 
+        /// Whether the style hangs off the tile's top-left corner rather than
+        /// sitting on the title's line: the Orb and the Squircle do.
+        static func hangs(_ style: Style) -> Bool { style != .inline }
+        /// A hanging plate's side as a multiple of the title's point size.
+        static let hangRatio: CGFloat = 1.75
+        /// A hanging plate's side never exceeds this multiple of the bar.
+        static let hangMaxBarRatio: CGFloat = 1.3
+        /// How much of a hanging plate's side lies past the tile's top and left
+        /// edges: its centre just outside the corner, so its inside quarter
+        /// curves clear of the title at its normal start.
+        static let hangOverflow: CGFloat = 0.55
+
         /// The plate's outline in a flipped `box`, outset by `outset`.
         /// Hit-testing, painting and the selection ring's cut all use this one
         /// shape. Inline is square at Sharp corners (`tileRadius` 0); the
