@@ -46,6 +46,7 @@ func runAgentPresenceChecks() async throws {
         summary.append(try await AgentScheduleChecks.durableWakeups())
     }
     if wants("activity") { summary.append(try AgentPresenceChecks.checkLastActivityMovesOnFrames()) }
+    if wants("idle-setting") { summary.append(try await AgentPresenceChecks.checkIdleSessionTimeoutFollowsSetting()) }
     print("AgentPresenceChecks passed: " + summary.joined(separator: "; "))
 }
 
@@ -801,6 +802,61 @@ enum AgentPresenceChecks {
         try expect(supervisor.lastActivity(for: id) == t0.addingTimeInterval(1.2),
                    "activity: a meter reading is not activity")
         return "last activity moves on frames and streaming, once a second, and not on meter readings"
+    }
+
+    /// Settings › Agents › "Stop idle sessions after". A supervisor built the
+    /// way the app builds it (no fixed timeout) keeps an idle session for the
+    /// 10-minute default, and reads the setting at every turn end, so a change
+    /// applies from the next idle period without a restart.
+    static func checkIdleSessionTimeoutFollowsSetting() async throws -> String {
+        final class PooledRunner: AgentSteeringRunning, @unchecked Sendable {
+            private let lock = NSLock()
+            private var alive = true
+            var acceptsSteerNow: Bool { false }
+            var hasBackgroundWork: Bool { false }
+            var keepsSessionAliveBetweenTurns: Bool { true }
+            var canAcceptAnotherTurn: Bool { lock.withLock { alive } }
+            var commandCapabilities: AgentSessionCommandCapabilities { ScriptedAgentRunner(script: []).commandCapabilities }
+            func steer(_ prompt: AgentPrompt, id: UUID) throws { throw AgentSteerNotAccepted("check") }
+            func observeSteerDispositions(_ handler: @escaping @Sendable (UUID, AgentSteerDisposition) -> Void) {}
+            func interrupt() throws {}
+            func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+                onEvent(.turnStarted(threadId: "provider", turnId: UUID().uuidString))
+                onEvent(.turnCompleted(threadId: "provider", turnId: UUID().uuidString, outcome: .completed, errorMessage: nil))
+            }
+            func stop() { lock.withLock { alive = false } }
+            func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+            func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+        }
+        let suite = "continuum-idle-session-check-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            throw Failure(description: "idle-setting: could not create isolated defaults")
+        }
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        try expect(AgentIdleSessionConfig.timeout(defaults: defaults) == 600,
+                   "idle-setting: the shipped default is not 600 s")
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-presence-idle-setting-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = PooledRunner()
+        let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root),
+                                         makeRunner: { _ in runner }, idleSessionDefaults: defaults)
+        defer { supervisor.stopAll() }
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root,
+                                  harness: .claudeCode, model: "anthropic/claude-opus-5-5", thinking: "low")
+        try expect(supervisor.send("first", to: id), "idle-setting: first turn refused")
+        try await eventually("idle-setting: first turn did not end") {
+            supervisor.records[id]?.latestTerminalEvent != nil && !supervisor.isRunning(id)
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        try expect(runner.canAcceptAnotherTurn, "idle-setting: the default stopped an idle session within 0.4 s")
+
+        defaults.set(0.002, forKey: AgentIdleSessionConfig.minutesKey) // 0.12 s
+        try expect(supervisor.send("second", to: id), "idle-setting: second turn refused")
+        try await eventually("idle-setting: a 0.12 s setting did not stop the idle session", timeout: 4) {
+            !runner.canAcceptAnotherTurn
+        }
+        return "idle sessions stop after the Settings value, read at each turn end; default 600 s"
     }
 
     /// The supervisor's session-ending paths, which settle children no stream

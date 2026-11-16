@@ -2266,9 +2266,11 @@ final class AgentSupervisor {
         maximumActiveManagedChildren: @escaping () -> Int? = {
             AgentSpawnLimitConfig.maximumActiveChildren()
         },
-        idleRunnerTimeout: TimeInterval = AgentSupervisor.defaultIdleRunnerTimeout
+        idleRunnerTimeout: TimeInterval? = nil,
+        idleSessionDefaults: UserDefaults = .standard
     ) {
         self.idleRunnerTimeout = idleRunnerTimeout
+        self.idleSessionDefaults = idleSessionDefaults
         self.store = store
         self.runLedger = ManagedRunLedger(support: store.layout.applicationSupportDirectory)
         self.makeRunner = makeRunner
@@ -13811,8 +13813,10 @@ final class AgentSupervisor {
     // MARK: - T5 steering, force send, interrupt, idle reaping
 
     /// How long an idle provider session may sit before it is reaped (D3).
-    nonisolated static let defaultIdleRunnerTimeout: TimeInterval = 600
-    private let idleRunnerTimeout: TimeInterval
+    nonisolated static let defaultIdleRunnerTimeout: TimeInterval = AgentIdleSessionConfig.defaultMinutes * 60
+    /// A fixed timeout for checks; `nil` reads Settings › Agents at every turn end.
+    private let idleRunnerTimeout: TimeInterval?
+    private let idleSessionDefaults: UserDefaults
     private var idleReapTokens: [AgentID: UUID] = [:]
     /// QA: runs inside `accept(.queue)`/`accept(.steer)` after admission and
     /// before the store write, so a check can end the turn in that gap.
@@ -14377,12 +14381,14 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
     }
 
-    /// D3 — an idle provider session is reaped after `idleRunnerTimeout`,
-    /// unless it reports background work still running.
+    /// D3 — an idle provider session is reaped after the idle-session setting
+    /// (or a check's fixed `idleRunnerTimeout`), unless it reports background
+    /// work still running.
     private func scheduleIdleReap(for id: AgentID, runner: AgentRunning) {
         let token = UUID()
         idleReapTokens[id] = token
-        DispatchQueue.main.asyncAfter(deadline: .now() + idleRunnerTimeout) { [weak self] in
+        let timeout = idleRunnerTimeout ?? AgentIdleSessionConfig.timeout(defaults: idleSessionDefaults)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
             guard let self, self.idleReapTokens[id] == token, self.idleSessionRunners[id] === runner else { return }
             // A running shell job (a dev server) or child keeps the session;
             // only children, never shell jobs, decide when children close.
