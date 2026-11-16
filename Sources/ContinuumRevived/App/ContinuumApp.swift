@@ -24899,9 +24899,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
         agentSupervisor.configureManagedMode(defaults: settingsDefaults)
-        // Performance at scale, item 4: off unless `agents.recordArchive.enabled`.
+        // Performance at scale, item 4: on unless `agents.recordArchive.enabled` is false.
         agentSupervisor.recordArchiveDefaults = settingsDefaults
         agentSupervisor.onArchivedAgentAdopted = { [weak self] _ in
+            self?.scheduleAgentSurfacePush(debounce: 0.05)
+        }
+        agentSupervisor.onRecordsArchived = { [weak self] _ in
             self?.scheduleAgentSurfacePush(debounce: 0.05)
         }
         let collaborationRoot = collaborationSupportRoot

@@ -466,9 +466,13 @@ final class WorkspaceAPIService {
     /// until something names it. Every id in a request — `agentId`, `retryOf`,
     /// a list of handles — is brought back before any operation looks it up,
     /// so no operation needs to know the archive exists. An id that is not an
-    /// archived agent costs one stat. With the gate off no payload is walked.
+    /// archived agent costs one stat. With the gate off no payload is walked;
+    /// if it went off while Array runs, the whole archive comes back once.
     private func adoptArchivedAgentsIfEnabled(namedIn payload: Any) {
-        guard AgentRecordArchiveConfig.enabled(defaults: supervisor.recordArchiveDefaults) else { return }
+        guard AgentRecordArchiveConfig.enabled(defaults: supervisor.recordArchiveDefaults) else {
+            supervisor.restoreArchivedRecordsIfGateOff()
+            return
+        }
         Self.archivedAgentScansForQA += 1
         adoptArchivedAgents(namedIn: payload)
     }

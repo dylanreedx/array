@@ -75,6 +75,13 @@ public struct AgentStoreLayout: Sendable {
         archiveDirectory.appendingPathComponent("\(id.rawValue.uuidString).json", isDirectory: false)
     }
 
+    /// Archived files that hold no record: moved here once, never retried at
+    /// boot, never deleted. A subdirectory, so nothing that lists the archive's
+    /// `.json` files sees it.
+    public var archiveQuarantineDirectory: URL {
+        archiveDirectory.appendingPathComponent("quarantine", isDirectory: true)
+    }
+
     // Ticket: docs/38-tickets/90-agent-ux/P3.15-wire-destructive-row-actions.md
     /// The tiles whose agent was deliberately deleted.
     ///
@@ -271,10 +278,15 @@ public final class AgentStore: @unchecked Sendable {
         if lstat(layout.agentFile(id: id).path, &info) == 0 { return .present }
         let failure = errno
         guard failure == ENOENT else { return .indeterminate(failure) }
-        // An archived agent still owns its checkout.
-        if lstat(layout.archivedAgentFile(id: id).path, &info) == 0 { return .present }
-        let archiveFailure = errno
-        return archiveFailure == ENOENT ? .absent : .indeterminate(archiveFailure)
+        // An archived agent still owns its checkout, and so does one whose
+        // archived file was quarantined: nothing proves it gone.
+        for file in [layout.archivedAgentFile(id: id),
+                     quarantinedAgentFile(id: id)] {
+            if lstat(file.path, &info) == 0 { return .present }
+            let archiveFailure = errno
+            guard archiveFailure == ENOENT else { return .indeterminate(archiveFailure) }
+        }
+        return .absent
     }
 
     public func load(id: AgentID) throws -> AgentRecord? {
@@ -284,9 +296,11 @@ public final class AgentStore: @unchecked Sendable {
     }
 
     public func delete(id: AgentID) throws {
-        let archived = layout.archivedAgentFile(id: id)
-        if FileManager.default.fileExists(atPath: archived.path) {
-            try FileManager.default.removeItem(at: archived)
+        // Every copy: a quarantined one left behind would bring a deleted
+        // agent back on the next lookup by id.
+        for copy in try [layout.archivedAgentFile(id: id)] + quarantinedCopies(id: id)
+            where FileManager.default.fileExists(atPath: copy.path) {
+            try FileManager.default.removeItem(at: copy)
         }
         let url = layout.agentFile(id: id)
         guard FileManager.default.fileExists(atPath: url.path) else { return }
@@ -294,6 +308,31 @@ public final class AgentStore: @unchecked Sendable {
     }
 
     // MARK: - Archive (performance at scale, item 4)
+
+    /// Which file a path names, and as written: an atomic replace is a new
+    /// inode, an in-place write moves the time or the size.
+    public struct FileIdentity: Equatable, Sendable {
+        let inode: UInt64, device: Int32, modifiedSeconds: Int, modifiedNanoseconds: Int, size: Int64
+        public init?(_ url: URL) {
+            var info = stat()
+            guard lstat(url.path, &info) == 0 else { return nil }
+            inode = UInt64(info.st_ino); device = info.st_dev
+            modifiedSeconds = info.st_mtimespec.tv_sec; modifiedNanoseconds = info.st_mtimespec.tv_nsec
+            size = Int64(info.st_size)
+        }
+    }
+
+    /// Every live record file's identity, by file name. Taken before a read
+    /// so a write that lands during the read cannot match.
+    public func recordFileIdentities() -> [String: FileIdentity] {
+        let directory = layout.agentsDirectory
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        var identities: [String: FileIdentity] = [:]
+        for name in names where name.hasSuffix(".json") {
+            identities[name] = FileIdentity(directory.appendingPathComponent(name, isDirectory: false))
+        }
+        return identities
+    }
 
     /// Moves a record out of the set `loadAll` reads. One `rename(2)` on one
     /// volume: at every instant the record is in exactly one of the two
@@ -319,8 +358,18 @@ public final class AgentStore: @unchecked Sendable {
             try FileManager.default.removeItem(at: archived)
             return try load(id: id)
         }
-        let record: AgentRecord = try writer(for: id).read(at: archived, beforeBackup: waitForBackupMigration,
-                                                           recoveryTimestamp: { $0.lastActivityAt })
+        func read() throws -> AgentRecord {
+            try writer(for: id).read(at: archived, beforeBackup: waitForBackupMigration,
+                                     recoveryTimestamp: { $0.lastActivityAt })
+        }
+        let record: AgentRecord
+        do {
+            record = try read()
+        } catch {
+            // Read twice before calling it damaged: a transient failure inside
+            // the first read must not move a good record out of reach.
+            do { record = try read() } catch { throw quarantineIfDamaged(archived, error) }
+        }
         guard Darwin.rename(archived.path, live.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
@@ -331,27 +380,121 @@ public final class AgentStore: @unchecked Sendable {
     /// through `unarchive`, so each is decoded before it moves and a live copy
     /// wins. A file that cannot be read stays where it is and is reported, so
     /// one bad file never blocks the rest. An absent archive costs one lstat.
-    public func unarchiveAll() -> (restored: [AgentID], unreadable: [(file: URL, error: Error)]) {
+    public func unarchiveAll() -> (restored: [AgentRecord], unreadable: [(file: URL, error: Error)]) {
         let directory = layout.archiveDirectory
         var info = stat()
         guard lstat(directory.path, &info) == 0 else { return ([], []) }
         let names: [String]
         do { names = try FileManager.default.contentsOfDirectory(atPath: directory.path) } catch { return ([], [(directory, error)]) }
-        var restored: [AgentID] = []
+        var restored: [AgentRecord] = []
         var unreadable: [(file: URL, error: Error)] = []
         for name in names.sorted() where name.hasSuffix(".json") && !name.hasPrefix(".") {
             let file = directory.appendingPathComponent(name, isDirectory: false)
             guard let uuid = UUID(uuidString: String(name.dropLast(5))) else {
-                unreadable.append((file, CocoaError(.fileReadCorruptFile)))
+                // Not a name the archive writes: no lookup can ever reach it.
+                unreadable.append((file, quarantine(file, CocoaError(.fileReadCorruptFile))))
                 continue
             }
             do {
-                if try unarchive(id: AgentID(rawValue: uuid)) != nil { restored.append(AgentID(rawValue: uuid)) }
+                if let record = try unarchive(id: AgentID(rawValue: uuid)) { restored.append(record) }
             } catch {
                 unreadable.append((file, error))
             }
         }
         return (restored, unreadable)
+    }
+
+    /// An archived file read but held no record, and no backup recovered one.
+    /// It now sits in `archiveQuarantineDirectory`; the warning that reports
+    /// this error is the only one it gets.
+    public struct ArchivedRecordQuarantined: Error, CustomStringConvertible {
+        public let file: URL
+        public let quarantinedAt: URL
+        public let underlying: Error
+        public var description: String {
+            "\(file.lastPathComponent) held no readable record (\(underlying)); moved to \(quarantinedAt.path) and kept. "
+                + "Asking for its agent by id reads it again; moving it back into agents/ as <agent id>.json restores it at the next launch"
+        }
+    }
+
+    public func quarantinedAgentFile(id: AgentID) -> URL {
+        layout.archiveQuarantineDirectory.appendingPathComponent("\(id.rawValue.uuidString).json", isDirectory: false)
+    }
+
+    /// The way back from the quarantine, by id only, so no boot pays for it: a
+    /// record a build could not decode comes back once a build can. Decoded
+    /// before it moves; a file that still holds no record stays and throws.
+    /// nil when the quarantine does not hold `id`; a live copy wins.
+    public func unquarantine(id: AgentID) throws -> AgentRecord? {
+        let copies = try quarantinedCopies(id: id)
+        guard !copies.isEmpty else { return nil }
+        var info = stat()
+        let live = layout.agentFile(id: id)
+        if lstat(live.path, &info) == 0 { return try load(id: id) }
+        // The first copy that decodes wins: a damaged first copy must not mask
+        // a readable later one. It returns under the canonical name.
+        var failure: Error = CocoaError(.fileReadCorruptFile)
+        for copy in copies {
+            do {
+                let record = try JSONCodec.makeDecoder().decode(AgentRecord.self, from: Data(contentsOf: copy))
+                guard record.id == id else { throw CocoaError(.fileReadCorruptFile) }
+                guard Darwin.rename(copy.path, live.path) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                return record
+            } catch { failure = error }
+        }
+        throw failure
+    }
+
+    /// Every quarantined copy of `id`: `<id>.json`, then the suffixed copies
+    /// `quarantine` makes when that name is taken, newest first. Throws
+    /// unless absence is proven: a delete must not take an unreadable
+    /// quarantine for an empty one.
+    public func quarantinedCopies(id: AgentID) throws -> [URL] {
+        let directory = layout.archiveQuarantineDirectory
+        let canonical = quarantinedAgentFile(id: id)
+        var info = stat()
+        if lstat(directory.path, &info) != 0 {
+            guard errno == ENOENT else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            return []
+        }
+        var copies: [URL] = []
+        if lstat(canonical.path, &info) == 0 { copies.append(canonical) }
+        else if errno != ENOENT { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let prefix = canonical.lastPathComponent + "."
+        let suffixed = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey])
+            .filter { $0.lastPathComponent.hasPrefix(prefix) }
+        func modified(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        }
+        return copies + suffixed.sorted { modified($0) > modified($1) }
+    }
+
+    /// Damaged, not unreachable: a file whose bytes cannot be read at all
+    /// (permissions, I/O) may read next time, so it stays where it is.
+    private func quarantineIfDamaged(_ file: URL, _ error: Error) -> Error {
+        guard (try? Data(contentsOf: file)) != nil else { return error }
+        return quarantine(file, error)
+    }
+
+    /// One move, never a delete. A name already taken in the quarantine (the
+    /// same agent damaged twice) gets a suffix rather than replacing it.
+    /// Returns the error to report: `ArchivedRecordQuarantined`, or `error`
+    /// itself when the move failed and the file stays.
+    private func quarantine(_ file: URL, _ error: Error) -> Error {
+        let directory = layout.archiveQuarantineDirectory
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch { return error }
+        var target = directory.appendingPathComponent(file.lastPathComponent, isDirectory: false)
+        if renamex_np(file.path, target.path, UInt32(RENAME_EXCL)) != 0 {
+            guard errno == EEXIST else { return error }
+            target = directory.appendingPathComponent("\(file.lastPathComponent).\(UUID().uuidString)", isDirectory: false)
+            guard renamex_np(file.path, target.path, UInt32(RENAME_EXCL)) == 0 else { return error }
+        }
+        return ArchivedRecordQuarantined(file: file, quarantinedAt: target, underlying: error)
     }
 
     /// Every archived record, STRICT: one unreadable file throws. Only the

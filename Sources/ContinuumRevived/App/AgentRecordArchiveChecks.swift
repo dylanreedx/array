@@ -171,6 +171,93 @@ enum AgentRecordArchiveChecks {
             Double(result.mallocBytes) / 1_048_576, Double(result.footprint) / 1_048_576, result.rows, result.rowBuildMs))
     }
 
+    /// The measure mode moves records, so it refuses every store under
+    /// `~/Library/Application Support` — prod "Array" as well as this
+    /// binary's own channel — after resolving symlinks and `..`.
+    static func isOutsideRealStores(_ root: String) -> Bool {
+        func resolved(_ path: String) -> String {
+            URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        let real = resolved(RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent().path)
+        let candidate = resolved(root)
+        return !root.isEmpty && candidate != real && !candidate.hasPrefix(real + "/")
+    }
+
+    /// The guard above, driven over the paths that must be refused.
+    static func measureStoreGuardWitness() throws {
+        let real = RegistryStore.defaultApplicationSupportDirectory().deletingLastPathComponent()
+        let prod = real.appendingPathComponent("Array").path
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("archive-guard-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let link = tmp.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: prod)
+        for refused in [prod, real.appendingPathComponent("Array Dev").path, real.path,
+                        tmp.path + "/../../../../../../../../" + String(prod.dropFirst()), link.path, ""] {
+            try expect(!isOutsideRealStores(refused), "measure-store guard accepted a real store: \(refused)")
+        }
+        try expect(isOutsideRealStores(tmp.appendingPathComponent("copy").path), "measure-store guard refused a copy outside Application Support")
+    }
+
+    /// `--agent-record-archive-measure-store=off|on|default` (default writes no setting): one production boot over
+    /// the store `CONTINUUM_APP_SUPPORT` names — a COPY of a real one, never
+    /// the original — with the gate as given. Prints the mount's time and the
+    /// footprint it left, then the archive pass's moves. One process per run.
+    /// Never stops the agents it restored: they may name real processes.
+    static func measureStore(gate: Bool?) async throws {
+        guard let root = ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"],
+              isOutsideRealStores(root) else {
+            throw Failure(message: "measure-store needs CONTINUUM_APP_SUPPORT pointing at a copy of a store, outside ~/Library/Application Support")
+        }
+        let store = AgentStore()
+        store.waitForBackupMigration()
+        func jsonCount(_ dir: URL) -> Int {
+            ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".json") }.count
+        }
+        let liveBefore = jsonCount(store.layout.agentsDirectory), archivedBefore = jsonCount(store.layout.archiveDirectory)
+        let settings = gateSuite(gate)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
+            warn: { _ in }, nameTitlerCommand: { _ in nil })
+        supervisor.codexRestoreHomeForQA = URL(fileURLWithPath: root).appendingPathComponent("codex-empty")
+        let app = AppDelegate()
+        app.agentSupervisor = supervisor
+        app.qaSettingsDefaults = settings
+        let canvas = CanvasNSView(canvasState: emptyCanvas)
+        let footprintBefore = footprintBytes(), mallocBefore = mallocInUse(), decodedBefore = AgentStore.recordsDecodedForQA
+        let start = ContinuousClock.now
+        try app.mountWorkspaceSceneAtBoot(canvasView: canvas, spawner: nil, projectStore: nil,
+            canvasState: emptyCanvas, installsGlobalEventMonitors: false)
+        func ms(_ d: Duration) -> Double { (Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18) * 1000 }
+        let mountMs = ms(ContinuousClock.now - start)
+        let decoded = AgentStore.recordsDecodedForQA - decodedBefore
+        let adopted = supervisor.records.count
+        let footprintMount = footprintBytes(), mallocMount = mallocInUse()
+        let passStart = ContinuousClock.now
+        await supervisor.recordArchivePassForQA?.value
+        let passMs = ms(ContinuousClock.now - passStart)
+        // Both gates settle alike: the boot's other main-actor work (helper
+        // flushes, rehydration) runs here whether or not a pass was awaited.
+        let settle = Double(ProcessInfo.processInfo.environment["ARCHIVE_MEASURE_SETTLE_SECONDS"] ?? "") ?? 0
+        if settle > 0 { try await Task.sleep(for: .seconds(settle)) }
+        let cost = supervisor.recordArchivePassCostForQA
+        var rowTimes: [Double] = []
+        var rows = 0
+        for _ in 0..<7 {
+            let rowStart = ContinuousClock.now
+            rows = app.agentInboxRowsForQA().count
+            rowTimes.append(ms(ContinuousClock.now - rowStart))
+        }
+        let mb = 1_048_576.0
+        print(String(format: "METRIC agent-record-archive-store gate=%@ liveFilesBefore=%d archivedFilesBefore=%d decoded=%d adopted=%d mountMs=%.1f passMs=%.1f moved=%d liveAfter=%d archivedFilesAfter=%d footprintMB=%.1f footprintMountDeltaMB=%.1f mallocMountDeltaMB=%.1f footprintAfterPassMB=%.1f inboxRows=%d inboxRowBuildMedianMs=%.2f passScanMs=%.1f passMainMs=%.1f settleS=%.0f footprintSettledMB=%.1f",
+            gate.map { $0 ? "on" : "off" } ?? "default", liveBefore, archivedBefore, decoded, adopted, mountMs, passMs,
+            adopted - supervisor.records.count, supervisor.records.count, jsonCount(store.layout.archiveDirectory),
+            Double(footprintMount) / mb, (Double(footprintMount) - Double(footprintBefore)) / mb,
+            Double(mallocMount - mallocBefore) / mb, Double(footprintBytes()) / mb, rows, rowTimes.sorted()[3],
+            cost?.scanMs ?? -1, cost?.mainMs ?? -1, settle, Double(footprintBytes()) / mb))
+        withExtendedLifetime((app, canvas, supervisor)) {}
+    }
+
     // MARK: - Witness
 
     struct Edges {
@@ -253,9 +340,11 @@ enum AgentRecordArchiveChecks {
     }
 
     /// One production boot: the mount wires the gate from Settings.
-    static func boot(_ store: AgentStore, settings: QAIsolatedDefaults) throws -> (AgentSupervisor, AppDelegate, Int, Double) {
+    final class Warnings { var lines: [String] = [] }
+
+    static func boot(_ store: AgentStore, settings: QAIsolatedDefaults, warnings: Warnings? = nil) async throws -> (AgentSupervisor, AppDelegate, Int, Double) {
         let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
-            warn: { _ in }, nameTitlerCommand: { _ in nil })
+            warn: { line in warnings?.lines.append(line) }, nameTitlerCommand: { _ in nil })
         supervisor.codexRestoreHomeForQA = store.layout.applicationSupportDirectory.appendingPathComponent("codex-empty")
         supervisor.recordArchiveNow = { now }
         let app = AppDelegate()
@@ -267,12 +356,22 @@ enum AgentRecordArchiveChecks {
             projectStore: nil, canvasState: emptyCanvas, installsGlobalEventMonitors: false)
         let elapsed = ContinuousClock.now - start
         let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+        await settleArchivePass(supervisor)
         return (supervisor, app, AgentStore.recordsDecodedForQA - decoded, seconds)
     }
 
     static func exists(_ url: URL) -> Bool { FileManager.default.fileExists(atPath: url.path) }
 
-    static func bootWitness(gate: Bool) async throws {
+    /// The archive pass runs after restore, once the shared-area bindings are
+    /// read off the main thread.
+    static func settleArchivePass(_ supervisor: AgentSupervisor) async {
+        await supervisor.recordArchivePassForQA?.value
+    }
+
+    /// `gate` is the setting the boot sees: false/true written explicitly, nil
+    /// for a person who never touched it — the production default.
+    static func bootWitness(gate setting: Bool?) async throws {
+        let gate = setting ?? true
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-\(UUID())")
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
@@ -284,16 +383,16 @@ enum AgentRecordArchiveChecks {
         store.waitForBackupMigration()
         let all = Set(fixture.records.map(\.id))
         let kept = all.subtracting(fixture.archivable)
-        let settings = gateSuite(gate ? true : nil)
+        let settings = gateSuite(setting)
         defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
 
-        let (first, firstApp, firstDecoded, firstSeconds) = try boot(store, settings: settings)
+        let (first, firstApp, firstDecoded, firstSeconds) = try await boot(store, settings: settings)
         try expect(firstDecoded == all.count, "first boot reads every record: \(firstDecoded)/\(all.count)")
         if !gate {
             try expect(Set(first.records.keys) == all, "gate off: boot adopts every record")
             try expect(!exists(store.layout.archiveDirectory), "gate off: nothing is archived")
             first.stopAll()
-            let (second, _, decoded, seconds) = try boot(store, settings: settings)
+            let (second, _, decoded, seconds) = try await boot(store, settings: settings)
             try expect(decoded == all.count && second.records.count == all.count, "gate off: the next boot still reads \(all.count), read \(decoded)")
             print(String(format: "METRIC agent-record-archive gate=off records=%d boot1=%.3fs boot2=%.3fs decoded2=%d", all.count, firstSeconds, seconds, decoded))
             second.stopAll()
@@ -305,7 +404,7 @@ enum AgentRecordArchiveChecks {
         for id in [edges.keptRecentChild, edges.keptParentOfRecentChild, edges.keptUnfinishedTurn, edges.keptUndelivered, edges.keptSnoozed] {
             try expect(live.contains(id), "kept edge \(fixture.records.first { $0.id == id }!.displayName) must stay live")
         }
-        try expect(live == kept, "gate on: live set is the \(kept.count) kept records, got \(live.count)")
+        try expect(live == kept, "gate \(setting == nil ? "default" : "on"): live set is the \(kept.count) kept records, got \(live.count)")
         // Crash-safe: every record is in exactly one place.
         for id in all {
             let inLive = exists(store.layout.agentFile(id: id)), inArchive = exists(store.layout.archivedAgentFile(id: id))
@@ -320,12 +419,12 @@ enum AgentRecordArchiveChecks {
         withExtendedLifetime(firstApp) {}
 
         // The gain: the next boot never reads the archive.
-        let (second, secondApp, secondDecoded, secondSeconds) = try boot(store, settings: settings)
+        let (second, secondApp, secondDecoded, secondSeconds) = try await boot(store, settings: settings)
         try expect(secondDecoded == kept.count, "second boot decodes \(kept.count) records, decoded \(secondDecoded)")
         // A boot may archive more (a completion delivered since), never bring one back.
         try expect(Set(second.records.keys).isSubset(of: kept) && !second.records.isEmpty, "second boot adopts within the kept set")
-        print(String(format: "METRIC agent-record-archive gate=on records=%d archived=%d boot1=%.3fs boot2=%.3fs decoded2=%d",
-            all.count, fixture.archivable.count, firstSeconds, secondSeconds, secondDecoded))
+        print(String(format: "METRIC agent-record-archive gate=%@ records=%d archived=%d boot1=%.3fs boot2=%.3fs decoded2=%d",
+            setting == nil ? "default" : "on", all.count, fixture.archivable.count, firstSeconds, secondSeconds, secondDecoded))
 
         // Lazy load on miss through a production entry: the phone's Stop.
         let outcome = await CompanionCommandActions.stop(edges.archivedChild.rawValue, supervisor: second)
@@ -337,11 +436,23 @@ enum AgentRecordArchiveChecks {
         _ = secondApp.revealAgentFromInbox(edges.archivedClosed.rawValue)
         try expect(second.records[edges.archivedClosed] != nil, "a reveal by id brings an archived agent back")
         let liveAfterAdoption = second.records.count
+        try expect(liveAfterAdoption < all.count, "fixture: the archive holds records before the gate goes off")
+        // Follow-up (a) at scale: the gate goes off while this session runs.
+        // What the first workspace API request after it pays, on the main thread.
+        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
+        let restoreStart = ContinuousClock.now
+        second.restoreArchivedRecordsIfGateOff()
+        let restoreElapsed = ContinuousClock.now - restoreStart
+        let restoreMs = (Double(restoreElapsed.components.seconds) + Double(restoreElapsed.components.attoseconds) / 1e18) * 1000
+        try expect(Set(second.records.keys) == all && archivedFiles(store).isEmpty,
+                   "gate off at runtime: the whole archive is live again, live \(second.records.count)/\(all.count), archive \(archivedFiles(store).count)")
+        print(String(format: "METRIC agent-record-archive runtime-gate-off restored=%d restoredMs=%.1f",
+            second.records.count - liveAfterAdoption, restoreMs))
         second.stopAll()
         // Turning the gate off reverts it: the next boot decodes every record.
         let off = gateSuite(false)
         defer { off.removePersistentDomain(forName: off.suiteDomainName) }
-        let (third, _, thirdDecoded, _) = try boot(store, settings: off)
+        let (third, _, thirdDecoded, _) = try await boot(store, settings: off)
         try expect(liveAfterAdoption < all.count && thirdDecoded == all.count && Set(third.records.keys) == all,
                    "gate off later: boot restores all \(all.count) records, decoded \(thirdDecoded), live \(third.records.count)")
         try expect(archivedFiles(store).isEmpty, "gate off later: the archive is empty")
@@ -349,8 +460,11 @@ enum AgentRecordArchiveChecks {
     }
 
     /// An old, finished, tile-less record the policy alone would archive.
-    static func idleRecord(_ name: String, cwd: String, idleFor days: Double) -> AgentRecord {
-        let at = Date().addingTimeInterval(-days * day)
+    /// `clock` is the "now" of the supervisor that judges it: `boot` pins the
+    /// fixture's `now`, so a real-clock age drifts under the threshold a day
+    /// after that date.
+    static func idleRecord(_ name: String, cwd: String, idleFor days: Double, clock: Date = Date()) -> AgentRecord {
+        let at = clock.addingTimeInterval(-days * day)
         var r = AgentRecord(id: AgentID(rawValue: UUID()), displayName: name, harness: .claudeCode,
             model: "anthropic/claude-haiku-4-5-20251001", thinking: "low", cwd: cwd, projectId: UUID(),
             createdAt: at.addingTimeInterval(-60), lastActivityAt: at)
@@ -413,6 +527,7 @@ enum AgentRecordArchiveChecks {
         supervisor.codexRestoreHomeForQA = support.appendingPathComponent("codex-empty")
         supervisor.recordArchiveDefaults = settings
         _ = supervisor.restore()
+        await settleArchivePass(supervisor)
         try expect(supervisor.records[later.id] == nil && exists(store.layout.archivedAgentFile(id: later.id)),
                    "control: an unscheduled idle agent is archived")
         try expect(supervisor.records[held.id] != nil && !exists(store.layout.archivedAgentFile(id: held.id)),
@@ -444,8 +559,8 @@ enum AgentRecordArchiveChecks {
         try fm.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: root) }
         let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
-        let shared = idleRecord("Shared helper", cwd: root.path, idleFor: 8)
-        let unshared = idleRecord("Unshared helper", cwd: root.path, idleFor: 8)
+        let shared = idleRecord("Shared helper", cwd: root.path, idleFor: 8, clock: now)
+        let unshared = idleRecord("Unshared helper", cwd: root.path, idleFor: 8, clock: now)
         try write([shared, unshared], to: store)
         store.waitForBackupMigration()
         // The cache a shared area keeps, where the app keeps it.
@@ -458,7 +573,7 @@ enum AgentRecordArchiveChecks {
             SharedAreaLocalSourceBinding(object: .init(), binding: .init(), host: .init(), projectID: shared.projectId!, agentID: shared.id)]))
         let settings = gateSuite(true)
         defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
-        let (booted, app, _, _) = try boot(store, settings: settings)
+        let (booted, app, _, _) = try await boot(store, settings: settings)
         try expect(booted.records[unshared.id] == nil && exists(store.layout.archivedAgentFile(id: unshared.id)),
                    "control: an unbound idle agent is archived")
         try expect(booted.records[shared.id] != nil && !exists(store.layout.archivedAgentFile(id: shared.id)),
@@ -473,6 +588,7 @@ enum AgentRecordArchiveChecks {
         defer { projecting.stopAll() }
         projecting.recordArchiveDefaults = settings
         _ = projecting.restore()
+        await settleArchivePass(projecting)
         try expect(projecting.records[unshared.id] == nil, "fixture: the unbound agent is still archived")
         let projector: SharedAgentProjector
         do {
@@ -487,7 +603,7 @@ enum AgentRecordArchiveChecks {
 
     /// The workspace API, through the production mount and dispatch: an
     /// archived agent is inspectable and findable by id.
-    static func apiWitness() throws {
+    static func apiWitness() async throws {
         let settings = gateSuite(true)
         defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
         var archivedIDs: [AgentID] = []
@@ -510,19 +626,14 @@ enum AgentRecordArchiveChecks {
         })
         defer { f.tearDown() }
         let supervisor = f.delegate.qaAgentSupervisor
+        await settleArchivePass(supervisor)
         let store = AgentStore(smokeTest: false)
         for id in archivedIDs {
             try expect(supervisor.records[id] == nil && exists(store.layout.archivedAgentFile(id: id)), "fixture helper archived at boot")
         }
         supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
-        // Gate off: a request naming an archived agent walks no payload.
+        // The gate off walks no payload: `runtimeGateOffWitness`.
         let scans = WorkspaceAPIService.archivedAgentScansForQA
-        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
-        _ = f.api.dispatch(agentId: f.agentId, requestId: "archive-off", op: "agent.inspect",
-            payload: ["agentId": archivedIDs[0].rawValue.uuidString])
-        try expect(WorkspaceAPIService.archivedAgentScansForQA == scans && supervisor.records[archivedIDs[0]] == nil,
-                   "gate off: the workspace API scanned a payload")
-        settings.set(true, forKey: AgentRecordArchiveConfig.enabledKey)
         let inspected = f.api.dispatch(agentId: f.agentId, requestId: "archive-inspect", op: "agent.inspect",
             payload: ["agentId": archivedIDs[0].rawValue.uuidString])
         guard case let .result(value) = inspected else { throw Failure(message: "agent.inspect of an archived agent: \(inspected)") }
@@ -535,6 +646,398 @@ enum AgentRecordArchiveChecks {
         try expect("\(found)".lowercased().contains(archivedIDs[1].rawValue.uuidString.lowercased()), "agent.find by id finds an archived agent: \(found)")
     }
 
+    /// Follow-up (a): the gate goes off while Array runs. With it off the
+    /// workspace API adopts nothing by id, so what this session archived
+    /// answered not_found until the next launch. Production mount (gate on)
+    /// archives two helpers; the gate flips off in Settings; the first
+    /// request through the real dispatch answers for both, walks no payload,
+    /// and leaves the archive empty.
+    static func runtimeGateOffWitness() async throws {
+        let settings = gateSuite(true)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        var helpers: [AgentID] = []
+        let f = try WorkspaceAPIChecks.makeFixture(settings: settings, beforeMount: { delegate, _ in
+            delegate.qaAgentSupervisor.recordArchiveNow = { Date() }
+            guard let lead = delegate.qaAgentSupervisor.records.values.first(where: { $0.tileId != nil }) else {
+                throw Failure(message: "fixture lead missing")
+            }
+            var records: [AgentRecord] = []
+            for name in ["Runtime off inspect", "Runtime off find"] {
+                var r = idleRecord(name, cwd: lead.cwd, idleFor: 30)
+                r.parentAgentID = lead.id
+                r.projectId = lead.projectId
+                records.append(r)
+            }
+            try write(records, to: AgentStore(smokeTest: false))
+            helpers = records.map(\.id)
+        })
+        defer { f.tearDown() }
+        let supervisor = f.delegate.qaAgentSupervisor
+        await settleArchivePass(supervisor)
+        let store = AgentStore(smokeTest: false)
+        for id in helpers {
+            try expect(supervisor.records[id] == nil && exists(store.layout.archivedAgentFile(id: id)),
+                       "fixture: the mount archived helper \(id.rawValue)")
+        }
+        supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
+        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
+        let scans = WorkspaceAPIService.archivedAgentScansForQA
+        let inspected = f.api.dispatch(agentId: f.agentId, requestId: "runtime-off-inspect", op: "agent.inspect",
+            payload: ["agentId": helpers[0].rawValue.uuidString])
+        guard case .result = inspected else {
+            throw Failure(message: "gate turned off at runtime: agent.inspect of an archived agent answered \(inspected)")
+        }
+        try expect("\(inspected)".lowercased().contains(helpers[0].rawValue.uuidString.lowercased()),
+                   "gate turned off at runtime: inspect answers for the archived agent")
+        // Not named by any request: the whole archive came back with the first.
+        let found = f.api.dispatch(agentId: f.agentId, requestId: "runtime-off-find", op: "agent.find",
+            payload: ["query": "Runtime off find"])
+        try expect("\(found)".lowercased().contains(helpers[1].rawValue.uuidString.lowercased()),
+                   "gate turned off at runtime: agent.find by name finds the other archived agent: \(found)")
+        for id in helpers {
+            try expect(supervisor.records[id] != nil && exists(store.layout.agentFile(id: id)) && !exists(store.layout.archivedAgentFile(id: id)),
+                       "gate turned off at runtime: helper \(id.rawValue) is live, one copy")
+        }
+        try expect(archivedFiles(store).isEmpty, "gate turned off at runtime: the archive is empty, holds \(archivedFiles(store))")
+        try expect(WorkspaceAPIService.archivedAgentScansForQA == scans, "gate turned off at runtime: the workspace API walked a payload")
+        // Done once: a record archived since stays put through the next request.
+        try store.archive(id: helpers[1])
+        _ = f.api.dispatch(agentId: f.agentId, requestId: "runtime-off-again", op: "agent.inspect",
+            payload: ["agentId": helpers[0].rawValue.uuidString])
+        try expect(exists(store.layout.archivedAgentFile(id: helpers[1])), "gate off at runtime: the archive is restored once, not on every request")
+        _ = try store.unarchive(id: helpers[1])
+        print("PASS agent record archive: the gate turned off while Array runs brings every archived agent back on the next workspace API request, without walking its payload")
+    }
+
+    /// Follow-up (c): a damaged archived file was retried, and warned about,
+    /// on every boot. Production boots with the gate off over an archive
+    /// holding a corrupt record, a file with no agent id and a record whose
+    /// bytes cannot be read: the first boot warns once per damaged file and
+    /// quarantines both, the second says nothing about them, and the
+    /// unreadable one stays archived until it reads. Quarantine moves, never
+    /// deletes, keeps the destructive paths closed, and gives a record back
+    /// by id once it decodes.
+    static func quarantineWitness() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-quarantine-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let quarantine = store.layout.archiveQuarantineDirectory
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: quarantine.path)
+            try? fm.removeItem(at: root)
+        }
+        let good = idleRecord("Readable archived", cwd: root.path, idleFor: 30)
+        let locked = idleRecord("Unreadable for now", cwd: root.path, idleFor: 30)
+        try write([good, locked], to: store)
+        store.waitForBackupMigration()
+        try fm.createDirectory(at: store.layout.archiveDirectory, withIntermediateDirectories: true)
+        for id in [good.id, locked.id] {
+            try fm.moveItem(at: store.layout.agentFile(id: id), to: store.layout.archivedAgentFile(id: id))
+        }
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: store.layout.archivedAgentFile(id: locked.id).path)
+        let damagedID = AgentID(rawValue: UUID())
+        let damaged = "\(damagedID.rawValue.uuidString).json", stray = "not-an-agent.json"
+        let lockedName = "\(locked.id.rawValue.uuidString).json"
+        try Data("{ not a record".utf8).write(to: store.layout.archiveDirectory.appendingPathComponent(damaged))
+        try Data("{}".utf8).write(to: store.layout.archiveDirectory.appendingPathComponent(stray))
+        let off = gateSuite(false)
+        defer { off.removePersistentDomain(forName: off.suiteDomainName) }
+        func mentions(_ warnings: Warnings, _ name: String) -> Int { warnings.lines.filter { $0.contains(name) }.count }
+
+        let firstWarnings = Warnings()
+        let (first, firstApp, _, _) = try await boot(store, settings: off, warnings: firstWarnings)
+        try expect(first.records[good.id] != nil, "control: the readable archived record is restored")
+        try expect(mentions(firstWarnings, damaged) == 1 && mentions(firstWarnings, stray) == 1,
+                   "first boot warns once per damaged file: \(firstWarnings.lines)")
+        try expect(mentions(firstWarnings, lockedName) == 1, "first boot warns about the unreadable file: \(firstWarnings.lines)")
+        first.stopAll()
+        withExtendedLifetime(firstApp) {}
+
+        let secondWarnings = Warnings()
+        let (second, secondApp, _, _) = try await boot(store, settings: off, warnings: secondWarnings)
+        try expect(mentions(secondWarnings, damaged) == 0 && mentions(secondWarnings, stray) == 0,
+                   "the next boot neither retries nor warns about a damaged archived file: \(secondWarnings.lines)")
+        try expect(archivedFiles(store) == [lockedName] && !exists(quarantine.appendingPathComponent(lockedName)),
+                   "a file whose bytes cannot be read stays archived, not quarantined: archive \(archivedFiles(store))")
+        try expect(exists(quarantine.appendingPathComponent(damaged)) && exists(quarantine.appendingPathComponent(stray)),
+                   "quarantine moves the damaged files, never deletes them")
+        try expect(store.ownershipPresence(id: damagedID) == .present, "a quarantined agent still owns its checkout")
+        do {
+            _ = try second.orphanWorktrees(repo: root)
+            throw Failure(message: "worktree repair ran past a quarantined archived record")
+        } catch is AgentSupervisor.CleanupRefusal {}
+        second.stopAll()
+        withExtendedLifetime(secondApp) {}
+
+        // The unreadable file reads now; the same agent is damaged a second time.
+        try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: store.layout.archivedAgentFile(id: locked.id).path)
+        try Data("{ damaged again".utf8).write(to: store.layout.archiveDirectory.appendingPathComponent(damaged))
+        let (third, thirdApp, _, _) = try await boot(store, settings: off)
+        try expect(third.records[locked.id] != nil, "a file that stayed archived is restored once it reads")
+        let held = (try? fm.contentsOfDirectory(atPath: quarantine.path)) ?? []
+        try expect(held.filter { $0.hasPrefix(damaged) }.count == 2, "a second quarantine of one name keeps both copies: \(held)")
+
+        // Gate on, by id: a damaged file is quarantined with one warning, and
+        // comes back from the quarantine by id once it decodes.
+        let adoptWarnings = Warnings()
+        let on = gateSuite(true)
+        defer { on.removePersistentDomain(forName: on.suiteDomainName) }
+        let (adopting, adoptingApp, _, _) = try await boot(store, settings: on, warnings: adoptWarnings)
+        let later = idleRecord("Damaged then repaired", cwd: root.path, idleFor: 30, clock: now)
+        let laterName = "\(later.id.rawValue.uuidString).json"
+        try Data("{ not yet".utf8).write(to: store.layout.archivedAgentFile(id: later.id))
+        try expect(!adopting.adoptArchivedAgent(later.id) && exists(quarantine.appendingPathComponent(laterName))
+                   && mentions(adoptWarnings, laterName) == 1, "a damaged file named by id is quarantined with one warning: \(adoptWarnings.lines)")
+        try JSONCodec.makeEncoder().encode(later).write(to: quarantine.appendingPathComponent(laterName))
+        try expect(adopting.adoptArchivedAgent(later.id) && !exists(quarantine.appendingPathComponent(laterName))
+                   && exists(store.layout.agentFile(id: later.id)), "a quarantined record that decodes comes back by id")
+
+        // Repair is fail-closed on the quarantine listing itself: an empty,
+        // readable quarantine lets it run (control); an unlistable one refuses.
+        try fm.removeItem(at: quarantine)
+        let repo = root.appendingPathComponent("repo", isDirectory: true)
+        try fm.createDirectory(at: repo, withIntermediateDirectories: true)
+        try git(["init", "-q"], in: repo)
+        do { _ = try adopting.orphanWorktrees(repo: repo) } catch {
+            throw Failure(message: "control: worktree repair with no quarantine refused: \(error)")
+        }
+        try fm.createDirectory(at: quarantine, withIntermediateDirectories: true)
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: quarantine.path)
+        var refused = false
+        do { _ = try adopting.orphanWorktrees(repo: repo) } catch { refused = true }
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: quarantine.path)
+        try expect(refused, "worktree repair ran with an unlistable quarantine")
+        adopting.stopAll()
+        third.stopAll()
+        withExtendedLifetime((thirdApp, adoptingApp)) {}
+        print("PASS agent record archive: a damaged archived file is quarantined once, warned about once and kept; an unreadable one stays archived; a quarantined record comes back by id; worktree repair stays closed")
+    }
+
+    /// Follow-up (b): the shared-area scan read every cached area's
+    /// `state.json` on the main thread at boot, and a file it could not read
+    /// skipped the archive with a warning that named no file. Through the
+    /// production mount, with one damaged `state.json` (a decode error carries
+    /// no path of its own): the scan runs, never on the main thread, the
+    /// record stays live, and the warning names the file.
+    static func sharedScanOffMainWitness() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-scan-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let idle = idleRecord("Idle beside a damaged shared area", cwd: root.path, idleFor: 8, clock: now)
+        try write([idle], to: store)
+        store.waitForBackupMigration()
+        let endpoint = try CollaborationServiceEndpoint(URL(string: "https://archive-scan-check.example.test")!)
+        let area = try SharedAreaLocalStore(applicationSupportRoot: AppDelegate().collaborationSupportRoot, endpoint: endpoint,
+            person: .init(), area: SharedArea.Document().id)
+        defer { try? fm.removeItem(at: area.layout.areaDirectory) }
+        try fm.createDirectory(at: area.layout.areaDirectory, withIntermediateDirectories: true)
+        let state = area.layout.stateFile
+        try Data(#"{"sourceBindings": "damaged"}"#.utf8).write(to: state)
+        let settings = gateSuite(true)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        let warnings = Warnings()
+        let scans = SharedAreaLocalStore.bindingScansForQA
+        let (supervisor, app, _, _) = try await boot(store, settings: settings, warnings: warnings)
+        defer { supervisor.stopAll() }
+        let after = SharedAreaLocalStore.bindingScansForQA
+        try expect(after.total > scans.total, "the boot never scanned the shared areas")
+        try expect(after.onMain == scans.onMain, "the boot read shared-area files on the main thread (\(after.onMain - scans.onMain) scan(s))")
+        try expect(supervisor.records[idle.id] != nil && !exists(store.layout.archivedAgentFile(id: idle.id)),
+                   "an unreadable shared area skips the archive pass")
+        try expect(warnings.lines.contains { $0.contains("archive skipped") && $0.contains(state.path) },
+                   "the warning names the shared-area file: \(warnings.lines)")
+        withExtendedLifetime(app) {}
+        print("PASS agent record archive: the boot scans shared areas off the main thread; an unreadable area skips the archive and the warning names its file")
+    }
+
+    /// The pass runs after boot, against live state. Two things change in
+    /// the window between restore and the pass, through production entries:
+    /// a child of an idle parent comes live (adoption by id), and the gate goes
+    /// off and on again while the workspace API restores the archive. The
+    /// parent must stay with its child, and what the pass then archives must
+    /// still come back when the gate goes off once more.
+    static func windowWitness() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-window-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let parent = idleRecord("Idle parent", cwd: root.path, idleFor: 8)
+        let unrelated = idleRecord("Idle unrelated", cwd: root.path, idleFor: 8)
+        var child = idleRecord("Child live after boot", cwd: root.path, idleFor: 0)
+        child.parentAgentID = parent.id
+        try write([parent, unrelated, child], to: store)
+        store.waitForBackupMigration()
+        try fm.createDirectory(at: store.layout.archiveDirectory, withIntermediateDirectories: true)
+        try fm.moveItem(at: store.layout.agentFile(id: child.id), to: store.layout.archivedAgentFile(id: child.id))
+        let settings = gateSuite(true)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
+            warn: { _ in }, nameTitlerCommand: { _ in nil })
+        defer { supervisor.stopAll() }
+        supervisor.codexRestoreHomeForQA = store.layout.applicationSupportDirectory.appendingPathComponent("codex-empty")
+        let app = AppDelegate()
+        app.agentSupervisor = supervisor
+        app.qaSettingsDefaults = settings
+        try app.mountWorkspaceSceneAtBoot(canvasView: CanvasNSView(canvasState: emptyCanvas), spawner: nil,
+            projectStore: nil, canvasState: emptyCanvas, installsGlobalEventMonitors: false)
+        // The window: the pass cannot run until this check awaits.
+        try expect(supervisor.adoptArchivedAgent(child.id), "fixture: the child comes live by id")
+        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
+        supervisor.restoreArchivedRecordsIfGateOff() // what a workspace API request runs
+        settings.set(true, forKey: AgentRecordArchiveConfig.enabledKey)
+        await supervisor.recordArchivePassForQA?.value
+        try expect(supervisor.records[unrelated.id] == nil && exists(store.layout.archivedAgentFile(id: unrelated.id)),
+                   "control: the pass archived the unrelated idle agent")
+        try expect(supervisor.records[parent.id] != nil && !exists(store.layout.archivedAgentFile(id: parent.id)),
+                   "a parent whose child came live after restore stays live")
+        settings.set(false, forKey: AgentRecordArchiveConfig.enabledKey)
+        supervisor.restoreArchivedRecordsIfGateOff()
+        try expect(supervisor.records[unrelated.id] != nil && archivedFiles(store).isEmpty,
+                   "what the pass archived comes back when the gate goes off again")
+        withExtendedLifetime(app) {}
+        print("PASS agent record archive: a child that comes live after restore keeps its parent; what the late pass archives still comes back when the gate goes off")
+    }
+
+    /// An archived child brought back by id brings its archived parent with
+    /// it; deleting an agent removes its quarantined copy too, so the next
+    /// lookup by id cannot resurrect it.
+    static func parentChainAndDeleteWitness() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-chain-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support"))
+        let parent = idleRecord("Archived parent", cwd: root.path, idleFor: 30, clock: now)
+        var child = idleRecord("Archived child", cwd: root.path, idleFor: 40, clock: now)
+        child.parentAgentID = parent.id
+        child.projectId = parent.projectId
+        var deleted = idleRecord("Deleted with a quarantined copy", cwd: root.path, idleFor: 30, clock: now)
+        deleted.settledOverride = .active // stays live through the boot's pass
+        try write([parent, child, deleted], to: store)
+        store.waitForBackupMigration()
+        // The child on an earlier launch, its parent on a later one.
+        try store.archive(id: child.id)
+        try store.archive(id: parent.id)
+        // A quarantined copy beside the live record: `unquarantine` leaves it there.
+        try fm.createDirectory(at: store.layout.archiveQuarantineDirectory, withIntermediateDirectories: true)
+        try fm.copyItem(at: store.layout.agentFile(id: deleted.id), to: store.quarantinedAgentFile(id: deleted.id))
+        let on = gateSuite(true)
+        defer { on.removePersistentDomain(forName: on.suiteDomainName) }
+        let (supervisor, app, _, _) = try await boot(store, settings: on)
+        try expect(supervisor.records[child.id] == nil && supervisor.records[parent.id] == nil, "fixture: both archived")
+        _ = app.revealAgentFromInbox(child.id.rawValue)
+        try expect(supervisor.records[child.id] != nil, "the archived child comes back by id")
+        try expect(supervisor.records[parent.id] != nil && exists(store.layout.agentFile(id: parent.id))
+                   && !exists(store.layout.archivedAgentFile(id: parent.id)),
+                   "an archived child brings its archived parent back with it")
+
+        // A damaged first quarantined copy must not mask a readable later one.
+        let twice = idleRecord("Quarantined twice", cwd: root.path, idleFor: 30, clock: now)
+        let twiceFirst = store.quarantinedAgentFile(id: twice.id)
+        try Data("{ damaged".utf8).write(to: twiceFirst)
+        try JSONCodec.makeEncoder().encode(twice).write(to: URL(fileURLWithPath: twiceFirst.path + ".\(UUID().uuidString)"))
+        try expect(supervisor.adoptArchivedAgent(twice.id) && supervisor.records[twice.id] != nil
+                   && exists(store.layout.agentFile(id: twice.id)),
+                   "a readable second quarantined copy comes back by id, under the canonical name")
+
+        // Only a suffixed copy left (the canonical one was recovered or moved out).
+        let suffixOnly = idleRecord("Only a suffixed copy", cwd: root.path, idleFor: 30, clock: now)
+        try JSONCodec.makeEncoder().encode(suffixOnly).write(to: URL(fileURLWithPath:
+            store.quarantinedAgentFile(id: suffixOnly.id).path + ".\(UUID().uuidString)"))
+        try expect(supervisor.adoptArchivedAgent(suffixOnly.id) && exists(store.layout.agentFile(id: suffixOnly.id)),
+                   "a suffix-only quarantined copy comes back by id")
+
+        // A delete that cannot read the quarantine deletes nothing.
+        var guarded = idleRecord("Delete with an unreadable quarantine", cwd: root.path, idleFor: 30, clock: now)
+        guarded.settledOverride = .active
+        try write([guarded], to: store)
+        let quarantineDir = store.layout.archiveQuarantineDirectory
+        try fm.copyItem(at: store.layout.agentFile(id: guarded.id), to: store.quarantinedAgentFile(id: guarded.id))
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: quarantineDir.path)
+        let blocked: Bool
+        do { try store.delete(id: guarded.id); blocked = false } catch { blocked = true }
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: quarantineDir.path)
+        try expect(blocked && exists(store.layout.agentFile(id: guarded.id)),
+                   "a delete that cannot read the quarantine fails and keeps the live record")
+        try fm.removeItem(at: store.quarantinedAgentFile(id: guarded.id))
+
+        // A malformed self-parent with a damaged first copy and a readable second one.
+        var cyclic = idleRecord("Its own parent", cwd: root.path, idleFor: 30, clock: now)
+        cyclic.parentAgentID = cyclic.id
+        try Data("{ damaged".utf8).write(to: store.quarantinedAgentFile(id: cyclic.id))
+        try JSONCodec.makeEncoder().encode(cyclic).write(to: URL(fileURLWithPath:
+            store.quarantinedAgentFile(id: cyclic.id).path + ".\(UUID().uuidString)"))
+        try expect(supervisor.adoptArchivedAgent(cyclic.id) && supervisor.records[cyclic.id] != nil,
+                   "a record that names itself as parent comes back without looping")
+
+        try expect(supervisor.records[deleted.id] != nil, "fixture: the deleted agent is live")
+        let report = supervisor.archive(deleted.id)
+        try expect(report.recordDeleted && !exists(store.layout.agentFile(id: deleted.id)), "the delete removes the live record")
+        try expect(!exists(store.quarantinedAgentFile(id: deleted.id)), "the delete removes the quarantined copy too")
+        try expect(!supervisor.adoptArchivedAgent(deleted.id) && supervisor.records[deleted.id] == nil,
+                   "a deleted agent does not come back by id")
+        supervisor.stopAll()
+        withExtendedLifetime(app) {}
+    }
+
+    /// Another instance on this store marks a record active between this
+    /// one's restore and its archive pass: the pass judges the durable copy,
+    /// so the record stays live.
+    static func staleEligibilityWitness() async throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agent-record-archive-stale-\(UUID())")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let support = root.appendingPathComponent("support")
+        let store = AgentStore(applicationSupportDirectory: support)
+        var marked = idleRecord("Marked active elsewhere", cwd: root.path, idleFor: 30)
+        let control = idleRecord("Untouched", cwd: root.path, idleFor: 30)
+        // Both eligible at restore; the other instance then marks the child active.
+        let idleParent = idleRecord("Parent of a child marked active", cwd: root.path, idleFor: 30)
+        var markedChild = idleRecord("Child marked active elsewhere", cwd: root.path, idleFor: 30)
+        markedChild.parentAgentID = idleParent.id
+        markedChild.projectId = idleParent.projectId
+        // An atomic save whose temp file was written before restore read the
+        // store and renamed over the record after: the rename keeps the
+        // temp file's earlier modification time.
+        var replaced = idleRecord("Replaced atomically after restore", cwd: root.path, idleFor: 30)
+        try write([marked, control, idleParent, markedChild, replaced], to: store)
+        store.waitForBackupMigration()
+        replaced.settledOverride = .active
+        let pendingSave = store.layout.agentsDirectory.appendingPathComponent(".pending-save.tmp")
+        try JSONCodec.makeEncoder().encode(replaced).write(to: pendingSave)
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: pendingSave.path)
+        let settings = gateSuite(true)
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
+            warn: { _ in }, nameTitlerCommand: { _ in nil })
+        defer { supervisor.stopAll() }
+        supervisor.codexRestoreHomeForQA = support.appendingPathComponent("codex-empty")
+        supervisor.recordArchiveDefaults = settings
+        _ = supervisor.restore()
+        // The other instance's write, before this one's pass runs.
+        marked.settledOverride = .active
+        markedChild.settledOverride = .active
+        try write([marked, markedChild], to: AgentStore(applicationSupportDirectory: support))
+        guard Darwin.rename(pendingSave.path, store.layout.agentFile(id: replaced.id).path) == 0 else {
+            throw Failure(message: "fixture: rename of the pending save failed")
+        }
+        await settleArchivePass(supervisor)
+        try expect(supervisor.records[control.id] == nil && exists(store.layout.archivedAgentFile(id: control.id)),
+                   "control: an untouched idle agent is archived")
+        try expect(exists(store.layout.agentFile(id: marked.id)) && !exists(store.layout.archivedAgentFile(id: marked.id)),
+                   "a record another instance marked active since restore stays live")
+        try expect(exists(store.layout.agentFile(id: markedChild.id)) && exists(store.layout.agentFile(id: idleParent.id))
+                   && !exists(store.layout.archivedAgentFile(id: idleParent.id)),
+                   "a child kept by the durable check keeps its parent live")
+        try expect(exists(store.layout.agentFile(id: replaced.id)) && !exists(store.layout.archivedAgentFile(id: replaced.id)),
+                   "a record replaced atomically after restore, with an older file time, stays live")
+    }
+
     static func archivedFiles(_ store: AgentStore) -> [String] {
         ((try? FileManager.default.contentsOfDirectory(atPath: store.layout.archiveDirectory.path)) ?? [])
             .filter { $0.hasSuffix(".json") }.sorted()
@@ -545,7 +1048,7 @@ enum AgentRecordArchiveChecks {
     /// answered by the workspace API, whose gate-off path adopts nothing.
     /// Both boots are the production mount. A corrupt archived file stays and
     /// does not block boot; an archived copy of a live record loses to it.
-    static func gateOffRevertWitness() throws {
+    static func gateOffRevertWitness() async throws {
         let off = gateSuite(false)
         defer { off.removePersistentDomain(forName: off.suiteDomainName) }
         var helpers: [AgentID] = []
@@ -565,12 +1068,9 @@ enum AgentRecordArchiveChecks {
             }
             try write(records, to: store)
             helpers = records.map(\.id)
-            // Boot 1, gate on: the production mount archives them.
-            let on = gateSuite(true)
-            defer { on.removePersistentDomain(forName: on.suiteDomainName) }
-            let (archiving, archivingApp, _, _) = try boot(store, settings: on)
-            archiving.stopAll()
-            withExtendedLifetime(archivingApp) {}
+            // Archived as a gate-on launch archives them (`bootWitness` drives
+            // that launch; this closure cannot await its pass).
+            for id in helpers { try store.archive(id: id) }
             for id in helpers {
                 try expect(exists(store.layout.archivedAgentFile(id: id)) && !exists(store.layout.agentFile(id: id)),
                            "boot with the gate on archived the helper")
@@ -591,7 +1091,8 @@ enum AgentRecordArchiveChecks {
         }
         try expect(try store.load(id: fixtureAgent!.id)?.displayName == fixtureAgent!.displayName,
                    "gate off: the live record wins over its archived copy")
-        try expect(archivedFiles(store) == [corrupt], "gate off: the archive holds only the corrupt file, holds \(archivedFiles(store))")
+        try expect(archivedFiles(store).isEmpty && exists(store.layout.archiveQuarantineDirectory.appendingPathComponent(corrupt)),
+                   "gate off: the corrupt file is quarantined and the archive is empty, holds \(archivedFiles(store))")
         // Through the real workspace API, which with the gate off adopts nothing.
         supervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true)
         let scans = WorkspaceAPIService.archivedAgentScansForQA
@@ -602,8 +1103,15 @@ enum AgentRecordArchiveChecks {
             try expect("\(reply)".lowercased().contains(id.rawValue.uuidString.lowercased()), "gate off: inspect answers for \(id.rawValue)")
         }
         try expect(WorkspaceAPIService.archivedAgentScansForQA == scans, "gate off: the workspace API scanned a payload")
-        try? FileManager.default.removeItem(at: store.layout.archiveDirectory.appendingPathComponent(corrupt))
-        print("PASS agent record archive: gate off restores every archived record at boot (live copy wins, a corrupt file stays without blocking boot) and agent.inspect answers for them")
+        // A session that never ran with the gate on never restores the archive
+        // at runtime: its boot already did.
+        try store.archive(id: helpers[0])
+        _ = f.api.dispatch(agentId: f.agentId, requestId: "revert-never-on", op: "agent.inspect",
+            payload: ["agentId": helpers[1].rawValue.uuidString])
+        try expect(exists(store.layout.archivedAgentFile(id: helpers[0])), "gate never on this session: a request restored the archive")
+        _ = try store.unarchive(id: helpers[0])
+        try? FileManager.default.removeItem(at: store.layout.archiveQuarantineDirectory)
+        print("PASS agent record archive: gate off restores every archived record at boot (live copy wins, a corrupt file is quarantined without blocking boot) and agent.inspect answers for them")
     }
 
     static func run() async throws {
@@ -611,17 +1119,31 @@ enum AgentRecordArchiveChecks {
             try measure(variant: String(arg.dropFirst("--agent-record-archive-measure=".count)))
             return
         }
+        if let arg = CommandLine.arguments.first(where: { $0.hasPrefix("--agent-record-archive-measure-store=") }) {
+            let value = arg.dropFirst("--agent-record-archive-measure-store=".count)
+            try await measureStore(gate: value == "default" ? nil : value == "on")
+            return
+        }
         guard ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"] != nil,
               Bundle.main.bundleIdentifier != AppChannel.prodBundleIdentifier else {
             throw Failure(message: "agent-record-archive check requires isolated CONTINUUM_APP_SUPPORT and a dev binary")
         }
+        try measureStoreGuardWitness()
         try await bootWitness(gate: false)
         try await bootWitness(gate: true)
+        // The production default: a setting nobody wrote archives at boot.
+        try await bootWitness(gate: nil)
+        try await sharedScanOffMainWitness()
+        try await windowWitness()
         try await wakeupWitness()
         try await sharedWitness()
-        try apiWitness()
-        try gateOffRevertWitness()
+        try await apiWitness()
+        try await gateOffRevertWitness()
+        try await runtimeGateOffWitness()
+        try await quarantineWitness()
+        try await parentChainAndDeleteWitness()
+        try await staleEligibilityWitness()
         print("PASS agent record archive: gate off unchanged; gate on archives only old finished tile-less records nothing holds, next boot skips them, and id lookups bring them back")
-        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; gate off scans no API payload and restores every archived record at boot; worktree repair and checkout cleanup treat archived agents as owners.")
+        print("MATRIX-NOTE: --agent-record-archive-check passed: 2,484-record store; gate off reads all on every boot; gate on — and the default, with no setting written — archives the idle set, boot 2 decodes only the kept set; companion, reveal, agent.inspect, agent.find, a due wakeup and a shared projection adopt by id; scheduled and shared-bound agents stay live; the shared-area scan runs off the main thread and a skip names the file; gate off scans no API payload and restores every archived record at boot, or on the next API request when it goes off at runtime; a damaged archived file is quarantined once; an archived child brings its archived parent back, a delete removes the quarantined copies, a readable second quarantined copy comes back, and the pass skips a record another instance changed since restore; worktree repair and checkout cleanup treat archived agents as owners; the real-store measure mode refuses every store under Application Support.")
     }
 }
