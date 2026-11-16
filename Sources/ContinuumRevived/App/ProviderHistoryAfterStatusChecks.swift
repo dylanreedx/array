@@ -60,18 +60,67 @@ enum ProviderHistoryAfterStatusChecks {
         guard containsOnce(provider, in: firstText), containsOnce(notice.body, in: firstText) else {
             throw Failure(description: "initial tile lost or duplicated provider history or the /status notice")
         }
+        guard let firstNotice = supervisor.transcriptDocument(for: id)?.entries.first(where: {
+                  AgentTranscriptCopyController.plainText(for: $0.blocks).contains(notice.body)
+              }),
+              let statusPosition = firstText.range(of: notice.body),
+              let providerPosition = firstText.range(of: provider),
+              statusPosition.lowerBound < providerPosition.lowerBound else {
+            throw Failure(description: "the initial tile did not preserve the existing status-before-provider order")
+        }
+        // The existing status-first path does not publish restored provider
+        // history. A display repair must not silently expand that disclosure.
+        let sharedText = { () -> String in
+            (supervisor.sharedTranscriptDocument(for: id)?.entries ?? [])
+                .map { AgentTranscriptCopyController.plainText(for: $0.blocks) }.joined(separator: "\n")
+        }
+        guard !sharedText().contains(provider) else {
+            throw Failure(description: "provider-only history crossed into the shared publisher after status")
+        }
+        let thread = AgentSupervisor.threadId(for: id)
+        let live = "PROVIDER_AFTER_STATUS_LIVE_TURN"
+        supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "after-status"), to: id)
+        supervisor.qaDeliver(.contentDelta(threadId: thread, turnId: "after-status", streamKind: .assistant, delta: live), to: id)
+        supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: "after-status", outcome: .completed, errorMessage: nil), to: id)
+        let liveDeadline = ContinuousClock.now + .seconds(20)
+        while !containsOnce(live, in: first.qaTranscriptText), ContinuousClock.now < liveDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        let currentText = first.qaTranscriptText
+        guard let currentStatus = currentText.range(of: notice.body),
+              let currentProvider = currentText.range(of: provider),
+              let currentLive = currentText.range(of: live),
+              currentStatus.lowerBound < currentProvider.lowerBound,
+              currentProvider.lowerBound < currentLive.lowerBound,
+              containsOnce(live, in: currentText), !sharedText().contains(provider),
+              containsOnce(live, in: sharedText()) else {
+            throw Failure(description: "the live turn changed order or expanded provider disclosure")
+        }
+        await supervisor.qaSaveTranscript(for: id)
+        try await CompanionTranscriptBoundaryChecks.verify(store: transcripts, agentID: id,
+                                                          expected: [live], excluded: [provider])
         first.detach()
         let reopened = tile()
         defer { reopened.detach() }
         let deadline = ContinuousClock.now + .seconds(20)
         while ContinuousClock.now < deadline {
             let text = reopened.qaTranscriptText
-            if containsOnce(provider, in: text), containsOnce(notice.body, in: text) { break }
+            if containsOnce(provider, in: text), containsOnce(notice.body, in: text), containsOnce(live, in: text) { break }
             try? await Task.sleep(for: .milliseconds(20))
         }
         let secondText = reopened.qaTranscriptText
-        guard containsOnce(provider, in: secondText), containsOnce(notice.body, in: secondText) else {
+        guard containsOnce(provider, in: secondText), containsOnce(notice.body, in: secondText),
+              containsOnce(live, in: secondText) else {
             throw Failure(description: "reattached tile lost or duplicated provider history or the /status notice")
+        }
+        guard let status = secondText.range(of: notice.body), let restoredProvider = secondText.range(of: provider),
+              let restoredLive = secondText.range(of: live),
+              status.lowerBound < restoredProvider.lowerBound, restoredProvider.lowerBound < restoredLive.lowerBound,
+              let reopenedNotice = reopened.qaDocumentForChecks.entries.first(where: { $0.id == firstNotice.id }),
+              reopenedNotice.createdAt == firstNotice.createdAt,
+              reopenedNotice.finishedAt == firstNotice.finishedAt,
+              !sharedText().contains(provider) else {
+            throw Failure(description: "reattachment changed order, notice identity/timestamps or shared disclosure")
         }
         let firstOrder = firstText.range(of: provider)!.lowerBound < firstText.range(of: notice.body)!.lowerBound ? "provider,status" : "status,provider"
         let reopenedOrder = secondText.range(of: provider)!.lowerBound < secondText.range(of: notice.body)!.lowerBound ? "provider,status" : "status,provider"
