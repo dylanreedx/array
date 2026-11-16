@@ -1,92 +1,93 @@
 # Transcript retention gate — 2026-11-16
 
-**Not gated. Keep the release card in Doing; do not ship this branch.**
+**Not gated. Keep the card in Doing; do not ship this branch.** Checkout:
+`.worktrees/transcript-retention`, branch `array/transcript-retention`, base
+`4c9d7495`. No push. Committed through `b8a94c7b`: retention/recovery, render
+A/B evidence, archive guard, restore-only witness and deterministic tail fence.
 
-The guarded-save draft prevents overwriting unverified archives but currently blocks
-new persistence for all valid archives inherited from a previous process. It warns
-and retains new history only in memory. This is a release-blocking regression; a
-verified archive must be resumed without losing provider-only display history.
-Checkout: `.worktrees/transcript-retention`, branch `array/transcript-retention`.
-Base: `4c9d7495`. Retention commit: `f573ac7f`. Recovery and tile fence commit:
-`474de68e` (`fix(agents): preserve transcripts through recovery and reattachment`).
-Nothing was pushed.
-
-## Uncommitted draft — not built or run
-
-The working tree contains a deterministic stale-tail witness and draft strict
-released-archive recovery. Do not treat these changes as verified or safe to
-ship. `git diff --check` and Swift frontend parsing passed. The draft:
-
-- Suspends a real buffered tile event across detach/reattach and checks exact
-  once application plus continued delivery. The RED control removes both
-  cancellation and generation checks from the stream guard. Build and run RED,
-  restore the guard, build and run GREEN `--transcript-retention-check`.
-- Saves a unique generation with each archive and requires the exact generation,
-  version and intact snapshot/journal on reload. Invalidates cached proof before
-  save attempts. Added checks for a corrupt snapshot with intact journal, a
-  same-version replacement, and a journal write failure after snapshot replace.
-  Build, exercise RED controls and GREEN, and independently review the final
-  patch, including backward compatibility and concurrent persistence. The new
-  witness is registered within `--transcript-retention-check`.
-
-The strict read does not solve the following blockers:
-
-1. Provider restore-only histories remain resident. Provider restore is bounded
-   and mints new prompt IDs, so merging it with an existing canonical archive
-   cannot safely infer overlap. Companion sync reads that canonical archive;
-   making display-only provider history canonical may change what is synced.
-   Design a durable local-only representation with explicit reconciliation,
-   preserving unreadable and existing archives. Witness bounded restore, existing
-   and corrupt archives, headless writes, release/reload/relaunch and the real
-   companion callback. The first write with an existing archive also needs care.
-2. When a released archive cannot be read, writes/events currently queue as
-   in-memory closures and the agent can continue. A quit before successful read
-   can lose new Array-only transcript content. A durable recovery or fail-closed
-   policy covering prompts, notices, outside turns and unsolicited events needs
-   a behavioral witness.
+The uncommitted valid-restart reconciliation, migration/retry, bounded replay,
+performance witness and related checks are a draft. The latest bounded-replay
+and migration-failure changes have not been built or run. Release lead has
+prioritized the release preview build; do not start a transcript build until it
+is complete. Then wait in 120-second loops for the build preflight below.
 
 ## Evidence
 
-- Guard RED with temporary bypass: `--transcript-retention-check` failed as
-  intended on write after restart. GREEN build passed and the check passed:
-  3 held, 2,197 released, heap delta -15.2 MB. Strict-recovery and stale-tail
-  witnesses passed in that GREEN run, but their own RED controls remain unrun.
+- Clean base render A/B: base aqua 1.7548%, dark 0.8304% (0.0300% tolerance),
+  byte-identical PNGs to an earlier branch repeat. Adjacent branch light varied.
+  The same failure exists on base; no baseline was changed. Artifacts remain at
+  `/tmp/array-render-ab.Sd8AsMB9-base` and `...-branch[-paired]`.
+- Retention GREEN on the last built draft passed in 115.6 s: 3 transcripts
+  held, 2,197 released, 2,269 events, heap -14.3 MB. All witnesses are invoked
+  from the existing matrix retention leg; no full matrix was run. That build
+  predates the latest uncommitted changes.
+- Save guard, restore-only, strict reload and stale buffered tail all failed
+  their specific RED controls and passed GREEN. Reconciliation RED omitted the
+  canonical model and failed as expected; six combined RED controls detected
+  notice loss, early quarantine, incorrect census, dropped saved turn, rejected
+  flush and ambiguous compaction. Open-history and historical-card/high-water
+  controls also failed as intended. Migration barrier, retry FIFO, and absence
+  after failed read each failed their corresponding RED controls. The bounded
+  replay and latest migration-failure witness still need RED/GREEN runs.
+- Resumed-stream COW witness RED moved the entries buffer on 240/240 appends;
+  GREEN moved it on 0/240. GREEN large-archive streaming median 0.096 ms,
+  p95 0.125 ms; the complete targeted leg took 49.7 s in that run. Timing
+  samples are not a complete frame-uptime benchmark. The 1,026-entry resume
+  initializer measured 5.8–11.8 ms main-thread CPU; no end-to-end frame budget
+  was asserted for it.
+- Final neighboring checks on the prior binary: shared transcript parity,
+  publisher performance, turn cards, tile detach and relay-backed share under
+  load passed. The relay check used isolated app support and tmux namespaces.
+- Corrected transcript-save performance remains red on the prior binary:
+  5.351 ms and 13.125 ms worst post-burst frames against 4 ms, and an adjacent
+  branch sample 4.422 ms. Saved documents/journals matched in those runs.
+  Corrected clean-base samples were 4.045 ms (fail) and 3.298 ms (pass); this
+  shows baseline variance but neither proves nor excludes a branch regression.
+  Earlier branch GREEN samples were 3.149 ms and 2.729 ms. Do not relax the
+  budget; rerun against final source and investigate any failure. Logs:
+  `/tmp/array-transcript-final-neighbors.log`, `/tmp/array-perf-base-run1.log`,
+  `/tmp/array-perf-base-run2.log`, `/tmp/array-perf-branch-paired.log`.
+- A mistaken macOS process-count preflight briefly started a third Swift build;
+  it was immediately interrupted. The base build subsequently passed under
+  the requested limit. SwiftPM attempted update checks in that build; all later
+  builds used `--skip-update`.
 
-- Earlier post-rebase build and retention witness passed: 3 transcripts held,
-  2,197 released, 2,269 events, heap delta -15.4 MB. Previous RED controls
-  covered unreadable file, tile retry, and restore-only history. The previously
-  green stream-fence check did not deterministically force the race; the new
-  draft witness above has not been run.
-- `--share-under-load-check` passed on the existing branch binary with the real
-  sibling `continuum-relay`, isolated app support and unique `TMUX_TMPDIR`,
-  with `TMUX` and `TMUX_PANE` unset. Exit 0: upload backoff, 5,719,455-byte
-  lead transcript, 32 helpers, guest tail, slow lane, local copy, 413 recovery.
-- Render A/B completed against clean base `4c9d7495`. Base build passed
-  (debug, 1,414.60 s); base render failed aqua 1.7548%, dark 0.8304%, tolerance
-  0.0300%. Both base PNGs have the same SHA-256 as an earlier branch repeat.
-  An adjacent branch repeat failed aqua 0.6882%, dark 0.8304%, with the dark
-  image identical; light varies across runs. The baseline failure is present on
-  base, and this branch did not introduce the identical mismatch. No baselines
-  changed. Artifacts: `/tmp/array-render-ab.Sd8AsMB9-base` and
-  `/tmp/array-render-ab.Sd8AsMB9-branch[-paired]`. The base build's SwiftPM
-  attempted package update checks; use `--skip-update` for subsequent builds.
+## Remaining work and limits
 
-- The base build was briefly started with two other builds running due to an
-  unsupported macOS `pgrep -c` preflight; it was immediately interrupted.
-  No successful base build or A/B result was obtained. Subsequent builds were
-  not started because the resource limit was occupied.
+1. Rebuild the latest draft and run the targeted retention leg. Exercise
+   RED/GREEN for bounded FIFO replay and migration-failure recovery; verify all
+   individual failures, not just the combined exit status. Then rerun save perf,
+   transcript/shared/tile neighbors and relay load with the final binary.
+2. Complete independent review of archive/reload, cancellation and shutdown,
+   including user-visible behavior. Explicit archive remains destructive;
+   the proposed broad archive refusals were reverted. Quarantine waits for any
+   already-started save before moving the archive. Its witness uses a 500 ms
+   negative observation. Migration witness uses a 300 ms negative observation;
+   it injects the task provider and does not drive AppDelegate startup wiring.
+3. A persistent preflight fault can accumulate queued mutations in memory;
+   quitting during a blocked save/replay can lose new unsaved content. A failed
+   startup migration can leave an absent/legacy-only agent blocked until a new
+   migration or restart. Partial writes remain fail-closed. Do not claim these
+   cases are crash-durable or automatically repaired.
+4. The inherited legacy migrator can use a snapshot fallback and delete a
+   legacy directory even if its journal is unreadable. Companion's inherited
+   forgiving read can yield incomplete history during corruption; the new
+   callback witness covers intact archives, not that failure or transport.
+   Canonical-only entries were already absent in fresh restored local/shared
+   views on base; the draft preserves them on disk but does not add a UI merge.
+   The general store guard does not prove content monotonicity for arbitrary
+   live open entries; the specifically reloaded disk prefix is frozen.
+5. SharedAgentProjector `.assistantOutput` has a released-reload gap, but the
+   current production host uses `.excluded` and a separate transcript publisher.
+   Do not claim that supported alternate mode is fixed.
 
-## Constraints and next steps
+Before **each** build: at least 25% free in `memory_pressure`, and fewer than
+2 other `swift-build` processes counted with `ps`; wait in 120-second loops.
+Debug only, `--skip-update`. No full matrix; never hold `/tmp/array-matrix.lock`.
+Never touch either `/Applications/Array.app` or `~/Desktop/Array Dev.app`, or
+the default tmux server. Isolate any checks' app support and tmux namespace,
+unset inherited `TMUX`/`TMUX_PANE`, and do not update visual baselines.
 
-Before **each** build check `memory_pressure` for at least 25% free and use
-`ps` to confirm fewer than two other `swift-build` processes. Coordinate
-parallel builds; an observation is not a reservation. Debug builds only. No
-full matrix; never hold `/tmp/array-matrix.lock`. Never touch the production or
-Desktop preview apps or the default tmux server. Use a unique disposable tmux
-namespace for any checks that require it. Do not update visual baselines.
-
-Once capacity permits, finish base A/B, build and run RED/GREEN draft witnesses,
-resolve the two blockers above, run relevant neighboring checks with a rebuilt
-binary and relay, and obtain review. Only move card
-`2AEBD979-B295-4E19-BCD2-C7D6BB8BCC7A` on board
-`2535EAF9-BC96-49FA-9148-C99B169586E3` to Done when actually gated.
+Move card `2AEBD979-B295-4E19-BCD2-C7D6BB8BCC7A` on board
+`2535EAF9-BC96-49FA-9148-C99B169586E3` to Done only after the final draft is
+actually gated. Otherwise leave Doing and keep this file and the card current.
