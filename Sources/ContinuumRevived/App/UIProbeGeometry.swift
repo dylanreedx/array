@@ -1984,7 +1984,7 @@ enum UIProbeGeometry {
               probe.inbox.rowIdsForQA == rootExpanded.rows.map(\.id),
               probe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [directIDs[7], rootID],
               probe.inbox.fanoutRemainderRowsForQA.first?.hiddenChildIDs == [grandchildIDs[8]],
-              probe.inbox.tableRowCountForQA == rootExpanded.rows.count + 2 else {
+              probe.inbox.tableRowCountForQA == rootExpanded.rows.count + 2 + nestedHeadRows else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): reopening the nested child did not restore its own remainder")
         }
 
@@ -2001,7 +2001,7 @@ enum UIProbeGeometry {
               probe.inbox.fanoutRemainderParentIDsForQA == Set([rootID, directIDs[7]]),
               probe.inbox.rowIdsForQA == sorted.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == rows.count,
-              probe.inbox.tableRowCountForQA == bothExpanded.rows.count + 2,
+              probe.inbox.tableRowCountForQA == bothExpanded.rows.count + 2 + nestedHeadRows,
               Set(probe.inbox.rowIdsForQA) == Set(rows.map(\.id)) else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): expanding both levels lost, duplicated or mis-targeted an agent")
         }
@@ -3281,6 +3281,12 @@ enum UIProbeGeometry {
                       abs(actualParentHeight - expectedParentHeight) <= 0.5 else {
                     throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): cached parent height at \(phase) was \(transitionProbe.inbox.rowHeightForQA(id: rollupParentID) ?? -1), wanted \(expectedParentHeight) from the live \(projectVisible ? "project+name+rollup" : "name+rollup") bands")
                 }
+                let chromeRows = transitionProbe.inbox.itemsForQA.filter { item in
+                    switch item {
+                    case .sectionLabel, .incident, .quietNeedsYou: return true
+                    default: return false
+                    }
+                }.count
                 if remainderExpected {
                     // `.plans/0721-subagents-handoff.md`: the remainder is the LAST
                     // row of its parent's group, and a group's last row is taller
@@ -3292,14 +3298,14 @@ enum UIProbeGeometry {
                           abs(remainderHeight - expectedRemainder) <= 0.5,
                           transitionProbe.inbox.fanoutRemainderRowsForQA.map(\.parentId) == [rollupParentID],
                           transitionProbe.inbox.tableRowCountForQA
-                            == transitionProbe.inbox.qaMaterializedRowCellCount + 1 else {
+                            == transitionProbe.inbox.qaMaterializedRowCellCount + 1 + chromeRows else {
                         throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): cached remainder height or table accounting was stale at \(phase)")
                     }
                 } else {
                     // Plan 106: an expanded group keeps the row that folds it back.
                     guard transitionProbe.inbox.fanoutRemainderTitlesForQA == ["Show less"],
                           transitionProbe.inbox.tableRowCountForQA
-                            == transitionProbe.inbox.qaMaterializedRowCellCount + 1 else {
+                            == transitionProbe.inbox.qaMaterializedRowCellCount + 1 + chromeRows else {
                         throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): expanded group lost the row that folds it back at \(phase)")
                     }
                 }
@@ -3501,7 +3507,19 @@ enum UIProbeGeometry {
                     format: "sidebar-ux-check.content-height@%.0fpt: bottom shrink changed %.1fpt to %.1fpt, wanted %.1fpt",
                     width, beforeHeight, afterHeight, bottomOneLineHeight))
             }
-            guard bottomProbe.inbox.isAtBottomForQA,
+            // Ready work adds Clear's explanatory footer below the agents.
+            // Preserve the reader at the agent edge; the new note begins exactly
+            // there instead of moving the last agent up by the note's height.
+            let table = bottomProbe.inbox.tableForQA
+            let clip = bottomProbe.inbox.scrollViewForQA.contentView
+            let viewport = clip.convert(clip.bounds, to: table)
+            let hasNewNote: Bool = {
+                if case .sectionLabel(let label) = bottomProbe.inbox.itemsForQA.last { return label.kind == .historyNote }
+                return false
+            }()
+            let noteBeginsAtBottom = hasNewNote && abs(
+                table.rect(ofRow: table.numberOfRows - 1).minY - viewport.maxY) <= 0.5
+            guard bottomProbe.inbox.isAtBottomForQA || noteBeginsAtBottom,
                   bottomProbe.inbox.selectedRowIdsForQA == [bottomAnchorID],
                   bottomProbe.inbox.visibleAgentIdsForQA.contains(bottomAnchorID),
                   let anchorAfter = bottomProbe.inbox.rowFrameInViewportForQA(id: bottomAnchorID),
@@ -5616,6 +5634,11 @@ enum UIProbeGeometry {
                 statusProbe.inbox.apply(
                     rows: statusRows.map { $0.id == confirmedVisible.id ? confirmedTransition : $0 },
                     changed: AgentsBoardChangeSet(added: [], updated: [confirmedVisible.id], removed: []))
+                // The new incident head can put this row below the viewport.
+                // Exercise its recycled status owner after actually revealing it.
+                guard statusProbe.inbox.scrollToAgentForQA(id: confirmedVisible.id) else {
+                    throw fail("\(label): transitioned row cannot be revealed for its status-owner check")
+                }
                 statusProbe.inbox.layoutForQA()
                 guard let recycled = statusProbe.inbox.qaMaterializedRowCells.first(where: {
                     $0.qaAgentID == confirmedVisible.id

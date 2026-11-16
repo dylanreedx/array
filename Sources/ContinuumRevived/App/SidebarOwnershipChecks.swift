@@ -568,20 +568,20 @@ enum SidebarOwnershipChecks {
         fire?()
         inbox.layoutForQA()
         try expectRows([busyLead, needsYou, working, recentDone, quietLead, quietLead + 1], "after 21 minutes")
-        try expectFold(busyLead, "5 more · 2 failed", "after 21 minutes")
+        try expectFold(busyLead, "5 more", "after 21 minutes")
         let agedTail = try leadTail("aged")
-        guard agedTail.contains("1 failed") else {
+        guard agedTail.contains("2 failed") else {
             throw Failure(description: "\(label): the failed subagent aged out and its lead stopped saying so: \(agedTail)")
         }
         guard let next = scheduled.last, abs(next - 4 * 60) <= 1 else {
             throw Failure(description: "\(label): after firing, the timer was not reset for the next subagent (scheduled \(scheduled))")
         }
 
-        // 4. Opening the failed subagent clears its lead's count.
+        // 4. Reading a failed helper preserves the reconciled outcome count.
         push(priorityRows(recentFailedRead: true), updated: [recentFailed])
         let openedTail = try leadTail("opened")
-        guard !openedTail.contains("failed") else {
-            throw Failure(description: "\(label): the lead still says failed after the subagent was opened: \(openedTail)")
+        guard openedTail.contains("2 failed") else {
+            throw Failure(description: "\(label): reading one failure changed the family outcome count: \(openedTail)")
         }
 
         // 5. Opened while still recent, it folds at once.
@@ -589,10 +589,10 @@ enum SidebarOwnershipChecks {
         push(priorityRows(recentFailedRead: true))
         try expectRows([busyLead, needsYou, working, recentDone, laterDone, quietLead, quietLead + 1],
                        "opened while recent")
-        try expectFold(busyLead, "4 more · 2 failed", "opened while recent")
-        return "\(label): needs you, working, recent newest first; fold row \"3 more · 1 failed\" / "
+        try expectFold(busyLead, "4 more", "opened while recent")
+        return "\(label): needs you, working, recent newest first; fold row \"3 more\" / "
             + "\"2 more, all done\" opens and closes in place; one timer ages out the failed subagent "
-            + "while its lead keeps \"1 failed\"; opening clears it"
+            + "while its lead keeps both failed outcomes, including after reading one"
     }
 
     /// The view as composited, sublayers and masks included.

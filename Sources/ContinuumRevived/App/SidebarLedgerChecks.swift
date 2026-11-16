@@ -629,10 +629,12 @@ extension SidebarLedgerChecks {
         inbox.layoutForQA()
         let history = inbox.itemsForQA.compactMap(\.agentRow)
         let expectedAge = (AgentInboxCellView.elapsedText(now.timeIntervalSince(old.terminalEvent!.endedAt)) ?? "") + " ago"
+        let oldIndex = inbox.itemsForQA.firstIndex { $0.agentRow?.id == uuid(130) }
+        let oldView = oldIndex.flatMap { inbox.cellForQA(atItem: $0) }
         guard history.map(\.id) == [uuid(131), uuid(130)],
-              let oldCell = inbox.cellForQA(id: uuid(130)) as? AgentInboxSlimCellView,
+              let oldCell = oldView as? AgentInboxSlimCellView,
               oldCell.qaElapsed == expectedAge else {
-            throw Failure(description: "Clear fabricated rendered History recency or order")
+            throw Failure(description: "Clear fabricated rendered History recency or order: rows \(history.map { ($0.id, $0.lifecycle) }), expected age \(expectedAge), cell \(String(describing: oldView)), age \((oldView as? AgentInboxSlimCellView)?.qaElapsed ?? "nil")")
         }
         guard inbox.selectRowsForQA(ids: [uuid(130), uuid(131)]),
               inbox.openRowMenuForQA(clickedRowId: uuid(130)),
@@ -751,6 +753,8 @@ extension SidebarLedgerChecks {
                             throw Failure(description: "\(layout.title): no rendered fold number")
                         }
                         try expect(!line.titleForQA.contains("failed"), "fold repeats or misclassifies failed helpers: \(line.titleForQA)")
+                        try expect(!(line.buttonForQA.accessibilityValue() as? String ?? "").contains("failed"),
+                                   "fold AX value contradicts the reconciled family tally")
                         folded += number
                     default: return (shown, folded)
                     }

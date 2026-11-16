@@ -124,8 +124,8 @@ extension SidebarOwnershipChecks {
             inbox.layoutViewportForQA()
         }
         let collapsed = try fold()
-        guard collapsed.qaTitle == "18 more · 1 failed",
-              collapsed.qaAccessibilityLabel == "Show 18 more agents · 1 failed" else {
+        guard collapsed.qaTitle == "18 more",
+              collapsed.qaAccessibilityLabel == "Show 18 more" else {
             throw Failure(description: "nested fold AX: collapsed label \(collapsed.qaAccessibilityLabel ?? "nil")")
         }
         try click(collapsed)
@@ -139,10 +139,10 @@ extension SidebarOwnershipChecks {
         }
         try click(expanded)
         let closed = try fold()
-        guard inbox.rowIdsForQA == [lead], closed.qaAccessibilityLabel == "Show 18 more agents · 1 failed" else {
+        guard inbox.rowIdsForQA == [lead], closed.qaAccessibilityLabel == "Show 18 more" else {
             throw Failure(description: "nested fold AX: pressing Show less did not fold the nested subtree")
         }
-        return "\(dark ? "dark" : "light") nested fold AX: 16 direct + 2 nested; Show 18 more agents · 1 failed → Hide 18 agents on Show less → collapsed through the real button"
+        return "\(dark ? "dark" : "light") nested fold AX: 16 direct + 2 nested; Show 18 more → Hide 18 agents on Show less → collapsed through the real button"
     }
 
     static let historyLead = 0xC00
@@ -440,6 +440,10 @@ extension SidebarOwnershipChecks {
               inbox.qaFullReloadCount == failReloads, failedBuilt <= 1 else {
             throw fail("a folded subagent failing rebuilt the open card (\(inbox.qaFullReloadCount - failReloads) "
                 + "full reloads, \(failedBuilt) rows built \(rebuilt.map(name)), line \(lineTitles()))")
+        }
+
+        guard try !cell(foldFolded.last!).showsSettleNudge else {
+            throw fail("a blocking failure left the old settlement nudge enabled")
         }
 
         // 5b. A new live subagent at the top of the card: still open, the row
