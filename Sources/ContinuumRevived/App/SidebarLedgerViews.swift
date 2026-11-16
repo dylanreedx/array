@@ -74,6 +74,7 @@ final class SidebarSectionLabelView: NSTableCellView {
                 .font: NSFont.monospacedDigitSystemFont(ofSize: Typography.style(for: .label).size, weight: .regular),
                 .foregroundColor: secondary]))
         }
+        label.textColor = secondary
         label.attributedStringValue = text
         label.setAccessibilityLabel(model.count.map { "\(model.title), \($0)" } ?? model.title)
         clearButton.applyTokens()
