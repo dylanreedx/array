@@ -74,6 +74,9 @@ expect("--sidebar-row-reveal-check" not in view or len(view) < total // 2,
        f"the changed view maps to its own legs ({len(view)}), not everything")
 
 alone = lambda *p: lc.select(repo, HEAD, list(p), built=built)
+composer = alone("Sources/ContinuumRevived/Canvas/AgentComposer/ComposerTextView.swift")
+expect(not composer["full"] and "--composer-key-routing-check" in composer["legs"] and len(composer["legs"]) < total // 2,
+       f"the composer text view selects the key-routing check that drives it ({len(composer['legs'])} legs)")
 missing = alone("Sources/ContinuumRevived/App/NoLegCoversThis.swift")
 expect(missing["full"] and "covered by no specific leg" in missing["full_reasons"][0],
        f"an unmapped file forces the full matrix: {missing['full_reasons']}")

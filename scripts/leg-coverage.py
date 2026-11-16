@@ -25,7 +25,10 @@ Package.swift, Package.resolved and ThirdParty/ select the FULL matrix, with the
 reason. Only nightly-gate.sh's release paths (.plans/, website/,
 docs/VERSIONING.md) select nothing.
 
-Known limits, said rather than hidden: a type is followed two levels from the
+A mapped Sources/ file also selects the flags whose rare words its path shares
+(seam names: ComposerTextView.swift selects --composer-key-routing-check).
+
+Known limits, said rather than hidden: a type is followed one level past the
 check, not transitively, so a change reached only through a longer call chain
 can be missed; dynamic dispatch through a protocol finds the protocol's files,
 not every conformer's; a leg whose flag is built at run time maps to nothing.
@@ -74,6 +77,13 @@ HUB_FILES = 60
 # the inventory, colour hygiene). It runs whenever Sources/ changes, but being
 # covered by scanners alone does not make a file mapped.
 BROAD_SHARE = 0.25
+# Seam names: a flag word of at least SEAM_MIN letters that appears in at most
+# SEAM_RARE flags (composer, jelly, dictation; not agent, tile, view) and in the
+# changed file's path selects that flag too. It reaches checks the bounded walk
+# misses (a check driving the composer view that hosts the changed text view),
+# but it only adds legs: it never makes an unmapped file mapped.
+SEAM_RARE = 12
+SEAM_MIN = 4
 # Builds run in every selection anyway; they are not coverage.
 ALWAYS = ("swift build", "swift run", "git diff --check", "npm ci ")
 
@@ -316,6 +326,21 @@ def dispatchers(index):
     return set(DISPATCH.values()) | {f for f in index.swift if f.endswith("Checks/main.swift")}
 
 
+CAMEL_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+
+
+def seam_legs(legs, path):
+    flags = [name for name in legs if FLAG_RE.fullmatch(name)]
+    words = {}
+    for flag in flags:
+        for word in set(flag[2:-len("-check")].split("-")):
+            words[word] = words.get(word, 0) + 1
+    stem = path.rsplit(".", 1)[0].split("/")[2:]  # below Sources/<target>/
+    named = {w.lower() for part in stem for w in CAMEL_RE.findall(part)}
+    rare = {w for w in named if len(w) >= SEAM_MIN and 0 < words.get(w, 0) <= SEAM_RARE}
+    return {flag for flag in flags if rare & set(flag[2:-len("-check")].split("-"))}
+
+
 def select(repo, rev, paths, built=None, base=None):
     index, legs, resources = built or build_map(repo, rev)
     broad, covering = split_broad(index, legs)
@@ -354,6 +379,8 @@ def select(repo, rev, paths, built=None, base=None):
             reasons.append("%s is covered by no specific leg" % path)
             continue
         hit |= {name for name in broad if path in legs[name]}
+        if path.startswith("Sources/"):
+            hit |= seam_legs(legs, path)
         per_path[path] = sorted(hit)
         chosen |= hit
     # ARRAY_MATRIX_LEGS matches a leg by its expanded words; a leg written with

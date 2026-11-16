@@ -72,13 +72,19 @@ QUIET = dict(build=env.pop('ARRAY_NIGHTLY_BUILD_PROCESS', 'swift-build'),
 BRANCH = 'gate/nightly-checkout'
 # A gate always runs the committed known-failure list, every leg and the retry.
 for key in ('ARRAY_AGENT_ID', 'TMUX', 'TMUX_PANE', 'ARRAY_MATRIX_LOCK_OWNER', 'ARRAY_RELEASE_LOCK_OWNER',
-            'ARRAY_MATRIX_LEGS', 'ARRAY_MATRIX_RETRY', 'ARRAY_MATRIX_KNOWN_FAILURES'):
+            'ARRAY_MATRIX_LEGS', 'ARRAY_MATRIX_RETRY', 'ARRAY_MATRIX_KNOWN_FAILURES', 'CONTINUUM_UPDATE_BASELINES'):
     env.pop(key, None)
+# run-matrix.sh reads *_ONLY switches (REPLAY_CHECKS_ONLY stops after the replay
+# legs and exits 0) and CONTINUUM_SKIP_* switches that drop legs. Inherited, they
+# would certify a partial run, so none reaches a gate's matrix; the gate sets
+# the one skip it means per mode, in matrix().
+for key in [k for k in env if k.endswith('_ONLY') or k.startswith('CONTINUUM_SKIP_')]:
+    env.pop(key)
 # Paths a release-prep commit may touch without voiding the gate below it:
 # nothing the build, the bundle or any matrix leg reads.
 INERT = ('.plans/', 'website/', 'docs/VERSIONING.md')
 CANDIDATES_KEPT = 3
-env.update(TERM='xterm-256color', CONTINUUM_SKIP_UI_BASELINES='1')
+env.update(TERM='xterm-256color')
 
 def run(cmd, **kw):
     return sp.run(cmd, env=env, stdin=sp.DEVNULL, check=True, **kw)
@@ -327,7 +333,10 @@ def matrix(mode, log, extra=None):
     began = time.monotonic()
     matrix_results = out / ('matrix-' + mode + '-' + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
     code = owned('bash scripts/run-matrix.sh' + ('' if mode == 'full' else ' --' + mode), 'ARRAY_MATRIX_LOCK_OWNER', log,
-                 dict(ARRAY_MATRIX_RESULTS=str(matrix_results), **(extra or {})))
+                 dict(ARRAY_MATRIX_RESULTS=str(matrix_results), **(extra or {}),
+                      # The unattended run has no WindowServer session to draw in; an
+                      # awake or full run must run the display-dependent legs too.
+                      **(dict(CONTINUUM_SKIP_UI_BASELINES='1') if mode == 'skip-awake' else {})))
     data = matrix_results / 'results.json'
     rows = json.loads(data.read_text()) if data.exists() else []
     failed = [r['leg'] for r in rows if r['status'] == 'fail']

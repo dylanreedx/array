@@ -143,9 +143,10 @@ ledger = pathlib.Path('docs/VERSIONING.md').read_text()
 items = E.parse('website/public/appcast.xml').findall('./channel/item')
 nums = [int(n) for n in re.findall(r'^\|[^|]+\|\s*(\d+)\s*\|', ledger, re.M)]
 nums += [int(i.findtext(ns + 'version')) for i in items if (i.findtext(ns + 'version') or '').isdigit()]
-known = set(re.findall(r'^\|\s*(\d+\.\d+\.\d+)\s*\|', ledger, re.M))
+# Stable (X.Y.Z) and tip (X.Y.Z-tip.<commit>) versions both consume the build sequence.
+known = set(re.findall(r'^\|\s*(\d+\.\d+\.\d+[^|\s]*)\s*\|', ledger, re.M))
 known |= {i.findtext(ns + 'shortVersionString') for i in items}
-orphans = [t for t in os.environ['GH_TAGS'].split() if re.fullmatch(r'v\d+\.\d+\.\d+', t) and t[1:] not in known]
+orphans = [t for t in os.environ['GH_TAGS'].split() if re.match(r'v\d+\.\d+\.\d+', t) and t[1:] not in known]
 if orphans:
     sys.exit('ship-release: on GitHub but in neither the ledger nor the feed, so their build numbers are unknown: '
              + ', '.join(orphans) + '. Land the ledger row and feed item (or delete the release), then prepare again.')

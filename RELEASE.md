@@ -33,13 +33,18 @@ scripts/feature-gate.sh <branch> --tier 1|2|3 [--legs --a-check,--b-check] [--sk
   changes that), plus any seam legs named with `--legs`. A change that reaches
   a path no specific leg covers (or `Package.swift`, `ThirdParty/`, dispatcher
   code that adds no flag, a removal from `run-matrix.sh`) runs every leg, and
-  the record says why.
+  the record says why. The selection follows code one level past each check
+  plus seam names, so it is a floor: name the legs of the seam you know you
+  touched with `--legs`.
 - Tiers 1 and 2 run the awake (display/focus) group, so they need an unlocked,
   awake Mac. `--skip-awake` runs without it; the record then lists each awake
   leg as unverified, and the feature is not done until an awake run covers it.
 - It runs through `nightly-gate.sh --feature`: the same quiet wait, shared lock,
   warm checkout and environment as the release gate. It never builds a
   candidate and writes nothing a ship reads. A held lock refuses the run.
+  No inherited `*_ONLY`, `CONTINUUM_SKIP_*` or `CONTINUUM_UPDATE_BASELINES`
+  switch reaches any gate's matrix. Only the unattended skip-awake run skips
+  the display-dependent baseline legs; awake and full runs include them.
 - Exit 0 means the selected legs are green, nothing more.
 
 Every run appends to that feature's evidence record,

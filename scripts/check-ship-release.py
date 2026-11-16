@@ -41,6 +41,8 @@ mode=${1:-full}
 case $mode in --skip-awake) ;; --awake-only) ;; full) ;; *) echo "unknown mode $mode" >&2; exit 2 ;; esac
 # What a leg would see: the checkout's branch, the CLIs on PATH, inherited gate state.
 env | grep '^ARRAY_NIGHTLY_' >> "$SHIP_EVENTS.knobs" || true
+# Mode switches that shrink a run: which ones reached this matrix, per mode.
+echo "$mode $(env | sed -nE 's/^([A-Z0-9_]*(_ONLY|SKIP_[A-Z0-9_]*|UPDATE_BASELINES))=.*/\1/p' | sort | tr '\n' ' ')" >> "$SHIP_EVENTS.controls"
 name=$(cat "$SHIP_PLAN/build-name"); echo "$(git rev-parse HEAD) $(/bin/ps -axo comm= | grep -c "/$name\$")" >> "$SHIP_EVENTS.busy"
 echo "$(git rev-parse HEAD) branch=$(git branch --show-current) first=${PATH%%:*} cli=$(command -v array-fixture-cli || echo none) ref=${ARRAY_NIGHTLY_REF:-unset}" >> "$SHIP_EVENTS.legs"
 echo "matrix $mode $(git rev-parse HEAD) owner=${ARRAY_MATRIX_LOCK_OWNER:-none}" >> "$SHIP_EVENTS"
@@ -172,7 +174,10 @@ class Fixture:
                         ARRAY_SHIP_GH=str(bindir / "gh"), ARRAY_SHIP_WAIT_SECONDS="20",
                         ARRAY_SHIP_WAIT_INTERVAL="0.2", GIT_AUTHOR_NAME="Fixture",
                         GIT_AUTHOR_EMAIL="fixture@example.invalid", GIT_COMMITTER_NAME="Fixture",
-                        GIT_COMMITTER_EMAIL="fixture@example.invalid")
+                        GIT_COMMITTER_EMAIL="fixture@example.invalid",
+                        # Inherited switches that would make the matrix a partial run.
+                        REPLAY_CHECKS_ONLY="1", CONTINUUM_SKIP_SURFACE_CHECKS="1",
+                        CONTINUUM_SKIP_UI_BASELINES="1", CONTINUUM_UPDATE_BASELINES="1")
         for key in ("ARRAY_MATRIX_LOCK_OWNER", "ARRAY_RELEASE_LOCK_OWNER", "ARRAY_MATRIX_LEGS", "ARRAY_NIGHTLY_REF"):
             self.env.pop(key, None)
 
@@ -320,12 +325,13 @@ def ship_cases(fx, gated, head):
     expect(result.returncode != 0 and "cannot tell whether" in result.stderr and not signed(),
            "a gh network error stops prepare instead of reading as not published", result)
     print("PASS prepare-refuses-gh-error")
-    orphan = fx.plan / f"gh-v{OTHER_VERSION}"
-    orphan.write_text("Array.dmg\n")  # uploaded by a publish that died before its push
-    result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
-    orphan.unlink()
-    expect(result.returncode != 0 and f"v{OTHER_VERSION}" in result.stderr and "build numbers are unknown" in result.stderr
-           and not signed(), "a GitHub-only upload stops build allocation", result)
+    for tag in (f"v{OTHER_VERSION}", f"v{OTHER_VERSION}-tip.0123456789ab"):  # stable, then a tip prerelease
+        orphan = fx.plan / f"gh-{tag}"
+        orphan.write_text("Array.dmg\n")  # uploaded by a publish that died before its push
+        result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
+        orphan.unlink()
+        expect(result.returncode != 0 and tag in result.stderr and "build numbers are unknown" in result.stderr
+               and not signed(), f"a GitHub-only upload ({tag}) stops build allocation", result)
     print("PASS prepare-counts-github-uploads")
     result = fx.run("ship-release.sh", "--version", VERSION, "--notes", str(notes))
     events = fx.log()
@@ -386,6 +392,12 @@ def ship_cases(fx, gated, head):
     expect("is live" in result.stdout and Feed.polls > Feed.lag and f"has not deployed build {BUILD}" in result.stdout,
            f"publish waits through the deploy lag, then returns ({Feed.polls} feed polls)", result)
     print("PASS publish-waits-for-live-feed")
+    controls = Path(str(fx.events) + ".controls").read_text().splitlines()
+    expect(controls and all(line.strip() == "--skip-awake CONTINUUM_SKIP_UI_BASELINES" if line.startswith("--skip-awake")
+                            else line.strip() == line.split()[0] for line in controls)
+           and any(line.startswith("--awake-only") for line in controls),
+           f"no inherited switch shrinks a gate's matrix; only skip-awake skips the display legs: {controls}")
+    print("PASS gate-matrix-is-never-partial")
 
 
 def quiet_cases(fx):
