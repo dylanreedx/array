@@ -328,6 +328,7 @@ check --sidebar-event-cost-check
 check --sidebar-fold-expand-check
 check --sidebar-helper-hover-check
 check --sidebar-hidden-footer-check
+check --sidebar-history-scope-check
 check --sidebar-hide-any-row-check
 check --sidebar-indicator-settings-check
 check --sidebar-liveness-check

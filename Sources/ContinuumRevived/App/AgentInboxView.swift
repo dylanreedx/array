@@ -2604,7 +2604,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         func isHidden(_ row: AgentInboxRow) -> Bool {
             row.externalSession.map { hiddenKeys.contains($0.sessionKey) } ?? false
         }
-        let sourced = newRows.filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
+        // Decide orphanhood against the full input, before scope/search can
+        // temporarily remove a real parent. Search remains the way to find a
+        // finished helper whose lead was deleted or cannot be restored.
+        let historyRows = InboxSort.excludingQuietOrphanedHelpers(
+            rows: newRows, openAgentId: openAgentId, searching: !query.isEmpty)
+        let sourced = historyRows.filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
         let scopedWithHidden = InboxScope.filter(
             rows: sourced, scope: effectiveScope, openAgentId: openAgentId,
             currentWorkspace: currentWorkspaceName,
@@ -2617,7 +2623,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         revealedHiddenIds = hiddenRevealed ? Set(hiddenHere.map(\.id)) : []
         updateHiddenFooter()
         let scoped = hiddenRevealed || hiddenHere.isEmpty ? scopedWithHidden : scopedWithHidden.filter { !isHidden($0) }
-        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
         let searched = query.isEmpty ? scoped : scoped.filter { row in
             [row.title, row.projectName, row.workspaceName, row.model, row.branch, row.whereMarker?.text]
                 .compactMap { $0?.localizedLowercase }

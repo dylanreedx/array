@@ -4,6 +4,14 @@ import ContinuumRevivedSync
 import CoreGraphics
 import Darwin
 import Foundation
+if CommandLine.arguments.contains("--sidebar-history-scope-check") {
+    if let flag = CommandLine.arguments.firstIndex(of: "--records-copy"),
+       CommandLine.arguments.indices.contains(flag + 1) {
+        try runSidebarHistoryRecordsAudit(copy: URL(fileURLWithPath: CommandLine.arguments[flag + 1]))
+    }
+    try runSidebarHistoryScopeChecks()
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--companion-agent-destination-check") {
     do { try runCompanionAgentDestinationChecks(); exit(0) }
     catch { print("FAIL companion agent destination: \(error)"); exit(1) }
