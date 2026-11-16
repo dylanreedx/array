@@ -59,6 +59,14 @@ enum TranscriptLateRestoreReloadChecks {
         func exactlyOnce(_ markers: [String], in text: String) -> Bool {
             markers.allSatisfy { text.components(separatedBy: $0).count - 1 == 1 }
         }
+        func inOrder(_ markers: [String], in text: String) -> Bool {
+            var remainder = text.startIndex..<text.endIndex
+            for marker in markers {
+                guard let match = text.range(of: marker, range: remainder) else { return false }
+                remainder = match.upperBound..<text.endIndex
+            }
+            return true
+        }
         let initial = "LATE_RESTORE_BEFORE_RELEASE"
         deliver(initial)
         await supervisor.qaSaveTranscript(for: id)
@@ -118,16 +126,32 @@ enum TranscriptLateRestoreReloadChecks {
         }
         let canonicalText = saved.entries.map { AgentTranscriptCopyController.plainText(for: $0.blocks) }.joined(separator: "\n")
         let canonicalMarkers = [old, initial] + queued
-        guard exactlyOnce(canonicalMarkers, in: canonicalText), !canonicalText.contains(provider) else {
-            throw Failure(description: "late provider restore lost canonical history or crossed the companion boundary")
+        guard exactlyOnce(canonicalMarkers, in: canonicalText), inOrder(canonicalMarkers, in: canonicalText),
+              !canonicalText.contains(provider) else {
+            throw Failure(description: "late provider restore lost or reordered canonical history or crossed the companion boundary")
         }
-        let expected = canonicalMarkers + [provider]
+        // The pre-existing archive stays first, followed by the earlier provider
+        // restore and only then the live writes queued during reload. Merely
+        // finding every marker would miss a restore appended after those writes.
+        let expected = [old, initial, provider] + queued
         let tileDeadline = ContinuousClock.now + .seconds(20)
         while !exactlyOnce(expected, in: tile.qaTranscriptText), ContinuousClock.now < tileDeadline {
             try? await Task.sleep(for: .milliseconds(20))
         }
         guard exactlyOnce(expected, in: tile.qaTranscriptText) else {
             throw Failure(description: "attached tile lost or duplicated late provider restore or transcript history")
+        }
+        guard inOrder(expected, in: tile.qaTranscriptText) else {
+            throw Failure(description: "attached tile placed provider restore after newer live history")
+        }
+        tile.detach()
+        tile.attach(agentID: id, supervisor: supervisor)
+        let reattachDeadline = ContinuousClock.now + .seconds(20)
+        while !exactlyOnce(expected, in: tile.qaTranscriptText), ContinuousClock.now < reattachDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        guard exactlyOnce(expected, in: tile.qaTranscriptText), inOrder(expected, in: tile.qaTranscriptText) else {
+            throw Failure(description: "reattached tile lost, duplicated, or reordered late provider history")
         }
     }
 }
