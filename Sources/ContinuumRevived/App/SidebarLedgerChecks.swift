@@ -289,13 +289,14 @@ enum SidebarLedgerChecks {
             ("Codex couldn't start", "Repair setup…", .cause(.couldNotStart)),
             ("Codex was busy", "Retry", .cause(.providerBusy)),
             ("Interrupted by restart", "Resume", .cause(.interruptedByRestart)),
-            ("Failed", "Open", .cause(.taskError)),
+            // Two plain Claude failures (helper 31, agent 36) group into one.
+            ("2 failed", "Open", .cause(.taskError)),
         ]
         for (title, action, kind) in expected {
             guard let at = inbox.itemsForQA.firstIndex(where: {
                 if case .incident(let incident) = $0 { return incident.title == title } else { return false }
             }) else {
-                throw fail("no incident '\(title)'; drawn: \(inbox.drawnSequenceForQA.filter { $0.hasPrefix("!") })")
+                throw fail("no incident '\(title)'; incidents: \(inbox.itemsForQA.compactMap { item -> String? in if case .incident(let i) = item { return i.title } else { return nil } })")
             }
             inbox.scrollItemToVisibleForQA(at)
             settle()

@@ -297,6 +297,21 @@ enum SidebarQuietInboxChecks {
         try expect(inbox.undoToastTextForQA.hasPrefix("Cleared 4"), "one Undo for the batch — got '\(inbox.undoToastTextForQA)'")
         try expect(sectionCell(AgentInboxView.quietHistoryNote) != nil, "the History footnote sits under the shelf")
         Q.photograph(sidebar, "quiet-2-cleared")
+        // The toast's drawn Undo, pressed through the window's real event path.
+        let undo = inbox.undoButtonForQA
+        let undoPoint = undo.convert(NSPoint(x: undo.bounds.midX, y: undo.bounds.midY), to: nil)
+        guard let undoHit = window.contentView?.hitTest(undoPoint), undoHit === undo || undoHit.isDescendant(of: undo) else {
+            throw Failure(description: "the window does not hit the drawn Undo button")
+        }
+        try Q.click(undo)
+        inbox.layoutForQA()
+        try expect(Set(inbox.sidebarClearIDs) == expectedClear, "the Undo button brings every cleared row back to Clear's reach")
+        try expect(drawnAgentIDs().isSuperset(of: [family.rawValue, solo.rawValue]), "the rows return to the list")
+        // ⌘Z undoes the same batch.
+        guard let clearAgain = sectionCell("Inbox")?.clearButton else { throw Failure(description: "no Clear after Undo") }
+        try Q.click(clearAgain)
+        inbox.layoutForQA()
+        try expect(!drawnAgentIDs().contains(family.rawValue), "a second Clear leaves the live list")
         try Q.pressUndo(inbox)
         try expect(Set(inbox.sidebarClearIDs) == expectedClear, "⌘Z brings every cleared row back to Clear's reach")
         try expect(drawnAgentIDs().isSuperset(of: [family.rawValue, solo.rawValue]), "the rows return to the list")
