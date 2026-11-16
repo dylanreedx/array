@@ -206,9 +206,113 @@ enum LongTranscriptPerformanceChecks {
         try expect(!canvas.qaPlacedBlockIDs.contains(removedBlock), "removed message must disappear")
         try expect(canvas.qaLastRebuildVisitedBlockCount > 8, "removing an older message must take the conservative walk")
         try measureTileIngress(document: document)
+        try measureTextViewLifecycle(document: document)
         try TranscriptSourceInvalidationChecks.run()
         try expect((appendVisits.max() ?? 0) <= 8, "appending a message must not walk transcript history")
         try expect((updateVisits.max() ?? 0) <= 8, "updating the tail must not walk transcript history")
+    }
+
+    /// Count actual TextKit views, not semantic blocks or retained subviews.
+    /// The probe includes AppKit's standard initializers and a deallocation
+    /// sentinel. The restored archive has no original runtime ring or image
+    /// store, so this answers only for this real tile and its restored document.
+    private static func measureTextViewLifecycle(document: AgentDocument) throws {
+        let probe = TextViewLifecycleProbe()
+        guard probe.install() else { throw Failure(description: "NSTextView lifecycle probe could not install") }
+        defer { probe.uninstall() }
+
+        let initial = probe.snapshot()
+        autoreleasepool {
+            let stock = NSTextView(frame: .zero)
+            let stockDefault = NSTextView()
+            let rich = RichInlineTextView(frame: .zero)
+            let code = CodeTextView()
+            withExtendedLifetime((stock, stockDefault, rich, code)) {}
+        }
+        let deadline = Date().addingTimeInterval(2)
+        while probe.snapshot().destroyed - initial.destroyed < 4 && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        let control = probe.snapshot()
+        try expect(control.created - initial.created == 4 && control.destroyed - initial.destroyed == 4,
+                   "NSTextView lifecycle probe must count stock, rich and code views created and destroyed")
+
+        let thread = "text-view-count-\(UUID().uuidString)"
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "text view lifecycle check",
+            frame: TileFrame(x: 0, y: 0, width: 420, height: 520),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")), threadId: thread)
+        tile.frame = NSRect(x: 0, y: 0, width: 420, height: 520)
+        let host = NSView(frame: tile.frame)
+        host.addSubview(tile)
+        host.layoutSubtreeIfNeeded()
+        guard let canvas = tile.qaCanvasTranscript else {
+            throw Failure(description: "tile must install the canvas transcript")
+        }
+        tile.qaInstallTranscriptSnapshotForChecks(ManagedAgentTranscriptModel(qaRestoring: document, threadId: thread))
+        canvas.flushPendingVisualUpdate()
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        let warm = probe.snapshot()
+        var messageCreated = 0
+        var messageDestroyed = 0
+        var messageCreatedTotal = 0
+        var messageDestroyedTotal = 0
+        for _ in 0..<12 {
+            let before = probe.snapshot()
+            autoreleasepool {
+                tile.qaBeginOptimisticSubmissionForChecks("A newly arrived message.")
+                canvas.flushPendingVisualUpdate()
+                host.layoutSubtreeIfNeeded()
+                tile.qaFinishOptimisticSubmissionForChecks(accepted: true)
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.001))
+            let after = probe.snapshot()
+            messageCreated = max(messageCreated, after.created - before.created)
+            messageDestroyed = max(messageDestroyed, after.destroyed - before.destroyed)
+            messageCreatedTotal += after.created - before.created
+            messageDestroyedTotal += after.destroyed - before.destroyed
+        }
+        let turn = "text-view-count-turn"
+        tile.ingest(.turnStarted(threadId: thread, turnId: turn))
+        tile.ingest(.contentDelta(threadId: thread, turnId: turn, streamKind: .assistant, delta: "First chunk"))
+        tile.qaFlushStreamingMarkupForChecks()
+        canvas.flushPendingVisualUpdate()
+        var updateCreated = 0
+        var updateDestroyed = 0
+        var updateCreatedTotal = 0
+        var updateDestroyedTotal = 0
+        for _ in 0..<12 {
+            let before = probe.snapshot()
+            autoreleasepool {
+                tile.ingest(.contentDelta(threadId: thread, turnId: turn, streamKind: .assistant, delta: " next chunk"))
+                tile.qaFlushStreamingMarkupForChecks()
+                canvas.flushPendingVisualUpdate()
+                host.layoutSubtreeIfNeeded()
+            }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.001))
+            let after = probe.snapshot()
+            updateCreated = max(updateCreated, after.created - before.created)
+            updateDestroyed = max(updateDestroyed, after.destroyed - before.destroyed)
+            updateCreatedTotal += after.created - before.created
+            updateDestroyedTotal += after.destroyed - before.destroyed
+        }
+        let beforeRebuild = probe.snapshot()
+        autoreleasepool { canvas.rebuild() }
+        try expect(canvas.qaLastRebuildVisitedBlockCount > 100, "full rebuild must visit the long history")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        let afterRebuild = probe.snapshot()
+        let rebuiltCreated = afterRebuild.created - beforeRebuild.created
+        let rebuiltDestroyed = afterRebuild.destroyed - beforeRebuild.destroyed
+        print("NSTextView lifecycle (standard initializers): tile setup created \(warm.created - control.created); 12 prompts total \(messageCreatedTotal) created/\(messageDestroyedTotal) destructions observed, max \(messageCreated)/\(messageDestroyed) per prompt; 12 updates total \(updateCreatedTotal)/\(updateDestroyedTotal), max \(updateCreated)/\(updateDestroyed); full canvas rebuild \(rebuiltCreated)/\(rebuiltDestroyed) observed; deferred destruction may fall outside these windows")
+        let setupClasses = warm.byClass.compactMap { name, count -> String? in
+            let delta = count - (control.byClass[name] ?? 0)
+            return delta > 0 ? "\(name)=\(delta)" : nil
+        }.sorted()
+        print("NSTextView tile setup classes: \(setupClasses.joined(separator: ", "))")
+        try expect(messageCreated == 0 && updateCreated == 0 && rebuiltCreated == 0,
+                   "transcript message or canvas rebuild must not create NSTextViews")
     }
 
     /// Measures the real tile's model, ingest and synchronization path against
