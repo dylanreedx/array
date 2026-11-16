@@ -1786,6 +1786,11 @@ enum ContinuumApp {
         // Mode A's tiles, tab and banner in light and dark, as PNGs in <dir>.
         if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-render-check") {
             setbuf(stdout, nil)
+            // Keep fixture text width independent of the device's Automatic
+            // scrollbar policy, which can choose overlay scrollbars.
+            var renderArguments = UserDefaults.standard.volatileDomain(forName: NSArgumentDomain)
+            renderArguments["AppleShowScrollBars"] = "Always"
+            UserDefaults.standard.setVolatileDomain(renderArguments, forName: NSArgumentDomain)
             _ = NSApplication.shared
             // The matrix appends `-continuum.terminal.*` defaults after the
             // flag; only a following non-flag argument names the folder.
