@@ -5476,7 +5476,8 @@ final class AgentSupervisor {
         }
         guard records[id] != nil else { return false }
         setSessionFileMark(id, url: url, offset: offset)
-        if rehydratedTranscripts[id] == nil, !transcript.steps.isEmpty {
+        // A released transcript refuses the seed; a tile must not draw it either.
+        if rehydratedTranscripts[id] == nil, releasedTranscripts[id] == nil, !transcript.steps.isEmpty {
             seedRehydratedTranscript(transcript, for: id)
             outsideHistoryObservers[id]?.values.forEach { $0(.restored(transcript)) }
         }
