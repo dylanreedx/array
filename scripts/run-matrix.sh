@@ -1580,11 +1580,13 @@ run_leg scripts/check-film-absent.sh
 # Release pipeline witnesses (fast ship): pre-existing reds classify from
 # scripts/matrix-known-failures.json with one serial retry; the appcast only
 # ever appends; publishing waits for the live feed and both downloads; the
-# continuous gate builds a candidate only when green and a ship reuses it.
+# continuous gate builds a candidate only when green and a ship reuses it; the
+# feature gate's affected-legs selection narrows a real range and fails safe.
 run_leg python3 scripts/check-matrix-known-failures.py
 run_leg python3 scripts/check-appcast-append.py
 run_leg python3 scripts/check-wait-live-release.py
 run_leg python3 scripts/check-ship-release.py
+run_leg python3 scripts/check-leg-coverage.py
 run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check
