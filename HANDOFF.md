@@ -1,5 +1,10 @@
 # Transcript retention gate — 2026-11-16
 
+**STOP: the machine is out of memory. Do not restart builds or checks until
+the requesting agent says the machine has recovered.** The last build and
+retention check finished before the stop instruction; no Swift build or
+retention check started by this agent was running when checked.
+
 **Not gated. Keep the card in Doing; do not ship this branch.** Checkout:
 `.worktrees/transcript-retention`, branch `array/transcript-retention`, base
 `4c9d7495`. No push. Committed through `36b21050`: retention/recovery, render
@@ -19,7 +24,8 @@ notice-only reattachment case both lost or duplicated provider history. Isolated
 pin checks and the new isolated production Copy-here handoff witness reported
 no failures in that run. The latter proves combined adoption/read retention,
 not each guard independently; their RED controls have not been run. The
-prioritized release preview build reported complete with exit 0; use the 120-second resource loop below.
+prioritized release preview build reported complete with exit 0. After the
+stop is lifted, use the 120-second resource loop below.
 
 ## Evidence
 
