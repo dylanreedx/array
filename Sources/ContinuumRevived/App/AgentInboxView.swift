@@ -8605,7 +8605,7 @@ final class AgentInboxRemainderView: NSTableCellView {
         self.remainder = remainder
         label.stringValue = remainder.title
         button.setAccessibilityLabel(remainder.isExpanded
-            ? "Hide \(remainder.hiddenChildCount) \(remainder.hiddenChildCount == 1 ? "agent" : "agents")"
+            ? "Hide \(remainder.hiddenDescendantCount) \(remainder.hiddenDescendantCount == 1 ? "agent" : "agents")"
             : "Show \(remainder.accessibilityTitle)")
         button.setAccessibilityHelp(remainder.isExpanded
             ? "Folds the extra child agents back" : "Shows the hidden child agents")
