@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// Dylan's three rules for the tile icon, as witnesses over the real tiles of
@@ -6,7 +7,7 @@ import ContinuumRevivedCore
 /// 1. Sized from the title: inside the title bar, never taller than it, and no
 ///    taller than the title's line (4/3 of its point size), at 125%, 50% and
 ///    30%. The chrome floor may hold the title up; the icon may not outgrow it.
-/// 2. Opaque: the plate's own layer tree, rendered over magenta and over green,
+/// 2. Opaque: the plate's own layer tree, rendered over black and over white,
 ///    shows neither anywhere inside its installed outline, in both appearances.
 /// 3. On top: a neighbour stacked above the icon's tile, overlapping the plate,
 ///    never covers it. The plate still paints there, and a press there is the
@@ -127,8 +128,10 @@ enum TileAgentIconWitnesses {
             hostLayer.render(in: context)
             return data
         }
-        let magenta = try render(over: NSColor(srgbRed: 1, green: 0, blue: 1, alpha: 1).cgColor)
-        let green = try render(over: NSColor(srgbRed: 0, green: 1, blue: 0, alpha: 1).cgColor)
+        // The provider foreground token is black in light and white in dark:
+        // every channel differs by 255, so any show-through is at full scale.
+        let black = try render(over: BrandToken.providerForeground.cgColor(for: .light))
+        let white = try render(over: BrandToken.providerForeground.cgColor(for: .dark))
         let width = Int((box.width * scale).rounded(.up)), height = Int((box.height * scale).rounded(.up))
         // Either row order: the render's rows may run either way up.
         func bleed(flipped: Bool) -> (Int, Int) {
@@ -140,7 +143,7 @@ enum TileAgentIconWitnesses {
                     guard outline.contains(p), !edge.contains(p) else { continue }
                     inside += 1
                     let i = (y * width + x) * 4
-                    for c in 0..<3 { largest = max(largest, abs(Int(magenta[i + c]) - Int(green[i + c]))) }
+                    for c in 0..<3 { largest = max(largest, abs(Int(black[i + c]) - Int(white[i + c]))) }
                 }
             }
             return (largest, inside)
