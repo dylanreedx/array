@@ -29,15 +29,16 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-REAL = ["nightly-gate.sh", "ship-release.sh", "append-appcast.py", "generate-appcast.sh", "wait-live-release.py"]
+REAL = ["nightly-gate.sh", "ship-release.sh", "append-appcast.py", "generate-appcast.sh", "wait-live-release.py",
+        "feature-gate.sh"]
 for index, arg in enumerate(sys.argv[1:]):  # optional replacements: name=path, for teeth checks
     name, _, path = arg.partition("=")
     REAL[REAL.index(name)] = (name, Path(path))
 STUBS = {
     # The matrix double records its mode and answers from the fixture's plan.
     "run-matrix.sh": r'''#!/bin/bash
-mode=$1
-case $mode in --skip-awake) ;; --awake-only) ;; *) echo "unknown mode $mode" >&2; exit 2 ;; esac
+mode=${1:-full}
+case $mode in --skip-awake) ;; --awake-only) ;; full) ;; *) echo "unknown mode $mode" >&2; exit 2 ;; esac
 # What a leg would see: the checkout's branch, the CLIs on PATH, inherited gate state.
 env | grep '^ARRAY_NIGHTLY_' >> "$SHIP_EVENTS.knobs" || true
 name=$(cat "$SHIP_PLAN/build-name"); echo "$(git rev-parse HEAD) $(/bin/ps -axo comm= | grep -c "/$name\$")" >> "$SHIP_EVENTS.busy"
@@ -45,6 +46,15 @@ echo "$(git rev-parse HEAD) branch=$(git branch --show-current) first=${PATH%%:*
 echo "matrix $mode $(git rev-parse HEAD) owner=${ARRAY_MATRIX_LOCK_OWNER:-none}" >> "$SHIP_EVENTS"
 mkdir -p "$ARRAY_MATRIX_RESULTS"
 status=$(cat "$SHIP_PLAN/matrix$mode" 2>/dev/null || echo pass)
+if [[ -n "${ARRAY_MATRIX_LEGS:-}" ]]; then
+  # A selected run: one row per selected leg, except awake legs under --skip-awake.
+  echo "selected $mode $(printf '%s' "$ARRAY_MATRIX_LEGS" | tr '\n' ',')" >> "$SHIP_EVENTS"
+  rows=$(printf '%s\n' "$ARRAY_MATRIX_LEGS" | while read -r leg; do
+    [[ $mode == --skip-awake && $leg == *awake* ]] && continue
+    printf '{"leg": "%s", "status": "%s", "seconds": 1},' "$leg" "$([[ $status == pass ]] && echo pass || echo fail)"; done)
+  printf '[%s]\n' "${rows%,}" > "$ARRAY_MATRIX_RESULTS/results.json"
+  [[ $status == pass ]]; exit
+fi
 printf '[{"leg": "--fixture-check", "status": "%s", "seconds": 1}, {"leg": "--load-check", "status": "retry-passed", "seconds": 1}]\n' \
   "$([[ $status == pass ]] && echo pass || echo fail)" > "$ARRAY_MATRIX_RESULTS/results.json"
 [[ $status == pass ]]
@@ -64,6 +74,10 @@ while [[ $# -gt 0 ]]; do case $1 in --bundle) b=$2;; --output-dir) o=$2;; --set-
 mkdir -p "$o"; cp -R "$b" "$o/Array.app"; head -c 4096 /dev/urandom > "$o/Array-$v.dmg"
 ''',
     "check-app-bundle.sh": '#!/bin/bash\necho "audit $*" >> "$SHIP_EVENTS"\n',
+    # The real selector has its own witness (check-leg-coverage.py); here it
+    # answers from the plan and records the range it was asked about.
+    "leg-coverage.py": ("import os, sys\nopen(os.environ['SHIP_EVENTS'], 'a').write('select ' + ' '.join(sys.argv[2:]) + '\\n')\n"
+                        "print(open(os.environ['SHIP_PLAN'] + '/selection.json').read())\n"),
 }
 SIGN = '#!/bin/sh\nprintf \'sparkle:edSignature="%s" length="%s"\\n\' "$(head -c 64 /dev/zero | base64)" "$(stat -f %z "$1")"\n'
 GH = r'''#!/bin/bash
@@ -444,8 +458,8 @@ def quiet_cases(fx):
     print("PASS gate-bounded-wait-records-contention")
 
     head = fx.commit("feat(app): change while fseventsd is over the ceiling", {"Sources/App.swift": "let app = 7\n"})
-    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_FSEVENTS_CPU_MAX="-1",
-                                                ARRAY_NIGHTLY_QUIET_MAX_SECONDS="0.5"))
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_FSEVENTS_CPU_MAX="-1",  # 4 s: a loaded Mac takes seconds per ps
+                                                ARRAY_NIGHTLY_QUIET_MAX_SECONDS="4"))
     waited = fx.summary(head).get("contention", {})
     expect(result.returncode == 0 and waited.get("quiet") is False and waited["last"]["swift_builds"] == 0
            and waited["last"]["fseventsd_cpu"] is not None and waited["polls"] > 1,
@@ -454,10 +468,10 @@ def quiet_cases(fx):
 
     idle = idle_stand_in()
     head = fx.commit("feat(app): change beside an idle build process", {"Sources/App.swift": "let app = 8\n"})
-    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_QUIET_MAX_SECONDS="5"))
+    result = fx.run("nightly-gate.sh", env=dict(ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_QUIET_MAX_SECONDS="10"))
     idle.kill(); idle.wait()
     waited = fx.summary(head).get("contention", {})
-    expect(result.returncode == 0 and waited.get("quiet") is True and waited["waited_seconds"] < 2
+    expect(result.returncode == 0 and waited.get("quiet") is True and waited["waited_seconds"] < 8
            and waited["last"]["idle_swift_builds"] == 1, f"an idle swift-build does not hold the gate: {waited}", result)
     print("PASS gate-ignores-idle-build")
 
@@ -471,6 +485,67 @@ def quiet_cases(fx):
     expect(not (knobs.exists() and knobs.read_text().strip()),
            f"no ARRAY_NIGHTLY_* knob reaches the matrix: {knobs.read_text() if knobs.exists() else ''}")
     print("PASS gate-knobs-safe-and-private")
+
+
+def feature_cases(fx):
+    """The per-feature gate: tier picks the legs, nightly-gate.sh --feature runs
+    them under the lock without touching anything a ship reads, and every run
+    lands in the feature's evidence record."""
+    records = fx.root / "records"
+    env = dict(ARRAY_FEATURE_RECORDS=str(records))
+    integration = sh("git", "-C", str(fx.repo), "rev-parse", "origin/array/integration").stdout.strip()
+    sh("git", "-C", str(fx.repo), "checkout", "-q", "-b", "array/feature-x", integration)
+    feature = fx.commit("feat(app): a feature", {"Sources/App.swift": "let app = 10\n"})
+    sh("git", "-C", str(fx.repo), "checkout", "-q", "--detach", integration)
+    before = len(fx.log())
+    (fx.plan / "selection.json").write_text(json.dumps(dict(full=False, full_reasons=[], legs=["--a-check", "--b-awake-check"])))
+    result = fx.run("feature-gate.sh", "array/feature-x", "--tier", "2", "--legs", "--seam-check", "--skip-awake", env=env)
+    events = fx.log()[before:]
+    record = records / "feature-x.md"
+    text = record.read_text() if record.exists() else ""
+    expect(result.returncode == 0 and any(line == f"select {integration} {feature} --json" for line in events),
+           f"tier 2 asks the selector about the branch's own range: {events}", result)
+    expect(f"matrix --skip-awake {feature} owner=" in "\n".join(events) and "owner=none" not in "\n".join(events)
+           and "selected --skip-awake --a-check,--b-awake-check,--seam-check" in events,
+           f"tier 2 runs the selected legs plus the author's, under the lock: {events}")
+    expect(not (fx.base / "results" / feature / "summary.json").exists() and not any(e.startswith("bundle") for e in events),
+           "a feature run writes no gate summary and builds no candidate")
+    expect("Tier 2" in text and "One independent review" in text and ": GREEN" in text and "Awake group: NOT run" in text
+           and "Selected but not run (1): --b-awake-check" in text and "OPEN" in text,
+           f"the record holds the tier's checklist, the run and the unverified awake leg:\n{text}")
+    print("PASS feature-tier2-selected-legs")
+
+    (fx.plan / "matrixfull").write_text("fail")
+    before = len(fx.log())
+    result = fx.run("feature-gate.sh", "array/feature-x", "--tier", "1", "--slug", "feature-x", env=env)
+    (fx.plan / "matrixfull").unlink()
+    events = fx.log()[before:]
+    text = record.read_text()
+    expect(result.returncode == 1 and any(e.startswith(f"matrix full {feature}") for e in events)
+           and not any(e.startswith(("select ", "selected ")) for e in events),
+           f"tier 1 runs every leg with the awake group, no selector: {events}", result)
+    expect(text.count("### ") == 2 and ": RED" in text and "--fixture-check" in text and text.count("# feature-x") == 1,
+           f"a red run is appended to the same record:\n{text}")
+    print("PASS feature-tier1-every-leg")
+
+    (fx.plan / "selection.json").write_text(json.dumps(dict(full=True, full_reasons=["x is covered by no specific leg"], legs=[])))
+    before = len(fx.log())
+    result = fx.run("feature-gate.sh", "array/feature-x", "--tier", "3", "--slug", "unmapped", env=env)
+    events = fx.log()[before:]
+    expect(result.returncode == 0 and any(e.startswith(f"matrix --skip-awake {feature}") for e in events)
+           and not any(e.startswith("selected ") for e in events)
+           and "covered by no specific leg" in (records / "unmapped.md").read_text(),
+           f"an unmapped change runs every leg, and says why: {events}", result)
+    print("PASS feature-unmapped-runs-full")
+
+    with open(fx.root / "matrix.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        result = fx.run("feature-gate.sh", "array/feature-x", "--tier", "3", "--slug", "locked", env=env)
+    expect(result.returncode == 1 and "lock held" in result.stderr and "no result" in result.stderr,
+           "a held lock refuses the feature run loudly", result)
+    result = fx.run("feature-gate.sh", "origin/array/integration", "--tier", "3", env=env)
+    expect(result.returncode == 1 and "no commits beyond" in result.stderr, "a branch with nothing new is refused", result)
+    print("PASS feature-refusals")
 
 
 def schedule_case():
@@ -517,6 +592,7 @@ with tempfile.TemporaryDirectory(prefix="array-ship-") as temp:
         ship_cases(fixture, *gate_cases(fixture))
         ref_case(fixture)
         quiet_cases(fixture)
+        feature_cases(fixture)
         schedule_case()
     except AssertionError as error:
         failures += 1

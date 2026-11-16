@@ -1,5 +1,67 @@
 # Releasing Array
 
+The standard: every feature is gated on its own branch at its risk tier, then
+all of them are gated together as one candidate, Dylan approves a preview of
+that candidate, and only then does it ship.
+
+## Per-feature gate
+
+Pick the tier by what the feature can break, not by how big the diff is. When
+unsure, take the higher tier.
+
+| Tier | What it covers | What it owes |
+|---|---|---|
+| 1 | State, persistence, supervisor or agent lifecycle, auth or accounts, anything that can lose user work or crash | A witness RED before and GREEN after through the production path. Every leg on that branch alone, awake group included. Two independent reviews given the diff, not the author's conclusions: one Codex, one Claude. A measurement on a COPY of a real store where state or persistence is touched. |
+| 2 | User-visible behaviour: pointer, camera, sidebar, perf | A witness RED before and GREEN after through the real event path (`NSApp.sendEvent`, not a direct `mouseDown`). Every leg on the touched seams plus the affected legs. One independent review. Light and dark stills, or a short film of the real app. |
+| 3 | Cosmetic or copy | An in-situ render in light and dark. Targeted legs. One review. |
+
+One command runs the matrix part:
+
+```sh
+scripts/feature-gate.sh <branch> --tier 1|2|3 [--legs --a-check,--b-check] [--skip-awake] [--slug name]
+```
+
+- Tier 1 runs every leg. Tiers 2 and 3 run the legs `scripts/leg-coverage.py`
+  says the branch reaches since it left `origin/array/integration` (`--base`
+  changes that), plus any seam legs named with `--legs`. A change that reaches
+  a path no specific leg covers (or `Package.swift`, `ThirdParty/`, dispatcher
+  code that adds no flag, a removal from `run-matrix.sh`) runs every leg, and
+  the record says why.
+- Tiers 1 and 2 run the awake (display/focus) group, so they need an unlocked,
+  awake Mac. `--skip-awake` runs without it; the record then lists each awake
+  leg as unverified, and the feature is not done until an awake run covers it.
+- It runs through `nightly-gate.sh --feature`: the same quiet wait, shared lock,
+  warm checkout and environment as the release gate. It never builds a
+  candidate and writes nothing a ship reads. A held lock refuses the run.
+- Exit 0 means the selected legs are green, nothing more.
+
+Every run appends to that feature's evidence record,
+`~/array-scratch/release-features/<slug>.md` (slug: the branch name without
+`array/`). Records live there because `releases/` is never committed. The
+script writes the tier's checklist, each matrix run (selection, passed, failed,
+known, retry-passed, not run, results path) and `Verdict: OPEN`. The feature's
+owner pastes the witness RED and GREEN output, the reviews (who, which harness,
+what they found, what was fixed) and the stills, film or store measurement. The
+release lead reads the record and writes `PASS` or `HOLD` with the reason. A
+change to the branch after a PASS needs a new run and a new verdict.
+
+## Combined candidate
+
+1. Cut one candidate branch from `origin/array/integration`
+   (`array/candidate-X.Y.Z`) and merge every feature whose record says PASS.
+   A merge conflict resolved by hand reopens that feature's verdict.
+2. Build the combined preview, `scripts/dev-app.sh` from the candidate bench
+   (it rebuilds `~/Desktop/Array Dev.app`), and give Dylan that preview. Nothing
+   below runs until he approves it.
+3. Gate the exact candidate head:
+   `ARRAY_NIGHTLY_REF=array/candidate-X.Y.Z scripts/nightly-gate.sh`, then
+   `scripts/nightly-gate.sh --awake <candidate sha>` on an unlocked Mac. Green
+   builds the optimized prod candidate for that commit. A red leg goes back to
+   its feature branch, which is re-gated at its tier and merged again.
+4. Dylan lands the candidate head on `array/integration`. A fast-forward keeps
+   the gated commit, so the ship below reuses its gate and candidate. Then follow
+   the fast path below: prepare, then publish on his go.
+
 ## Ship from a gated head (the fast path)
 
 `scripts/nightly-gate.sh` (installed below) gates each new
@@ -20,11 +82,19 @@ appcast item and one ledger row, and commits locally. Publish uploads both
 DMGs, pushes `array/integration` and `main`, and returns only once
 arrayapp.dev serves the build and both downloads answer (15-minute timeout).
 
+Prepare holds the shared matrix lock from finding the candidate until it is
+signed, so a gate cannot prune that candidate meanwhile; it refuses while a
+gate, matrix or release build holds the lock. A `gh` error other than "release
+not found" stops it rather than reading as "not published". A GitHub release
+that is in neither the ledger nor the feed also stops it, because its build
+number is unknown: land its ledger row and feed item, or delete it, first.
+
 Pre-existing reds classify from `scripts/matrix-known-failures.json`: each entry
 has a reason, evidence and an expiry within 30 days, after which the leg counts
 as a real failure again. A leg red in the parallel group gets one serial retry,
-reported as `retry-passed`. Witness: `scripts/check-ship-release.py`. The manual
-steps below remain the fallback.
+reported as `retry-passed`. Witnesses: `scripts/check-ship-release.py` (gate,
+feature gate, ship) and `scripts/check-leg-coverage.py` (leg selection). The
+manual steps below remain the fallback.
 
 ## Cut a preview and release candidate together
 

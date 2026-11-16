@@ -34,6 +34,10 @@ SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 env['PATH'] = ':'.join(p for p in [SYSTEM_PATH, os.environ.get('PATH', '')] if p)
 # Gating a named ref is for this process only; no leg may inherit it.
 REF = env.pop('ARRAY_NIGHTLY_REF', 'origin/array/integration')
+# --feature (scripts/feature-gate.sh): newline-separated leg names to run, empty
+# for every leg, and whether to run the awake group too. Never inherited.
+FEATURE_LEGS = [leg.strip() for leg in env.pop('ARRAY_NIGHTLY_LEGS', '').splitlines() if leg.strip()]
+FEATURE_AWAKE = env.pop('ARRAY_NIGHTLY_AWAKE', '0') == '1'
 # Before taking the shared lock the gate waits until the Mac is quiet: no other swift-build (an agent's build bypasses the lock) and
 # fseventsd under a CPU ceiling for consecutive samples. Timing legs that need
 # FSEvents within seconds failed under exactly that load. The wait is bounded;
@@ -123,10 +127,10 @@ if args and args[0] in ('--install', '--uninstall'):
     sys.exit(0)
 if (base / 'repository.txt').exists() and script.parent == base:
     repo = Path((base / 'repository.txt').read_text().strip())
-USAGE = ('Usage: nightly-gate.sh [--latest-green | --ship-base [REF] | --awake SHA'
+USAGE = ('Usage: nightly-gate.sh [--latest-green | --ship-base [REF] | --awake SHA | --feature REF'
          ' | --install [--dry-run] | --uninstall [--dry-run]]')
 if not (args in ([], ['--latest-green']) or (args[:1] == ['--ship-base'] and len(args) <= 2)
-        or (args[:1] == ['--awake'] and len(args) == 2)):
+        or (args[:1] in (['--awake'], ['--feature']) and len(args) == 2)):
     sys.exit(USAGE)
 base.mkdir(parents=True, exist_ok=True)
 
@@ -242,7 +246,7 @@ def wait_until_quiet(log):
 # to do waits; afterwards the lock is taken exactly as below, and a run that
 # finds it taken skips as before.
 PRE_CONTENTION = None
-if args == [] or args[:1] == ['--awake']:
+if args == [] or args[:1] in (['--awake'], ['--feature']):
     git('fetch', 'origin')
     wanted = git('rev-parse', '--verify', (REF if args == [] else args[1]) + '^{commit}')
     done = load(wanted)
@@ -267,7 +271,7 @@ git('fetch', 'origin')
 # ARRAY_NIGHTLY_REF gates another ref by hand (a branch before it lands); the
 # LaunchAgent never sets it.
 commit = git('rev-parse', '--verify', REF + '^{commit}')
-if args[:1] == ['--awake']:
+if args[:1] in (['--awake'], ['--feature']):
     commit = git('rev-parse', '--verify', args[1] + '^{commit}')
 if args == ['--latest-green']:
     # Git history order, not result timestamp: newest checked integration ancestor.
@@ -316,14 +320,14 @@ def owned(command, owner, log, extra_env=None):
     return sp.run(['/usr/bin/caffeinate', '-i', '/bin/bash', '-c', script], cwd=checkout,
                   env=dict(env, **(extra_env or {})), stdin=sp.DEVNULL, stdout=log, stderr=sp.STDOUT).returncode
 
-def matrix(mode, log):
+def matrix(mode, log, extra=None):
     contention = PRE_CONTENTION
     if contention:
         print('Machine before the lock: ' + json.dumps(contention), file=log, flush=True)
     began = time.monotonic()
     matrix_results = out / ('matrix-' + mode + '-' + dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
-    code = owned('bash scripts/run-matrix.sh --' + mode, 'ARRAY_MATRIX_LOCK_OWNER', log,
-                 dict(ARRAY_MATRIX_RESULTS=str(matrix_results)))
+    code = owned('bash scripts/run-matrix.sh' + ('' if mode == 'full' else ' --' + mode), 'ARRAY_MATRIX_LOCK_OWNER', log,
+                 dict(ARRAY_MATRIX_RESULTS=str(matrix_results), **(extra or {})))
     data = matrix_results / 'results.json'
     rows = json.loads(data.read_text()) if data.exists() else []
     failed = [r['leg'] for r in rows if r['status'] == 'fail']
@@ -345,6 +349,30 @@ def notify(message):
     (out / 'notification.log').write_text(notice.stdout + notice.stderr)
 
 started = time.monotonic()
+if args[:1] == ['--feature']:
+    # One feature branch, before it merges: the legs feature-gate.sh selected
+    # (or every leg), in the gate's warm checkout, under the shared lock. It
+    # never writes summary.json or latest.json and never builds a candidate, so
+    # nothing a ship reads can mistake a feature run for a gate.
+    mode = 'full' if FEATURE_AWAKE else 'skip-awake'
+    with (out / 'feature.log').open('w') as log:
+        try:
+            checkout_at(log)
+            extra = dict(ARRAY_MATRIX_LEGS='\n'.join(FEATURE_LEGS)) if FEATURE_LEGS else {}
+            feature = matrix(mode, log, extra)
+            rows = json.loads((Path(feature['matrix_results']) / 'results.json').read_text()) \
+                if (Path(feature['matrix_results']) / 'results.json').exists() else []
+            ran = {r['leg'] for r in rows}
+            # A selected awake leg under --skip-awake is skipped, not failed: say so.
+            feature['not_run'] = [leg for leg in FEATURE_LEGS if leg not in ran]
+        except Exception as error:
+            feature = dict(green=False, failed=1, failed_legs=[str(error)], contention=dict(LAST_CONTENTION) or None)
+    feature.update(commit=commit, mode=mode, selected=FEATURE_LEGS or 'all', awake=FEATURE_AWAKE,
+                   date=dt.datetime.now(dt.timezone.utc).isoformat(), seconds=round(time.monotonic() - started, 2),
+                   managed_agent=env.get('CONTINUUM_ARRAY_MANAGED_AGENT') == '1')
+    atomic(out / 'feature.json', feature)
+    print(json.dumps(feature, indent=2))
+    sys.exit(0 if feature['green'] else 1)
 if args[:1] == ['--awake']:
     # The display/focus group the unattended gate skips, at the same commit and
     # in the same warm checkout. It needs an unlocked, awake console.
