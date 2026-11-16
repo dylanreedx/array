@@ -114,8 +114,16 @@ enum SidebarTruthChecks {
             try expect(world.supervisor.send("keep working", to: id), "closed-helper setup: send")
         }
         guard await waitUntil(timeout: 10, pollInterval: 0.02, {
-            [childOne, childTwo].allSatisfy { world.supervisor.isRunning($0) && world.runners.byAgent[$0] != nil }
-        }) else { throw Failure(message: "closed-helper setup: runners did not start") }
+            // Runner creation precedes delivery of its queued turnStarted event.
+            // Close only once the production sidebar has observed both turns.
+            world.app.qaRefreshAgentSurfaces()
+            inbox.layoutForQA()
+            return [childOne, childTwo].allSatisfy {
+                world.supervisor.isRunning($0) && world.runners.byAgent[$0] != nil
+                    && inbox.drawnRowForQA(id: $0.rawValue)?.state == .working
+                    && inbox.drawnRowForQA(id: $0.rawValue)?.elapsedStartedAt != nil
+            }
+        }) else { throw Failure(message: "closed-helper setup: working rows and turn clocks did not arrive") }
         world.app.qaRefreshAgentSurfaces()
         inbox.layoutForQA()
         try expect(inbox.hoverRowForQA(id: childOne.rawValue)
@@ -508,7 +516,11 @@ enum SidebarTruthChecks {
         try expect(world.supervisor.send("keep going", to: busyAgent),
                    "setup: the busy agent must accept a prompt")
         guard await waitUntil(timeout: 10, pollInterval: 0.02, {
-            world.supervisor.isRunning(busyAgent) && world.runners.byAgent[busyAgent] != nil
+            world.app.qaRefreshAgentSurfaces()
+            inbox.layoutForQA()
+            return world.supervisor.isRunning(busyAgent) && world.runners.byAgent[busyAgent] != nil
+                && inbox.drawnRowForQA(id: busyAgent.rawValue)?.state == .working
+                && inbox.drawnRowForQA(id: busyAgent.rawValue)?.elapsedStartedAt != nil
         }) else { throw Failure(message: "setup: the busy agent's turn never started") }
         world.app.qaRefreshAgentSurfaces()
         try expect(block(world, busyAgent) == "live"
@@ -548,14 +560,23 @@ enum SidebarTruthChecks {
                   let stop = geometry.elementFrames["stopAction"] else {
                 throw Failure(message: "W2: Background and both actions must materialize at \(width)pt")
             }
-            // AppKit can include a fractional alignment outset in converted
-            // button bounds even though both controls have 20pt width constraints.
-            try expect(restore.width >= 20 && restore.width <= 22
-                       && stop.width >= 20 && stop.width <= 22
+            // Normal cards use the shared controls' intrinsic sizes. Their title
+            // text-field bounds include descent beyond its painted title line.
+            try expect(restore.width >= 18 && restore.height >= 18
+                       && stop.width >= 18 && stop.height >= 18
                        && cell.contains(restore) && cell.contains(stop)
-                       && !title.intersects(stop) && !title.intersects(restore)
+                       && title.midY < min(stop.minY, restore.minY)
                        && stop.maxX <= restore.minX,
-                       "W2: at \(width)pt the title and two 20pt actions keep distinct hit lanes — title \(title), stop \(stop), restore \(restore), cell \(cell)")
+                       "W2: at \(width)pt the title and intrinsic card actions keep distinct lines — title \(title), stop \(stop), restore \(restore), cell \(cell)")
+            guard let card = inbox.onScreenCardForQA(id: busyAgent.rawValue) else {
+                throw Failure(message: "W2: the working card must be available for hit testing")
+            }
+            for (rect, action) in [(stop, "Stop"), (restore, "Bring back to canvas")] {
+                let point = card.convert(NSPoint(x: rect.midX, y: rect.midY), to: nil)
+                let hit = world.window.contentView?.hitTest(point)
+                try expect((hit as? NSButton)?.toolTip == action,
+                           "W2: at \(width)pt the \(action) hit target must reach its own button")
+            }
         }
         world.window.setContentSize(NSSize(width: 300, height: 1_000))
         world.window.contentView?.layoutSubtreeIfNeeded()
