@@ -225,6 +225,9 @@ final class AgentComposerFooterView: NSView, TokenThemed, AgentPageZoomScalable 
     var controlsEnabled: Bool {
         get { harnessButton.isEnabled && modelButton.isEnabled && effortButton.isEnabled }
         set {
+            // Set on every streamed event; repaint only when it changes.
+            guard harnessButton.isEnabled != newValue || modelButton.isEnabled != newValue
+                    || effortButton.isEnabled != newValue else { return }
             harnessButton.isEnabled = newValue
             modelButton.isEnabled = newValue
             effortButton.isEnabled = newValue

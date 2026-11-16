@@ -18,8 +18,10 @@ final class ComposerActionButton: NSControl, TokenThemed, AgentPageZoomScalable 
     /// reproduces the shipped numbers exactly.
     private(set) var pageZoom: AgentPageZoom = .default
 
+    /// The tile re-resolves this on every streamed event; an unchanged value
+    /// must not re-run the label, image, accessibility and token writes.
     var presentation: AgentComposerPresentation {
-        didSet { applyPresentation() }
+        didSet { if presentation != oldValue { applyPresentation() } }
     }
 
     /// Icon only, a square of `controlHeight`. Stop collapses to this beside
