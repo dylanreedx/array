@@ -78,7 +78,7 @@ enum SidebarTruthChecks {
     static func run() async throws {
         try historyScopeVisibility()
         if CommandLine.arguments.contains("--history-scope-only") { return }
-        try await closedTileHelperStyle()
+        for layout in SidebarLayout.allCases { try await closedTileHelperStyle(layout: layout) }
         if CommandLine.arguments.contains("--closed-tile-only") { return }
         let world = try makeWorld()
         defer { tearDown(world) }
@@ -106,11 +106,13 @@ enum SidebarTruthChecks {
     /// Keep this in the matrix's existing sidebar-truth leg. Mount the production
     /// scene, pop out a helper, then close its tile through the canvas callback.
     /// Its working, tile-less sibling is the presentation control.
-    static func closedTileHelperStyle() async throws {
+    static func closedTileHelperStyle(layout: SidebarLayout = .ledger) async throws {
+        QuickHideChecks.acceptFirstMouseEverywhere()
         let world = try makeWorld()
         defer { tearDown(world) }
         world.window.orderFrontOffscreenForChecks()
         let inbox = world.inbox
+        inbox.setSidebarLayoutForQA(layout)
         inbox.prefersReducedMotion = { true }
         for id in [childOne, childTwo] {
             try expect(world.supervisor.send("keep working", to: id), "closed-helper setup: send")
@@ -135,7 +137,19 @@ enum SidebarTruthChecks {
             throw Failure(message: "closed-helper setup: Pop out did not bind a tile")
         }
         let turnStart = inbox.drawnRowForQA(id: childOne.rawValue)?.elapsedStartedAt
-        world.canvas.onTileCloseRequested?(tile)
+        let canvasWindow = SidebarOwnershipChecks.KeyWindow(contentRect: world.canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        canvasWindow.contentView = world.canvas
+        canvasWindow.orderFrontOffscreenForChecks()
+        canvasWindow.makeKey()
+        defer { canvasWindow.orderOut(nil); canvasWindow.contentView = nil }
+        if let viewport = world.canvas.framedViewportForTileJump(tile) { world.canvas.setViewport(viewport) }
+        world.canvas.layoutSubtreeIfNeeded()
+        guard let tileView = world.canvas.tileView(for: tile) else {
+            throw Failure(message: "closed-helper: no rendered tile before closing")
+        }
+        tileView.layoutSubtreeIfNeeded()
+        let close = tileView.qaCloseButtonFrame
+        try QuickHideChecks.click(tileView, at: NSPoint(x: close.midX, y: close.midY))
         _ = inbox.hoverRowForQA(id: nil)
         try expect(world.canvas.tileRecord(for: tile) == nil
                    && world.supervisor.records[childOne]?.closeRequestedAt != nil
@@ -148,7 +162,7 @@ enum SidebarTruthChecks {
         try expect(closed.parentId == parentAgent.rawValue && sibling.parentId == parentAgent.rawValue
                    && !closed.hasTile && !sibling.hasTile,
                    "closed-helper: both working helpers are tile-less children of the same lead")
-        print("closed-helper: closeRequestedAt set; tile removed; runner live; variants \(closed.variant)/\(sibling.variant); labels \(closed.presentationLabel ?? "nil")/\(sibling.presentationLabel ?? "nil")")
+        print("closed-helper (\(layout.title), NSApp.sendEvent): closeRequestedAt set; tile removed; runner live; variants \(closed.variant)/\(sibling.variant); labels \(closed.presentationLabel ?? "nil")/\(sibling.presentationLabel ?? "nil")")
         try expect(closed.variant == sibling.variant && closed.variant == .card,
                    "closed-helper: closing a tile changed its helper's variant: \(closed.variant) vs sibling \(sibling.variant)")
         try expect(closed.presentationLabel == sibling.presentationLabel && closed.presentationLabel == "Working",

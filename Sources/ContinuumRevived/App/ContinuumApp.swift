@@ -40528,8 +40528,11 @@ extension AppDelegate {
         if case .settled = $0.lifecycle { return true } else { return false }
     }.map(\.id))
     let headerRow = parked.shelfHeaderTableRowForQA
-    try expect(headerRow == parked.rowIdsForQA.filter { !settledIds.contains($0) }.count,
-               "the heading sits between the active block and the settled tail — row \(String(describing: headerRow)) of \(parked.rowCountForQA + 1)")
+    let activeTableRows = parked.rowIdsForQA.filter { !settledIds.contains($0) }.compactMap { parked.tableRowIndexForQA(id: $0) }
+    let settledTableRows = parked.rowIdsForQA.filter { settledIds.contains($0) }.compactMap { parked.tableRowIndexForQA(id: $0) }
+    try expect(headerRow.map { heading in activeTableRows.allSatisfy { $0 < heading }
+                && settledTableRows.allSatisfy { $0 > heading } } == true,
+               "the heading sits between every active and settled row — heading \(String(describing: headerRow)), active \(activeTableRows), settled \(settledTableRows)")
     // A heading is one line, the same room a row it is holding would have taken.
     try expect(abs((parked.shelfHeaderHeightForQA ?? 0) - AgentInboxView.slimRowHeight) < 0.5,
                "the heading is one slim line — laid out at \(String(describing: parked.shelfHeaderHeightForQA))pt")
@@ -40537,8 +40540,8 @@ extension AppDelegate {
     // a programmatic `selectRowIndexes` does not consult it: exactly one table row
     // refuses selection, and it is the heading's.
     let selectable = parked.selectableTableRowsForQA
-    try expect(selectable.indices.filter { !selectable[$0] } == [headerRow],
-               "the heading is the one row that refuses selection — refusing rows \(selectable.indices.filter { !selectable[$0] }), heading at \(String(describing: headerRow))")
+    try expect(selectable == parked.itemsForQA.map { $0.agentRow != nil },
+               "every agent selects and every heading/incident refuses — \(selectable)")
     // …and selecting every agent really does leave it out of the selection.
     _ = parked.selectRowsForQA(ids: parked.rowIdsForQA)
     try expect(parked.selectedRowCountForQA == parked.rowCountForQA
@@ -40553,8 +40556,9 @@ extension AppDelegate {
     // cross-review.)
     let belowHeader = parkedSorted.last { settledIds.contains($0.id) }!
     let belowIndex = parked.rowIdsForQA.firstIndex(of: belowHeader.id)!
-    try expect(headerRow.map { belowIndex < $0 } == false,
-               "setup: the row under test must be below the heading — agent index \(belowIndex), heading at \(String(describing: headerRow))")
+    let belowTableIndex = parked.tableRowIndexForQA(id: belowHeader.id) ?? -1
+    try expect(headerRow.map { belowTableIndex > $0 } == true && belowTableIndex > belowIndex,
+               "setup: the row under test is below the heading in a distinct index space — agent \(belowIndex), table \(belowTableIndex), heading \(String(describing: headerRow))")
     var revealedBelow: [UUID] = []
     parked.onRevealRow = { revealedBelow.append($0) }
     try expect(parked.clickRowForQA(id: belowHeader.id) && revealedBelow == [belowHeader.id],
@@ -40813,7 +40817,7 @@ extension AppDelegate {
     let pagedFooterTitle = paged.settledMoreTitleForQA ?? "<none>"
     // LAST ROW IN THE TABLE, and below the shelf's heading: a footer anywhere but
     // under the tail is pointing at the wrong section.
-    try expect(paged.settledMoreTableRowForQA == paged.rowCountForQA + 1,
+    try expect(paged.settledMoreTableRowForQA == (paged.rowIdsForQA.compactMap { paged.tableRowIndexForQA(id: $0) }.max() ?? -1) + 1,
                "the footer is the last row, under the tail — row \(String(describing: paged.settledMoreTableRowForQA)) of \(paged.rowCountForQA + 2)")
     try expect((paged.shelfHeaderTableRowForQA ?? -1) < (paged.settledMoreTableRowForQA ?? -1),
                "…and the heading is still its own row, above it — heading \(String(describing: paged.shelfHeaderTableRowForQA)), footer \(String(describing: paged.settledMoreTableRowForQA))")
@@ -40822,8 +40826,7 @@ extension AppDelegate {
     // NOT A ROW YOU CAN ACT ON, for the reason the heading is not: exactly two table
     // rows refuse selection, and they are the two that are not agents.
     let pagedSelectable = paged.selectableTableRowsForQA
-    try expect(pagedSelectable.indices.filter { !pagedSelectable[$0] }
-                == [paged.shelfHeaderTableRowForQA, paged.settledMoreTableRowForQA].compactMap { $0 },
+    try expect(pagedSelectable == paged.itemsForQA.map { $0.agentRow != nil },
                "the heading and the footer are the rows that refuse selection — refusing \(pagedSelectable.indices.filter { !pagedSelectable[$0] })")
     // The last settled row sits BELOW the heading, where the two index spaces differ.
     var pagedRevealed: [UUID] = []

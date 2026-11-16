@@ -664,7 +664,7 @@ extension SidebarLedgerChecks {
             }
             let renderCount = inbox.sidebarLayoutRenderCountForQA
             for next in [layout == .ledger ? SidebarLayout.quietInbox : .ledger, layout] {
-                guard let button = settings.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Layout" }) else {
+                guard let button = settings.descendants(ChoiceButton.self).first(where: { $0.accessibilityIdentifier() == "settings.sidebarLayout" }) else {
                     throw Failure(description: "Settings has no Layout choice")
                 }
                 button.presentsOffscreenForQA = true

@@ -1844,7 +1844,7 @@ enum UIProbeGeometry {
         // The layout's head (the Ledger's For you list and its headings).
         let headRows = probe.inbox.itemsForQA.filter { item in
             switch item {
-            case .sectionLabel, .incident: return true
+            case .sectionLabel, .incident, .quietNeedsYou: return true
             default: return false
             }
         }.count
@@ -1919,7 +1919,7 @@ enum UIProbeGeometry {
 
         let nestedHeadRows = probe.inbox.itemsForQA.filter { item in
             switch item {
-            case .sectionLabel, .incident: return true
+            case .sectionLabel, .incident, .quietNeedsYou: return true
             default: return false
             }
         }.count
