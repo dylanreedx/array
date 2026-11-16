@@ -720,7 +720,8 @@ final class TileAgentBubbleView: NSView {
     /// in the plane's coordinates.)
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard !isHidden, let tile, let superview else { return nil }
-        return tile.agentBubbleContains(tile.convert(point, from: superview)) ? tile : nil
+        guard tile.agentBubbleContains(tile.convert(point, from: superview)) else { return nil }
+        return tile.pinnedHeaderPressTarget ?? tile
     }
 
     override func updateTrackingAreas() {

@@ -51,6 +51,11 @@ enum AgentJumpComposerChecks {
         defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
         settings.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
         settings.set(false, forKey: DragMagnetizeConfig.enabledKey)
+        settings.set(true, forKey: AgentCharacterConfig.enabledKey)
+        let characters = AgentCharacterController.shared
+        characters.reduceMotion = { true }
+        characters.windowIsVisible = { _ in true }
+        characters.adopt(defaults: settings)
 
         let tallTile = UUID(), shortTile = UUID()
         var tallAgent: AgentID?, shortAgent: AgentID?
@@ -333,6 +338,86 @@ enum AgentJumpComposerChecks {
             }
         }
 
+        // The icon is the header's OWN view and layer, re-anchored beside the
+        // pinned label. Style changes use the live character setting; no second
+        // renderer, snapshot, timer, or sprite is involved.
+        do {
+            let label = "the header's icon follows the pinned head"
+            guard let iconView = tall.agentBubbleView, let iconLayer = tall.qaAgentBubble else {
+                throw Failure(description: "[\(label)] attached agent has no icon view/layer")
+            }
+            for style in AgentCharacterConfig.BubbleStyle.allCases {
+                try landOnTall()
+                settings.set(style.rawValue, forKey: AgentCharacterConfig.bubbleStyleKey)
+                SettingChangeEvent.post(SettingID(rawValue: AgentCharacterConfig.bubbleStyleKey))
+                spin(0.1)
+                if tall.qaStickyHead == nil || iconLayer.bubbleStyle != style {
+                    failures.append("[\(label), \(style.rawValue)] changing the setting did not update the already-pinned icon")
+                }
+                guard let world = canvas.navigationTileSnapshot(for: tallTile)?.worldFrame else {
+                    throw Failure(description: "[\(label)] missing world frame")
+                }
+                let zoom = 0.8
+                canvas.setViewport(CanvasViewport(x: world.x - 120 / zoom, y: world.y - 100 / zoom, zoom: zoom))
+                canvas.layoutSubtreeIfNeeded()
+                spin(0.1)
+                guard tall.qaStickyHead == nil, let atHeader = tall.agentBubbleFrame else {
+                    failures.append("[\(label), \(style.rawValue)] icon missing at the real header")
+                    continue
+                }
+                canvas.setViewport(CanvasViewport(x: world.x - 120 / zoom, y: world.y + 400, zoom: zoom))
+                canvas.layoutSubtreeIfNeeded()
+                spin(0.1)
+                if tall.agentBubbleView !== iconView || tall.qaAgentBubble !== iconLayer {
+                    failures.append("[\(label), \(style.rawValue)] pinning replaced the header's icon view or layer")
+                }
+                if iconLayer.bubbleStyle != style || iconLayer.isHidden {
+                    failures.append("[\(label), \(style.rawValue)] pinned icon does not show the live style")
+                }
+                if let head = tall.qaStickyHead, let pinned = tall.agentBubbleFrame {
+                    let rect = onScreen(iconView.bounds, of: iconView)
+                    if abs(pinned.minX - atHeader.minX) > 0.01 || pinned.size != atHeader.size {
+                        failures.append("[\(label), \(style.rawValue)] pinned icon changed its header size or leading alignment")
+                    }
+                    if pinned.minY < head.frame.minY - 0.5 || pinned.minY > head.frame.maxY || rect.minY < -0.5 || rect.maxY > canvasSize.height {
+                        failures.append("[\(label), \(style.rawValue)] icon is not wholly visible beside the pinned head: \(pinned), screen \(rect)")
+                    }
+                    if !tall.agentBubbleContains(NSPoint(x: pinned.midX, y: pinned.midY)) {
+                        failures.append("[\(label), \(style.rawValue)] icon's hit shape stayed at the real header")
+                    }
+                    let point = iconView.convert(NSPoint(x: iconView.bounds.midX, y: iconView.bounds.midY), to: nil)
+                    let before = tall.tile.frame
+                    _ = delegate.qaFocusBroker.enterScope(.canvas, reason: .userClick)
+                    spin(0.1)
+                    try press(at: point, in: window)
+                    spin(0.1)
+                    if delegate.qaFocusBroker.activeSurface != .tile(tallTile) || tall.tile.frame != before {
+                        failures.append("[\(label), \(style.rawValue)] clicking the pinned icon did not focus its tile without moving it")
+                    }
+                    var presented: NSMenu?
+                    TileNSView.qaMenuPresenter = { presented = $0 }
+                    if let event = NSEvent.mouseEvent(with: .rightMouseDown, location: point, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                        NSApp.sendEvent(event)
+                    }
+                    TileNSView.qaMenuPresenter = nil
+                    if presented?.items.isEmpty != false {
+                        failures.append("[\(label), \(style.rawValue)] right-clicking the pinned icon did not open its header menu")
+                    }
+                } else {
+                    failures.append("[\(label), \(style.rawValue)] no icon beside the pinned head")
+                }
+                canvas.setViewport(CanvasViewport(x: world.x - 120 / zoom, y: world.y - 100 / zoom, zoom: zoom))
+                canvas.layoutSubtreeIfNeeded()
+                spin(0.1)
+                if tall.agentBubbleView !== iconView || tall.qaAgentBubble !== iconLayer || tall.agentBubbleFrame != atHeader {
+                    failures.append("[\(label), \(style.rawValue)] unpinning did not restore the same icon to its real header")
+                }
+            }
+            report.append("  \(label): same view/layer, live Inline/Orb/Squircle, fully visible, clickable, restored on unpin")
+        }
+
         // A tile that fits: framed whole, focused, no head.
         jump("sidebar, tile that fits", tile: short, start: far, flies: false, how: { try clickRow(shortAgent) }) { camera in
             var problems: [String] = []
@@ -354,7 +439,7 @@ enum AgentJumpComposerChecks {
             delegate.qaRefreshAgentSurfaces()
             try clickRow(tallAgent)
             spin(0.4)
-            try writeStills(tile: tall, canvas: canvas, window: window, to: URL(fileURLWithPath: directory))
+            try writeStills(tile: tall, canvas: canvas, window: window, settings: settings, to: URL(fileURLWithPath: directory))
             report.append("  stills written to \(directory)")
         }
 
@@ -427,55 +512,65 @@ enum AgentJumpComposerChecks {
         }
     }
 
-    /// The head as it sits on the canvas, light and dark: a crop of the top of
-    /// the canvas around the tile, from the window server's own picture. Three
-    /// looks for the design review: `flush` is the head as built; `card` and
-    /// `lifted` are the alternatives, dressed on the same live view here only.
-    private static func writeStills(tile: ManagedAgentTileNSView, canvas: CanvasNSView, window: NSWindow, to directory: URL) throws {
+    /// In-situ review stills, using the real icon setting at every requested
+    /// zoom in both appearances. Captures the window server's own rendered
+    /// canvas, including the icon's unclipped world-plane sibling view.
+    private static func writeStills(tile: ManagedAgentTileNSView, canvas: CanvasNSView, window: NSWindow,
+                                    settings: UserDefaults, to directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        guard let head = tile.qaStickyHeadView, let layer = head.layer else { throw Failure(description: "stills: no pinned head") }
-        let built = head.frame
-        for style in ["flush", "card", "lifted"] {
-            head.frame = built
-            layer.cornerRadius = 0; layer.borderWidth = 0; layer.masksToBounds = false
-            layer.shadowOpacity = 0
-            switch style {
-            case "card":
-                head.frame = built.insetBy(dx: 6, dy: 0).offsetBy(dx: 0, dy: 6)
-                layer.cornerRadius = 7
-                layer.masksToBounds = true
-                layer.borderWidth = 1
-                layer.borderColor = LineToken.separator.color.nsColor(for: head.effectiveTokenTheme).cgColor
-            case "lifted":
-                layer.shadowColor = NSColor.black.cgColor
-                layer.shadowOpacity = 0.22
-                layer.shadowRadius = 6
-                layer.shadowOffset = CGSize(width: 0, height: -2)
-            default: break
-            }
-            for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-                window.appearance = NSAppearance(named: appearance)
-                if style == "card" { layer.borderColor = LineToken.separator.color.nsColor(for: appearance == .aqua ? .light : .dark).cgColor }
-                spin(0.4)
-                window.displayIfNeeded()
-                spin(0.2)
-                guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber), [.boundsIgnoreFraming]) else {
-                    throw Failure(description: "no window image")
+        let originalCamera = canvas.viewport
+        let originalStyle = settings.string(forKey: AgentCharacterConfig.bubbleStyleKey)
+        let originalAppearance = window.appearance
+        defer {
+            if let originalStyle { settings.set(originalStyle, forKey: AgentCharacterConfig.bubbleStyleKey) }
+            else { settings.removeObject(forKey: AgentCharacterConfig.bubbleStyleKey) }
+            SettingChangeEvent.post(SettingID(rawValue: AgentCharacterConfig.bubbleStyleKey))
+            canvas.setViewport(originalCamera)
+            window.appearance = originalAppearance
+        }
+        guard let world = canvas.navigationTileSnapshot(for: tile.tile.id)?.worldFrame else {
+            throw Failure(description: "stills: missing tile world frame")
+        }
+        for style in AgentCharacterConfig.BubbleStyle.allCases {
+            settings.set(style.rawValue, forKey: AgentCharacterConfig.bubbleStyleKey)
+            SettingChangeEvent.post(SettingID(rawValue: AgentCharacterConfig.bubbleStyleKey))
+            for zoom in [0.30, 0.80, 1.25] {
+                // Deliberately pan inside the tile even at 30%, where a whole
+                // 2200-world tile could fit. This exercises the pinned state at
+                // the requested zoom rather than letting jump framing alter it.
+                canvas.setViewport(CanvasViewport(x: world.x - 100 / zoom, y: world.y + 400, zoom: zoom))
+                canvas.layoutSubtreeIfNeeded()
+                for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                    window.appearance = NSAppearance(named: appearance)
+                    spin(0.4)
+                    window.displayIfNeeded()
+                    spin(0.2)
+                    guard let head = tile.qaStickyHeadView, let icon = tile.agentBubbleView,
+                          tile.qaAgentBubble?.bubbleStyle == style else {
+                        throw Failure(description: "stills: missing pinned head/icon at \(zoom), \(style.rawValue)")
+                    }
+                    guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
+                        CGWindowID(window.windowNumber), [.boundsIgnoreFraming]) else {
+                        throw Failure(description: "no window image")
+                    }
+                    let scale = CGFloat(image.width) / window.frame.width
+                    let header = head.convert(head.bounds, to: nil)
+                    let plate = icon.convert(icon.bounds, to: nil)
+                    let canvasRect = canvas.convert(canvas.bounds, to: nil)
+                    let leading = min(header.minX, plate.minX) - 36
+                    let trailing = min(canvasRect.maxX, header.maxX + 36)
+                    let crop = NSRect(x: max(canvasRect.minX, leading), y: canvasRect.maxY - 180,
+                                      width: trailing - max(canvasRect.minX, leading), height: 180)
+                    let pixels = CGRect(x: crop.minX * scale, y: (window.frame.height - crop.maxY) * scale,
+                                        width: crop.width * scale, height: crop.height * scale)
+                    guard let cropped = image.cropping(to: pixels),
+                          let data = NSBitmapImageRep(cgImage: cropped).representation(using: .png, properties: [:]) else {
+                        throw Failure(description: "could not crop the still")
+                    }
+                    let percent = Int((zoom * 100).rounded())
+                    try data.write(to: directory.appendingPathComponent("sticky-head-\(style.rawValue)-\(percent)-\(name).png"))
                 }
-                let scale = CGFloat(image.width) / window.frame.width
-                let visible = tile.convert(tile.bounds, to: nil).intersection(canvas.convert(canvas.bounds, to: nil))
-                let crop = NSRect(x: visible.minX - 40, y: visible.maxY - 220, width: visible.width + 80, height: 220)
-                let pixels = CGRect(x: crop.minX * scale, y: (window.frame.height - crop.maxY) * scale,
-                                    width: crop.width * scale, height: crop.height * scale)
-                guard let cropped = image.cropping(to: pixels),
-                      let data = NSBitmapImageRep(cgImage: cropped).representation(using: .png, properties: [:]) else {
-                    throw Failure(description: "could not crop the still")
-                }
-                try data.write(to: directory.appendingPathComponent("sticky-head-\(style)-\(name).png"))
             }
         }
-        head.frame = built
-        layer.cornerRadius = 0; layer.borderWidth = 0; layer.masksToBounds = false; layer.shadowOpacity = 0
-        window.appearance = nil
     }
 }

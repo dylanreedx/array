@@ -80,6 +80,7 @@ if [[ -n "$MATRIX_TMUX_BIN" ]]; then
   esac
 fi
 
+STICKY_HEAD_ONLY=0
 RESTORE_SCALING_ONLY=0
 STARTUP_SPIKE_ONLY=0
 COMPOSER_SEND_ONLY=0
@@ -118,6 +119,7 @@ BROWSER_SCHEDULING_ONLY=0
 HOOK_BRIDGE_ONLY=0
 if [[ $# -gt 0 ]]; then
   case "$1" in
+    --sticky-head) STICKY_HEAD_ONLY=1; shift ;;
     --effort-catalog) EFFORT_CATALOG_ONLY=1; shift ;;
     --restore-scaling) RESTORE_SCALING_ONLY=1; shift ;;
     --startup-spike) STARTUP_SPIKE_ONLY=1; shift ;;
@@ -244,8 +246,10 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--startup-spike | --browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --sidebar-fold-band | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context | --helper-context-diet]
+Usage: scripts/run-matrix.sh [--sticky-head | --startup-spike | --browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --sidebar-fold-band | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context | --helper-context-diet]
 
+
+--sticky-head rebuilds Array with -j 2, then runs sticky head, icon, jump, and camera neighbors serially.
 
 --focus-safe-input runs only the browser input witnesses and their contract/catalog neighbors.
 --permission-ux rebuilds the app and MCP helper, then reports permission scope, browser, simulator, grants and session witnesses. This is a targeted development gate.
@@ -994,6 +998,52 @@ run_leg python3 scripts/check-prepass-source-patterns.py
 run_leg python3 scripts/check-prepass-source-patterns.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
 run_leg python3 scripts/check-prepass-signature-safety.py
 run_leg python3 scripts/check-prepass-signature-safety.py Sources/ContinuumRevived/Resources/GatePrepass/evaluator.py
+# Sticky head review: serialized, isolated neighbors; no preview bundle rebuild.
+if [[ "$STICKY_HEAD_ONLY" -eq 1 ]]; then
+  run swift build --product Array -j 2
+  run_leg scripts/check-matrix-inventory.sh
+  run_app_check .build/debug/Array --sticky-head-performance-check
+  run_app_check .build/debug/Array --agent-jump-composer-check
+  run_app_check .build/debug/Array --tile-agent-bubble-check
+  run_app_check .build/debug/Array --tile-agent-bubble-drag-check
+  run_app_check .build/debug/Array --tile-character-check
+  run_app_check .build/debug/Array --sidebar-row-reveal-check
+  run_app_check .build/debug/Array --agent-inbox-check
+  run_app_check .build/debug/Array --inbox-reveal-project-check
+  run_app_check .build/debug/Array --leader-jump-check
+  run_app_check .build/debug/Array --leader-jump-framing-check
+  run_app_check .build/debug/Array --leader-zone-jump-check
+  run_app_check .build/debug/Array --leader-activation-check
+  run_app_check .build/debug/Array --leader-snap-check
+  run_app_check .build/debug/Array --leader-modal-recovery-check
+  run_app_check .build/debug/Array --leader-jump-visible-indicators-check
+  run_app_check .build/debug/Array --palette-jump-check
+  run_app_check .build/debug/Array --palette-jump-framing-check
+  run_app_check .build/debug/Array --tile-reveal-work-check
+  run_app_check .build/debug/Array --canvas-zoom-momentum-check
+  run_app_check .build/debug/Array --agent-local-file-link-check
+  run_app_check .build/debug/Array --focus-border-check
+  run_app_check .build/debug/Array --canvas-visibility-index-check
+  run_app_check .build/debug/Array --perf-budget-camera-slope-check
+  run_app_check .build/debug/Array --camera-chrome-redraw-check
+  run_app_check .build/debug/Array --tile-chrome-scale-check
+  run_app_check .build/debug/Array --agent-tile-chrome-consolidation-check
+  run_app_check .build/debug/Array --workspace-api-agent-camera-check
+  run_app_check .build/debug/Array --workspace-api-canvas-check
+  run_app_check .build/debug/Array --workspace-api-open-check
+  run_app_check .build/debug/Array --workspace-scene-owner-check
+  run_app_check .build/debug/Array --zone-chrome-zorder-check
+  run_app_check .build/debug/Array --settings-panel-check
+  run_app_check .build/debug/Array --settings-modal-check
+  run_app_check .build/debug/Array --settings-search-check
+  run_app_check .build/debug/Array --perf-budget-zoom-check
+  run_app_check .build/debug/Array --perf-budget-magnify-slope-check
+  run_app_check .build/debug/Array --tile-chrome-canvas-check
+  run_app_check .build/debug/Array --agent-tile-click-focus-check
+  run_app_check .build/debug/Array --subagent-sidebar-open-check
+  matrix_report 'Sticky head matrix (targeted)'
+  exit $?
+fi
 if [[ "$BROWSER_SCHEDULING_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product Array
   run_app_check .build/debug/Array --browser-background-scheduling-check
@@ -2567,6 +2617,7 @@ run_app_check .build/debug/Array --sidebar-row-reveal-check
 # tile's head at the top edge; a click on the head focuses the tile; a tile that
 # fits is framed whole; the setting off restores the old jump.
 run_app_check .build/debug/Array --agent-jump-composer-check
+run_app_check .build/debug/Array --sticky-head-performance-check
 # With auto-layout OFF, a zone's automatic placement clamped only the camera, so
 # a tile could be framed past the zone's edge; auto-layout's settle grew the zone
 # over it and hid that. Toolbar spawns into one zone until it is full, asserting
