@@ -72,7 +72,10 @@ extension SidebarOwnershipChecks {
         // The user's app is active when they click; this one never is, and an
         // inactive app swallows a press on a row as an activation click.
         QuickHideChecks.acceptFirstMouseEverywhere()
+        let background = try checkFoldBand(outputDirectory: outputDirectory)
+        if ProcessInfo.processInfo.environment["CONTINUUM_FOLD_BAND_ONLY"] == "1" { return background }
         var report: [String] = []
+        report.append(background)
         for dark in [true, false] {
             report.append(try checkFoldExpansion(dark: dark, outputDirectory: outputDirectory))
             report.append(try checkNestedFoldAccessibility(dark: dark, outputDirectory: outputDirectory))

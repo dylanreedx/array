@@ -3243,6 +3243,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 card.setOwnership(ownership(atTableRow: index))
             }
         }
+        // Surviving fold lines share the resized card too; they are not in cellsByRow.
+        refreshVisibleOwnership()
         let nudges: Set<UUID> = Set([oldNudge, settleNudgeTargetID(now: renderNow)].compactMap { $0 })
         var stale = IndexSet(new.indices.filter { row in
             guard !inserted.contains(row) else { return false }
@@ -3300,6 +3302,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 card.setOwnership(ownership(atTableRow: index))
             }
         }
+        // A fold line's identity can survive while its lead's card changes height.
+        refreshVisibleOwnership()
         // A survivor is redrawn when what it draws from its neighbours changed: its
         // place in the tree, its rollup (a child in another workspace left), or the
         // settle nudge moving to or from it.

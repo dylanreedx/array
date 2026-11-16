@@ -85,6 +85,7 @@ COMPOSER_SEND_ONLY=0
 EFFORT_CATALOG_ONLY=0
 CROSS_HARNESS_DELEGATION_ONLY=0
 SIDEBAR_REFINEMENTS_ONLY=0
+SIDEBAR_FOLD_BAND_ONLY=0
 FAST=0
 CODEX_PERMISSIONS_ONLY=0
 TILE_SELECTION_ONLY=0
@@ -158,6 +159,7 @@ if [[ $# -gt 0 ]]; then
       SIDEBAR_REFINEMENTS_ONLY=1
       shift
       ;;
+    --sidebar-fold-band) SIDEBAR_FOLD_BAND_ONLY=1; shift ;;
     --workspace-selector)
       WORKSPACE_SELECTOR_ONLY=1
       shift
@@ -240,7 +242,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context | --helper-context-diet]
+Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --sidebar-fold-band | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context | --helper-context-diet]
 
 
 --focus-safe-input runs only the browser input witnesses and their contract/catalog neighbors.
@@ -1200,6 +1202,13 @@ if [[ "$CODEX_PERMISSIONS_ONLY" -eq 1 ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --codex-appserver-runner-check
   matrix_report 'Codex permissions matrix (targeted)'
+  exit $?
+fi
+if [[ "$SIDEBAR_FOLD_BAND_ONLY" -eq 1 ]]; then
+  run swift build --product Array -j 2
+  run_app_check .build/debug/Array --sidebar-fold-expand-check
+  run_app_check .build/debug/Array --sidebar-truth-check
+  matrix_report 'Sidebar fold band matrix (targeted)'
   exit $?
 fi
 if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
