@@ -68,6 +68,18 @@ enum UIProbeAppearance {
         return view
     }
 
+    /// Keep a real parent and its helper in the viewport. The full sidebar
+    /// fixture can scroll this family out of view as row layouts grow, leaving
+    /// its fold control unmaterialized in the appearance and adopted censuses.
+    private static func makeInboxFamily() -> NSView {
+        let parent = LabFixtures.inboxAgentIds[5]
+        let rows = LabFixtures.inboxRows().filter { $0.id == parent || $0.parentId == parent }
+        let view = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 240))
+        view.clock = { LabFixtures.inboxNow }
+        view.reload(rows: rows)
+        return view
+    }
+
     private static func makeIOSPreviewTile() -> NSView {
         let tile = Tile(id: UUID(), kind: .iosPreview, title: "iOS Preview",
                         frame: TileFrame(x: 0, y: 0, width: 440, height: 700),
@@ -407,6 +419,9 @@ enum UIProbeAppearance {
             // sweep never renders, which `declaredConformers()` is right to reject.
             ("appearance.inboxOptionalChrome", NSSize(width: 320, height: 180), {
                 makeInboxOptionalChrome()
+            }),
+            ("appearance.inboxFamily", NSSize(width: 320, height: 240), {
+                makeInboxFamily()
             }),
             ("appearance.agentInbox", NSSize(width: 320, height: 620 + AgentInboxView.scopeControlHeight), {
                 LabCatalog.makeAgentInboxPreview(selecting: LabFixtures.inboxAgentIds[1])
@@ -1894,6 +1909,8 @@ enum UIProbeAppearance {
         return collaboration + [
             AdoptedSurface(id: "inboxOptionalChrome", size: NSSize(width: 320, height: 180),
                            make: { makeInboxOptionalChrome() }),
+            AdoptedSurface(id: "inboxFamily", size: NSSize(width: 320, height: 240),
+                           make: { makeInboxFamily() }),
             AdoptedSurface(id: "editorNavigator", size: NSSize(width: 260, height: 400), make: {
                 FileTreeBrowserView(rootURL: URL(fileURLWithPath: "/nonexistent-editor-navigator-probe-root"))
             }),
