@@ -103,8 +103,8 @@ reported complete with exit 0; use the 120-second resource loop below.
    current production host uses `.excluded` and a separate transcript publisher.
    Do not claim that supported alternate mode is fixed.
 
-Before **each** build: at least 25% free in `memory_pressure`, and fewer than
-2 other `swift-build` processes counted with `ps`; wait in 120-second loops.
+Before **each** build: at least 25% free in `memory_pressure`, and zero other
+`swift-build` processes (`pgrep -f swift-build`); wait in 120-second loops.
 Debug only, `--skip-update`. No full matrix; never hold `/tmp/array-matrix.lock`.
 Never touch either `/Applications/Array.app` or `~/Desktop/Array Dev.app`, or
 the default tmux server. Isolate any checks' app support and tmux namespace,
