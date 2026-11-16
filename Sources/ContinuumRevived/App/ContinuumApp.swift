@@ -1788,9 +1788,9 @@ enum ContinuumApp {
             setbuf(stdout, nil)
             // Keep fixture text width independent of the device's Automatic
             // scrollbar policy, which can choose overlay scrollbars.
-            var renderArguments = UserDefaults.standard.volatileDomain(forName: NSArgumentDomain)
+            var renderArguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
             renderArguments["AppleShowScrollBars"] = "Always"
-            UserDefaults.standard.setVolatileDomain(renderArguments, forName: NSArgumentDomain)
+            UserDefaults.standard.setVolatileDomain(renderArguments, forName: UserDefaults.argumentDomain)
             _ = NSApplication.shared
             // The matrix appends `-continuum.terminal.*` defaults after the
             // flag; only a following non-flag argument names the folder.
