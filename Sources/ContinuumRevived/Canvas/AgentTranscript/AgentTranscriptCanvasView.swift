@@ -265,6 +265,40 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             }
             rowOffsets = offsets
             textLength = cursor
+            isReleased = false
+        }
+
+        /// True for a block far from the viewport that kept its geometry and
+        /// dropped its text layout (`releasingDistantLayout`).
+        let isReleased: Bool
+
+        /// The same block without its CoreText: no rows and no decorations, every
+        /// measure that places it and every hit area kept. A transcript keeps
+        /// one of these for each block far from what it shows, and lays the
+        /// block out again before it comes near the viewport.
+        func released() -> LaidBlock { LaidBlock(releasing: self) }
+
+        private init(releasing source: LaidBlock) {
+            id = source.id
+            revision = source.revision
+            width = source.width
+            contextSignature = source.contextSignature
+            role = source.role
+            variant = source.variant
+            presented = source.presented
+            height = source.height
+            rows = []
+            decorations = []
+            controls = source.controls
+            regions = source.regions
+            images = source.images
+            containedIDs = source.containedIDs
+            toolStatus = source.toolStatus
+            alpha = source.alpha
+            clipsToBounds = source.clipsToBounds
+            rowOffsets = source.rowOffsets
+            textLength = source.textLength
+            isReleased = true
         }
     }
 
@@ -274,6 +308,10 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let y: CGFloat
         let textStart: Int
         let blockID: AgentNodeID
+        /// The entry `block` was laid out from in the placed document, to lay a
+        /// released block out again (`unit(at:)`). Only an index: a placement
+        /// per block, kept for the transcript's life, must stay small.
+        let entryIndex: Int
     }
 
     struct ControlKey: Hashable {
@@ -477,6 +515,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         for (key, block) in cache where block.containedIDs.contains(id) { cache.removeValue(forKey: key) }
         rebuild()
         scrollOffset = min(scrollOffset, maximumScrollOffset)
+        releasingDistantLayout()
         syncCharacters()
         needsDisplay = true
     }
@@ -635,6 +674,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let stick = isNearBottom
         change()
         scrollOffset = stick ? maximumScrollOffset : min(scrollOffset, maximumScrollOffset)
+        // Here as well as before drawing: a transcript the canvas is not
+        // drawing (a resting tile, a far zoom) still takes every update.
+        releasingDistantLayout()
         positionGyro()
         needsDisplay = true
     }
@@ -704,6 +746,32 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
     }
 
+    /// What one entry draws, as units, in order.
+    private func units(of entries: [AgentEntry], at entryIndex: Int) -> [Unit] {
+        let entry = entries[entryIndex]
+        if entry.role == .reasoning {
+            // Open reasoning is shown by the tail status, as in the list.
+            guard entry.lifecycle == .finished, !entry.blocks.isEmpty else { return [] }
+            return [.reasoning(entry, duration: Self.reasoningDuration(entries, at: entryIndex))]
+        }
+        return entry.blocks.compactMap { block in
+            // A delegation is one row: its superseded tool row and the
+            // chips that follow a run's first chip draw nowhere else.
+            if chipFold.superseded.contains(block.id) || chipFold.leaderByFollower[block.id] != nil { return nil }
+            if let followers = chipFold.followersByLeader[block.id] {
+                return .block(Self.presentedChipRun(block, followers: followers), entry)
+            }
+            return .block(block, entry)
+        }
+    }
+
+    /// The unit a placed block was laid out from: the placed document is the
+    /// current one, since every document change places again.
+    private func unit(of item: Placed) -> Unit? {
+        guard document.entries.indices.contains(item.entryIndex) else { return nil }
+        return units(of: document.entries, at: item.entryIndex).first { $0.id == item.blockID }
+    }
+
     /// Walk the document; lay out only units the cache cannot answer; place all.
     /// Never called from `draw`.
     func rebuild() {
@@ -726,23 +794,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let entries = document.entries
         chipFold = Self.foldDelegations(entries)
         for (entryIndex, entry) in entries.enumerated() {
-            var units: [Unit] = []
-            if entry.role == .reasoning {
-                // Open reasoning is shown by the tail status, as in the list.
-                guard entry.lifecycle == .finished, !entry.blocks.isEmpty else { continue }
-                units = [.reasoning(entry, duration: Self.reasoningDuration(entries, at: entryIndex))]
-            } else {
-                units = entry.blocks.compactMap { block in
-                    // A delegation is one row: its superseded tool row and the
-                    // chips that follow a run's first chip draw nowhere else.
-                    if chipFold.superseded.contains(block.id) || chipFold.leaderByFollower[block.id] != nil { return nil }
-                    if let followers = chipFold.followersByLeader[block.id] {
-                        return .block(Self.presentedChipRun(block, followers: followers), entry)
-                    }
-                    return .block(block, entry)
-                }
-            }
-            for unit in units {
+            for unit in units(of: entries, at: entryIndex) {
                 let (revision, presented, variant) = identity(of: unit)
                 let laid: LaidBlock
                 if let cached = cache[unit.id], cached.revision == revision, cached.width == width,
@@ -761,7 +813,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                     let startsTurn = entry.role == .user && previousEntryID != entry.id
                     y += startsTurn ? turnSpacing : rowSpacing
                 }
-                result.append(Placed(block: laid, y: y, textStart: text, blockID: unit.id))
+                result.append(Placed(block: laid, y: y, textStart: text, blockID: unit.id, entryIndex: entryIndex))
                 y += laid.height
                 text += laid.textLength
                 previousEntryID = entry.id
@@ -769,6 +821,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
         cache = next
         placed = result
+        placedGeneration &+= 1
         blocksBottom = y
         runningToolUnits = running
         if !running.isEmpty { ToolRowLiveClock.shared.add(self) }
@@ -804,12 +857,94 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 break
             }
             cache[item.blockID] = laid
-            placed[index] = Placed(block: laid, y: item.y, textStart: item.textStart, blockID: item.blockID)
+            placed[index] = Placed(block: laid, y: item.y, textStart: item.textStart, blockID: item.blockID, entryIndex: item.entryIndex)
             qaLiveClockRelayoutCount += 1
             setNeedsDisplay(NSRect(x: 0, y: item.y - scrollOffset, width: bounds.width, height: laid.height))
         }
         if displaced { preservingTail { rebuild() } }
         return !runningToolUnits.isEmpty
+    }
+
+    // MARK: Distant layout
+
+    /// Bumped by every `rebuild`, so the release pass runs once per new placement.
+    private var placedGeneration = 0
+    private var releasedGeneration = -1
+    private var releasedAtOffset: CGFloat = 0
+    private var relayoutAfterReleaseScheduled = false
+    private(set) var qaReleasedBlockCount = 0
+
+    /// How far around the viewport blocks stay laid out: at least a screenful.
+    private var layoutSpan: CGFloat { max(bounds.height, 400) }
+
+    /// The placed block at `index` with its full layout, laying it out again if
+    /// the transcript released it. Everything that reads rows or decorations of
+    /// a block it did not just draw goes through here.
+    @discardableResult
+    private func materialize(_ index: Int) -> Placed {
+        let item = placed[index]
+        guard item.block.isReleased, let unit = unit(of: item) else { return item }
+        let (_, _, variant) = identity(of: unit)
+        let laid = layoutUnit(unit, width: item.block.width, signature: item.block.contextSignature, variant: variant)
+        let full = Placed(block: laid, y: item.y, textStart: item.textStart, blockID: item.blockID, entryIndex: item.entryIndex)
+        cache[item.blockID] = laid
+        placed[index] = full
+        if abs(laid.height - item.block.height) >= 0.01 || laid.textLength != item.block.textLength,
+           !relayoutAfterReleaseScheduled {
+            // Something changed since the block was placed without a rebuild
+            // noticing; place everything again on the next turn of the run loop.
+            relayoutAfterReleaseScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.relayoutAfterReleaseScheduled = false
+                self.preservingTail { self.rebuild() }
+            }
+        }
+        return full
+    }
+
+    /// Windowed history: lay out every block near the viewport, and release
+    /// the text layout of blocks far from it. A viewed transcript used to keep
+    /// every line it ever drew as CoreText (runs, glyphs, fonts), so its memory
+    /// grew with its history (`--long-session-memory-check`). Released blocks
+    /// keep their height, text length and hit areas, so placement, scrolling,
+    /// selection offsets and copy are unchanged; they are laid out again before
+    /// they come within a screenful of the viewport, from `viewWillDraw`.
+    ///
+    /// Laying out near the viewport costs a window of blocks; the release pass
+    /// walks every block, so it runs only after a rebuild (itself a walk of
+    /// every block) or a scroll of more than a screenful.
+    func releasingDistantLayout() {
+        // Not `bounds.height > 0`: a resting tile's transcript has no height
+        // and still takes every update. Its window is a screenful at its offset.
+        guard !placed.isEmpty else { return }
+        let span = layoutSpan
+        var index = firstPlaced(atOrBelow: scrollOffset - span)
+        while index < placed.count, placed[index].y <= scrollOffset + bounds.height + span {
+            materialize(index)
+            index += 1
+        }
+        guard placedGeneration != releasedGeneration || abs(scrollOffset - releasedAtOffset) > span else { return }
+        releasedGeneration = placedGeneration
+        releasedAtOffset = scrollOffset
+        let keepLow = scrollOffset - 3 * span
+        let keepHigh = scrollOffset + bounds.height + 3 * span
+        var released = 0
+        for index in placed.indices {
+            let item = placed[index]
+            if item.block.isReleased { released += 1; continue }
+            guard item.y + item.block.height < keepLow || item.y > keepHigh else { continue }
+            let stub = item.block.released()
+            cache[item.blockID] = stub
+            placed[index] = Placed(block: stub, y: item.y, textStart: item.textStart, blockID: item.blockID, entryIndex: item.entryIndex)
+            released += 1
+        }
+        qaReleasedBlockCount = released
+    }
+
+    override func viewWillDraw() {
+        releasingDistantLayout()
+        super.viewWillDraw()
     }
 
     // MARK: Delegations
@@ -1031,7 +1166,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             let item = placed[index]
             index += 1
             if item.y > viewport.maxY { break }
-            for decoration in item.block.decorations {
+            for decoration in materialize(index - 1).block.decorations {
                 guard case let .character(mark, rect) = decoration else { continue }
                 let docRect = rect.offsetBy(dx: insets.left, dy: item.y)
                 guard docRect.intersects(viewport) else { continue }
@@ -1110,8 +1245,10 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             let item = placed[index]
             index += 1
             if item.y > visible.maxY { break }
-            let block = item.block
-            guard item.y + block.height >= visible.minY else { continue }
+            guard item.y + item.block.height >= visible.minY else { continue }
+            // `viewWillDraw` lays out everything near the viewport; a draw
+            // AppKit started without it still draws text, never a gap.
+            let block = item.block.isReleased ? materialize(index - 1).block : item.block
             context.saveGState()
             context.translateBy(x: x0, y: item.y - scrollOffset)
             if block.alpha < 1 { context.setAlpha(block.alpha) }
@@ -1429,7 +1566,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         if docY < placed[index].y, index > 0, docY - (placed[index - 1].y + placed[index - 1].block.height) < placed[index].y - docY {
             index -= 1
         }
-        let item = placed[index]
+        let item = materialize(index)
         let local = CGPoint(x: point.x - insets.left, y: docY - item.y)
         var best: (row: Int, line: Line, offset: CGPoint, distance: CGFloat)?
         for (rowIndex, row) in item.block.rows.enumerated() {
@@ -1455,7 +1592,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             if placed[mid].textStart + placed[mid].block.textLength <= index { low = mid + 1 } else { high = mid }
         }
         guard low < placed.count else { return nil }
-        let item = placed[low]
+        let item = materialize(low)
         for rowIndex in item.block.rows.indices.reversed() where item.textStart + item.block.rowOffsets[rowIndex] <= index {
             return (item, rowIndex, index - item.textStart - item.block.rowOffsets[rowIndex])
         }
@@ -1675,7 +1812,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         guard let selection = selectedRange else { return nil }
         var pieces: [String] = []
         let end = NSMaxRange(selection)
-        for item in placed where item.textStart < end && item.textStart + item.block.textLength > selection.location {
+        for index in placed.indices where placed[index].textStart < end
+            && placed[index].textStart + placed[index].block.textLength > selection.location {
+            let item = materialize(index)
             for (rowIndex, row) in item.block.rows.enumerated() {
                 let rowStart = item.textStart + item.block.rowOffsets[rowIndex]
                 let lo = max(selection.location, rowStart)
@@ -1775,7 +1914,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     /// Every laid row's text in document order, rows joined by newlines.
     var qaLaidOutText: String {
-        placed.flatMap { $0.block.rows.map(\.string.string) }.joined(separator: "\n")
+        placed.indices.flatMap { materialize($0).block.rows.map(\.string.string) }.joined(separator: "\n")
     }
 
     /// The view point at the left edge of document offset `index`, mid-line.
