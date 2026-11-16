@@ -1962,23 +1962,32 @@ final class AgentSupervisor {
         guard let transcriptStore, failureDetailLoads.insert(id).inserted else { return nil }
         let sequence = event.sequence
         let startedAt = [record.latestPromptAt, record.latestTurnAt].compactMap { $0 }.max()
-        Task { [weak self] in
+        // Detached: a relaunch can hold ~110 failed agents, and a MainActor task
+        // would run every reverse transcript scan on the main thread. Only the
+        // publish hops back.
+        Task.detached(priority: .utility) { [weak self] in
             let document = try? await transcriptStore.load(
                 agentID: id, sessionID: AgentTranscriptStore.canonicalSessionID(for: id))
             let text = document.flatMap { Self.lastErrorMessage(in: $0, for: event, since: startedAt) }
-            guard let self else { return }
-            self.failureDetailLoads.remove(id)
-            self.failureDetailCache[id] = (sequence, text)
-            guard text != nil, !self.failureDetailPushPending else { return }
-            self.failureDetailPushPending = true
-            DispatchQueue.main.async { [weak self] in
+            Self.failureDetailScanForQA?(pthread_main_np() != 0)
+            await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.failureDetailPushPending = false
-                self.onFailureDetailsLoaded?()
+                self.failureDetailLoads.remove(id)
+                self.failureDetailCache[id] = (sequence, text)
+                guard text != nil, !self.failureDetailPushPending else { return }
+                self.failureDetailPushPending = true
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.failureDetailPushPending = false
+                    self.onFailureDetailsLoaded?()
+                }
             }
         }
         return nil
     }
+
+    /// QA: told, per lazy failure-detail scan, whether it ran on the main thread.
+    nonisolated(unsafe) static var failureDetailScanForQA: ((Bool) -> Void)?
 
     /// Error words belong to this terminal turn only. Old transcripts without
     /// a correlated turn identity or dated activity retain the generic failure.
