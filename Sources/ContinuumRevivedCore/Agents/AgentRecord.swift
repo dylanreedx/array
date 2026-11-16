@@ -652,8 +652,8 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         // without reopening that shared precedence function.
         let strictWindow = autoSettleAfter.map(\.nextUp)
         // The close intent is rung 0 too, but only once nothing blocks it: a
-        // blocked agent whose tile was closed stays active (and says "Finishing",
-        // `closingSince`), and leaves for History by itself when its turn ends.
+        // blocked agent whose tile was closed keeps its normal active row, and
+        // leaves for History by itself when its turn ends.
         let closedAt = archivedAt ?? (facts.blocksSettlement(now: now) ? nil : closeIntentAt(facts: facts))
         return InboxLifecycle.resolve(
             override: settledOverride,
@@ -679,9 +679,9 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         return lastActivityAt
     }
 
-    /// The "Finishing" fact: the tile was closed (or lost) while something still
-    /// blocks the agent, so the row stays live — slim — until its turn ends. nil
-    /// for every agent that is not closing, and for one already archived.
+    /// The tile was closed (or lost) while something still blocks the agent.
+    /// Its normal row stays live until the turn ends. nil for every agent that
+    /// is not closing, and for one already archived. This is not an agent status.
     public func closingSince(facts: AgentLifecycleFacts, now: Date) -> Date? {
         guard archivedAt == nil, facts.blocksSettlement(now: now) else { return nil }
         return closeIntentAt(facts: facts)

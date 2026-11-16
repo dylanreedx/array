@@ -4460,14 +4460,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             card.configureExternalActions(moveHere: nil, copy: nil, hide: nil)
             // Plan 106: a subagent row offers Pop out and Stop on hover.
             card.configureSubagentActions(popOut: action(.popOut), stop: action(.stopAgent))
-        } else if let slim = cell as? AgentInboxSlimCellView {
-            if model.closingSince != nil {
-                slim.configureBackgroundActions(
+            if model.closingSince != nil, !card.isSubagentRow {
+                card.configureClosedTileActions(
                     bringBack: isWired(.openInTile) ? { [weak self] in self?.onRevealRow?(id) } : nil,
                     stop: action(.stopAgent))
-            } else {
-                slim.configureBackgroundActions(bringBack: nil, stop: nil)
-                switch model.lifecycle {
+            }
+        } else if let slim = cell as? AgentInboxSlimCellView {
+            slim.configureBackgroundActions(bringBack: nil, stop: nil)
+            switch model.lifecycle {
             case .snoozed:
                 slim.configureHoverAction(symbol: "alarm", label: "Wake", perform: action(.wake))
             case .settled:
@@ -4475,7 +4475,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     symbol: "arrow.uturn.backward", label: "Un-settle", perform: action(.unsettle))
             case .active, .archived:
                 slim.configureHoverAction(symbol: "arrow.uturn.backward", label: "Un-settle", perform: nil)
-                }
             }
         }
     }
@@ -4484,7 +4483,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func hoverActionsForQA(id: UUID) -> (shown: Bool, titles: [String])? {
         guard let tableRow = tableRow(forAgentId: id) else { return nil }
         let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
-        if let card = cell as? AgentInbox96CellView { return (card.qaHoverActionsShown, card.qaHoverActionTitles) }
+        if let card = cell as? AgentInbox96CellView {
+            return (card.qaHoverActionsShown, card.isSubagentRow ? card.subagentActionTitlesForQA : card.qaHoverActionTitles)
+        }
         if let slim = cell as? AgentInboxSlimCellView {
             return (slim.qaHoverActionShown, slim.qaHoverActionTitles)
         }
@@ -4573,17 +4574,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     func clickBackgroundBringBackForQA(id: UUID) -> Bool {
-        guard let tableRow = tableRow(forAgentId: id),
-              let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
-                as? AgentInboxSlimCellView else { return false }
-        return cell.clickBackgroundBringBackForQA()
+        guard let cell = cellForQA(id: id) else { return false }
+        return cell.clickHoverSettleForQA()
     }
 
     func clickBackgroundStopForQA(id: UUID) -> Bool {
-        guard let tableRow = tableRow(forAgentId: id),
-              let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
-                as? AgentInboxSlimCellView else { return false }
-        return cell.clickBackgroundStopForQA()
+        guard let cell = cellForQA(id: id) else { return false }
+        return cell.clickHoverSnoozeForQA()
     }
 
     /// At most one nudge is ever offered, and only while no row is blocked on the
@@ -6560,7 +6557,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         for tableRow in visibleTimedTableRows() {
             let cell = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
             (cell as? AgentInbox96CellView)?.updateElapsedClock(now: now)
-            // A Background row is slim and still timed (counted from the close).
             (cell as? AgentInboxSlimCellView)?.updateElapsedClock(now: now)
         }
     }
@@ -7132,7 +7128,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         return nil
     }
-    /// The drawn row's own value (variant, Background fact), for the same witnesses.
+    /// The drawn row's own value (variant, close intent), for the same witnesses.
     func drawnRowForQA(id: UUID) -> AgentInboxRow? { rows.first { $0.id == id } }
     /// Every row the last push handed this view, before scope/search/fold shaping.
     /// Program 96/P0.1 reads these so a corpus can prove what the PRODUCTION join
@@ -9800,7 +9796,7 @@ enum InboxRowAction: String, CaseIterable, Equatable {
         guard !InboxBulkAction.isArchived(row) else { return false }
         // The supervisor's live-runner fact remains authoritative when a closed
         // tile's last rendered status is stale. Do not infer this from
-        // `closingSince`: a child blocker can keep a parent's row Background
+        // `closingSince`: a child blocker can keep a closed parent's row live
         // without leaving a runner on the parent itself.
         if row.hasLiveRunner { return true }
         switch row.state {
@@ -11926,7 +11922,6 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         // injected-clock string. A caller that only has the row still gets a
         // conservative lifecycle-based presence answer for deterministic math.
         let resolvedTime = timeText ?? {
-            if row.closingSince != nil { return "present" }
             switch row.lifecycle {
             case .settled, .snoozed: return "present"
             case .active, .archived: return ""
@@ -11937,7 +11932,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
             title: AgentInboxCellView.measuredTextWidth(row.displayTitle, .title),
             branch: AgentInboxCellView.measuredTextWidth(branchText(branch: row.branch), .label),
             time: resolvedTime.isEmpty ? 0 : relativeTimeColumnWidth(
-                unconfirmed: row.isUnconfirmed, closing: row.closingSince != nil),
+                unconfirmed: row.isUnconfirmed),
             disclosure: disclosure == .none
                 ? 0
                 : disclosureWidth ?? measuredDisclosureWidth(disclosure),
@@ -12007,7 +12002,6 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         if row.isUnconfirmed {
             return "Unconfirmed: no live agent snapshot; last known status \(row.label ?? "Ready")"
         }
-        if row.closingSince != nil { return "Background" }
         return row.presentationLabel ?? "Ready"
     }
 
@@ -12093,7 +12087,7 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
         branchLabel.isHidden = branchLabel.stringValue.isEmpty
         let relativeText = AgentInboxSlimCellView.relativeText(for: row, now: now)
         timeColumnWidth?.constant = AgentInboxSlimCellView.relativeTimeColumnWidth(
-            unconfirmed: row.isUnconfirmed, closing: row.closingSince != nil)
+            unconfirmed: row.isUnconfirmed)
         timeLabel.stringValue = row.isUnconfirmed
             ? AgentInboxCellView.elapsedText(row.elapsed).map { "last seen \($0)" } ?? ""
             : relativeText
@@ -12197,9 +12191,9 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     @objc private func disclosureClicked() { onToggleDisclosure?() }
 
-    /// The shared inbox clock, for a Background row: only its time label moves.
+    /// The shared inbox clock only advances this lifecycle's relative time.
     func updateElapsedClock(now: Date) {
-        guard let row = shown?.row, row.closingSince != nil, !row.isUnconfirmed else { return }
+        guard let row = shown?.row, !row.isUnconfirmed else { return }
         timeLabel.stringValue = AgentInboxSlimCellView.relativeText(for: row, now: now)
     }
 
@@ -12345,11 +12339,10 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
 
     /// Per row, mirroring the card's rule: the "last seen " qualifier is paid
     /// for only by the unconfirmed row that renders it.
-    static func relativeTimeColumnWidth(unconfirmed: Bool, closing: Bool = false) -> Double {
+    static func relativeTimeColumnWidth(unconfirmed: Bool) -> Double {
         let font = NSFont.token(.captionMono)
         let labels = AgentElapsedFormatter.columnLabels.flatMap {
-            closing ? [backgroundText($0)]
-                : unconfirmed ? ["last seen \($0)"] : ["\($0) ago", "in \($0)"]
+            unconfirmed ? ["last seen \($0)"] : ["\($0) ago", "in \($0)"]
         }
         return labels.map { label in
             Double(ceil((label as NSString).size(withAttributes: [.font: font]).width))
@@ -12364,16 +12357,8 @@ final class AgentInboxSlimCellView: NSTableCellView, AgentInboxRowCell {
     /// it collapses into. Empty for a lifecycle with no time to show and for a
     /// distance that has gone negative — an overdue snooze is P4.6's raised hand,
     /// not a row for this view to label "in -3m".
-    /// A closed tile whose agent is still working: "Background · 2m", counted
-    /// from the close. The turn remains live and can be restored or stopped from
-    /// the two hover controls.
-    static func backgroundText(_ elapsed: String) -> String {
-        "Background · \(elapsed)"
-    }
-
     static func relativeText(for row: AgentInboxRow, now: Date) -> String {
-        guard let since = row.closingSince else { return relativeText(for: row.lifecycle, now: now) }
-        return backgroundText(AgentInboxCellView.elapsedText(max(0, now.timeIntervalSince(since))) ?? "")
+        relativeText(for: row.lifecycle, now: now)
     }
 
     static func relativeText(for lifecycle: InboxLifecycle, now: Date) -> String {

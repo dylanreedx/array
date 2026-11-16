@@ -75,13 +75,13 @@ func runSidebarLifecycleChecks() {
     expect(headless.lifecycle(facts: unreachable, now: now) == .active,
            "a headless agent has no tile to lose — never derived closed")
 
-    // 4 · R2: children follow their topmost present ancestor — section, Background
+    // 4 · R2: children follow their topmost present ancestor — section, close intent
     // and workspace — and a child with no parent in the list keeps its own.
     let parentId = UUID(), childId = UUID(), grandchildId = UUID(), orphanId = UUID()
     func row(_ id: UUID, parent: UUID?, lifecycle: InboxLifecycle,
-             closingSince: Date? = nil, workspace: String?) -> AgentInboxRow {
+             closingSince: Date? = nil, workspace: String?, state: InboxState = .ready) -> AgentInboxRow {
         AgentInboxRow(
-            id: id, title: "row", workspaceName: workspace, state: .ready,
+            id: id, title: "row", workspaceName: workspace, state: state,
             lifecycle: lifecycle, createdAt: now, parentId: parent, closingSince: closingSince)
     }
     let closedAt = now.addingTimeInterval(-10)
@@ -102,11 +102,11 @@ func runSidebarLifecycleChecks() {
         row(parentId, parent: nil, lifecycle: .active, closingSince: closedAt, workspace: "Alpha"),
         row(childId, parent: parentId, lifecycle: .active, workspace: "Alpha"),
     ])
-    expect(backgroundPlaced.last?.closingSince == closedAt && backgroundPlaced.last?.variant == .slim,
-           "a Background parent's child draws slim with it")
-    expect(row(parentId, parent: nil, lifecycle: .active, closingSince: closedAt, workspace: nil)
-            .presentationLabel == AgentStatusVocabulary.background,
-           "a Background row says Background")
+    expect(backgroundPlaced.last?.closingSince == closedAt && backgroundPlaced.last?.variant == .card,
+           "a closed-tile parent's active child keeps its normal row")
+    expect(row(parentId, parent: nil, lifecycle: .active, closingSince: closedAt, workspace: nil, state: .working)
+            .presentationLabel == "Working",
+           "a closed-tile working row keeps its Working status")
 
     let childClosedAt = now.addingTimeInterval(-5)
     let childKeepsClose = AgentInboxRowBuilder.placingChildrenWithParents([
@@ -115,8 +115,8 @@ func runSidebarLifecycleChecks() {
             closingSince: childClosedAt, workspace: "Alpha"),
     ])
     expect(childKeepsClose.last?.closingSince == childClosedAt
-           && childKeepsClose.last?.variant == .slim,
-           "a child's own Background close stamp survives an open parent")
+           && childKeepsClose.last?.variant == .card,
+           "a child's close stamp survives an open parent without changing its row")
     let childCloseWins = AgentInboxRowBuilder.placingChildrenWithParents([
         row(parentId, parent: nil, lifecycle: .active,
             closingSince: closedAt, workspace: "Alpha"),
@@ -124,10 +124,10 @@ func runSidebarLifecycleChecks() {
             closingSince: childClosedAt, workspace: "Alpha"),
     ])
     expect(childCloseWins.last?.closingSince == childClosedAt,
-           "a child's own Background timestamp survives a parent's close stamp")
+           "a child's own close timestamp survives a parent's close stamp")
 
-    print("SidebarLifecycle: closeRequestedAt round-trips and decodes absent; idle close → History, busy close → Background; "
-          + "an unreachable binding derives closed (never a headless one); children follow their root's section and workspace, preserving their own Background close stamps")
+    print("SidebarLifecycle: closeRequestedAt round-trips and decodes absent; idle close → History, busy close → normal live row; "
+          + "an unreachable binding derives closed (never a headless one); children follow their root's section and workspace, preserving their own close stamps")
 }
 
 /// R4: one unreadable project root must not fail every project's listing.
