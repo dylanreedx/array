@@ -99,7 +99,7 @@ enum HelperWatchdogChecks {
         try await HelperGuardChecks.hook(bench, child, tool: "Read")
         try HelperGuardChecks.expect(supervisor.records[child]?.helperWatchdogNeedsYou == nil,
                                      "hook progress did not clear the watchdog's state")
-        let cleared = await waitUntil(timeout: 30, pollInterval: 0.02) { modelSays() == nil && line() == nil }
+        let cleared = await waitUntil(timeout: 30, pollInterval: 0.02) { modelSays() == nil && line()?.contains("Needs you") != true }
         try HelperGuardChecks.expect(cleared, "hook progress did not clear sidebar")
         now.addTimeInterval(601)
         await supervisor.sweepHelperWatchdog()

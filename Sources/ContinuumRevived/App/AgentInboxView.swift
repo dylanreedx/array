@@ -3319,13 +3319,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let oldNudge = settleNudgeTargetID(now: renderNow)
         // Native table row movement must be immediate for an agent push. A
         // partially animated header insertion otherwise leaves survivor views
-        // between their cached rects when the next update arrives.
-        if preservingAgentRows {
+        // between their cached rects when the next update arrives. Only the
+        // table's geometry runs unanimated: a fold glyph's morph, started by the
+        // ownership refresh between these calls, keeps its own motion.
+        func immediately(_ body: () -> Void) {
+            guard preservingAgentRows else { return body() }
             NSAnimationContext.beginGrouping()
             NSAnimationContext.current.duration = 0
             NSAnimationContext.current.allowsImplicitAnimation = false
+            body()
+            NSAnimationContext.endGrouping()
         }
-        defer { if preservingAgentRows { NSAnimationContext.endGrouping() } }
         let anchor = preservingAgentRows ? visibleScrollAnchor(excluding: changedAgentIDs) : nil
         if !preservingAgentRows { endRename(commit: true) }
         cancelCrossfades()
@@ -3338,13 +3342,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         })
         let newNudge = settleNudgeTargetID(now: renderNow)
         let nudges: Set<UUID> = oldNudge == newNudge ? [] : Set([oldNudge, newNudge].compactMap { $0 })
-        tableView.beginUpdates()
-        if !removed.isEmpty { tableView.removeRows(at: removed, withAnimation: []) }
-        if !inserted.isEmpty { tableView.insertRows(at: inserted, withAnimation: []) }
-        // Restore before AppKit materializes the newly exposed viewport; an
-        // incident above the reader must not scroll or rebuild unrelated rows.
-        restoreScrollAnchor(anchor)
-        tableView.endUpdates()
+        immediately {
+            tableView.beginUpdates()
+            if !removed.isEmpty { tableView.removeRows(at: removed, withAnimation: []) }
+            if !inserted.isEmpty { tableView.insertRows(at: inserted, withAnimation: []) }
+            // Restore before AppKit materializes the newly exposed viewport; an
+            // incident above the reader must not scroll or rebuild unrelated rows.
+            restoreScrollAnchor(anchor)
+            tableView.endUpdates()
+        }
         for (index, cell) in cellsByRow {
             if let card = cell as? AgentInbox96CellView, ownsSubagents {
                 card.setOwnership(ownership(atTableRow: index))
@@ -3378,16 +3384,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 self.performRowAction(.settle)
             }
         }
-        tableView.noteHeightOfRows(withIndexesChanged: stale)
+        immediately { tableView.noteHeightOfRows(withIndexesChanged: stale) }
         tableView.reloadData(forRowIndexes: stale, columnIndexes: IndexSet(integer: 0))
         applyWorkspaceMarksInPlace()
         updateShelfSpacerHeight()
         updateEmptyState()
         updateBulkBar()
         updateAccessibilityHierarchy()
-        tableView.layoutSubtreeIfNeeded()
-        layoutSubtreeIfNeeded()
-        restoreScrollAnchor(anchor)
+        immediately {
+            tableView.layoutSubtreeIfNeeded()
+            layoutSubtreeIfNeeded()
+            restoreScrollAnchor(anchor)
+        }
         if preservingAgentRows { repositionRenameField() }
         refreshHoverFromPointer()
         scheduleWakeRerender()
