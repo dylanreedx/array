@@ -415,7 +415,10 @@ def quiet_cases(fx):
     def start_waiting_gate():
         log = open(fx.root / "waiting-gate.log", "w+")
         gate = subprocess.Popen(["/bin/bash", "scripts/nightly-gate.sh"], cwd=fx.repo,
-                                env=dict(fx.env, ARRAY_NIGHTLY_REF="HEAD"), stdin=subprocess.DEVNULL,
+                                # CPU bar 0: on a loaded Mac the stand-in gets under any bar;
+                                # gate-ignores-idle-build witnesses the bar itself.
+                                env=dict(fx.env, ARRAY_NIGHTLY_REF="HEAD", ARRAY_NIGHTLY_BUILD_CPU_MIN="0"),
+                                stdin=subprocess.DEVNULL,
                                 stdout=log, stderr=subprocess.STDOUT)
         deadline = time.time() + 15
         while "Waiting for a quiet Mac" not in (fx.root / "waiting-gate.log").read_text() and time.time() < deadline:
@@ -434,7 +437,7 @@ def quiet_cases(fx):
     build = stand_in()
     head = fx.commit("feat(app): change while another build runs", {"Sources/App.swift": "let app = 5\n"})
     gate, log = start_waiting_gate()
-    time.sleep(1.0)
+    time.sleep(5.0)  # long enough for the gate's first ps sample on a loaded Mac
     free = lock_is_free()
     started_early = Path(str(fx.events) + ".busy").exists() and head in busy()
     build.kill(); build.wait()
