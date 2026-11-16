@@ -185,6 +185,19 @@ func runSidebarLedgerCoreChecks() {
     let released = SidebarClearMarks.apply(marks, to: [newer])
     expect(released.released == [F.id(19)] && !released.rows[0].isCleared, "new activity releases a clear mark")
 
+    // New activity inside a cleared family must release its root's mark too.
+    // Clear may have stored only the root, because it subsumed these helpers.
+    for activeChild in [
+        F.row(201, "Done helper", parent: 200, state: .working, outcome: nil),
+        F.row(201, "Done helper", parent: 200, outcome: .failed, detail: F.usage, endedHoursAgo: 0),
+    ] {
+        let changedFamily = finished.map { $0.id == activeChild.id ? activeChild : $0 }
+        let reappeared = SidebarClearMarks.apply(marks, to: changedFamily)
+        expect(reappeared.released.contains(F.id(200)), "new helper activity releases the cleared family's root")
+        expect(reappeared.rows.allSatisfy { $0.lifecycle == .active && !$0.isCleared },
+               "new helper activity brings the cleared family back from History")
+    }
+
     // 5. Layout setting.
     let suite = "array.sidebar-ledger-core-check.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!

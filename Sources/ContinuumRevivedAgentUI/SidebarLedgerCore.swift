@@ -448,8 +448,8 @@ public enum SidebarIncidents {
     }
 }
 
-/// What Clear may touch. Clear is Settle: non-destructive, persisted, undone
-/// by restoring the captured lifecycle, and undone by any new activity.
+/// What Clear may acknowledge in the sidebar. Marks persist, Undo removes
+/// them, and new activity releases them; agent lifecycle and tiles stay intact.
 public enum SidebarClear {
     public enum Refusal: String, Equatable, Sendable {
         case working, needsYou, pausedOnUsage, blockingFailure, standing, blocked, alreadyParked
@@ -589,10 +589,32 @@ public enum SidebarClearMarks {
         guard !marks.isEmpty else { return (rows, []) }
         let present = Set(rows.map(\.id))
         var released: Set<UUID> = []
+        let parentOf = Dictionary(rows.compactMap { row in row.parentId.map { (row.id, $0) } },
+                                  uniquingKeysWith: { first, _ in first })
+        // A root mark can subsume the whole family. Activity beneath it must
+        // release that acknowledgement too, or a working/blocked helper would
+        // stay in History despite having no mark of its own.
+        for row in rows {
+            var ancestor = parentOf[row.id]
+            var seen: Set<UUID> = [row.id]
+            while let id = ancestor, seen.insert(id).inserted {
+                if let mark = marks[id] {
+                    let busy: Bool
+                    switch row.state {
+                    case .working, .approval, .input: busy = true
+                    case .failed, .ready: busy = false
+                    }
+                    let activity = max(row.lastActiveAt ?? row.createdAt,
+                                       row.terminalEvent?.endedAt ?? row.createdAt)
+                    if busy || activity >= mark.clearedAt { released.insert(id) }
+                }
+                ancestor = parentOf[id]
+            }
+        }
         var clearedRoots: [UUID: Date] = [:]
         var out = rows.map { row -> AgentInboxRow in
             guard let mark = marks[row.id] else { return row }
-            guard holds(mark, for: row) else { released.insert(row.id); return row }
+            guard !released.contains(row.id), holds(mark, for: row) else { released.insert(row.id); return row }
             var cleared = row
             if row.parentId.map(present.contains) != true, row.lifecycle == .active {
                 cleared = row.followingParent(lifecycle: .settled(at: mark.clearedAt), closingSince: row.closingSince,
@@ -604,7 +626,6 @@ public enum SidebarClearMarks {
         }
         guard !clearedRoots.isEmpty else { return (out, released) }
         // Helpers travel with a cleared root, as they do with a settled one.
-        let parentOf = Dictionary(out.compactMap { r in r.parentId.map { (r.id, $0) } }, uniquingKeysWith: { a, _ in a })
         func root(_ id: UUID) -> UUID? {
             var seen: Set<UUID> = [id]
             var current = id
