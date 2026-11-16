@@ -309,6 +309,31 @@ public final class AgentStore: @unchecked Sendable {
 
     // MARK: - Archive (performance at scale, item 4)
 
+    /// Which file a path names, and as written: an atomic replace is a new
+    /// inode, an in-place write moves the time or the size.
+    public struct FileIdentity: Equatable, Sendable {
+        let inode: UInt64, device: Int32, modifiedSeconds: Int, modifiedNanoseconds: Int, size: Int64
+        public init?(_ url: URL) {
+            var info = stat()
+            guard lstat(url.path, &info) == 0 else { return nil }
+            inode = UInt64(info.st_ino); device = info.st_dev
+            modifiedSeconds = info.st_mtimespec.tv_sec; modifiedNanoseconds = info.st_mtimespec.tv_nsec
+            size = Int64(info.st_size)
+        }
+    }
+
+    /// Every live record file's identity, by file name. Taken before a read
+    /// so a write that lands during the read cannot match.
+    public func recordFileIdentities() -> [String: FileIdentity] {
+        let directory = layout.agentsDirectory
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        var identities: [String: FileIdentity] = [:]
+        for name in names where name.hasSuffix(".json") {
+            identities[name] = FileIdentity(directory.appendingPathComponent(name, isDirectory: false))
+        }
+        return identities
+    }
+
     /// Moves a record out of the set `loadAll` reads. One `rename(2)` on one
     /// volume: at every instant the record is in exactly one of the two
     /// places, so a crash can neither lose it nor leave two copies.

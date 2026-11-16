@@ -3043,8 +3043,10 @@ final class AgentSupervisor {
             unarchiveAllBeforeRestore()
         }
         let stored: [AgentRecord]
-        // A file written after this instant may say something restore did not read.
-        let restoreReadAt = Date()
+        // Each file as it was before restore read it. A record whose file is
+        // still that same file says what restore read; any write since (an
+        // atomic replace is a new inode) does not match.
+        let restoreReadFiles = store.recordFileIdentities()
         do {
             stored = try store.loadAll()
         } catch {
@@ -3196,7 +3198,7 @@ final class AgentSupervisor {
         settleHelpersCutOffByRestart()
         if AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
             archiveMayHoldRecords = true
-            scheduleRecordArchivePass(stored: stored, skipped: Set(report.skipped), readAt: restoreReadAt)
+            scheduleRecordArchivePass(stored: stored, skipped: Set(report.skipped), readFiles: restoreReadFiles)
         }
         for root in Set(records.values.map(\.checkoutRoot)) {
             ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
@@ -3215,7 +3217,7 @@ final class AgentSupervisor {
     /// area), so the pass itself runs once they are in, on the main thread,
     /// against the live state of that moment. The boot does not wait for it:
     /// the records it moves leave a sidebar that has already drawn them.
-    private func scheduleRecordArchivePass(stored: [AgentRecord], skipped: Set<AgentID>, readAt: Date) {
+    private func scheduleRecordArchivePass(stored: [AgentRecord], skipped: Set<AgentID>, readFiles: [String: AgentStore.FileIdentity]) {
         let scan = recordArchiveSharedAgents
         recordArchivePassForQA?.cancel()
         recordArchivePassCostForQA = nil
@@ -3229,7 +3231,7 @@ final class AgentSupervisor {
             switch shared {
             case let .success(shared):
                 let start = ContinuousClock.now
-                self.archiveIdleRecords(shared: shared, stored: stored, skipped: skipped, readAt: readAt)
+                self.archiveIdleRecords(shared: shared, stored: stored, skipped: skipped, readFiles: readFiles)
                 self.recordArchivePassCostForQA = (scanMs, Self.milliseconds(ContinuousClock.now - start))
             case let .failure(error):
                 self.warn("AgentSupervisor.restore: archive skipped, shared-area bindings are unreadable: \(error)")
@@ -3246,7 +3248,7 @@ final class AgentSupervisor {
     /// process, a queue, an event this session delivered, a durable wakeup, a
     /// shared-area binding, a parent's subscription or undelivered completion,
     /// or a child that stays.
-    private func archiveIdleRecords(shared: Set<AgentID>, stored: [AgentRecord], skipped: Set<AgentID>, readAt: Date) {
+    private func archiveIdleRecords(shared: Set<AgentID>, stored: [AgentRecord], skipped: Set<AgentID>, readFiles: [String: AgentStore.FileIdentity]) {
         // The gate may have gone off while the bindings were read.
         guard AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) else { return }
         let now = recordArchiveNow()
@@ -3290,15 +3292,13 @@ final class AgentSupervisor {
                 // Judged again on the durable copy, under the lock: another
                 // instance on this store may have changed a record since
                 // restore read it (marked it active, prompted it, gave it a
-                // tile). A file untouched since then is what restore read; one
-                // written since is decoded and judged again; anything unclear
+                // tile). The same file restore read needs no second decode;
+                // any other is decoded and judged again; anything unclear
                 // stays.
                 for id in eligible {
-                    var info = stat()
-                    guard lstat(store.layout.agentFile(id: id).path, &info) == 0 else { eligible.remove(id); continue }
-                    let written = Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec)
-                        + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9)
-                    guard written >= readAt else { continue }
+                    let file = store.layout.agentFile(id: id)
+                    guard let identity = AgentStore.FileIdentity(file) else { eligible.remove(id); continue }
+                    if readFiles[file.lastPathComponent] == identity { continue }
                     guard let durable = try? store.load(id: id),
                           AgentRecordArchivePolicy.recordAllowsArchive(durable, now: now) else { eligible.remove(id); continue }
                 }

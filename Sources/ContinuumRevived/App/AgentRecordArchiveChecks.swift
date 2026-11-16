@@ -1001,8 +1001,16 @@ enum AgentRecordArchiveChecks {
         var markedChild = idleRecord("Child marked active elsewhere", cwd: root.path, idleFor: 30)
         markedChild.parentAgentID = idleParent.id
         markedChild.projectId = idleParent.projectId
-        try write([marked, control, idleParent, markedChild], to: store)
+        // An atomic save whose temp file was written before restore read the
+        // store and renamed over the record after: the rename keeps the
+        // temp file's earlier modification time.
+        var replaced = idleRecord("Replaced atomically after restore", cwd: root.path, idleFor: 30)
+        try write([marked, control, idleParent, markedChild, replaced], to: store)
         store.waitForBackupMigration()
+        replaced.settledOverride = .active
+        let pendingSave = store.layout.agentsDirectory.appendingPathComponent(".pending-save.tmp")
+        try JSONCodec.makeEncoder().encode(replaced).write(to: pendingSave)
+        try fm.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: pendingSave.path)
         let settings = gateSuite(true)
         defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
         let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
@@ -1015,6 +1023,9 @@ enum AgentRecordArchiveChecks {
         marked.settledOverride = .active
         markedChild.settledOverride = .active
         try write([marked, markedChild], to: AgentStore(applicationSupportDirectory: support))
+        guard Darwin.rename(pendingSave.path, store.layout.agentFile(id: replaced.id).path) == 0 else {
+            throw Failure(message: "fixture: rename of the pending save failed")
+        }
         await settleArchivePass(supervisor)
         try expect(supervisor.records[control.id] == nil && exists(store.layout.archivedAgentFile(id: control.id)),
                    "control: an untouched idle agent is archived")
@@ -1023,6 +1034,8 @@ enum AgentRecordArchiveChecks {
         try expect(exists(store.layout.agentFile(id: markedChild.id)) && exists(store.layout.agentFile(id: idleParent.id))
                    && !exists(store.layout.archivedAgentFile(id: idleParent.id)),
                    "a child kept by the durable check keeps its parent live")
+        try expect(exists(store.layout.agentFile(id: replaced.id)) && !exists(store.layout.archivedAgentFile(id: replaced.id)),
+                   "a record replaced atomically after restore, with an older file time, stays live")
     }
 
     static func archivedFiles(_ store: AgentStore) -> [String] {
