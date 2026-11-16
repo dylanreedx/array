@@ -40189,7 +40189,7 @@ extension AppDelegate {
     // Handed in REVERSED, so "the view is in the model's order" cannot be
     // satisfied by the view simply keeping what it was given.
     let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    inbox.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    inbox.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     let inboxCheckNow = Date()
     inbox.clock = { inboxCheckNow }
     inbox.reload(rows: fixture.reversed())
@@ -40214,7 +40214,7 @@ extension AppDelegate {
         elapsed: 59, elapsedStartedAt: clockStart,
         createdAt: inboxCheckNow.addingTimeInterval(-120))
     let clockInbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 180))
-    clockInbox.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    clockInbox.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     let clockWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 180),
         styleMask: [.borderless], backing: .buffered, defer: false)
@@ -40416,7 +40416,7 @@ extension AppDelegate {
     // MARK: A3 · P3.8 · the scope filters the list, and flipping it clears selection
 
     let scoped = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    scoped.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    scoped.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     scoped.clock = { LabFixtures.inboxNow }
     scoped.reload(rows: fixture)
     let scopedWindow = NSWindow(
@@ -40533,7 +40533,7 @@ extension AppDelegate {
             variant: row.variant, createdAt: row.createdAt, parentId: row.parentId)
     }
     let collides = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    collides.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    collides.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     collides.reload(rows: sameName)
     try expect(collides.scopeTitlesForQA == menuTitles(InboxScope.entries(for: sameName), rows: sameName),
                "a shared name must still be two entries — got \(collides.scopeTitlesForQA)")
@@ -40600,7 +40600,7 @@ extension AppDelegate {
                "an unreadable stored scope falls back to the default rather than emptying the list")
     // …and the restore path is the one the app uses, with no write-back.
     let restored = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    restored.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    restored.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     var restoreWrites = 0
     restored.onScopeChange = { _ in restoreWrites += 1 }
     restored.setScope(.project("continuum"))
@@ -40617,7 +40617,7 @@ extension AppDelegate {
     // pushes rows, and a push rebuilds the menu — which re-selects the scope for its
     // own reasons and would mask the restore below.
     let verbs = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    verbs.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    verbs.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     verbs.reload(rows: fixture)
     verbs.layoutForQA()
     var verbsPicked: [AgentInboxView.WorkspaceManagementAction] = []
@@ -40691,7 +40691,7 @@ extension AppDelegate {
                "the parked fixture must include a collapsed row whose glyph carries an accent")
 
     let parked = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    parked.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    parked.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     parked.clock = { LabFixtures.inboxNow }
     parked.reload(rows: parkedFixture)
     let parkedWindow = NSWindow(
@@ -40898,7 +40898,7 @@ extension AppDelegate {
     // `apply(rows:changed:)` takes its incremental path — which re-asks for the
     // row's view but NOT for its height unless it is told to.
     let live = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    live.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    live.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     live.clock = { LabFixtures.inboxNow }
     live.reload(rows: fixture)
     let liveWindow = NSWindow(
@@ -40988,7 +40988,7 @@ extension AppDelegate {
         pagedRow(91, lifecycle: .snoozed(until: pagedNow.addingTimeInterval(3_600))),
     ]
     let paged = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    paged.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    paged.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     paged.clock = { pagedNow }
     let pagedWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
@@ -41048,7 +41048,7 @@ extension AppDelegate {
     // and it arrives as a row that clicks and selects like any other.
     let deepId = pagedSettled[26].id
     let openPaged = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    openPaged.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    openPaged.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     openPaged.clock = { pagedNow }
     let openPagedWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
@@ -41123,7 +41123,7 @@ extension AppDelegate {
                "the inbox's indent cap and the spawn cap are the same number — inbox \(AgentInboxRow.maxDepth), spawn \(AgentSupervisor.maxSpawnDepth)")
 
     let nested = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    nested.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    nested.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     nested.clock = { LabFixtures.inboxNow }
     nested.reload(rows: fixture)
     let nestedWindow = NSWindow(
@@ -41220,7 +41220,7 @@ extension AppDelegate {
     let grandchild = descendant("01", of: childRow, minutesAfter: 1)
     let greatGrandchild = descendant("02", of: grandchild, minutesAfter: 2)
     let deep = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    deep.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    deep.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     deep.clock = { LabFixtures.inboxNow }
     deep.reload(rows: fixture + [grandchild, greatGrandchild])
     let deepWindow = NSWindow(
@@ -41314,7 +41314,7 @@ extension AppDelegate {
         workspaceName: grandchild.workspaceName, state: .approval, model: grandchild.model,
         role: grandchild.role, createdAt: grandchild.createdAt, parentId: grandchild.parentId)
     let waiting = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    waiting.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    waiting.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     waiting.clock = { LabFixtures.inboxNow }
     waiting.reload(rows: fixture + [waitingGrandchild])
     let waitingWindow = NSWindow(
@@ -41446,7 +41446,7 @@ extension AppDelegate {
     // the model changes no VISIBLE row at all — same ids, same values — and the
     // parent would keep a triangle that now folds nothing and cannot be got rid of.
     let folding = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    folding.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    folding.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     folding.clock = { LabFixtures.inboxNow }
     folding.reload(rows: fixture)
     let foldingWindow = NSWindow(
@@ -41514,7 +41514,7 @@ extension AppDelegate {
         title: "unrelated root", state: .working,
         createdAt: LabFixtures.inboxNow.addingTimeInterval(-600), parentId: nil)
     let tree = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 620))
-    tree.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    tree.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     tree.clock = { LabFixtures.inboxNow }
     let treeWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 620),
@@ -41721,7 +41721,7 @@ extension AppDelegate {
             parentId: cappedParent.id))
     }
     let capped = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 1200))
-    capped.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    capped.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     capped.clock = { LabFixtures.inboxNow }
     let cappedWindow = NSWindow(
         contentRect: NSRect(x: 0, y: 0, width: 320, height: 1200),
@@ -41755,7 +41755,7 @@ extension AppDelegate {
     }
 
     let empty = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 320, height: 200))
-    empty.setSidebarLayoutForQA(.quietInbox) // today's rows; the Ledger has its own legs
+    empty.setSidebarLayoutForQA(.legacyLegLayoutForQA)
     empty.reload(rows: [])
     try expect(empty.isEmptyMessageVisibleForQA && empty.rowCountForQA == 0,
                "an inbox with no agents says so rather than rendering as a blank rectangle")

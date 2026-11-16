@@ -680,10 +680,11 @@ enum SidebarTruthChecks {
                   let stop = geometry.elementFrames["stopAction"] else {
                 throw Failure(message: "W2: Background and both actions must materialize at \(width)pt")
             }
-            // Normal cards use the shared controls' intrinsic sizes. Their title
-            // text-field bounds include descent beyond its painted title line.
-            try expect(restore.width >= 18 && restore.height >= 18
-                       && stop.width >= 18 && stop.height >= 18
+            // Normal cards use the shared controls' intrinsic sizes (27x18 and
+            // 26x18 measured at every width). Their title text-field bounds
+            // include descent beyond its painted title line.
+            try expect((24...30).contains(restore.width) && (17...20).contains(restore.height)
+                       && (24...30).contains(stop.width) && (17...20).contains(stop.height)
                        && cell.contains(restore) && cell.contains(stop)
                        && title.midY < min(stop.minY, restore.minY)
                        && stop.maxX <= restore.minX,

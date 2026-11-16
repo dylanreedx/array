@@ -289,13 +289,14 @@ enum SidebarLedgerChecks {
             ("Codex couldn't start", "Repair setup…", .cause(.couldNotStart)),
             ("Codex was busy", "Retry", .cause(.providerBusy)),
             ("Interrupted by restart", "Resume", .cause(.interruptedByRestart)),
-            ("Failed", "Open", .cause(.taskError)),
+            // Two plain Claude failures (helper 31, agent 36) group into one.
+            ("2 failed", "Open", .cause(.taskError)),
         ]
         for (title, action, kind) in expected {
             guard let at = inbox.itemsForQA.firstIndex(where: {
                 if case .incident(let incident) = $0 { return incident.title == title } else { return false }
             }) else {
-                throw fail("no incident '\(title)'; drawn: \(inbox.drawnSequenceForQA.filter { $0.hasPrefix("!") })")
+                throw fail("no incident '\(title)'; incidents: \(inbox.itemsForQA.compactMap { item -> String? in if case .incident(let i) = item { return i.title } else { return nil } })")
             }
             inbox.scrollItemToVisibleForQA(at)
             settle()
@@ -629,10 +630,12 @@ extension SidebarLedgerChecks {
         inbox.layoutForQA()
         let history = inbox.itemsForQA.compactMap(\.agentRow)
         let expectedAge = (AgentInboxCellView.elapsedText(now.timeIntervalSince(old.terminalEvent!.endedAt)) ?? "") + " ago"
+        let oldIndex = inbox.itemsForQA.firstIndex { $0.agentRow?.id == uuid(130) }
+        let oldView = oldIndex.flatMap { inbox.cellForQA(atItem: $0) }
         guard history.map(\.id) == [uuid(131), uuid(130)],
-              let oldCell = inbox.cellForQA(id: uuid(130)) as? AgentInboxSlimCellView,
+              let oldCell = oldView as? AgentInboxSlimCellView,
               oldCell.qaElapsed == expectedAge else {
-            throw Failure(description: "Clear fabricated rendered History recency or order")
+            throw Failure(description: "Clear fabricated rendered History recency or order: rows \(history.map { ($0.id, $0.lifecycle) }), expected age \(expectedAge), cell \(String(describing: oldView)), age \((oldView as? AgentInboxSlimCellView)?.qaElapsed ?? "nil")")
         }
         guard inbox.selectRowsForQA(ids: [uuid(130), uuid(131)]),
               inbox.openRowMenuForQA(clickedRowId: uuid(130)),
@@ -696,9 +699,65 @@ extension SidebarLedgerChecks {
         }
     }
 
+    /// The production lazy load after a relaunch: a restored failed agent's
+    /// words come from its transcript, scanned off the main thread.
+    static func checkFailureDetailLoadsOffMain() throws {
+        let support = FileManager.default.temporaryDirectory
+            .appendingPathComponent("array-failure-detail-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: support) }
+        let ended = Date().addingTimeInterval(-60)
+        var record = AgentRecord(id: AgentID(rawValue: UUID()), displayName: "Relaunched failure", harness: .claudeCode,
+            model: "m", thinking: "", cwd: support.path, projectId: nil,
+            parentAgentID: nil, createdAt: ended.addingTimeInterval(-600), lastActivityAt: ended)
+        record.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "turn-1", outcome: .failed, endedAt: ended)
+        try AgentStore(applicationSupportDirectory: support).upsert(record)
+        let transcripts = AgentTranscriptStore(root: support.appendingPathComponent("agent-transcripts", isDirectory: true))
+        let error = AgentEntry(id: AgentNodeID(rawValue: "quota")!, role: .system,
+            provenance: .providerItem(provider: "runtime", itemID: "turn-1"),
+            blocks: [AgentBlock(id: AgentNodeID(rawValue: "error")!, kind: .error, payload: .error(.init(message: usage)))],
+            createdAt: ended)
+        var saved = false
+        Task { @MainActor in
+            try? await transcripts.saveSnapshot(agentID: record.id,
+                sessionID: AgentTranscriptStore.canonicalSessionID(for: record.id),
+                document: AgentDocument(entries: [error]))
+            saved = true
+        }
+        while !saved { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: support),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) }, transcriptStore: transcripts)
+        _ = supervisor.restore()
+        let scans = LockedScans()
+        AgentSupervisor.failureDetailScanForQA = { onMain in scans.add(onMain) }
+        defer { AgentSupervisor.failureDetailScanForQA = nil }
+        var loaded = false
+        supervisor.onFailureDetailsLoaded = { loaded = true }
+        guard supervisor.sidebarFailureDetail(for: record.id) == nil else {
+            throw Failure(description: "the failure detail was known before its transcript loaded")
+        }
+        let deadline = Date().addingTimeInterval(10)
+        while !loaded, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        let seen = scans.values
+        guard loaded, supervisor.sidebarFailureDetail(for: record.id) == usage else {
+            throw Failure(description: "a relaunched failure's words did not load from its transcript")
+        }
+        guard seen == [false] else {
+            throw Failure(description: "the failure-detail scan ran on the main thread (scans: \(seen))")
+        }
+    }
+
+    final class LockedScans: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [Bool] = []
+        func add(_ value: Bool) { lock.lock(); stored.append(value); lock.unlock() }
+        var values: [Bool] { lock.lock(); defer { lock.unlock() }; return stored }
+    }
+
     static func runLayouts() throws -> String {
         QuickHideChecks.acceptFirstMouseEverywhere()
         try checkFailureCorrelation()
+        try checkFailureDetailLoadsOffMain()
         var reports: [String] = []
         for layout in layoutsUnderTest {
             let name = "array.sidebar-layouts.\(UUID().uuidString)"
@@ -751,6 +810,8 @@ extension SidebarLedgerChecks {
                             throw Failure(description: "\(layout.title): no rendered fold number")
                         }
                         try expect(!line.titleForQA.contains("failed"), "fold repeats or misclassifies failed helpers: \(line.titleForQA)")
+                        try expect(!(line.buttonForQA.accessibilityValue() as? String ?? "").contains("failed"),
+                                   "fold AX value contradicts the reconciled family tally")
                         folded += number
                     default: return (shown, folded)
                     }
