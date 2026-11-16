@@ -3,6 +3,12 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Darwin
 
+/// Test-only suspension before reading an adopted session. Nil in production.
+@MainActor
+enum AdoptedTranscriptReadCheckHooks {
+    static var beforeRead: (@Sendable (AgentID) async -> Void)?
+}
+
 // Plan: .plans/79-session-handoff/README.md, phase 2.
 //
 // What happens to a session another app holds, after the sidebar's click or
@@ -209,7 +215,9 @@ extension AppDelegate {
         let provider = link.provider
         let supervisor = agentSupervisor
         let adoptionToken = supervisor.beginAdoptingSessionHistory(for: agentId)
+        let beforeRead = AdoptedTranscriptReadCheckHooks.beforeRead
         Task.detached(priority: .utility) { [weak self] in
+            await beforeRead?(agentId)
             let tail = SessionFileTail.tail(in: url, maxBytes: RehydrationLimits().maxBytes)
             let transcript = provider == .claude
                 ? ClaudeSessionTranscriptReader.parse(lines: tail.lines, threadId: threadId, truncated: tail.truncated)

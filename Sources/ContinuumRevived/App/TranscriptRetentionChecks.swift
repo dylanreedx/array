@@ -381,6 +381,11 @@ enum TranscriptRetentionChecks {
             failures.append("provider history pin: \(error)")
         }
         do {
+            try await ProviderHistoryCopyHandoffChecks.run(root: root)
+        } catch {
+            failures.append("provider history Copy-here handoff: \(error)")
+        }
+        do {
             try await TranscriptLinkedRetentionChecks.run(root: root)
         } catch {
             failures.append("transcript linked retention: \(error)")
