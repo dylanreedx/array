@@ -298,6 +298,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private(set) var attachedAgentID: AgentID?
     private var eventSubscription: Task<Void, Never>?
     private var eventSubscriptionGeneration: UUID?
+    /// Checks can pause after a buffered event is read but before it is applied.
+    var qaBeforeTailEvent: (@MainActor (AgentRuntimeEvent) async -> Void)?
+    var qaEventSubscription: Task<Void, Never>? { eventSubscription }
     private var transcriptReloadObserverToken: UUID?
     private var transcriptReloadGeneration: UUID?
     /// Whoever owns the agent's RECORD: the tile asks it for the branch state
@@ -965,6 +968,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         eventSubscriptionGeneration = subscriptionGeneration
         eventSubscription = Task { @MainActor [weak self] in
             for await event in stream {
+                if let pause = self?.qaBeforeTailEvent { await pause(event) }
                 // A cancelled stream may still yield a buffered event. Never
                 // apply it after a replacement snapshot has been installed.
                 guard !Task.isCancelled, let self,

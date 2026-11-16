@@ -236,6 +236,11 @@ enum TranscriptRetentionChecks {
             failures.append("restore-only existing archive: \(error)")
         }
         do {
+            try await TranscriptTailFenceChecks.run(supervisor: supervisor, id: ids[transcriptCount + 1])
+        } catch {
+            failures.append("tail fence: \(error)")
+        }
+        do {
             try await ReleasedTranscriptRecoveryChecks.run(root: root)
         } catch {
             failures.append("released transcript recovery: \(error)")
