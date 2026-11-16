@@ -69,9 +69,14 @@ reported complete with exit 0; use the 120-second resource loop below.
    semantics: a model-only insertion can break open-stream identity, tool detail
    bindings and sharing. The direct-seed witness exercises that broad case; a
    reachable slow Copy-here callback is protected by draft pins but is not yet
-   witnessed end to end. Separately, the inherited `/status` notice-only case
-   needs a safe local-only composition with the canonical companion boundary
-   preserved. Do not claim the pins fix the direct-seed case.
+   witnessed end to end. Watch/move currently appear to link fresh or existing
+   agents before idle release, while the public adoption API permits an already
+   released agent. Waiting for reload alone does not resolve archive/provider
+   overlap or colliding live identities. Separately, the inherited `/status`
+   notice-only case needs safe local-only composition with the canonical
+   companion boundary preserved. Document-only reconstruction freezes active
+   state and loses replay tool details; appending provider history after a
+   notice changes ordering. Do not claim pins fix the direct-seed case.
 2. Add pin RED controls and a production-path witness. Verify each relevant
    RED/GREEN result, then rerun the targeted retention leg, save perf,
    transcript/shared/tile neighbors and relay load on the final binary.
