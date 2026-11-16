@@ -197,8 +197,9 @@ enum TranscriptArchiveReconciliationChecks {
             throw Failure(description: "valid archive without a generation could not be extended: \(plain(olderSaved))")
         }
 
-        // The provider session read can finish after canonical history was
-        // saved and released, before any tile attaches.
+        // No production provider read finishes for a released transcript: the
+        // read pins refuse one and keep a pinned one resident. A direct seed is
+        // refused, and the released history still reloads intact.
         let lateThread = AgentSupervisor.threadId(for: lateID)
         supervisor.qaDeliver(.turnStarted(threadId: lateThread, turnId: "late-new"), to: lateID)
         supervisor.qaDeliver(.contentDelta(threadId: lateThread, turnId: "late-new", streamKind: .assistant,
@@ -220,24 +221,33 @@ enum TranscriptArchiveReconciliationChecks {
         guard supervisor.isTranscriptReleased(lateID) else {
             throw Failure(description: "late-restore fixture did not release canonical history before provider read")
         }
+        if let pin = supervisor.beginProviderHistoryRead(for: lateID) {
+            supervisor.endProviderHistoryRead(pin, for: lateID)
+            throw Failure(description: "a provider read pinned a released transcript")
+        }
+        let warningsBeforeLate = warnings.count
         supervisor.seedRehydratedTranscript(provider, for: lateID)
+        guard supervisor.rehydratedTranscript(for: lateID) == nil, warnings.count == warningsBeforeLate + 1 else {
+            throw Failure(description: "a released transcript accepted provider history")
+        }
         let lateView = tile()
         lateView.attach(agentID: lateID, supervisor: supervisor)
         let lateVisibleDeadline = ContinuousClock.now + .seconds(20)
         while ContinuousClock.now < lateVisibleDeadline {
             let text = lateView.qaTranscriptText
-            if text.contains("PROVIDER_LOCAL_ONLY"), text.contains("PROVIDER_PRIVATE_ASSISTANT"), text.contains("LATE_NEW_TURN") { break }
+            if text.contains("LATE_CANONICAL_HISTORY"), text.contains("LATE_NEW_TURN") { break }
             try? await Task.sleep(for: .milliseconds(20))
         }
         let lateVisible = lateView.qaTranscriptText
         lateView.detach()
         lateSaved = try await transcriptStore.load(agentID: lateID, sessionID: lateSession)
-        guard lateVisible.contains("PROVIDER_LOCAL_ONLY"), lateVisible.contains("PROVIDER_PRIVATE_ASSISTANT"),
-              lateVisible.contains("LATE_NEW_TURN"), supervisor.rehydratedTranscript(for: lateID) == provider,
+        guard lateVisible.contains("LATE_CANONICAL_HISTORY"), lateVisible.components(separatedBy: "LATE_NEW_TURN").count - 1 == 1,
+              !lateVisible.contains("PROVIDER_LOCAL_ONLY"), !lateVisible.contains("PROVIDER_PRIVATE_ASSISTANT"),
               !plain(lateSaved).contains("PROVIDER_LOCAL_ONLY"), !plain(lateSaved).contains("PROVIDER_PRIVATE_ASSISTANT") else {
-            throw Failure(description: "provider restore arriving after release disappeared or crossed the canonical boundary: \(lateVisible)")
+            throw Failure(description: "released history did not reload intact after a refused provider seed: \(lateVisible)")
         }
 
+        let warningsBeforeCorrupt = warnings.count
         var notices: [AgentLocalNotice] = []
         let token = supervisor.addLocalNoticeObserver(for: corruptID) { notices.append($0) }
         defer { supervisor.removeLocalNoticeObserver(token, for: corruptID) }
@@ -251,7 +261,7 @@ enum TranscriptArchiveReconciliationChecks {
             try? await Task.sleep(for: .milliseconds(20))
         }
         guard supervisor.qaTranscriptPersistenceIsBlocked(corruptID),
-              notices.contains(where: { $0.title == "Transcript not saved" }), !warnings.isEmpty,
+              notices.contains(where: { $0.title == "Transcript not saved" }), warnings.count > warningsBeforeCorrupt,
               try Data(contentsOf: corruptSnapshot) == corruptBytes else {
             throw Failure(description: "corrupt canonical archive was overwritten or did not visibly fail closed")
         }

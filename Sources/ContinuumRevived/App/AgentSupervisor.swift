@@ -3414,9 +3414,28 @@ final class AgentSupervisor {
     /// `needsPreviousSessionNotice` false, so the plain placeholder is not also
     /// shown, and lets any tile that later attaches rehydrate the same content.
     func seedRehydratedTranscript(_ transcript: RehydratedTranscript, for id: AgentID) {
+        // No production read starts or finishes for a released transcript, and
+        // a reload drain has no position that is after its archive and before
+        // its queued writes (.plans/transcript-retention-reattach.md).
+        guard releasedTranscripts[id] == nil else {
+            warn("Agent \(id.rawValue.uuidString): provider history arrived for a released transcript; not shown")
+            return
+        }
         separateCanonicalTranscriptIfNeeded(id)
         transcriptHasLocalOnlyHistory.insert(id)
         rehydratedTranscripts[id] = transcript
+        // A projection made before the read (a `/status` notice) is what a
+        // later tile installs. Add the history where the live tile drew it,
+        // and keep it out of sharing as the tile-only render did. Anything but
+        // notices could hold a live stream; no production seed reaches that.
+        if var projection = transcriptProjections[id],
+           projection.document.entries.allSatisfy({ if case .localNotice = $0.provenance { return true }; return false }) {
+            let before = Set(projection.document.entries.map(\.id))
+            projection.appendNotice(id: "notice-previous-session", title: "previous session", text: transcript.boundaryNoticeText)
+            Self.replay(transcript, into: &projection, threadId: Self.threadId(for: id))
+            transcriptProjections[id] = projection
+            unsharedProviderEntryIDs[id] = Set(projection.document.entries.map(\.id)).subtracting(before)
+        }
         // A provider read may finish after its tile has detached.
         defer { scheduleTranscriptRelease(for: id) }
         guard var record = records[id],
@@ -7872,6 +7891,7 @@ final class AgentSupervisor {
         canonicalTranscriptPreflightFailures.remove(id)
         canonicalTranscriptRecoveryAwaitingSave.remove(id)
         transcriptHasLocalOnlyHistory.remove(id)
+        unsharedProviderEntryIDs.removeValue(forKey: id)
         providerHistoryReadPins.removeValue(forKey: id)
         adoptingSessionHistory.remove(id)
         transcriptReloads.removeValue(forKey: id)?.cancel()
@@ -11984,6 +12004,9 @@ final class AgentSupervisor {
     private var canonicalTranscriptPreflightFailures: Set<AgentID> = []
     private var canonicalTranscriptRecoveryAwaitingSave: Set<AgentID> = []
     private var transcriptHasLocalOnlyHistory: Set<AgentID> = []
+    /// Provider history merged into an existing notice-only projection. Shown
+    /// locally, never published (`sharedTranscriptDocument`).
+    private var unsharedProviderEntryIDs: [AgentID: Set<AgentNodeID>] = [:]
     /// The last complete archive this process wrote, even if a subsequent save
     /// failed. Unlike this ownership proof, the release receipt is invalidated
     /// before each attempted save.
@@ -12322,7 +12345,9 @@ final class AgentSupervisor {
     func sharedTranscriptDocument(for id: AgentID) -> AgentDocument? {
         transcriptReadAt[id] = .now
         if releasedTranscripts[id] != nil { _ = startTranscriptReload(for: id); return nil }
-        return transcriptDocument(for: id)
+        guard var document = transcriptDocument(for: id) else { return nil }
+        if let unshared = unsharedProviderEntryIDs[id] { document.entries.removeAll { unshared.contains($0.id) } }
+        return document
     }
 
     /// Nothing is reading or about to write this agent's transcript.
@@ -12553,16 +12578,10 @@ final class AgentSupervisor {
             // entire loaded prefix, including entries saved after startup,
             // against any later mutation following a failed reload.
             canonicalTranscriptProtectedPrefix[id] = document.entries.count
-            var model = resumed
-            if transcriptHasLocalOnlyHistory.contains(id), let restored = rehydratedTranscripts[id] {
-                // A provider read can finish after the canonical model was
-                // released. Preserve it only in the local presentation.
-                canonicalTranscriptSeparate.insert(id)
-                canonicalTranscriptProjections[id] = model
-                model.appendNotice(id: "notice-previous-session", title: "previous session", text: restored.boundaryNoticeText)
-                Self.replay(restored, into: &model, threadId: Self.threadId(for: id))
-            } else if canonicalTranscriptSeparate.contains(id) { canonicalTranscriptProjections[id] = model }
-            transcriptProjections[id] = model
+            // A released transcript holds no provider history: release refuses
+            // local-only history and a seed refuses a released transcript.
+            if canonicalTranscriptSeparate.contains(id) { canonicalTranscriptProjections[id] = resumed }
+            transcriptProjections[id] = resumed
         }
         var totalReplayed = 0
         var didReplay = false

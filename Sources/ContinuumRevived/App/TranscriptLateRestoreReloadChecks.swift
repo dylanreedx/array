@@ -3,7 +3,11 @@ import ContinuumRevivedAgentContent
 import ContinuumRevivedCore
 import Foundation
 
-/// A provider read may finish while a released archive is replaying live writes.
+/// A released transcript never takes provider history. No production read can
+/// start for a released agent or finish while its reload drains
+/// (`.plans/transcript-retention-reattach.md`); a direct seed mid-drain is
+/// refused and leaves the archive and the queued live writes exactly once, in
+/// order, on disk and in an attached and a reattached tile.
 @MainActor
 enum TranscriptLateRestoreReloadChecks {
     private struct Failure: Error, CustomStringConvertible { let description: String }
@@ -81,6 +85,16 @@ enum TranscriptLateRestoreReloadChecks {
             throw Failure(description: "late-restore fixture did not save and release its archive")
         }
 
+        // The production restore and Copy pins refuse a released agent, and the
+        // restore wiring does not ask for a previous-session read for one.
+        if let pin = supervisor.beginProviderHistoryRead(for: id) {
+            supervisor.endProviderHistoryRead(pin, for: id)
+            throw Failure(description: "a provider read pinned a released transcript")
+        }
+        guard !supervisor.needsPreviousSessionNotice(id) else {
+            throw Failure(description: "restore wiring would read provider history for a released transcript")
+        }
+
         let gate = ConstructionGate()
         supervisor.qaBeforeResumedTranscriptConstruction = { agent, isPreflight in
             if agent == id && !isPreflight { await gate.wait() }
@@ -130,28 +144,28 @@ enum TranscriptLateRestoreReloadChecks {
               !canonicalText.contains(provider) else {
             throw Failure(description: "late provider restore lost or reordered canonical history or crossed the companion boundary")
         }
-        // The pre-existing archive stays first, followed by the earlier provider
-        // restore and only then the live writes queued during reload. Merely
-        // finding every marker would miss a restore appended after those writes.
-        let expected = [old, initial, provider] + queued
+        guard supervisor.rehydratedTranscript(for: id) == nil else {
+            throw Failure(description: "a released transcript accepted provider history mid-drain")
+        }
+        let expected = [old, initial] + queued
+        func shows(_ text: String) -> Bool {
+            exactlyOnce(expected, in: text) && inOrder(expected, in: text) && !text.contains(provider)
+        }
         let tileDeadline = ContinuousClock.now + .seconds(20)
-        while !exactlyOnce(expected, in: tile.qaTranscriptText), ContinuousClock.now < tileDeadline {
+        while !shows(tile.qaTranscriptText), ContinuousClock.now < tileDeadline {
             try? await Task.sleep(for: .milliseconds(20))
         }
-        guard exactlyOnce(expected, in: tile.qaTranscriptText) else {
-            throw Failure(description: "attached tile lost or duplicated late provider restore or transcript history")
-        }
-        guard inOrder(expected, in: tile.qaTranscriptText) else {
-            throw Failure(description: "attached tile placed provider restore after newer live history")
+        guard shows(tile.qaTranscriptText) else {
+            throw Failure(description: "attached tile lost, duplicated or reordered history, or showed a refused provider seed")
         }
         tile.detach()
         tile.attach(agentID: id, supervisor: supervisor)
         let reattachDeadline = ContinuousClock.now + .seconds(20)
-        while !exactlyOnce(expected, in: tile.qaTranscriptText), ContinuousClock.now < reattachDeadline {
+        while !shows(tile.qaTranscriptText), ContinuousClock.now < reattachDeadline {
             try? await Task.sleep(for: .milliseconds(20))
         }
-        guard exactlyOnce(expected, in: tile.qaTranscriptText), inOrder(expected, in: tile.qaTranscriptText) else {
-            throw Failure(description: "reattached tile lost, duplicated, or reordered late provider history")
+        guard shows(tile.qaTranscriptText) else {
+            throw Failure(description: "reattached tile lost, duplicated or reordered history, or showed a refused provider seed")
         }
     }
 }
