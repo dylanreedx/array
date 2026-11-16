@@ -2187,11 +2187,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     }
 
     /// An agent-message card as drawn: its header and body rows, whether every
-    /// body line sits inside the card, the colour of its accent bar (nil when it
+    /// body line sits inside the card, the colour of its full border (nil when it
     /// wears no agent's colour, only the decorative line), and the centre of
     /// its reveal control, if it drew one.
     struct QAMessageCard {
         let blockID: AgentNodeID
+        let frame: NSRect
         let header: String
         let body: String
         let bodyFits: Bool
@@ -2207,7 +2208,10 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
         guard let card = fills.first?.0 else { return nil }
         let plain = renderContext.tokens.decorativeLine.color.nsColor(for: theme).cgColor
-        let bar = fills.dropFirst().first?.1
+        let edge = item.block.decorations.compactMap { decoration -> CGColor? in
+            if case let .stroke(_, color, _, _) = decoration { return color }
+            return nil
+        }.first
         let bodyRow = item.block.rows[1]
         let fits = bodyRow.lines.allSatisfy { card.contains(CGRect(x: $0.x, y: $0.top, width: $0.width, height: $0.height)) }
         let reveal = item.block.controls.first { control in
@@ -2215,8 +2219,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             return false
         }
         return QAMessageCard(
-            blockID: blockID, header: item.block.rows[0].string.string, body: bodyRow.string.string, bodyFits: fits,
-            accent: bar == plain ? nil : bar,
+            blockID: blockID, frame: card.offsetBy(dx: insets.left, dy: item.y - scrollOffset),
+            header: item.block.rows[0].string.string, body: bodyRow.string.string, bodyFits: fits,
+            accent: edge == plain ? nil : edge,
             revealPoint: reveal.map { NSPoint(x: insets.left + $0.rect.midX, y: item.y + $0.rect.midY - scrollOffset) })
     }
 

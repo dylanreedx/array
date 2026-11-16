@@ -932,11 +932,17 @@ enum HelperCompletionChecks {
         // collection still reads running, the text waits as a note.
         try await start(builder, "Run the long build.")
         pool[builder]!.background = true
-        try await end(builder, "Waiting.")
+        // A 2 KB progress message: the note keeps whole sentences and says it
+        // was shortened, never ending mid-word ("…Sonnet review. I").
+        let longProgress = "Waiting." + String(repeating: " The build gets an independent Sonnet review before it lands.", count: 34)
+        try await end(builder, longProgress)
         await flushToLead()
         verdict(results(builder).isEmpty && status(builder)?.status == .spawned
             && queuedNotes().contains { $0.text.contains("Waiting.") },
             "P3 a progress turn end starts no lead turn and waits as a note")
+        let longNote = queuedNotes().compactMap { payloads($0.text).first?.text }.first { $0.contains("Waiting.") } ?? ""
+        verdict(longNote.hasSuffix("before it lands. …") && longNote.count <= 700,
+            "P3 a long progress note is cut at a sentence and marked, never mid-word: …\(longNote.suffix(40))")
         try await unsolicited(builder, report: "BUILD-REPORT", "Build passed.")
         await flushToLead()
         verdict(results(builder).count == 1 && results(builder)[0].contains("Builder finished: succeeded")

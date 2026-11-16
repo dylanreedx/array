@@ -34,6 +34,24 @@ public struct AgentTranscriptProjection: Sendable {
 
     private static let eventWindow = 400
     private var openStream: OpenStream?
+
+    /// An insertion that arrived while a reply was streaming.
+    ///
+    /// Placed at the next block boundary — when the open text run closes, or
+    /// after the turn completes — never inside the run. Inserting it at once
+    /// closed the run, so the rest of the reply streamed into a second entry
+    /// below the card: one reply cut in half mid-word.
+    private enum HeldInsertion: Sendable {
+        case prompt(id: AgentNodeID, prompt: AgentPrompt, receivedAt: Date?)
+        case notice(id: AgentNodeID, title: String, body: String)
+
+        var id: AgentNodeID {
+            switch self {
+            case let .prompt(id, _, _), let .notice(id, _, _): return id
+            }
+        }
+    }
+    private var heldInsertions: [HeldInsertion] = []
     private var runCountsByTurn: [String: Int] = [:]
     private var itemEntries: [String: AgentNodeID] = [:]
     private var itemBlocks: [String: AgentNodeID] = [:]
@@ -239,7 +257,7 @@ public struct AgentTranscriptProjection: Sendable {
             return result
 
         case .turnCompleted(let tid, let turnID, let outcome, let errorMessage) where tid == threadId:
-            var result = closeStreamingRun()
+            var result = closeStreamingRun(releasingHeld: false)
             // `.plans/45` S5 (C3) — the sweep. This handler used to DISCARD the
             // outcome, so any item still active when the turn ended kept
             // "In progress" forever — Dylan's stale-indicator complaint,
@@ -271,6 +289,8 @@ public struct AgentTranscriptProjection: Sendable {
             turnSubmittedAt = nil
             turnHasStarted = false
             renderedRuntimeErrorMessage = nil
+            // After the turn's footer, so it stays on the reply it timed.
+            result += releaseHeldInsertions()
             return result
 
         case .runtimeError(let tid, let message) where tid == nil || tid == threadId:
@@ -478,7 +498,7 @@ public struct AgentTranscriptProjection: Sendable {
         id: AgentNodeID,
         prompt: AgentPrompt
     ) throws -> [AgentDocumentPatch] {
-        guard !document.entries.contains(where: { $0.id == id }) else { return [] }
+        guard !document.entries.contains(where: { $0.id == id }), !isHeld(id) else { return [] }
 
         // Another agent's words, or a host's note about its sessions, arrive by
         // the same route as a prompt. Recognised here for the same reason as a
@@ -488,6 +508,12 @@ public struct AgentTranscriptProjection: Sendable {
         if case let .hostNote(note) = inbound {
             return try appendNotice(id: id, title: "Side sessions", body: note)
         }
+        // Another agent's message never lands inside a reply that is still
+        // streaming: it waits for the next block boundary (see `HeldInsertion`).
+        if openStream != nil, inbound.isAgentMessage {
+            heldInsertions.append(.prompt(id: id, prompt: prompt, receivedAt: wallClockNow()))
+            return []
+        }
         var patches = try applyReturningPatches(closeStreamingRun())
         // A consumed steer stays inside its runtime turn. A previous local
         // command with no provider turn must not contribute idle time instead.
@@ -495,6 +521,19 @@ public struct AgentTranscriptProjection: Sendable {
             turnEntryStart = document.entries.count
             turnSubmittedAt = wallClockNow()
         }
+        patches += try applyReturningPatches(promptMutations(id: id, prompt: prompt, inbound: inbound, receivedAt: nil))
+        return patches
+    }
+
+    /// The writes for one prompt entry. Reads no document state, so a held
+    /// insertion can be built inside `closeStreamingRun` before the stream's own
+    /// closing writes are applied.
+    private mutating func promptMutations(
+        id: AgentNodeID,
+        prompt: AgentPrompt,
+        inbound: AgentMessageEnvelope.Inbound,
+        receivedAt: Date?
+    ) -> [AgentDocumentMutation] {
         compatibilityIDs[id] = id.rawValue
         var mutations: [AgentDocumentMutation] = [
             .beginEntry(id: id, role: .user, provenance: .localPrompt(promptID: id.rawValue))
@@ -515,7 +554,8 @@ public struct AgentTranscriptProjection: Sendable {
         default: messages = []
         }
         if !messages.isEmpty {
-            for (index, message) in messages.enumerated() {
+            for (index, var message) in messages.enumerated() {
+                if let receivedAt { message.receivedAt = receivedAt }
                 mutations.append(.upsertStructured(entryID: id, block: AgentBlock(
                     id: childID(of: id, key: index == 0 ? "agent-message" : "agent-message-\(index)"),
                     kind: .agentMessage,
@@ -570,8 +610,7 @@ public struct AgentTranscriptProjection: Sendable {
             )))
         }
         mutations.append(.finishEntry(id: id))
-        patches += try applyReturningPatches(mutations)
-        return patches
+        return mutations
     }
 
     public mutating func appendUserPrompt(
@@ -586,6 +625,10 @@ public struct AgentTranscriptProjection: Sendable {
     /// history is never edited here.
     @discardableResult
     public mutating func withdrawLocalPrompt(id: AgentNodeID) throws -> [AgentDocumentPatch] {
+        if isHeld(id) {
+            heldInsertions.removeAll { $0.id == id }
+            return []
+        }
         guard let entry = document.entries.first(where: { $0.id == id }),
               case .localPrompt = entry.provenance else { return [] }
         if let start = turnEntryStart, document.entries.indices.contains(start), document.entries[start].id == id {
@@ -605,13 +648,21 @@ public struct AgentTranscriptProjection: Sendable {
         title: String,
         body: String
     ) throws -> [AgentDocumentPatch] {
-        guard !document.entries.contains(where: { $0.id == id }) else { return [] }
-
+        guard !document.entries.contains(where: { $0.id == id }), !isHeld(id) else { return [] }
+        if openStream != nil {
+            heldInsertions.append(.notice(id: id, title: title, body: body))
+            return []
+        }
         var patches = try applyReturningPatches(closeStreamingRun())
+        patches += try applyReturningPatches(noticeMutations(id: id, title: title, body: body))
+        return patches
+    }
+
+    private mutating func noticeMutations(id: AgentNodeID, title: String, body: String) -> [AgentDocumentMutation] {
         compatibilityIDs[id] = id.rawValue
         let blockID = childID(of: id, key: "notice")
         let titleID = childID(of: blockID, key: "title")
-        patches += try applyReturningPatches([
+        return [
             .beginEntry(id: id, role: .system, provenance: .localNotice(reason: id.rawValue)),
             .upsertStructured(entryID: id, block: AgentBlock(
                 id: blockID,
@@ -624,8 +675,7 @@ public struct AgentTranscriptProjection: Sendable {
                 )]
             )),
             .finishEntry(id: id)
-        ])
-        return patches
+        ]
     }
 
     @discardableResult
@@ -791,7 +841,10 @@ public struct AgentTranscriptProjection: Sendable {
         rawMarkupSourcesByEntryID[stream.entryID] = stream.buffer.source
     }
 
-    private mutating func closeStreamingRun() -> [AgentDocumentMutation] {
+    /// Closes the open run, then places what was held for its boundary.
+    /// `releasingHeld: false` leaves that to the caller (turn completion places
+    /// held insertions after the turn's own closing writes).
+    private mutating func closeStreamingRun(releasingHeld: Bool = true) -> [AgentDocumentMutation] {
         guard openStream != nil else { return [] }
         var result: [AgentDocumentMutation] = []
         if openStream?.scheduler.flush() == true {
@@ -801,7 +854,27 @@ public struct AgentTranscriptProjection: Sendable {
         let entryID = openStream!.entryID
         openStream = nil
         result.append(.finishEntry(id: entryID))
+        if releasingHeld { result += releaseHeldInsertions() }
         return result
+    }
+
+    private func isHeld(_ id: AgentNodeID) -> Bool {
+        heldInsertions.contains { $0.id == id }
+    }
+
+    private mutating func releaseHeldInsertions() -> [AgentDocumentMutation] {
+        guard !heldInsertions.isEmpty else { return [] }
+        let held = heldInsertions
+        heldInsertions = []
+        return held.flatMap { insertion -> [AgentDocumentMutation] in
+            switch insertion {
+            case let .prompt(id, prompt, receivedAt):
+                return promptMutations(id: id, prompt: prompt,
+                                       inbound: AgentMessageEnvelope.classify(prompt.text), receivedAt: receivedAt)
+            case let .notice(id, title, body):
+                return noticeMutations(id: id, title: title, body: body)
+            }
+        }
     }
 
     private mutating func nextRun(in turnID: String) -> Int {

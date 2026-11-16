@@ -621,12 +621,18 @@ public struct AgentMessagePayload: Codable, Equatable, Sendable {
     public var senderName: String
     /// What the sender wrote, verbatim.
     public var text: String
+    /// When it really arrived, set only when the card was held back to the
+    /// next block boundary so it would not split a streaming reply. The
+    /// entry's own `createdAt` is when it was placed, which keeps entry times
+    /// in document order.
+    public var receivedAt: Date?
 
-    public init(origin: Origin, senderAgentID: UUID? = nil, senderName: String, text: String) {
+    public init(origin: Origin, senderAgentID: UUID? = nil, senderName: String, text: String, receivedAt: Date? = nil) {
         self.origin = origin
         self.senderAgentID = senderAgentID
         self.senderName = senderName
         self.text = text
+        self.receivedAt = receivedAt
     }
 }
 

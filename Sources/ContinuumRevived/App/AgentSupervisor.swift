@@ -9242,7 +9242,7 @@ final class AgentSupervisor {
         let line = kind == .progress
             ? "\(name) progress note (no action needed; its result follows): "
             : "\(name) added after its result was delivered: "
-        let body = AgentMessageEnvelope.wrap(line + String(text.prefix(600)), senderID: helper.rawValue, senderName: child.humanDisplayName)
+        let body = AgentMessageEnvelope.wrap(line + AgentMessageEnvelope.excerpt(text, limit: 600), senderID: helper.rawValue, senderName: child.humanDisplayName)
         let key = "\(kind.rawValue)|\(lead.rawValue.uuidString)|\(helper.rawValue.uuidString)"
         let previous = queueOpTasks[lead]
         queueOpTasks[lead] = Task { @MainActor [weak self] in
