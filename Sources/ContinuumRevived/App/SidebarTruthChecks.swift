@@ -76,6 +76,8 @@ enum SidebarTruthChecks {
     static let otherTile = UUID(uuidString: "5D000000-0000-4000-8000-0000000000F1")!
 
     static func run() async throws {
+        try historyScopeVisibility()
+        if CommandLine.arguments.contains("--history-scope-only") { return }
         let world = try makeWorld()
         defer { tearDown(world) }
         try defaultScopeIsTheWorkspace(world)
@@ -97,6 +99,110 @@ enum SidebarTruthChecks {
               + "heading, most recent first, at the bottom of the list; the header has two compact rows whose New "
               + "agent button made an agent; hovering it offered Snooze and Settle, and "
               + "Settle settled it")
+    }
+
+    /// Exercise the production list, after the record builder has inherited
+    /// placement. Removing its history filter must change visible IDs/counts.
+    static func historyScopeVisibility() throws {
+        let now = SidebarOwnershipChecks.now
+        func id(_ n: Int) -> UUID { SidebarOwnershipChecks.uuid(n) }
+        func record(_ n: Int, _ title: String, parent: Int? = nil,
+                    archived: Bool = false, known: Bool = true) -> AgentRecord {
+            var value = AgentRecord(
+                id: AgentID(rawValue: id(n)), displayName: title, model: "fixture/model",
+                thinking: "medium", cwd: "/tmp/sidebar-history-fixture",
+                parentAgentID: parent.map { AgentID(rawValue: id($0)) },
+                createdAt: now.addingTimeInterval(-3_600), lastActivityAt: now.addingTimeInterval(-300),
+                latestTerminalEvent: known ? AgentTerminalEvent(
+                    sequence: 1, turnID: "finished", outcome: .succeeded,
+                    endedAt: now.addingTimeInterval(-300)) : nil,
+                archivedAt: archived ? now.addingTimeInterval(-30) : nil)
+            value.acknowledgedTerminalSequence = known ? 1 : 0
+            return value
+        }
+        var woke = record(0xE04, "Successful raised hand", parent: 0xEFF)
+        woke.snoozedAt = now.addingTimeInterval(-120)
+        woke.snoozedUntil = now.addingTimeInterval(3_600)
+        woke.runCompletedAt = now.addingTimeInterval(-60)
+        woke.lastVisitedAt = now.addingTimeInterval(-180)
+        var snoozed = record(0xE06, "Own snoozed helper", parent: 0xE05)
+        snoozed.snoozedAt = now.addingTimeInterval(-120)
+        snoozed.snoozedUntil = now.addingTimeInterval(3_600)
+        snoozed.runCompletedAt = now.addingTimeInterval(-300)
+        let records = [
+            record(0xE00, "Standing lead"), record(0xE01, "Standing helper", parent: 0xE00),
+            record(0xE02, "Hidden quiet orphan", parent: 0xEFF, archived: true),
+            record(0xE03, "Hidden quiet helper", parent: 0xE02, archived: true), woke,
+            record(0xE05, "Snoozed family context", parent: 0xEFF, archived: true), snoozed,
+            record(0xE07, "Unknown family context", parent: 0xEFF, archived: true),
+            record(0xE08, "Own unknown outcome", parent: 0xE07, known: false),
+        ]
+        let context = AgentContextIndex.build(
+            registry: .empty(), documents: [:], projectCanvases: [:], terminalDescriptors: [], agents: records)
+        let snapshot = AgentInventory.snapshot(
+            terminalDescriptors: [], liveStatuses: [:], agents: records, activityByAgent: [:],
+            replicaId: id(0xEFA), now: now)
+        let rows = AgentInboxRowBuilder.rows(
+            from: snapshot, context: context,
+            records: Dictionary(uniqueKeysWithValues: records.map { ($0.id.rawValue, $0) }), now: now)
+        let expected = Set([0xE00, 0xE01, 0xE04, 0xE05, 0xE06, 0xE07, 0xE08].map(id))
+        for dark in [false, true] {
+            let (inbox, window) = SidebarOwnershipChecks.build(
+                dark: dark, height: 700, rows: rows, folds: [id(0xE00): true, id(0xE05): true, id(0xE07): true],
+                clock: { now }) { _, _ in }
+            defer { window.orderOut(nil) }
+            inbox.prefersReducedMotion = { true }
+            inbox.foldsHistoryIntoShelf = true
+            inbox.layoutForQA()
+            try expect(inbox.historyHeaderTitleForQA == "History (4)",
+                       "history visibility: expected History (4), got \(inbox.historyHeaderTitleForQA ?? "none")")
+            if !inbox.isHistoryExpandedForQA { _ = inbox.clickHistoryDisclosureForQA() }
+            inbox.layoutForQA()
+            try expect(Set(inbox.rowIdsForQA) == expected,
+                       "history visibility: omit quiet orphans, retain raised hand and own snoozed/unknown families")
+            let args = CommandLine.arguments
+            if let flag = args.firstIndex(of: "--render-dir"), args.indices.contains(flag + 1) {
+                let directory = URL(fileURLWithPath: args[flag + 1], isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try SidebarHelperHoverChecks.write(
+                    SidebarHelperHoverChecks.capture(inbox, crop: inbox.bounds),
+                    to: directory.appendingPathComponent("history-scope-\(dark ? "dark" : "light").png"))
+            }
+            inbox.setSearchForQA("Hidden quiet")
+            inbox.layoutForQA()
+            try expect(Set(inbox.rowIdsForQA) == Set([id(0xE02), id(0xE03)])
+                       && inbox.historyHeaderTitleForQA == "History (2)",
+                       "history visibility: search must recover both quiet orphan records")
+            inbox.setSearchForQA("")
+            inbox.layoutForQA()
+            try expect(Set(inbox.rowIdsForQA) == expected,
+                       "history visibility: clearing search must restore the protected default list")
+
+            let workspace = id(0xEFC), otherWorkspace = id(0xEFD)
+            let parent = AgentInboxRow(
+                id: id(0xE20), title: "Scoped parent", workspaceId: otherWorkspace,
+                state: .ready, createdAt: now)
+            let child = AgentInboxRow(
+                id: id(0xE21), title: "Scoped child", workspaceId: workspace,
+                state: .ready, createdAt: now, parentId: parent.id,
+                terminalEvent: records[0].latestTerminalEvent)
+            inbox.reload(rows: [parent, child])
+            inbox.setScope(.workspaceID(workspace, "Scoped workspace"))
+            inbox.layoutForQA()
+            try expect(inbox.rowIdsForQA == [child.id],
+                       "history visibility: a scope-hidden present parent must not make its child an orphan")
+            var sourceParent = parent
+            sourceParent.externalSession = InboxExternalSession(
+                sessionKey: "history-source-fixture", isProminent: true,
+                canMoveHere: false, canCopy: false, source: "Terminal")
+            inbox.setScope(.all)
+            inbox.reload(rows: [sourceParent, child])
+            inbox.setHiddenSources(["Terminal"])
+            inbox.layoutForQA()
+            try expect(inbox.rowIdsForQA == [child.id],
+                       "history visibility: a source-hidden present parent must not make its child an orphan")
+            print("SidebarHistoryView \(dark ? "dark" : "light"): 7 protected/default rows, History (4); quiet family searchable as History (2); scope/source-hidden parents retain children")
+        }
     }
 
     // MARK: - World

@@ -910,6 +910,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     public var state: InboxState
     public let attention: InboxAttention
     public let lifecycle: InboxLifecycle
+    /// This agent's lifecycle before a parent supplies its display placement.
+    /// A parent's History section cannot establish that this helper finished.
+    public let ownLifecycle: InboxLifecycle
     public let model: String?
     /// A `.pi/agents/<role>.md` id (P2D.3), never shown as a title.
     public let role: String?
@@ -1190,7 +1193,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         hasTile: Bool = true,
         isPinned: Bool = false,
         characterActivity: AgentCharacterActivity? = nil,
-        characterName: String? = nil
+        characterName: String? = nil,
+        ownLifecycle: InboxLifecycle? = nil
     ) {
         self.id = id
         self.title = title
@@ -1202,6 +1206,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         self.state = state
         self.attention = attention
         self.lifecycle = lifecycle
+        self.ownLifecycle = ownLifecycle ?? lifecycle
         self.model = model
         self.role = role
         self.branch = branch
@@ -1262,7 +1267,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
             identityColor: identityColor, selfReport: selfReport, whereMarker: whereMarker,
             externalSession: externalSession, hasTile: hasTile, isPinned: isPinned,
-            characterActivity: characterActivity, characterName: characterName)
+            characterActivity: characterActivity, characterName: characterName,
+            ownLifecycle: ownLifecycle)
             .carryingOverlays(from: self)
     }
 
@@ -1339,7 +1345,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             closingSince: closingSince, hasLiveRunner: hasLiveRunner,
             identityColor: identityColor, selfReport: selfReport,
             hasTile: hasTile, isPinned: isPinned, characterActivity: characterActivity,
-            characterName: characterName)
+            characterName: characterName, ownLifecycle: ownLifecycle)
             .carryingOverlays(from: self)
     }
 

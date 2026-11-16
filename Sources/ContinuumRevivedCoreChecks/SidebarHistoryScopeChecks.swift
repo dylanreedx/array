@@ -120,6 +120,42 @@ func runSidebarHistoryScopeChecks() throws {
         expect(filtered(family) == family, "any helper attention must preserve its orphan family")
     }
     print("SidebarHistoryAttention: record-backed successful wake and unread/woke family context preserved")
+
+    // Placement deliberately follows an archived parent. It must not turn the
+    // child's own snooze or missing terminal outcome into proof of completion.
+    for snoozed in [true, false] {
+        var protectedChild = record
+        protectedChild.parentAgentID = quietParent.id
+        protectedChild.archivedAt = nil
+        protectedChild.snoozedAt = snoozed ? now.addingTimeInterval(-120) : nil
+        protectedChild.snoozedUntil = snoozed ? now.addingTimeInterval(3_600) : nil
+        protectedChild.runCompletedAt = snoozed ? now.addingTimeInterval(-300) : nil
+        protectedChild.latestTerminalEvent = snoozed ? AgentTerminalEvent(
+            sequence: 1, turnID: "earlier", outcome: .succeeded,
+            endedAt: now.addingTimeInterval(-300)) : nil
+        let own = try fromRecords([protectedChild])
+        if snoozed {
+            expect(own[0].lifecycle == .snoozed(until: now.addingTimeInterval(3_600)),
+                   "history fixture must carry the child's own snooze")
+        } else {
+            expect(own[0].lifecycle == .active && own[0].terminalEvent == nil,
+                   "history fixture must carry the child's unresolved outcome")
+        }
+        let family = try fromRecords([quietParent, protectedChild])
+        expect(family.count == 2 && family.allSatisfy { $0.lifecycle == .archived(at: now) },
+               "production placement must still draw the family under its archived lead")
+        expect(filtered(family) == family,
+               "sidebar history must preserve an orphan family with a \(snoozed ? "snoozed" : "unknown-outcome") helper after production placement")
+        let frozen = family.map { $0.withUnconfirmed() }
+        expect(filtered(frozen) == frozen,
+               "observation freezing must preserve the helper's own lifecycle facts")
+    }
+    var archivedUnknown = record
+    archivedUnknown.latestTerminalEvent = nil
+    let unknownRows = try fromRecords([archivedUnknown])
+    expect(filtered(unknownRows) == unknownRows,
+           "archival is placement, not evidence of a resolved orphan outcome")
+    print("SidebarHistoryLifecycle: production-placed snoozed/unknown helpers and frozen copies preserve their families; unknown archived outcomes retained")
     print("SidebarHistoryScope: quiet orphan families omitted; standing leads retain helpers/sub-leads; open, running, blocked, unread-failed and unknown work preserved; cycles safe; workspace scope preserved")
 }
 

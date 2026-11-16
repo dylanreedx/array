@@ -163,10 +163,10 @@ public enum InboxSort {
                 case .working, .approval, .input: return false
                 case .ready, .failed: break
                 }
-                switch row.lifecycle {
+                switch row.ownLifecycle {
                 case .snoozed: return false
-                case .settled, .archived: return true
-                case .active: return row.terminalEvent != nil
+                case .active, .settled, .archived:
+                    return row.terminalEvent != nil
                 }
             }
             if isQuiet { omitted.formUnion(visited) }
