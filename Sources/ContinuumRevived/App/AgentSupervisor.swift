@@ -5222,6 +5222,7 @@ final class AgentSupervisor {
         }
         runners[id]?.stop()
         runners[id] = nil
+        if let run = runnerGenerationTokens[id] { settleHelperReceipts(lead: id, run: run, stopped: true) }
         chooserChildFinished(id)
         if let task = chooserRequests[id] {
             chooserRequestEnded(id, request: task.id)
@@ -6858,6 +6859,7 @@ final class AgentSupervisor {
                 contextDietRequested: retryOf.map { records[$0]?.delegationContext?.contextDietRequested ?? false }
             )
             guard var spawned = records[childID] else { return nil }
+            delegatedHelperIDs.insert(childID)
             spawned.delegationContext = AgentDelegationContext(
                 brief: originalBrief ?? request.prompt, baseHead: resolved.baseHead, retryOf: retryOf,
                 createdWorktree: overlapping && resolved.isolate, checkoutNotice: resolved.notice, contract: contract,
@@ -8306,6 +8308,140 @@ final class AgentSupervisor {
         }
     }
 
+    // MARK: - Tidy finished helper tiles
+
+    /// When each helper first finished a turn, this launch. A look at the tile
+    /// after this (focus, hover dwell, typing, which all mark it visited) makes
+    /// the tile the person's, and Array leaves it alone.
+    private(set) var helperFirstFinishedAt: [AgentID: Date] = [:]
+    /// Helpers another agent created this launch (`agent.delegate`, pi
+    /// `spawn_agent`): stamped where the delegation commits. Parentage alone is
+    /// not enough — "New session with summary" makes a user-started child.
+    private var delegatedHelperIDs: Set<AgentID> = []
+    /// When each helper's latest result was RECEIVED by the agent that
+    /// delegated it, this launch: the lead's runner was handed the wake turn,
+    /// or consumed the steer, that carries it. Queue admission is not receipt —
+    /// a stopped lead's queue stays paused, and a queued result can be deleted.
+    private(set) var helperResultDeliveredAt: [AgentID: Date] = [:]
+    /// Fired on the main actor each time a helper's result is received by the
+    /// agent that delegated it. The app closes the tile after a grace period.
+    var onHelperResultDelivered: ((AgentID) -> Void)?
+
+    /// Each staged wake's (helper, completed turn) pairs, until the lead's
+    /// runner has the item: the lead's next turn STARTED with it, or a running
+    /// turn consumed it as a steer. Both settle the item `.consumed`, once.
+    private var helperReceiptsAwaiting: [UUID: [(helper: AgentID, turn: String)]] = [:]
+    /// How many turns each helper has finished, this launch, counted at every
+    /// turn end — held, de-duplicated or delivered alike.
+    private var helperTurnsFinished: [AgentID: Int] = [:]
+    /// The finished-turn count each delivered completion carries.
+    private var helperCompletionGeneration: [String: Int] = [:]
+    /// The finished-turn count of the result each helper's lead last received.
+    private var helperResultReceivedGeneration: [AgentID: Int] = [:]
+
+    /// Receipts settled by the run that took them: the run's last turn ended
+    /// successfully (confirmed, with its end), or it failed or was stopped.
+    private var helperReceiptConfirmedAt: [AgentID: Date] = [:]
+    private(set) var helperReceiptFailed: Set<AgentID> = []
+    /// The lead run each wake item was sent to, or handed to as a steer. A
+    /// settle in any other run (a replacement consuming a stale fallback) is
+    /// not a receipt, and only the owning run's end decides one.
+    private var helperReceiptOwner: [UUID: RunnerGenerationToken] = [:]
+    private var helperReceiptRun: [AgentID: RunnerGenerationToken] = [:]
+
+    /// When the lead's run that took this helper's latest received result
+    /// ended successfully; nil until then.
+    func helperResultConfirmedAt(_ id: AgentID) -> Date? { helperReceiptConfirmedAt[id] }
+
+    /// The lead's run ended: decide every receipt it took. The run returns only
+    /// after the prompt's own turn (a buffered unsolicited turn comes first), so
+    /// its outcome is the one that carried the result.
+    private func settleHelperReceipts(lead: AgentID, run: RunnerGenerationToken, stopped: Bool = false) {
+        let ended = records[lead]?.latestTerminalEvent
+        for (helper, received) in helperResultDeliveredAt
+        where records[helper]?.parentAgentID == lead && helperReceiptConfirmedAt[helper] == nil
+            && !helperReceiptFailed.contains(helper) && helperReceiptRun[helper] == run {
+            if !stopped, let ended, ended.outcome == .succeeded, ended.endedAt >= received {
+                helperReceiptConfirmedAt[helper] = ended.endedAt
+            } else {
+                helperReceiptFailed.insert(helper)
+            }
+        }
+    }
+
+    private func noteHelperResultsReceived(queueItem: UUID, by lead: AgentID) {
+        let owner = helperReceiptOwner.removeValue(forKey: queueItem)
+        guard let run = runnerGenerationTokens[lead], owner == run else {
+            // Settled outside the run it was given to: drop it; a requeued
+            // item is re-owned when it is sent again.
+            if owner != nil { helperReceiptsAwaiting[queueItem] = nil }
+            return
+        }
+        for (helper, turn) in helperReceiptsAwaiting.removeValue(forKey: queueItem) ?? [] {
+            guard records[helper]?.parentAgentID == lead else { continue }
+            guard let generation = helperCompletionGeneration[turn] else { continue }
+            helperResultReceivedGeneration[helper] = generation
+            helperResultDeliveredAt[helper] = helperCompletionNow()
+            helperReceiptRun[helper] = run
+            helperReceiptConfirmedAt[helper] = nil
+            helperReceiptFailed.remove(helper)
+            onHelperResultDelivered?(helper)
+        }
+    }
+
+    /// The record's half of "Tidy finished helper tiles": nil when nothing the
+    /// supervisor knows keeps this helper's tile, otherwise why it stays. The
+    /// canvas half (selected, hovered, moved, a draft) is the app's.
+    ///
+    /// Only a helper another agent delegated, whose latest turn succeeded, that
+    /// asks nothing of anyone, whose result has reached that agent, that has no
+    /// helper of its own still on the canvas or at work, and that nobody has
+    /// looked at since it first finished.
+    func helperTileTidyRefusal(_ id: AgentID, now: Date) -> String? {
+        guard let record = records[id] else { return "no record" }
+        guard let parent = record.parentAgentID, records[parent] != nil, delegatedHelperIDs.contains(id),
+              record.capabilities.locallyManaged else { return "not a delegated helper" }
+        guard record.tileId != nil else { return "no tile" }
+        guard record.archivedAt == nil, record.closeRequestedAt == nil else { return "already closed" }
+        // A Managed lead's popped-out helper folds back by its own rule.
+        guard record.helperTileOpenedAt == nil, !record.pinned else { return "pinned or popped out" }
+        guard !isRunning(id) else { return "running" }
+        guard let terminal = record.latestTerminalEvent, terminal.outcome == .succeeded else { return "did not succeed" }
+        guard terminal.endedAt >= (record.latestPromptAt ?? record.createdAt) else { return "a turn is pending" }
+        guard record.declaredStatus?.needsYou == nil, record.helperWatchdogNeedsYou == nil,
+              !helperIsBlocked(record) else { return "needs someone" }
+        guard !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) else { return "still busy" }
+        // This turn's result, received: a receipt older than the latest turn's
+        // end belongs to an earlier turn.
+        // The lead received the result of the helper's LAST finished turn: none
+        // has finished since (held, de-duplicated or still on its way).
+        guard let received = helperResultDeliveredAt[id], received >= terminal.endedAt,
+              heldHelperCompletions[id] == nil,
+              let generation = helperResultReceivedGeneration[id], generation == helperTurnsFinished[id]
+        else { return "result not received" }
+        // Settling the wake at a lead turn start is not correlated with the
+        // input (a buffered unsolicited turn starts first; a failed start never
+        // writes it). The lead's run returns only after the prompt's own turn,
+        // so the receipt counts once the lead is idle again and that turn
+        // succeeded after it.
+        if helperReceiptFailed.contains(id) { return "lead did not finish with the result" }
+        guard helperResultConfirmedAt(id) != nil else { return "lead has not finished with the result" }
+        // Array's own helpers, a harness's native subagents (observed children
+        // with a turn still open, whatever the runner reports) or shell jobs.
+        guard !helperHasBackgroundWork(id), !records.values.contains(where: { child in
+            guard child.parentAgentID == id else { return false }
+            if isRunning(child.id) { return true }
+            guard let ended = child.latestTerminalEvent?.endedAt else { return true }
+            return (child.latestTurnAt ?? .distantPast) > ended
+        }) else { return "has running helpers" }
+        // A helper of its own still on the canvas keeps this one's tile too.
+        guard !records.values.contains(where: { $0.parentAgentID == id && $0.tileId != nil })
+        else { return "a helper still has its tile" }
+        guard let finished = helperFirstFinishedAt[id] else { return "not finished this launch" }
+        if let visited = record.lastVisitedAt, visited > finished { return "looked at since finishing" }
+        return nil
+    }
+
     private func foldHelpers(of lead: AgentID) {
         var pending = children(of: lead)
         var seen: Set<AgentID> = [lead]
@@ -8983,6 +9119,7 @@ final class AgentSupervisor {
     }
 
     private func helperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {
+        helperTurnsFinished[id, default: 0] += 1
         let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
         let previous = heldHelperCompletions[id]
         if let previous, previous.identity != identity { removeHeldRecords(previous, helper: id) }
@@ -9284,6 +9421,8 @@ final class AgentSupervisor {
         guard let child = records[id], child.capabilities.locallyManaged,
               helperCompletionTurns[id] != identity else { return }
         helperCompletionTurns[id] = identity
+        helperCompletionGeneration[identity] = helperTurnsFinished[id, default: 0]
+        if helperFirstFinishedAt[id] == nil { helperFirstFinishedAt[id] = helperCompletionNow() }
         let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let text = helperCompletionText(id, child: child, outcome: outcome, error: error, statusOverride: statusOverride).text
         let parents = Set([child.parentAgentID].compactMap { $0 }
@@ -9447,6 +9586,7 @@ final class AgentSupervisor {
                                 senderName: records[AgentID(rawValue: state.helper)]?.humanDisplayName ?? "Agent") }
                         })
                         helperWakeSenders[queueID] = group.map(\.helper)
+                        helperReceiptsAwaiting[queueID] = group.map { (AgentID(rawValue: $0.helper), $0.turn) }
                         try qaBeforeHelperWakeAdmission?()
                         // Always a helper item, idle lead or busy: it queues after
                         // user input and drains with every other pending result.
@@ -12136,7 +12276,10 @@ final class AgentSupervisor {
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
-            for member in [message] + merged { self.helperWakeSenders[member.id] = nil }
+            for member in [message] + merged {
+                self.helperWakeSenders[member.id] = nil
+                self.helperReceiptOwner[member.id] = self.runnerGenerationTokens[id]
+            }
             // Helper fallback remains in durable custody until the runner starts
             // its next turn. Other queue entries keep their existing echo path.
             if !message.helperCompletion { self.echoPrompt(prompt, for: id) }
@@ -12573,6 +12716,7 @@ final class AgentSupervisor {
                 }
                 self.helperWaitSteerTools[id, default: []].formUnion(self.openToolItems[id] ?? [])
                 self.deliveringSteers[id, default: []].append((message.id, message, prompt))
+                self.helperReceiptOwner[message.id] = self.runnerGenerationTokens[id]
                 self.notifyTurnCapabilitiesChanged(id)
                 let accepted = await Task.detached(priority: .userInitiated) {
                     (try? runner.steer(prompt, id: message.id)) != nil
@@ -12629,6 +12773,7 @@ final class AgentSupervisor {
     /// (pi confirms late, from `queue_update`). The write only retires custody.
     private func settleDeliveringSteer(_ steerID: UUID, disposition: AgentSteerDisposition, for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
+        if disposition == .consumed { noteHelperResultsReceived(queueItem: steerID, by: id) }
         if disposition == .consumed, let entry = deliveringSteers[id]?.first(where: { $0.id == steerID }),
            publishedConsumedSteers.insert(steerID).inserted {
             notifyTurnCapabilitiesChanged(id)
@@ -13459,6 +13604,7 @@ final class AgentSupervisor {
         // finishing must not have its runner cleared by the old one's completion.
         if runnerGenerationTokens[id] == generation, runners[id] === runner {
             runners[id] = nil
+            settleHelperReceipts(lead: id, run: generation)
             markOwnClaudeTurn(for: id)
             interruptingAgents.remove(id)
             openToolItems[id] = nil

@@ -336,6 +336,10 @@ public enum SettingsSchema {
                                     default: AgentShortReportConfig.enabledDefault),
                             help: "A helper agent whose final message runs over \(AgentShortReportConfig.pushBackWordLimit) words is asked once to cut it to about \(AgentShortReportConfig.targetWords) and save the rest to a file. The agent that delegated the work gets the helper's short report instead of its full reply. The push-back works with Claude agents for now.",
                             keywords: ["report", "summary", "subagents", "helpers", "delegate", "context", "short"]),
+                SettingsRow(.toggle(key: HelperTileTidyConfig.enabledKey, label: "Tidy finished helper tiles",
+                                    default: HelperTileTidyConfig.enabledDefault),
+                            help: "When a helper another agent started has finished and its result has reached that agent, Array closes the helper's tile after a short wait, the same as closing it yourself. The agent stays in the sidebar, and opening it there brings the tile back. A helper that failed, needs you, or that you have looked at, moved or typed into keeps its tile.",
+                            keywords: ["tidy", "close", "tiles", "subagents", "helpers", "delegate", "clean up", "finished"]),
             ]),
         ])
     }

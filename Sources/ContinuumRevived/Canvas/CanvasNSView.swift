@@ -99,6 +99,10 @@ final class CanvasNSView: NSView, TokenThemed {
         var tileIds: Set<UUID>
         var zoneIds: Set<UUID>
         var before: CanvasGeometrySnapshot
+        /// The tiles the edit was begun on, before any layout chain is captured.
+        var subjectTileIds: Set<UUID> = []
+        /// An agent's geometry (`applyProgrammaticTileGeometry`), not the person's.
+        var programmatic = false
     }
     private var pendingGeometryEdit: PendingGeometryEdit?
     private var canvasHistories: [UUID: CanvasHistoryController] = [:]
@@ -519,6 +523,12 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Returns true only after every backing store durably accepted the solve.
     /// A false result restores the gesture baseline in memory.
     var onLayoutCommitted: ((CanvasLayoutTransaction) -> Bool)?
+
+    /// The tiles the person moved, resized or docked, once the edit commits —
+    /// the gesture's own tiles, never the members a layout slid aside, and never
+    /// an agent's programmatic geometry. "Tidy finished helper tiles" keeps a
+    /// tile the person has handled.
+    var onUserTileGeometryCommitted: ((Set<UUID>) -> Void)?
 
     private func autoLayoutScene() -> CanvasAutoLayoutEngine.Scene {
         var layoutTiles = (flatCompatibilitySceneActive ? canvasState.tiles : []).map {
@@ -3091,7 +3101,8 @@ final class CanvasNSView: NSView, TokenThemed {
             action: action,
             tileIds: capturedTileIds,
             zoneIds: capturedZoneIds,
-            before: captureGeometry(tileIds: capturedTileIds, zoneIds: capturedZoneIds)
+            before: captureGeometry(tileIds: capturedTileIds, zoneIds: capturedZoneIds),
+            subjectTileIds: tileIds
         )
         return true
     }
@@ -3119,6 +3130,13 @@ final class CanvasNSView: NSView, TokenThemed {
             canvasHistories[workspaceId]?.record(transaction)
         }
         notifyGeometryCommit(transaction)
+        if !pending.programmatic,
+           [.moveTile, .resizeTile, .dockTile, .resizeTileToPreset].contains(pending.action) {
+            let handled = pending.subjectTileIds.filter { id in
+                transaction.before.tiles.first { $0.tileId == id } != transaction.after.tiles.first { $0.tileId == id }
+            }
+            if !handled.isEmpty { onUserTileGeometryCommitted?(handled) }
+        }
         return transaction
     }
 
@@ -9042,6 +9060,7 @@ final class CanvasNSView: NSView, TokenThemed {
         let before = CanvasEngine.worldFrame(tile: tile, in: layer.placement)
         guard before != worldFrame else { return .unchanged }
         guard beginGeometryEdit(action, tileIds: [tileId], includeAllZones: true) else { return .gestureActive }
+        pendingGeometryEdit?.programmatic = true
         beginAutoLayoutGesture()
         var next = tile
         next.frame = tileFrame(fromWorldFrame: worldFrame, tileId: tileId)

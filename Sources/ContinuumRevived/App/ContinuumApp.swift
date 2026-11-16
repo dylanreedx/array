@@ -3664,6 +3664,21 @@ enum ContinuumApp {
             catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
         }
 
+        if CommandLine.arguments.contains("--helper-tile-tidy-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runHelperTileTidyChecks()
+                    print("ContinuumRevivedHelperTileTidyChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--workspace-api-delegation-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -10858,6 +10873,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let agentId = agentSupervisor.agent(forTile: id) {
                 if parksAgent { agentSupervisor.requestClose(agentID: agentId) }
                 agentSupervisor.detachView(agentID: agentId)
+                helperTileClosed(agentId: agentId)
             }
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
         }
@@ -10904,6 +10920,157 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               !state.inspectorStates.contains(where: { $0.inspectedBrowserTileId == tileId }) else { return false }
         deleteTileAfterEditorBarrier(id: tileId, unattended: true)
         return canvasView.tileRecord(for: tileId) == nil
+    }
+
+    // MARK: - Tidy finished helper tiles
+
+    /// How long a finished helper's tile stays after its result reached the
+    /// agent that delegated it. Internal: never shown, never asked for.
+    var helperTileTidyGrace: TimeInterval = 120
+    /// How soon a sweep held back by something passing (a hover, a selection, a
+    /// gesture, focus) looks again.
+    var helperTileTidyRetry: TimeInterval = 15
+    /// The longest a held-back tile waits between looks; waits back off to it
+    /// rather than giving up, so a passing reason never drops a tile for good.
+    var helperTileTidyMaxRetry: TimeInterval = 10 * 60
+    private var helperTileTidyWaits: [AgentID: Int] = [:]
+    /// Helpers kept only because a helper of their own still has a tile: closing
+    /// that tile looks at them again.
+    private var helperTilesKeptForChild: Set<AgentID> = []
+    var helperTileTidyNow: () -> Date = Date.init
+    private var helperTileTidyTimer: Timer?
+    /// Helpers whose result was delivered and whose tile may still be tidied.
+    private var helperTileTidyPending: Set<AgentID> = []
+    /// Tiles the person moved, resized, docked, undid or redid a change to, or
+    /// typed in, and when.
+    private var helperTilesHandledAt: [UUID: Date] = [:]
+    /// Witness: why each helper's tile was kept at the last sweep that saw it.
+    private(set) var qaHelperTileTidyRefusals: [AgentID: String] = [:]
+
+    private func helperResultDelivered(_ id: AgentID) {
+        guard HelperTileTidyConfig.enabled(defaults: settingsDefaults) else { return }
+        helperTileTidyPending.insert(id)
+        helperTileTidyWaits[id] = nil
+        armHelperTileTidy(in: helperTileTidyGrace)
+    }
+
+    /// A managed agent's tile closed (tidied or by the person): a parent kept
+    /// only for that tile is looked at again.
+    private func helperTileClosed(agentId: AgentID) {
+        guard let parent = agentSupervisor.records[agentId]?.parentAgentID,
+              helperTilesKeptForChild.remove(parent) != nil else { return }
+        helperTileTidyPending.insert(parent)
+        armHelperTileTidy(in: helperTileTidyRetry)
+    }
+
+    private func noteUserHandledTiles(_ tileIds: Set<UUID>) {
+        let now = helperTileTidyNow()
+        for id in tileIds { helperTilesHandledAt[id] = now }
+    }
+
+    private func armHelperTileTidy(in delay: TimeInterval) {
+        let fireAt = Date().addingTimeInterval(max(0.05, delay))
+        if let timer = helperTileTidyTimer, timer.isValid, timer.fireDate <= fireAt { return }
+        helperTileTidyTimer?.invalidate()
+        helperTileTidyTimer = Timer.scheduledTimer(withTimeInterval: max(0.05, delay), repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.helperTileTidyTimer = nil
+                self?.sweepFinishedHelperTiles()
+            }
+        }
+    }
+
+    /// Close every finished helper tile whose time has come, exactly as its ×
+    /// does (`deleteTile`'s managed-agent branch: the record parks in History,
+    /// the runner and transcript stay, the row reopens it) but unattended: no
+    /// dialog, no focus hand-off, and no settle of the zone, so no other tile
+    /// moves. Re-arms itself while anything is still waiting.
+    func sweepFinishedHelperTiles() {
+        let now = helperTileTidyNow()
+        var nextDelay: TimeInterval?
+        func wait(_ delay: TimeInterval) { nextDelay = min(nextDelay ?? delay, delay) }
+        guard HelperTileTidyConfig.enabled(defaults: settingsDefaults) else {
+            for id in helperTileTidyPending { qaHelperTileTidyRefusals[id] = "setting off" }
+            helperTileTidyPending.removeAll()
+            return
+        }
+        for id in helperTileTidyPending.sorted(by: { $0.rawValue.uuidString < $1.rawValue.uuidString }) {
+            switch helperTileTidyDecision(id, now: now) {
+            case .close(let tileId):
+                deleteTileAfterEditorBarrier(id: tileId, parksAgent: true, unattended: true)
+                if canvasView?.tileRecord(for: tileId) == nil {
+                    helperTileTidyPending.remove(id)
+                    helperTileTidyWaits[id] = nil
+                    qaHelperTileTidyRefusals[id] = nil
+                    fputs("Tidied finished helper tile \(tileId.uuidString)\n", stderr)
+                } else {
+                    qaHelperTileTidyRefusals[id] = "close refused"
+                    wait(helperTileTidyRetry)
+                }
+            case .wait(let reason, let delay):
+                qaHelperTileTidyRefusals[id] = reason
+                if reason == "grace" { wait(delay); break }
+                // Back off: 15 s, 30 s, 1 min … up to ten minutes between looks.
+                let tries = helperTileTidyWaits[id, default: 0]
+                helperTileTidyWaits[id] = tries + 1
+                wait(min(delay * pow(2, Double(min(tries, 10))), helperTileTidyMaxRetry))
+            case .keep(let reason):
+                qaHelperTileTidyRefusals[id] = reason
+                helperTileTidyPending.remove(id)
+                helperTileTidyWaits[id] = nil
+                if reason == "a helper still has its tile" { helperTilesKeptForChild.insert(id) }
+            }
+        }
+        if let nextDelay, !helperTileTidyPending.isEmpty { armHelperTileTidy(in: nextDelay) }
+    }
+
+    private enum HelperTileTidyDecision {
+        case close(UUID)
+        /// Not yet; look again after the delay.
+        case wait(String, TimeInterval)
+        /// Never: the tile is the person's, or the helper did not end done.
+        case keep(String)
+    }
+
+    private func helperTileTidyDecision(_ id: AgentID, now: Date) -> HelperTileTidyDecision {
+        guard let record = agentSupervisor.records[id], let tileId = record.tileId else { return .keep("no tile") }
+        if let refusal = agentSupervisor.helperTileTidyRefusal(id, now: now) {
+            switch refusal {
+            // Passing states: a helper of its own still at work, a turn settling.
+            case "has running helpers", "still busy", "lead has not finished with the result":
+                return .wait(refusal, helperTileTidyRetry)
+            // Its own helper's tile may still be tidied; once none of them can
+            // be, neither can this one.
+            case "a helper still has its tile":
+                let waiting = agentSupervisor.children(of: id).contains { helperTileTidyPending.contains($0) }
+                return waiting ? .wait(refusal, helperTileTidyRetry) : .keep(refusal)
+            default:
+                // Final until a new result is delivered.
+                return .keep(refusal)
+            }
+        }
+        if let handled = helperTilesHandledAt[tileId], let finished = agentSupervisor.helperFirstFinishedAt[id],
+           handled > finished { return .keep("handled since finishing") }
+        // Not mounted (another workspace, a dehydrated zone): look again later.
+        guard let canvasView, let tile = canvasView.tileRecord(for: tileId), tile.kind == .managedAgent,
+              let view = canvasView.tileView(for: tileId) as? ManagedAgentTileNSView
+        else { return .wait("tile not mounted", helperTileTidyRetry) }
+        if view.hasUnsentDraft { return .keep("typed into") }
+        if let confirmed = agentSupervisor.helperResultConfirmedAt(id) {
+            let due = confirmed.addingTimeInterval(helperTileTidyGrace)
+            if due > now { return .wait("grace", due.timeIntervalSince(now)) }
+        }
+        // Focus seen after it finished is a look, even one held across the
+        // finish that never moved the read watermark.
+        if focusBroker.activeSurface == .tile(tileId)
+            || agentSupervisor.focusedAgentID == id { return .keep("focused since finishing") }
+        if canvasView.tileSelection.ids.contains(tileId) { return .wait("selected", helperTileTidyRetry) }
+        if hoveredCompletionTileID == tileId { return .wait("hovered", helperTileTidyRetry) }
+        if canvasView.tileSelection.ownsPointer || canvasView.isGeometryGestureActive {
+            return .wait("gesture", helperTileTidyRetry)
+        }
+        guard controller(owningTile: tileId) != nil else { return .wait("project not live", helperTileTidyRetry) }
+        return .close(tileId)
     }
 
     private func killTmuxWindowForDeletedTerminalTile(tileId: UUID, owner: ZoneRuntimeController?) {
@@ -17427,6 +17594,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             canvasView.removeTile(id: tileId)
             recoverFocusAfterTileRemoval(deletedTileId: tileId, in: canvasView)
         }
+        helperTileClosed(agentId: id)
         let sessions = owner?.managedSessionStore ?? ManagedAgentSessionStore(projectRoot: URL(fileURLWithPath: root))
         try sessions.delete(tileId: tileId)
         reconciledManagedSessionSource.invalidateCache()
@@ -21397,6 +21565,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func wireManagedAgentTile(_ tileId: UUID, agentID: AgentID? = nil, initialLaunchSelection: AgentLaunchSelection? = nil) {
         guard let view = canvasView?.tileView(for: tileId) as? ManagedAgentTileNSView else { return }
         view.onShareRequested = { [weak self] tile in self?.shareAgentTile(tile) }
+        view.onUserDraftEdited = { [weak self] in self?.noteUserHandledTiles([tileId]) }
         view.setTitleBarShareAction(true)
         // A rebuilt view of an agent this Mac shares keeps its "Yours · shared" tab.
         if hostedAgentArea(forTile: view.tile.id) != nil {
@@ -25068,6 +25237,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         canvasView.onTileHoverChanged = { [weak self] tileId, hovered in
             self?.completionHoverChanged(tileId: tileId, hovered: hovered)
+        }
+        // Tidy finished helper tiles: a delivered result starts the grace
+        // period, and the person handling a tile makes it theirs.
+        agentSupervisor.onHelperResultDelivered = { [weak self] id in
+            self?.helperResultDelivered(id)
+        }
+        canvasView.onUserTileGeometryCommitted = { [weak self] tileIds in
+            self?.noteUserHandledTiles(tileIds)
         }
         // WS2 F2: wired HERE for the same reason `onZoneActivated` is. This is the
         // ONLY production route from a committed canvas gesture to durable
