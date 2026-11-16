@@ -28,6 +28,10 @@ import Foundation
 //                    final assistant text (capped; truncation is noted).
 public struct SpawnResultFile: Codable, Equatable, Sendable {
     public static let currentSchema = 1
+    private static let pruneEnumerations = QACounter()
+    private static let pruneDecodes = QACounter()
+    public static var pruneEnumerationsForQA: Int { pruneEnumerations.value }
+    public static var pruneDecodesForQA: Int { pruneDecodes.value }
     /// Bytes of `finalText` kept in a terminal result. The child's full answer
     /// stays in its own transcript; this is a courier, not an archive.
     public static let finalTextByteCap = 32 * 1024
@@ -230,13 +234,15 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
     public static func pruneDeliveredRows(parentCwd: String, helper: UUID? = nil, recipient: UUID? = nil,
                                           before: Date? = nil) {
         let dir = directory(parentCwd: parentCwd).appendingPathComponent(".deliveries")
+        pruneEnumerations.increment()
         guard let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
         for url in urls where url.pathExtension == "json" {
             let name = url.lastPathComponent
             let named = (helper.map { name.hasPrefix($0.uuidString + "-") } ?? false)
                 || (recipient.map { name.hasSuffix("-\($0.uuidString).json") } ?? false)
-            guard named || before != nil,
-                  let row = try? JSONCodec.makeDecoder().decode(Delivery.self, from: Data(contentsOf: url)),
+            guard named || before != nil else { continue }
+            pruneDecodes.increment()
+            guard let row = try? JSONCodec.makeDecoder().decode(Delivery.self, from: Data(contentsOf: url)),
                   row.phase == .delivered, named || (before.map { row.completedAt < $0 } ?? false) else { continue }
             try? FileManager.default.removeItem(at: url)
         }

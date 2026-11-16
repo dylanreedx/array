@@ -1,4 +1,7 @@
 import ContinuumRevivedCore
+#if canImport(Darwin)
+import Darwin
+#endif
 import Foundation
 
 // Ticket: docs/38-tickets/90-agent-ux/P2C.1-worktree-manager.md
@@ -54,12 +57,92 @@ func runWorktreeManagerChecks() {
         try runWorktreeOrphanCheck()
         try runWorktreeRepairCheck()
         try runWorktreeCurrentBranchCheck()
+        #if os(macOS)
+        try runWorktreePipeLifecycleChecks()
+        #endif
         print("WorktreeManager checks: slug purity/determinism, add+list, duplicate slug, existing branch, remove, porcelain parsing, invalid repository, merged-branch deletion, orphan detection, repair, and the checked-out branch + its cache passed")
     } catch {
         fputs("FAIL: WorktreeManager checks failed: \(error)\n", stderr)
         Foundation.exit(1)
     }
 }
+
+#if os(macOS)
+/// Runs the production Process/Pipe path without touching a user's checkout.
+/// The fake git exercises both output streams, a launch failure, and a timeout.
+/// Counting actual process pipe descriptors catches handles held after a call.
+func runWorktreePipeLifecycleChecks() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("worktree-pipes-\(UUID())", isDirectory: true)
+    try fm.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: root) }
+
+    func executable(_ name: String, _ script: String) throws -> URL {
+        let url = root.appendingPathComponent(name)
+        try script.write(to: url, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    func pipeCount() throws -> Int {
+        let size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nil, 0)
+        guard size > 0 else { throw WorktreeCheckError("could not size pipe descriptor list") }
+        let stride = MemoryLayout<proc_fdinfo>.stride
+        var capacity = Int(size) / stride + 32
+        for _ in 0..<4 {
+            var descriptors = [proc_fdinfo](repeating: proc_fdinfo(), count: capacity)
+            let bytes = Int32(capacity * stride)
+            let got = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, &descriptors, bytes)
+            guard got > 0 else { throw WorktreeCheckError("could not read pipe descriptor list") }
+            if got < bytes {
+                return descriptors.prefix(Int(got) / stride).filter { $0.proc_fdtype == PROX_FDTYPE_PIPE }.count
+            }
+            capacity *= 2
+        }
+        throw WorktreeCheckError("pipe descriptor list kept growing")
+    }
+
+    let fake = try executable("fake-git", """
+        #!/bin/sh
+        case "$*" in
+          "rev-parse --git-dir") printf '.git\\n' ;;
+          "rev-parse --abbrev-ref HEAD") printf 'fixture-branch\\n'; printf 'benign stderr\\n' >&2 ;;
+          "rev-parse --verify --quiet refs/heads/failure") printf 'fixture error\\n' >&2; exit 2 ;;
+          *) printf 'unexpected invocation\\n' >&2; exit 7 ;;
+        esac
+        """)
+    let manager = WorktreeManager(gitExecutableURL: fake)
+    let before = try pipeCount()
+    for _ in 0..<24 {
+        let branch = try manager.currentBranch(repo: root)
+        try worktreeExpect(branch == "fixture-branch", "git stdout was lost")
+        do {
+            _ = try manager.branchExists(repo: root, branch: "failure")
+            throw WorktreeCheckError("failing git command unexpectedly succeeded")
+        } catch let error as WorktreeManager.WorktreeError {
+            guard case let .gitFailed(_, code, stderr) = error else { throw error }
+            try worktreeExpect(code == 2 && stderr == "fixture error", "git stderr or status was lost: \(error)")
+        }
+    }
+    let missing = WorktreeManager(gitExecutableURL: root.appendingPathComponent("missing-git"))
+    var launchFailed = false
+    do { _ = try missing.branchExists(repo: root, branch: "missing") }
+    catch { launchFailed = true }
+    try worktreeExpect(launchFailed, "missing git executable unexpectedly launched")
+
+    let slow = try executable("slow-git", "#!/bin/sh\nexec /bin/sleep 5\n")
+    do {
+        _ = try WorktreeManager(timeoutSeconds: 0.05, gitExecutableURL: slow).branchExists(repo: root, branch: "slow")
+        throw WorktreeCheckError("slow git command did not time out")
+    } catch let error as WorktreeManager.WorktreeError {
+        guard case .timedOut = error else { throw error }
+    }
+    let after = try pipeCount()
+    try worktreeExpect(after <= before + 8, "git commands retained pipe descriptors: before=\(before), after=\(after)")
+    print("WorktreeManager pipe lifecycle: stdout/stderr, launch failure, timeout and descriptors passed (\(before) → \(after))")
+}
+
+#endif
 
 struct WorktreeCheckError: Error, CustomStringConvertible {
     let description: String

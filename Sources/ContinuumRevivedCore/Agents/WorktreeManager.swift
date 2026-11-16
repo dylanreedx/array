@@ -482,22 +482,49 @@ public struct WorktreeManager: Sendable {
 
         let output = WorktreeProcessOutput()
         let errorOutput = WorktreeProcessOutput()
+        // Each handler detaches itself at EOF, on its own queue, so a read
+        // handle is closed only after its last availableData has returned.
+        // Setting readabilityHandler = nil from here would not wait for a
+        // callback already inside availableData, which raises on a closed handle.
+        let atEOF = DispatchGroup()
+        atEOF.enter()
+        atEOF.enter()
         stdout.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                atEOF.leave()
+                return
+            }
             output.append(chunk)
         }
         stderr.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                atEOF.leave()
+                return
+            }
             errorOutput.append(chunk)
         }
+        var bothAtEOF = false
         defer {
-            stdout.fileHandleForReading.readabilityHandler = nil
-            stderr.fileHandleForReading.readabilityHandler = nil
+            // Foundation may keep Process and its pipes alive beyond this call.
+            // Release our descriptors now rather than after a whole warm pass.
+            try? stdout.fileHandleForWriting.close()
+            try? stderr.fileHandleForWriting.close()
+            if !bothAtEOF { bothAtEOF = atEOF.wait(timeout: .now() + 1) == .success }
+            if bothAtEOF {
+                try? stdout.fileHandleForReading.close()
+                try? stderr.fileHandleForReading.close()
+            }
+            // Otherwise the read ends close when their handles deallocate.
         }
 
         try process.run()
+        // Our copies of the write ends must close for the read ends to see EOF.
+        try? stdout.fileHandleForWriting.close()
+        try? stderr.fileHandleForWriting.close()
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.01)
@@ -508,7 +535,7 @@ public struct WorktreeManager: Sendable {
             if process.isRunning { process.interrupt() }
             throw WorktreeError.timedOut(arguments: arguments)
         }
-        Thread.sleep(forTimeInterval: 0.02)
+        bothAtEOF = atEOF.wait(timeout: .now() + 1) == .success
 
         let text = String(data: output.data, encoding: .utf8) ?? ""
         if process.terminationStatus != 0 {

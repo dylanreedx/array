@@ -2377,6 +2377,24 @@ enum ContinuumApp {
             CFRunLoopRun()
             return
         }
+        if CommandLine.arguments.contains("--restore-delivery-scaling-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { print(try await RestoreDeliveryScalingChecks.run()); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            CFRunLoopRun()
+            return
+        }
+        if CommandLine.arguments.contains("--startup-branch-warm-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { _ = try await StartupBranchWarmChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            CFRunLoopRun()
+            return
+        }
         if CommandLine.arguments.contains("--restore-scaling-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -11646,7 +11664,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// real session showed ~0.4 s frozen per app switch in synchronous
     /// `rev-parse` spawns from this path); this reads every agent repo once on a
     /// utility queue and re-renders one time if any chip changed.
-    private func warmCheckedOutBranchesIfNeeded() {
+    func warmCheckedOutBranchesIfNeeded() {
         guard !branchWarmInFlight else { return }
         let targets = agentSupervisor.warmCheckedOutBranchTargets()
         guard !targets.isEmpty else { return }
@@ -11667,7 +11685,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private var branchWarmInFlight = false
+    private(set) var branchWarmInFlight = false
 
     /// Push whatever `agentActivity` currently holds at all four surfaces, and
     /// publish the change-set that got it there. Split out of
