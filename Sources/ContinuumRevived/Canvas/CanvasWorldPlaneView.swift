@@ -275,9 +275,9 @@ final class CanvasWorldPlaneView: NSView {
         return ordinals.sorted().map { visibilityTiles[$0] }
     }
 
-    // MARK: Agent bubbles past their tiles' corners
+    // MARK: Agent icons above the tiles
 
-    /// A squircle hangs past its tile, into the gutter a neighbour's selection
+    /// An agent icon draws above every tile, where a neighbour's selection
     /// ring runs along. The rings stop short of every plate they meet, and find
     /// them here: each plate's frame is filed under the cells it covers when it
     /// moves (O(1) a move), and a ring asks only the cells its stroke crosses.

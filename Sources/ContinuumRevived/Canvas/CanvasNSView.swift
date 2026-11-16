@@ -4142,18 +4142,19 @@ final class CanvasNSView: NSView, TokenThemed {
         return (Self.focusBorderColor(named: config.color).withAlphaComponent(0.7), CGFloat(config.gap))
     }
 
-    // MARK: Rings stop short of squircles
+    // MARK: Rings stop short of icons
 
-    /// Where every ring that passes a squircle must not paint: each plate's
+    /// Where every ring that passes an agent icon must not paint: each plate's
     /// outline outset by a breathing gap, in canvas coordinates, for the
-    /// plates along the outline of `ring` (canvas coordinates). Its own tile's
-    /// plate and a neighbour's hanging into the gutter alike. O(1) in the
+    /// plates along the outline of `ring` (canvas coordinates) — a neighbour
+    /// overlapping the ring's tile, say: the icon draws above every tile, and
+    /// no ring may cross it. O(1) in the
     /// number of tiles: the plane answers from the cells the ring's stroke
     /// crosses (`CanvasWorldPlaneView.agentBubbles(alongOutlineOf:margin:)`).
     func agentBubbleRingCut(around ring: CGRect) -> RingCut? {
         let zoom = CGFloat(canvasState.viewport.zoom)
         guard zoom > 0, !ring.isEmpty else { return nil }
-        let breathing = TileAgentBubbleLayer.Squircle.ringBreathing
+        let breathing = TileAgentBubbleLayer.Plate.ringBreathing
         let world = worldPlane.convert(ring, from: self)
         let margin = (breathing + FocusBorderOverlayView.lineWidth) / zoom
         // Ring-local and rounded to 1/64 pt, so a pan (which moves the ring and
@@ -4164,19 +4165,19 @@ final class CanvasNSView: NSView, TokenThemed {
             .map { plate -> RingCut.Plate in
                 let box = convert(plate.frame, from: worldPlane).offsetBy(dx: -ring.minX, dy: -ring.minY)
                 return RingCut.Plate(box: CGRect(x: q(box.minX), y: q(box.minY), width: q(box.width), height: q(box.height)),
-                                     tileRadius: q(plate.bubble.tileRadius * zoom), scale: q(plate.bubble.chromeScale * zoom))
+                                     style: plate.bubble.bubbleStyle, tileRadius: q(plate.bubble.tileRadius * zoom))
             }
         return plates.isEmpty ? nil : RingCut(plates: plates)
     }
 
-    /// The squircles a ring passes, in the ring's own coordinates (origin at
+    /// The icons a ring passes, in the ring's own coordinates (origin at
     /// its frame's top-left): Equatable, so a ring can keep its mask while its
     /// cut is unchanged.
     struct RingCut: Equatable {
         struct Plate: Equatable {
             var box: CGRect
+            var style: AgentCharacterConfig.BubbleStyle
             var tileRadius: CGFloat
-            var scale: CGFloat
         }
         var plates: [Plate]
 
@@ -4184,9 +4185,9 @@ final class CanvasNSView: NSView, TokenThemed {
         var path: CGPath {
             let cut = CGMutablePath()
             for plate in plates {
-                cut.addPath(TileAgentBubbleLayer.Squircle.path(
-                    in: plate.box, tileRadius: plate.tileRadius, scale: plate.scale,
-                    outset: TileAgentBubbleLayer.Squircle.ringBreathing))
+                cut.addPath(TileAgentBubbleLayer.Plate.path(
+                    plate.style, in: plate.box, tileRadius: plate.tileRadius,
+                    outset: TileAgentBubbleLayer.Plate.ringBreathing))
             }
             return cut
         }
@@ -4196,7 +4197,7 @@ final class CanvasNSView: NSView, TokenThemed {
     /// again. O(rings), never O(tiles).
     private func agentBubbleMoved(from old: CGRect?, to new: CGRect?) {
         let zoom = CGFloat(canvasState.viewport.zoom)
-        let reach = (TileAgentBubbleLayer.Squircle.ringBreathing + FocusBorderOverlayView.lineWidth) / max(zoom, 0.0001)
+        let reach = (TileAgentBubbleLayer.Plate.ringBreathing + FocusBorderOverlayView.lineWidth) / max(zoom, 0.0001)
         func near(_ ring: CGRect) -> Bool {
             let world = worldPlane.convert(ring, from: self).insetBy(dx: -reach, dy: -reach)
             return [old, new].contains { $0.map(world.intersects) ?? false }
@@ -6999,8 +7000,8 @@ final class CanvasNSView: NSView, TokenThemed {
         for (rank, entry) in tileEntries.enumerated() {
             let id = ObjectIdentifier(entry.view)
             keys[id] = .init(tier: 2, rank: rank, originalIndex: originals[id] ?? rank)
-            // An agent's bubble breaks its tile's corner, so it sits above every
-            // tile: a neighbour's chrome never cuts it, whichever was focused last.
+            // An agent's icon sits above every tile: nothing on its tile or a
+            // neighbour's draws over it, whichever was focused last.
             if let bubble = entry.view.agentBubbleView, bubble.superview === worldPlane {
                 let bubbleId = ObjectIdentifier(bubble)
                 keys[bubbleId] = .init(tier: 3, rank: rank, originalIndex: originals[bubbleId] ?? rank)
@@ -15035,7 +15036,7 @@ final class FocusBorderOverlayView: NSView, CornerStyled {
     private let outlineMask = CAShapeLayer()
     private(set) var qaResolvedGeometry: TileOutlineGeometry.Result?
     /// Where the ring must not paint, for a ring at a frame (canvas
-    /// coordinates): the squircles it passes (`agentBubbleRingCut`).
+    /// coordinates): the agent icons it passes (`agentBubbleRingCut`).
     var bubbleCut: ((CGRect) -> CanvasNSView.RingCut?)?
     /// The cut and occluders the mask was last built from, overlay-local: a
     /// camera step that moves the ring with its plates rebuilds nothing.

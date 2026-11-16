@@ -117,15 +117,15 @@ enum TileCharacterChecks {
                   let title = view.qaTitleRectInBar() else {
                 throw Failure(description: "zoom \(zoom): no character, mark or title")
             }
-            let scale = rect.height / 12
+            let scale = view.zoomChromeScale
             buckets.append(Double(scale))
-            try expect(abs(rect.width - 20 * scale) < 0.01, "zoom \(zoom): 20 x 12 art at chrome scale \(scale)")
-            // The character lives in its bubble, its art centred in the slot.
-            guard let bubble = view.agentBubbleFrame, let bar = view.qaTitleBarView, let ink = view.qaCharacterInk else {
+            try expect(abs(rect.width / 20 - rect.height / 12) < 0.01, "zoom \(zoom): 20 x 12 art, got \(rect.size)")
+            // The character lives in its bubble, its body centred on the plate.
+            guard let bubble = view.agentBubbleFrame, let bar = view.qaTitleBarView, let body = view.qaCharacterBody else {
                 throw Failure(description: "zoom \(zoom): the character has no bubble")
             }
-            try expect(abs(ink.rect.midX - ink.target.x) < 0.51 && abs(ink.rect.midY - ink.target.y) < 0.51,
-                       "zoom \(zoom): centred in its bubble (\(ink.rect) at \(ink.target))")
+            try expect(abs(body.body.x - body.target.x) < 0.51 && abs(body.body.y - body.target.y) < 0.51,
+                       "zoom \(zoom): centred on its plate (\(body.body) at \(body.target))")
             if title.width > 0 {
                 try expect(title.minX >= mark.maxX + CGFloat(Space.s) * scale - 0.01,
                            "zoom \(zoom): the title starts after the mark (\(title.minX) vs \(mark.maxX))")

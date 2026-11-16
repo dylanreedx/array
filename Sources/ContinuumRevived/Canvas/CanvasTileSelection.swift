@@ -410,7 +410,7 @@ final class TileSelectionOverlay: NSView {
     }
 
     /// The same clipping area is used by drawing and the overlap witness. A
-    /// ring stops short of every squircle it passes, as the ants do. Built in
+    /// ring stops short of every agent icon it passes, as the ants do. Built in
     /// the ring's own coordinates and kept while nothing around it changes, so
     /// a pan, which moves the ring with its plates, subtracts no paths.
     private func visibleArea(_ outline: TileOutlineGeometry.Result) -> CGPath {

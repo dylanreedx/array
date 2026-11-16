@@ -179,12 +179,11 @@ public enum AgentCharacterConfig {
     public static let bubbleStyleKey = "agentCharacters.bubbleStyle"
     /// Where the icon sits on its agent's tile, and what holds it.
     public enum BubbleStyle: String, CaseIterable, Sendable {
-        /// At the start of the title bar, with no container. Never leaves the tile.
+        /// A rounded square on the title's line (square at Sharp corners).
         case inline
-        /// A rounded square tucked into the tile's top-left corner, 4 pt past
-        /// its top and left edges.
+        /// A superellipse on the title's line, the app-icon shape.
         case squircle
-        /// The squircle in glass: a bezel, a lit sphere and a gloss.
+        /// A circle in glass on the title's line.
         case orb
 
         public var title: String {
@@ -194,9 +193,6 @@ public enum AgentCharacterConfig {
             case .orb: return "Orb"
             }
         }
-
-        /// Whether the icon sits in a container breaking the tile's corner.
-        public var breaksCorner: Bool { self != .inline }
     }
     public static let defaultBubbleStyle = BubbleStyle.inline
     /// The stored style; anything else, including 0.7.50's `minimal` (its
