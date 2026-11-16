@@ -226,6 +226,9 @@ final class TileAgentBubbleLayer: CALayer {
         guard style != bubbleStyle else { return }
         bubbleStyle = style
         repaint()
+        // The hover look belongs to the style: an Orb's swell never outlives it,
+        // and a plate hovered as it becomes an Orb swells at once.
+        applyHoverLook(animated: false)
         setNeedsLayout()
         onShapeChange?()
     }
@@ -269,10 +272,29 @@ final class TileAgentBubbleLayer: CALayer {
     func setHovered(_ hovered: Bool) {
         guard hovered != isHovered else { return }
         isHovered = hovered
-        guard bubbleStyle == .orb else { return }
-        let glassOpacity: Float = Self.orbGlassAtRest || hovered ? 1 : 0
-        let swell: CGFloat = hovered ? 1.06 : 1
+        applyHoverLook(animated: true)
+    }
+
+    /// How much a hovered Orb swells; every other plate holds its size.
+    static let orbHoverSwell: CGFloat = 1.06
+    /// The plate's scale now: the Orb's swell while hovered, else 1. Its hit
+    /// shape follows it (`TileNSView.agentBubbleContains`).
+    var hoverSwell: CGFloat { bubbleStyle == .orb && isHovered ? Self.orbHoverSwell : 1 }
+
+    /// The glass and the swell for the current style and hover, from both.
+    private func applyHoverLook(animated: Bool) {
+        let glassOpacity: Float = bubbleStyle == .orb && (Self.orbGlassAtRest || isHovered) ? 1 : 0
+        let swell = CATransform3DMakeScale(hoverSwell, hoverSwell, 1)
         CATransaction.begin()
+        defer { CATransaction.commit() }
+        guard animated, bubbleStyle == .orb else {
+            CATransaction.setDisableActions(true)
+            glass.removeAnimation(forKey: Self.motionKeyPrefix + "hover.glass")
+            removeAnimation(forKey: Self.motionKeyPrefix + "hover.swell")
+            glass.opacity = glassOpacity
+            transform = swell
+            return
+        }
         CATransaction.setAnimationDuration(0.18)
         CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
         let fade = CABasicAnimation(keyPath: "opacity")
@@ -281,9 +303,8 @@ final class TileAgentBubbleLayer: CALayer {
         glass.add(fade, forKey: Self.motionKeyPrefix + "hover.glass")
         let grow = CABasicAnimation(keyPath: "transform")
         grow.fromValue = presentation()?.transform ?? transform
-        transform = CATransform3DMakeScale(swell, swell, 1)
+        transform = swell
         add(grow, forKey: Self.motionKeyPrefix + "hover.swell")
-        CATransaction.commit()
     }
 
     /// Shown while the tile has an icon to put in it.
@@ -396,7 +417,9 @@ final class TileAgentBubbleLayer: CALayer {
         shadowCaster.isHidden = !orb
         shadowCaster.shadowOpacity = Float(dark ? 0.45 : 0.18)
         glass.isHidden = !orb
-        glass.opacity = Self.orbGlassAtRest || isHovered ? 1 : 0
+        // The glass's target opacity for the style and hover: the same value
+        // a hover fade animates to, so setting it never fights the fade.
+        glass.opacity = orb && (Self.orbGlassAtRest || isHovered) ? 1 : 0
         if orb {
             // The lens: clear in the middle, the plate's colour deepening into
             // the edge, as glass thickens towards its rim.
@@ -691,9 +714,10 @@ final class TileAgentBubbleView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let cursorTrackingArea { removeTrackingArea(cursorTrackingArea) }
-        // Include the box's maximum edges too: NSRect excludes them, while the
-        // plate's hit-test includes its outline.
-        let area = NSTrackingArea(rect: bounds.insetBy(dx: -1, dy: -1),
+        // Include the box's maximum edges too (NSRect excludes them, while the
+        // plate's hit-test includes its outline), and a hovered Orb's swell.
+        let reach = 1 + bounds.width * (TileAgentBubbleLayer.orbHoverSwell - 1) / 2
+        let area = NSTrackingArea(rect: bounds.insetBy(dx: -reach, dy: -reach),
                                   options: [.mouseMoved, .cursorUpdate, .mouseEnteredAndExited, .activeInActiveApp],
                                   owner: self, userInfo: nil)
         addTrackingArea(area)

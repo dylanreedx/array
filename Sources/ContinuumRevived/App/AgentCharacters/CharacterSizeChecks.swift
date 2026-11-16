@@ -133,7 +133,22 @@ enum CharacterSizeChecks {
             let band = NSRect(x: 0, y: 0, width: view.bounds.width, height: 60)
             guard let rep = view.bitmapImageRepForCachingDisplay(in: band) else { return nil }
             view.cacheDisplay(in: band, to: rep)
-            return rep.tiffRepresentation
+            guard var data = rep.tiffRepresentation else { return nil }
+            // The icon is the tile's sibling in the world plane, above it: its
+            // own layer tree, rendered, is part of the header's picture.
+            if let host = view.agentBubbleView, let layer = host.layer, !host.isHidden {
+                view.qaAgentBubble?.layoutIfNeeded()
+                let width = Int((host.bounds.width * 4).rounded(.up)), height = Int((host.bounds.height * 4).rounded(.up))
+                guard width > 0, height > 0, let context = CGContext(
+                    data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+                context.scaleBy(x: 4, y: 4)
+                layer.render(in: context)
+                guard let image = context.makeImage(), let icon = NSBitmapImageRep(cgImage: image).tiffRepresentation else { return nil }
+                data.append(icon)
+                data.append(contentsOf: Array("\(host.frame)".utf8))
+            }
+            return data
         }
         func row() -> Data? {
             guard let cell = inbox.cellForQA(id: rowID),
@@ -190,8 +205,8 @@ enum CharacterSizeChecks {
                 // never under a device pixel per art pixel, whatever the size.
                 let sizeScale = max(factor, chrome)
                 let art = sprite.width / 20
-                try expect(abs(sprite.height - 12 * art) < 0.01 && art * backing >= 0.999,
-                           "\(where_): the header character is 20 x 12 art, at least a device pixel each, got \(sprite.size)")
+                try expect(abs(sprite.height - 12 * art) < 0.01 && art * backing * CGFloat(zoom) >= 0.999,
+                           "\(where_): the header character is 20 x 12 art, at least a device pixel each on screen, got \(sprite.size)")
                 if zoom == 1 {
                     // The tile sits on whole points (world 40, 40 at 1). The sprite's
                     // origin is its top-left in the flipped bar: the window's maxY.

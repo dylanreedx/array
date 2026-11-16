@@ -266,6 +266,26 @@ enum TileAgentBubbleChecks {
         }
         try expect(buckets.count >= 3, "the sweep crossed several chrome scale buckets: \(buckets.sorted())")
 
+        // 2a. On a 1x display, zoomed out, the art never drops under a device
+        // pixel per art pixel on screen (the floor counts the zoom).
+        TileNSView.qaCharacterBackingOverride = 1
+        for zoom in [0.5, 0.3, 0.2] {
+            canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: zoom))
+            for view in views { view.qaTitleBarView?.needsLayout = true }
+            canvas.layoutSubtreeIfNeeded()
+            for view in views { view.layoutSubtreeIfNeeded() }
+            for (index, view) in views.enumerated() {
+                guard let art = view.qaArtScale else { throw Failure(description: "1x zoom \(zoom) tile \(index): no art") }
+                let onScreen = art.perArt * CGFloat(zoom)
+                try expect(onScreen >= 0.999,
+                           "1x zoom \(zoom) tile \(index): the art draws \(onScreen) device px per art px on screen")
+            }
+        }
+        TileNSView.qaCharacterBackingOverride = nil
+        for view in views { view.qaTitleBarView?.needsLayout = true }
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        canvas.layoutSubtreeIfNeeded()
+
         // 2b. What is painted where. The world plane's layer tree is rendered
         // in-process (`render(in:)` honours every clip on the way, as the render
         // server does) with the icon shown and faded out. (Not the window
@@ -668,9 +688,9 @@ enum TileAgentBubbleChecks {
         // The art: its typical pose fitted to the plate, never under a device
         // pixel per art pixel, its body on the plate's centre.
         if let art = view.qaArtScale, let fill = view.qaArtFill {
-            try expect(art.perArt * art.backing >= 0.999
-                       && (abs(fill - TileAgentBubbleLayer.Plate.artFit) < 0.01 || art.perArt * art.backing < 1.001),
-                       "\(label): the art's typical pose fills \(fill) of the plate, \(art.perArt * art.backing) device px per art px")
+            let onScreen = art.perArt * art.backing * CGFloat(zoom)
+            try expect(onScreen >= 0.999 && (abs(fill - TileAgentBubbleLayer.Plate.artFit) < 0.01 || fill > TileAgentBubbleLayer.Plate.artFit),
+                       "\(label): the art's typical pose fills \(fill) of the plate, \(onScreen) device px per art px on screen")
         }
         guard let body = view.qaCharacterBody else { throw Failure(description: "\(label): no art") }
         try expect(abs(body.body.x - body.target.x) <= pixel && abs(body.body.y - body.target.y) <= pixel,
@@ -898,6 +918,33 @@ enum TileAgentBubbleChecks {
             try expect(!bubble.isHovered, "glass at rest \(atRest): the box's empty corner is not the orb")
             host.mouseExited(with: move(to: .zero, .mouseMoved))
             try expect(!bubble.isHovered && abs(bubble.transform.m11 - 1) < 0.001, "leaving the orb settles it")
+        }
+        // A hovered Orb takes a press on the rim it swelled to, and only then.
+        let r = icon.width / 2, swollen = r * (1 + (TileAgentBubbleLayer.orbHoverSwell - 1) / 2)
+        let rim = NSPoint(x: icon.midX + swollen / 2.0.squareRoot(), y: icon.midY + swollen / 2.0.squareRoot())
+        try expect(!view.agentBubbleContains(rim), "fixture: at rest the swollen rim is off the orb")
+        host.mouseMoved(with: move(to: NSPoint(x: icon.midX, y: icon.midY), .mouseMoved))
+        try expect(view.agentBubbleContains(rim), "a hovered orb takes a press on the rim it swelled to")
+        // The swell belongs to the Orb: changing style while hovered drops it,
+        // and leaving afterwards leaves the plate at its size.
+        for other in [Style.inline, .squircle] {
+            setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.orb.rawValue)
+            try expect(pump(until: { showsStyle(.orb, views, canvas) }), "Orb again")
+            host.mouseMoved(with: move(to: NSPoint(x: icon.midX, y: icon.midY), .mouseMoved))
+            try expect(bubble.transform.m11 > 1.01, "fixture: the hovered orb swells")
+            setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, other.rawValue)
+            try expect(pump(until: { showsStyle(other, views, canvas) }), "\(other.title) while hovered")
+            try expect(abs(bubble.transform.m11 - 1) < 0.001,
+                       "changing a hovered Orb to \(other.title) keeps its swell (scale \(bubble.transform.m11))")
+            host.mouseExited(with: move(to: .zero, .mouseMoved))
+            try expect(abs(bubble.transform.m11 - 1) < 0.001, "\(other.title) after leaving is at its size")
+            // And the reverse: a hovered plate becoming an Orb swells at once.
+            host.mouseMoved(with: move(to: NSPoint(x: icon.midX, y: icon.midY), .mouseMoved))
+            setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.orb.rawValue)
+            try expect(pump(until: { showsStyle(.orb, views, canvas) }), "Orb while hovered")
+            try expect(bubble.isHovered && bubble.transform.m11 > 1.01,
+                       "a hovered \(other.title) becoming an Orb swells (scale \(bubble.transform.m11))")
+            host.mouseExited(with: move(to: .zero, .mouseMoved))
         }
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
         canvas.layoutSubtreeIfNeeded()
@@ -1165,6 +1212,11 @@ enum TileAgentBubbleChecks {
             host.cursorUpdate(with: event)
             try expect(NSCursor.current == expected, "\(label): cursor entry selects \(expected)")
         }
+        // The pointer leaves: nothing stays hovered for the checks after this.
+        host.mouseExited(with: NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 0, pressure: 0)!)
+        try expect(view.qaAgentBubble?.isHovered == false, "\(style.title): the pointer leaving unhovers the icon")
     }
 
     // MARK: Drag from the icon, on the production mount

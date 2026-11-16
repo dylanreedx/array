@@ -190,6 +190,10 @@ class TileNSView: NSView, TokenThemed {
     }
     var qaCharacterLayer: CharacterSpriteLayer? { titleBar?.characterLayer }
 
+    /// QA: the backing scale a tile icon's art is fitted for, as a 1x display
+    /// would report it; nil reads the window's.
+    static var qaCharacterBackingOverride: CGFloat?
+
     /// The agent's identity colour on its bubble; nil for none.
     func setAgentBubbleTint(_ tint: NSColor?) { titleBar?.bubbleTint = tint }
     var qaAgentBubble: TileAgentBubbleLayer? { titleBar?.bubble }
@@ -210,7 +214,10 @@ class TileNSView: NSView, TokenThemed {
     /// tile, ahead of any resize band.
     func agentBubbleContains(_ local: NSPoint) -> Bool {
         guard let frame = agentBubbleFrame, let bubble = titleBar?.bubble else { return false }
-        return TileAgentBubbleLayer.Plate.path(bubble.bubbleStyle, in: frame, tileRadius: bubble.tileRadius).contains(local)
+        // A hovered Orb swells about its centre: what it paints, it takes.
+        let grow = frame.width * (bubble.hoverSwell - 1) / 2
+        return TileAgentBubbleLayer.Plate.path(bubble.bubbleStyle, in: frame.insetBy(dx: -grow, dy: -grow),
+                                               tileRadius: bubble.tileRadius).contains(local)
     }
 
     /// Put the bubble's view where the bar says the bubble goes: in this tile's
@@ -2810,12 +2817,13 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// whole device pixels: a title-sized plate is a few dozen device pixels,
     /// where a whole-pixel step is half the art's size (and canvas zoom makes
     /// art pixels fractional on screen anyway). Never under one device pixel
-    /// per art pixel, from a device-pixel origin, drawn nearest-neighbour.
+    /// per art pixel ON SCREEN, from a device-pixel origin, drawn
+    /// nearest-neighbour.
     private var characterRect: NSRect? {
         guard let size = characterSize, let bubble = bubbleRect, let art = characterArt else { return nil }
         let backing = backingScaleForCharacter
         func snap(_ value: CGFloat) -> CGFloat { (value * backing).rounded() / backing }
-        let perArt = max(1 / backing, bubble.height * TileAgentBubbleLayer.Plate.artFit / art.typicalSide)
+        let perArt = max(minimumPerArt, bubble.height * TileAgentBubbleLayer.Plate.artFit / art.typicalSide)
         return NSRect(x: snap(bubble.midX - art.body.x * perArt), y: snap(bubble.midY - art.body.y * perArt),
                       width: size.width * perArt, height: size.height * perArt)
     }
@@ -2936,7 +2944,17 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     }
 
     private var backingScaleForCharacter: CGFloat {
-        window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        TileNSView.qaCharacterBackingOverride ?? window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+    }
+
+    /// One device pixel per art pixel on screen, in world points. The zoom is
+    /// the chrome floor's bucket (`TileNSView.chromeScaleBucket`), which never
+    /// exceeds the real zoom, read back from the floored bar: so the art never
+    /// drops under a device pixel, and a camera step inside a bucket moves
+    /// nothing.
+    private var minimumPerArt: CGFloat {
+        let zoom = min(1, TileNSView.minScreenGrabPx / TileNSView.titleBarHeight / max(chromeScale, 1))
+        return 1 / (backingScaleForCharacter * zoom)
     }
 
     private func setHeaderScale(_ scale: CGFloat) {
