@@ -6,18 +6,20 @@
 A/B evidence, archive guard, restore-only witness and deterministic tail fence.
 
 The valid-restart, bounded reload, provider-read pins and related witnesses
-in the latest local draft commit are unfinished and must not ship. The latest targeted retention leg failed: a provider
-history seeded during a yielding reload was missing or duplicated in the
+in local draft commit `253730e8` are unfinished and must not ship. The latest
+targeted retention leg failed: a provider history seeded during a yielding reload was missing or duplicated in the
 reattached tile. That test calls the seed API directly; a slow Copy-here read
 plus notice-only work is source-reachable but has not been witnessed through the
 production entry. Pins under development aim to prevent current production
 callers from entering that state, but do not fix arbitrary direct mid-drain
-seeding. The latest pin draft built successfully, but the latest retention run failed
-(109.5 s): the late-restore check above and a separate inherited `/status`
+seeding. The latest draft and strengthened witnesses built successfully with
+71% free memory and zero other Swift builds. The latest retention run failed
+(108.0 s): the late-restore check above and a separate inherited `/status`
 notice-only reattachment case both lost or duplicated provider history. Isolated
-pin checks reported no failures in that run; their RED controls and a production
-Copy-here path witness have not been run. The prioritized release preview build
-reported complete with exit 0; use the 120-second resource loop below.
+pin checks and the new isolated production Copy-here handoff witness reported
+no failures in that run. The latter proves combined adoption/read retention,
+not each guard independently; their RED controls have not been run. The
+prioritized release preview build reported complete with exit 0; use the 120-second resource loop below.
 
 ## Evidence
 
@@ -25,10 +27,11 @@ reported complete with exit 0; use the 120-second resource loop below.
   byte-identical PNGs to an earlier branch repeat. Adjacent branch light varied.
   The same failure exists on base; no baseline was changed. Artifacts remain at
   `/tmp/array-render-ab.Sd8AsMB9-base` and `...-branch[-paired]`.
-- Retention GREEN on the last built draft passed in 115.6 s: 3 transcripts
-  held, 2,197 released, 2,269 events, heap -14.3 MB. All witnesses are invoked
-  from the existing matrix retention leg; no full matrix was run. That build
-  predates the latest uncommitted changes.
+- Retention GREEN on an earlier built draft passed in 115.6 s: 3 transcripts
+  held, 2,197 released, 2,269 events, heap -14.3 MB. The latest RED run measured
+  3 held, 2,197 released and heap -12.9 MB. All witnesses are invoked
+  from the existing matrix retention leg; no full matrix was run. That earlier
+  GREEN predates the latest witnesses and changes.
 - Save guard, restore-only, strict reload and stale buffered tail all failed
   their specific RED controls and passed GREEN. Reconciliation RED omitted the
   canonical model and failed as expected; six combined RED controls detected
@@ -37,7 +40,9 @@ reported complete with exit 0; use the 120-second resource loop below.
   controls also failed as intended. Migration barrier, retry FIFO, and absence
   after failed read each failed their corresponding RED controls. The bounded
   replay and migration-failure controls have also failed RED as intended;
-  provider-pin changes built and their isolated checks reported no failures; they still need RED controls and production-path coverage.
+  provider-pin changes built and their isolated checks reported no failures;
+  they still need RED controls. The new Copy-here witness reported no failure
+  for the combined adoption/read guards.
 - Resumed-stream COW witness RED moved the entries buffer on 240/240 appends;
   GREEN moved it on 0/240. GREEN large-archive streaming median 0.096 ms,
   p95 0.125 ms; the complete targeted leg took 49.7 s in that run. Timing
@@ -53,8 +58,8 @@ reported complete with exit 0; use the 120-second resource loop below.
   Corrected clean-base samples were 4.045 ms (fail) and 3.298 ms (pass); this
   shows baseline variance but neither proves nor excludes a branch regression.
   Earlier branch GREEN samples were 3.149 ms and 2.729 ms; a later normal
-  run passed at 3.843 ms and an opt-in attribution run passed at 2.994 ms. Do not relax the
-  budget; rerun against final source and investigate any failure. Logs:
+  run passed at 3.843 ms and an opt-in attribution run passed at 2.994 ms.
+  Do not relax the budget; rerun against final source and investigate any failure. Logs:
   `/tmp/array-transcript-final-neighbors.log`, `/tmp/array-perf-base-run1.log`,
   `/tmp/array-perf-base-run2.log`, `/tmp/array-perf-branch-paired.log`.
 - A mistaken macOS process-count preflight briefly started a third Swift build;
@@ -68,16 +73,17 @@ reported complete with exit 0; use the 120-second resource loop below.
    insertion over an existing archive needs explicit provenance and overlap
    semantics: a model-only insertion can break open-stream identity, tool detail
    bindings and sharing. The direct-seed witness exercises that broad case; a
-   reachable slow Copy-here callback is protected by draft pins but is not yet
-   witnessed end to end. Watch/move currently appear to link fresh or existing
+   slow Copy-here callback is now witnessed at the production handoff boundary
+   with synthetic files; the test covers combined adoption/read protection,
+   not the individual pin. Watch/move currently appear to link fresh or existing
    agents before idle release, while the public adoption API permits an already
    released agent. Waiting for reload alone does not resolve archive/provider
    overlap or colliding live identities. Separately, the inherited `/status`
    notice-only case needs safe local-only composition with the canonical
    companion boundary preserved. Document-only reconstruction freezes active
-   state and loses replay tool details; appending provider history after a
-   notice changes ordering. Do not claim pins fix the direct-seed case.
-2. Add pin RED controls and a production-path witness. Verify each relevant
+   state and loses replay tool details; appending provider history after later
+   live turns changes ordering. Do not claim pins fix the direct-seed case.
+2. Add pin RED controls. Verify each relevant
    RED/GREEN result, then rerun the targeted retention leg, save perf,
    transcript/shared/tile neighbors and relay load on the final binary.
 3. Complete independent review of archive/reload, cancellation and shutdown,
