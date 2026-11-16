@@ -725,6 +725,28 @@ extension SidebarLedgerChecks {
             try press(inbox.undoButtonForQA, in: window, "Undo")
             inbox.layoutForQA()
             try expect(liveIDs().isSuperset(of: before), "Undo did not restore the live rows")
+            // A lazy detail reveals that the acknowledged failure was a
+            // blocker all along, without changing its event sequence or time.
+            inbox.scrollToTopForQA()
+            inbox.layoutForQA()
+            guard let again = inbox.itemsForQA.firstIndex(where: {
+                if case .sectionLabel(let s) = $0 { return s.clearCount > 0 }; return false
+            }), let clear = inbox.cellForQA(atItem: again) as? SidebarSectionLabelView else {
+                throw Failure(description: "missing repeated Clear control")
+            }
+            try press(clear.clearButton, in: window, "Clear before detail load")
+            try expect(inbox.clearMarks[uuid(36)] != nil, "unknown failure was not cleared")
+            let revealed = rows().map { r -> AgentInboxRow in
+                var next = r
+                if r.id == uuid(36) { next.failureDetail = usage }
+                return next
+            }
+            inbox.reload(rows: revealed)
+            inbox.layoutForQA()
+            try expect(inbox.clearMarks[uuid(36)] == nil && liveIDs().contains(uuid(36)),
+                       "same-event usage detail left a blocker hidden by Clear")
+            try press(inbox.undoButtonForQA, in: window, "Undo repeated Clear")
+            inbox.layoutForQA()
             reports.append("\(layout.title): 18 = 12 paused + 1 failed + 2 stopped + 3 done = \(count.shown) shown + \(count.folded) folded from rendered rows/AX; fold, Settings Layout, Clear and Undo used NSApp.sendEvent; blockers stayed, marks reloaded, helper activity restored its family")
         }
         return "SidebarLayoutsChecks passed:\n" + reports.joined(separator: "\n")

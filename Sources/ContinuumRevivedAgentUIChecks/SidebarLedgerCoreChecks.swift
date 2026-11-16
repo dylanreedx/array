@@ -198,6 +198,22 @@ func runSidebarLedgerCoreChecks() {
                "new helper activity brings the cleared family back from History")
     }
 
+    // A lazy transcript detail can reveal a blocker on the SAME terminal
+    // event after Clear. It must reappear without waiting for another turn.
+    let unknown = F.row(300, "Initially unknown", outcome: .failed, detail: "No details")
+    let unknownMarks = [unknown.id: SidebarClearMarks.mark(for: unknown, now: F.now)]
+    for detail in [F.usage, "OAuth session expired", "could not start executable"] {
+        var revealed = unknown
+        revealed.failureDetail = detail
+        let applied = SidebarClearMarks.apply(unknownMarks, to: [revealed])
+        expect(applied.released.contains(unknown.id) && !applied.rows[0].isCleared,
+               "a late blocking cause releases an existing Clear mark")
+    }
+    let queued = AgentInboxRow(id: unknown.id, title: unknown.title, state: .ready,
+        createdAt: unknown.createdAt, settlementBlocked: true, terminalEvent: unknown.terminalEvent)
+    expect(SidebarClearMarks.apply(unknownMarks, to: [queued]).released.contains(unknown.id),
+           "new blocked work releases an existing Clear mark")
+
     // 5. Layout setting.
     let suite = "array.sidebar-ledger-core-check.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!

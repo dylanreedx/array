@@ -564,6 +564,9 @@ public enum SidebarClearMarks {
         case .working, .approval, .input: return false
         case .failed, .ready: break
         }
+        // Details can arrive lazily for this same terminal event. A newly
+        // discovered blocker is never hidden behind an old acknowledgement.
+        if row.settlementBlocked || SidebarRecovery.cause(for: row)?.isBlocking == true { return false }
         if (row.terminalEvent?.sequence ?? 0) > mark.sequence { return false }
         let activity = row.lastActiveAt ?? row.terminalEvent?.endedAt ?? row.createdAt
         return activity <= mark.activityAt.addingTimeInterval(activitySlack)
