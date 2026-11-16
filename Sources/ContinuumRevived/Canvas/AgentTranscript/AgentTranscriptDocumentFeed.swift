@@ -19,18 +19,6 @@ struct AgentTranscriptDocumentFeed {
             : AgentTranscriptListView(toolDetailStore: toolDetailStore)
     }
 
-    /// The managed projection retains the reducer's categories across multiple
-    /// mutations. Translate them to the view's version sequence; ambiguous
-    /// insert/remove combinations deliberately fall back to the full walk.
-    mutating func present(_ entries: [AgentEntry], touched: AgentTranscriptProjection.TouchedNodes,
-                          final: Bool, to surface: any AgentTranscriptSurface) throws {
-        let next = AgentDocument(version: rendered.version &+ 1, entries: entries)
-        let patch = try touched.surfacePatch(fromVersion: rendered.version)
-            ?? AgentDocumentPatch.empty(fromVersion: rendered.version)
-        try surface.enqueue(document: next, patch: patch, final: final)
-        rendered = next
-    }
-
     /// `touched` is the source's own changed set. A structural change, or none
     /// known, takes the surface's full walk: the expensive answer is always right.
     mutating func present(_ entries: [AgentEntry], touched: Set<AgentNodeID>, structural: Bool, final: Bool,

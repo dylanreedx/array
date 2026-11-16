@@ -81,38 +81,14 @@ enum SharedAgentHelperChecks {
         let reviewer = try record("Review the diff", parent: lead, observed: true, at: 2, ordinal: { _ in 2 },
                                   pick: set.characters[4].name)
         let unrelated = try record("Someone else's agent", parent: nil, at: 3)
-        let notificationOnly = try record("Notification witness", parent: nil, at: 4)
         let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
                                          warn: { _ in }, nameTitlerCommand: { _ in nil },
                                          transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)))
-        var senderChanges: [String] = []
-        let senderToken = supervisor.addMessageSenderObserver(for: scout) {
-            guard let current = supervisor.records[scout] else { senderChanges.append("absent"); return }
-            senderChanges.append("\(current.identityColor ?? "none"):\(current.tileId != nil)")
-        }
-        var removedSenderChanges = 0
-        let removedToken = supervisor.addMessageSenderObserver(for: notificationOnly) { removedSenderChanges += 1 }
         _ = supervisor.restore()
-        try expect(senderChanges == ["teal:false"] && removedSenderChanges == 1,
-                   "sender observers receive the restored records")
-        try expect(supervisor.setIdentityColor(agentID: scout, "blue"), "sender witness changes colour")
-        let temporaryTile = UUID()
-        supervisor.attach(agentID: scout, to: temporaryTile)
-        supervisor.detachView(agentID: scout)
-        try expect(supervisor.setIdentityColor(agentID: scout, "teal"), "sender witness restores colour")
-        try expect(senderChanges == ["teal:false", "blue:false", "blue:true", "blue:false", "teal:false"],
-                   "sender observer reads colour and tile changes from the live record")
-        _ = supervisor.archive(notificationOnly)
-        try expect(removedSenderChanges == 2 && supervisor.records[notificationOnly] == nil,
-                   "sender observer receives record removal")
-        supervisor.removeMessageSenderObserver(senderToken)
-        supervisor.removeMessageSenderObserver(removedToken)
         supervisor.publishCharacterPacks()
         func deliver(_ event: AgentRuntimeEvent, _ id: AgentID) { supervisor.qaDeliver(event, to: id) }
         func thread(_ id: AgentID) -> String { AgentSupervisor.threadId(for: id) }
         func settle() async { for _ in 0..<20 { await Task.yield() } }
-        var hostStatusChanges: [InboxState?] = []
-        let hostStatusToken = supervisor.addReferenceStatusObserver(for: scout) { hostStatusChanges.append($0) }
 
         // The lead starts a turn and spawns both helpers; each helper works.
         deliver(.turnStarted(threadId: thread(lead), turnId: "lead-1"), lead)
@@ -126,8 +102,6 @@ enum SharedAgentHelperChecks {
         }
         deliver(.turnStarted(threadId: thread(unrelated), turnId: "other"), unrelated)
         await settle()
-        try expect(hostStatusChanges == [.working],
-                   "host reference observer receives the changed agent's runtime status only")
 
         // The production host session.
         let hostID = SharedArea.ID<SharedArea.Host>(), object = SharedArea.ID<SharedArea.Object>()
@@ -205,26 +179,6 @@ enum SharedAgentHelperChecks {
         try expect(roster.rollup.working == 2 && roster.rollup.anyWorking, "the lead's rollup on the guest counts two working helpers")
         try expect(guest.transcriptView.agentMessageSenders.current(scout.rawValue)?.identityColorName == "teal",
                    "a helper's message card on the guest takes its identity colour")
-        // Drive the guest source independently of its view so this also checks
-        // removal and unsubscription without perturbing the lane fixture.
-        let senderRoster = SharedAgentHelperRoster()
-        let senderSource = senderRoster.senderSource
-        var guestSenderChanges = 0
-        let guestSenderToken = senderSource.subscribe(scout.rawValue) { guestSenderChanges += 1 }
-        senderRoster.update(roster.helpers)
-        var changedHelpers = roster.helpers
-        if let index = changedHelpers.firstIndex(where: { $0.id == scout.rawValue }) {
-            changedHelpers[index].identityColor = "blue"
-        }
-        senderRoster.update(changedHelpers)
-        try expect(senderSource.current(scout.rawValue)?.identityColorName == "blue" && guestSenderChanges == 2,
-                   "guest sender observers receive insertion and colour changes")
-        senderRoster.update(changedHelpers.filter { $0.id != scout.rawValue })
-        try expect(senderSource.current(scout.rawValue) == nil && guestSenderChanges == 3,
-                   "guest sender observers receive removal")
-        if let guestSenderToken { senderSource.unsubscribe(guestSenderToken) }
-        senderRoster.update(changedHelpers)
-        try expect(guestSenderChanges == 3, "guest sender unsubscription stops delivery")
 
         // A chip's reveal opens that helper's own stream, drawn by the same renderer.
         guard let reveal = guest.transcriptView.onRevealAgent else { throw Failure(description: "the guest's chips reveal nothing") }
@@ -288,8 +242,6 @@ enum SharedAgentHelperChecks {
 
         // The last helper ends: the glyph clears on the guest as on the host.
         deliver(.turnCompleted(threadId: thread(scout), turnId: "child-1", outcome: .failed, errorMessage: "PRIVATE-CHILD-ERROR"), scout)
-        try expect(hostStatusChanges.last == .failed, "host reference observer receives terminal failure")
-        supervisor.removeReferenceStatusObserver(hostStatusToken)
         await publishAll(); await read()
         try compare("all finished")
         try expect(roster.rollup.working == 0 && roster.rollup.failed == 1 && !roster.rollup.anyWorking,

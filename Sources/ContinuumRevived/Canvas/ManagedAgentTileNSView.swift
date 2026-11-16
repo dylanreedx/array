@@ -258,14 +258,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var managedImageRevisions: [AgentImageAttachmentID: UInt64] = [:]
     private var managedImageAvailable: Set<AgentImageAttachmentID> = []
     private var managedImageHydrating: Set<AgentImageAttachmentID> = []
-    private var managedImageUnresolved: Set<AgentImageAttachmentID> = []
-    private struct ImageRetryNode { var next: AgentImageAttachmentID? }
-    private var imageRetryNodes: [AgentImageAttachmentID: ImageRetryNode] = [:]
-    private var imageRetryHead: AgentImageAttachmentID?
-    private var imageRetryTail: AgentImageAttachmentID?
     private var managedImageBindingGeneration: UInt64 = 0
-    private(set) var qaManagedImageFullScanBlockVisits = 0
-    private(set) var qaManagedImageSyncMetadataVisits = 0
     private let imagePreviewController = AgentImageQuickPreviewController()
     private let statusRowPlacement: AgentStatusRowPlacement
     private var v2Feed = AgentTranscriptDocumentFeed()
@@ -695,19 +688,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         completionRegistry: AgentCompletionProviderRegistry? = nil
     ) {
         v2DraftStore = draftStore
-        if v2AttachmentStore !== attachmentStore {
-            // A lookup result belongs to the store that produced it. Retire
-            // in-flight work and seed this store from the visible document.
-            managedImageBindingGeneration &+= 1
-            managedImageMetadata.removeAll()
-            managedImageRevisions.removeAll()
-            managedImageAvailable.removeAll()
-            managedImageHydrating.removeAll()
-            managedImageUnresolved.removeAll()
-            imageRetryNodes.removeAll()
-            imageRetryHead = nil
-            imageRetryTail = nil
-        }
         v2AttachmentStore = attachmentStore
         v2PromptHistory = promptHistory
         v2CompletionRegistry = completionRegistry ?? v2DefaultCompletionRegistry
@@ -998,9 +978,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         while let notice = noticesAheadOfTail.first, all || notice.afterEvent <= tailEventsRead {
             noticesAheadOfTail.removeFirst()
             if let image = notice.screenshot {
-                if (try? model.appendBrowserScreenshot(id: notice.id, metadata: image)) != nil {
-                    hydrateManagedImages([image])
-                }
+                try? model.appendBrowserScreenshot(id: notice.id, metadata: image)
             } else {
                 model.appendNotice(id: notice.id, title: notice.title, text: notice.body)
             }
@@ -1019,17 +997,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private func installTranscriptSnapshot(_ snapshot: ManagedAgentTranscriptModel) {
         prepareStreamingMarkupForTeardown(final: true)
         model = snapshot
-        hydrateManagedImagesFromDocument()
         descriptor.status = model.currentStatus
         agentStatus = model.currentStatus
         lastForwardedDocumentVersion = nil
         synchronizeV2Transcript(final: true)
         scheduleStreamingMarkupParseTimerIfNeeded()
-    }
-
-    /// Offline check seam, using the same install path as a supervisor attach.
-    func qaInstallTranscriptSnapshotForChecks(_ snapshot: ManagedAgentTranscriptModel) {
-        installTranscriptSnapshot(snapshot)
     }
 
     var agentReferenceForDragging: AgentPromptReference? {
@@ -2173,7 +2145,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         v2Composer?.unbindActionSink()
         v2Composer?.bindCompletionContext(nil)
         managedImageBindingGeneration &+= 1
-        managedImageHydrating.removeAll()
         // Keep transcript-owned image metadata/capabilities alive while the
         // transcript remains on screen; resetProjection owns their purge.
         transcriptCollectionFixture?.bindToolDetailAgent(nil)
@@ -2531,10 +2502,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         managedImageRevisions.removeAll()
         managedImageAvailable.removeAll()
         managedImageHydrating.removeAll()
-        managedImageUnresolved.removeAll()
-        imageRetryNodes.removeAll()
-        imageRetryHead = nil
-        imageRetryTail = nil
         applyHeader(status: model.currentStatus)
         refreshTranscriptThinkingIndicator()
         // A reset restarts the reducer's version numbering, so the forwarded
@@ -2769,7 +2736,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         }
         cancelStreamingMarkupParseTimer()
         model.appendUserPrompt(id: id, prompt: prompt)
-        hydrateManagedImages(prompt.imageAttachments.map(\.metadata))
         // final: true — the user's own words must not wait on the 30Hz streaming gate.
         synchronizeV2Transcript(final: true)
         // S3: your own message is where the transcript goes, even if you had
@@ -2801,9 +2767,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             // The bubble never went anywhere: take it back (the draft is in the
             // composer) and say "Not sent" with the real reason, every time.
             model.withdrawLocalPrompt(id: optimisticID)
-            // Withdrawal is rare; reconcile against the remaining document so
-            // a missing attachment from the refused prompt does not retry forever.
-            hydrateManagedImagesFromDocument()
             showSendRefusedNotice(refusalText(for: refusal))
             return
         }
@@ -2839,7 +2802,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         cancelStreamingMarkupParseTimer()
         guard let id = AgentNodeID(rawValue: "local-prompt-\(UUID().uuidString)") else { return }
         model.appendUserPrompt(id: id, prompt: prompt)
-        hydrateManagedImages(prompt.imageAttachments.map(\.metadata))
         // The user's own prompt is a direct response to their keystroke; echo it
         // without waiting on the streaming gate.
         synchronizeV2Transcript(final: true)
@@ -4028,8 +3990,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                     ) ?? AgentImageThumbnailRequest()
                 }
             },
-            observe: { _, _ in AgentImageResourceObservation() },
-            hasReliableInvalidation: true
+            observe: { _, _ in AgentImageResourceObservation() }
         )
     }
 
@@ -4114,10 +4075,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func hydrateManagedImagesFromDocument() {
-        guard v2AttachmentStore != nil, transcriptAttachmentOwnerAgentID != nil else { return }
+        guard let store = v2AttachmentStore,
+              let agentID = transcriptAttachmentOwnerAgentID else { return }
         var metadataByID: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
         func collect(_ block: AgentBlock) {
-            qaManagedImageFullScanBlockVisits += 1
             switch block.payload {
             case let .image(payload): metadataByID[payload.attachment.id] = payload.attachment
             case let .imageGallery(payload):
@@ -4126,81 +4087,24 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             }
             block.children.forEach(collect)
         }
-        for entry in model.document.entries { entry.blocks.forEach(collect) }
-        managedImageUnresolved.formIntersection(metadataByID.keys)
-        hydrateManagedImages(Array(metadataByID.values))
-    }
-
-    /// The projection creates images only for locally submitted prompts and
-    /// browser screenshots. Register those at their append sites; a restored
-    /// snapshot is scanned once above. Streaming text can then retry unavailable
-    /// images without traversing the entire transcript on every chunk.
-    private func hydrateManagedImages(_ metadata: [AgentImageAttachmentMetadata]) {
-        guard let store = v2AttachmentStore,
-              let agentID = transcriptAttachmentOwnerAgentID else { return }
+        model.document.entries.flatMap(\.blocks).forEach(collect)
         let bindingGeneration = managedImageBindingGeneration
-        var changedExistingMetadata = false
-        for item in metadata {
-            let id = item.id
-            if let previous = managedImageMetadata[id], previous != item {
-                changedExistingMetadata = true
-            }
-            managedImageMetadata[id] = item
-            if !managedImageAvailable.contains(id), managedImageUnresolved.insert(id).inserted {
-                enqueueImageRetry(id)
-            }
+        for (id, metadata) in metadataByID {
+            managedImageMetadata[id] = metadata
             guard !managedImageAvailable.contains(id), !managedImageHydrating.contains(id) else { continue }
             managedImageHydrating.insert(id)
             Task { @MainActor [weak self] in
-                defer {
-                    if self?.managedImageBindingGeneration == bindingGeneration {
-                        self?.managedImageHydrating.remove(id)
-                    }
-                }
+                defer { self?.managedImageHydrating.remove(id) }
                 guard let self, self.managedImageBindingGeneration == bindingGeneration,
                       let stored = try? await store.storedAttachment(for: id),
-                      self.managedImageBindingGeneration == bindingGeneration,
                       Self.isManagedImage(stored, for: agentID),
                       AgentImageFileValidator.validatedLocalImageFile(stored.fileURL) != nil else { return }
                 self.managedImageMetadata[id] = stored.manifest.metadata
                 self.managedImageAvailable.insert(id)
-                self.managedImageUnresolved.remove(id)
                 self.managedImageRevisions[id, default: 0] &+= 1
                 try? self.transcriptCollectionFixture?.updateRenderContext(self.v2RenderContext)
             }
         }
-        // A repeated attachment ID can change metadata already shown by older
-        // blocks. Refresh those cards as well as the newly appended block.
-        if changedExistingMetadata {
-            try? transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
-        }
-    }
-
-    private func retryManagedImages() {
-        // Keep missing attachments eligible without letting old missing files
-        // turn every streamed token into a history-sized scan or I/O burst.
-        // The queue rotates fairly, and stale resolved IDs fall out as visited.
-        for _ in 0..<min(4, imageRetryNodes.count) {
-            guard let id = imageRetryHead, let node = imageRetryNodes.removeValue(forKey: id) else { break }
-            imageRetryHead = node.next
-            if imageRetryHead == nil { imageRetryTail = nil }
-            qaManagedImageSyncMetadataVisits += 1
-            guard managedImageUnresolved.contains(id), let metadata = managedImageMetadata[id] else { continue }
-            enqueueImageRetry(id)
-            hydrateManagedImages([metadata])
-        }
-    }
-
-    private func enqueueImageRetry(_ id: AgentImageAttachmentID) {
-        guard imageRetryNodes[id] == nil else { return }
-        imageRetryNodes[id] = ImageRetryNode(next: nil)
-        if let tail = imageRetryTail { imageRetryNodes[tail]?.next = id }
-        else { imageRetryHead = id }
-        imageRetryTail = id
-    }
-
-    func qaManagedImageSnapshot(_ id: AgentImageAttachmentID) -> AgentImageResourceSnapshot {
-        managedImageSnapshot(id)
     }
 
     private func resolveManagedImageAction(
@@ -4281,8 +4185,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     /// C10: built from `agentSource` (the supervisor), never from anything the
-    /// document carries. The keyed observer includes record and live turn
-    /// changes, including a headless or cross-project agent.
+    /// document carries. `turnSnapshot(for:)` and `addTurnCapabilitiesObserver`
+    /// are both already tile-independent production seams — the same ones a
+    /// headless/cross-project agent's row already resolves through — so a chip
+    /// referencing a tile-less child works exactly like one referencing a
+    /// tiled one.
     private var agentReferenceStatusSource: AgentReferenceStatusSource {
         guard let supervisor = agentSource else { return .unavailable }
         return Self.agentReferenceStatusSource(supervisor)
@@ -4300,12 +4207,15 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             },
             subscribe: { [weak supervisor] rawAgentID, callback in
                 guard let supervisor else { return nil }
-                return supervisor.addReferenceStatusObserver(for: AgentID(rawValue: rawAgentID), callback)
+                let agentID = AgentID(rawValue: rawAgentID)
+                return supervisor.addTurnCapabilitiesObserver { [weak supervisor] changedID in
+                    guard changedID == agentID, let supervisor else { return }
+                    callback(supervisor.turnSnapshot(for: agentID).map { InboxState.state(forSnapshot: $0) })
+                }
             },
             unsubscribe: { [weak supervisor] token in
-                supervisor?.removeReferenceStatusObserver(token)
-            },
-            hasReliableNotifications: true
+                supervisor?.removeTurnCapabilitiesObserver(token)
+            }
         )
     }
 
@@ -4339,17 +4249,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// colour is the one it has now and a deleted sender has no button.
     private var agentMessageSenderSource: AgentMessageSenderSource {
         guard let supervisor = agentSource else { return .unavailable }
-        return AgentMessageSenderSource(
-            current: { [weak supervisor] rawAgentID in
-                guard let record = supervisor?.records[AgentID(rawValue: rawAgentID)] else { return nil }
-                return .init(identityColorName: record.identityColor, hasTile: record.tileId != nil)
-            },
-            subscribe: { [weak supervisor] rawAgentID, callback in
-                supervisor?.addMessageSenderObserver(for: AgentID(rawValue: rawAgentID), callback)
-            },
-            unsubscribe: { [weak supervisor] token in supervisor?.removeMessageSenderObserver(token) },
-            hasReliableNotifications: true
-        )
+        return AgentMessageSenderSource(current: { [weak supervisor] rawAgentID in
+            guard let record = supervisor?.records[AgentID(rawValue: rawAgentID)] else { return nil }
+            return .init(identityColorName: record.identityColor, hasTile: record.tileId != nil)
+        })
     }
 
     private func cancelStreamingMarkupParseTimer() {
@@ -4410,7 +4313,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // chunk — so per-chunk cost grew with conversation length and long
         // sessions stalled the main thread.
         let document = model.document
-        retryManagedImages()
+        hydrateManagedImagesFromDocument()
         refreshReplyOptions(from: document)
         guard document.version != lastForwardedDocumentVersion else { return }
         lastForwardedDocumentVersion = document.version
@@ -4432,7 +4335,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             // in a new place: this asks the reducer, which already computed it,
             // and costs a set union per chunk.
             let touched = model.drainTouchedNodes()
-            try v2Feed.present(document.entries, touched: touched, final: final, to: transcript)
+            try v2Feed.present(document.entries, touched: touched.ids, structural: touched.isStructural,
+                               final: final, to: transcript)
             v2RenderError = nil
             if case .needsAction = v2TurnSnapshot?.state {
                 // A pending request is an interaction boundary, not a streaming

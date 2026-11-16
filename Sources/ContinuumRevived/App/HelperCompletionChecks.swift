@@ -1323,34 +1323,8 @@ enum HelperCompletionChecks {
                 next: "BUSY-NEXT", detailsPath: "BUSY-DETAILS"), for: c)
             finish(c, "group-\(i)", i == 0 ? .failed : .interrupted)
         }
-        // Exercise the real supervisor wake path with accumulated unrelated
-        // couriers, and count actual file read attempts rather than stopwatch
-        // time alone. Every helper's receipt still has to be written.
-        let resultDirectory = SpawnResultFile.directory(parentCwd: cwd.path)
-        for index in 0..<100 {
-            let file = SpawnResultFile(toolCallId: "group-noise-\(index)", status: .completed,
-                                       agentId: UUID(), turnIdentity: UUID().uuidString, recipientId: UUID())
-            let data = try JSONCodec.makeEncoder().encode(file)
-            try data.write(to: SpawnResultFile.url(parentCwd: cwd.path, handle: file.toolCallId))
-        }
-        let fileCount = try FileManager.default.contentsOfDirectory(at: resultDirectory, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "json" }.count
-        var courierReads = 0
-        s.qaHelperCompletionCourierRead = { _ in courierReads += 1 }
         now.addTimeInterval(9)
-        let markStart = ProcessInfo.processInfo.systemUptime
         await s.flushHelperCompletions()
-        let markMillis = (ProcessInfo.processInfo.systemUptime - markStart) * 1_000
-        s.qaHelperCompletionCourierRead = nil
-        print(String(format: "helper batch marking: %d courier reads for %d files and three completions, %.2f ms", courierReads, fileCount, markMillis))
-        try HelperGuardChecks.expect(courierReads <= fileCount + children.count,
-            "helper batch marking reread unrelated couriers: \(courierReads) reads for \(fileCount) files")
-        for child in children {
-            let handle = s.records[child]!.spawnResultHandle!
-            let marked = SpawnResultFile.read(parentCwd: cwd.path, handle: handle)
-            try HelperGuardChecks.expect(marked?.deliveredVia == "wake" && marked?.deliveryReceipt != nil,
-                "helper batch marking missed a delivered courier")
-        }
         let updates = s.queuedMessages(for: parent).filter { isCompletionMessage($0.text) }
         try HelperGuardChecks.expect(updates.count == 1 && children.allSatisfy { updates[0].text.contains(s.records[$0]!.humanDisplayName) }, "busy lead did not queue one grouped update")
         var batchProjection = AgentTranscriptProjection(threadId: "batch-attribution")

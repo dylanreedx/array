@@ -274,7 +274,6 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let y: CGFloat
         let textStart: Int
         let blockID: AgentNodeID
-        let entryID: AgentNodeID
     }
 
     struct ControlKey: Hashable {
@@ -306,14 +305,6 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private var appliedVersion: UInt64?
     private var document = AgentDocument()
     private var renderingError: Error?
-    private var pendingTouchedIDs: Set<AgentNodeID> = []
-    private var pendingNeedsFullRebuild = false
-    private var entryPlacementStarts: [Int] = []
-    private var historicalChipSources: Set<String> = []
-    private var earliestUndatedReasoning: Int?
-    private var hasHistoricalReferences = false
-    private var hasHistoricalSenders = false
-    private var hasHistoricalImages = false
 
     private var cache: [AgentNodeID: LaidBlock] = [:]
     private var placed: [Placed] = []
@@ -355,16 +346,6 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     var imageRequests: [AgentImageAttachmentID: AgentImageThumbnailRequest] = [:]
     var imageObservations: [AgentImageAttachmentID: AgentImageResourceObservation] = [:]
     var statusSubscriptions: [UUID: UUID] = [:]
-    var statusDependents: [UUID: Set<AgentNodeID>] = [:]
-    var senderSubscriptions: [UUID: UUID] = [:]
-    var senderDependents: [UUID: Set<AgentNodeID>] = [:]
-    var imageDependents: [AgentImageAttachmentID: Set<AgentNodeID>] = [:]
-    var blockStatusSources: [AgentNodeID: Set<UUID>] = [:]
-    var blockSenderSources: [AgentNodeID: Set<UUID>] = [:]
-    var blockImageSources: [AgentNodeID: Set<AgentImageAttachmentID>] = [:]
-    var imageProviderGeneration: UInt64 = 0
-    var imageNextRequestGeneration: UInt64 = 0
-    var imageRequestGeneration: [AgentImageAttachmentID: UInt64] = [:]
 
     /// The pasteboard Cmd-C and drawn Copy buttons write. Checks substitute a
     /// private one so a witness never touches the user's clipboard.
@@ -379,8 +360,6 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     /// Documents applied (each a rebuild): the positive control for a witness
     /// that asserts how little each one re-laid.
     private(set) var qaVisualApplyCount = 0
-    /// Semantic units visited by the most recent presentation rebuild.
-    private(set) var qaLastRebuildVisitedBlockCount = 0
     private(set) var qaLastDrawScale: CGFloat = 0
     private(set) var qaLastDrawnLineCount = 0
     private(set) var qaLastDrawnControlCount = 0
@@ -442,13 +421,6 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    isolated deinit {
-        for token in statusSubscriptions.values { renderContext.agentStatus.unsubscribe(token) }
-        for token in senderSubscriptions.values { renderContext.agentMessageSenders.unsubscribe(token) }
-        imageObservations.values.forEach { $0.cancel() }
-        imageRequests.values.forEach { $0.cancel() }
-    }
-
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
     override var acceptsFirstResponder: Bool { true }
@@ -501,18 +473,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     /// A disclosure toggled or a live source moved: re-lay out that unit only and
     /// keep what the reader was looking at where it was.
     func invalidatePresentation(of id: AgentNodeID) {
-        invalidatePresentations(of: [id])
-    }
-
-    func invalidatePresentations(of ids: Set<AgentNodeID>) {
-        guard !ids.isEmpty else { return }
-        var discardedIDs = ids
-        for (key, block) in cache where ids.contains(key) || !block.containedIDs.isDisjoint(with: ids) {
-            discardedIDs.insert(key)
-            discardedIDs.formUnion(block.containedIDs)
-            cache.removeValue(forKey: key)
-        }
-        removeDependencies(blockIDs: discardedIDs)
+        cache.removeValue(forKey: id)
+        for (key, block) in cache where block.containedIDs.contains(id) { cache.removeValue(forKey: key) }
         rebuild()
         scrollOffset = min(scrollOffset, maximumScrollOffset)
         syncCharacters()
@@ -530,27 +492,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             throw UpdateError.versionMismatch(expected: expected, actual: patch.fromVersion)
         }
         latestEnqueuedVersion = patch.toVersion
-        pendingTouchedIDs.formUnion(patch.inserted)
-        pendingTouchedIDs.formUnion(patch.updated)
-        if patch.isEmpty || !patch.removed.isEmpty || !patch.moved.isEmpty {
-            pendingNeedsFullRebuild = true
-        }
         updateScheduler.schedule({ [weak self] in
             guard let self else { return }
-            let ids = self.pendingTouchedIDs
-            let needsFullRebuild = self.pendingNeedsFullRebuild
-            self.pendingTouchedIDs.removeAll(keepingCapacity: true)
-            self.pendingNeedsFullRebuild = false
-            let oldCount = self.document.entries.count
-            let oldTail = self.document.entries.last
             self.document = document
             self.appliedVersion = document.version
             self.qaVisualApplyCount += 1
-            self.preservingTail {
-                if needsFullRebuild || !self.rebuildSuffix(oldCount: oldCount, oldTail: oldTail, touched: ids) {
-                    self.rebuild()
-                }
-            }
+            self.preservingTail { self.rebuild() }
         }, final: final)
     }
 
@@ -565,24 +512,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     func updateRenderContext(_ context: AgentRenderContext) throws {
         let moved = Self.signature(of: context) != Self.signature(of: renderContext)
             || context.tokens != renderContext.tokens
-        imageProviderGeneration &+= 1
-        for token in statusSubscriptions.values { renderContext.agentStatus.unsubscribe(token) }
-        for token in senderSubscriptions.values { renderContext.agentMessageSenders.unsubscribe(token) }
-        statusSubscriptions.removeAll()
-        senderSubscriptions.removeAll()
-        imageObservations.values.forEach { $0.cancel() }
-        imageObservations.removeAll()
-        imageRequests.values.forEach { $0.cancel() }
-        imageRequests.removeAll()
-        imageSources.removeAll()
         renderContext = contextWithDisclosureState(context)
-        for id in statusDependents.keys { subscribeStatusSource(id) }
-        for id in senderDependents.keys { subscribeSenderSource(id) }
-        for id in imageDependents.keys { observeImageSource(id) }
-        // A new image provider may return the same revision for different data.
-        let imageBlocks = Set(imageDependents.values.flatMap { $0 })
-        for id in imageBlocks { cache.removeValue(forKey: id) }
-        for (key, block) in cache where !block.containedIDs.isDisjoint(with: imageBlocks) { cache.removeValue(forKey: key) }
         gyro.apply(theme: context.appearance)
         guard moved else {
             // A new live source (a chip's status, an image's state) changes no
@@ -774,144 +704,10 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
     }
 
-    /// Rebuild a verified tail only. A reducer patch is the authority on which
-    /// nodes changed; missing or ambiguous locality always takes the full walk.
-    private func rebuildSuffix(oldCount: Int, oldTail: AgentEntry?, touched: Set<AgentNodeID>) -> Bool {
-        let entries = document.entries
-        guard oldCount > 0, entries.count >= oldCount,
-              entryPlacementStarts.count == oldCount, let oldTail,
-              entries[oldCount - 1].id == oldTail.id,
-              bounds.width > 0, laidWidth > 0,
-              abs(columnWidth - laidWidth) <= Self.widthHysteresis,
-              !touched.isEmpty else { return false }
-        // External sources are allowed to change independently of the document.
-        // A source without a change contract must retain the full identity walk.
-        if hasHistoricalImages && !renderContext.imageResources.hasReliableInvalidation { return false }
-        if hasHistoricalSenders && !renderContext.agentMessageSenders.hasReliableNotifications { return false }
-        if hasHistoricalReferences && !renderContext.agentStatus.hasReliableNotifications { return false }
-
-        let start = oldCount - 1
-        let suffix = entries[start...]
-        var suffixIDs: Set<AgentNodeID> = []
-        var containsReference = false
-        var containsSender = false
-        var containsImage = false
-        func collect(_ block: AgentBlock) {
-            suffixIDs.insert(block.id)
-            switch block.payload {
-            case .agentReference: containsReference = true
-            case .agentMessage: containsSender = true
-            case .image, .imageGallery: containsImage = true
-            default: break
-            }
-            block.children.forEach(collect)
-        }
-        for entry in suffix {
-            suffixIDs.insert(entry.id)
-            entry.blocks.forEach(collect)
-            if case let .providerItem(_, source?) = entry.provenance,
-               historicalChipSources.contains(source) { return false }
-        }
-        // A new/changed chip may supersede an old provider row or join an old
-        // run. The full planner owns those cases.
-        var oldContainsReference = false
-        func inspectOld(_ block: AgentBlock) {
-            if case .agentReference = block.payload { oldContainsReference = true }
-            block.children.forEach(inspectOld)
-        }
-        oldTail.blocks.forEach(inspectOld)
-        guard !containsReference, !oldContainsReference, touched.isSubset(of: suffixIDs),
-              suffixIDs.isDisjoint(with: chipFold.superseded) else { return false }
-        // A previously undated reasoning span may end at a later dated entry,
-        // even across several undated entries.
-        if let unresolved = earliestUndatedReasoning, unresolved < start,
-           suffix.contains(where: { $0.createdAt != nil }) { return false }
-
-        let first = entryPlacementStarts[start]
-        guard first <= placed.count else { return false }
-        var oldSuffixIDs: Set<AgentNodeID> = []
-        for item in placed[first...] {
-            oldSuffixIDs.insert(item.blockID)
-            runningToolUnits.removeValue(forKey: item.blockID)
-        }
-        placed.removeSubrange(first...)
-        entryPlacementStarts.removeSubrange(start...)
-        var y = placed.last.map { $0.y + $0.block.height } ?? insets.top
-        var text = placed.last.map { $0.textStart + $0.block.textLength } ?? 0
-        var previousEntryID = placed.last?.entryID
-        let signature = Self.signature(of: renderContext)
-        let rowSpacing = CGFloat(renderContext.pageZoom.scaled(8))
-        let turnSpacing = CGFloat(renderContext.pageZoom.scaled(Double(AgentTranscriptLayout.interTurnSpacing)))
-        var relaid: [AgentNodeID] = []
-        qaLastRebuildVisitedBlockCount = 0
-        let earlierUnresolved = earliestUndatedReasoning.flatMap { $0 < start ? $0 : nil }
-        earliestUndatedReasoning = earlierUnresolved
-        var laterDate = false
-        for index in entries[start...].indices.reversed() {
-            let entry = entries[index]
-            if entry.role == .reasoning, entry.createdAt != nil, !laterDate {
-                earliestUndatedReasoning = index
-            }
-            if entry.createdAt != nil { laterDate = true }
-        }
-        for index in start..<entries.count {
-            let entry = entries[index]
-            entryPlacementStarts.append(placed.count)
-            qaLastRebuildVisitedBlockCount += max(1, entry.blocks.count)
-            let units: [Unit]
-            if entry.role == .reasoning {
-                units = entry.lifecycle == .finished && !entry.blocks.isEmpty
-                    ? [.reasoning(entry, duration: Self.reasoningDuration(entries, at: index))] : []
-            } else {
-                units = entry.blocks.map { .block($0, entry) }
-            }
-            for unit in units {
-                oldSuffixIDs.remove(unit.id)
-                let (revision, presented, variant) = identity(of: unit)
-                let laid: LaidBlock
-                if let cached = cache[unit.id], cached.revision == revision, cached.width == laidWidth,
-                   cached.contextSignature == signature, cached.role == entry.role,
-                   cached.variant == variant, cached.presented == presented {
-                    laid = cached
-                } else {
-                    if let stale = cache[unit.id] {
-                        removeDependencies(blockIDs: stale.containedIDs.union([unit.id]))
-                    }
-                    laid = layoutUnit(unit, width: laidWidth, signature: signature, variant: variant)
-                    relaid.append(unit.id)
-                }
-                cache[unit.id] = laid
-                if laid.toolStatus?.running == true { runningToolUnits[unit.id] = unit }
-                if !placed.isEmpty {
-                    y += entry.role == .user && previousEntryID != entry.id ? turnSpacing : rowSpacing
-                }
-                placed.append(Placed(block: laid, y: y, textStart: text, blockID: unit.id, entryID: entry.id))
-                y += laid.height
-                text += laid.textLength
-                previousEntryID = entry.id
-            }
-        }
-        for id in oldSuffixIDs {
-            if let stale = cache.removeValue(forKey: id) {
-                removeDependencies(blockIDs: stale.containedIDs.union([id]))
-            }
-        }
-        blocksBottom = y
-        hasHistoricalSenders = hasHistoricalSenders || containsSender
-        hasHistoricalImages = hasHistoricalImages || containsImage
-        if !runningToolUnits.isEmpty { ToolRowLiveClock.shared.add(self) }
-        qaBlockLayoutCount += relaid.count
-        qaLastRelaidBlockIDs = relaid
-        placeTail()
-        if let anchor = selectionAnchor, anchor > text { selectionAnchor = nil; selectionFocus = nil }
-        return true
-    }
-
     /// Walk the document; lay out only units the cache cannot answer; place all.
     /// Never called from `draw`.
     func rebuild() {
         guard bounds.width > 0 else { return }
-        qaLastRebuildVisitedBlockCount = 0
         let width = (laidWidth > 0 && abs(columnWidth - laidWidth) <= Self.widthHysteresis) ? laidWidth : columnWidth
         if width != laidWidth { qaFullRelayoutCount += 1 }
         laidWidth = width
@@ -929,39 +725,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         var previousEntryID: AgentNodeID?
         let entries = document.entries
         chipFold = Self.foldDelegations(entries)
-        entryPlacementStarts.removeAll(keepingCapacity: true)
-        historicalChipSources.removeAll(keepingCapacity: true)
-        earliestUndatedReasoning = nil
-        hasHistoricalReferences = false
-        hasHistoricalSenders = false
-        hasHistoricalImages = false
-        func inspectDependencies(_ block: AgentBlock) {
-            switch block.payload {
-            case .agentReference: hasHistoricalReferences = true
-            case .agentMessage: hasHistoricalSenders = true
-            case .image, .imageGallery: hasHistoricalImages = true
-            default: break
-            }
-            block.children.forEach(inspectDependencies)
-        }
-        var hasLaterDate = false
-        for index in entries.indices.reversed() {
-            let entry = entries[index]
-            if entry.role == .reasoning, entry.createdAt != nil, !hasLaterDate {
-                earliestUndatedReasoning = index
-            }
-            if entry.createdAt != nil { hasLaterDate = true }
-            for block in entry.blocks {
-                inspectDependencies(block)
-                if case let .agentReference(reference) = block.payload,
-                   let source = reference.sourceItemID, !source.isEmpty {
-                    historicalChipSources.insert(source)
-                }
-            }
-        }
         for (entryIndex, entry) in entries.enumerated() {
-            entryPlacementStarts.append(result.count)
-            qaLastRebuildVisitedBlockCount += max(1, entry.blocks.count)
             var units: [Unit] = []
             if entry.role == .reasoning {
                 // Open reasoning is shown by the tail status, as in the list.
@@ -986,9 +750,6 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                    cached.variant == variant, cached.presented == presented {
                     laid = cached
                 } else {
-                    if let stale = cache[unit.id] {
-                        removeDependencies(blockIDs: stale.containedIDs.union([unit.id]))
-                    }
                     laid = layoutUnit(unit, width: width, signature: signature, variant: variant)
                     relaid.append(unit.id)
                 }
@@ -1000,7 +761,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                     let startsTurn = entry.role == .user && previousEntryID != entry.id
                     y += startsTurn ? turnSpacing : rowSpacing
                 }
-                result.append(Placed(block: laid, y: y, textStart: text, blockID: unit.id, entryID: entry.id))
+                result.append(Placed(block: laid, y: y, textStart: text, blockID: unit.id))
                 y += laid.height
                 text += laid.textLength
                 previousEntryID = entry.id
@@ -1017,9 +778,6 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         if let anchor = selectionAnchor, anchor > text { selectionAnchor = nil; selectionFocus = nil }
         let liveBlocks = Set(next.keys)
         regionOffsets = regionOffsets.filter { liveBlocks.contains($0.key.blockID) }
-        var liveDependencyBlocks = liveBlocks
-        for block in next.values { liveDependencyBlocks.formUnion(block.containedIDs) }
-        reconcileDependencies(liveBlockIDs: liveDependencyBlocks)
     }
 
     // MARK: Running tool clocks
@@ -1046,7 +804,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 break
             }
             cache[item.blockID] = laid
-            placed[index] = Placed(block: laid, y: item.y, textStart: item.textStart, blockID: item.blockID, entryID: item.entryID)
+            placed[index] = Placed(block: laid, y: item.y, textStart: item.textStart, blockID: item.blockID)
             qaLiveClockRelayoutCount += 1
             setNeedsDisplay(NSRect(x: 0, y: item.y - scrollOffset, width: bounds.width, height: laid.height))
         }

@@ -3845,7 +3845,6 @@ enum ContinuumApp {
             Task { @MainActor in
                 do {
                     try await runAgentAccountUsageAppChecks()
-                    try runAgentQuotaFanoutChecks()
                     try await runAgentAccountSwitchChecks()
                     try await runAgentAccountSameLoginChecks()
                     if let capture = ProcessInfo.processInfo.environment["CONTINUUM_ACCOUNT_USAGE_CAPTURE_DIR"],
@@ -4666,18 +4665,6 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 try StreamingIngestChecks.run()
                 print("StreamingIngestChecks passed")
-                Foundation.exit(0)
-            } catch {
-                fputs("FAIL: \(error)\n", stderr)
-                Foundation.exit(1)
-            }
-        }
-
-        if CommandLine.arguments.contains("--long-transcript-performance-check") {
-            do {
-                _ = NSApplication.shared
-                try LongTranscriptPerformanceChecks.run()
-                print("LongTranscriptPerformanceChecks passed")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

@@ -73,42 +73,9 @@ private func checkAssistantDeltasSkipSeparatorSourceReads() {
     print("Assistant separator work checks passed: 1/20/100 KiB answers, 200 Unicode deltas each, zero separator source reads; whole reasoning chunks preserved")
 }
 
-/// The reducer may insert, update and finish one new entry before the surface
-/// consumes it. Its single view-version edge must retain those identities, and
-/// remove/reinsert of the same ID must not masquerade as an append.
-private func checkCoalescedSurfacePatch() {
-    var projection = AgentTranscriptProjection(threadId: "surface-patch")
-    let id = AgentNodeID(rawValue: "surface-patch-prompt")!
-    _ = try? projection.appendUserPrompt(id: id, text: "first")
-    let inserted = projection.drainTouchedNodes()
-    guard let entry = projection.document.entries.first,
-          let block = entry.blocks.first,
-          let patch = try? inserted.surfacePatch(fromVersion: 12) else {
-        expect(false, "coalesced prompt must produce a structural view patch")
-        return
-    }
-    expect(patch.fromVersion == 12 && patch.toVersion == 13,
-           "view patch must advance the surface version exactly once")
-    expect(Set(patch.inserted) == Set([id, block.id]) && patch.updated.isEmpty,
-           "an inserted prompt and its block stay inserted after their updates and finish")
-    expect(patch.removed.isEmpty && patch.moved.isEmpty,
-           "a new prompt must not invent removals or moves")
-
-    _ = try? projection.withdrawLocalPrompt(id: id)
-    _ = try? projection.appendUserPrompt(id: id, text: "replacement")
-    let replacement = projection.drainTouchedNodes()
-    expect((try? replacement.surfacePatch(fromVersion: 13)) == nil,
-           "remove/reinsert of the same ID must decline the incremental patch")
-    expect(projection.document.entries.first?.blocks.first?.payload == .paragraph([.text("replacement")]),
-           "declining an ambiguous patch must retain the replacement document")
-    expect(projection.drainTouchedNodes().ids.isEmpty,
-           "draining must clear the accumulated categories")
-}
-
 func runAgentTranscriptProjectionChecks() {
     checkSteeringPreservesRequestTiming()
     checkAssistantDeltasSkipSeparatorSourceReads()
-    checkCoalescedSurfacePatch()
     let thread = "projection-thread"
     var projection = AgentTranscriptProjection(threadId: thread)
 

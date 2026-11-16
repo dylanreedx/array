@@ -251,9 +251,6 @@ enum AgentImageThumbnailResult {
 /// cancellable bounded thumbnail requests, and revision invalidation only; full
 /// originals and local file URLs stay behind the action owner boundary.
 struct AgentImageResourceProvider: @unchecked Sendable {
-    /// True only when every change to a snapshot invalidates its presentation or
-    /// refreshes the transcript render context.
-    let hasReliableInvalidation: Bool
     private let snapshotValue: (AgentImageAttachmentID) -> AgentImageResourceSnapshot
     private let requestThumbnailValue: (
         AgentImageAttachmentID,
@@ -275,10 +272,8 @@ struct AgentImageResourceProvider: @unchecked Sendable {
         },
         observe: @escaping (AgentImageAttachmentID, @escaping @MainActor (UInt64) -> Void) -> AgentImageResourceObservation = { _, _ in
             AgentImageResourceObservation()
-        },
-        hasReliableInvalidation: Bool = false
+        }
     ) {
-        self.hasReliableInvalidation = hasReliableInvalidation
         snapshotValue = snapshot
         requestThumbnailValue = requestThumbnail
         observeValue = observe
@@ -304,9 +299,9 @@ struct AgentImageResourceProvider: @unchecked Sendable {
         observeValue(id, invalidated)
     }
 
-    static let unavailable = AgentImageResourceProvider(snapshot: { id in
+    static let unavailable = AgentImageResourceProvider { id in
         AgentImageResourceSnapshot(attachmentID: id, state: .missing)
-    }, hasReliableInvalidation: true)
+    }
 }
 
 /// Running tool durations belong to one rendered transcript. The same semantic

@@ -120,7 +120,6 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
     /// Parses and renders a complete Markdown document. Cheap to call again: the
     /// tile keeps one loaded-text snapshot and only re-renders on a theme change.
     func apply(markdown: String, theme: TokenTheme) {
-        qaMarkdownApplyCount += 1
         let priorOffset = scrollView.contentView.bounds.origin
         body.apply(markdown: markdown, theme: theme)
         body.layoutSubtreeIfNeeded()
@@ -129,7 +128,6 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
     }
 
     func applyTheme(_ theme: TokenTheme) {
-        qaThemeApplicationCount += 1
         body.applyTheme(theme)
     }
 
@@ -137,9 +135,6 @@ final class FileMarkdownDocumentView: NSView, RichInlineTextSelectionContainer {
     var scrollOrigin: CGPoint { scrollView.contentView.bounds.origin }
 
     // MARK: - QA introspection
-
-    private(set) var qaMarkdownApplyCount = 0
-    private(set) var qaThemeApplicationCount = 0
 
     /// The laid-out block views, in document order.
     var qaBlockViews: [NSView] { body.blockViews }
