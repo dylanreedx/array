@@ -217,8 +217,27 @@ enum SidebarOwnershipChecks {
                   open.accessibilityLabel()?.contains("branch array/integration") == true else {
                 throw Failure(description: "\(label): the open lead must keep its shared count and expose its branch to AX: \(open.visibleTextForQA)")
             }
-            guard try cell(reporter).reportPillForQA == "1/6 failed" else {
-                throw Failure(description: "\(label): the report result is not the small pill")
+            // A finished helper's report check that did not pass is a NEUTRAL
+            // pill: the agent did not fail, so no failure red is drawn.
+            let reportCell = try cell(reporter)
+            guard reportCell.reportPillForQA == "1 unconfirmed" else {
+                throw Failure(description: "\(label): the report result is not the small pill: \(reportCell.reportPillForQA ?? "nil")")
+            }
+            guard let pill = reportCell.reportPillFrameForQA, pill.width > 0,
+                  let rep = reportCell.bitmapImageRepForCachingDisplay(in: pill),
+                  let red = AccentToken.accentFailed.color.nsColor(in: reportCell).usingColorSpace(.sRGB) else {
+                throw Failure(description: "\(label): the report pill is not drawn")
+            }
+            reportCell.cacheDisplay(in: pill, to: rep)
+            var inked = 0, reddish = 0
+            for x in 0..<rep.pixelsWide { for y in 0..<rep.pixelsHigh {
+                guard let px = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), px.alphaComponent > 0.4 else { continue }
+                inked += 1
+                let d = abs(px.hueComponent - red.hueComponent)
+                if px.saturationComponent > 0.3, min(d, 1 - d) < 0.035 { reddish += 1 }
+            } }
+            guard inked > 0, reddish < 8 else {
+                throw Failure(description: "\(label): a succeeded helper's unconfirmed-checks pill paints the failure red (\(reddish) red px of \(inked))")
             }
             let probe = try cell(verify + 1)
             guard probe.visibleTextForQA.contains(where: { $0.contains("Calling /usage") }) else {

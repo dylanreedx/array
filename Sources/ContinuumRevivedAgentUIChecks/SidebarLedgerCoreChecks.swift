@@ -117,6 +117,25 @@ func runSidebarLedgerCoreChecks() {
                         detail: "Array restarted while this helper was working, so its turn did not finish.")
     expect(SidebarRecovery.cause(for: restart) == .interruptedByRestart && SidebarRecovery.state(for: restart) == .stopped,
            "restart interruption is its own cause, counted as stopped")
+    // A succeeded helper whose report has checks that did not pass did NOT fail:
+    // it counts as done, and no count line or fold count says "failed" for it.
+    let researchLead = F.row(950, "Research lead")
+    let research = AgentInboxRow(
+        id: F.id(951), title: "Weekend news roundup", projectName: "Array", state: .ready,
+        createdAt: F.now.addingTimeInterval(-600), parentId: F.id(950),
+        terminalEvent: AgentTerminalEvent(sequence: 1, turnID: nil, outcome: .succeeded,
+                                          endedAt: F.now.addingTimeInterval(-60)),
+        selfReport: InboxSelfReport(checksPassed: 0, checksFailed: 3))
+    if case let .checks(failed, total)? = research.selfReportLine {
+        expect(failed == 3 && total == 3, "setup: the report carries 3 of 3 checks that did not pass")
+    } else { expect(false, "setup: a finished helper's report must surface its checks") }
+    expect(SidebarRecovery.state(for: research) == .done, "report checks that did not pass do not make a succeeded helper failed")
+    for shownIDs in [Set<UUID>(), Set([research.id])] {
+        let researchTally = SidebarLeadTally.tally(leadId: researchLead.id, rows: [researchLead, research], shownIDs: shownIDs)
+        expect(researchTally.count(.failed) == 0 && (researchTally.foldedCounts[.failed] ?? 0) == 0
+               && !researchTally.countLine.contains("failed"),
+               "report checks must never count as failed agents: \(researchTally.countLine)")
+    }
 
     // 2. One reconciled count, through the real bounded fold.
     let rows = F.releaseFamily
