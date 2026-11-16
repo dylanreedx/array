@@ -298,7 +298,7 @@ public final class AgentStore: @unchecked Sendable {
     public func delete(id: AgentID) throws {
         // Every copy: a quarantined one left behind would bring a deleted
         // agent back on the next lookup by id.
-        for copy in [layout.archivedAgentFile(id: id)] + quarantinedCopies(id: id)
+        for copy in try [layout.archivedAgentFile(id: id)] + quarantinedCopies(id: id)
             where FileManager.default.fileExists(atPath: copy.path) {
             try FileManager.default.removeItem(at: copy)
         }
@@ -401,7 +401,7 @@ public final class AgentStore: @unchecked Sendable {
     /// before it moves; a file that still holds no record stays and throws.
     /// nil when the quarantine does not hold `id`; a live copy wins.
     public func unquarantine(id: AgentID) throws -> AgentRecord? {
-        let copies = quarantinedCopies(id: id)
+        let copies = try quarantinedCopies(id: id)
         guard !copies.isEmpty else { return nil }
         var info = stat()
         let live = layout.agentFile(id: id)
@@ -423,16 +423,28 @@ public final class AgentStore: @unchecked Sendable {
     }
 
     /// Every quarantined copy of `id`: `<id>.json`, then the suffixed copies
-    /// `quarantine` makes when that name is taken.
-    public func quarantinedCopies(id: AgentID) -> [URL] {
+    /// `quarantine` makes when that name is taken, newest first. Throws
+    /// unless absence is proven: a delete must not take an unreadable
+    /// quarantine for an empty one.
+    public func quarantinedCopies(id: AgentID) throws -> [URL] {
+        let directory = layout.archiveQuarantineDirectory
         let canonical = quarantinedAgentFile(id: id)
         var info = stat()
-        var copies = lstat(canonical.path, &info) == 0 ? [canonical] : []
+        if lstat(directory.path, &info) != 0 {
+            guard errno == ENOENT else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            return []
+        }
+        var copies: [URL] = []
+        if lstat(canonical.path, &info) == 0 { copies.append(canonical) }
+        else if errno != ENOENT { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         let prefix = canonical.lastPathComponent + "."
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: layout.archiveQuarantineDirectory.path)) ?? []
-        copies += names.filter { $0.hasPrefix(prefix) }.sorted()
-            .map { layout.archiveQuarantineDirectory.appendingPathComponent($0, isDirectory: false) }
-        return copies
+        let suffixed = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey])
+            .filter { $0.lastPathComponent.hasPrefix(prefix) }
+        func modified(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        }
+        return copies + suffixed.sorted { modified($0) > modified($1) }
     }
 
     /// Damaged, not unreachable: a file whose bytes cannot be read at all

@@ -3043,6 +3043,8 @@ final class AgentSupervisor {
             unarchiveAllBeforeRestore()
         }
         let stored: [AgentRecord]
+        // A file written after this instant may say something restore did not read.
+        let restoreReadAt = Date()
         do {
             stored = try store.loadAll()
         } catch {
@@ -3194,7 +3196,7 @@ final class AgentSupervisor {
         settleHelpersCutOffByRestart()
         if AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
             archiveMayHoldRecords = true
-            scheduleRecordArchivePass(stored: stored, skipped: Set(report.skipped))
+            scheduleRecordArchivePass(stored: stored, skipped: Set(report.skipped), readAt: restoreReadAt)
         }
         for root in Set(records.values.map(\.checkoutRoot)) {
             ProjectStandardsPresence.shared.refresh(checkoutRoot: URL(fileURLWithPath: root, isDirectory: true))
@@ -3213,7 +3215,7 @@ final class AgentSupervisor {
     /// area), so the pass itself runs once they are in, on the main thread,
     /// against the live state of that moment. The boot does not wait for it:
     /// the records it moves leave a sidebar that has already drawn them.
-    private func scheduleRecordArchivePass(stored: [AgentRecord], skipped: Set<AgentID>) {
+    private func scheduleRecordArchivePass(stored: [AgentRecord], skipped: Set<AgentID>, readAt: Date) {
         let scan = recordArchiveSharedAgents
         recordArchivePassForQA?.cancel()
         recordArchivePassCostForQA = nil
@@ -3227,7 +3229,7 @@ final class AgentSupervisor {
             switch shared {
             case let .success(shared):
                 let start = ContinuousClock.now
-                self.archiveIdleRecords(shared: shared, stored: stored, skipped: skipped)
+                self.archiveIdleRecords(shared: shared, stored: stored, skipped: skipped, readAt: readAt)
                 self.recordArchivePassCostForQA = (scanMs, Self.milliseconds(ContinuousClock.now - start))
             case let .failure(error):
                 self.warn("AgentSupervisor.restore: archive skipped, shared-area bindings are unreadable: \(error)")
@@ -3244,7 +3246,7 @@ final class AgentSupervisor {
     /// process, a queue, an event this session delivered, a durable wakeup, a
     /// shared-area binding, a parent's subscription or undelivered completion,
     /// or a child that stays.
-    private func archiveIdleRecords(shared: Set<AgentID>, stored: [AgentRecord], skipped: Set<AgentID>) {
+    private func archiveIdleRecords(shared: Set<AgentID>, stored: [AgentRecord], skipped: Set<AgentID>, readAt: Date) {
         // The gate may have gone off while the bindings were read.
         guard AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) else { return }
         let now = recordArchiveNow()
@@ -3282,26 +3284,38 @@ final class AgentSupervisor {
                 if pending?.contains(id.rawValue) ?? true { eligible.remove(id) }
             }
         }
-        // Never strand a child that stays: its parent stays too, up the tree.
-        // Every live record counts, including one that came live after
-        // restore (a spawn, an adoption by id), which `current` never held.
-        let everyone = Array(current.values) + records.values.filter { current[$0.id] == nil }
-        var changed = true
-        while changed {
-            changed = false
-            for record in everyone where !eligible.contains(record.id) {
-                if let parent = record.parentAgentID, eligible.remove(parent) != nil { changed = true }
-            }
-        }
         var moved: [AgentID] = []
         do {
             try withAgentStoreLock {
-                for id in eligible.sorted(by: { $0.rawValue.uuidString < $1.rawValue.uuidString }) {
-                    // Judged again on the durable copy, under the lock: another
-                    // instance on this store may have changed it since restore
-                    // (marked it active, prompted it, gave it a tile).
+                // Judged again on the durable copy, under the lock: another
+                // instance on this store may have changed a record since
+                // restore read it (marked it active, prompted it, gave it a
+                // tile). A file untouched since then is what restore read; one
+                // written since is decoded and judged again; anything unclear
+                // stays.
+                for id in eligible {
+                    var info = stat()
+                    guard lstat(store.layout.agentFile(id: id).path, &info) == 0 else { eligible.remove(id); continue }
+                    let written = Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec)
+                        + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9)
+                    guard written >= readAt else { continue }
                     guard let durable = try? store.load(id: id),
-                          AgentRecordArchivePolicy.recordAllowsArchive(durable, now: now) else { continue }
+                          AgentRecordArchivePolicy.recordAllowsArchive(durable, now: now) else { eligible.remove(id); continue }
+                }
+                // Never strand a child that stays: its parent stays too, up the
+                // tree. After the durable check, so a child it kept keeps its
+                // parent. Every live record counts, including one that came
+                // live after restore (a spawn, an adoption by id), which
+                // `current` never held.
+                let everyone = Array(current.values) + records.values.filter { current[$0.id] == nil }
+                var changed = true
+                while changed {
+                    changed = false
+                    for record in everyone where !eligible.contains(record.id) {
+                        if let parent = record.parentAgentID, eligible.remove(parent) != nil { changed = true }
+                    }
+                }
+                for id in eligible.sorted(by: { $0.rawValue.uuidString < $1.rawValue.uuidString }) {
                     do { try store.archive(id: id); moved.append(id) } catch {
                         warn("AgentSupervisor.restore: could not archive agent \(id.rawValue.uuidString): \(error)")
                     }
@@ -3355,6 +3369,8 @@ final class AgentSupervisor {
     /// records the live set lacks. Cleared when the gate goes off and they are
     /// brought back.
     private var archiveMayHoldRecords = false
+    /// The ids `adoptArchivedAgent` is bringing back right now, up a parent chain.
+    private var adoptingArchivedIDs: Set<AgentID> = []
 
     /// The gate went off while Array runs. With it off nothing adopts by id,
     /// so what this session's restore archived would answer not_found until
@@ -3387,9 +3403,13 @@ final class AgentSupervisor {
     @discardableResult
     func adoptArchivedAgent(_ id: AgentID, fileManager: FileManager = .default) -> Bool {
         if records[id] != nil { return true }
-        // Most ids asked about are simply unknown: answer those with two stats.
+        // A malformed parent chain (a cycle) ends here rather than recursing.
+        guard adoptingArchivedIDs.insert(id).inserted else { return false }
+        defer { adoptingArchivedIDs.remove(id) }
+        // Most ids asked about are simply unknown: answer those with a stat and
+        // a listing of a quarantine that is usually absent.
         let archived = fileManager.fileExists(atPath: store.layout.archivedAgentFile(id: id).path)
-        guard archived || fileManager.fileExists(atPath: store.quarantinedAgentFile(id: id).path) else { return false }
+        guard archived || !((try? store.quarantinedCopies(id: id)) ?? []).isEmpty else { return false }
         let record: AgentRecord?
         do {
             record = try withAgentStoreLock { archived ? try store.unarchive(id: id) : try store.unquarantine(id: id) }
@@ -3407,7 +3427,7 @@ final class AgentSupervisor {
         let id = record.id
         // Its parent first: one archived on a later launch than the child would
         // otherwise leave it live with no parent record, and parent lookups do
-        // not adopt. Ends at a live or unknown id, so a cycle cannot loop.
+        // not adopt. `adoptingArchivedIDs` ends a malformed cycle.
         if let parent = record.parentAgentID { adoptArchivedAgent(parent, fileManager: fileManager) }
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: record.cwd, isDirectory: &isDirectory), isDirectory.boolValue else {

@@ -944,6 +944,36 @@ enum AgentRecordArchiveChecks {
                    && exists(store.layout.agentFile(id: twice.id)),
                    "a readable second quarantined copy comes back by id, under the canonical name")
 
+        // Only a suffixed copy left (the canonical one was recovered or moved out).
+        let suffixOnly = idleRecord("Only a suffixed copy", cwd: root.path, idleFor: 30, clock: now)
+        try JSONCodec.makeEncoder().encode(suffixOnly).write(to: URL(fileURLWithPath:
+            store.quarantinedAgentFile(id: suffixOnly.id).path + ".\(UUID().uuidString)"))
+        try expect(supervisor.adoptArchivedAgent(suffixOnly.id) && exists(store.layout.agentFile(id: suffixOnly.id)),
+                   "a suffix-only quarantined copy comes back by id")
+
+        // A delete that cannot read the quarantine deletes nothing.
+        var guarded = idleRecord("Delete with an unreadable quarantine", cwd: root.path, idleFor: 30, clock: now)
+        guarded.settledOverride = .active
+        try write([guarded], to: store)
+        let quarantineDir = store.layout.archiveQuarantineDirectory
+        try fm.copyItem(at: store.layout.agentFile(id: guarded.id), to: store.quarantinedAgentFile(id: guarded.id))
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: quarantineDir.path)
+        let blocked: Bool
+        do { try store.delete(id: guarded.id); blocked = false } catch { blocked = true }
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: quarantineDir.path)
+        try expect(blocked && exists(store.layout.agentFile(id: guarded.id)),
+                   "a delete that cannot read the quarantine fails and keeps the live record")
+        try fm.removeItem(at: store.quarantinedAgentFile(id: guarded.id))
+
+        // A malformed self-parent with a damaged first copy and a readable second one.
+        var cyclic = idleRecord("Its own parent", cwd: root.path, idleFor: 30, clock: now)
+        cyclic.parentAgentID = cyclic.id
+        try Data("{ damaged".utf8).write(to: store.quarantinedAgentFile(id: cyclic.id))
+        try JSONCodec.makeEncoder().encode(cyclic).write(to: URL(fileURLWithPath:
+            store.quarantinedAgentFile(id: cyclic.id).path + ".\(UUID().uuidString)"))
+        try expect(supervisor.adoptArchivedAgent(cyclic.id) && supervisor.records[cyclic.id] != nil,
+                   "a record that names itself as parent comes back without looping")
+
         try expect(supervisor.records[deleted.id] != nil, "fixture: the deleted agent is live")
         let report = supervisor.archive(deleted.id)
         try expect(report.recordDeleted && !exists(store.layout.agentFile(id: deleted.id)), "the delete removes the live record")
@@ -966,7 +996,12 @@ enum AgentRecordArchiveChecks {
         let store = AgentStore(applicationSupportDirectory: support)
         var marked = idleRecord("Marked active elsewhere", cwd: root.path, idleFor: 30)
         let control = idleRecord("Untouched", cwd: root.path, idleFor: 30)
-        try write([marked, control], to: store)
+        // Both eligible at restore; the other instance then marks the child active.
+        let idleParent = idleRecord("Parent of a child marked active", cwd: root.path, idleFor: 30)
+        var markedChild = idleRecord("Child marked active elsewhere", cwd: root.path, idleFor: 30)
+        markedChild.parentAgentID = idleParent.id
+        markedChild.projectId = idleParent.projectId
+        try write([marked, control, idleParent, markedChild], to: store)
         store.waitForBackupMigration()
         let settings = gateSuite(true)
         defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
@@ -978,12 +1013,16 @@ enum AgentRecordArchiveChecks {
         _ = supervisor.restore()
         // The other instance's write, before this one's pass runs.
         marked.settledOverride = .active
-        try write([marked], to: AgentStore(applicationSupportDirectory: support))
+        markedChild.settledOverride = .active
+        try write([marked, markedChild], to: AgentStore(applicationSupportDirectory: support))
         await settleArchivePass(supervisor)
         try expect(supervisor.records[control.id] == nil && exists(store.layout.archivedAgentFile(id: control.id)),
                    "control: an untouched idle agent is archived")
         try expect(exists(store.layout.agentFile(id: marked.id)) && !exists(store.layout.archivedAgentFile(id: marked.id)),
                    "a record another instance marked active since restore stays live")
+        try expect(exists(store.layout.agentFile(id: markedChild.id)) && exists(store.layout.agentFile(id: idleParent.id))
+                   && !exists(store.layout.archivedAgentFile(id: idleParent.id)),
+                   "a child kept by the durable check keeps its parent live")
     }
 
     static func archivedFiles(_ store: AgentStore) -> [String] {
