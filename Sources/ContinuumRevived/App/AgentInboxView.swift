@@ -1074,7 +1074,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private var hoveredFanoutParentId: UUID?
     private(set) var cellBuildCountForQA = 0
     var onCellBuildForQA: ((UUID) -> Void)?
-    private var retainedCellsDuringUpdate: [UUID: AgentInboxRowCell] = [:]
 
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P2.3-content-derived-row-height.md
     /// `NSTableView` caches delegate heights independently of the cell's layout.
@@ -3318,6 +3317,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let oldNesting = Dictionary(zip(old, nestingByTableRow)) { first, _ in first }
         let renderNow = clock()
         let oldNudge = settleNudgeTargetID(now: renderNow)
+        // Native table row movement must be immediate for an agent push. A
+        // partially animated header insertion otherwise leaves survivor views
+        // between their cached rects when the next update arrives.
+        if preservingAgentRows {
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            NSAnimationContext.current.allowsImplicitAnimation = false
+        }
+        defer { if preservingAgentRows { NSAnimationContext.endGrouping() } }
         let anchor = preservingAgentRows ? visibleScrollAnchor(excluding: changedAgentIDs) : nil
         if !preservingAgentRows { endRename(commit: true) }
         cancelCrossfades()
@@ -3328,18 +3336,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         cellsByRow = Dictionary(uniqueKeysWithValues: next.enumerated().compactMap { index, item in
             previousCells[item.identity].map { (index, $0) }
         })
-        if preservingAgentRows {
-            retainedCellsDuringUpdate = Dictionary(uniqueKeysWithValues: next.enumerated().compactMap { index, item in
-                guard let model = item.agentRow, !changedAgentIDs.contains(model.id),
-                      ![oldNudge, settleNudgeTargetID(now: renderNow)].contains(model.id),
-                      previousRollups[model.id] == rollupsByParent[model.id],
-                      previousTallies?[model.id] == sidebarTallies[model.id],
-                      oldNesting[item.identity] == nestingByTableRow[index],
-                      let cell = previousCells[item.identity] else { return nil }
-                return (model.id, cell)
-            })
-        }
-        defer { retainedCellsDuringUpdate.removeAll() }
+        let newNudge = settleNudgeTargetID(now: renderNow)
+        let nudges: Set<UUID> = oldNudge == newNudge ? [] : Set([oldNudge, newNudge].compactMap { $0 })
         tableView.beginUpdates()
         if !removed.isEmpty { tableView.removeRows(at: removed, withAnimation: []) }
         if !inserted.isEmpty { tableView.insertRows(at: inserted, withAnimation: []) }
@@ -3357,11 +3355,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // A survivor is redrawn when what it draws from its neighbours changed: its
         // place in the tree, its rollup (a child in another workspace left), or the
         // settle nudge moving to or from it.
-        let nudges: Set<UUID> = Set([oldNudge, settleNudgeTargetID(now: renderNow)].compactMap { $0 })
         var stale = IndexSet(new.indices.filter { row in
             guard !inserted.contains(row) else { return false }
             if let id = next[row].agentRow?.id {
-                if nudges.contains(id) || changedAgentIDs.contains(id)
+                if changedAgentIDs.contains(id)
                     || previousRollups[id] != rollupsByParent[id] { return true }
                 if let previousTallies, previousTallies[id] != sidebarTallies[id] { return true }
             }
@@ -3370,6 +3367,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if jumpHintsVisible {
             stale.formUnion(IndexSet((0..<InboxJump.maximumRows).compactMap(tableRow(forRowIndex:))))
         }
+        // Nudge visibility changes no row geometry. Update the existing control
+        // instead of rebuilding a second, otherwise unchanged helper card.
+        for id in nudges {
+            guard let index = tableRow(forAgentId: id),
+                  let card = tableView.view(atColumn: 0, row: index, makeIfNecessary: false) as? AgentInbox96CellView else { continue }
+            card.showSettleNudge(id == newNudge) { [weak self] in
+                guard let self else { return }
+                self.rowChoiceTargetIds = [id]
+                self.performRowAction(.settle)
+            }
+        }
         tableView.noteHeightOfRows(withIndexesChanged: stale)
         tableView.reloadData(forRowIndexes: stale, columnIndexes: IndexSet(integer: 0))
         applyWorkspaceMarksInPlace()
@@ -3377,6 +3385,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         updateEmptyState()
         updateBulkBar()
         updateAccessibilityHierarchy()
+        tableView.layoutSubtreeIfNeeded()
+        layoutSubtreeIfNeeded()
         restoreScrollAnchor(anchor)
         if preservingAgentRows { repositionRenameField() }
         refreshHoverFromPointer()
@@ -4322,10 +4332,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // an empty row is a thing the blankness floor can see, where a hint pill
         // quietly drawn on the wrong row is not. (Raised in cross-review.)
         guard let index = rowIndex(forTableRow: row) else { return nil }
-        if let retained = retainedCellsDuringUpdate[model.id] {
-            cellsByRow[row] = retained
-            return retained
-        }
         cellBuildCountForQA += 1
         onCellBuildForQA?(model.id)
         let interacting = isInteracting(row: row)
@@ -6674,6 +6680,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// not given the same delta a second time (notably when a row shrinks at bottom).
     private func restoreScrollAnchor(_ anchor: (id: UUID, viewportMinY: CGFloat)?) {
         guard let anchor, let tableRow = tableRow(forAgentId: anchor.id) else { return }
+        // NSTableView computes row heights lazily and answers an average for rows
+        // above it has not measured, so a fresh insertion above the anchor can
+        // report an estimated rect that later settles. Resolve every row up to
+        // the anchor first, so the restore uses the geometry that will be drawn.
+        for row in 0...tableRow { _ = tableView.rect(ofRow: row) }
         keep(tableRow: tableRow, atViewportMinY: anchor.viewportMinY)
     }
 
