@@ -308,7 +308,7 @@ enum SidebarRowRevealChecks {
     /// A real click on the row's title, through the window: mouse-up queued
     /// first so the table's tracking loop ends, then mouse-down sent.
     /// `pressedRow` presses there and drags to `id` before releasing.
-    private static func click(row id: UUID, in sidebar: WorkspaceSidebarView, window: NSWindow,
+    static func click(row id: UUID, in sidebar: WorkspaceSidebarView, window: NSWindow,
                               betweenDownAndUp: (() -> Void)? = nil, pressedRow: UUID? = nil,
                               modifiers: NSEvent.ModifierFlags = []) throws {
         let inbox = sidebar.agentInbox
