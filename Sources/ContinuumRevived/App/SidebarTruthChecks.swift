@@ -103,6 +103,104 @@ enum SidebarTruthChecks {
               + "Settle settled it")
     }
 
+    /// Keep this in the matrix's existing sidebar-truth leg. Mount the production
+    /// scene, pop out a helper, then close its tile through the canvas callback.
+    /// Its working, tile-less sibling is the presentation control.
+    static func closedTileHelperStyle() async throws {
+        let world = try makeWorld()
+        defer { tearDown(world) }
+        world.window.orderFrontOffscreenForChecks()
+        let inbox = world.inbox
+        inbox.prefersReducedMotion = { true }
+        for id in [childOne, childTwo] {
+            try expect(world.supervisor.send("keep working", to: id), "closed-helper setup: send")
+        }
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+            // Runner creation precedes delivery of its queued turnStarted event.
+            // Close only once the production sidebar has observed both turns.
+            world.app.qaRefreshAgentSurfaces()
+            inbox.layoutForQA()
+            return [childOne, childTwo].allSatisfy {
+                world.supervisor.isRunning($0) && world.runners.byAgent[$0] != nil
+                    && inbox.drawnRowForQA(id: $0.rawValue)?.state == .working
+                    && inbox.drawnRowForQA(id: $0.rawValue)?.elapsedStartedAt != nil
+            }
+        }) else { throw Failure(message: "closed-helper setup: working rows and turn clocks did not arrive") }
+        world.app.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
+        try expect(inbox.hoverRowForQA(id: childOne.rawValue)
+                   && inbox.cellForQA(id: childOne.rawValue)?.clickSubagentActionForQA("Pop out") == true,
+                   "closed-helper setup: production Pop out action")
+        guard let tile = world.supervisor.records[childOne]?.tileId else {
+            throw Failure(message: "closed-helper setup: Pop out did not bind a tile")
+        }
+        let turnStart = inbox.drawnRowForQA(id: childOne.rawValue)?.elapsedStartedAt
+        world.canvas.onTileCloseRequested?(tile)
+        _ = inbox.hoverRowForQA(id: nil)
+        try expect(world.canvas.tileRecord(for: tile) == nil
+                   && world.supervisor.records[childOne]?.closeRequestedAt != nil
+                   && world.supervisor.isRunning(childOne),
+                   "closed-helper: close must remove the tile and stamp the intent, keeping the runner")
+        guard let closed = inbox.drawnRowForQA(id: childOne.rawValue),
+              let sibling = inbox.drawnRowForQA(id: childTwo.rawValue) else {
+            throw Failure(message: "closed-helper: both helpers must remain visible under their lead")
+        }
+        try expect(closed.parentId == parentAgent.rawValue && sibling.parentId == parentAgent.rawValue
+                   && !closed.hasTile && !sibling.hasTile,
+                   "closed-helper: both working helpers are tile-less children of the same lead")
+        print("closed-helper: closeRequestedAt set; tile removed; runner live; variants \(closed.variant)/\(sibling.variant); labels \(closed.presentationLabel ?? "nil")/\(sibling.presentationLabel ?? "nil")")
+        try expect(closed.variant == sibling.variant && closed.variant == .card,
+                   "closed-helper: closing a tile changed its helper's variant: \(closed.variant) vs sibling \(sibling.variant)")
+        try expect(closed.presentationLabel == sibling.presentationLabel && closed.presentationLabel == "Working",
+                   "closed-helper: closing a tile changed its working status")
+        try expect(closed.elapsedStartedAt == turnStart && turnStart != nil,
+                   "closed-helper: closing a tile reset the turn clock")
+        // Observe over a minute into the same turns: a close-relative clock would
+        // show a different value. The production cell reads this shared clock.
+        guard let closedStart = closed.elapsedStartedAt, let siblingStart = sibling.elapsedStartedAt else {
+            throw Failure(message: "closed-helper: both working turns must have a clock anchor")
+        }
+        let shownAt = max(closedStart, siblingStart).addingTimeInterval(65.5)
+        inbox.clock = { shownAt }
+        let args = CommandLine.arguments
+        let renderDirectory = args.firstIndex(of: "--render-dir").flatMap {
+            args.indices.contains($0 + 1) ? URL(fileURLWithPath: args[$0 + 1], isDirectory: true) : nil
+        }
+        for dark in [false, true] {
+            world.window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            world.app.qaRefreshAgentSurfaces()
+            inbox.layoutForQA()
+            inbox.updateElapsedClockForQA(now: shownAt)
+            SidebarParityCapture.pump()
+            guard let a = inbox.cellForQA(id: childOne.rawValue),
+                  let b = inbox.cellForQA(id: childTwo.rawValue) else {
+                throw Failure(message: "closed-helper: both helpers must use AgentInbox96CellView")
+            }
+            try expect(type(of: a) == type(of: b) && a.isSubagentRow && b.isSubagentRow,
+                       "closed-helper: both helpers must retain the nested cell class")
+            try expect(a.qaStateLabel == b.qaStateLabel && !a.qaStateLabel.contains("Background"),
+                       "closed-helper: status text differs: \(a.qaStateLabel)/\(b.qaStateLabel)")
+            try expect(a.qaStatusAlphasForQA[0] > 0 && b.qaStatusAlphasForQA[0] > 0,
+                       "closed-helper: both status labels must be painted at rest")
+            for (cell, start) in [(a, closedStart), (b, siblingStart)] {
+                try expect(cell.qaStateLabel == AgentInboxCellView.elapsedText(shownAt.timeIntervalSince(start)),
+                           "closed-helper: rendered duration must still measure the working turn")
+            }
+            if let renderDirectory {
+                try FileManager.default.createDirectory(at: renderDirectory, withIntermediateDirectories: true)
+                guard let lead = inbox.cellForQA(id: parentAgent.rawValue) else {
+                    throw Failure(message: "closed-helper: the lead must render above its helpers")
+                }
+                let crop = [lead, a, b].reduce(NSRect.null) { $0.union($1.convert($1.bounds, to: inbox)) }
+                    .insetBy(dx: 0, dy: -8).intersection(inbox.bounds)
+                try SidebarHelperHoverChecks.write(
+                    SidebarHelperHoverChecks.capture(inbox, crop: crop),
+                    to: renderDirectory.appendingPathComponent("closed-helper-\(dark ? "dark" : "light").png"))
+            }
+            print("closed-helper \(dark ? "dark" : "light"): nested AgentInbox96CellView/card for both; status and turn duration \(a.qaStateLabel)/\(b.qaStateLabel)")
+        }
+    }
+
     /// Exercise the production list, after the record builder has inherited
     /// placement. Removing its history filter must change visible IDs/counts.
     static func historyScopeVisibility() throws {
@@ -204,101 +302,6 @@ enum SidebarTruthChecks {
             try expect(inbox.rowIdsForQA == [child.id],
                        "history visibility: a source-hidden present parent must not make its child an orphan")
             print("SidebarHistoryView \(dark ? "dark" : "light"): 7 protected/default rows, History (4); quiet family searchable as History (2); scope/source-hidden parents retain children")
-    /// Keep this in the matrix's existing sidebar-truth leg. Mount the production
-    /// scene, pop out a helper, then close its tile through the canvas callback.
-    /// Its working, tile-less sibling is the presentation control.
-    static func closedTileHelperStyle() async throws {
-        let world = try makeWorld()
-        defer { tearDown(world) }
-        world.window.orderFrontOffscreenForChecks()
-        let inbox = world.inbox
-        inbox.prefersReducedMotion = { true }
-        for id in [childOne, childTwo] {
-            try expect(world.supervisor.send("keep working", to: id), "closed-helper setup: send")
-        }
-        guard await waitUntil(timeout: 10, pollInterval: 0.02, {
-            // Runner creation precedes delivery of its queued turnStarted event.
-            // Close only once the production sidebar has observed both turns.
-            world.app.qaRefreshAgentSurfaces()
-            inbox.layoutForQA()
-            return [childOne, childTwo].allSatisfy {
-                world.supervisor.isRunning($0) && world.runners.byAgent[$0] != nil
-                    && inbox.drawnRowForQA(id: $0.rawValue)?.state == .working
-                    && inbox.drawnRowForQA(id: $0.rawValue)?.elapsedStartedAt != nil
-            }
-        }) else { throw Failure(message: "closed-helper setup: working rows and turn clocks did not arrive") }
-        world.app.qaRefreshAgentSurfaces()
-        inbox.layoutForQA()
-        try expect(inbox.hoverRowForQA(id: childOne.rawValue)
-                   && inbox.cellForQA(id: childOne.rawValue)?.clickSubagentActionForQA("Pop out") == true,
-                   "closed-helper setup: production Pop out action")
-        guard let tile = world.supervisor.records[childOne]?.tileId else {
-            throw Failure(message: "closed-helper setup: Pop out did not bind a tile")
-        }
-        let turnStart = inbox.drawnRowForQA(id: childOne.rawValue)?.elapsedStartedAt
-        world.canvas.onTileCloseRequested?(tile)
-        _ = inbox.hoverRowForQA(id: nil)
-        try expect(world.canvas.tileRecord(for: tile) == nil
-                   && world.supervisor.records[childOne]?.closeRequestedAt != nil
-                   && world.supervisor.isRunning(childOne),
-                   "closed-helper: close must remove the tile and stamp the intent, keeping the runner")
-        guard let closed = inbox.drawnRowForQA(id: childOne.rawValue),
-              let sibling = inbox.drawnRowForQA(id: childTwo.rawValue) else {
-            throw Failure(message: "closed-helper: both helpers must remain visible under their lead")
-        }
-        try expect(closed.parentId == parentAgent.rawValue && sibling.parentId == parentAgent.rawValue
-                   && !closed.hasTile && !sibling.hasTile,
-                   "closed-helper: both working helpers are tile-less children of the same lead")
-        print("closed-helper: closeRequestedAt set; tile removed; runner live; variants \(closed.variant)/\(sibling.variant); labels \(closed.presentationLabel ?? "nil")/\(sibling.presentationLabel ?? "nil")")
-        try expect(closed.variant == sibling.variant && closed.variant == .card,
-                   "closed-helper: closing a tile changed its helper's variant: \(closed.variant) vs sibling \(sibling.variant)")
-        try expect(closed.presentationLabel == sibling.presentationLabel && closed.presentationLabel == "Working",
-                   "closed-helper: closing a tile changed its working status")
-        try expect(closed.elapsedStartedAt == turnStart && turnStart != nil,
-                   "closed-helper: closing a tile reset the turn clock")
-        // Observe over a minute into the same turns: a close-relative clock would
-        // show a different value. The production cell reads this shared clock.
-        guard let closedStart = closed.elapsedStartedAt, let siblingStart = sibling.elapsedStartedAt else {
-            throw Failure(message: "closed-helper: both working turns must have a clock anchor")
-        }
-        let shownAt = max(closedStart, siblingStart).addingTimeInterval(65.5)
-        inbox.clock = { shownAt }
-        let args = CommandLine.arguments
-        let renderDirectory = args.firstIndex(of: "--render-dir").flatMap {
-            args.indices.contains($0 + 1) ? URL(fileURLWithPath: args[$0 + 1], isDirectory: true) : nil
-        }
-        for dark in [false, true] {
-            world.window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-            world.app.qaRefreshAgentSurfaces()
-            inbox.layoutForQA()
-            inbox.updateElapsedClockForQA(now: shownAt)
-            SidebarParityCapture.pump()
-            guard let a = inbox.cellForQA(id: childOne.rawValue),
-                  let b = inbox.cellForQA(id: childTwo.rawValue) else {
-                throw Failure(message: "closed-helper: both helpers must use AgentInbox96CellView")
-            }
-            try expect(type(of: a) == type(of: b) && a.isSubagentRow && b.isSubagentRow,
-                       "closed-helper: both helpers must retain the nested cell class")
-            try expect(a.qaStateLabel == b.qaStateLabel && !a.qaStateLabel.contains("Background"),
-                       "closed-helper: status text differs: \(a.qaStateLabel)/\(b.qaStateLabel)")
-            try expect(a.qaStatusAlphasForQA[0] > 0 && b.qaStatusAlphasForQA[0] > 0,
-                       "closed-helper: both status labels must be painted at rest")
-            for (cell, start) in [(a, closedStart), (b, siblingStart)] {
-                try expect(cell.qaStateLabel == AgentInboxCellView.elapsedText(shownAt.timeIntervalSince(start)),
-                           "closed-helper: rendered duration must still measure the working turn")
-            }
-            if let renderDirectory {
-                try FileManager.default.createDirectory(at: renderDirectory, withIntermediateDirectories: true)
-                guard let lead = inbox.cellForQA(id: parentAgent.rawValue) else {
-                    throw Failure(message: "closed-helper: the lead must render above its helpers")
-                }
-                let crop = [lead, a, b].reduce(NSRect.null) { $0.union($1.convert($1.bounds, to: inbox)) }
-                    .insetBy(dx: 0, dy: -8).intersection(inbox.bounds)
-                try SidebarHelperHoverChecks.write(
-                    SidebarHelperHoverChecks.capture(inbox, crop: crop),
-                    to: renderDirectory.appendingPathComponent("closed-helper-\(dark ? "dark" : "light").png"))
-            }
-            print("closed-helper \(dark ? "dark" : "light"): nested AgentInbox96CellView/card for both; status and turn duration \(a.qaStateLabel)/\(b.qaStateLabel)")
         }
     }
 
