@@ -50,6 +50,7 @@ enum AgentJumpComposerChecks {
         }
         defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
         settings.set(false, forKey: CanvasAutoLayoutConfig.enabledKey)
+        settings.set(false, forKey: DragMagnetizeConfig.enabledKey)
 
         let tallTile = UUID(), shortTile = UUID()
         var tallAgent: AgentID?, shortAgent: AgentID?
@@ -80,6 +81,7 @@ enum AgentJumpComposerChecks {
         let delegate = f.delegate
         let canvas = f.canvas
         canvas.agentJumpDefaults = settings
+        canvas.dragMagnetizeDefaults = settings
         guard let tall = canvas.tileView(for: tallTile) as? ManagedAgentTileNSView,
               let short = canvas.tileView(for: shortTile) as? ManagedAgentTileNSView else {
             throw Failure(description: "precondition: the boot mount did not hydrate both agent tiles")
@@ -163,6 +165,10 @@ enum AgentJumpComposerChecks {
                     problems.append("the tile has no composer")
                 }
                 if tileRect.maxY > canvasSize.height { problems.append("the tile's bottom is below the screen: \(tileRect)") }
+                let margin = Double(canvasSize.height - tileRect.maxY)
+                if abs(margin - CameraFraming.tilePaddingScreenPx) > 1 {
+                    problems.append("the tile's bottom sits \(margin) pt above the screen's edge, not \(CameraFraming.tilePaddingScreenPx)")
+                }
                 if tileRect.minY >= 0 { problems.append("precondition: the tile's top is on screen, so this tile fit: \(tileRect)") }
                 if let head = view.qaStickyHead, let headView = view.qaStickyHeadView {
                     let headRect = onScreen(headView.bounds, of: headView)
@@ -208,29 +214,122 @@ enum AgentJumpComposerChecks {
             }
         }, expect: composerFirstOutcome(tall, startZoom: 0.5, takesKeyboard: false))
 
-        // The pinned head is pressed like a header: focus, and nothing moves.
-        do {
-            let label = "click on the pinned head"
+        // The pinned head is pressed like a header, through the window.
+        func landOnTall() throws {
             canvas.navigationFlightOverrideForQA = false
             try clickRow(tallAgent)
             spin(0.3)
             _ = delegate.qaFocusBroker.enterScope(.canvas, reason: .userClick)
             spin(0.1)
-            let before = tall.tile.frame
-            let camera = canvas.viewport
-            if let headView = tall.qaStickyHeadView {
-                let point = headView.convert(NSPoint(x: headView.bounds.midX, y: headView.bounds.midY), to: nil)
+        }
+        func headPoint(_ fractionX: CGFloat) -> NSPoint? {
+            guard let headView = tall.qaStickyHeadView else { return nil }
+            return headView.convert(NSPoint(x: headView.bounds.width * fractionX, y: headView.bounds.midY), to: nil)
+        }
+        func hitsHead(_ point: NSPoint) -> Bool {
+            guard let headView = tall.qaStickyHeadView, let content = window.contentView else { return false }
+            return content.hitTest(content.superview?.convert(point, from: nil) ?? point) === headView
+        }
+        do {
+            let label = "click on the pinned head"
+            try landOnTall()
+            let before = tall.tile.frame, camera = canvas.viewport, forwarded = tall.qaStickyHeadForwardedPresses
+            if let point = headPoint(0.5) {
+                let hit = hitsHead(point)
                 try press(at: point, in: window)
                 spin(0.3)
-                if delegate.qaFocusBroker.activeSurface != .tile(tallTile) {
+                if !hit {
+                    failures.append("[\(label)] the window's hit test does not land on the pinned head")
+                } else if tall.qaStickyHeadForwardedPresses != forwarded + 1 {
+                    failures.append("[\(label)] the head did not hand the press to the tile as a header press")
+                } else if delegate.qaFocusBroker.activeSurface != .tile(tallTile) {
                     failures.append("[\(label)] the tile did not take focus: \(String(describing: delegate.qaFocusBroker.activeSurface))")
                 } else if tall.tile.frame != before || canvas.viewport != camera {
                     failures.append("[\(label)] a click moved something: tile \(before) → \(tall.tile.frame), camera \(camera) → \(canvas.viewport)")
                 } else {
-                    report.append("  \(label): the tile took focus, nothing moved")
+                    report.append("  \(label): hit the head, forwarded as a header press, the tile took focus, nothing moved")
                 }
             } else {
                 failures.append("[\(label)] precondition: no pinned head to press")
+            }
+        }
+
+        // While the head takes over from a real bar still partly on screen, the
+        // bar's close button sits under the head's blank right side. A press
+        // there is the head's, never a close.
+        do {
+            let label = "press over the covered close button"
+            try landOnTall()
+            var camera = canvas.viewport
+            camera.y = tallWorld.y + 10 / camera.zoom
+            canvas.setViewport(camera)
+            spin(0.2)
+            // The close button's own centre, inside the band where the head
+            // overlaps the still-visible bar.
+            tall.wakeChrome()
+            spin(0.1)
+            let close = tall.qaCloseButtonFrame
+            let headTop = tall.qaStickyHead?.frame.minY ?? 0
+            let inBand = NSPoint(x: close.midX, y: (max(close.minY, headTop) + close.maxY) / 2)
+            let point = tall.convert(inBand, to: nil)
+            if !close.isEmpty, close.maxY > headTop, hitsHead(point) {
+                let forwarded = tall.qaStickyHeadForwardedPresses
+                try press(at: point, in: window)
+                spin(0.3)
+                if canvas.tileView(for: tallTile) == nil || delegate.qaAgentSupervisor.records[tallAgent]?.tileId != tallTile {
+                    failures.append("[\(label)] the press closed or detached the tile")
+                } else if tall.qaStickyHeadForwardedPresses != forwarded + 1 {
+                    failures.append("[\(label)] the press did not reach the head")
+                } else {
+                    report.append("  \(label): the head took it; the tile stayed")
+                }
+            } else {
+                failures.append("[\(label)] the close button \(close) under the head (top \(headTop)) is not hit-tested to the head while the real bar is 10 pt on screen")
+            }
+        }
+
+        // A drag on the head moves the tile by exactly the pointer's travel.
+        do {
+            let label = "drag the pinned head"
+            try landOnTall()
+            // WORLD frames: a drop can change the tile's zone, and with it the
+            // space its stored frame is written in.
+            func world() -> TileFrame? { canvas.navigationTileSnapshot(for: tallTile)?.worldFrame }
+            let zoom = canvas.viewport.zoom
+            if let start = headPoint(0.5), let before = world() {
+                try drag(from: start, by: NSPoint(x: 90, y: 0), in: window)
+                spin(0.3)
+                let after = world() ?? before
+                let moved = after.x - before.x
+                if abs(moved - 90 / zoom) > 1 || abs(after.y - before.y) > 0.5 {
+                    failures.append("[\(label)] the tile moved (\(moved), \(after.y - before.y)) world for a 90 pt drag at zoom \(zoom)")
+                } else {
+                    report.append("  \(label): moved \(String(format: "%.1f", moved)) world for 90 pt at zoom \(zoom)")
+                }
+            } else {
+                failures.append("[\(label)] precondition: no pinned head")
+            }
+        }
+
+        // A right-click opens the header's menu.
+        do {
+            let label = "right-click on the pinned head"
+            try landOnTall()
+            var presented: NSMenu?
+            TileNSView.qaMenuPresenter = { presented = $0 }
+            defer { TileNSView.qaMenuPresenter = nil }
+            if let point = headPoint(0.5),
+               let down = NSEvent.mouseEvent(with: .rightMouseDown, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                NSApp.sendEvent(down)
+                spin(0.1)
+                if presented?.items.isEmpty == false {
+                    report.append("  \(label): the tile menu (\(presented!.items.count) items)")
+                } else {
+                    failures.append("[\(label)] no tile menu")
+                }
+            } else {
+                failures.append("[\(label)] precondition: no pinned head")
             }
         }
 
@@ -261,8 +360,15 @@ enum AgentJumpComposerChecks {
 
         // The setting off: today's jump.
         settings.set(false, forKey: AgentJumpConfig.composerFirstKey)
+        canvas.setViewport(far)
+        let tallNow = canvas.navigationTileSnapshot(for: tallTile)?.worldFrame ?? tallWorld
+        let tallRect = CGRect(x: tallNow.x, y: tallNow.y, width: tallNow.width, height: tallNow.height)
+        let oldJump = canvas.framedWorkViewport(for: tallRect, kind: .managedAgent)
         jump("setting off, tall tile", tile: tall, start: far, flies: false, how: { try clickRow(tallAgent) }) { camera in
             var problems: [String] = []
+            if abs(camera.x - oldJump.x) > 0.5 || abs(camera.y - oldJump.y) > 0.5 || abs(camera.zoom - oldJump.zoom) > 0.0001 {
+                problems.append("camera \(camera) is not the old jump's \(oldJump)")
+            }
             let rect = tileOnScreen(tall)
             if rect.minY < 0 || rect.minY > canvasSize.height { problems.append("the tile's top is not on screen: \(rect)") }
             if let composer = composerFacts(tall) {
@@ -282,6 +388,27 @@ enum AgentJumpComposerChecks {
 
     private static func spin(_ seconds: TimeInterval) {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    }
+
+    /// A real drag through the window: drags and the release queued, then the press.
+    private static func drag(from start: NSPoint, by delta: NSPoint, in window: NSWindow) throws {
+        func mouse(_ type: NSEvent.EventType, _ point: NSPoint) throws -> NSEvent {
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1,
+                pressure: type == .leftMouseUp ? 0 : 1) else { throw Failure(description: "could not synthesise \(type)") }
+            return event
+        }
+        let end = NSPoint(x: start.x + delta.x, y: start.y + delta.y)
+        for step in 1...6 {
+            let t = CGFloat(step) / 6
+            NSApp.postEvent(try mouse(.leftMouseDragged, NSPoint(x: start.x + delta.x * t, y: start.y + delta.y * t)), atStart: false)
+        }
+        NSApp.postEvent(try mouse(.leftMouseUp, end), atStart: false)
+        NSApp.sendEvent(try mouse(.leftMouseDown, start))
+        while let pending = NSApp.nextEvent(matching: [.leftMouseUp, .leftMouseDragged], until: Date(), inMode: .default, dequeue: true) {
+            NSApp.sendEvent(pending)
+        }
     }
 
     /// A real click through the window: mouse-up queued first, mouse-down sent.

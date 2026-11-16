@@ -1140,11 +1140,12 @@ class TileNSView: NSView, TokenThemed {
         return (stickyHead.frame, titleBar.snapshot.title)
     }
     var qaStickyHeadView: NSView? { stickyHead.flatMap { $0.isHidden ? nil : $0 } }
+    var qaStickyHeadForwardedPresses: Int { stickyHead?.qaForwardedPressCount ?? 0 }
 
     /// The header's own press handling, for the pinned head: what a press on the
     /// title bar does — focus on a click, move on a drag — without a subclass's
     /// redelivery of presses meant for its drawn controls.
-    fileprivate func stickyHeadMouseDown(with event: NSEvent) { tilePress(with: event) }
+    fileprivate func stickyHeadMouseDown(with event: NSEvent) { tilePress(with: event, onPinnedHead: true) }
 
     func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
@@ -1280,6 +1281,12 @@ class TileNSView: NSView, TokenThemed {
             Self.hitTestPromotionTotal &+= 1
             promoteBodyToNative()
         }
+        // The pinned head is opaque and drawn over everything on the tile, the
+        // real bar's controls included while it takes over from that bar: what
+        // it covers cannot be pressed through it. Its press is the header's.
+        if let stickyHead, !stickyHead.isHidden, stickyHead.frame.contains(local) {
+            return stickyHead
+        }
         // The agent's bubble is a grab handle drawn over everything on the tile:
         // it moves the tile, though it sits in the corner's resize band and over
         // the under-bar's and the body's corner.
@@ -1312,10 +1319,6 @@ class TileNSView: NSView, TokenThemed {
             }
             return self
         }
-        // The pinned head is a header: its press is the header's press.
-        if let stickyHead, !stickyHead.isHidden, stickyHead.frame.contains(local) {
-            return stickyHead
-        }
         // Floored move-grab strip. At low zoom the title bar is visually enlarged,
         // but body content can still be stacked above it in AppKit's subview order.
         // Claim the entire post-resize grab strip before `super.hitTest` so terminal
@@ -1341,7 +1344,10 @@ class TileNSView: NSView, TokenThemed {
         tilePress(with: event)
     }
 
-    private func tilePress(with event: NSEvent) {
+    /// `onPinnedHead`: the press landed on the pinned head, which is the header
+    /// wherever it sits — never a resize, a bubble or a title rename — while the
+    /// event keeps its real location for everything the drag reads from it.
+    private func tilePress(with event: NSEvent, onPinnedHead: Bool = false) {
         agentReferenceDrag?.end()
         agentReferenceDrag = nil
         canvas?.tileSelection.preparePointerDown()
@@ -1366,13 +1372,13 @@ class TileNSView: NSView, TokenThemed {
         }
         let local = convert(event.locationInWindow, from: nil)
         // The agent's bubble is a grab handle: never a resize, always the header.
-        let onBubble = agentBubbleContains(local)
-        let edgeAtPress = onBubble ? nil : resizeEdge(at: local)
-        let onHeader = onBubble || local.y < grabHeightInLocalCoordinates
+        let onBubble = !onPinnedHead && agentBubbleContains(local)
+        let edgeAtPress = onBubble || onPinnedHead ? nil : resizeEdge(at: local)
+        let onHeader = onPinnedHead || onBubble || local.y < grabHeightInLocalCoordinates
         // A double-click on the title renames what the tile shows, before the
         // selection or a drag can claim the press. Anything else on the bar
         // (and every tile with nothing to rename) keeps the old behaviour.
-        if event.clickCount == 2, event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.shift, .command, .option, .control]),
+        if !onPinnedHead, event.clickCount == 2, event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.shift, .command, .option, .control]),
            local.y < grabHeightInLocalCoordinates, titleContains(localPoint: local), beginTitleRename() {
             dragKind = .none
             return
@@ -2414,7 +2420,11 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// Painted first in `draw(_:)`, over the `tileChrome` layer fill and under
     /// everything the bar draws. A user-chosen zone colour, like a zone's tint.
     var identityTint: NSColor? {
-        didSet { if identityTint != oldValue { needsDisplay = true } }
+        didSet {
+            guard identityTint != oldValue else { return }
+            needsDisplay = true
+            if let stickyMirror, !stickyMirror.isHidden { stickyMirror.needsDisplay = true }
+        }
     }
     // Redraw only when the drawn VALUE moved. `CanvasNSView.layoutTile` re-assigns
     // `tile` on every camera event to keep the view's copy current, so an
@@ -2618,8 +2628,14 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     }
 
     func showStyledContextActions(at point: NSPoint) {
+        showStyledContextActions(at: point, anchor: self)
+    }
+
+    /// The same menu anchored on another view — the pinned head, while this bar
+    /// is off screen.
+    fileprivate func showStyledContextActions(at point: NSPoint, anchor: NSView) {
         onActionsMenuPresentationChange?(true)
-        presentStyledActions(makeTileContextMenu(), anchor: self, rect: NSRect(origin: point, size: NSSize(width: 1, height: 1)))
+        presentStyledActions(makeTileContextMenu(), anchor: anchor, rect: NSRect(origin: point, size: NSSize(width: 1, height: 1)))
     }
 
     private func presentStyledActions(_ menu: NSMenu, anchor: NSView, rect: NSRect) {
@@ -4313,16 +4329,17 @@ final class TileOwnershipOutlineView: NSView {
 /// The pinned copy of a tile's header (`TileNSView.setStickyHeadTop`). A real
 /// view that draws live from the title bar it mirrors — never a picture of it —
 /// at the bar's own size, so it is the header's typography and scale at every
-/// zoom. A press on it is a press on the header: it is forwarded, shifted onto
-/// the real header, to the tile's own press handling, so a click focuses the
-/// tile and a drag moves it. A double-click does not rename: the title it would
-/// edit is off screen.
+/// zoom. A press on it is a press on the header: the tile's own press handling
+/// runs with the press classified as a header press and the event's real
+/// location, so a click focuses the tile and a drag moves it, aims auto layout
+/// and finds a reference target exactly where the pointer is. A right-click
+/// opens the header's menu here. A double-click does not rename: the title it
+/// would edit is off screen.
 @MainActor
 private final class TileStickyHeadView: NSView {
     private weak var tile: TileNSView?
     private weak var bar: TitleBarView?
-    /// Window-space shift from this head onto the real header, fixed for one press.
-    private var pressShift: NSPoint?
+    private var pressing = false
 
     init(tile: TileNSView, bar: TitleBarView) {
         self.tile = tile
@@ -4350,34 +4367,35 @@ private final class TileStickyHeadView: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// QA: presses this head handed to the tile as header presses.
+    private(set) var qaForwardedPressCount = 0
+
     override func mouseDown(with event: NSEvent) {
         guard let tile else { return }
-        // This head's top-left and the real header's, both in window space.
-        let head = tile.convert(NSPoint(x: frame.minX, y: frame.minY), to: nil)
-        let header = tile.convert(NSPoint(x: frame.minX, y: 0), to: nil)
-        let shift = NSPoint(x: header.x - head.x, y: header.y - head.y)
-        pressShift = shift
-        guard let shifted = Self.shifted(event, by: shift) else { return }
-        tile.stickyHeadMouseDown(with: shifted)
+        pressing = true
+        qaForwardedPressCount += 1
+        tile.stickyHeadMouseDown(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let tile, let shift = pressShift, let shifted = Self.shifted(event, by: shift) else { return }
-        tile.mouseDragged(with: shifted)
+        guard pressing, let tile else { return }
+        tile.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { pressShift = nil }
-        guard let tile, let shift = pressShift, let shifted = Self.shifted(event, by: shift) else { return }
-        tile.mouseUp(with: shifted)
+        guard pressing, let tile else { return }
+        pressing = false
+        tile.mouseUp(with: event)
     }
 
-    private static func shifted(_ event: NSEvent, by shift: NSPoint) -> NSEvent? {
-        NSEvent.mouseEvent(
-            with: event.type,
-            location: NSPoint(x: event.locationInWindow.x + shift.x, y: event.locationInWindow.y + shift.y),
-            modifierFlags: event.modifierFlags, timestamp: event.timestamp,
-            windowNumber: event.windowNumber, context: nil, eventNumber: event.eventNumber,
-            clickCount: 1, pressure: event.pressure)
+    override func menu(for event: NSEvent) -> NSMenu? { bar?.makeTileContextMenu() }
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard let bar else { return super.rightMouseDown(with: event) }
+        if let present = TileNSView.qaMenuPresenter {
+            present(bar.makeTileContextMenu())
+            return
+        }
+        bar.showStyledContextActions(at: convert(event.locationInWindow, from: nil), anchor: self)
     }
 }
