@@ -10949,7 +10949,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let refusal = agentSupervisor.helperTileTidyRefusal(id, now: now) {
             switch refusal {
             // Passing states: a helper of its own still at work, a turn settling.
-            case "has running helpers", "still busy":
+            case "has running helpers", "still busy", "lead has not finished with the result":
                 return .wait(refusal, helperTileTidyRetry)
             // Its own helper's tile may still be tidied; once none of them can
             // be, neither can this one.
@@ -10968,8 +10968,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
               let view = canvasView.tileView(for: tileId) as? ManagedAgentTileNSView
         else { return .wait("tile not mounted", helperTileTidyRetry) }
         if view.hasUnsentDraft { return .keep("typed into") }
-        if let received = agentSupervisor.helperResultDeliveredAt[id] {
-            let due = received.addingTimeInterval(helperTileTidyGrace)
+        if let confirmed = agentSupervisor.helperResultConfirmedAt(id) {
+            let due = confirmed.addingTimeInterval(helperTileTidyGrace)
             if due > now { return .wait("grace", due.timeIntervalSince(now)) }
         }
         // Focus seen after it finished is a look, even one held across the

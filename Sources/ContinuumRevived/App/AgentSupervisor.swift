@@ -5042,6 +5042,7 @@ final class AgentSupervisor {
         }
         runners[id]?.stop()
         runners[id] = nil
+        settleHelperReceipts(lead: id, stopped: true)
         chooserChildFinished(id)
         if let task = chooserRequests[id] {
             chooserRequestEnded(id, request: task.id)
@@ -8142,12 +8143,39 @@ final class AgentSupervisor {
     /// The finished-turn count of the result each helper's lead last received.
     private var helperResultReceivedGeneration: [AgentID: Int] = [:]
 
+    /// Receipts settled by the run that took them: the run's last turn ended
+    /// successfully (confirmed, with its end), or it failed or was stopped.
+    private var helperReceiptConfirmedAt: [AgentID: Date] = [:]
+    private(set) var helperReceiptFailed: Set<AgentID> = []
+
+    /// When the lead's run that took this helper's latest received result
+    /// ended successfully; nil until then.
+    func helperResultConfirmedAt(_ id: AgentID) -> Date? { helperReceiptConfirmedAt[id] }
+
+    /// The lead's run ended: decide every receipt it took. The run returns only
+    /// after the prompt's own turn (a buffered unsolicited turn comes first), so
+    /// its outcome is the one that carried the result.
+    private func settleHelperReceipts(lead: AgentID, stopped: Bool = false) {
+        let ended = records[lead]?.latestTerminalEvent
+        for (helper, received) in helperResultDeliveredAt
+        where records[helper]?.parentAgentID == lead && helperReceiptConfirmedAt[helper] == nil
+            && !helperReceiptFailed.contains(helper) {
+            if !stopped, let ended, ended.outcome == .succeeded, ended.endedAt >= received {
+                helperReceiptConfirmedAt[helper] = ended.endedAt
+            } else {
+                helperReceiptFailed.insert(helper)
+            }
+        }
+    }
+
     private func noteHelperResultsReceived(queueItem: UUID, by lead: AgentID) {
         for (helper, turn) in helperReceiptsAwaiting.removeValue(forKey: queueItem) ?? [] {
             guard records[helper]?.parentAgentID == lead else { continue }
             guard let generation = helperCompletionGeneration[turn] else { continue }
             helperResultReceivedGeneration[helper] = generation
             helperResultDeliveredAt[helper] = helperCompletionNow()
+            helperReceiptConfirmedAt[helper] = nil
+            helperReceiptFailed.remove(helper)
             onHelperResultDelivered?(helper)
         }
     }
@@ -8182,6 +8210,13 @@ final class AgentSupervisor {
               heldHelperCompletions[id] == nil,
               let generation = helperResultReceivedGeneration[id], generation == helperTurnsFinished[id]
         else { return "result not received" }
+        // Settling the wake at a lead turn start is not correlated with the
+        // input (a buffered unsolicited turn starts first; a failed start never
+        // writes it). The lead's run returns only after the prompt's own turn,
+        // so the receipt counts once the lead is idle again and that turn
+        // succeeded after it.
+        if helperReceiptFailed.contains(id) { return "lead did not finish with the result" }
+        guard helperResultConfirmedAt(id) != nil else { return "lead has not finished with the result" }
         // Array's own helpers, a harness's native subagents (observed children
         // with a turn still open, whatever the runner reports) or shell jobs.
         guard !helperHasBackgroundWork(id), !records.values.contains(where: { child in
@@ -13356,6 +13391,7 @@ final class AgentSupervisor {
         // finishing must not have its runner cleared by the old one's completion.
         if runnerGenerationTokens[id] == generation, runners[id] === runner {
             runners[id] = nil
+            settleHelperReceipts(lead: id)
             markOwnClaudeTurn(for: id)
             interruptingAgents.remove(id)
             openToolItems[id] = nil

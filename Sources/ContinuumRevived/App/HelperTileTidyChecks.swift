@@ -96,12 +96,15 @@ func runHelperTileTidyChecks() async throws {
     // else succeeds. (A launch is built inside `agent.delegate`, before the
     // supervisor stamps the brief on the record.)
     var nextHelperFails = false
+    // The next turn of an agent with no parent (the lead's wake) fails.
+    var nextLeadTurnFails = false
     let supervisor = AgentSupervisor(
         store: AgentStore(applicationSupportDirectory: URL(fileURLWithPath: appSupportPath, isDirectory: true)
             .appendingPathComponent("helper-tile-tidy-check", isDirectory: true)),
         makeRunner: { launch -> AgentRunning in
-            let fails = launch.record.parentAgentID != nil && nextHelperFails
+            var fails = launch.record.parentAgentID != nil && nextHelperFails
             if fails { nextHelperFails = false }
+            if launch.record.parentAgentID == nil, nextLeadTurnFails { nextLeadTurnFails = false; fails = true }
             let turn = UUID().uuidString
             return ScriptedAgentRunner(script: [
                 .turnStarted(threadId: "fixture", turnId: turn),
@@ -310,7 +313,22 @@ func runHelperTileTidyChecks() async throws {
                "paused: the tile closes once the grace period after receipt has passed")
     print("PASS a result held in a stopped lead's queue keeps the tile until received, then grace runs from receipt")
 
-    // 9 · THE POSITIVE CASE: finished, delivered, untouched.
+    // 9 · THE LEAD'S WAKE TURN FAILS: custody settled the wake at its start,
+    //     but the lead never finished with it, so the tile stays.
+    nextLeadTurnFails = true
+    let (unread, unreadTile) = try await delegateAndDeliver("Unread-result helper")
+    let leadFailed = await waitUntil(timeout: 20, pollInterval: 0.02) {
+        !supervisor.isRunning(lead) && supervisor.records[lead]?.latestTerminalEvent?.outcome == .failed
+    }
+    try expect(leadFailed && !nextLeadTurnFails, "lead failed: setup — the lead's wake turn failed")
+    await settle(delegate.helperTileTidyGrace * 2.5)
+    try expect(canvas.tileRecord(for: unreadTile) != nil,
+               "lead failed: the helper keeps its tile — refusal \(String(describing: delegate.qaHelperTileTidyRefusals[unread]))")
+    try expect(delegate.qaHelperTileTidyRefusals[unread] == "lead did not finish with the result",
+               "lead failed: kept because the run that took it failed, got \(String(describing: delegate.qaHelperTileTidyRefusals[unread]))")
+    print("PASS a lead whose wake turn failed leaves the helper's tile in place")
+
+    // 10 · THE POSITIVE CASE: finished, delivered, untouched.
     try expect(canvas.isAutoLayoutActive(inZone: zoneId), "setup: auto layout is active in the zone, so a settle would move tiles")
     let (done, doneTile) = try await delegateAndDeliver("Finished helper")
     await settle(delegate.helperTileTidyGrace * 0.5)
@@ -345,7 +363,7 @@ func runHelperTileTidyChecks() async throws {
     print("PASS reopening the row restores the helper's tile")
 
     // Every negative control still holds its tile at the end.
-    for (name, tile) in [("setting off", offTile), ("failed", failedTile), ("looked at", lookedTile),
+    for (name, tile) in [("lead failed", unreadTile), ("setting off", offTile), ("failed", failedTile), ("looked at", lookedTile),
                          ("typed into", typedTile), ("resized", resizedTile), ("user-started", userTile), ("lead", leadTile)] {
         try expect(canvas.tileRecord(for: tile) != nil, "\(name): the tile is still on the canvas at the end")
     }
