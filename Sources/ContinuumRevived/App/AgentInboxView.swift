@@ -1396,6 +1396,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // list draws, so the count chip, fold line, incidents and Clear agree.
     private(set) var sidebarLayout: SidebarLayout
     private(set) var standingLeadIDs: Set<UUID>
+    /// Clear's acknowledgements: sidebar-only, persisted in the same defaults.
+    private(set) var clearMarks: [UUID: SidebarClearMark]
+    /// The ids the toast's Undo would un-clear.
+    private var pendingClearUndo: [UUID]?
     /// What Clear N acts on right now.
     private(set) var sidebarClearIDs: [UUID] = []
     /// The incident list ("For you") over the live rows.
@@ -1415,6 +1419,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         self.activeIndicatorStyle = SidebarActiveIndicatorStyle.resolve(in: indicatorDefaults)
         self.sidebarLayout = SidebarLayout.resolve(in: indicatorDefaults)
         self.standingLeadIDs = SidebarStandingLeads.load(from: indicatorDefaults)
+        self.clearMarks = SidebarClearMarks.load(from: indicatorDefaults)
         // The scope is a fixed-width ChoiceButton: project names can never resize the band.
         scopeButton = ChoiceButton(title: InboxScope.allTitle)
         scopeButton.translatesAutoresizingMaskIntoConstraints = false
@@ -1776,22 +1781,48 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         render(display(from: allRows))
     }
     private(set) var sidebarLayoutRenderCountForQA = 0
+    /// Checks pick a layout without writing any defaults domain.
+    func setSidebarLayoutForQA(_ layout: SidebarLayout) {
+        sidebarLayout = layout
+        render(display(from: allRows))
+    }
 
     // MARK: - Sidebar round: Clear, standing leads, incidents
 
     static let clearedVerb = "Cleared"
 
-    /// Clear N: acknowledge every clearable outcome. Clear is Settle, so it is
-    /// non-destructive, persisted, refused for anything blocked, undone by the
-    /// toast, and undone by new activity. Never `archive`, which deletes.
+    /// Clear N: acknowledge every clearable outcome IN THE SIDEBAR ONLY. No
+    /// agent lifecycle moves, no tile closes, nothing is settled or archived:
+    /// the rows leave the live list (a lead to History, a helper into its
+    /// lead's fold), the marks persist, Undo or any new activity brings them
+    /// back. Tile cleanup is tidy-helper-tiles' job, not Clear's.
     @discardableResult
     func performSidebarClear() -> Int {
         let ids = sidebarClearIDs
-        guard !ids.isEmpty, let onRowAction else { return 0 }
-        let captured = captureLifecycle(ids)
-        onRowAction(.settle, ids)
-        offerUndo(Self.clearedVerb, capturedInOrder: captured)
+        guard !ids.isEmpty else { return 0 }
+        let byId = Dictionary(allRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let now = clock()
+        for id in ids {
+            guard let row = byId[id] else { continue }
+            clearMarks[id] = SidebarClearMarks.mark(for: row, now: now)
+        }
+        SidebarClearMarks.save(clearMarks, to: indicatorDefaults)
+        dismissUndoToast()
+        pendingClearUndo = ids
+        undoToast.show(InboxUndoToast.message(verb: Self.clearedVerb, count: ids.count, snoozedUntil: nil))
+        updateBottomStack()
+        restartUndoToastTimer()
+        render(display(from: allRows))
         return ids.count
+    }
+
+    /// Bring cleared rows back: Undo, or Un-settle on a cleared History row.
+    func unclear(_ ids: [UUID]) {
+        var changed = false
+        for id in ids where clearMarks.removeValue(forKey: id) != nil { changed = true }
+        guard changed else { return }
+        SidebarClearMarks.save(clearMarks, to: indicatorDefaults)
+        render(display(from: allRows))
     }
 
     /// Pin or unpin a lead in Standing. Persisted per agent.
@@ -2554,9 +2585,15 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// (P2D.4). A shelf count taken before them would report a snoozed child that is
     /// already hidden under its parent, and the header would say it is holding a row
     /// that unfolding it does not produce.
-    private func display(from unmarkedRows: [AgentInboxRow]) -> [InboxListItem] {
-        // Sidebar round: Standing is a sidebar preference, stamped on the row so
-        // the row menu's Pin can offer it on a lead.
+    private func display(from incomingRows: [AgentInboxRow]) -> [InboxListItem] {
+        // Sidebar round: Clear's marks, then Standing, both sidebar preferences
+        // stamped on the rows. A mark new activity released is dropped.
+        let cleared = SidebarClearMarks.apply(clearMarks, to: incomingRows)
+        if !cleared.released.isEmpty {
+            for id in cleared.released { clearMarks[id] = nil }
+            SidebarClearMarks.save(clearMarks, to: indicatorDefaults)
+        }
+        let unmarkedRows = cleared.rows
         let newRows = standingLeadIDs.isEmpty ? unmarkedRows : unmarkedRows.map { row in
             guard row.parentId == nil, standingLeadIDs.contains(row.id) else { return row }
             var marked = row
@@ -4177,7 +4214,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .incident(let incident):
                 let cell = incidentCells[incident.id] ?? SidebarIncidentCellView()
                 cell.onAction = { [weak self] in self?.pressIncident(incident) }
-                cell.apply(incident, actionEnabled: onIncidentAction != nil)
+                // This release: only "Switch & resume…" acts (it opens Settings >
+                // Agents > Accounts); the other actions draw disabled.
+                cell.apply(incident, actionEnabled: onIncidentAction != nil && incident.kind == .cause(.usageLimit))
                 incidentCells[incident.id] = cell
                 return cell
             // P4.8
@@ -5514,6 +5553,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         case .share:
             // The share popover is the host's; no lifecycle moves, so no undo.
             onRowAction?(action, targets.map(\.id))
+        case .unsettle where !targets.isEmpty && targets.allSatisfy({ clearMarks[$0.id] != nil }):
+            // A cleared row comes back from History by removing the mark.
+            unclear(targets.map(\.id))
         case .pin where targets.allSatisfy({ $0.parentId == nil }),
              .unpin where targets.allSatisfy({ $0.parentId == nil }):
             // Sidebar round: a lead's Pin is Standing, a sidebar preference.
@@ -5911,7 +5953,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// ⌘Z on the list presses the toast's Undo while it is up.
     fileprivate func undoFromKeyboard() -> Bool {
-        guard !undoToast.isHidden, pendingHideUndo != nil || pendingUndo != nil else { return false }
+        guard !undoToast.isHidden, pendingHideUndo != nil || pendingUndo != nil || pendingClearUndo != nil else { return false }
         performUndo()
         return true
     }
@@ -5930,6 +5972,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         undoToastTimer = nil
         pendingUndo = nil
         pendingHideUndo = nil
+        pendingClearUndo = nil
         undoToast.hide()
         updateBottomStack()
     }
@@ -5943,11 +5986,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// back.
     private func performUndo() {
         // One press puts back the whole batch: the hidden sessions and the snoozes.
-        let keys = pendingHideUndo, restoring = pendingUndo
-        guard keys != nil || restoring != nil else { return }
+        let keys = pendingHideUndo, restoring = pendingUndo, cleared = pendingClearUndo
+        guard keys != nil || restoring != nil || cleared != nil else { return }
         dismissUndoToast()
         if let keys { showHiddenExternalSessions(keys) }
         if let restoring { onUndoLifecycle?(restoring) }
+        if let cleared { unclear(cleared) }
     }
 
     /// P3.5's `isInteracting`: hover, selection, or keyboard-active. The last two

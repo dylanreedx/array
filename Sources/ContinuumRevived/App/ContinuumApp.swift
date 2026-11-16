@@ -894,6 +894,19 @@ enum ContinuumApp {
         }
         // Sidebar round: the Ledger layout's counts, causes, Clear/Undo, layout
         // switch and tile-less rows, through real events on the production list.
+        // Sidebar round: Clear acknowledges in the sidebar only; every tile stays.
+        if CommandLine.arguments.contains("--sidebar-clear-tiles-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarLedgerChecks.runClearTiles())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-ledger-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {
@@ -16053,11 +16066,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.onFailureDetailsLoaded = { [weak self] in
             self?.pushExternalSessionRows()
         }
-        // Sidebar round: each incident's one action reaches an existing entry
-        // point. Accounts, sign-in (the CLI's own login) and setup live in
-        // Settings > Agents. Retry and Resume open the owning agent rather than
-        // sending a prompt on the user's behalf: unattended resend stays off
-        // until account switching lands (array/usage-fallback).
+        // Sidebar round: "Switch & resume…" opens Settings > Agents, where the
+        // accounts live; the CLI keeps its own login. The other incident
+        // actions draw disabled this release.
         sidebar.agentInbox.onIncidentAction = { [weak self] incident in
             self?.performSidebarIncident(incident)
         }
@@ -16568,7 +16579,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// What an incident's action did, for the witness.
     enum SidebarIncidentOutcome: Equatable {
         case openedSettings(String)
-        case revealed(UUID)
         case none
     }
     private(set) var lastSidebarIncidentOutcomeForQA: SidebarIncidentOutcome = .none
@@ -16577,15 +16587,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     func performSidebarIncident(_ incident: SidebarIncident) -> SidebarIncidentOutcome {
         let outcome: SidebarIncidentOutcome
         switch incident.kind {
-        case .cause(.usageLimit), .cause(.signInExpired), .cause(.couldNotStart):
+        case .cause(.usageLimit):
             openSettings(paneID: "agents")
             outcome = .openedSettings("agents")
-        case .needsYou, .cause(.providerBusy), .cause(.interruptedByRestart), .cause(.taskError):
-            if let target = incident.ownerIDs.first ?? incident.agentIDs.first, revealAgentFromInbox(target) {
-                outcome = .revealed(target)
-            } else {
-                outcome = .none
-            }
+        case .needsYou, .cause:
+            outcome = .none
         }
         lastSidebarIncidentOutcomeForQA = outcome
         return outcome

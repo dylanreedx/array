@@ -11,15 +11,14 @@ import ContinuumRevivedCore
 //   1. the lead's chip says "18 helpers · 12 paused · 1 failed", its AX help
 //      carries the full partition, and shown helper rows + the drawn fold
 //      numbers = 18; "failed" is drawn once on the card;
-//   2. each failure class draws its label and one action, and pressing the
-//      action reaches the host with that incident;
-//   3. Clear N acts on exactly the clearable rows: the rows leave, blocked rows
-//      stay, Undo brings them back;
+//   2. each failure class draws its label and one action; "Switch & resume…"
+//      reaches the host when pressed, the others draw disabled this release;
+//   3. Clear N acts on exactly the clearable rows without telling the host: the
+//      rows leave, blocked rows stay, Undo brings them back;
 //   4. switching Settings > Sidebar > Layout re-renders the list live;
 //   5. a tile-less helper draws as a normal row beside a tiled sibling.
-// Persistence through a store reload is asserted on a real AgentSupervisor and
-// AgentStore: a settled (cleared) record stays settled for a second supervisor
-// on the same root, and new activity clears it.
+// Clear is sidebar-only: it reaches no host action, its marks survive a second
+// list on the same defaults (a store reload), and new activity releases them.
 @MainActor
 enum SidebarLedgerChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -135,7 +134,6 @@ enum SidebarLedgerChecks {
         for dark in [true, false] {
             report.append(try checkLedger(dark: dark, outputDirectory: outputDirectory))
         }
-        report.append(try checkPersistence())
         return "SidebarLedgerChecks passed:\n" + report.joined(separator: "\n")
     }
 
@@ -300,9 +298,15 @@ enum SidebarLedgerChecks {
                 throw fail("incident '\(title)' draws '\(cell.titleForQA)' / '\(cell.actionButton.title)'")
             }
             let before = pressed.count
-            try press(cell.actionButton, in: window, "\(title) → \(action)")
-            guard pressed.count == before + 1, pressed.last?.kind == kind, pressed.last?.title == title else {
-                throw fail("pressing \(action) on '\(title)' reached the host as \(pressed.last.map { "\($0.title)" } ?? "nothing")")
+            let acts = kind == .cause(.usageLimit)
+            guard cell.actionButton.isEnabled == acts else {
+                throw fail("'\(action)' on '\(title)' is \(cell.actionButton.isEnabled ? "enabled" : "disabled")")
+            }
+            if acts {
+                try press(cell.actionButton, in: window, "\(title) → \(action)")
+                guard pressed.count == before + 1, pressed.last?.kind == kind, pressed.last?.title == title else {
+                    throw fail("pressing \(action) on '\(title)' reached the host as \(pressed.last.map { "\($0.title)" } ?? "nothing")")
+                }
             }
         }
         // The usage incident counts owners: 11 Claude agents, 11 can resume.
@@ -323,10 +327,14 @@ enum SidebarLedgerChecks {
         guard clearTitle == "Clear \(expectedClear.count)" else {
             throw fail("Clear reads '\(clearTitle)', expected Clear \(expectedClear.count)")
         }
+        let hostActionsBefore = actions.count
         try press(labelCell.clearButton, in: window, "Clear")
-        guard let clearAction = actions.last, clearAction.0 == .settle,
-              Set(clearAction.1.map(number)) == expectedClear else {
-            throw fail("Clear sent \(actions.last.map { "\($0.0) \($0.1.map(number).sorted())" } ?? "nothing")")
+        // Sidebar-only: Clear sends the host nothing (no Settle, no tile close).
+        guard actions.count == hostActionsBefore else {
+            throw fail("Clear reached the host: \(actions.suffix(actions.count - hostActionsBefore).map(\.0))")
+        }
+        guard Set(inbox.clearMarks.keys.map(number)) == expectedClear else {
+            throw fail("Clear marked \(inbox.clearMarks.keys.map(number).sorted())")
         }
         settle()
         let liveIDs = Set(inbox.itemsForQA.compactMap(\.agentRow).filter { $0.lifecycle == .active }.map { number($0.id) })
@@ -336,8 +344,28 @@ enum SidebarLedgerChecks {
         for stays in [32, 35, lead] where !liveIDs.contains(stays) {
             throw fail("blocked row \(stays) left the list on Clear")
         }
-        for paused in [14, 15, 16, 17] where !inbox.allRowsForQA.contains(where: { number($0.id) == paused && !$0.isCleared }) {
+        for paused in [14, 15, 16, 17] where inbox.clearMarks[uuid(paused)] != nil {
             throw fail("paused or setup helper \(paused) was cleared")
+        }
+        // A store reload: a second list on the same defaults draws the same.
+        let reloaded = AgentInboxView(frame: inbox.frame, indicatorDefaults: defaults)
+        reloaded.clock = { now }
+        reloaded.foldsUntouchedGroups = false
+        reloaded.setScope(.all)
+        reloaded.reload(rows: rows())
+        let reloadedLive = Set(reloaded.itemsForQA.compactMap(\.agentRow).filter { $0.lifecycle == .active }.map { number($0.id) })
+        for gone in [30, 33, 34, 36] where reloadedLive.contains(gone) {
+            throw fail("after a reload, cleared \(gone) is back without new activity")
+        }
+        // New activity releases a mark: a newer terminal event on 36.
+        let active = rows().map { row -> AgentInboxRow in
+            guard row.id == uuid(36) else { return row }
+            return row.withTerminalEventForQA(AgentTerminalEvent(sequence: 99, turnID: "again", outcome: .failed, endedAt: now))
+        }
+        reloaded.reload(rows: active)
+        guard reloaded.itemsForQA.contains(where: { $0.agentRow?.id == uuid(36) && $0.agentRow?.lifecycle == .active }),
+              reloaded.clearMarks[uuid(36)] == nil else {
+            throw fail("new activity on a cleared agent did not bring it back")
         }
         guard inbox.sidebarTallies[uuid(lead)]?.total == 18, inbox.sidebarTallies[uuid(lead)]?.reconciles == true else {
             throw fail("Clear changed the lead's total: \(String(describing: inbox.sidebarTallies[uuid(lead)]))")
@@ -377,33 +405,7 @@ enum SidebarLedgerChecks {
             throw fail("switching back to Ledger did not re-render")
         }
         return "  \(label): chip '18 helpers · 12 paused · 1 failed', \(familyRows) drawn + folds \(foldNumbers) = 18 (\(foldTitles.joined(separator: " / "))); "
-            + "\(expected.count) incident actions pressed to the host; Clear \(expectedClear.count) left blockers, Undo restored; layout switch re-rendered twice; tile-less helper drawn like its sibling"
-    }
-
-    // MARK: - Persistence through a store reload
-
-    static func checkPersistence() throws -> String {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("array-sidebar-ledger-check-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let cwd = root.appendingPathComponent("project", isDirectory: true)
-        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
-        let first = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root))
-        let done = first.spawn(role: "reviewer", prompt: nil, cwd: cwd, model: "claude-opus-5-5", thinking: "medium")
-        guard first.settle(agentID: done) else {
-            throw Failure(description: "persistence: the supervisor refused to clear an idle agent")
-        }
-        let second = AgentSupervisor(store: AgentStore(applicationSupportDirectory: root))
-        _ = second.restore()
-        guard second.records[done]?.settledOverride == .settled else {
-            throw Failure(description: "persistence: a reloaded store lost the clear (\(String(describing: second.records[done]?.settledOverride)))")
-        }
-        // New activity brings it back.
-        second.qaDeliver(.turnStarted(threadId: AgentSupervisor.threadId(for: done), turnId: "again"), to: done, now: now)
-        guard second.records[done]?.settledOverride == .neutral else {
-            throw Failure(description: "persistence: new activity did not un-clear the agent")
-        }
-        return "  persistence: a cleared record stays cleared through a store reload; new activity un-clears it"
+            + "\(expected.count) incidents drawn with their actions, Switch & resume pressed to the host and the rest disabled; Clear \(expectedClear.count) left blockers, Undo restored; layout switch re-rendered twice; tile-less helper drawn like its sibling"
     }
 
     static func still(window: NSWindow, inbox: AgentInboxView, to url: URL) throws {
@@ -412,5 +414,145 @@ enum SidebarLedgerChecks {
         guard let rep = inbox.bitmapImageRepForCachingDisplay(in: inbox.bounds) else { return }
         inbox.cacheDisplay(in: inbox.bounds, to: rep)
         try rep.representation(using: .png, properties: [:])?.write(to: url)
+    }
+}
+
+// MARK: - Clear leaves every tile (`--sidebar-clear-tiles-check`)
+
+extension SidebarLedgerChecks {
+    /// The production app (WorkspaceAPIChecks fixture: real delegate, canvas,
+    /// supervisor, store) with its real sidebar in a window. A finished lead
+    /// with a tile and a finished helper; Clear pressed on its button through
+    /// `NSApp.sendEvent`. Clear is an acknowledgement in the sidebar only: every
+    /// tile stays on the canvas, no record is settled, the lead leaves the
+    /// live list, and Undo brings it back.
+    static func runClearTiles() throws -> String {
+        guard let settings = QAIsolatedDefaults(isolatedSuiteName: "array.qa.sidebar-clear-tiles.\(UUID().uuidString)") else {
+            throw Failure(description: "no isolated defaults suite")
+        }
+        defer { settings.removePersistentDomain(forName: settings.suiteDomainName) }
+        var leadID: AgentID?
+        let f = try WorkspaceAPIChecks.makeFixture(settings: settings, beforeMount: { delegate, _ in
+            let store = AgentStore(smokeTest: false)
+            let supervisor = delegate.qaAgentSupervisor
+            guard var lead = supervisor.records.values.first(where: { $0.tileId != nil }) else {
+                throw Failure(description: "fixture lead with a tile missing")
+            }
+            let ended = Date().addingTimeInterval(-3_600)
+            lead.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "t", outcome: .succeeded, endedAt: ended)
+            lead.acknowledgedTerminalSequence = 1
+            lead.runCompletedAt = ended
+            try store.upsert(lead)
+            var helper = AgentRecord(id: AgentID(rawValue: UUID()), displayName: "Finished helper", harness: .pi,
+                model: lead.model, thinking: lead.thinking, cwd: lead.cwd, projectId: lead.projectId,
+                parentAgentID: lead.id, createdAt: ended.addingTimeInterval(-60), lastActivityAt: ended)
+            helper.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "t", outcome: .succeeded, endedAt: ended)
+            helper.acknowledgedTerminalSequence = 1
+            helper.runCompletedAt = ended
+            try store.upsert(helper)
+            leadID = lead.id
+        })
+        defer { f.tearDown() }
+        guard let leadID, let tileID = f.delegate.qaAgentSupervisor.records[leadID]?.tileId else {
+            throw Failure(description: "the fixture lead has no tile after boot")
+        }
+        f.delegate.wireCanvasCallbacks(f.canvas)
+        try f.delegate.reconciledManagedSessionSource.reconcile(
+            registry: f.delegate.registryStore!.loadOrEmpty(), reason: .continuumRestarted, now: Date())
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 360, height: 1_000))
+        let window = SidebarOwnershipChecks.KeyWindow(contentRect: sidebar.frame, styleMask: [.borderless],
+                                                      backing: .buffered, defer: false)
+        window.contentView = sidebar
+        window.orderFrontOffscreenForChecks()
+        window.makeKey()
+        defer { window.orderOut(nil) }
+        f.delegate.qaInstallWorkspaceSidebar(sidebar)
+        let inbox = sidebar.agentInbox
+        inbox.setSidebarLayoutForQA(.ledger)
+        inbox.setScope(.all)
+        f.delegate.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
+        let tilesBefore = Set(f.canvas.allTilesInWorldFrames().map(\.id))
+        guard f.canvas.tileView(for: tileID) != nil, tilesBefore.contains(tileID) else {
+            throw Failure(description: "the lead's tile is not on the canvas before Clear")
+        }
+        guard inbox.sidebarClearIDs.contains(leadID.rawValue) else {
+            let row = inbox.allRowsForQA.first { $0.id == leadID.rawValue }
+            let why = row.map { "state \($0.state) lifecycle \($0.lifecycle) blocked \($0.settlementBlocked) refusal \(String(describing: SidebarClear.refusal(for: $0, standing: [])))" } ?? "no row"
+            throw Failure(description: "the finished lead is not clearable (\(why)); rows \(inbox.allRowsForQA.count)")
+        }
+        guard let at = inbox.itemsForQA.firstIndex(where: {
+            if case .sectionLabel(let s) = $0 { return s.clearCount > 0 } else { return false }
+        }), let label = inbox.cellForQA(atItem: at) as? SidebarSectionLabelView else {
+            throw Failure(description: "no Clear button drawn: \(inbox.drawnSequenceForQA)")
+        }
+        inbox.layoutForQA()
+        window.contentView?.layoutSubtreeIfNeeded()
+        try press(label.clearButton, in: window, "Clear")
+        f.delegate.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
+        let tilesAfter = Set(f.canvas.allTilesInWorldFrames().map(\.id))
+        guard f.canvas.tileView(for: tileID) != nil, tilesAfter == tilesBefore else {
+            throw Failure(description: "Clear closed tiles: \(tilesBefore.subtracting(tilesAfter).count) gone (lead tile present: \(f.canvas.tileView(for: tileID) != nil))")
+        }
+        guard f.delegate.qaAgentSupervisor.records[leadID]?.settledOverride == .neutral else {
+            throw Failure(description: "Clear settled the record (\(String(describing: f.delegate.qaAgentSupervisor.records[leadID]?.settledOverride)))")
+        }
+        let live = { inbox.itemsForQA.compactMap(\.agentRow).filter { $0.lifecycle == .active }.map(\.id) }
+        guard !live().contains(leadID.rawValue) else {
+            throw Failure(description: "the cleared lead is still in the live list")
+        }
+        guard inbox.undoToastTextForQA.hasPrefix("Cleared"), inbox.clickUndoForQA() else {
+            throw Failure(description: "no Undo after Clear ('\(inbox.undoToastTextForQA)')")
+        }
+        f.delegate.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
+        guard live().contains(leadID.rawValue), f.canvas.tileView(for: tileID) != nil else {
+            throw Failure(description: "Undo did not bring the lead back")
+        }
+        // "Switch & resume…": a live usage stop on the helper, its incident's
+        // button pressed through the window, Settings opens on Agents.
+        f.delegate.qaAttachWindowForOfflineCheck(window)
+        let supervisor = f.delegate.qaAgentSupervisor
+        guard let helperID = supervisor.records.values.first(where: { $0.parentAgentID == leadID })?.id else {
+            throw Failure(description: "the fixture helper is missing")
+        }
+        let thread = AgentSupervisor.threadId(for: helperID)
+        supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "usage"), to: helperID)
+        supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: "usage", outcome: .failed,
+                                            errorMessage: "You've hit your 5-hour limit · resets 4:00 AM"), to: helperID)
+        f.delegate.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
+        guard let usageAt = inbox.itemsForQA.firstIndex(where: {
+            if case .incident(let i) = $0 { return i.kind == .cause(.usageLimit) } else { return false }
+        }), let usageCell = inbox.cellForQA(atItem: usageAt) as? SidebarIncidentCellView else {
+            let helperRow = inbox.allRowsForQA.first { $0.id == helperID.rawValue }
+            throw Failure(description: "no usage incident drawn (helper state \(String(describing: helperRow?.state)), detail \(helperRow?.failureDetail ?? "nil"))")
+        }
+        window.contentView?.layoutSubtreeIfNeeded()
+        guard usageCell.actionButton.title == "Switch & resume…", usageCell.actionButton.isEnabled else {
+            throw Failure(description: "usage action reads '\(usageCell.actionButton.title)', enabled \(usageCell.actionButton.isEnabled)")
+        }
+        try press(usageCell.actionButton, in: window, "Switch & resume…")
+        guard let modal = f.delegate.qaSettingsModal, modal.isVisible, modal.model.selectedPaneID == "agents" else {
+            throw Failure(description: "Switch & resume did not open Settings > Agents (modal \(f.delegate.qaSettingsModal?.isVisible == true), pane \(f.delegate.qaSettingsModal?.model.selectedPaneID ?? "nil"))")
+        }
+        return "SidebarClearTilesChecks passed: Switch & resume… pressed through the window opened Settings > Agents (accounts); Clear through the real button left all \(tilesBefore.count) tiles on the canvas, settled no record, moved the lead out of the live list, and Undo brought it back"
+    }
+}
+
+extension AgentInboxRow {
+    /// The same row with a newer terminal event, for the release witness.
+    func withTerminalEventForQA(_ event: AgentTerminalEvent) -> AgentInboxRow {
+        var row = AgentInboxRow(
+            id: id, title: title, projectName: projectName, projectId: projectId, directoryName: directoryName,
+            workspaceName: workspaceName, workspaceId: workspaceId, state: state, attention: attention,
+            lifecycle: lifecycle, model: model, role: role, branch: branch, isIsolated: isIsolated,
+            elapsed: elapsed, elapsedStartedAt: elapsedStartedAt, lastActiveAt: event.endedAt, depth: depth,
+            createdAt: createdAt, parentId: parentId, settlementBlocked: settlementBlocked, zoneName: zoneName,
+            harness: harness, checkedOutBranch: checkedOutBranch, terminalEvent: event,
+            terminalIsUnread: true, identityColor: identityColor, hasTile: hasTile, isPinned: isPinned)
+        row.failureDetail = failureDetail
+        return row
     }
 }

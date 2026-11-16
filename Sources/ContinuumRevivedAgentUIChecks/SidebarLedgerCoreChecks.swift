@@ -167,6 +167,24 @@ func runSidebarLedgerCoreChecks() {
     expect(SidebarClear.eligibleIDs(rows: finished, standing: []) == [F.id(200)],
            "a finished family clears as its lead")
 
+    // 4b. Clear marks: sidebar-only, released by new activity.
+    let marks: [UUID: SidebarClearMark] = [
+        F.id(200): SidebarClearMarks.mark(for: finished[0], now: F.now),
+        F.id(19): SidebarClearMarks.mark(for: rows.first { $0.id == F.id(19) }!, now: F.now),
+    ]
+    let marked = SidebarClearMarks.apply(marks, to: finished + rows)
+    let markedRoot = marked.rows.first { $0.id == F.id(200) }!
+    let markedChild = marked.rows.first { $0.id == F.id(201) }!
+    let markedHelper = marked.rows.first { $0.id == F.id(19) }!
+    expect(markedRoot.lifecycle != .active && markedChild.lifecycle != .active && markedRoot.isCleared,
+           "a cleared lead goes to History with its family")
+    expect(markedHelper.lifecycle == .active && markedHelper.isCleared, "a cleared helper stays in its active family, folded")
+    let woken = F.row(19, "Finished helper", parent: 1, outcome: .succeeded, endedHoursAgo: 0)
+    var newer = woken
+    newer = AgentInboxRow(id: woken.id, title: woken.title, state: .working, createdAt: woken.createdAt, parentId: woken.parentId)
+    let released = SidebarClearMarks.apply(marks, to: [newer])
+    expect(released.released == [F.id(19)] && !released.rows[0].isCleared, "new activity releases a clear mark")
+
     // 5. Layout setting.
     let suite = "array.sidebar-ledger-core-check.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!

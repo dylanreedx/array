@@ -510,3 +510,92 @@ public enum SidebarStandingLeads {
         defaults.set(ids.map(\.uuidString).sorted(), forKey: defaultsKey)
     }
 }
+
+/// Clear's record: an acknowledgement in the sidebar only. It moves no agent
+/// lifecycle, closes no tile and settles nothing; it hides an outcome the user
+/// has seen. A mark holds while the agent does nothing new: a newer terminal
+/// event, newer activity, work or a raised hand releases it.
+public struct SidebarClearMark: Codable, Equatable, Sendable {
+    public let sequence: UInt64
+    public let activityAt: Date
+    public let clearedAt: Date
+
+    public init(sequence: UInt64, activityAt: Date, clearedAt: Date) {
+        self.sequence = sequence
+        self.activityAt = activityAt
+        self.clearedAt = clearedAt
+    }
+}
+
+public enum SidebarClearMarks {
+    public static let defaultsKey = "continuum.sidebar.clearedOutcomes"
+    /// Slack for an activity stamp re-derived at the same instant.
+    static let activitySlack: TimeInterval = 1
+
+    public static func mark(for row: AgentInboxRow, now: Date) -> SidebarClearMark {
+        SidebarClearMark(sequence: row.terminalEvent?.sequence ?? 0,
+                         activityAt: row.lastActiveAt ?? row.terminalEvent?.endedAt ?? row.createdAt,
+                         clearedAt: now)
+    }
+
+    /// Whether the mark still hides this row.
+    public static func holds(_ mark: SidebarClearMark, for row: AgentInboxRow) -> Bool {
+        switch row.state {
+        case .working, .approval, .input: return false
+        case .failed, .ready: break
+        }
+        if (row.terminalEvent?.sequence ?? 0) > mark.sequence { return false }
+        let activity = row.lastActiveAt ?? row.terminalEvent?.endedAt ?? row.createdAt
+        return activity <= mark.activityAt.addingTimeInterval(activitySlack)
+    }
+
+    public static func load(from defaults: UserDefaults) -> [UUID: SidebarClearMark] {
+        guard let data = defaults.data(forKey: defaultsKey),
+              let decoded = try? JSONDecoder().decode([String: SidebarClearMark].self, from: data) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: decoded.compactMap { key, value in UUID(uuidString: key).map { ($0, value) } })
+    }
+
+    public static func save(_ marks: [UUID: SidebarClearMark], to defaults: UserDefaults) {
+        let encoded = Dictionary(uniqueKeysWithValues: marks.map { ($0.key.uuidString, $0.value) })
+        if let data = try? JSONEncoder().encode(encoded) { defaults.set(data, forKey: defaultsKey) }
+    }
+
+    /// The rows as the sidebar draws them: a cleared top-level agent goes to
+    /// History (its family with it), a cleared helper folds inside its lead.
+    /// Rows whose mark no longer holds are returned in `released`.
+    public static func apply(
+        _ marks: [UUID: SidebarClearMark], to rows: [AgentInboxRow]
+    ) -> (rows: [AgentInboxRow], released: Set<UUID>) {
+        guard !marks.isEmpty else { return (rows, []) }
+        let present = Set(rows.map(\.id))
+        var released: Set<UUID> = []
+        var clearedRoots: [UUID: Date] = [:]
+        var out = rows.map { row -> AgentInboxRow in
+            guard let mark = marks[row.id] else { return row }
+            guard holds(mark, for: row) else { released.insert(row.id); return row }
+            var cleared = row
+            if row.parentId.map(present.contains) != true, row.lifecycle == .active {
+                cleared = row.followingParent(lifecycle: .settled(at: mark.clearedAt), closingSince: row.closingSince,
+                                              workspaceName: row.workspaceName, workspaceId: row.workspaceId)
+                clearedRoots[row.id] = mark.clearedAt
+            }
+            cleared.isCleared = true
+            return cleared
+        }
+        guard !clearedRoots.isEmpty else { return (out, released) }
+        // Helpers travel with a cleared root, as they do with a settled one.
+        let parentOf = Dictionary(out.compactMap { r in r.parentId.map { (r.id, $0) } }, uniquingKeysWith: { a, _ in a })
+        func root(_ id: UUID) -> UUID? {
+            var seen: Set<UUID> = [id]
+            var current = id
+            while let parent = parentOf[current], seen.insert(parent).inserted { current = parent }
+            return current == id ? nil : current
+        }
+        out = out.map { row in
+            guard let top = root(row.id), let at = clearedRoots[top], row.lifecycle == .active else { return row }
+            return row.followingParent(lifecycle: .settled(at: at), closingSince: row.closingSince,
+                                       workspaceName: row.workspaceName, workspaceId: row.workspaceId)
+        }
+        return (out, released)
+    }
+}
