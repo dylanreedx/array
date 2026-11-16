@@ -288,6 +288,7 @@ check --request-telemetry-check
 check --reserved-dispatch-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
+check --restore-delivery-scaling-check
 check --restore-scaling-check
 check --retired-flat-write-check
 check --reveal-in-finder-check
@@ -352,6 +353,7 @@ check --spawn-placement-check
 check --spawn-rate-limit-check
 check --spawn-sizing-check
 check --standards-resolution-check
+check --startup-branch-warm-check
 check --stranded-tile-recovery-check
 check --stray-window-audit-check
 check --streaming-ingest-check
@@ -467,6 +469,7 @@ check --workspace-switch-confidence-check
 check --workspace-switch-polish-check
 check --workspace-tool-context-check
 check --workspace-top-bar-check
+check --worktree-pipe-lifecycle-check
 check --zindex-relaunch-hit-test-check
 check --zone-adaptive-bounds-check
 check --zone-arming-check
@@ -789,6 +792,7 @@ leg run_app_check .build/debug/Array --request-telemetry-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
+leg run_app_check .build/debug/Array --restore-delivery-scaling-check
 leg run_app_check .build/debug/Array --restore-scaling-check
 leg run_app_check .build/debug/Array --retired-flat-write-check
 leg run_app_check .build/debug/Array --reveal-in-finder-check
@@ -851,6 +855,7 @@ leg run_app_check .build/debug/Array --spawn-placement-check
 leg run_app_check .build/debug/Array --spawn-rate-limit-check
 leg run_app_check .build/debug/Array --spawn-sizing-check
 leg run_app_check .build/debug/Array --standards-resolution-check
+leg run_app_check .build/debug/Array --startup-branch-warm-check
 leg run_app_check .build/debug/Array --stranded-tile-recovery-check
 leg run_app_check .build/debug/Array --stray-window-audit-check
 leg run_app_check .build/debug/Array --streaming-ingest-check
@@ -1027,6 +1032,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-che
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --worktree-pipe-lifecycle-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --zone-membership-repair-check
 leg run_leg .build/debug/ContinuumRevivedFileTreeChecks
 leg run_leg .build/debug/ContinuumRevivedPaletteChecks
@@ -1103,7 +1109,7 @@ count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 22
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 209
+count ContinuumRevivedCoreChecks 210
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

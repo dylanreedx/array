@@ -9156,24 +9156,33 @@ final class AgentSupervisor {
     static let deliveredRowRetention: TimeInterval = 7 * 86_400
 
     private func recoverHelperCompletionBatches(for leads: [AgentID]) {
+        var prunedJournals: Set<String> = []
         for parent in leads {
             guard let cwd = records[parent]?.cwd else { continue }
-            // Delivered rows only serve a lookup's pointer: a week is plenty.
-            SpawnResultFile.pruneDeliveredRows(parentCwd: cwd,
-                before: helperCompletionNow().addingTimeInterval(-Self.deliveredRowRetention))
-            do {
-                let states = try SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue)
-                for state in states.sorted(by: { $0.completedAt < $1.completedAt }) where state.phase != .delivered {
-                    guard let wakeID = state.wakeID, let text = state.text else { continue }
-                    // Held here and now: its release delivers it. A relaunch,
-                    // which holds nothing, replays it once (P1).
-                    if state.held == true, heldHelperCompletions[AgentID(rawValue: state.helper)]?.identity == state.turn { continue }
-                    var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(id: wakeID, deadline: state.dueAt, updates: [])
-                    guard !batch.updates.contains(where: { $0.0.rawValue == state.helper && $0.2 == state.turn }) else { continue }
-                    batch.updates.append((AgentID(rawValue: state.helper), text, state.turn))
-                    helperCompletionBatches[parent] = batch
+            autoreleasepool {
+                let journal = SpawnResultFile.directory(parentCwd: cwd)
+                    .appendingPathComponent(".deliveries", isDirectory: true)
+                    .standardizedFileURL.resolvingSymlinksInPath().path
+                if prunedJournals.insert(journal).inserted {
+                    // All leads in this checkout share the journal. Prune it once
+                    // per recovery pass, while still reading each lead's rows.
+                    SpawnResultFile.pruneDeliveredRows(parentCwd: cwd,
+                        before: helperCompletionNow().addingTimeInterval(-Self.deliveredRowRetention))
                 }
-            } catch { warn("Helper completion journal unreadable; retry remains available") }
+                do {
+                    let states = try SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue)
+                    for state in states.sorted(by: { $0.completedAt < $1.completedAt }) where state.phase != .delivered {
+                        guard let wakeID = state.wakeID, let text = state.text else { continue }
+                        // Held here and now: its release delivers it. A relaunch,
+                        // which holds nothing, replays it once (P1).
+                        if state.held == true, heldHelperCompletions[AgentID(rawValue: state.helper)]?.identity == state.turn { continue }
+                        var batch = helperCompletionBatches[parent] ?? HelperCompletionBatch(id: wakeID, deadline: state.dueAt, updates: [])
+                        guard !batch.updates.contains(where: { $0.0.rawValue == state.helper && $0.2 == state.turn }) else { continue }
+                        batch.updates.append((AgentID(rawValue: state.helper), text, state.turn))
+                        helperCompletionBatches[parent] = batch
+                    }
+                } catch { warn("Helper completion journal unreadable; retry remains available") }
+            }
         }
     }
 
@@ -9281,10 +9290,12 @@ final class AgentSupervisor {
         // Once per lead per launch, like the recovery read above.
         for parent in recovering {
             helperDeliveryJournalsRead.insert(parent)
-            guard let cwd = records[parent]?.cwd,
-                  let states = try? SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue) else { continue }
-            let ids = Set(states.compactMap(\.wakeID)).filter { id in
-                states.filter { $0.wakeID == id }.allSatisfy { $0.phase == .delivered }
+            let ids: Set<UUID> = autoreleasepool {
+                guard let cwd = records[parent]?.cwd,
+                      let states = try? SpawnResultFile.deliveries(parentCwd: cwd, recipient: parent.rawValue) else { return [] }
+                return Set(states.compactMap(\.wakeID)).filter { id in
+                    states.filter { $0.wakeID == id }.allSatisfy { $0.phase == .delivered }
+                }
             }
             for id in ids { finishScheduledAdmission(id) }
             if !ids.isEmpty { await releaseScheduledWakeups(for: parent, knownIDs: Set(ids)) }

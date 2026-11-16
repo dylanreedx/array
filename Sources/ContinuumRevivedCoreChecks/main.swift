@@ -241,6 +241,12 @@ if CommandLine.arguments.contains("--project-standards-index-check") {
 }
 // `.plans/102` P2a: report and status bounds, the push-back decision, the
 // courier, the catalogue entries and the Settings toggle.
+#if os(macOS)
+if CommandLine.arguments.contains("--worktree-pipe-lifecycle-check") {
+    do { try runWorktreePipeLifecycleChecks(); Foundation.exit(0) }
+    catch { fputs("FAIL worktree pipe lifecycle: \(error)\n", stderr); Foundation.exit(1) }
+}
+#endif
 if CommandLine.arguments.contains("--agent-report-contract-check") {
     runAgentReportContractChecks()
     Foundation.exit(0)

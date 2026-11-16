@@ -495,6 +495,12 @@ public struct WorktreeManager: Sendable {
         defer {
             stdout.fileHandleForReading.readabilityHandler = nil
             stderr.fileHandleForReading.readabilityHandler = nil
+            // Foundation may keep Process and its pipes alive beyond this call.
+            // Release our descriptors now rather than after a whole warm pass.
+            try? stdout.fileHandleForReading.close()
+            try? stdout.fileHandleForWriting.close()
+            try? stderr.fileHandleForReading.close()
+            try? stderr.fileHandleForWriting.close()
         }
 
         try process.run()

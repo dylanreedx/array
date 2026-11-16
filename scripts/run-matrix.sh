@@ -81,6 +81,7 @@ if [[ -n "$MATRIX_TMUX_BIN" ]]; then
 fi
 
 RESTORE_SCALING_ONLY=0
+STARTUP_SPIKE_ONLY=0
 COMPOSER_SEND_ONLY=0
 EFFORT_CATALOG_ONLY=0
 CROSS_HARNESS_DELEGATION_ONLY=0
@@ -118,6 +119,7 @@ if [[ $# -gt 0 ]]; then
   case "$1" in
     --effort-catalog) EFFORT_CATALOG_ONLY=1; shift ;;
     --restore-scaling) RESTORE_SCALING_ONLY=1; shift ;;
+    --startup-spike) STARTUP_SPIKE_ONLY=1; shift ;;
     --awake-only) MATRIX_MODE=awake-only; shift ;;
     --skip-awake) MATRIX_MODE=skip-awake; shift ;;
     --browser-scheduling) BROWSER_SCHEDULING_ONLY=1; shift ;;
@@ -240,7 +242,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/run-matrix.sh [--browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context | --helper-context-diet]
+Usage: scripts/run-matrix.sh [--startup-spike | --browser-scheduling | --focus-safe-input | --awake-only | --skip-awake | --permission-ux | --agent-schedules | --share-revocation | --composer-send | --collaboration | --boards | --fast | --tile-selection | --agent-reference | --transcript-viewport | --sidebar-refinements | --workspace-selector | --agent-tile-menu | --codex-permissions | --ios-preview-proof | --ios-preview-live | --ios-preview-tile | --companion-tasks | --notifications | --notifications-linux | --hook-bridge | --managed-mode | --helper-isolation | --tool-context | --helper-context-diet]
 
 
 --focus-safe-input runs only the browser input witnesses and their contract/catalog neighbors.
@@ -1161,6 +1163,18 @@ if [[ "$EFFORT_CATALOG_ONLY" -eq 1 ]]; then
   matrix_report 'Effort catalogue matrix (targeted)'
   exit $?
 fi
+# Startup spike witnesses use products built separately after the resource gate.
+if [[ "$STARTUP_SPIKE_ONLY" -eq 1 ]]; then
+  run_app_check .build/debug/Array --restore-delivery-scaling-check
+  run_app_check .build/debug/Array --startup-branch-warm-check
+  run_app_check .build/debug/Array --helper-completion-check
+  run_app_check .build/debug/Array --agent-restore-check
+  run_app_check .build/debug/Array --restore-scaling-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --worktree-pipe-lifecycle-check
+  matrix_report 'Startup spike matrix (targeted)'
+  exit $?
+fi
 # Offline launch regression subset. Uses the same result reporting and app isolation
 # as the full gate; every product is rebuilt before its witnesses run.
 if [[ "$RESTORE_SCALING_ONLY" -eq 1 ]]; then
@@ -1847,6 +1861,9 @@ run_app_check .build/debug/Array --agent-display-name-check
 # their identity/model/role intact, the tiled one re-resolved from its tileId and
 # carrying a previous-session notice — and a prompt is what starts them again.
 run_app_check .build/debug/Array --restore-scaling-check
+run_app_check .build/debug/Array --startup-branch-warm-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --worktree-pipe-lifecycle-check
+run_app_check .build/debug/Array --restore-delivery-scaling-check
 run_app_check .build/debug/Array --agent-restore-check
 # Performance at scale, item 4: with agents.recordArchive.enabled (off in code),
 # old finished tile-less records move to agents/archive/ and the next boot skips
