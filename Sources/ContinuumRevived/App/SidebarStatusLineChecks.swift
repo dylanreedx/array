@@ -17,8 +17,10 @@ import Foundation
 ///
 /// Asserts: a working agent's declared `now` in the secondary ink; its
 /// `needsYou` as "Needs you: …" painted in the asking amber, in light and dark;
-/// once the turn ends the declared status is gone; a report with a failed check
-/// reads "1 of 4 checks failed" with the failure painted red, an all-pass
+/// once the turn ends the declared status is gone; a SUCCEEDED agent's report
+/// with a check that did not pass reads "1 of 4 checks unconfirmed" in the
+/// secondary ink with no failure red anywhere (a report check is not the agent
+/// failing), an all-pass
 /// one "all 3 checks passed" (plan 106 dropped the "Done ·"); a new turn hides the last turn's report and
 /// status; an over-long ask stays one truncated line; and the card height never
 /// moves, equal to a row that never said anything.
@@ -189,22 +191,25 @@ enum SidebarStatusLineChecks {
         try expect(supervisor.records[agent]?.declaredStatus != nil, "setup: the record still holds the declared status")
         try await waitForLine(nil, "a finished agent's declared status")
 
-        // A report with a failed check.
+        // A succeeded agent whose report has a check that did not pass.
         try file(["summary": "Built and compared", "checks": [
             ["what": "swift build", "result": "pass"], ["what": "matrix leg", "result": "fail"],
             ["what": "screenshots", "result": "pass"], ["what": "lint", "result": "pass"],
             ["what": "read the ledger", "result": "info"],
         ]])
-        try await waitForLine("1 of 4 checks failed", "a finished agent's report with a failure")
+        try await waitForLine("1 of 4 checks unconfirmed", "a succeeded agent's report with a check that did not pass")
+        try expect(supervisor.records[agent]?.latestTerminalEvent?.outcome == .succeeded,
+                   "setup: the agent's own turn must have succeeded")
         cell = try card(agent)
         let red = AccentToken.accentFailed.color.nsColor(in: cell)
-        try expect(same(colour(of: cell.selfReportTextForQA!, at: "1 of 4"), red), "the failure count must be in the failure red")
+        try expect(same(colour(of: cell.selfReportTextForQA!, at: "1 of 4"), TextToken.textSecondary.color.nsColor(in: cell)),
+                   "an unconfirmed check count must be in the secondary ink, not the failure red")
         // Plan 106 dropped the "Done ·": the line opens with the result itself.
         try expect(cell.selfReportTextForQA?.string.hasPrefix("1 of 4") == true,
                    "the report result must lead the line, with no \"Done ·\"")
-        try expect(paints(red, in: cell), "the failure red must reach the drawn pixels")
+        try expect(!paints(red, in: cell), "a succeeded agent's unconfirmed checks must paint no failure red")
         try expect(cell.frame.height == restingHeight, "a report line must not change the card's height")
-        try shoot("Done: a check failed")
+        try shoot("Done: a check unconfirmed")
 
         try file(["summary": "All green", "checks": [
             ["what": "swift build", "result": "pass"], ["what": "matrix leg", "result": "pass"],

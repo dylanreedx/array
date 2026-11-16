@@ -1725,8 +1725,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 
     /// The words of the self-report line, in this appearance's tokens: the ask in
-    /// the asking amber, the declared `now` in the row's secondary ink, and a
-    /// report's failures in the failure red.
+    /// the asking amber, the declared `now` and a report's results (passed or
+    /// unconfirmed) in the row's secondary ink.
     static func selfReportText(_ line: InboxSelfReportLine, in view: NSView) -> NSAttributedString {
         let secondary = TextToken.textSecondary.color.nsColor(in: view)
         let paragraph = NSMutableParagraphStyle()
@@ -1746,8 +1746,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             let text = NSMutableAttributedString(attributedString: run("Done · ", secondary))
             let noun = total == 1 ? "check" : "checks"
             if failed > 0 {
-                text.append(run("\(failed) of \(total) \(noun) failed",
-                                AccentToken.accentFailed.color.nsColor(in: view)))
+                // A report check that did not pass is not the agent failing: a
+                // succeeded agent's unconfirmed checks stay in quiet ink.
+                text.append(run("\(failed) of \(total) \(noun) unconfirmed", secondary))
             } else {
                 text.append(run(total == 1 ? "1 check passed" : "all \(total) checks passed", secondary))
             }
@@ -1937,9 +1938,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let sub = row.depth > 0 || row.parentId != nil
         titleLabel.font = sub ? Self.subagentTitleFont : .token(.title)
         placementLabel.font = .token(.label)
-        // A report with failed checks is a small pill in the clock's place.
-        if sub, case let .checks(failed, total)? = row.selfReportLine, failed > 0 {
-            reportPillText = "\(failed)/\(total) failed"
+        // A report with checks that did not pass is a small neutral pill in the
+        // clock's place. Only the agent's own outcome is ever red.
+        if sub, case let .checks(failed, _)? = row.selfReportLine, failed > 0 {
+            reportPillText = "\(failed) unconfirmed"
         } else {
             reportPillText = nil
         }
@@ -2015,7 +2017,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             case .now(let says)?:
                 facts.append(run(says, secondary))
             case let .checks(failed, total)? where failed > 0:
-                facts.append(run("\(failed) of \(total) \(total == 1 ? "check" : "checks") failed", failedInk))
+                facts.append(run("\(failed) of \(total) \(total == 1 ? "check" : "checks") unconfirmed", secondary))
             case let .checks(_, total)?:
                 facts.append(run(total == 1 ? "1 check passed" : "all \(total) checks passed", secondary))
             default:
@@ -2052,7 +2054,6 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let failed = AccentToken.accentFailed.color.nsColor(in: self)
         let clock = stateLabel.stringValue
         stateLabel.textColor = clock == "Failed" ? failed : clock == "Done" ? primary : secondary
-        decorations.failure = failed
         decorations.dark = theme == .dark
         let resting = isSubagentRow && row.state != .working && Self.ask(row) == nil
         if titleShimmerPhase != nil {
@@ -2117,6 +2118,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     var tailTextForQA: String? { tailLabel.isHidden ? nil : tailLabel.stringValue }
     var clockTextForQA: String? { stateLabel.isHidden ? nil : stateLabel.stringValue }
     var reportPillForQA: String? { reportPillText }
+    /// The drawn pill, in this cell's coordinates. nil when none is drawn.
+    var reportPillFrameForQA: NSRect? { decorations.reportPill.map { decorations.convert($0.rect, to: self) } }
     var isTitleShimmeringForQA: Bool { titleShimmer.isShimmeringForQA }
     var isPulsingForQA: Bool { pulseDots.isPulsingForQA }
     var isSweepingForQA: Bool { ownershipChrome.sweep.isMovingForQA }
@@ -3739,9 +3742,8 @@ private final class Decorations: NSView {
     var workspaceColour: NSColor?
     var workspaceSlot: NSRect?
     var workspaceTreatment: AgentInbox96CellView.WorkspaceTreatment = .workspaceLabel
-    /// Plan 106: a subagent's report result, "1/6 failed", in a small quiet pill.
+    /// Plan 106: a subagent's report result, "1 unconfirmed", in a small quiet pill.
     var reportPill: (rect: NSRect, text: String)?
-    var failure = AccentToken.accentFailed.color.nsColor(for: TokenTheme.light)
     var dark = false
 
     override init(frame frameRect: NSRect) {
@@ -3777,13 +3779,13 @@ private final class Decorations: NSView {
         }
         if paintsBorder { drawBorder() }
         if let pill = reportPill {
-            failure.withAlphaComponent(dark ? 0.16 : 0.1).setFill()
+            muted.withAlphaComponent(dark ? 0.16 : 0.1).setFill()
             NSBezierPath(roundedRect: pill.rect, xRadius: pill.rect.height / 2, yRadius: pill.rect.height / 2).fill()
             let font = AgentInbox96CellView.pillFont
             let size = (pill.text as NSString).size(withAttributes: [.font: font])
             (pill.text as NSString).draw(
                 at: NSPoint(x: pill.rect.midX - size.width / 2, y: pill.rect.midY - size.height / 2),
-                withAttributes: [.font: font, .foregroundColor: failure])
+                withAttributes: [.font: font, .foregroundColor: muted])
         }
         if let slot = identityDot, let identityDotColour {
             identityDotColour.setFill()
