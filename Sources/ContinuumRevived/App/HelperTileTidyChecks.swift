@@ -6,7 +6,8 @@ import Foundation
 /// production. A lead in a live zone delegates helpers over the real workspace
 /// API (`agent.delegate`); each runs and finishes on a scripted runner; the
 /// supervisor's own flush delivers its result to the lead; and the app's own
-/// timer closes the tile. Nothing here calls the sweep or the close.
+/// timer closes the tile. Two mid-grace looks call the sweep directly to show
+/// it holds the tile; every close is the timer's.
 ///
 /// Positive: a finished, delivered, untouched helper's tile leaves the zone
 /// layer and the saved canvas after the grace period, no other tile moves, the
@@ -275,8 +276,41 @@ func runHelperTileTidyChecks() async throws {
     try expect(delegate.qaHelperTileTidyRefusals[middle] == "a helper still has its tile",
                "live child: kept for its helper, got \(String(describing: delegate.qaHelperTileTidyRefusals[middle]))")
     print("PASS a helper whose own helper keeps its tile keeps its tile too")
+    // …and once the person closes that helper's tile, the middle one is decided
+    // again. (Closing a tile hands focus to the top tile — here the middle one —
+    // and that focus counts as a look, so it is then kept for that reason.)
+    try expect(!DeleteConfirmPolicy.current.requiresConfirmation(for: .managedAgent),
+               "setup: this machine's delete-confirm policy would put a modal alert in front of deleteTile")
+    delegate.deleteTile(id: grandchildTile)
+    let middleRedecided = await waitUntil(timeout: 10, pollInterval: 0.02) {
+        canvas.tileRecord(for: middleTile) == nil
+            || (delegate.qaHelperTileTidyRefusals[middle].map { $0 != "a helper still has its tile" } ?? false)
+    }
+    try expect(middleRedecided, "child closed: the middle helper is decided again, got \(String(describing: delegate.qaHelperTileTidyRefusals[middle]))")
+    print("PASS closing that helper's tile re-decides the middle helper (now: \(canvas.tileRecord(for: middleTile) == nil ? "tidied" : delegate.qaHelperTileTidyRefusals[middle] ?? "?"))")
 
-    // 8 · THE POSITIVE CASE: finished, delivered, untouched.
+    // 8 · A RESULT THE LEAD HAS NOT RECEIVED keeps the tile. Stop pauses the
+    //     lead's queue: the helper's result is admitted there and waits.
+    supervisor.stop(lead)
+    try expect(supervisor.isQueuePaused(for: lead), "paused: setup — Stop pauses the lead's queue")
+    let (held, heldTile) = try await delegateAndDeliver("Held-result helper", expectDelivery: false)
+    await settle(delegate.helperTileTidyGrace * 2.5)
+    try expect(canvas.tileRecord(for: heldTile) != nil && supervisor.helperResultDeliveredAt[held] == nil,
+               "paused: a result sitting in a paused queue is not received, and the tile stays")
+    supervisor.resumeQueue(for: lead)
+    let receivedOK = await waitUntil(timeout: 20, pollInterval: 0.02) { supervisor.helperResultDeliveredAt[held] != nil }
+    try expect(receivedOK, "paused: resuming the queue hands the result to the lead")
+    let received = supervisor.helperResultDeliveredAt[held]!
+    await settle(delegate.helperTileTidyGrace * 0.5)
+    delegate.sweepFinishedHelperTiles()
+    try expect(canvas.tileRecord(for: heldTile) != nil && delegate.qaHelperTileTidyRefusals[held] == "grace",
+               "paused: the grace period runs from receipt, got \(String(describing: delegate.qaHelperTileTidyRefusals[held]))")
+    let heldClosed = await waitUntil(timeout: 10, pollInterval: 0.02) { canvas.tileRecord(for: heldTile) == nil }
+    try expect(heldClosed && Date().timeIntervalSince(received) >= delegate.helperTileTidyGrace,
+               "paused: the tile closes once the grace period after receipt has passed")
+    print("PASS a result held in a stopped lead's queue keeps the tile until received, then grace runs from receipt")
+
+    // 9 · THE POSITIVE CASE: finished, delivered, untouched.
     try expect(canvas.isAutoLayoutActive(inZone: zoneId), "setup: auto layout is active in the zone, so a settle would move tiles")
     let (done, doneTile) = try await delegateAndDeliver("Finished helper")
     await settle(delegate.helperTileTidyGrace * 0.5)
@@ -312,7 +346,6 @@ func runHelperTileTidyChecks() async throws {
 
     // Every negative control still holds its tile at the end.
     for (name, tile) in [("setting off", offTile), ("failed", failedTile), ("looked at", lookedTile),
-                         ("middle", middleTile), ("grandchild", grandchildTile),
                          ("typed into", typedTile), ("resized", resizedTile), ("user-started", userTile), ("lead", leadTile)] {
         try expect(canvas.tileRecord(for: tile) != nil, "\(name): the tile is still on the canvas at the end")
     }

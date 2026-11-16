@@ -8121,29 +8121,23 @@ final class AgentSupervisor {
     /// `spawn_agent`): stamped where the delegation commits. Parentage alone is
     /// not enough — "New session with summary" makes a user-started child.
     private var delegatedHelperIDs: Set<AgentID> = []
-    /// When each helper's latest result reached the agent that delegated it,
-    /// this launch: the moment its delivery journal row is marked delivered.
+    /// When each helper's latest result was RECEIVED by the agent that
+    /// delegated it, this launch: the lead's runner was handed the wake turn,
+    /// or consumed the steer, that carries it. Queue admission is not receipt —
+    /// a stopped lead's queue stays paused, and a queued result can be deleted.
     private(set) var helperResultDeliveredAt: [AgentID: Date] = [:]
-    /// Fired on the main actor each time a helper's result is delivered to the
+    /// Fired on the main actor each time a helper's result is received by the
     /// agent that delegated it. The app closes the tile after a grace period.
     var onHelperResultDelivered: ((AgentID) -> Void)?
 
-    /// A helper result still waiting in the lead's hands: batched, queued,
-    /// mid-delivery, or behind a paused queue.
-    private func leadHoldsHelperResults(_ lead: AgentID) -> Bool {
-        if isQueuePaused(for: lead) { return true }
-        if helperCompletionBatches[lead]?.updates.isEmpty == false { return true }
-        if (deliveringSteers[lead] ?? []).contains(where: { $0.message.helperCompletion }) { return true }
-        return (queuedWorkItemsCache[lead] ?? []).contains { item in
-            if case .prompt(let message) = item { return message.helperCompletion }
-            return false
+    /// The helpers whose results ride this queue item, now in the lead's runner.
+    private func noteHelperResultsReceived(queueItem: UUID, by lead: AgentID) {
+        for raw in helperWakeSenders[queueItem] ?? [] {
+            let helper = AgentID(rawValue: raw)
+            guard records[helper]?.parentAgentID == lead else { continue }
+            helperResultDeliveredAt[helper] = helperCompletionNow()
+            onHelperResultDelivered?(helper)
         }
-    }
-
-    private func noteHelperResultDelivered(_ id: AgentID, to recipient: AgentID) {
-        guard records[id]?.parentAgentID == recipient else { return }
-        helperResultDeliveredAt[id] = helperCompletionNow()
-        onHelperResultDelivered?(id)
     }
 
     /// The record's half of "Tidy finished helper tiles": nil when nothing the
@@ -8168,14 +8162,17 @@ final class AgentSupervisor {
         guard record.declaredStatus?.needsYou == nil, record.helperWatchdogNeedsYou == nil,
               !helperIsBlocked(record) else { return "needs someone" }
         guard !currentLifecycleFacts(for: id, now: now).blocksSettlement(now: now) else { return "still busy" }
-        guard let delivered = helperResultDeliveredAt[id], delivered >= terminal.endedAt else { return "result not delivered" }
-        // Admitted to the lead's queue is not received: a stopped lead's queue
-        // stays paused, and a busy lead's holds the result until its turn ends.
-        guard !leadHoldsHelperResults(parent) else { return "lead has not taken the result" }
-        // Array's own helpers, and a harness's native subagents or shell jobs.
-        guard !helperHasBackgroundWork(id),
-              !records.values.contains(where: { $0.parentAgentID == id && isRunning($0.id) })
-        else { return "has running helpers" }
+        // This turn's result, received: a receipt older than the latest turn's
+        // end belongs to an earlier turn.
+        guard let received = helperResultDeliveredAt[id], received >= terminal.endedAt else { return "result not received" }
+        // Array's own helpers, a harness's native subagents (observed children
+        // with a turn still open, whatever the runner reports) or shell jobs.
+        guard !helperHasBackgroundWork(id), !records.values.contains(where: { child in
+            guard child.parentAgentID == id else { return false }
+            if isRunning(child.id) { return true }
+            guard let ended = child.latestTerminalEvent?.endedAt else { return true }
+            return (child.latestTurnAt ?? .distantPast) > ended
+        }) else { return "has running helpers" }
         // A helper of its own still on the canvas keeps this one's tile too.
         guard !records.values.contains(where: { $0.parentAgentID == id && $0.tileId != nil })
         else { return "a helper still has its tile" }
@@ -9335,7 +9332,6 @@ final class AgentSupervisor {
                             state.phase = .delivered; state.via = "wake"; state.leaseUntil = nil
                             try SpawnResultFile.saveDelivery(state, parentCwd: cwd)
                             SpawnResultFile.markDelivered(state, parentCwd: cwd)
-                            noteHelperResultDelivered(AgentID(rawValue: state.helper), to: parent)
                         }
                         finishScheduledAdmission(queueID)
                         await releaseScheduledWakeups(for: parent, knownIDs: [queueID])
@@ -12016,7 +12012,10 @@ final class AgentSupervisor {
                 self.notifyTurnCapabilitiesChanged(id)
                 return
             }
-            for member in [message] + merged { self.helperWakeSenders[member.id] = nil }
+            for member in [message] + merged {
+                self.noteHelperResultsReceived(queueItem: member.id, by: id)
+                self.helperWakeSenders[member.id] = nil
+            }
             // Helper fallback remains in durable custody until the runner starts
             // its next turn. Other queue entries keep their existing echo path.
             if !message.helperCompletion { self.echoPrompt(prompt, for: id) }
@@ -12509,6 +12508,7 @@ final class AgentSupervisor {
     /// (pi confirms late, from `queue_update`). The write only retires custody.
     private func settleDeliveringSteer(_ steerID: UUID, disposition: AgentSteerDisposition, for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
+        if disposition == .consumed { noteHelperResultsReceived(queueItem: steerID, by: id) }
         if disposition == .consumed, let entry = deliveringSteers[id]?.first(where: { $0.id == steerID }),
            publishedConsumedSteers.insert(steerID).inserted {
             notifyTurnCapabilitiesChanged(id)
