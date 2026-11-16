@@ -320,6 +320,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private var contentHeight: CGFloat = 0
     private var blocksBottom: CGFloat = 0
     private var laidWidth: CGFloat = -1
+    private var needsDeferredRebuild = false
     private var scrollOffset: CGFloat = 0
     private let nearBottomThreshold = AgentTranscriptScrollController().nearBottomThreshold
 
@@ -359,6 +360,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     var senderSubscriptions: [UUID: UUID] = [:]
     var senderDependents: [UUID: Set<AgentNodeID>] = [:]
     var imageDependents: [AgentImageAttachmentID: Set<AgentNodeID>] = [:]
+    // During relayout, keep decoded/in-flight resources until surviving image
+    // dependencies re-register. Prune candidates only after the transaction.
+    var imageOrphanCandidates: Set<AgentImageAttachmentID> = []
     var blockStatusSources: [AgentNodeID: Set<UUID>] = [:]
     var blockSenderSources: [AgentNodeID: Set<UUID>] = [:]
     var blockImageSources: [AgentNodeID: Set<AgentImageAttachmentID>] = [:]
@@ -512,7 +516,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             discardedIDs.formUnion(block.containedIDs)
             cache.removeValue(forKey: key)
         }
-        removeDependencies(blockIDs: discardedIDs)
+        removeDependencies(blockIDs: discardedIDs, preserveImageResources: true)
         rebuild()
         scrollOffset = min(scrollOffset, maximumScrollOffset)
         syncCharacters()
@@ -565,24 +569,36 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     func updateRenderContext(_ context: AgentRenderContext) throws {
         let moved = Self.signature(of: context) != Self.signature(of: renderContext)
             || context.tokens != renderContext.tokens
-        imageProviderGeneration &+= 1
+        // Only an explicitly identified, reliably observable provider may
+        // retain caches across context changes. Unknown providers can reuse a
+        // revision for different pixels and must take the full reset.
+        let sameImageProvider = context.imageResources.hasReliableInvalidation
+            && renderContext.imageResources.hasReliableInvalidation
+            && context.imageResources.identity != nil
+            && context.imageResources.identity == renderContext.imageResources.identity
+        if !sameImageProvider { imageProviderGeneration &+= 1 }
         for token in statusSubscriptions.values { renderContext.agentStatus.unsubscribe(token) }
         for token in senderSubscriptions.values { renderContext.agentMessageSenders.unsubscribe(token) }
         statusSubscriptions.removeAll()
         senderSubscriptions.removeAll()
-        imageObservations.values.forEach { $0.cancel() }
-        imageObservations.removeAll()
-        imageRequests.values.forEach { $0.cancel() }
-        imageRequests.removeAll()
-        imageSources.removeAll()
+        if !sameImageProvider {
+            imageObservations.values.forEach { $0.cancel() }
+            imageObservations.removeAll()
+            imageRequests.values.forEach { $0.cancel() }
+            imageRequests.removeAll()
+            imageSources.removeAll()
+            imageOrphanCandidates.removeAll()
+        }
         renderContext = contextWithDisclosureState(context)
         for id in statusDependents.keys { subscribeStatusSource(id) }
         for id in senderDependents.keys { subscribeSenderSource(id) }
-        for id in imageDependents.keys { observeImageSource(id) }
-        // A new image provider may return the same revision for different data.
-        let imageBlocks = Set(imageDependents.values.flatMap { $0 })
-        for id in imageBlocks { cache.removeValue(forKey: id) }
-        for (key, block) in cache where !block.containedIDs.isDisjoint(with: imageBlocks) { cache.removeValue(forKey: key) }
+        if !sameImageProvider {
+            for id in imageDependents.keys { observeImageSource(id) }
+            // A new image provider may return the same revision for different data.
+            let imageBlocks = Set(imageDependents.values.flatMap { $0 })
+            for id in imageBlocks { cache.removeValue(forKey: id) }
+            for (key, block) in cache where !block.containedIDs.isDisjoint(with: imageBlocks) { cache.removeValue(forKey: key) }
+        }
         gyro.apply(theme: context.appearance)
         guard moved else {
             // A new live source (a chip's status, an image's state) changes no
@@ -729,7 +745,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     override func layout() {
         super.layout()
         guard bounds.width > 0 else { return }
-        if laidWidth < 0 || abs(columnWidth - laidWidth) > Self.widthHysteresis {
+        if needsDeferredRebuild || laidWidth < 0 || abs(columnWidth - laidWidth) > Self.widthHysteresis {
             preservingTail { rebuild() }
         }
     }
@@ -875,7 +891,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                     laid = cached
                 } else {
                     if let stale = cache[unit.id] {
-                        removeDependencies(blockIDs: stale.containedIDs.union([unit.id]))
+                        removeDependencies(blockIDs: stale.containedIDs.union([unit.id]), preserveImageResources: true)
                     }
                     laid = layoutUnit(unit, width: laidWidth, signature: signature, variant: variant)
                     relaid.append(unit.id)
@@ -897,6 +913,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             }
         }
         blocksBottom = y
+        pruneTransientImageResources()
         hasHistoricalSenders = hasHistoricalSenders || containsSender
         hasHistoricalImages = hasHistoricalImages || containsImage
         if !runningToolUnits.isEmpty { ToolRowLiveClock.shared.add(self) }
@@ -910,7 +927,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     /// Walk the document; lay out only units the cache cannot answer; place all.
     /// Never called from `draw`.
     func rebuild() {
-        guard bounds.width > 0 else { return }
+        guard bounds.width > 0 else { needsDeferredRebuild = true; return }
+        needsDeferredRebuild = false
         qaLastRebuildVisitedBlockCount = 0
         let width = (laidWidth > 0 && abs(columnWidth - laidWidth) <= Self.widthHysteresis) ? laidWidth : columnWidth
         if width != laidWidth { qaFullRelayoutCount += 1 }
@@ -987,7 +1005,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                     laid = cached
                 } else {
                     if let stale = cache[unit.id] {
-                        removeDependencies(blockIDs: stale.containedIDs.union([unit.id]))
+                        removeDependencies(blockIDs: stale.containedIDs.union([unit.id]), preserveImageResources: true)
                     }
                     laid = layoutUnit(unit, width: width, signature: signature, variant: variant)
                     relaid.append(unit.id)
@@ -1020,6 +1038,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         var liveDependencyBlocks = liveBlocks
         for block in next.values { liveDependencyBlocks.formUnion(block.containedIDs) }
         reconcileDependencies(liveBlockIDs: liveDependencyBlocks)
+        pruneTransientImageResources()
     }
 
     // MARK: Running tool clocks

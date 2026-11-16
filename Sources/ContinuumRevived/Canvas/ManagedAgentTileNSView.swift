@@ -4,6 +4,45 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
+/// Observations may be cancelled while an AppKit view is being destroyed.
+/// Keep registration independent of actor/lifetime so cancellation remains
+/// safe even when destruction occurs off the main thread.
+private final class ManagedImageObservationRegistry: @unchecked Sendable {
+    typealias Callback = @MainActor (UInt64) -> Void
+    private let lock = NSLock()
+    private var observers: [AgentImageAttachmentID: [UUID: Callback]] = [:]
+
+    func observe(_ id: AgentImageAttachmentID, callback: @escaping Callback) -> AgentImageResourceObservation {
+        let token = UUID()
+        lock.lock()
+        observers[id, default: [:]][token] = callback
+        lock.unlock()
+        return AgentImageResourceObservation { [weak self] in self?.remove(id, token: token) }
+    }
+
+    private func remove(_ id: AgentImageAttachmentID, token: UUID) {
+        lock.lock()
+        observers[id]?[token] = nil
+        if observers[id]?.isEmpty == true { observers[id] = nil }
+        lock.unlock()
+    }
+
+    @MainActor
+    func notify(_ id: AgentImageAttachmentID, revision: UInt64) {
+        lock.lock()
+        let callbacks = observers[id].map { Array($0) } ?? []
+        lock.unlock()
+        for (token, callback) in callbacks {
+            // A callback may synchronously rebind the surface and cancel other
+            // subscriptions from the same snapshot. Do not deliver to those.
+            lock.lock()
+            let active = observers[id]?[token] != nil
+            lock.unlock()
+            if active { callback(revision) }
+        }
+    }
+}
+
 /// A stack view with top-left origin so a transcript inside an NSScrollView
 /// starts at the top and grows downward (AppKit document coords are otherwise
 /// bottom-left, which parks a short transcript at the bottom of the clip view).
@@ -254,6 +293,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
     private let toolDetailStore = AgentToolDetailStore()
     private let managedImageThumbnailPipeline = ComposerImageIOThumbnailPipeline()
+    private let managedImageObservers = ManagedImageObservationRegistry()
+    private let managedImageProviderID = UUID()
     private var managedImageMetadata: [AgentImageAttachmentID: AgentImageAttachmentMetadata] = [:]
     private var managedImageRevisions: [AgentImageAttachmentID: UInt64] = [:]
     private var managedImageAvailable: Set<AgentImageAttachmentID> = []
@@ -4025,8 +4066,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                     ) ?? AgentImageThumbnailRequest()
                 }
             },
-            observe: { _, _ in AgentImageResourceObservation() },
-            hasReliableInvalidation: true
+            observe: { [weak managedImageObservers] id, callback in
+                managedImageObservers?.observe(id, callback: callback) ?? AgentImageResourceObservation()
+            },
+            hasReliableInvalidation: true,
+            identity: AgentImageResourceIdentity(owner: managedImageProviderID, generation: managedImageBindingGeneration)
         )
     }
 
@@ -4136,11 +4180,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         guard let store = v2AttachmentStore,
               let agentID = transcriptAttachmentOwnerAgentID else { return }
         let bindingGeneration = managedImageBindingGeneration
-        var changedExistingMetadata = false
+        var changedExistingMetadata: Set<AgentImageAttachmentID> = []
         for item in metadata {
             let id = item.id
-            if let previous = managedImageMetadata[id], previous != item {
-                changedExistingMetadata = true
+            if managedImageMetadata[id] != item {
+                changedExistingMetadata.insert(id)
             }
             managedImageMetadata[id] = item
             if !managedImageAvailable.contains(id), managedImageUnresolved.insert(id).inserted {
@@ -4163,13 +4207,13 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 self.managedImageAvailable.insert(id)
                 self.managedImageUnresolved.remove(id)
                 self.managedImageRevisions[id, default: 0] &+= 1
-                try? self.transcriptCollectionFixture?.updateRenderContext(self.v2RenderContext)
+                self.managedImageObservers.notify(id, revision: self.managedImageRevisions[id] ?? 0)
             }
         }
         // A repeated attachment ID can change metadata already shown by older
         // blocks. Refresh those cards as well as the newly appended block.
-        if changedExistingMetadata {
-            try? transcriptCollectionFixture?.updateRenderContext(v2RenderContext)
+        for id in changedExistingMetadata {
+            managedImageObservers.notify(id, revision: managedImageRevisions[id] ?? 0)
         }
     }
 

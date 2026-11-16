@@ -1000,6 +1000,7 @@ extension AgentTranscriptCanvasView {
     /// shown at; there is no downscaled copy.
     func requestImageSource(_ attachment: AgentImageAttachmentMetadata, snapshot: AgentImageResourceSnapshot, blockID: AgentNodeID) {
         let id = attachment.id
+        imageOrphanCandidates.remove(id)
         imageDependents[id, default: []].insert(blockID)
         blockImageSources[blockID, default: []].insert(id)
         observeImageSource(id)
@@ -1140,7 +1141,7 @@ extension AgentTranscriptCanvasView {
     }
 
     /// Forget only the changed blocks, keeping work proportional to the suffix.
-    func removeDependencies(blockIDs: Set<AgentNodeID>) {
+    func removeDependencies(blockIDs: Set<AgentNodeID>, preserveImageResources: Bool = false) {
         for blockID in blockIDs {
             for id in blockStatusSources.removeValue(forKey: blockID) ?? [] {
                 statusDependents[id]?.remove(blockID)
@@ -1161,12 +1162,28 @@ extension AgentTranscriptCanvasView {
                 if imageDependents[id]?.isEmpty == true {
                     imageDependents[id] = nil
                     imageObservations.removeValue(forKey: id)?.cancel()
-                    imageRequestGeneration[id] = nil
-                    imageRequests.removeValue(forKey: id)?.cancel()
-                    imageSources[id] = nil
+                    if preserveImageResources {
+                        imageOrphanCandidates.insert(id)
+                    } else {
+                        retireImageResource(id)
+                    }
                 }
             }
         }
+    }
+
+    private func retireImageResource(_ id: AgentImageAttachmentID) {
+        imageOrphanCandidates.remove(id)
+        imageRequestGeneration[id] = nil
+        imageRequests.removeValue(forKey: id)?.cancel()
+        imageSources[id] = nil
+    }
+
+    /// Only images that did not re-register during relayout are really gone.
+    func pruneTransientImageResources() {
+        let candidates = imageOrphanCandidates
+        imageOrphanCandidates.removeAll()
+        for id in candidates where imageDependents[id] == nil { retireImageResource(id) }
     }
 
     /// Full rebuilds can replace arbitrary nodes. Reconcile subscriptions after
