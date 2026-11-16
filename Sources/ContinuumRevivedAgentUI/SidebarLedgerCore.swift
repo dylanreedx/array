@@ -117,12 +117,13 @@ public enum SidebarTallyState: String, CaseIterable, Equatable, Sendable {
 
 public enum SidebarRecovery {
     public static func providerName(_ harness: String?) -> String {
-        switch harness?.lowercased() {
-        case "codex"?: return "Codex"
-        case "claude"?, "claude-code"?, "claudecode"?: return "Claude"
-        case "pi"?: return "Pi"
-        default: return "The provider"
-        }
+        // Records carry the harness's display name ("Claude Code", "Codex",
+        // "Pi") or its raw value; match either.
+        let name = harness?.lowercased() ?? ""
+        if name.contains("claude") { return "Claude" }
+        if name.contains("codex") { return "Codex" }
+        if name == "pi" || name.hasPrefix("pi ") { return "Pi" }
+        return "The provider"
     }
 
     /// Classify recorded failure words. nil when the words name no class: the
@@ -321,6 +322,9 @@ public struct SidebarIncident: Equatable, Sendable, Identifiable {
 }
 
 public enum SidebarIncidents {
+    /// Asking agents listed one per line before the rest share a line.
+    public static let maxAsksShown = 3
+
     /// The incidents in the live rows, blocking first. `rows` are the rows the
     /// list draws from (already scoped), including folded helpers.
     public static func build(rows: [AgentInboxRow]) -> [SidebarIncident] {
@@ -350,8 +354,10 @@ public enum SidebarIncidents {
         let live = rows.filter { $0.lifecycle == .active && !$0.isCleared }
         var result: [SidebarIncident] = []
 
-        // Needs you: one per asking agent, attributed to its family.
-        for row in live where row.state == .approval || row.state == .input {
+        // Needs you: one per asking agent, attributed to its family; past
+        // `maxAsksShown`, the rest share one line so the list stays short.
+        let asking = live.filter { $0.state == .approval || $0.state == .input }
+        for row in asking.prefix(asking.count > maxAsksShown ? maxAsksShown - 1 : maxAsksShown) {
             let lead = family(of: row)
             result.append(SidebarIncident(
                 id: "needs:\(row.id.uuidString)", kind: .needsYou, symbol: "hand.raised.fill",
@@ -360,13 +366,27 @@ public enum SidebarIncidents {
                 actionTitle: "Respond", agentIDs: [row.id], ownerIDs: [row.id],
                 familyIDs: [lead.id], harness: row.harness))
         }
+        if asking.count > maxAsksShown {
+            let rest = Array(asking.dropFirst(maxAsksShown - 1))
+            result.append(SidebarIncident(
+                id: "needs:more", kind: .needsYou, symbol: "hand.raised.fill",
+                title: "\(rest.count) more need you", detail: rest.prefix(3).map(\.displayTitle).joined(separator: " · "),
+                actionTitle: "Respond", agentIDs: rest.map(\.id), ownerIDs: rest.map(\.id),
+                familyIDs: unique(rest.map { family(of: $0).id }), harness: nil))
+        }
 
         // Causes: one incident per cause and provider.
         var grouped: [String: (cause: SidebarFailureCause, harness: String?, rows: [AgentInboxRow])] = [:]
         var order: [String] = []
         for row in live {
             guard let cause = SidebarRecovery.cause(for: row) else { continue }
-            let key = "\(cause.rawValue):\(row.harness ?? "")"
+            // Causes whose words name the CLI are grouped per CLI; the rest once.
+            let perCLI: Bool
+            switch cause {
+            case .usageLimit, .signInExpired, .couldNotStart, .providerBusy: perCLI = true
+            case .interruptedByRestart, .taskError: perCLI = false
+            }
+            let key = perCLI ? "\(cause.rawValue):\(SidebarRecovery.providerName(row.harness))" : cause.rawValue
             if grouped[key] == nil { grouped[key] = (cause, row.harness, []); order.append(key) }
             grouped[key]?.rows.append(row)
         }

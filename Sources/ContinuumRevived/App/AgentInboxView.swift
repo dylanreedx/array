@@ -7239,8 +7239,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             switch item {
             case .agent(let row): return row.title
             case .projectHeading(let title, _): return "# \(title)"
-            case .sectionLabel(let label): return "## \(label.title)"
-            case .incident(let incident): return "! \(incident.title)"
             default: return nil
             }
         }

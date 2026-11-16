@@ -1500,6 +1500,8 @@ enum UIProbeGeometry {
         host.frame = NSRect(origin: .zero, size: size)
 
         let inbox = AgentInboxView(frame: framePinnedInbox ? host.bounds : .zero)
+        // Fan-out and row accounting, not the Ledger's head: today's rows.
+        inbox.setSidebarLayoutForQA(.quietInbox)
         host.addSubview(inbox)
         if framePinnedInbox {
             // Conditional overlays change fitting size. A frame-pinned full inbox is
@@ -1839,10 +1841,17 @@ enum UIProbeGeometry {
             }
         }
 
-        let expectedTableRows = expectedAgentCells + actualRemainders.count + expectedNonAgentRows
+        // The layout's head (the Ledger's For you list and its headings).
+        let headRows = probe.inbox.itemsForQA.filter { item in
+            switch item {
+            case .sectionLabel, .incident: return true
+            default: return false
+            }
+        }.count
+        let expectedTableRows = expectedAgentCells + actualRemainders.count + expectedNonAgentRows + headRows
         guard probe.inbox.tableRowCountForQA == expectedTableRows,
-              probe.inbox.nonAgentTableRowCountForQA == actualRemainders.count + expectedNonAgentRows else {
-            throw fail("\(label): default table rows \(probe.inbox.tableRowCountForQA) != \(expectedAgentCells) capped agent cells + \(actualRemainders.count) exact remainder rows + \(expectedNonAgentRows) shelf/paging rows")
+              probe.inbox.nonAgentTableRowCountForQA == actualRemainders.count + expectedNonAgentRows + headRows else {
+            throw fail("\(label): default table rows \(probe.inbox.tableRowCountForQA) != \(expectedAgentCells) capped agent cells + \(actualRemainders.count) exact remainder rows + \(expectedNonAgentRows) shelf/paging rows + \(headRows) head rows")
         }
     }
 
@@ -1908,10 +1917,16 @@ enum UIProbeGeometry {
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
 
+        let nestedHeadRows = probe.inbox.itemsForQA.filter { item in
+            switch item {
+            case .sectionLabel, .incident: return true
+            default: return false
+            }
+        }.count
         guard probe.inbox.rowIdsForQA == bounded.rows.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == bounded.rows.count,
-              probe.inbox.tableRowCountForQA == bounded.rows.count + 2,
-              probe.inbox.nonAgentTableRowCountForQA == 2 else {
+              probe.inbox.tableRowCountForQA == bounded.rows.count + 2 + nestedHeadRows,
+              probe.inbox.nonAgentTableRowCountForQA == 2 + nestedHeadRows else {
             throw fail("sidebar-ux-check.nested-fanout@\(Int(width))pt.\(appearanceName.rawValue): default table lost an agent or one of the two same-anchor remainder rows")
         }
         let initialRemainders = probe.inbox.fanoutRemainderRowsForQA

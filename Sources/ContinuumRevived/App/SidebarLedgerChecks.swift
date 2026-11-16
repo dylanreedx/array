@@ -556,3 +556,67 @@ extension AgentInboxRow {
         return row
     }
 }
+
+// MARK: - Stills of a copied real store (`--sidebar-real-stills-check <store> <out>`)
+
+extension SidebarLedgerChecks {
+    /// Renders Ledger and Quiet inbox, dark and light, from a COPY of an Array
+    /// application-support folder (agents + agent-transcripts). Reads the copy
+    /// only; writes only the PNGs. Rows come from the production builder;
+    /// each failed record's words come from its transcript's last error, the
+    /// rule `AgentSupervisor.sidebarFailureDetail` applies.
+    static func runRealStills(store root: URL, output: URL) async throws -> String {
+        let records = try AgentStore(applicationSupportDirectory: root).loadAll()
+        let transcripts = AgentTranscriptStore(root: root.appendingPathComponent("agent-transcripts", isDirectory: true))
+        var details: [UUID: String] = [:]
+        for record in records {
+            guard let outcome = record.latestTerminalEvent?.outcome,
+                  [.failed, .runtimeError, .interrupted].contains(outcome) else { continue }
+            if let document = try? await transcripts.load(
+                agentID: record.id, sessionID: AgentTranscriptStore.canonicalSessionID(for: record.id)),
+               let message = AgentSupervisor.lastErrorMessage(in: document) {
+                details[record.id.rawValue] = message
+            }
+        }
+        let now = Date()
+        let context = AgentContextIndex.build(
+            registry: .empty(), documents: [:], projectCanvases: [:], terminalDescriptors: [], agents: records)
+        let snapshot = AgentInventory.snapshot(
+            terminalDescriptors: [], liveStatuses: [:], agents: records, activityByAgent: [:],
+            replicaId: UUID(), now: now)
+        let rows = AgentInboxRowBuilder.rows(
+            from: snapshot, context: context,
+            records: Dictionary(uniqueKeysWithValues: records.map { ($0.id.rawValue, $0) }),
+            failureDetails: details, now: now)
+        var written: [String] = []
+        try await MainActor.run {
+            for layout in SidebarLayout.allCases {
+                for dark in [true, false] {
+                    let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 494, height: 1_110),
+                                               indicatorDefaults: defaults(layout))
+                    inbox.clock = { now }
+                    inbox.prefersReducedMotion = { true }
+                    inbox.hoverCardEnabled = false
+                    inbox.onIncidentAction = { _ in }
+                    let window = SidebarOwnershipChecks.KeyWindow(contentRect: inbox.frame, styleMask: [.borderless],
+                                                                  backing: .buffered, defer: false)
+                    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                    window.contentView = inbox
+                    window.orderFrontOffscreenForChecks()
+                    inbox.setScope(.all)
+                    inbox.foldsHistoryIntoShelf = true
+                    inbox.reload(rows: rows)
+                    inbox.layoutForQA()
+                    inbox.scrollToTopForQA()
+                    inbox.layoutForQA()
+                    let name = "real-\(layout.rawValue)-\(dark ? "dark" : "light").png"
+                    try still(window: window, inbox: inbox, to: output.appendingPathComponent(name))
+                    window.orderOut(nil)
+                    written.append(name)
+                }
+            }
+        }
+        let failed = rows.filter { SidebarRecovery.cause(for: $0) != nil }.count
+        return "SidebarRealStills: \(records.count) copied records, \(details.count) failure details read, \(failed) rows with a cause; wrote \(written.joined(separator: ", "))"
+    }
+}

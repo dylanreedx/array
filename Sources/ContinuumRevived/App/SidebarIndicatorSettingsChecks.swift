@@ -249,6 +249,9 @@ final class ClassicSidebarDefaultsForChecks: UserDefaults, @unchecked Sendable {
         switch key {
         case SidebarActiveIndicatorStyle.defaultsKey: return SidebarActiveIndicatorStyle.classic.rawValue
         case SidebarActiveIndicatorScope.defaultsKey: return scope?.rawValue
+        // Today's sidebar: the legacy legs witness today's rows, which the
+        // Quiet inbox keeps. The Ledger has its own legs.
+        case SidebarLayout.defaultsKey: return SidebarLayout.quietInbox.rawValue
         default: return nil
         }
     }

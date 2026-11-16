@@ -1544,8 +1544,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let hidden: Bool
         if proposal.isTwoLine {
             let sub = row.depth > 0 || row.parentId != nil
-            text = (ledger != nil && sub ? Self.ledgerClock(row, now: now)
-                    : Self.ownershipClock(row, isSubagent: sub, now: now)) ?? ""
+            if ledger != nil, !sub, let cause = SidebarRecovery.cause(for: row) {
+                // Ledger: a lead says WHY, in the cause's own word.
+                text = cause.label(harness: row.harness)
+            } else {
+                text = (ledger != nil && sub ? Self.ledgerClock(row, now: now)
+                        : Self.ownershipClock(row, isSubagent: sub, now: now)) ?? ""
+            }
             hidden = text.isEmpty || reportPillText != nil
         } else {
             let word = Self.stateWord(row, now: now)
@@ -1668,6 +1673,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if proposal.isTwoLine { applyOwnershipColours(row) }
         decorations.accent = accent
         statusGlyph.colour = accent
+        if ledger != nil, row.depth == 0, row.parentId == nil, let cause = SidebarRecovery.cause(for: row),
+           !cause.isBlocking || cause == .usageLimit, cause != .taskError, cause != .providerBusy {
+            // A pause or an interruption is not a failure: quiet ink.
+            stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        }
         if ledger != nil, row.depth > 0 || row.parentId != nil {
             switch SidebarRecovery.state(for: row) {
             case .failed: statusGlyph.colour = AccentToken.accentFailed.color.nsColor(in: self)

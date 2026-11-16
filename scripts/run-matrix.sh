@@ -2406,6 +2406,16 @@ run_app_check .build/debug/Array --sidebar-ownership-check
 # of the Snoozed and History headings and History's "Show 25 more" footer, and
 # asserts each opens or pages its rows.
 run_app_check .build/debug/Array --sidebar-fold-expand-check
+# Sidebar round: the Ledger layout on the production list, through real events
+# in both appearances: one reconciled count per lead (shown + folded = total,
+# failed said once), one action per failure class, Clear N leaving blockers and
+# returning on Undo and after a reload, a live layout switch, tile-less helpers
+# drawn like their siblings.
+run_app_check .build/debug/Array --sidebar-ledger-check
+# Sidebar round: Clear is sidebar-only. Through the real app, Clear leaves
+# every tile on the canvas and settles nothing, and Switch & resume opens
+# Settings > Agents.
+run_app_check .build/debug/Array --sidebar-clear-tiles-check
 # Presentation-layer sampling across helper completion, arrival, reload and unfold.
 run_app_check .build/debug/Array --sidebar-row-presentation-check
 # .plans/113: the header's sort list (Most active, By project, Newest first)
