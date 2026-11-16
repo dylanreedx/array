@@ -61,7 +61,10 @@ enum HelperWatchdogChecks {
         await supervisor.sweepHelperWatchdog()
         now.addTimeInterval(599)
         await supervisor.sweepHelperWatchdog()
-        try HelperGuardChecks.expect(alerts().isEmpty && modelSays() == nil && line() == nil, "watchdog fired early")
+        // Under the Ledger the lead's line always carries its count chip; before
+        // the watchdog fires it must not raise the helper's ask.
+        try HelperGuardChecks.expect(alerts().isEmpty && modelSays() == nil && line()?.contains("Needs you") != true,
+                                     "watchdog fired early: lead line \(line() ?? "nil")")
         now.addTimeInterval(2)
         await supervisor.sweepHelperWatchdog()
         // The state is set by the sweep itself, before anything is drawn.
@@ -69,7 +72,8 @@ enum HelperWatchdogChecks {
                                      "the sweep returned without setting the watchdog's needs-you")
         let pushed = await waitUntil(timeout: 30, pollInterval: 0.02) { modelSays() == ask }
         try HelperGuardChecks.expect(pushed, "the watchdog's needs-you did not reach the model: stored \(String(describing: supervisor.records[child]?.helperWatchdogNeedsYou)), pushed row \(String(describing: sidebar.inboxForQA.pushedRowForQA(id: child.rawValue)?.selfReportLine))")
-        try HelperGuardChecks.expect(line() == "Needs you: \(ask)"
+        // The ask leads the line; the Ledger's count chip may follow it.
+        try HelperGuardChecks.expect(line()?.hasPrefix("Needs you: \(ask)") == true
                                      && sidebar.inboxForQA.onScreenCardForQA(id: child.rawValue)?.clockTextForQA == "waiting",
                                      "the lead does not raise its helper's needs-you: lead \(String(describing: line())), helper \(String(describing: sidebar.inboxForQA.onScreenCardForQA(id: child.rawValue)?.clockTextForQA))")
         try HelperGuardChecks.expect(alerts().count == 1, "expected exactly one queued parent message, got \(alerts().count)")
