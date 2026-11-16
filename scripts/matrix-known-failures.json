@@ -16,6 +16,14 @@
       "evidence": "Classified pre-existing by hand in the 0.7.49 and 0.7.50 gates (.plans/release-0750-artifacts.md); the same four failures, red in the parallel group and again on serial retry, in the fast-ship proof gate at 0ae0c265.",
       "added": "2026-11-15",
       "expires": "2026-12-15"
+    },
+    {
+      "leg": "--lead-checkout-ledger-check",
+      "kind": "known-red",
+      "reason": "The full ledger lifetime/count fixture remains red under this Mac's FSEvents load; reproduced before the checkout exclusions change. The new exclusions and teardown controls pass separately.",
+      "evidence": "Pre-existing in the 0.7.52 gate, nightly d0663181 and app-source-equivalent fast-ship c5d07ef6. Release lead explicitly approved this entry in release board card 27539BBC comment 1ABE0D7C on 2026-11-16; focus-steal legs must remain unclassified.",
+      "added": "2026-11-16",
+      "expires": "2026-12-16"
     }
   ]
 }
