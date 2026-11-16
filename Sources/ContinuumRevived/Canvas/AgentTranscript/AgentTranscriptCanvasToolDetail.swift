@@ -327,10 +327,12 @@ final class AgentTranscriptCanvasToolDetail {
         let generation: UInt64
 
         private func key(for entry: AgentEntry) -> AgentToolDetailKey? {
+            // Compare the raw string: the candidate's ID is already valid, so
+            // equality is the same test as building and validating a new ID, without
+            // the secret-redaction pass that ran per tool row on every rebuild.
             guard case let .providerItem(provider, itemID?) = entry.provenance,
-                  let itemID = AgentToolDetailID(itemID),
                   let candidate = identityByEntryID[entry.id],
-                  candidate.providerItemID == itemID,
+                  candidate.providerItemID.rawValue == itemID,
                   agentID == nil || candidate.scope.agentID == agentID?.rawValue.uuidString,
                   candidate.scope.provider == provider
             else { return nil }
