@@ -65,6 +65,11 @@ enum TranscriptSourceInvalidationChecks {
     @MainActor private final class PendingImageProvider {
         var completions: [@MainActor (AgentImageThumbnailResult) -> Void] = []
         var requests: [AgentImageThumbnailRequest] = []
+        let identity: AgentImageResourceIdentity
+
+        init(owner: UUID, generation: UInt64) {
+            identity = AgentImageResourceIdentity(owner: owner, generation: generation)
+        }
 
         var context: AgentRenderContext {
             AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark,
@@ -75,14 +80,18 @@ enum TranscriptSourceInvalidationChecks {
                         let request = AgentImageThumbnailRequest()
                         requests.append(request)
                         return request
-                    }, hasReliableInvalidation: true))
+                    }, hasReliableInvalidation: true, identity: identity))
         }
     }
 
     /// A cancelled provider is allowed to finish late, even with the same
     /// revision as its replacement. It must not steal the new request or image.
     private static func checkLateImageCompletion() throws {
-        let old = PendingImageProvider(), current = PendingImageProvider()
+        // Same owner but a new binding generation may serve different data at
+        // the SAME revision; old completions must not affect the replacement.
+        let owner = UUID()
+        let old = PendingImageProvider(owner: owner, generation: 1)
+        let current = PendingImageProvider(owner: owner, generation: 2)
         let imageID = AgentImageAttachmentID(rawValue: "source-race-image")!
         let block = AgentBlock(id: id("source-race-block"), revision: 1, kind: .image,
                                payload: .image(.init(attachment: .init(id: imageID))))
@@ -109,6 +118,153 @@ enum TranscriptSourceInvalidationChecks {
         old.completions[0](.success(.init(attachmentID: imageID, revision: 7, image: oldImage, pixelSize: oldImage.size)))
         try expect(canvas.imageSources[imageID]?.image === newImage,
                    "a second late completion must not replace the current image")
+    }
+
+    @MainActor private final class ZeroWidthImageSource {
+        let identity = AgentImageResourceIdentity(owner: UUID(), generation: 1)
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        var available = false
+        var revision: UInt64 = 0
+        var callbacks: [UUID: @MainActor (UInt64) -> Void] = [:]
+
+        var context: AgentRenderContext {
+            AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark,
+                imageResources: AgentImageResourceProvider(
+                    snapshot: { [self] id in
+                        .init(attachmentID: id, state: available ? .available : .missing, revision: revision)
+                    },
+                    requestThumbnail: { [self] id, _, version, completion in
+                        completion(.success(.init(attachmentID: id, revision: version,
+                                                  image: image, pixelSize: image.size)))
+                        return AgentImageThumbnailRequest()
+                    },
+                    observe: { [self] _, callback in
+                        let token = UUID()
+                        callbacks[token] = callback
+                        return AgentImageResourceObservation { [weak self] in self?.callbacks[token] = nil }
+                    }, hasReliableInvalidation: true, identity: identity))
+        }
+
+        func hydrate() {
+            available = true
+            revision += 1
+            for callback in Array(callbacks.values) { callback(revision) }
+        }
+    }
+
+    /// An image can hydrate while layout is temporarily zero-width. Its
+    /// dependency and presentation must recover when the SAME width returns.
+    private static func checkZeroWidthImageInvalidation() throws {
+        let source = ZeroWidthImageSource()
+        let attachment = AgentImageAttachmentID(rawValue: "zero-width-image")!
+        let blockID = id("zero-width-block")
+        let image = AgentBlock(id: blockID, revision: 1, kind: .image,
+                               payload: .image(.init(attachment: .init(id: attachment))))
+        let entry = AgentEntry(id: id("zero-width-entry"), revision: 1, role: .user,
+                               provenance: .localPrompt(promptID: nil), lifecycle: .finished, blocks: [image])
+        let canvas = AgentTranscriptCanvasView()
+        canvas.frame = NSRect(x: 0, y: 0, width: 420, height: 520)
+        try canvas.updateRenderContext(source.context)
+        try canvas.enqueue(document: AgentDocument(version: 1, entries: [entry]),
+                           patch: AgentDocumentPatch(fromVersion: 0, toVersion: 1))
+        canvas.flushPendingVisualUpdate()
+        try expect(canvas.qaLaidOutText.contains("Missing") && source.callbacks.count == 1,
+                   "zero-width fixture must initially render and observe the missing image")
+        canvas.setFrameSize(NSSize(width: 0, height: 520))
+        source.hydrate()
+        canvas.setFrameSize(NSSize(width: 420, height: 520))
+        canvas.layoutSubtreeIfNeeded()
+        let updated = canvas.qaLaidOutText.contains("Available locally")
+        let observing = source.callbacks.count == 1
+        let decoded = canvas.imageSources[attachment]?.image === source.image
+        print("zero-width image: refreshed on same-width restore: \(updated), observed: \(observing), displayed: \(decoded)")
+        try expect(updated && observing && decoded,
+                   "hydration at zero width must render, observe, and display when width returns")
+    }
+
+    @MainActor private final class GalleryImageSource {
+        let identity = AgentImageResourceIdentity(owner: UUID(), generation: 1)
+        var ready: Set<AgentImageAttachmentID> = []
+        var revisions: [AgentImageAttachmentID: UInt64] = [:]
+        var callbacks: [AgentImageAttachmentID: [UUID: @MainActor (UInt64) -> Void]] = [:]
+        var requests: [AgentImageAttachmentID: [AgentImageThumbnailRequest]] = [:]
+        var completions: [AgentImageAttachmentID: [@MainActor (AgentImageThumbnailResult) -> Void]] = [:]
+
+        var context: AgentRenderContext {
+            AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: .dark,
+                imageResources: AgentImageResourceProvider(
+                    snapshot: { [self] id in
+                        .init(attachmentID: id, state: ready.contains(id) ? .available : .missing,
+                              revision: revisions[id, default: 0])
+                    },
+                    requestThumbnail: { [self] id, _, _, completion in
+                        let request = AgentImageThumbnailRequest()
+                        requests[id, default: []].append(request)
+                        completions[id, default: []].append(completion)
+                        return request
+                    },
+                    observe: { [self] id, callback in
+                        let token = UUID()
+                        callbacks[id, default: [:]][token] = callback
+                        return AgentImageResourceObservation { [weak self] in self?.callbacks[id]?[token] = nil }
+                    }, hasReliableInvalidation: true, identity: identity))
+        }
+        func hydrate(_ id: AgentImageAttachmentID) {
+            ready.insert(id)
+            revisions[id, default: 0] += 1
+            for callback in Array(callbacks[id]?.values ?? Dictionary<UUID, @MainActor (UInt64) -> Void>().values) {
+                callback(revisions[id, default: 0])
+            }
+        }
+    }
+
+    /// The two cells share a block but have separate request lifetimes.
+    /// Hydrating B must keep A's in-flight request; removing A must cancel it.
+    private static func checkGalleryInFlightAndRemoval() throws {
+        let source = GalleryImageSource()
+        let a = AgentImageAttachmentID(rawValue: "gallery-inflight-a")!
+        let b = AgentImageAttachmentID(rawValue: "gallery-inflight-b")!
+        source.ready.insert(a)
+        source.revisions[a] = 1
+        let blockID = id("gallery-inflight-block")
+        let entryID = id("gallery-inflight-entry")
+        let aPayload = AgentImagePayload(attachment: .init(id: a))
+        let bPayload = AgentImagePayload(attachment: .init(id: b))
+        let block = AgentBlock(id: blockID, revision: 1, kind: .imageGallery,
+                               payload: .imageGallery(.init(images: [aPayload, bPayload])))
+        var entry = AgentEntry(id: entryID, revision: 1, role: .user,
+                               provenance: .localPrompt(promptID: nil), lifecycle: .finished, blocks: [block])
+        let canvas = AgentTranscriptCanvasView()
+        canvas.frame = NSRect(x: 0, y: 0, width: 420, height: 520)
+        try canvas.updateRenderContext(source.context)
+        try canvas.enqueue(document: AgentDocument(version: 1, entries: [entry]),
+                           patch: AgentDocumentPatch(fromVersion: 0, toVersion: 1))
+        canvas.flushPendingVisualUpdate()
+        guard let first = source.requests[a]?.first, source.completions[a]?.count == 1 else {
+            throw Failure(description: "gallery fixture must start A's held thumbnail request")
+        }
+        source.hydrate(b)
+        let retained = canvas.imageRequests[a] === first && !first.isCancelled && source.requests[a]?.count == 1
+        let requestedB = source.requests[b]?.count == 1
+        print("gallery in-flight: A request retained after B hydrates: \(retained), B requested: \(requestedB)")
+        try expect(retained && requestedB, "gallery hydration must not cancel or re-request sibling A")
+
+        entry.revision += 1
+        entry.blocks[0].revision += 1
+        entry.blocks[0].payload = .imageGallery(.init(images: [bPayload]))
+        try canvas.enqueue(document: AgentDocument(version: 2, entries: [entry]),
+                           patch: AgentDocumentPatch(fromVersion: 1, toVersion: 2, updated: [entryID, blockID]))
+        canvas.flushPendingVisualUpdate()
+        let cancelled = first.isCancelled && canvas.imageRequests[a] == nil && source.callbacks[a]?.isEmpty == true
+        let keptB = canvas.imageRequests[b] === source.requests[b]?.first
+        print("gallery removal: orphan A cancelled: \(cancelled), sibling B retained: \(keptB)")
+        try expect(cancelled && keptB, "removing gallery A must cancel only A's orphaned request and observation")
+        let oldImage = NSImage(size: NSSize(width: 12, height: 12))
+        source.completions[a]?[0](.success(.init(attachmentID: a, revision: 1, image: oldImage, pixelSize: oldImage.size)))
+        try expect(canvas.imageSources[a] == nil, "late completion for removed gallery image must stay discarded")
+        let newImage = NSImage(size: NSSize(width: 20, height: 20))
+        source.completions[b]?[0](.success(.init(attachmentID: b, revision: 1, image: newImage, pixelSize: newImage.size)))
+        try expect(canvas.imageSources[b]?.image === newImage, "retained sibling thumbnail must be displayed")
     }
 
     static func run() throws {
@@ -205,5 +361,7 @@ enum TranscriptSourceInvalidationChecks {
         try expect(replacement.statusCallbacks.isEmpty && replacement.senderCallbacks.isEmpty && replacement.imageCallbacks.isEmpty,
                    "releasing the canvas must detach all subscriptions")
         try checkLateImageCompletion()
+        try checkZeroWidthImageInvalidation()
+        try checkGalleryInFlightAndRemoval()
     }
 }

@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedAgentContent
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
 /// `--agent-notice-order-check`: an Array-authored notice (a browser
@@ -19,6 +20,16 @@ import ContinuumRevivedCore
 @MainActor
 func runAgentNoticeOrderChecks() async throws -> String {
     struct Failure: Error, CustomStringConvertible { let description: String }
+    // Exercise the production canvas and its real thumbnail provider, including
+    // its cache. A semantic image-state assertion alone cannot see repeated
+    // cancellation or decoding of already rendered images.
+    let rendererKey = AgentTranscriptCanvasView.rendererEnvironmentKey
+    let previousRenderer = ProcessInfo.processInfo.environment[rendererKey]
+    setenv(rendererKey, "canvas", 1)
+    defer {
+        if let previousRenderer { setenv(rendererKey, previousRenderer, 1) }
+        else { unsetenv(rendererKey) }
+    }
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("array-notice-order-\(UUID().uuidString)", isDirectory: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -40,6 +51,12 @@ func runAgentNoticeOrderChecks() async throws -> String {
         frame: .init(x: 0, y: 0, width: 520, height: 640), zPosition: .first, runtimeRef: nil,
         metadata: TileMetadata(launchProfileId: "managed-agent")))
     tile.frame = NSRect(x: 0, y: 0, width: 520, height: 640)
+    let host = NSView(frame: tile.frame)
+    host.addSubview(tile)
+    host.layoutSubtreeIfNeeded()
+    guard let canvas = tile.qaCanvasTranscript, canvas.bounds.width > 0 else {
+        throw Failure(description: "fixture: a laid-out real canvas is required")
+    }
     tile.bindV2ComposerState(draftStore: AgentComposerDraftStore(applicationSupportDirectory: root, attachmentStore: attachments),
                              promptHistory: AgentPromptHistory(), attachmentStore: attachments)
     tile.attach(agentID: agent, supervisor: supervisor)
@@ -94,6 +111,43 @@ func runAgentNoticeOrderChecks() async throws -> String {
     guard tile.qaManagedImageSnapshot(screenshotID).state == .available else {
         throw Failure(description: "the newly published screenshot never became available to the tile")
     }
+    // Hydration and thumbnail decoding are separate asynchronous operations.
+    // Wait for a real decoded image before starting the next attachment, then
+    // require that exact cached image to survive the next hydration.
+    canvas.flushPendingVisualUpdate()
+    for _ in 0..<250 where canvas.imageSources[screenshotID] == nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard let decodedBeforeTokens = canvas.imageSources[screenshotID]?.image else {
+        throw Failure(description: "the first screenshot never decoded in the canvas")
+    }
+    // The tile emits a new context for the same provider when its tokens are
+    // applied, and again when page zoom changes. Neither refresh transfers the
+    // image to a different store or changes its revision.
+    tile.applyTokens()
+    canvas.flushPendingVisualUpdate()
+    let tokensRetained = canvas.imageSources[screenshotID]?.image === decodedBeforeTokens
+    print("same-provider token refresh: cached image retained: \(tokensRetained)")
+    for _ in 0..<250 where canvas.imageSources[screenshotID] == nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard let decodedBeforeZoom = canvas.imageSources[screenshotID]?.image else {
+        throw Failure(description: "screenshot did not recover after token refresh")
+    }
+    guard tile.setPageZoom(AgentPageZoom(percent: 110)) else {
+        throw Failure(description: "fixture could not change page zoom")
+    }
+    canvas.flushPendingVisualUpdate()
+    let zoomRetained = canvas.imageSources[screenshotID]?.image === decodedBeforeZoom
+    print("same-provider zoom refresh: cached image retained: \(zoomRetained)")
+    _ = tile.setPageZoom(.default)
+    canvas.flushPendingVisualUpdate()
+    for _ in 0..<250 where canvas.imageSources[screenshotID] == nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard let firstDecodedImage = canvas.imageSources[screenshotID]?.image else {
+        throw Failure(description: "screenshot did not recover after zoom refresh")
+    }
     let promptImage = try await supervisor.stageBrowserScreenshot(SharedTileParityChecks.screenshotPNG(), for: agent)
     await supervisor.commitBrowserScreenshot(promptImage.manifest.metadata.id, for: agent)
     tile.appendUserPrompt(AgentPrompt(text: "Inspect image", imageAttachments: [promptImage.promptAttachment]))
@@ -103,6 +157,15 @@ func runAgentNoticeOrderChecks() async throws -> String {
     guard tile.qaManagedImageSnapshot(promptImage.manifest.metadata.id).state == .available else {
         throw Failure(description: "a newly appended image prompt never became available to the tile")
     }
+    canvas.flushPendingVisualUpdate()
+    for _ in 0..<250 where canvas.imageSources[promptImage.manifest.metadata.id] == nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard canvas.imageSources[promptImage.manifest.metadata.id] != nil else {
+        throw Failure(description: "the second image never decoded in the canvas")
+    }
+    let retainedFirstImage = canvas.imageSources[screenshotID]?.image === firstDecodedImage
+    print("independent hydration: first cached image retained after second hydration: \(retainedFirstImage)")
     // An attachment may be temporarily absent when its prompt reaches the
     // tile. It must retry on a later sync, not permanently cache the miss.
     var delayed: [(attachment: AgentComposerStoredAttachment, held: URL)] = []
@@ -124,13 +187,40 @@ func runAgentNoticeOrderChecks() async throws -> String {
     guard retryVisits > 0, retryVisits <= 4 else {
         throw Failure(description: "one sync visited \(retryVisits) missing-image records; expected at most four")
     }
-    for item in delayed { try FileManager.default.moveItem(at: item.held, to: item.attachment.fileURL) }
+    // The delayed attachments share one gallery block. Hydrate its first
+    // cell while its siblings remain absent, then retain that exact displayed
+    // image while another cell becomes available. The shared block must not
+    // discard cached siblings when just one cell's resource changes.
+    let firstGallery = delayed[0]
+    let firstGalleryID = firstGallery.attachment.manifest.metadata.id
+    try FileManager.default.moveItem(at: firstGallery.held, to: firstGallery.attachment.fileURL)
+    for i in 0..<250 where canvas.imageSources[firstGalleryID] == nil {
+        tile.ingest(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "gallery first \(i)"))
+        canvas.flushPendingVisualUpdate()
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard let firstGalleryImage = canvas.imageSources[firstGalleryID]?.image else {
+        throw Failure(description: "first delayed gallery image never decoded")
+    }
+    for item in delayed.dropFirst() { try FileManager.default.moveItem(at: item.held, to: item.attachment.fileURL) }
     for i in 0..<100 where delayed.contains(where: { tile.qaManagedImageSnapshot($0.attachment.manifest.metadata.id).state != .available }) {
         tile.ingest(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "retry \(i)"))
         try await Task.sleep(for: .milliseconds(20))
     }
     guard delayed.allSatisfy({ tile.qaManagedImageSnapshot($0.attachment.manifest.metadata.id).state == .available }) else {
         throw Failure(description: "some images did not recover after their files returned")
+    }
+    canvas.flushPendingVisualUpdate()
+    for _ in 0..<250 where canvas.imageSources[delayed[1].attachment.manifest.metadata.id] == nil {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard canvas.imageSources[delayed[1].attachment.manifest.metadata.id] != nil else {
+        throw Failure(description: "second delayed gallery image never decoded")
+    }
+    let preserved = canvas.imageSources[firstGalleryID]?.image === firstGalleryImage
+    print("gallery hydration: first cached image retained across seven sibling hydrations: \(preserved)")
+    guard retainedFirstImage, preserved, tokensRetained, zoomRetained else {
+        throw Failure(description: "same-provider refresh discarded a cached image (tokens: \(tokensRetained), zoom: \(zoomRetained), independent hydration: \(retainedFirstImage), gallery: \(preserved))")
     }
 
     // Restore the supervisor snapshot through a second real tile, then grow

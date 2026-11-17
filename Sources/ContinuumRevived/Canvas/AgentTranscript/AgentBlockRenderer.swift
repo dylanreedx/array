@@ -250,10 +250,18 @@ enum AgentImageThumbnailResult {
 /// Host-local resolver for opaque semantic image IDs. It exposes cheap state,
 /// cancellable bounded thumbnail requests, and revision invalidation only; full
 /// originals and local file URLs stay behind the action owner boundary.
+/// A provider may opt into retaining its sources across context-only updates
+/// when both its owner and binding generation are unchanged.
+struct AgentImageResourceIdentity: Equatable, Sendable {
+    let owner: UUID
+    let generation: UInt64
+}
+
 struct AgentImageResourceProvider: @unchecked Sendable {
     /// True only when every change to a snapshot invalidates its presentation or
     /// refreshes the transcript render context.
     let hasReliableInvalidation: Bool
+    let identity: AgentImageResourceIdentity?
     private let snapshotValue: (AgentImageAttachmentID) -> AgentImageResourceSnapshot
     private let requestThumbnailValue: (
         AgentImageAttachmentID,
@@ -276,9 +284,11 @@ struct AgentImageResourceProvider: @unchecked Sendable {
         observe: @escaping (AgentImageAttachmentID, @escaping @MainActor (UInt64) -> Void) -> AgentImageResourceObservation = { _, _ in
             AgentImageResourceObservation()
         },
-        hasReliableInvalidation: Bool = false
+        hasReliableInvalidation: Bool = false,
+        identity: AgentImageResourceIdentity? = nil
     ) {
         self.hasReliableInvalidation = hasReliableInvalidation
+        self.identity = identity
         snapshotValue = snapshot
         requestThumbnailValue = requestThumbnail
         observeValue = observe
