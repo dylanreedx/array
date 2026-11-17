@@ -822,6 +822,8 @@ extension SidebarLedgerChecks {
                         try expect(!(line.buttonForQA.accessibilityValue() as? String ?? "").contains("failed"),
                                    "fold AX value contradicts the reconciled family tally")
                         folded += number
+                    case .familyCause:
+                        continue // Quiet: the family's cause line, inside the card
                     default: return (shown, folded)
                     }
                 }

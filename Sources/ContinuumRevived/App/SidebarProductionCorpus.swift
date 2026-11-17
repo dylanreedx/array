@@ -197,7 +197,7 @@ enum SidebarProductionCorpus {
             expected.stateLabel = "now"
         case .interrupted:
             expected.titleContains = "work that ends"
-            expected.stateLabel = "Stopped"
+            expected.stateLabel = "Interrupted"
         case .cancelled:
             expected.titleContains = "work that ends"
             expected.stateLabel = "Cancelled"
@@ -990,7 +990,7 @@ enum SidebarProductionCorpus {
         let outcomeStates = [Flow.succeeded, .interrupted, .cancelled].compactMap { flow in
             results.first { $0.flow == flow }?.row?.stateLabel
         }
-        try expect(outcomeStates == ["now", "Stopped", "Cancelled"],
+        try expect(outcomeStates == ["now", "Interrupted", "Cancelled"],
                    "§4.6: success, interruption and cancellation must remain distinct; "
                    + "got \(outcomeStates)")
 

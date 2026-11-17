@@ -40077,7 +40077,7 @@ extension AppDelegate {
 
     let terminalWords: [(AgentTerminalOutcome, String?)] = [
         (.succeeded, "Done"), (.failed, "Failed"), (.runtimeError, "Failed"),
-        (.interrupted, "Stopped"), (.cancelled, "Cancelled"),
+        (.interrupted, "Interrupted"), (.cancelled, "Cancelled"),
     ]
     for (offset, pair) in terminalWords.enumerated() {
         let terminalRow = AgentInboxRow(
