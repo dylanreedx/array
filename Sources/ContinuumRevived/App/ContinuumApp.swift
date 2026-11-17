@@ -3294,6 +3294,16 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--tile-agent-icon-styles-check") {
+            _ = NSApplication.shared
+            do {
+                print(try TileAgentBubbleChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL tile agent icon styles: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--tile-agent-bubble-drag-check") {
             _ = NSApplication.shared
             Task { @MainActor in

@@ -211,6 +211,12 @@ enum TileAgentBubbleChecks {
             throw Failure(description: "the tiles are not in the world plane")
         }
 
+        // `--tile-agent-icon-styles-check`: the style, size, lens and icons-off witnesses
+        // on this same fixture, instead of the rest of this check.
+        if CommandLine.arguments.contains("--tile-agent-icon-styles-check") {
+            return try TileAgentIconStyleChecks.run(canvas: canvas, window: window, defaults: defaults, views: views)
+        }
+
         // 1. State: the working light follows the status; the colour follows the record.
         try expect(pump(until: {
             zip(views, specs).allSatisfy { view, spec in view.qaAgentBubble?.isWorking == spec.working }
@@ -407,8 +413,9 @@ enum TileAgentBubbleChecks {
                     }
                     try expect(bubble.qaPlateColors.count >= 2 && bubble.qaPlateColors.allSatisfy { $0.alpha >= 0.999 },
                                "\(label): the plate's fill is opaque (\(bubble.qaPlateColors.map(\.alpha)))")
+                    // Minimal holds the provider mark, not the character.
                     let fill = view.qaArtFill ?? 0
-                    try expect(fill >= 0.85, "\(label): the art fills its plate (\(fill) of the side)")
+                    if style != .minimalSquircle { try expect(fill >= 0.85, "\(label): the art fills its plate (\(fill) of the side)") }
                     // Opaque, witnessed: the plate's own layer tree, rendered
                     // over magenta and over green, shows neither inside its outline.
                     guard let host = view.agentBubbleView, let hostLayer = host.layer else {
@@ -458,7 +465,10 @@ enum TileAgentBubbleChecks {
                     let barColour = (0..<3).map { base[$0] * (1 - wash[3]) + wash[$0] * wash[3] }
                     let ratio = contrast(plateColour, barColour)
                     let needed: CGFloat = bubble.tint == nil ? 1.3 : TileAgentBubbleLayer.plateContrast - 0.01
-                    try expect(ratio >= needed, "\(label): the plate \(plateColour) stands clear of its bar \(barColour) (contrast \(ratio), needs \(needed))")
+                    // Minimal is the flat token background: its even full border,
+                    // not a contrasting fill, sets it off its bar.
+                    if style == .minimalSquircle { try expect(bubble.qaParts.ringShown, "\(label): Minimal's border shows") }
+                    else { try expect(ratio >= needed, "\(label): the plate \(plateColour) stands clear of its bar \(barColour) (contrast \(ratio), needs \(needed))") }
                 }
             }
             window.appearance = nil
@@ -705,15 +715,17 @@ enum TileAgentBubbleChecks {
         }
         try expect(view.qaDragKindIsMove(at: NSPoint(x: frame.midX, y: frame.midY)), "\(label): the icon is a grab")
         // The art: its typical pose fitted to the plate, never under a device
-        // pixel per art pixel, its body on the plate's centre.
-        if let art = view.qaArtScale, let fill = view.qaArtFill {
+        // pixel per art pixel, its body on the plate's centre. (Minimal has no art.)
+        if style != .minimalSquircle, let art = view.qaArtScale, let fill = view.qaArtFill {
             let onScreen = art.perArt * art.backing * CGFloat(zoom)
             try expect(onScreen >= 0.999 && (abs(fill - TileAgentBubbleLayer.Plate.artFit) < 0.01 || fill > TileAgentBubbleLayer.Plate.artFit),
                        "\(label): the art's typical pose fills \(fill) of the plate, \(onScreen) device px per art px on screen")
         }
+        if style != .minimalSquircle {
         guard let body = view.qaCharacterBody else { throw Failure(description: "\(label): no art") }
         try expect(abs(body.body.x - body.target.x) <= pixel && abs(body.body.y - body.target.y) <= pixel,
                    "\(label): the art's body \(body.body) is centred on its plate \(body.target)")
+        }
         // The title follows tightly: one identifier. (A hanging plate reserves
         // no gap: the title keeps its normal start, checked above.)
         let gap = CGFloat(Space.s) * max(1 + (view.titleBarScale - 1) / 2, view.zoomChromeScale)
@@ -1034,6 +1046,31 @@ enum TileAgentBubbleChecks {
             try expect(pump(until: { showsStyle(style, views, canvas) }),
                        "choosing \(style.title) in Settings moves every tile's icon live")
         }
+        // The icon size row: a real ChoiceButton, Small / Default / Large, live.
+        setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.orb.rawValue)
+        try expect(pump(until: { showsStyle(.orb, views, canvas) }), "Orb for the size row")
+        guard let sizeButton = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Tile icon size" }) else {
+            throw Failure(description: "Agent Icons has no Tile icon size ChoiceButton")
+        }
+        sizeButton.presentsOffscreenForQA = true
+        try expect(sizeButton.items.map(\.title) == ["Small", "Default", "Large"], "Tile icon size offers \(sizeButton.items.map(\.title))")
+        try expect(sizeButton.selectedID == "standard", "Tile icon size starts at Default")
+        let before = views[0].agentBubbleFrame?.width ?? 0
+        sizeButton.scrollToVisible(sizeButton.bounds.insetBy(dx: 0, dy: -80))
+        fixture.settle(0.2)
+        try click(sizeButton)
+        fixture.settle()
+        guard let sizeList = sizeButton.qaPresentedList, let large = sizeList.rowView(id: "large") else {
+            throw Failure(description: "the Tile icon size choice did not offer Large")
+        }
+        sizeButton.qaPresentedPanel?.makeKey()
+        try click(large)
+        fixture.settle()
+        try expect(defaults.string(forKey: AgentCharacterConfig.iconScaleKey) == "large", "choosing Large stores it")
+        try expect(pump(until: { canvas.layoutSubtreeIfNeeded(); return (views[0].agentBubbleFrame?.width ?? 0) > before * 1.1 }),
+                   "choosing Large in Settings grows every tile's icon live (\(before) -> \(views[0].agentBubbleFrame?.width ?? 0))")
+        setSetting(defaults, AgentCharacterConfig.iconScaleKey, "standard")
+        setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.inline.rawValue)
     }
 
     // MARK: Pictures

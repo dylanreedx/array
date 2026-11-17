@@ -1069,6 +1069,7 @@ class TileNSView: NSView, TokenThemed {
         let barHeight = chromeBarHeight
         let barFrame = NSRect(x: 0, y: 0, width: bounds.width, height: barHeight)
         let chrome = zoomChromeScale
+        titleBar?.iconTaper = iconTaper
         if titleBar?.frame != barFrame || titleBar?.zoomChromeScale != chrome {
             titleBar?.zoomChromeScale = chrome
             titleBar?.frame = barFrame
@@ -1761,6 +1762,13 @@ class TileNSView: NSView, TokenThemed {
     /// The zoom chrome scale every bar draws its controls at: the floored grab
     /// height over the natural 24 pt (1 zoomed in, > 1 zoomed out).
     var zoomChromeScale: CGFloat { max(1, zoomFloorHeight / Self.titleBarHeight) }
+
+    /// The hanging icon's zoomed-out taper, from the zoom's chrome bucket so it
+    /// steps with the bar and never re-lays the tile on every pinch tick.
+    var iconTaper: CGFloat {
+        guard let zoom = canvas?.viewport.zoom, zoom.isFinite, zoom > 0 else { return 1 }
+        return CGFloat(AgentCharacterConfig.iconTaper(zoom: Self.chromeScaleBucket(for: zoom)))
+    }
 
     /// Plan 110 › size: how much taller this tile's bar is for its character's
     /// size (Small 1, Medium 1.5, Large 2.25); 1 for a tile with no character.
@@ -2568,6 +2576,12 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// Controls (⋯, the pill, the drag dots, gaps) draw at this, as they always
     /// have; a Medium or Large bar's taller height never shrinks them.
     var zoomChromeScale: CGFloat = 1
+    /// The hanging icon's size setting (0.8 / 1 / 1.2) and its zoomed-out taper
+    /// (`AgentCharacterConfig.iconTaper`), both multiplied into its side.
+    var iconScaleFactor: CGFloat { CGFloat(AgentCharacterController.shared.iconScale.factor) }
+    var iconTaper: CGFloat = 1 {
+        didSet { if iconTaper != oldValue, TileAgentBubbleLayer.Plate.hangs(bubble.bubbleStyle) { needsLayout = true } }
+    }
     /// What the mark and the character draw at: the size's factor, or the zoom
     /// chrome scale once the zoom floor is larger, so zoomed far out every size
     /// draws like Small and nothing is ever smaller than Small.
@@ -2927,7 +2941,8 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let height = bounds.height > 0 ? bounds.height : 24 * sizeScale
         if TileAgentBubbleLayer.Plate.hangs(bubble.bubbleStyle) {
             let side = snap(min(titleFontWorldSize * TileAgentBubbleLayer.Plate.hangRatio,
-                                height * TileAgentBubbleLayer.Plate.hangMaxBarRatio))
+                                                height * TileAgentBubbleLayer.Plate.hangMaxBarRatio)
+                            * iconScaleFactor * iconTaper)
             let inset = CGFloat(Space.m) * chromeScale
             // Its inside part stops short of the title's start (`leadingInset`).
             let reach = max(side * TileAgentBubbleLayer.Plate.hangOverflow, side - inset * 1.2)
@@ -3008,6 +3023,20 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// the bar has laid it out or shown it: its view is placed from this.
     var bubbleRectInBar: NSRect? { bubbleRect }
     var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
+    /// Minimal draws the provider mark inside its plate, so the one beside the
+    /// title steps aside; every other style, and icons off, keep it.
+    private var markInPlate: Bool { characterSize != nil && bubble.bubbleStyle == .minimalSquircle }
+
+    private func syncProviderMark() {
+        let inPlate = markInPlate
+        let hidden = providerMarkView.image == nil || inPlate
+        bubble.setMark(inPlate ? providerMarkView.image : nil)
+        guard providerMarkView.isHidden != hidden else { return }
+        providerMarkView.isHidden = hidden
+        needsLayout = true
+        invalidateChrome()
+    }
+    var qaMarkInPlate: Bool { markInPlate }
 
     func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String?,
                       shared: (set: SharedAgentCharacterSet, assignment: AgentCharacterAssignment)? = nil, now: Date) {
@@ -3034,6 +3063,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
                 invalidateChrome()
                 onBubbleChange?()
             }
+            syncProviderMark()
             setHeaderScale(1)
             return
         }
@@ -3063,6 +3093,13 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             invalidateChrome()
             onBubbleChange?()
         }
+        syncProviderMark()
+        if iconScaleFactor != lastIconScale {
+            lastIconScale = iconScaleFactor
+            needsLayout = true
+            invalidateChrome()
+            onBubbleChange?()
+        }
         applyBubbleWorking()
         setHeaderScale(controller.layoutFactor)
         reconcileCharacterVisibility()
@@ -3070,6 +3107,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
 
     /// Told when the bubble appears, goes or moves: the tile places its view.
     var onBubbleChange: (() -> Void)?
+    private var lastIconScale: CGFloat = 1
     /// The bubble rect last handed to the tile.
     private var placedBubbleRect: NSRect?
 
@@ -3129,7 +3167,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
 
     func reconcileCharacterVisibility() {
         let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
-        characterLayer.setPaused(characterHeld || !visible || isHiddenOrHasHiddenAncestor)
+        characterLayer.setPaused(characterHeld || !visible || isHiddenOrHasHiddenAncestor || markInPlate)
         bubble.setPaused(characterHeld || !visible || isHiddenOrHasHiddenAncestor)
     }
 
@@ -3293,7 +3331,8 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             tileChrome: SurfaceToken.tileChrome.color.nsColor(for: theme),
             tileBody: SurfaceToken.tileBody.color.nsColor(for: theme),
             textPrimary: TextToken.textPrimary.color.nsColor(for: theme),
-            textSecondary: TextToken.textSecondary.color.nsColor(for: theme)))
+            textSecondary: TextToken.textSecondary.color.nsColor(for: theme),
+            providerForeground: BrandToken.providerForeground.nsColor(for: theme)))
         if let titleEditor { styleTitleEditor(titleEditor) }
         needsDisplay = true
     }
@@ -3364,7 +3403,8 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
                 onBubbleChange?()
             }
             if characterLayer.frame != local { characterLayer.frame = local }
-            if characterLayer.isHidden { characterLayer.isHidden = false }
+            // Minimal holds the provider mark, not the character.
+            if characterLayer.isHidden == !markInPlate { characterLayer.isHidden = markInPlate }
             CATransaction.commit()
             bubble.setShown(true)
             characterLayer.refreshOrientation()
@@ -3428,6 +3468,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             providerMarkView.toolTip = providerModel
             providerMarkView.isHidden = true
         }
+        syncProviderMark()
         applyTokens()
         needsLayout = true
         invalidateChrome()

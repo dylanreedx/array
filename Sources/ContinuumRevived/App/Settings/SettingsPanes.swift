@@ -362,7 +362,7 @@ struct SettingsFieldRow: View {
             SidebarHeaderBackgroundSettingsRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == SidebarActiveIndicatorStyle.defaultsKey || key == SidebarActiveIndicatorScope.defaultsKey || key == SidebarLayout.defaultsKey:
             SidebarActiveIndicatorSettingsRow(model: model, row: row)
-        case let .choice(key, _, _, _, _) where key == AgentCharacterConfig.bubbleStyleKey:
+        case let .choice(key, _, _, _, _) where key == AgentCharacterConfig.bubbleStyleKey || key == AgentCharacterConfig.iconScaleKey:
             TileAgentIconSettingsRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == CornerStyle.defaultsKey:
             PickerRow(row: row, model: model, segmented: true)

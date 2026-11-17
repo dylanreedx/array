@@ -8,7 +8,8 @@ import ContinuumRevivedCore
 ///    bar, never taller than it nor than the title's line (4/3 of its point
 ///    size). Orb and Squircle: hanging off the tile's top-left corner, never
 ///    over 1.3 bars, the title at its normal start (`expectHanging`). The
-///    chrome floor may hold the title up; the icon may not outgrow it.
+///    chrome floor may hold the title up; the icon may not outgrow it. Below 80%
+///    zoom it tapers by sqrt(zoom / 0.8), so its floor is the title's line times that.
 /// 2. Opaque: the plate's own layer tree, rendered over black and over white,
 ///    shows neither anywhere inside its installed outline, in both appearances.
 /// 3. On top: a neighbour stacked above the icon's tile, overlapping the plate,
@@ -117,7 +118,7 @@ enum TileAgentIconWitnesses {
         let side = frame.height, title = view.qaTitleFontWorldSize
         try expect(abs(frame.width - side) <= pixel, "\(label): a square plate (\(frame.size))")
         try expect(side <= 1.3 * bar + pixel && side <= title * TileAgentBubbleLayer.Plate.hangRatio + pixel
-                   && side >= title * 4 / 3 - pixel,
+                   && side >= title * 4 / 3 * view.iconTaper - pixel,
                    "\(label): the hanging plate is \(side) pt: title-sized (title \(title) pt), at most 1.3 of the \(bar) pt bar")
         for (edge, past) in [("left", -frame.minX), ("top", -frame.minY)] {
             try expect(past >= side / 3 - pixel && past <= side * 0.6 + pixel,
