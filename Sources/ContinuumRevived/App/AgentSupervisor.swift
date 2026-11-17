@@ -9488,6 +9488,9 @@ final class AgentSupervisor {
         var cutoff: Date?
         var reply: String?
         var transcriptUnavailable: Bool
+        /// Counted at terminal arrival, before a released transcript can defer
+        /// settlement while a later turn finishes.
+        var finishedGeneration: Int
         /// The report this turn filed, captured when it ended (or filed between
         /// turns while it was held). A later turn's report never replaces it.
         var report: AgentFiledReport?
@@ -9543,7 +9546,7 @@ final class AgentSupervisor {
     private final class CompletionBox { var done = false }
 
     private func runHelperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?, identity: String,
-                                        completedAt: Date?, report: AgentFiledReport?, unavailableCause: String?) {
+                                        completedAt: Date?, finishedGeneration: Int, report: AgentFiledReport?, unavailableCause: String?) {
         var outcome = outcome, error = error
         if let cause = unavailableCause {
             if outcome == .completed { outcome = .failed }
@@ -9557,7 +9560,8 @@ final class AgentSupervisor {
         let owned = last != nil && turnReplyFloors[id].map { $0.entryID != last } != false
         let reply = unavailableCause == nil && owned ? transcriptProjections[id]?.finalAssistantText : nil
         let completion = HelperTurnCompletion(id: id, turn: turn, identity: identity, outcome: outcome, error: error,
-            cutoff: completedAt, reply: reply, transcriptUnavailable: unavailableCause != nil, report: report)
+            cutoff: completedAt, reply: reply, transcriptUnavailable: unavailableCause != nil,
+            finishedGeneration: finishedGeneration, report: report)
         withSettlement(completion) { helperTurnCompleted(completion) }
     }
 
@@ -9570,7 +9574,6 @@ final class AgentSupervisor {
 
     private func helperTurnCompleted(_ completion: HelperTurnCompletion) {
         let id = completion.id
-        helperTurnsFinished[id, default: 0] += 1
         let previous = heldHelperCompletions[id]
         if let previous, previous.identity != completion.identity { removeHeldRecords(previous, helper: id) }
         // A completion that waited while the helper started another turn is not
@@ -9884,8 +9887,9 @@ final class AgentSupervisor {
         guard let child = records[id], child.capabilities.locallyManaged,
               helperCompletionTurns[id] != identity else { return }
         helperCompletionTurns[id] = identity
-        helperCompletionGeneration[identity] = helperTurnsFinished[id, default: 0]
-        if helperFirstFinishedAt[id] == nil { helperFirstFinishedAt[id] = helperCompletionNow() }
+        helperCompletionGeneration[identity] = settlementScope.flatMap {
+            $0.id == id ? $0.finishedGeneration : nil
+        } ?? helperTurnsFinished[id, default: 0]
         if let scope = settlementScope, scope.id == id { settledHelperCompletions[id] = scope }
         let baseline = subscriptionsSettling(id).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let text = helperCompletionText(id, child: child, outcome: outcome, error: error, statusOverride: statusOverride).text
@@ -14433,6 +14437,19 @@ final class AgentSupervisor {
         default: noteActivity(id, now: now)
         }
         event = withCompactionBeforeReading(event, for: id)
+        // Tidy receipts compare against every actual turn end, including
+        // completions still waiting on their transcript. Capture this before
+        // notifying readers and before any later turn can finish.
+        let finishedGeneration: Int
+        if case .turnCompleted = event {
+            helperTurnsFinished[id, default: 0] += 1
+            finishedGeneration = helperTurnsFinished[id, default: 0]
+            if records[id]?.capabilities.locallyManaged == true, helperFirstFinishedAt[id] == nil {
+                helperFirstFinishedAt[id] = helperCompletionNow()
+            }
+        } else {
+            finishedGeneration = 0
+        }
         if case .turnCompleted(_, _, .failed, let error) = event,
            error == AgentContextFullRecovery.canonicalErrorMessage {
             pauseQueue(id, .held)
@@ -14738,7 +14755,8 @@ final class AgentSupervisor {
                 guard !box.done else { return }
                 box.done = true
                 self?.runHelperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage, identity: identity,
-                                             completedAt: completedAt, report: report, unavailableCause: cause)
+                                             completedAt: completedAt, finishedGeneration: finishedGeneration,
+                                             report: report, unavailableCause: cause)
             }
             if deferUntilTranscriptReloaded(id, { settle(nil) }) {
                 let bound = Self.transcriptCompletionBound
