@@ -105,6 +105,7 @@ enum SidebarDogfoodChecks {
         reports.append(try checkHistoryRows())
         reports.append(try checkHistoryPaints())
         reports.append(try checkLiveUsage())
+        reports.append(try checkOrphanRoot())
         return "SidebarDogfoodChecks passed:\n" + reports.joined(separator: "\n")
     }
 
@@ -323,6 +324,36 @@ enum SidebarDogfoodChecks {
         try expect(usageLine() == nil && usageIncidents().isEmpty,
                    "(b) usage returned but the item stays — incidents \(inbox.sidebarIncidents.map(\.title))")
         return "Live usage: no item from old words or at 40%; at 100% 'Codex usage ran out' with Resume (one account, or a second folder on the same login) and Switch & resume… only with a second login; × dismisses, persists, and a new stop brings it back; usage back clears it"
+    }
+
+    // MARK: - 4. An orphan whose lead is gone is its own root card
+
+    static func checkOrphanRoot() throws -> String {
+        let h = try makeHarness("orphan-root")
+        defer { h.close() }
+        let inbox = h.inbox
+        let lead = h.spawn("Measure performance at scale")
+        let orphan = h.spawn("Measure and archive cold agent residency", parent: lead)
+        h.finish(lead)
+        h.finish(orphan, failed: "Tests failed: 3 of 40 in ResidencyChecks")
+        h.refresh()
+        // The lead record goes (Delete), its failed helper stays unopened.
+        _ = h.supervisor.archive(lead)
+        h.refresh()
+        try expect(h.supervisor.records[lead] == nil && h.supervisor.records[orphan] != nil,
+                   "fixture: the lead's record must be gone and the helper's kept")
+        let drawn = inbox.itemsForQuietCheck.compactMap(\.agentRow).first { $0.id == orphan.rawValue }
+        guard let row = drawn else {
+            throw Failure(description: "the orphan failure is not drawn at all — rows \(inbox.itemsForQuietCheck.compactMap(\.agentRow).map(\.displayTitle))")
+        }
+        try expect(row.parentId == nil && row.depth == 0,
+                   "the orphan failure draws under an absent lead (parent \(row.parentId?.uuidString ?? "nil"), depth \(row.depth)) — a loose strip")
+        guard let index = inbox.itemsForQuietCheck.firstIndex(where: { $0.agentRow?.id == orphan.rawValue }),
+              let cell = inbox.tableForQA.view(atColumn: 0, row: index, makeIfNecessary: true) as? AgentInbox96CellView else {
+            throw Failure(description: "the orphan failure has no card cell")
+        }
+        try expect(!cell.isSubagentRow, "the orphan failure draws as a helper strip, not a lead card")
+        return "Orphan root: '\(row.displayTitle)' with its lead deleted draws as its own root card (depth 0, no parent)"
     }
 
     // MARK: - 1. History rows read like A

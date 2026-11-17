@@ -177,6 +177,35 @@ public enum InboxSort {
         return rows.filter { !omitted.contains($0.id) }
     }
 
+    /// A helper the orphan rule keeps whose lead record is gone becomes a root,
+    /// with its own helpers re-depthed under it: it draws as a normal card, not
+    /// a loose strip under a lead that is not there.
+    public static func promotingOrphansToRoots(_ rows: [AgentInboxRow]) -> [AgentInboxRow] {
+        let present = Set(rows.map(\.id))
+        let orphanDepth = Dictionary(rows.compactMap { row -> (UUID, Int)? in
+            guard let parent = row.parentId, parent != row.id, !present.contains(parent) else { return nil }
+            return (row.id, row.depth)
+        }, uniquingKeysWith: { first, _ in first })
+        guard !orphanDepth.isEmpty else { return rows }
+        let parentOf = Dictionary(rows.compactMap { row in row.parentId.map { (row.id, $0) } },
+                                  uniquingKeysWith: { first, _ in first })
+        func shift(of id: UUID) -> Int? {
+            var current = id
+            var seen: Set<UUID> = []
+            while seen.insert(current).inserted {
+                if let depth = orphanDepth[current] { return depth }
+                guard let parent = parentOf[current] else { return nil }
+                current = parent
+            }
+            return nil
+        }
+        return rows.map { row in
+            if orphanDepth[row.id] != nil { return row.reparented(parentId: nil, depth: 0) }
+            guard let shift = shift(of: row.id), shift > 0 else { return row }
+            return row.reparented(parentId: row.parentId, depth: max(0, row.depth - shift))
+        }
+    }
+
     /// The maximum number of direct children shown inline for one parent. This is
     /// a presentation cap, deliberately separate from the supervisor's spawn cap:
     /// old stores and fixture corpora can contain more children than a new spawn

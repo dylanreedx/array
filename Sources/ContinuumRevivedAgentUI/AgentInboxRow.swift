@@ -1357,6 +1357,36 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
             .carryingOverlays(from: self)
     }
 
+    /// The same row under another parent at another depth. A helper whose lead
+    /// record is gone becomes a root (`parentId` nil, depth 0) so it draws a
+    /// normal card instead of a strip under nothing.
+    public func reparented(parentId newParent: UUID?, depth newDepth: Int) -> AgentInboxRow {
+        var row = AgentInboxRow(
+            id: id, title: title, projectName: projectName, projectId: projectId,
+            directoryName: directoryName,
+            workspaceName: workspaceName,
+            workspaceId: workspaceId,
+            state: state, attention: attention, lifecycle: lifecycle, model: model, role: role,
+            branch: branch, isIsolated: isIsolated,
+            elapsed: elapsed,
+            elapsedStartedAt: elapsedStartedAt,
+            lastActiveAt: lastActiveAt, depth: newDepth,
+            variant: variant, createdAt: createdAt, parentId: newParent,
+            isUnconfirmed: isUnconfirmed, settlementBlocked: settlementBlocked,
+            zoneName: zoneName, harness: harness, checkedOutBranch: checkedOutBranch,
+            terminalEvent: terminalEvent, terminalIsUnread: terminalIsUnread,
+            closingSince: closingSince, hasLiveRunner: hasLiveRunner,
+            identityColor: identityColor, selfReport: selfReport,
+            hasTile: hasTile, isPinned: isPinned, characterActivity: characterActivity,
+            characterName: characterName, ownLifecycle: ownLifecycle)
+            .carryingOverlays(from: self)
+        row.whereMarker = whereMarker
+        row.externalSession = externalSession
+        // With no lead, there is nothing to resume through.
+        if newParent == nil { row.resumesThroughLead = false }
+        return row
+    }
+
     /// The same row with the three fields tool chatter moves inside a turn
     /// (`AgentInboxRowBuilder.refreshingChatter`). A copy of `self`, so no other
     /// field can be dropped on the way.

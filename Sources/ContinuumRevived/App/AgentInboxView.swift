@@ -2666,8 +2666,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // Decide orphanhood against the full input, before scope/search can
         // temporarily remove a real parent. Search remains the way to find a
         // finished helper whose lead was deleted or cannot be restored.
-        let historyRows = InboxSort.excludingQuietOrphanedHelpers(
-            rows: newRows, openAgentId: openAgentId, searching: !query.isEmpty)
+        let historyRows = InboxSort.promotingOrphansToRoots(InboxSort.excludingQuietOrphanedHelpers(
+            rows: newRows, openAgentId: openAgentId, searching: !query.isEmpty))
         let sourced = historyRows.filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
         let scopedWithHidden = InboxScope.filter(
             rows: sourced, scope: effectiveScope, openAgentId: openAgentId,
