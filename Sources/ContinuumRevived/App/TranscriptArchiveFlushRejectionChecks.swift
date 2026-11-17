@@ -78,12 +78,43 @@ enum TranscriptArchiveFlushRejectionChecks {
             await supervisor.qaWaitForTranscriptPersistence(for: id)
             try? await Task.sleep(for: .milliseconds(20))
         }
+        // Verify the dormant flush's safety outcome before any new event can
+        // close the local stream or attempt another save.
+        guard supervisor.qaTranscriptPersistenceIsBlocked(id) else {
+            throw Failure(description: "a rejected deferred canonical flush did not block persistence")
+        }
+        guard !supervisor.isTranscriptReleased(id) else {
+            throw Failure(description: "a rejected deferred canonical flush released its transcript")
+        }
+        let warningText = "new transcript content may be lost"
+        guard warnings.contains(where: { $0.contains(warningText) }) else {
+            throw Failure(description: "a rejected deferred canonical flush did not emit its persistence warning")
+        }
+        guard try Data(contentsOf: snapshot) == before else {
+            throw Failure(description: "a rejected deferred canonical flush replaced the prior archive")
+        }
+        // Notices wait for a real block boundary so they never split a live
+        // reply. Finish this same turn through production delivery; do not
+        // rebuild the projection or repair the archive to expose the notice.
+        supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: turn,
+            outcome: .completed, errorMessage: nil), to: id)
         let localText = (supervisor.transcriptDocument(for: id)?.entries ?? [])
             .map { AgentTranscriptCopyController.plainText(for: $0.blocks) }.joined(separator: "\n")
-        guard supervisor.qaTranscriptPersistenceIsBlocked(id), !supervisor.isTranscriptReleased(id),
-              !warnings.isEmpty, try Data(contentsOf: snapshot) == before,
-              localText.contains("new transcript content may be lost") else {
-            throw Failure(description: "a rejected deferred canonical flush did not block persistence and retain the prior archive")
+        guard localText.components(separatedBy: warningText).count - 1 == 1 else {
+            throw Failure(description: "the real turn boundary did not reveal the pending persistence warning exactly once")
+        }
+        // Allow the earlier streaming debounce to finish too: the boundary
+        // and its warning must not make any deferred save replace the archive.
+        try? await Task.sleep(for: .milliseconds(350))
+        await supervisor.qaWaitForTranscriptPersistence(for: id)
+        guard supervisor.qaTranscriptPersistenceIsBlocked(id) else {
+            throw Failure(description: "the real turn boundary unblocked rejected transcript persistence")
+        }
+        guard !supervisor.isTranscriptReleased(id) else {
+            throw Failure(description: "the real turn boundary released the rejected transcript")
+        }
+        guard try Data(contentsOf: snapshot) == before else {
+            throw Failure(description: "the real turn boundary replaced the prior archive after flush rejection")
         }
     }
 }
