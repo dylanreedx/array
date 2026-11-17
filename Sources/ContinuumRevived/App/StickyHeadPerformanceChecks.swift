@@ -187,10 +187,12 @@ enum StickyHeadPerformanceChecks {
             for (name, start, camera, expectedPinned) in phases {
                 warm(start)
                 expect(canvas.qaTotalInstalledTileCount == installed, "\(installed)/\(name): incorrect installed population")
+                let orbScale = max(1, ceil(CGFloat(start.zoom) * window.backingScaleFactor))
                 expect(views.allSatisfy { view in
                     guard let host = view.agentBubbleView, let bubble = view.qaAgentBubble else { return false }
                     return !bubble.isHidden && view.qaCharacterLayer?.contents != nil
                         && host.superview === view.superview && bubble.superlayer === host.layer
+                        && bubble.contentsScale == orbScale
                 }, "\(installed)/\(name): real icons/art were not installed")
                 let pinned = views.filter { $0.qaStickyHead != nil }.count
                 expect(pinned == expectedPinned, "\(installed)/\(name): expected \(expectedPinned) pinned heads, got \(pinned)")
@@ -226,6 +228,8 @@ enum StickyHeadPerformanceChecks {
                     }
                 }
                 StickyHeadWorkCounters.isEnabled = false
+                expect(views.allSatisfy { $0.qaAgentBubble?.contentsScale == orbScale },
+                       "\(installed)/\(name): pans and within-scale zooms keep the Orb backing scale")
                 let sample = Sample(
                     installed: installed, name: name, pinned: pinned,
                     layouts: StickyHeadWorkCounters.layoutRequests,

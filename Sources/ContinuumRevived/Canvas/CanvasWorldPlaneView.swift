@@ -293,6 +293,7 @@ final class CanvasWorldPlaneView: NSView {
 
     private var agentBubbleCells: [VisibilityCell: [ObjectIdentifier]] = [:]
     private var agentBubbleEntries: [ObjectIdentifier: AgentBubbleEntry] = [:]
+    private var agentOrbRenderScale: CGFloat = 1
     /// Told when a filed plate appears, moves or goes: old and new WORLD frames.
     var onAgentBubbleMoved: ((CGRect?, CGRect?) -> Void)?
     /// QA: how many filed plates ring queries have examined. Must not grow with
@@ -301,6 +302,12 @@ final class CanvasWorldPlaneView: NSView {
     /// QA: how many times a plate was filed again (a camera step must file none).
     private(set) var qaAgentBubbleRefiles = 0
     var qaAgentBubbleCount: Int { agentBubbleEntries.count }
+
+    func setAgentOrbRenderScale(_ scale: CGFloat) {
+        guard scale != agentOrbRenderScale else { return }
+        agentOrbRenderScale = scale
+        for entry in agentBubbleEntries.values { entry.view?.bubble.setOrbRenderScale(scale) }
+    }
 
     /// The cells `rect` covers; nil past `limit` (or a non-finite rect).
     private func agentBubbleCells(for rect: CGRect, limit: Int = 4_096) -> [VisibilityCell]? {
@@ -327,6 +334,7 @@ final class CanvasWorldPlaneView: NSView {
         qaAgentBubbleRefiles += 1
         unfile(id, previous)
         if let frame, let cells = agentBubbleCells(for: frame) {
+            if previous == nil { view.bubble.setOrbRenderScale(agentOrbRenderScale) }
             for cell in cells { agentBubbleCells[cell, default: []].append(id) }
             agentBubbleEntries[id] = AgentBubbleEntry(view: view, frame: frame, cells: cells)
         }
@@ -337,6 +345,7 @@ final class CanvasWorldPlaneView: NSView {
     /// the rings near it cut again.
     func agentBubbleReshaped(_ view: TileAgentBubbleView) {
         guard let entry = agentBubbleEntries[ObjectIdentifier(view)] else { return }
+        view.bubble.setOrbRenderScale(agentOrbRenderScale)
         onAgentBubbleMoved?(entry.frame, entry.frame)
     }
 

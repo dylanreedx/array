@@ -18,7 +18,8 @@ import QuartzCore
 ///   mark stays beside the title.
 ///
 /// `ARRAY_AGENT_ICON_STILLS_DIR=<dir>` also writes a still of every style, size
-/// and appearance. The matrix sets nothing.
+/// and appearance. `ARRAY_AGENT_ORB_CLOSEUP_DIR=<dir>` captures the Classic
+/// Orb at 80%, 125% and 250% in both appearances. The matrix sets nothing.
 @MainActor
 enum TileAgentIconStyleChecks {
     typealias Check = TileAgentBubbleChecks
@@ -75,6 +76,10 @@ enum TileAgentIconStyleChecks {
         let stills = ProcessInfo.processInfo.environment["ARRAY_AGENT_ICON_STILLS_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
         if let stills { try FileManager.default.createDirectory(at: stills, withIntermediateDirectories: true) }
         setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, SidebarActiveIndicatorStyle.classic.rawValue)
+        if let path = ProcessInfo.processInfo.environment["ARRAY_AGENT_ORB_CLOSEUP_DIR"], !path.isEmpty {
+            return try captureOrbCloseUps(canvas: canvas, window: window, defaults: defaults, views: views,
+                                          world: world, directory: URL(fileURLWithPath: path, isDirectory: true))
+        }
 
         // 0. Defaults: nothing about a fresh install changed.
         try Check.expect(AgentCharacterConfig.defaultBubbleStyle == .inline, "the default style is still Inline")
@@ -97,6 +102,8 @@ enum TileAgentIconStyleChecks {
             }
         }
         report.append("art: pixel-exact atlas in every style")
+        try show(.orb, views, canvas, defaults)
+        report.append(try checkOrbMaskScale(canvas: canvas, window: window, views: views, world: world))
 
         // 1. Each style renders, opaque, in both appearances; Minimal holds the mark.
         for (theme, appearance) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
@@ -170,20 +177,21 @@ enum TileAgentIconStyleChecks {
             let bubble = subject.qaAgentBubble!
             let phase = bubble.phase
             try Check.expect(bubble.isWorking, "\(style.title): the fixture's first agent is working")
-            try Check.expect(bubble.isMoving && bubble.qaAnimationKeys.contains(TileAgentBubbleLayer.motionKeyPrefix + (style == .orb ? "orbit" : "rim")),
+            try Check.expect(bubble.isMoving && bubble.qaAnimationKeys.contains(TileAgentBubbleLayer.motionKeyPrefix + (style == .orb ? "glow" : "rim")),
                              "\(style.title): the working light is attached while working (\(bubble.qaAnimationKeys))")
-            try Check.expect(bubble.qaParts.orbitShown, "\(style.title): the rim light is visible while working")
+            try Check.expect(style == .orb ? bubble.qaWorkingGlow != nil && !bubble.qaParts.orbitShown : bubble.qaParts.orbitShown,
+                             "\(style.title): the working light is visible")
             let layouts = subject.qaTitleBarLayoutPasses
             Check.pump(0.6)
             try Check.expect(subject.qaTitleBarLayoutPasses == layouts, "\(style.title): the working light must not lay out the title bar")
             bubble.setWorking(false, style: SidebarActiveIndicatorStyle.classic.rawValue, phase: phase)
-            try Check.expect(!bubble.isMoving && bubble.qaAnimationKeys.isEmpty && !bubble.qaParts.orbitShown,
+            try Check.expect(!bubble.isMoving && bubble.qaAnimationKeys.isEmpty && !bubble.qaParts.orbitShown && bubble.qaWorkingGlow == nil,
                              "\(style.title): idle removes every layer animation (\(bubble.qaAnimationKeys))")
             bubble.setWorking(true, style: SidebarActiveIndicatorStyle.classic.rawValue, phase: phase)
             bubble.setPaused(true)
             try Check.expect(bubble.qaAnimationKeys.isEmpty, "\(style.title): paused removes every layer animation")
             bubble.setPaused(false)
-            try Check.expect(!bubble.qaAnimationKeys.isEmpty, "\(style.title): resuming brings the rim light back")
+            try Check.expect(!bubble.qaAnimationKeys.isEmpty, "\(style.title): resuming brings the working light back")
             // The idle tile of the fixture never animates.
             let idle = views[1].qaAgentBubble!
             try Check.expect(!idle.isWorking && idle.qaAnimationKeys.isEmpty, "\(style.title): an idle agent's icon holds still")
@@ -251,6 +259,64 @@ enum TileAgentIconStyleChecks {
         report.append("icons off: no plate, no hanging icon, provider mark beside the title, corner identical in all styles")
 
         return (["PASS tile agent icon styles"] + report).joined(separator: "\n")
+    }
+
+    private static func checkOrbMaskScale(canvas: CanvasNSView, window: NSWindow,
+                                          views: [ManagedAgentTileNSView], world: TileFrame) throws -> String {
+        guard let bubble = views.first?.qaAgentBubble else { throw Check.Failure(description: "missing Orb") }
+        func masks(in layer: CALayer) -> [CAShapeLayer] {
+            let own = (layer.mask as? CAShapeLayer).map { [$0] } ?? []
+            return own + (layer.sublayers ?? []).flatMap { masks(in: $0) }
+        }
+        func expectScale(_ expected: CGFloat, at label: String) throws {
+            let actual = masks(in: bubble).map(\.contentsScale)
+            try Check.expect(actual.count >= 6 && actual.allSatisfy { $0 == expected },
+                             "\(label): Orb shape masks must render at \(expected)x, got \(actual)")
+        }
+        for zoom in [0.8, 1.25, 2.5, 3.0, 1.25] {
+            settle(canvas, views, zoom: zoom, around: world)
+            try expectScale(max(1, ceil(zoom * window.backingScaleFactor)), at: "settled zoom \(zoom)")
+        }
+        let driver = canvas.cameraDriver
+        let start = canvas.viewport.zoom
+        let before = max(1, ceil(start * window.backingScaleFactor))
+        driver.noteScrollZoom(deltaY: 140, location: CGPoint(x: 70, y: 70))
+        driver.qaFlushPending()
+        let after = max(1, ceil(canvas.viewport.zoom * window.backingScaleFactor))
+        try Check.expect(after > before, "the driver zoom crosses a backing scale")
+        try expectScale(before, at: "while zooming")
+        driver.qaMarkSettledNow()
+        try expectScale(after, at: "after the driver settles")
+        return "Orb close-up: mask scale follows the window and settled zoom through 300%; a zoom step leaves it alone"
+    }
+
+    private static func captureOrbCloseUps(canvas: CanvasNSView, window: NSWindow, defaults: UserDefaults,
+                                           views: [ManagedAgentTileNSView], world: TileFrame, directory: URL) throws -> String {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try show(.orb, views, canvas, defaults)
+        let subject = views[0]
+        guard let host = subject.agentBubbleView, let plane = host.superview else {
+            throw Check.Failure(description: "missing the close-up Orb")
+        }
+        let bubble = host.bubble
+        for (theme, appearance) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
+            window.appearance = NSAppearance(named: appearance)
+            for (percent, zoom) in [(80, 0.8), (125, 1.25), (250, 2.5)] {
+                settle(canvas, views, zoom: zoom, around: world)
+                let frame = canvas.convert(host.frame, from: plane)
+                let crop = CGRect(x: (frame.midX - 56).rounded(), y: (frame.midY - 56).rounded(), width: 128, height: 112)
+                // The same teal agent and atlas pose in each still. Only the
+                // working-light layers change between the two captures.
+                bubble.sprite.setPaused(true)
+                for (state, working) in [("idle", false), ("working", true)] {
+                    bubble.setWorking(working, style: SidebarActiveIndicatorStyle.classic.rawValue, phase: 0)
+                    bubble.setPaused(true)
+                    try Check.write(try Check.capture(canvas, window, rect: crop),
+                                    to: directory.appendingPathComponent("\(theme)-\(percent)-\(state).png"))
+                }
+            }
+        }
+        return "Captured 12 Orb close-ups at \(Int(window.backingScaleFactor))x window backing in \(directory.path)"
     }
 
     /// Every sidebar light choice works on the Orb: the glass stays on, the

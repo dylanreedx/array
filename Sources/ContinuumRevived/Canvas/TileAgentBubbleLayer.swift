@@ -14,8 +14,8 @@ import QuartzCore
 /// - **Squircle**: a superellipse, the app-icon shape.
 /// - **Orb**: a circle in glass: the art undistorted on the opaque plate, an
 ///   edge vignette over it, a translucent rim and a specular highlight above.
-///   Working, it takes the sidebar's light (the Inset treatment turns a rim
-///   light instead).
+///   Working, it takes the sidebar's light. Classic uses a thin, even ring and
+///   a soft glow around it. The Inset treatment turns a rim light.
 /// - **Minimal**: a flat squircle, an even full border, the token background
 ///   and the agent's character inside it. Working, a highlight sweeps round
 ///   the whole border; the character shows its own poses.
@@ -23,12 +23,9 @@ import QuartzCore
 /// Hosted by a view in the world plane (`TileAgentBubbleView`) stacked above
 /// every tile, so nothing on its tile or a neighbour's draws over it.
 ///
-/// One `CALayer` subtree, never drawn: no layout pass, no `draw(_:)`, nothing
-/// AppKit hit-tests, and nothing a camera step touches. Every part is geometry
-/// the render server draws itself (gradients, shape masks, a shadow with an
-/// explicit path), so it is sharp at every zoom with no re-rasterization, and
-/// the only motion — the working light — is render-server animation on the
-/// sidebar's clock.
+/// One `CALayer` subtree: gradients, shape masks, and explicit shadow paths.
+/// The Orb's mask surfaces use the resting canvas zoom and display scale.
+/// The working light runs in the render server on the sidebar's clock.
 ///
 /// Every colour is a gradient stop or a mask, never a layer fill or border: the
 /// bubble paints the agent's identity colour, which is not a tile token, so it
@@ -143,6 +140,9 @@ final class TileAgentBubbleLayer: CALayer {
     private var usesRimLight: Bool {
         bubbleStyle == .minimalSquircle || (bubbleStyle == .orb && Self.orbTreatment == .inset)
     }
+    private var usesOrbHalo: Bool {
+        bubbleStyle == .orb && Self.orbTreatment == .classic && workingStyle == SidebarActiveIndicatorStyle.classic.rawValue
+    }
     /// QA: repaint and lay out after a static treatment change.
     func qaRepaint() { repaint(); setNeedsLayout(); layoutIfNeeded() }
 
@@ -161,6 +161,8 @@ final class TileAgentBubbleLayer: CALayer {
 
     /// The orb's soft shadow, cast from the plate's path (a masked layer cannot cast one).
     private let shadowCaster = CALayer()
+    /// A centred, coloured shadow under the working Orb's full ring.
+    private let workingGlow = CALayer()
     /// The plate: one opaque fill, edge to edge.
     private let plate = CAGradientLayer()
     private let plateMask = CAShapeLayer()
@@ -192,6 +194,11 @@ final class TileAgentBubbleLayer: CALayer {
     private let rimMask = CAShapeLayer()
     private let specular = CAGradientLayer()
 
+    private var renderLayers: [CALayer] {
+        [shadowCaster, workingGlow, plate, plateMask, clip, clipMask, wash, sheen, ring, ringMask,
+         orbitHost, orbitMask, orbit, artClip, artMask, glass, glassMask, lens, rim, rimMask, specular]
+    }
+
     static let motionKeyPrefix = "tileAgentBubble."
     /// Seconds for the rim light to travel once round the Orb or Minimal's edge.
     static let rimPeriod: CFTimeInterval = 5
@@ -219,9 +226,7 @@ final class TileAgentBubbleLayer: CALayer {
 
     private func configure() {
         actions = Self.still
-        for layer in [shadowCaster, plate, plateMask, clip, clipMask, wash, sheen, ring, ringMask,
-                      orbitHost, orbitMask, orbit, artClip, artMask, glass, glassMask, lens, rim, rimMask,
-                      specular] as [CALayer] {
+        for layer in renderLayers {
             layer.actions = Self.still
         }
         isHidden = true
@@ -242,6 +247,7 @@ final class TileAgentBubbleLayer: CALayer {
         glass.mask = glassMask
         rim.mask = rimMask
         addSublayer(shadowCaster)
+        addSublayer(workingGlow)
         addSublayer(plate)
         addSublayer(clip)
         clip.addSublayer(wash)
@@ -262,6 +268,7 @@ final class TileAgentBubbleLayer: CALayer {
     func setStyle(_ style: Style) {
         guard style != bubbleStyle else { return }
         bubbleStyle = style
+        if style != .orb { setOrbRenderScale(1) }
         repaint()
         // The hover look belongs to the style: an Orb's swell never outlives it,
         // and a plate hovered as it becomes an Orb swells at once.
@@ -375,6 +382,21 @@ final class TileAgentBubbleLayer: CALayer {
 
     // MARK: Geometry
 
+    /// Shape masks can back their alpha with a surface. Give the Orb's glass
+    /// and masks enough device pixels for the resting camera; the sprite still
+    /// samples the original pixel-art atlas independently.
+    func setOrbRenderScale(_ scale: CGFloat) {
+        let scale = bubbleStyle == .orb ? scale : 1
+        guard contentsScale != scale else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        contentsScale = scale
+        for layer in renderLayers {
+            layer.contentsScale = scale
+        }
+        CATransaction.commit()
+    }
+
     /// The plate's outline in this layer's (flipped) coordinates.
     var platePath: CGPath {
         let box = CGRect(origin: .zero, size: bounds.size)
@@ -388,12 +410,15 @@ final class TileAgentBubbleLayer: CALayer {
         defer { CATransaction.commit() }
         let box = CGRect(origin: .zero, size: bounds.size)
         let side = min(box.width, box.height)
-        for layer in [shadowCaster, plate, clip, ring, orbitHost, artClip, glass] as [CALayer] { layer.frame = box }
+        for layer in [shadowCaster, workingGlow, plate, clip, ring, orbitHost, artClip, glass] as [CALayer] { layer.frame = box }
         for mask in [plateMask, clipMask, ringMask, orbitMask, artMask, glassMask] { mask.frame = box }
         let shape = platePath
         shadowCaster.shadowPath = shape
         shadowCaster.shadowRadius = max(0.5, side * 0.06)
         shadowCaster.shadowOffset = CGSize(width: 0, height: -max(0.5, side * 0.03))
+        workingGlow.shadowPath = shape
+        workingGlow.shadowRadius = max(0.8, side * 0.08)
+        workingGlow.shadowOffset = .zero
         plateMask.path = shape
         clipMask.path = shape
         artClip.mask = artMask
@@ -412,11 +437,11 @@ final class TileAgentBubbleLayer: CALayer {
         lens.frame = box
         rim.frame = box
         rimMask.frame = box
-        let rimWidth = max(0.75, side * (bubbleStyle == .orb ? 0.07 : 0.085))
+        let rimWidth = max(0.65, side * (bubbleStyle == .orb ? 0.06 : 0.085))
         rimMask.path = Plate.path(bubbleStyle, in: box.insetBy(dx: rimWidth / 2, dy: rimWidth / 2), tileRadius: tileRadius)
         rimMask.lineWidth = rimWidth
-        specular.frame = CGRect(x: box.minX + side * 0.14, y: box.minY + side * 0.07,
-                                width: side * 0.5, height: side * 0.3)
+        specular.frame = CGRect(x: box.minX + side * 0.13, y: box.minY + side * 0.06,
+                                width: side * 0.53, height: side * 0.32)
         // The orbit's light: a conic gradient big enough to cover the plate at
         // any angle, turning inside the edge's mask.
         let diagonal = (box.width * box.width + box.height * box.height).squareRoot()
@@ -424,6 +449,11 @@ final class TileAgentBubbleLayer: CALayer {
         orbitMask.path = shape
         orbitMask.lineWidth = max(1.25, side * 0.08) * 2
         artClip.sublayerTransform = CATransform3DIdentity
+        if usesOrbHalo {
+            let width = max(0.55, side * 0.036)
+            ringMask.path = Plate.path(.orb, in: box.insetBy(dx: rimWidth * 0.8, dy: rimWidth * 0.8), tileRadius: tileRadius)
+            ringMask.lineWidth = width
+        }
         if usesRimLight {
             // The rim light's track: a hairline just inside the edge, lit by a
             // band that turns inside it.
@@ -464,6 +494,7 @@ final class TileAgentBubbleLayer: CALayer {
         let working = isWorking
         let orb = bubbleStyle == .orb
         let minimal = bubbleStyle == .minimalSquircle
+        workingGlow.isHidden = !(working && usesOrbHalo)
         orbitHost.isHidden = true
         sheen.isHidden = true
         sheen.locations = nil
@@ -506,21 +537,28 @@ final class TileAgentBubbleLayer: CALayer {
             lens.locations = inset ? [0, 0.55, 1] : [0, 0.72, 1]
             lens.startPoint = CGPoint(x: 0.5, y: 0.5)
             lens.endPoint = CGPoint(x: 1, y: 1)
-            rim.colors = [NSColor.white.withAlphaComponent(dark ? 0.75 : 0.9).cgColor,
+            rim.colors = [NSColor.white.withAlphaComponent(dark ? 0.66 : 0.78).cgColor,
                           NSColor.white.withAlphaComponent(0.08).cgColor,
-                          NSColor.white.withAlphaComponent(dark ? 0.35 : 0.5).cgColor]
+                          NSColor.white.withAlphaComponent(dark ? 0.32 : 0.42).cgColor]
             rim.locations = [0, 0.55, 1]
             rim.startPoint = CGPoint(x: 0.15, y: 0)
             rim.endPoint = CGPoint(x: 0.85, y: 1)
-            specular.colors = [NSColor.white.withAlphaComponent(dark ? (inset ? 0.6 : 0.5) : (inset ? 0.7 : 0.6)).cgColor,
+            let highlight: CGFloat = dark ? (inset ? 0.6 : 0.44) : (inset ? 0.7 : 0.53)
+            specular.colors = [NSColor.white.withAlphaComponent(highlight).cgColor,
+                               NSColor.white.withAlphaComponent(highlight * 0.32).cgColor,
                                NSColor.white.withAlphaComponent(0).cgColor]
+            specular.locations = [0, 0.55, 1]
             specular.startPoint = CGPoint(x: 0.5, y: 0.5)
             specular.endPoint = CGPoint(x: 1, y: 1)
         }
 
-        // Working, Inline and Squircle take the sidebar's light; the Orb and
-        // Minimal run their own light round the rim, below.
-        if working && !usesRimLight {
+        if working && usesOrbHalo {
+            ring.isHidden = false
+            ring.colors = flat(mix(hue, .white, dark ? 0.24 : 0).withAlphaComponent(dark ? 0.48 : 0.42))
+            workingGlow.shadowColor = hue.cgColor
+            workingGlow.shadowOpacity = dark ? 0.58 : 0.48
+            workingGlow.opacity = 0.66
+        } else if working && !usesRimLight {
             switch workingStyle {
             case "gradient":
                 let alpha: CGFloat = dark ? 0.42 : 0.3
@@ -643,11 +681,24 @@ final class TileAgentBubbleLayer: CALayer {
 
     private func reconcileMotion(force: Bool) {
         let moving = isWorking && !isPaused && !isHidden && !reduceMotion()
-        let signature = moving ? "\(workingStyle):\(bubbleStyle):\(bounds.size)" : nil
+        let signature = moving ? "\(workingStyle):\(bubbleStyle):\(usesRimLight):\(bounds.size)" : nil
         guard force || signature != motionSignature else { return }
-        for layer in [wash, sheen, orbit, ring] { layer.removeAllAnimations() }
+        for layer in [wash, sheen, orbit, workingGlow] { layer.removeAllAnimations() }
         motionSignature = signature
         guard moving else { return }
+        if usesOrbHalo {
+            let breathe = CAKeyframeAnimation(keyPath: "opacity")
+            breathe.values = [0.42, 1, 0.42]
+            breathe.keyTimes = [0, 0.5, 1]
+            breathe.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut),
+                                       CAMediaTimingFunction(name: .easeInEaseOut)]
+            breathe.duration = Self.rimPeriod
+            breathe.repeatCount = .infinity
+            breathe.beginTime = Self.beginTime(period: Self.rimPeriod, phase: phase, in: workingGlow)
+            workingGlow.add(breathe, forKey: Self.motionKeyPrefix + "glow")
+            Self.motionInstallCount += 1
+            return
+        }
         if usesRimLight {
             // The rim light: one turn every 5 s, on the shared clock so a
             // re-install never jumps. A render-server animation: nothing per frame.
@@ -716,7 +767,11 @@ final class TileAgentBubbleLayer: CALayer {
         (!plate.isHidden, !ring.isHidden, !glass.isHidden && glass.opacity > 0, !orbitHost.isHidden, !sheen.isHidden)
     }
     var qaAnimationKeys: [String] {
-        [wash, sheen, orbit, ring].flatMap { $0.animationKeys() ?? [] }
+        [wash, sheen, orbit, workingGlow].flatMap { $0.animationKeys() ?? [] }
+    }
+    var qaWorkingGlow: CALayer? { workingGlow.isHidden ? nil : workingGlow }
+    var qaWorkingRing: CAShapeLayer? {
+        usesOrbHalo && !ring.isHidden ? ringMask : nil
     }
     /// The real middle-glow geometry and gradient configuration, for transitions.
     var qaSheenFrame: CGRect { sheen.frame }

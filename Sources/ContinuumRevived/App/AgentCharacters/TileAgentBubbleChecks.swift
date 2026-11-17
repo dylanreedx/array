@@ -157,6 +157,11 @@ enum TileAgentBubbleChecks {
             if let colour = spec.colour { _ = supervisor.setIdentityColor(agentID: id, colour) }
             agents.append(id)
         }
+        let captureEnvironment = ProcessInfo.processInfo.environment
+        if captureEnvironment["ARRAY_AGENT_ORB_CLOSEUP_DIR"] != nil || captureEnvironment["TILE_AGENT_BUBBLE_FILM_LIGHT"] != nil,
+           let name = controller.selectedTheme?.characters.first?.name {
+            supervisor.setCharacterName(agentID: agents[0], name)
+        }
 
         let canvas = CanvasNSView(
             canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [],
@@ -607,7 +612,7 @@ enum TileAgentBubbleChecks {
         try expect(pump(until: { views[0].qaAgentBubble!.isMoving }), "back in sight it moves again")
 
         // 5. Every sidebar style lends its light, inline and on a plate.
-        for bubbleStyle in [Style.inline, .squircle] {
+        for bubbleStyle in [Style.inline, .squircle, .orb] {
             setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, bubbleStyle.rawValue)
             try expect(pump(until: { showsStyle(bubbleStyle, views, canvas) }), "\(bubbleStyle.title) for the lights")
             for style in SidebarActiveIndicatorStyle.allCases {
@@ -618,6 +623,26 @@ enum TileAgentBubbleChecks {
                            "\(bubbleStyle.title) \(style.title): only working agents move")
                 if bubbleStyle == .squircle && style == .classic {
                     try expect(views[0].qaAgentBubble?.qaParts.orbitShown == true, "Classic's light travels round the plate")
+                }
+                if bubbleStyle == .orb && style == .classic {
+                    let working = views[0].qaAgentBubble!
+                    working.layoutIfNeeded()
+                    guard let ring = working.qaWorkingRing, let path = ring.path,
+                          let glow = working.qaWorkingGlow else { throw Failure(description: "working Orb has no ring or glow") }
+                    let box = path.boundingBoxOfPath
+                    let radius = box.width / 2
+                    let round = (0..<16).allSatisfy { step in
+                        let angle = Double(step) * .pi / 8
+                        let dx = cos(angle), dy = sin(angle)
+                        return path.contains(CGPoint(x: box.midX + dx * (radius - 0.01), y: box.midY + dy * (radius - 0.01)))
+                            && !path.contains(CGPoint(x: box.midX + dx * (radius + 0.01), y: box.midY + dy * (radius + 0.01)))
+                    }
+                    try expect(round && abs(box.midX - working.bounds.midX) < 0.01
+                               && abs(box.midY - working.bounds.midY) < 0.01 && ring.lineWidth < working.bounds.width * 0.05,
+                               "the working Orb's ring is a concentric full hairline")
+                    try expect(glow.shadowPath == working.platePath && glow.shadowOffset == .zero && glow.shadowRadius > 0
+                               && !working.qaParts.orbitShown && views[1].qaAgentBubble?.qaWorkingGlow == nil,
+                               "only the working Orb lights an even, soft glow")
                 }
             }
             setSetting(defaults, SidebarActiveIndicatorStyle.defaultsKey, SidebarActiveIndicatorStyle.fallback.rawValue)
@@ -1235,6 +1260,10 @@ enum TileAgentBubbleChecks {
         let subject = mode == "idle" ? views[1] : (working ? views[0] : views[3])
         setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, filmStyle.rawValue)
         try expect(pump(until: { showsStyle(filmStyle, views, canvas) }), "\(filmStyle.title) for the hover film")
+        if let rawValue = env["TILE_AGENT_BUBBLE_FILM_LIGHT"], let style = SidebarActiveIndicatorStyle(rawValue: rawValue) {
+            setSetting(defaults, SidebarActiveIndicatorStyle.defaultsKey, style.rawValue)
+            try expect(pump(until: { subject.qaAgentBubble?.workingStyle == style.rawValue }), "\(style.title) light for the film")
+        }
         for view in views { view.qaAgentBubble?.qaRepaint() }
         if env["TILE_AGENT_BUBBLE_FILM_APPEARANCE"] == "light" { window.appearance = NSAppearance(named: .aqua) }
         if env["TILE_AGENT_BUBBLE_FILM_APPEARANCE"] != "light" { window.appearance = NSAppearance(named: .darkAqua) }
@@ -1370,6 +1399,7 @@ enum TileAgentBubbleChecks {
             try expect(bubble.1 == title.1, "zoom=\(zoom): snapped icon and title-bar final frames differ: \(bubble.1) vs \(title.1)")
             lines.append("zoom=\(zoom): production snapping icon/title-bar parity PASS: \(bubble.1)")
         }
+        lines.append(try await exerciseDrag(zoom: 2.5, style: .orb).0)
         return lines.joined(separator: "\n")
     }
 
@@ -1423,7 +1453,11 @@ enum TileAgentBubbleChecks {
         // No magnet: the tile must follow the pointer exactly, so the witness can
         // tell a move from a snap.
         canvas.dragMagnetizeDefaults.set(snapping, forKey: DragMagnetizeConfig.enabledKey)
-        canvas.setViewport(CanvasViewport(x: 300, y: 250, zoom: zoom))
+        if zoom > 1, let closeUp = canvas.allTilesInWorldFrames().first(where: { $0.id == agentTile })?.frame {
+            canvas.setViewport(CanvasViewport(x: closeUp.x - 120 / zoom, y: closeUp.y - 110 / zoom, zoom: zoom))
+        } else {
+            canvas.setViewport(CanvasViewport(x: 300, y: 250, zoom: zoom))
+        }
         let window = KeyWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = canvas
         window.orderFrontOffscreenForChecks()

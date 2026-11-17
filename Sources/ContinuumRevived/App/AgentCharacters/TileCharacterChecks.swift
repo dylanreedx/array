@@ -138,6 +138,18 @@ enum TileCharacterChecks {
             }
         }
         try expect(Set(buckets).count >= 3, "the sweep crossed several chrome scale buckets: \(buckets)")
+        defaults.set(AgentCharacterConfig.BubbleStyle.orb.rawValue, forKey: AgentCharacterConfig.bubbleStyleKey)
+        controller.reload(force: true)
+        canvas.setViewport(CanvasViewport(x: view.tile.frame.x - 120 / 2.5, y: view.tile.frame.y - 110 / 2.5, zoom: 2.5))
+        canvas.layoutSubtreeIfNeeded()
+        guard let orb = view.qaAgentBubble, let atlas = orb.sprite.sprite else {
+            throw Failure(description: "250% Orb has no character atlas")
+        }
+        try expect(orb.bubbleStyle == .orb && orb.sprite.magnificationFilter == .nearest
+                   && (orb.sprite.contents as AnyObject?) === atlas.image,
+                   "250% Orb keeps nearest-neighbour magnification of the original character atlas")
+        defaults.removeObject(forKey: AgentCharacterConfig.bubbleStyleKey)
+        controller.reload(force: true)
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
         canvas.layoutSubtreeIfNeeded()
 

@@ -4668,6 +4668,7 @@ final class CanvasNSView: NSView, TokenThemed {
             // stop being re-armed per event only to detonate — a main-thread
             // double-fsync and a zone re-plan — in the gap where the NEXT
             // gesture begins. That gap was the zoom→pan transition lag.
+            if !pointerPanActive { updateAgentOrbRenderScale() }
             discardCursorRects()
             window?.invalidateCursorRects(for: self)
             delegate?.canvasDidChange(self)
@@ -4694,6 +4695,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     private func cameraGestureDidSettle() {
         agentChromeRestedForMotion = false
+        updateAgentOrbRenderScale()
         // Resting text sits on whole device pixels again: one retile per scroll
         // view whose grid re-snap waited out the gesture.
         flushPixelGridRetiles()
@@ -5771,6 +5773,7 @@ final class CanvasNSView: NSView, TokenThemed {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        updateAgentOrbRenderScale()
         // The occlusion observer is per-WINDOW, so it is re-registered on every
         // move: a canvas that changed windows would otherwise be listening to a
         // window it no longer lives in.
@@ -5837,6 +5840,17 @@ final class CanvasNSView: NSView, TokenThemed {
             installFrameTailObserver()
             startResidencyEvaluation()
         }
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if !defersPixelGridRetile { updateAgentOrbRenderScale() }
+    }
+
+    private func updateAgentOrbRenderScale() {
+        guard let window else { return }
+        // Round up to a device-pixel scale so nearby settled zooms reuse masks.
+        worldPlane.setAgentOrbRenderScale(max(1, ceil(viewport.zoom * window.backingScaleFactor)))
     }
 
     /// Leave motion: every tile gets its real body back, unconditionally.
