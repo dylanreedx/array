@@ -82,6 +82,16 @@ enum SidebarQuietInboxChecks {
         }
         inbox.layoutForQA()
         Q.photograph(sidebar, "quiet")
+        // A cheap cost reading on the real-state copy: one full sidebar rebuild
+        // (core, items, every row's cell), the median of five.
+        var rebuilds: [Double] = []
+        for _ in 0..<5 {
+            let start = CFAbsoluteTimeGetCurrent()
+            inbox.reload(rows: inbox.allRowsForQuietCheck)
+            inbox.layoutForQA()
+            rebuilds.append((CFAbsoluteTimeGetCurrent() - start) * 1000)
+        }
+        let rebuildMs = rebuilds.sorted()[2]
         let head = inbox.itemsForQuietCheck.prefix(12).map { item -> String in
             switch item {
             case .sectionLabel(let label): return "[\(label.title)\(label.clearCount > 0 ? " · Clear \(label.clearCount)" : "")]"
@@ -91,7 +101,7 @@ enum SidebarQuietInboxChecks {
             default: return "·\(String(describing: item).prefix(30))"
             }
         }
-        return "Quiet stills from \(supervisor.records.count) records, \(inbox.allRowsForQuietCheck.count) rows, layout \(inbox.sidebarLayout), incidents \(inbox.sidebarIncidents.count), clear \(inbox.sidebarClearIDs.count), active \(inbox.allRowsForQuietCheck.filter { $0.lifecycle == .active }.count), lifecycles \(Dictionary(grouping: inbox.allRowsForQuietCheck, by: { String(describing: $0.lifecycle).prefix(8) }).mapValues(\.count)), failed+detail \(inbox.allRowsForQuietCheck.filter { $0.lifecycle == .active && $0.failureDetail != nil }.count): " + head.joined(separator: " | ")
+        return "Quiet stills from \(supervisor.records.count) records, rebuild \(String(format: "%.1f", rebuildMs)) ms median of 5, \(inbox.allRowsForQuietCheck.count) rows, layout \(inbox.sidebarLayout), incidents \(inbox.sidebarIncidents.count), clear \(inbox.sidebarClearIDs.count), active \(inbox.allRowsForQuietCheck.filter { $0.lifecycle == .active }.count), lifecycles \(Dictionary(grouping: inbox.allRowsForQuietCheck, by: { String(describing: $0.lifecycle).prefix(8) }).mapValues(\.count)), failed+detail \(inbox.allRowsForQuietCheck.filter { $0.lifecycle == .active && $0.failureDetail != nil }.count): " + head.joined(separator: " | ")
     }
 
     static func run() throws -> String {

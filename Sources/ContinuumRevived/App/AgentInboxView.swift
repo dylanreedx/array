@@ -1411,6 +1411,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private(set) var sidebarFamilyChips: [SidebarQuietInbox.FamilyChip] = []
     private var quietNeedsYouCell: SidebarQuietNeedsYouView?
     var familyCauseCells: [String: AgentInboxRemainderView] = [:]
+    /// Stopped helpers behind each fold, counted once per render.
+    private var foldStoppedByParent: [UUID: Int] = [:]
     /// Pressed incident actions reach the host here (account sheet, sign-in,
     /// repair, retry/resume, open). nil: the action button is disabled.
     var onIncidentAction: ((SidebarIncident) -> Void)?
@@ -1846,10 +1848,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// "N folded · includes K stopped", over the remainder's own hidden ids.
     func ledgerFoldTitle(_ remainder: FanoutRemainder) -> String {
-        let byId = Dictionary(allRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let stopped = remainder.hiddenDescendantIDs.filter { id in
-            byId[id].map { SidebarRecovery.state(for: $0) == .stopped } ?? false
-        }.count
+        // Counted once per render in `display` (was a dictionary over every row
+        // built again for each fold cell configured).
+        let stopped = foldStoppedByParent[remainder.parentId] ?? 0
         var title = "\(remainder.hiddenDescendantCount) folded"
         if stopped > 0 { title += " · includes \(stopped) stopped" }
         return title
@@ -2684,6 +2685,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let bounded = InboxSort.boundedForInbox(
             rows: sorted, expandedParents: expandedFanoutParents, now: clock())
         fanoutRemaindersByParent = bounded.remainderByParent
+        let rowByID = Dictionary(sorted.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        foldStoppedByParent = Dictionary(bounded.remainders.map { remainder in
+            (remainder.parentId, remainder.hiddenDescendantIDs.reduce(into: 0) { count, id in
+                if let row = rowByID[id], SidebarRecovery.state(for: row) == .stopped { count += 1 }
+            })
+        }, uniquingKeysWith: { first, _ in first })
         // The capped fields are a presentation-only overlay on the full rollup.
         // `holdsParentOpen` and the lifecycle/action policy continue to read the
         // uncapped descendant tallies above, so a remainder cannot change resource
@@ -9023,6 +9030,8 @@ final class AgentInboxRemainderView: NSTableCellView {
     // the right; the line itself does not press.
     private var causeAction: InboxSettleNudgeButton?
     private var causeLabelWidth: NSLayoutConstraint?
+    /// The action's width, measured when its title is set, never in layout.
+    private var causeActionWidth: CGFloat = 0
     private var onCauseAction: (() -> Void)?
     private(set) var causeIncidentForQA: SidebarIncident?
     /// The cause line's words, kept apart from the drawn string so redrawing
@@ -9053,7 +9062,10 @@ final class AgentInboxRemainderView: NSTableCellView {
             causeLabelWidth = width
             return made
         }()
-        action.title = incident.actionTitle
+        if action.title != incident.actionTitle || causeActionWidth == 0 {
+            action.title = incident.actionTitle
+            causeActionWidth = ceil(action.intrinsicContentSize.width)
+        }
         action.isEnabled = actionEnabled
         action.toolTip = actionEnabled ? nil : "Not available yet"
         action.setAccessibilityLabel(incident.actionTitle)
@@ -9105,8 +9117,7 @@ final class AgentInboxRemainderView: NSTableCellView {
 
     private func layoutCauseAction() {
         guard let causeAction, causeIncidentForQA != nil else { return }
-        let size = causeAction.intrinsicContentSize
-        let width = ceil(size.width), height = InboxSettleNudgeButton.height
+        let width = causeActionWidth, height = InboxSettleNudgeButton.height
         let right = bounds.width - CGFloat(AgentInbox96CellView.outerGutter) - 6 - 8
         let mid = (ownership != nil ? InboxOwnershipChrome.subagentHeight : bounds.height) / 2
         causeAction.frame = NSRect(x: right - width, y: floor(mid - height / 2), width: width, height: height)
