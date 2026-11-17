@@ -314,9 +314,10 @@ final class SidebarQuietHistoryEntryView: NSTableCellView {
     required init?(coder: NSCoder) { return nil }
     override var isFlipped: Bool { true }
 
-    func apply(_ row: AgentInboxRow, helpers: Int, now: Date) {
+    func apply(_ row: AgentInboxRow, helpers: Int, endedAt: Date?, now: Date) {
         titleLabel.stringValue = row.displayTitle
-        detailLabel.stringValue = Self.detail(helpers: helpers, endedAt: Self.endedAt(row), now: now)
+        shownDate = endedAt ?? Self.endedAt(row)
+        detailLabel.stringValue = Self.detail(helpers: helpers, endedAt: shownDate, now: now)
         detailLabel.isHidden = detailLabel.stringValue.isEmpty
         setAccessibilityLabel([row.displayTitle, detailLabel.stringValue].filter { !$0.isEmpty }.joined(separator: ", "))
         setAccessibilityIdentifier(AgentInboxView.accessibilityIdentifier(for: row))
@@ -324,6 +325,8 @@ final class SidebarQuietHistoryEntryView: NSTableCellView {
         needsLayout = true
     }
 
+    /// The family's last activity this card was given (the date it shows).
+    private(set) var shownDate: Date?
     var titleForQA: String { titleLabel.stringValue }
     var detailForQA: String { detailLabel.isHidden ? "" : detailLabel.stringValue }
     var titleFrameForQA: NSRect { titleLabel.frame }

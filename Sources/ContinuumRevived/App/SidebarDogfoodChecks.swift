@@ -65,13 +65,14 @@ enum SidebarDogfoodChecks {
         }
     }
 
-    static func makeHarness(_ name: String, reducedMotion: Bool = true) throws -> Harness {
+    static func makeHarness(_ name: String, reducedMotion: Bool = true,
+                            beforeMount: ((_ delegate: AppDelegate, _ tempRoot: URL) throws -> Void)? = nil) throws -> Harness {
         Q.acceptFirstMouseEverywhere()
         guard let suite = QAIsolatedDefaults(isolatedSuiteName: "dev.arrayapp.qa.dogfood-\(name).\(UUID().uuidString)") else {
             throw Failure(description: "no isolated defaults suite")
         }
         suite.set(SidebarLayout.quietInbox.rawValue, forKey: SidebarLayout.defaultsKey)
-        let fixture = try WorkspaceAPIChecks.makeFixture(settings: suite)
+        let fixture = try WorkspaceAPIChecks.makeFixture(settings: suite, beforeMount: beforeMount)
         let delegate = fixture.delegate
         let window = Q.KeyWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 900),
                                  styleMask: [.borderless], backing: .buffered, defer: false)
@@ -139,6 +140,7 @@ enum SidebarDogfoodChecks {
         reports.append(try checkHistoryPaints())
         reports.append(try checkLiveUsage())
         reports.append(try checkOrphanRoot())
+        reports.append(try checkUntitledLead())
         return "SidebarDogfoodChecks passed:\n" + reports.joined(separator: "\n")
     }
 
@@ -408,6 +410,60 @@ enum SidebarDogfoodChecks {
         return "Orphan root: '\(row.displayTitle)' with its lead deleted draws as its own root card (depth 0, no parent)"
     }
 
+    // MARK: - 5. An untitled, prompted lead reads as its first prompt
+
+    static func checkUntitledLead() throws -> String {
+        let untitled = AgentID(rawValue: UUID())
+        let prompt = "Investigate the flaky login test on CI"
+        let h = try makeHarness("untitled-lead") { delegate, _ in
+            // A restored lead that was prompted but never named, closed to History.
+            let ended = Date().addingTimeInterval(-3_600)
+            guard let peer = delegate.qaAgentSupervisor.records.values.first else {
+                throw Failure(description: "fixture agent missing")
+            }
+            let record = AgentRecord(
+                id: untitled, displayName: AgentRecord.defaultAgentName, displayNameSource: .sentinel,
+                model: peer.model, thinking: peer.thinking, cwd: peer.cwd, projectId: peer.projectId,
+                createdAt: ended.addingTimeInterval(-60), lastActivityAt: ended, latestPromptAt: ended.addingTimeInterval(-50),
+                latestTerminalEvent: AgentTerminalEvent(sequence: 1, turnID: "t", outcome: .succeeded, endedAt: ended),
+                archivedAt: ended)
+            try AgentStore(smokeTest: false).upsert(record)
+            var projection = AgentTranscriptProjection(threadId: "untitled")
+            projection.appendUserPrompt(prompt)
+            let transcripts = AgentTranscriptStore(root: RegistryStore.defaultApplicationSupportDirectory()
+                .appendingPathComponent("agent-transcripts", isDirectory: true))
+            var saved = false
+            Task { @MainActor in
+                try? await transcripts.saveSnapshot(agentID: untitled,
+                    sessionID: AgentTranscriptStore.canonicalSessionID(for: untitled), document: projection.document)
+                saved = true
+            }
+            while !saved { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        }
+        defer { h.close() }
+        let inbox = h.inbox
+        h.refresh()
+        guard let header = inbox.historyHeaderViewForQA else { throw Failure(description: "no History heading") }
+        _ = header
+        if !inbox.isHistoryExpandedForQA { _ = inbox.clickHistoryDisclosureForQA() }
+        inbox.layoutForQA()
+        try expect(inbox.isHistoryExpandedForQA, "History did not open")
+        func card() -> SidebarQuietHistoryEntryView? {
+            guard let row = inbox.itemsForQuietCheck.firstIndex(where: { $0.agentRow?.id == untitled.rawValue }) else { return nil }
+            return inbox.tableForQA.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarQuietHistoryEntryView
+        }
+        // The transcript is read off the main thread; the sidebar re-pushes when it lands.
+        let deadline = Date().addingTimeInterval(10)
+        while card()?.titleForQA != AgentName.fromPrompt(prompt), Date() < deadline {
+            pump(0.05)
+            inbox.layoutForQA()
+        }
+        let expected = AgentName.fromPrompt(prompt) ?? prompt
+        try expect(card()?.titleForQA == expected,
+                   "an untitled, prompted History lead reads '\(card()?.titleForQA ?? "no card")', wanted its prompt line '\(expected)' (record \(h.supervisor.records[untitled] != nil), pushed \(inbox.pushedRowForQA(id: untitled.rawValue).map { "\($0.displayTitle) \($0.lifecycle)" } ?? "nil"), History \(inbox.historyHeaderTitleForQA ?? "nil"))")
+        return "Untitled lead: a restored, prompted lead with no title draws its first prompt line '\(expected)' in History, not 'New agent'"
+    }
+
     // MARK: - 1. History rows read like A
 
     static func checkHistoryRows() throws -> String {
@@ -424,8 +480,13 @@ enum SidebarDogfoodChecks {
             extra.append(family)
             extra.append(contentsOf: (0..<2).map { h.spawn("Older helper \(index + 1).\($0 + 1)", parent: family) })
         }
-        for id in extra { h.finish(id) }
+        // Family 4's helper finishes LAST: its family's last activity is the
+        // newest, so it must lead History although its lead finished early.
+        let lateHelper = extra[3 * 3 + 1]  // "Older helper 4.1"
+        for id in extra where id != lateHelper { h.finish(id) }
         for id in [lead, solo] + helpers { h.finish(id) }
+        pump(0.05)
+        h.finish(lateHelper)
         h.refresh()
         // Clear through the drawn control: both families go to History.
         guard let clear = (Q.views(in: inbox) {
@@ -464,6 +525,20 @@ enum SidebarDogfoodChecks {
         }
         try expect(other.isEmpty, "History draws something other than one card per family: \(other)")
         let pageCards = drawn.count
+        // Newest first by family activity, and the card shows that same date.
+        func drawnOrder() -> [(title: String, at: Date?)] {
+            inbox.itemsForQuietCheck.indices.compactMap { row -> (String, Date?)? in
+                guard let entry = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarQuietHistoryEntryView
+                else { return nil }
+                return (entry.titleForQA, entry.shownDate)
+            }
+        }
+        func nonIncreasing(_ order: [(title: String, at: Date?)]) -> Bool {
+            zip(order, order.dropFirst()).allSatisfy { ($0.at ?? .distantPast) >= ($1.at ?? .distantPast) }
+        }
+        let firstPage = drawnOrder()
+        try expect(firstPage.first?.title == "Older family 4" && nonIncreasing(firstPage),
+                   "History is not newest-first by family activity: \(firstPage.map { "\($0.title) \($0.at.map { String(format: "%.3f", $0.timeIntervalSince1970) } ?? "-")" })")
         drawn[h.fixture.agentId.rawValue] = nil  // the fixture's own parked source agent
         // Families total: 2 + the older ones + the fixture's agent; a page of
         // `settledPageSize` cards, and the footer counts the families left.
@@ -492,6 +567,15 @@ enum SidebarDogfoodChecks {
                        "History card lines overlap or leave the card: title \(t), detail \(d), card \(c)")
             try expect(c.height >= 50 && c.height <= 58, "History card is \(c.height)pt tall, wanted A's ~54")
         }
-        return "History rows: one card per family at \(SidebarQuietHistoryEntryView.height)pt; '\(leadCard.titleForQA)' / '\(leadCard.detailForQA)', solo '\(soloCard.detailForQA)'; helpers stay inside their lead"
+        // "Show more" through its drawn control keeps the order.
+        guard let more = Q.views(in: inbox, where: { $0 is AgentInboxSettledMoreView && !$0.isHiddenOrHasHiddenAncestor }).first else {
+            throw Failure(description: "no Show more under History")
+        }
+        try Q.click(more)
+        inbox.layoutForQA()
+        let allPages = drawnOrder()
+        try expect(allPages.count == families && nonIncreasing(allPages),
+                   "after Show more, History is not newest-first (\(allPages.count) cards): \(allPages.map(\.title))")
+        return "History rows: newest first by family activity across Show more (\(allPages.count) cards, '\(firstPage.first?.title ?? "")' first by its late helper); one card per family at \(SidebarQuietHistoryEntryView.height)pt; '\(leadCard.titleForQA)' / '\(leadCard.detailForQA)', solo '\(soloCard.detailForQA)'; helpers stay inside their lead"
     }
 }

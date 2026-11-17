@@ -1061,6 +1061,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Quiet inbox (variants/A): the History rows drawn as one two-line card
     /// per family, with how many helpers each holds. Set by `display`.
     private(set) var historyEntryHelpers: [UUID: Int] = [:]
+    /// The date each History card shows and is ordered by: its family's last activity.
+    private(set) var historyEntryDates: [UUID: Date] = [:]
     private var historyEntryCells: [UUID: SidebarQuietHistoryEntryView] = [:]
     /// .plans/113: one heading cell per project group in `By project`.
     private var projectHeadingCells: [String: AgentInboxShelfHeaderView] = [:]
@@ -2764,6 +2766,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             if inStanding { standingRows.append(row) } else { otherRows.append(row) }
         }
         historyEntryHelpers = [:]
+        historyEntryDates = [:]
         var built = sidebarHeadItems()
         if !standingRows.isEmpty {
             built.append(.sectionLabel(SidebarSectionLabel(kind: .standing, title: "Standing", count: nil, clearCount: 0)))
@@ -2804,14 +2807,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             if historyExpanded {
                 // Quiet inbox pages by family: helpers are never drawn there, so
                 // they must not take page slots or the footer's hidden count.
+                let quiet = sidebarLayout == .quietInbox
                 let page = InboxSort.pageSettled(
-                    sidebarLayout == .quietInbox
-                        ? parts.history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }
-                        : parts.history,
+                    quiet ? quietHistoryFamilies(parts.history, all: sorted) : parts.history,
                     limit: settledLimit, openAgentId: openAgentId)
-                built.append(contentsOf: sidebarLayout == .quietInbox
-                    ? quietHistoryItems(for: page.shown, family: sorted)
-                    : agentItems(for: page.shown))
+                built.append(contentsOf: quiet ? page.shown.map(InboxListItem.agent) : agentItems(for: page.shown))
                 if page.hasMore {
                     built.append(.settledMore(hidden: page.hidden))
                 }
@@ -2861,27 +2861,34 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// after the visible end of its live parent's subtree. `display(from:)`
     /// already excludes a folded parent and re-anchors an ancestor's remainder
     /// when a nested fold removes the model's original anchor.
-    /// Quiet inbox History: one item per family, its lead only. Helpers stay
-    /// with their lead; the card says how many ("4 helpers · Nov 10").
-    private func quietHistoryItems(for page: [AgentInboxRow], family all: [AgentInboxRow]) -> [InboxListItem] {
-        var childrenOf: [UUID: [UUID]] = [:]
-        for row in all { if let parent = row.parentId, parent != row.id { childrenOf[parent, default: []].append(row.id) } }
-        func descendants(of id: UUID) -> Int {
-            var seen: Set<UUID> = [id]
-            var stack = childrenOf[id] ?? []
+    /// Quiet inbox History: one card per family, its lead only, newest first by
+    /// the family's last activity (the latest across the lead and its helpers).
+    /// Each card says how many helpers it holds and that same date
+    /// ("4 helpers · Nov 10"). Paging takes this order, so a page never
+    /// interleaves older families.
+    private func quietHistoryFamilies(_ history: [AgentInboxRow], all: [AgentInboxRow]) -> [AgentInboxRow] {
+        let historyIDs = Set(history.map(\.id))
+        var childrenOf: [UUID: [AgentInboxRow]] = [:]
+        for row in all { if let parent = row.parentId, parent != row.id { childrenOf[parent, default: []].append(row) } }
+        func activity(_ row: AgentInboxRow) -> Date {
+            [row.lastActiveAt, row.terminalEvent?.endedAt].compactMap { $0 }.max() ?? row.createdAt
+        }
+        let roots = history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }
+        var dated: [(row: AgentInboxRow, at: Date, index: Int)] = []
+        for (index, root) in roots.enumerated() {
+            var seen: Set<UUID> = [root.id]
+            var latest = activity(root)
+            var stack = childrenOf[root.id] ?? []
             while let next = stack.popLast() {
-                guard seen.insert(next).inserted else { continue }
-                stack.append(contentsOf: childrenOf[next] ?? [])
+                guard seen.insert(next.id).inserted else { continue }
+                latest = max(latest, activity(next))
+                stack.append(contentsOf: childrenOf[next.id] ?? [])
             }
-            return seen.count - 1
+            historyEntryHelpers[root.id] = seen.count - 1
+            historyEntryDates[root.id] = latest
+            dated.append((root, latest, index))
         }
-        let shown = Set(page.map(\.id))
-        return page.compactMap { row in
-            // A helper whose lead is drawn here travels inside that card.
-            if let parent = row.parentId, shown.contains(parent) { return nil }
-            historyEntryHelpers[row.id] = descendants(of: row.id)
-            return .agent(row)
-        }
+        return dated.sorted { $0.at != $1.at ? $0.at > $1.at : $0.index < $1.index }.map(\.row)
     }
 
     private func agentItems(for sectionRows: [AgentInboxRow]) -> [InboxListItem] {
@@ -4353,7 +4360,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if let model = item.agentRow, let helpers = historyEntryHelpers[model.id] {
             let cell = historyEntryCells[model.id] ?? SidebarQuietHistoryEntryView()
             cell.alphaValue = 1
-            cell.apply(model, helpers: helpers, now: clock())
+            cell.apply(model, helpers: helpers, endedAt: historyEntryDates[model.id], now: clock())
             historyEntryCells[model.id] = cell
             return cell
         }
