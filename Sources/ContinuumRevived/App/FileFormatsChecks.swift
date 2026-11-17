@@ -19,6 +19,11 @@ enum FileFormatsChecks {
             try await Task.sleep(for: .milliseconds(5))
         }
     }
+    private static func labels(in view: NSView?) -> [String] {
+        guard let view else { return [] }
+        let own = (view as? NSTextField).map { [$0.stringValue] } ?? []
+        return own + view.subviews.flatMap { labels(in: $0) }
+    }
 
     static func run() async throws {
         _ = NSApplication.shared
@@ -52,6 +57,20 @@ enum FileFormatsChecks {
         }
         let url = f.pbRoot.appendingPathComponent(name)
         try bytes.write(to: url)
+        let initialRetryCaptured = DispatchSemaphore(value: 0)
+        let initialRetryContinue = DispatchSemaphore(value: 0)
+        if name.hasSuffix(".csv") {
+            FileContentCoordinator.shared.qaFailNextCapture(forPath: url.path)
+            FileContentCoordinator.shared.qaAfterCaptureOnce(forPath: url.path) {
+                initialRetryCaptured.signal()
+                _ = initialRetryContinue.wait(timeout: .now() + 30)
+            }
+        }
+        defer {
+            initialRetryContinue.signal()
+            FileContentCoordinator.shared.qaClearCaptureFailure(forPath: url.path)
+            FileContentCoordinator.shared.qaClearAfterCaptureHook(forPath: url.path)
+        }
         try expect(f.runtime.qaHasCanvas, "format fixture bypassed the production mount")
         try expect(f.delegate.qaAgentSupervisor.setWorkspaceToolsEnabled(agentID: f.agentId, true), "workspace tools policy did not enable")
         let armed = f.canvas.armedZoneId
@@ -69,6 +88,28 @@ enum FileFormatsChecks {
                    "\(name): opening a preview changed the armed zone or camera")
         guard let initial = f.canvas.tileView(for: tileID) as? FileTileNSView else {
             throw Failure(description: "\(name): production open did not mount a file host")
+        }
+        if name.hasSuffix(".csv") {
+            let initialStamp = FileContentObservation.Stamp(path: url.path)
+            try await eventually("initial snapshot failure was not shown", {
+                initial.qaRenderer == nil && labels(in: initial.qaActiveBody).contains { $0.contains("private file preview") }
+            })
+            // Detaching cancels work. Reattachment must resume the retry even
+            // though the source stamp has not changed.
+            window.contentView = nil
+            try await Task.sleep(for: .milliseconds(1_300))
+            try expect(initial.qaRichNeedsRetry && initialRetryCaptured.wait(timeout: .now()) == .timedOut,
+                       "detached tile must retain its retry obligation without running it")
+            window.contentView = f.canvas
+            try await eventually("initial failure did not retry after reattachment", {
+                initialRetryCaptured.wait(timeout: .now()) == .success
+            })
+            try expect(FileContentObservation.Stamp(path: url.path) == initialStamp,
+                       "initial retry fixture must not change the source stamp")
+            initialRetryContinue.signal()
+            try await eventually("initial failure did not recover", {
+                initial.qaRenderer != nil && !initial.qaRichRefreshPending
+            })
         }
         try await ready(initial, name: name)
         if let world = result["actualWorldRect"]?.object,
@@ -101,19 +142,288 @@ enum FileFormatsChecks {
         }
         try await ready(restored, name: name)
         try await checkBody(restored, name: name)
+        guard let observedPath = restored.tile.metadata.documentLocation?.path ?? restored.tile.metadata.filePath else {
+            throw Failure(description: "\(name): restored tile has no observed path")
+        }
         try expect(restored.tile.metadata.documentLocation == record.metadata.documentLocation,
                    "\(name): hydration changed document ownership")
         let afterHydration = try Data(contentsOf: url)
         try expect(afterHydration == bytes, "\(name): hydration wrote source bytes")
 
         if name.hasSuffix(".csv") {
-            // Shared observation clock sees external edits; no per-renderer
-            // timer or direct call to a private load function is involved.
-            let replacement = Data("id,value\r\n00999,changed externally\r\n".utf8)
+            // Drive the same shared observation clock as the live file tile.
+            // Distinct metadata changes arrive as one burst; unchanged bytes
+            // must not dispose the renderer, reset its grid, or decode again.
+            weak var originalRenderer = restored.qaRenderer
+            try expect(originalRenderer != nil, "CSV fixture must start with a live renderer")
+            let startsBefore = restored.qaRichRefreshStartCount
+            let finishesBefore = restored.qaRichRefreshFinishCount
+            FileContentCoordinator.shared.qaBeginDecodeTracking(forPath: url.path)
+            defer { FileContentCoordinator.shared.qaEndDecodeTracking(forPath: url.path) }
+            func waitForCoordinator(_ message: String) async throws {
+                try await eventually(message, {
+                    !restored.qaRichRefreshPending
+                        && FileContentCoordinator.shared.qaActiveOperationCount(forPath: url.path) == 0
+                })
+            }
+            try await waitForCoordinator("CSV source never reached a quiet baseline")
+            let decodesBefore = FileContentCoordinator.shared.qaDecodeCount(forPath: url.path)
+            for offset in 0..<3 {
+                try FileManager.default.setAttributes(
+                    [.modificationDate: Date(timeIntervalSince1970: 1_900_000_000 + Double(offset))],
+                    ofItemAtPath: url.path)
+                FileContentObservation.shared.poll()
+            }
+            let replacedImmediately = originalRenderer == nil || restored.qaRenderer !== originalRenderer
+            print("rich file metadata burst before wait: \(restored.qaRichRefreshStartCount - startsBefore) refresh starts, \(replacedImmediately ? 1 : 0) renderer replacements, \(FileContentCoordinator.shared.qaDecodeCount(forPath: url.path) - decodesBefore) decoder starts")
+            try expect(!replacedImmediately,
+                       "a metadata change must retain the renderer while checking content")
+            try await eventually("metadata-only burst did not complete its refresh", {
+                restored.qaRichRefreshFinishCount > finishesBefore && !restored.qaRichRefreshPending
+            })
+            try expect(restored.qaRichRefreshStartCount - startsBefore == 1,
+                       "a burst of unchanged-file observations must coalesce into one refresh")
+            try expect(originalRenderer != nil && restored.qaRenderer === originalRenderer,
+                       "metadata-only changes with identical bytes must retain the actual rich renderer")
+            let additionalDecodes = FileContentCoordinator.shared.qaDecodeCount(forPath: url.path) - decodesBefore
+            try expect(additionalDecodes == 0, "metadata-only changes with identical bytes must not decode again")
+            print("rich file metadata burst: \(restored.qaRichRefreshStartCount - startsBefore) refresh, 0 renderer replacements and \(additionalDecodes) decodes across 3 observations")
+            try await selectedValue(restored, expected: "00123")
+
+            // Same-sized different bytes must not be confused with identical
+            // content, even though the existing renderer was kept during I/O.
+            let replacement = Data("id,value\r\n00999,9007199254740993\r\n".utf8)
+            try expect(replacement.count == bytes.count, "changed CSV fixture must keep the original byte count")
+            let changedFinish = restored.qaRichRefreshFinishCount
+            let changedDecodes = FileContentCoordinator.shared.qaDecodeCount(forPath: url.path)
             try replacement.write(to: url, options: .atomic)
             FileContentObservation.shared.poll()
+            try await eventually("same-size changed CSV did not finish refresh", {
+                restored.qaRichRefreshFinishCount > changedFinish && !restored.qaRichRefreshPending
+            })
+            try await ready(restored, name: name)
+            try expect(restored.qaRenderer !== originalRenderer,
+                       "changed CSV bytes must replace the old renderer")
+            try expect(FileContentCoordinator.shared.qaDecodeCount(forPath: url.path) > changedDecodes,
+                       "changed CSV bytes must start an actual decode")
+            try await selectedValue(restored, expected: "00999")
+            try await waitForCoordinator("changed CSV worker did not finish")
+
+            // Hold the worker after it captures the first valid immutable copy,
+            // then replace the source again before the worker resumes. The real
+            // observer sees the later write while a refresh is in flight.
+            let captured = DispatchSemaphore(value: 0)
+            let resumeCapture = DispatchSemaphore(value: 0)
+            FileContentCoordinator.shared.qaAfterCaptureOnce(forPath: url.path) {
+                captured.signal()
+                _ = resumeCapture.wait(timeout: .now() + 30)
+            }
+            defer {
+                resumeCapture.signal()
+                FileContentCoordinator.shared.qaClearAfterCaptureHook(forPath: url.path)
+            }
+            let firstInFlight = Data("id,value\r\n00888,9007199254740993\r\n".utf8)
+            let finalInFlight = Data("id,value\r\n00777,9007199254740993\r\n".utf8)
+            let inFlightFinish = restored.qaRichRefreshFinishCount
+            try firstInFlight.write(to: url, options: .atomic)
+            FileContentObservation.shared.poll()
+            try await eventually("in-flight refresh did not reach the capture barrier", {
+                captured.wait(timeout: .now()) == .success
+            })
+            try finalInFlight.write(to: url, options: .atomic)
+            FileContentObservation.shared.poll()
+            resumeCapture.signal()
+            try await eventually("write during capture did not settle", {
+                restored.qaRichRefreshFinishCount > inFlightFinish && !restored.qaRichRefreshPending
+                    && restored.qaRenderer != nil
+            })
+            try await selectedValue(restored, expected: "00777")
+            try await waitForCoordinator("in-flight CSV workers did not finish")
+
+            // A same-inode, same-size write can restore the same mtime while a
+            // captured snapshot is blocked. The ctime change must trigger a
+            // retry so the later bytes, not the captured old bytes, appear.
+            let inPlaceCaptured = DispatchSemaphore(value: 0)
+            let resumeInPlace = DispatchSemaphore(value: 0)
+            FileContentCoordinator.shared.qaAfterCaptureOnce(forPath: url.path) {
+                inPlaceCaptured.signal()
+                _ = resumeInPlace.wait(timeout: .now() + 30)
+            }
+            defer {
+                resumeInPlace.signal()
+                FileContentCoordinator.shared.qaClearAfterCaptureHook(forPath: url.path)
+            }
+            let inPlaceDate = Date(timeIntervalSince1970: 1_900_000_800)
+            try FileManager.default.setAttributes([.modificationDate: inPlaceDate], ofItemAtPath: url.path)
+            let beforeInPlace = FileContentObservation.Stamp(path: url.path)
+            let inPlaceFinish = restored.qaRichRefreshFinishCount
+            FileContentObservation.shared.poll()
+            try await eventually("in-place refresh did not reach the capture barrier", {
+                inPlaceCaptured.wait(timeout: .now()) == .success
+            })
+            let suppressedBefore = FileContentObservation.shared.qaSuppressedCallbackCount(forPath: observedPath)
+            FileContentObservation.shared.qaSetCallbacksSuppressed(forPath: observedPath, suppressed: true)
+            defer { FileContentObservation.shared.qaSetCallbacksSuppressed(forPath: observedPath, suppressed: false) }
+            let inPlaceBytes = Data("id,value\r\n00555,9007199254740993\r\n".utf8)
+            try expect(inPlaceBytes.count == finalInFlight.count, "in-place rewrite must retain byte count")
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seek(toOffset: 0)
+            try handle.write(contentsOf: inPlaceBytes)
+            try handle.close()
+            try FileManager.default.setAttributes([.modificationDate: inPlaceDate], ofItemAtPath: url.path)
+            let afterInPlace = FileContentObservation.Stamp(path: url.path)
+            try expect(beforeInPlace.device == afterInPlace.device && beforeInPlace.inode == afterInPlace.inode
+                       && beforeInPlace.bytes == afterInPlace.bytes
+                       && beforeInPlace.modifiedSeconds == afterInPlace.modifiedSeconds
+                       && beforeInPlace.modifiedNanoseconds == afterInPlace.modifiedNanoseconds
+                       && (beforeInPlace.changedSeconds != afterInPlace.changedSeconds
+                           || beforeInPlace.changedNanoseconds != afterInPlace.changedNanoseconds),
+                       "in-place fixture must preserve device, inode, size and mtime while changing ctime")
+            // Advance the observer's stamp without delivering its callback:
+            // completion must independently detect the changed source.
+            FileContentObservation.shared.poll()
+            try expect(FileContentObservation.shared.qaSuppressedCallbackCount(forPath: observedPath) > suppressedBefore,
+                       "the in-flight fixture must suppress a real observer callback")
+            resumeInPlace.signal()
+            try await eventually("in-place write during capture did not settle", {
+                restored.qaRichRefreshFinishCount > inPlaceFinish && !restored.qaRichRefreshPending
+                    && restored.qaRenderer != nil
+            })
+            try await selectedValue(restored, expected: "00555")
+            FileContentObservation.shared.qaSetCallbacksSuppressed(forPath: observedPath, suppressed: false)
+            try await waitForCoordinator("in-place CSV workers did not finish")
+
+            // An unchanged-stamp transient snapshot failure must display a
+            // failure and retry on its own; no second file event is supplied.
+            let retryCaptured = DispatchSemaphore(value: 0)
+            let resumeRetry = DispatchSemaphore(value: 0)
+            FileContentCoordinator.shared.qaFailNextCapture(forPath: url.path)
+            FileContentCoordinator.shared.qaAfterCaptureOnce(forPath: url.path) {
+                retryCaptured.signal()
+                _ = resumeRetry.wait(timeout: .now() + 30)
+            }
+            defer {
+                resumeRetry.signal()
+                FileContentCoordinator.shared.qaClearCaptureFailure(forPath: url.path)
+                FileContentCoordinator.shared.qaClearAfterCaptureHook(forPath: url.path)
+            }
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: 1_900_001_000)], ofItemAtPath: url.path)
+            let transientStamp = FileContentObservation.Stamp(path: url.path)
+            let transientFinish = restored.qaRichRefreshFinishCount
+            FileContentObservation.shared.poll()
+            try await eventually("transient snapshot failure was not shown", {
+                restored.qaRichRefreshFinishCount > transientFinish && restored.qaRenderer == nil
+                    && labels(in: restored.qaActiveBody).contains { $0.contains("private file preview") }
+            })
+            let transientBody = restored.qaActiveBody
+            let firstFailureFinish = restored.qaRichRefreshFinishCount
+            window.contentView = nil
+            try await Task.sleep(for: .milliseconds(1_300))
+            try expect(restored.qaRichNeedsRetry && retryCaptured.wait(timeout: .now()) == .timedOut,
+                       "detached tile must keep its retry obligation without running it")
+            FileContentCoordinator.shared.qaFailNextCapture(forPath: url.path)
+            window.contentView = f.canvas
+            try await eventually("repeated identical snapshot failure was not retried", {
+                restored.qaRichRefreshFinishCount > firstFailureFinish && restored.qaRenderer == nil
+            })
+            try expect(restored.qaActiveBody === transientBody,
+                       "repeating the same snapshot failure must retain its visible error body")
+            try await eventually("unchanged-stamp snapshot failure did not retry after reattachment", {
+                retryCaptured.wait(timeout: .now()) == .success
+            })
+            try expect(FileContentObservation.Stamp(path: url.path) == transientStamp,
+                       "transient recovery fixture must not modify the source again")
+            resumeRetry.signal()
+            try await eventually("transient snapshot failure did not recover", {
+                restored.qaRenderer != nil && !restored.qaRichRefreshPending
+            })
+            try await selectedValue(restored, expected: "00555")
+            try await waitForCoordinator("transient retry worker did not finish")
+
+            // Comparing valid private snapshots can fail independently of
+            // capture. It too must retry with no further filesystem event.
+            FileContentCoordinator.shared.qaFailNextComparison(forPath: url.path)
+            defer { FileContentCoordinator.shared.qaClearComparisonFailure(forPath: url.path) }
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: 1_900_001_100)], ofItemAtPath: url.path)
+            let comparisonStamp = FileContentObservation.Stamp(path: url.path)
+            let comparisonFinish = restored.qaRichRefreshFinishCount
+            FileContentObservation.shared.poll()
+            try await eventually("snapshot comparison failure was not shown", {
+                restored.qaRichRefreshFinishCount > comparisonFinish && restored.qaRenderer == nil
+                    && labels(in: restored.qaActiveBody).contains { $0.contains("compare its private snapshots") }
+            })
+            try await eventually("snapshot comparison failure did not retry", {
+                restored.qaRenderer != nil && !restored.qaRichRefreshPending
+            })
+            try expect(FileContentObservation.Stamp(path: url.path) == comparisonStamp,
+                       "snapshot comparison recovery must not require another source change")
+            try await selectedValue(restored, expected: "00555")
+            try await waitForCoordinator("comparison retry worker did not finish")
+
+            // Exhaust the real preview budget before changing bytes. Detach
+            // during the bounded 100 ms retry, before terminal failure; after
+            // pressure clears, the same stamp must recover on reattachment.
+            let budget = FileContentBudget.shared
+            var pressureLease: FileContentBudget.Lease? = try budget.reserve(budget.limit - budget.retainedBytes)
+            defer { pressureLease = nil }
+            let budgetReplacement = Data("id,value\r\n00666,9007199254740993\r\n".utf8)
+            let budgetStarts = restored.qaRichRefreshStartCount
+            var budgetRetryHooks = 0
+            var budgetRetryWasPending = false
+            restored.qaDidScheduleRichBudgetRetry = {
+                budgetRetryHooks += 1
+                budgetRetryWasPending = restored.qaRichRefreshStartCount > budgetStarts
+                    && restored.qaRenderer == nil && restored.qaRichRefreshPending && restored.qaRichNeedsRetry
+                restored.qaDidScheduleRichBudgetRetry = nil
+                window.contentView = nil
+            }
+            defer { restored.qaDidScheduleRichBudgetRetry = nil }
+            try budgetReplacement.write(to: url, options: .atomic)
+            let budgetStamp = FileContentObservation.Stamp(path: url.path)
+            FileContentObservation.shared.poll()
+            try await eventually("budget pressure never entered its pending retry", {
+                budgetRetryHooks > 0
+            })
+            try expect(budgetRetryWasPending,
+                       "budget hook must run during the scheduled retry before terminal failure")
+            let startsAtDetach = restored.qaRichRefreshStartCount
+            pressureLease = nil
+            try await eventually("canceled budget worker did not drain", {
+                FileContentCoordinator.shared.qaActiveOperationCount(forPath: url.path) == 0
+            })
+            try await Task.sleep(for: .milliseconds(1_300))
+            try expect(restored.qaRenderer == nil && restored.qaRichNeedsRetry
+                       && restored.qaRichRefreshStartCount == startsAtDetach,
+                       "detached tile must retain retry state without restarting work")
+            window.contentView = f.canvas
+            try await eventually("detached preview budget retry did not recover", {
+                restored.qaRenderer != nil && !restored.qaRichRefreshPending
+            })
+            try expect(FileContentObservation.Stamp(path: url.path) == budgetStamp,
+                       "budget recovery fixture must not modify the source again")
+            try await selectedValue(restored, expected: "00666")
+
+            // Missing and recreated content are real state changes, not an
+            // excuse to retain stale pixels or stop observing the path.
+            let deletionFinish = restored.qaRichRefreshFinishCount
+            try FileManager.default.removeItem(at: url)
+            FileContentObservation.shared.poll()
+            try await eventually("deleted CSV did not finish refresh", {
+                restored.qaRichRefreshFinishCount > deletionFinish && !restored.qaRichRefreshPending
+            })
+            try expect(restored.qaRenderer == nil && !restored.qaHasDocumentSession,
+                       "deleted CSV must remove its stale renderer")
+            let recreationFinish = restored.qaRichRefreshFinishCount
+            try replacement.write(to: url, options: .atomic)
+            FileContentObservation.shared.poll()
+            try await eventually("recreated CSV did not finish refresh", {
+                restored.qaRichRefreshFinishCount > recreationFinish && !restored.qaRichRefreshPending
+            })
             try await ready(restored, name: name)
             try await selectedValue(restored, expected: "00999")
+
             // Drive the same filesystem coordinator and notification the real
             // file-tree rename sends. Never present a modal or touch Trash.
             let moved = try ProjectFileOperationCoordinator(rootURL: f.pbRoot).rename(entry: url, newName: "renamed.csv")
@@ -126,9 +436,12 @@ enum FileFormatsChecks {
             try expect(restored.tile.metadata.documentLocation?.path == moved.destination.path,
                        "rename did not update rich document identity")
             try await selectedValue(restored, expected: "00999")
+            let renamedDeletionFinish = restored.qaRichRefreshFinishCount
             try FileManager.default.removeItem(at: moved.destination)
             FileContentObservation.shared.poll()
-            try await eventually("deleted source did not finish its failed load", { !restored.qaRichLoading })
+            try await eventually("deleted source did not finish its failed load", {
+                restored.qaRichRefreshFinishCount > renamedDeletionFinish && !restored.qaRichRefreshPending
+            })
             try expect(restored.qaRenderer == nil && !restored.qaHasDocumentSession,
                        "deleted source left a stale renderer or created a text session")
         }

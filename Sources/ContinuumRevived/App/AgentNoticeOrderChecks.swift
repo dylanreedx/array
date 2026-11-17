@@ -84,5 +84,80 @@ func runAgentNoticeOrderChecks() async throws -> String {
     guard shownRows == savedRows else {
         throw Failure(description: "the tile's entry order differs from the saved transcript's:\n  tile:  \(shownRows)\n  saved: \(savedRows)")
     }
-    return "tile and saved transcript agree on \(savedRows.count) entries, screenshot at \(savedImage + 1) of \(savedRows.count)"
+
+    // Exercise the actual resource provider, not just the semantic image row:
+    // a cheap sync that dropped hydration entirely must fail here.
+    let screenshotID = staged.manifest.metadata.id
+    for _ in 0..<250 where tile.qaManagedImageSnapshot(screenshotID).state != .available {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard tile.qaManagedImageSnapshot(screenshotID).state == .available else {
+        throw Failure(description: "the newly published screenshot never became available to the tile")
+    }
+    let promptImage = try await supervisor.stageBrowserScreenshot(SharedTileParityChecks.screenshotPNG(), for: agent)
+    await supervisor.commitBrowserScreenshot(promptImage.manifest.metadata.id, for: agent)
+    tile.appendUserPrompt(AgentPrompt(text: "Inspect image", imageAttachments: [promptImage.promptAttachment]))
+    for _ in 0..<250 where tile.qaManagedImageSnapshot(promptImage.manifest.metadata.id).state != .available {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard tile.qaManagedImageSnapshot(promptImage.manifest.metadata.id).state == .available else {
+        throw Failure(description: "a newly appended image prompt never became available to the tile")
+    }
+    // An attachment may be temporarily absent when its prompt reaches the
+    // tile. It must retry on a later sync, not permanently cache the miss.
+    var delayed: [(attachment: AgentComposerStoredAttachment, held: URL)] = []
+    for i in 0..<8 {
+        let attachment = try await supervisor.stageBrowserScreenshot(SharedTileParityChecks.screenshotPNG(), for: agent)
+        await supervisor.commitBrowserScreenshot(attachment.manifest.metadata.id, for: agent)
+        let held = root.appendingPathComponent("held-image-\(i).png")
+        try FileManager.default.moveItem(at: attachment.fileURL, to: held)
+        delayed.append((attachment, held))
+    }
+    tile.appendUserPrompt(AgentPrompt(text: "Retry images", imageAttachments: delayed.map { $0.attachment.promptAttachment }))
+    try await Task.sleep(for: .milliseconds(100))
+    guard delayed.allSatisfy({ tile.qaManagedImageSnapshot($0.attachment.manifest.metadata.id).state != .available }) else {
+        throw Failure(description: "a missing image was unexpectedly available")
+    }
+    let beforeMissingRetry = tile.qaManagedImageSyncMetadataVisits
+    tile.ingest(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "retry budget"))
+    let retryVisits = tile.qaManagedImageSyncMetadataVisits - beforeMissingRetry
+    guard retryVisits > 0, retryVisits <= 4 else {
+        throw Failure(description: "one sync visited \(retryVisits) missing-image records; expected at most four")
+    }
+    for item in delayed { try FileManager.default.moveItem(at: item.held, to: item.attachment.fileURL) }
+    for i in 0..<100 where delayed.contains(where: { tile.qaManagedImageSnapshot($0.attachment.manifest.metadata.id).state != .available }) {
+        tile.ingest(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "retry \(i)"))
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard delayed.allSatisfy({ tile.qaManagedImageSnapshot($0.attachment.manifest.metadata.id).state == .available }) else {
+        throw Failure(description: "some images did not recover after their files returned")
+    }
+
+    // Restore the supervisor snapshot through a second real tile, then grow
+    // history and stream another event. A text event must not revisit old blocks
+    // to discover images; resolved images must continue to be available.
+    let restored = ManagedAgentTileNSView(tile: Tile(id: UUID(), kind: .managedAgent, title: "Restored",
+        frame: .init(x: 0, y: 0, width: 520, height: 640), zPosition: .first, runtimeRef: nil,
+        metadata: TileMetadata(launchProfileId: "managed-agent")))
+    restored.frame = NSRect(x: 0, y: 0, width: 520, height: 640)
+    restored.bindV2ComposerState(draftStore: AgentComposerDraftStore(applicationSupportDirectory: root, attachmentStore: attachments),
+                                 promptHistory: AgentPromptHistory(), attachmentStore: attachments)
+    restored.attach(agentID: agent, supervisor: supervisor)
+    for _ in 0..<250 where restored.qaManagedImageSnapshot(screenshotID).state != .available {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard restored.qaManagedImageSnapshot(screenshotID).state == .available,
+          restored.qaManagedImageFullScanBlockVisits > 0 else {
+        throw Failure(description: "restored screenshot did not hydrate from the snapshot")
+    }
+    for i in 0..<100 { restored.appendUserPrompt("history \(i)") }
+    let visitsBefore = restored.qaManagedImageFullScanBlockVisits
+    let retryBefore = restored.qaManagedImageSyncMetadataVisits
+    restored.ingest(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "More text."))
+    guard restored.qaManagedImageFullScanBlockVisits == visitsBefore,
+          restored.qaManagedImageSyncMetadataVisits == retryBefore,
+          restored.qaManagedImageSnapshot(screenshotID).state == .available else {
+        throw Failure(description: "text ingest rescanned image history or lost a restored image")
+    }
+    return "tile and saved transcript agree on \(savedRows.count) entries; prompt, new, restored and retried images hydrate; text ingest scans zero historical image blocks"
 }

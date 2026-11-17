@@ -151,6 +151,12 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         semanticProjection = AgentTranscriptProjection(threadId: threadId)
     }
 
+    /// Offline performance fixture only: old semantic history is preserved, but
+    /// live transport state and the old stream's parser buffer are unavailable.
+    public init(qaRestoring document: AgentDocument, threadId: String) {
+        semanticProjection = AgentTranscriptProjection(qaRestoring: document, threadId: threadId)
+    }
+
     /// `wallClockNow` defaults to a REAL clock, unlike the projection's
     /// injected-clock init.
     ///

@@ -101,6 +101,16 @@ public struct AgentTranscriptProjection: Sendable {
         self.wallClockNow = wallClockNow
     }
 
+    /// Offline performance checks seed historical semantic state from a copied
+    /// archive. The archive has no runtime event ring, item mappings, or open
+    /// streaming buffer; checks must start a new turn after restoring it.
+    public init(qaRestoring document: AgentDocument, threadId: String) {
+        self.threadId = threadId
+        self.reducer = AgentDocumentReducer(document: document)
+        self.monotonicNow = { AgentTranscriptClock.monotonic() }
+        self.wallClockNow = { AgentTranscriptClock.entryDate() }
+    }
+
     public var document: AgentDocument { reducer.document }
     public var activeToolCount: Int { activeItemIDs.count }
     public var compatibilityMarkupSourcesByEntryID: [AgentNodeID: String] {
@@ -445,15 +455,23 @@ public struct AgentTranscriptProjection: Sendable {
     /// at 10,000 rows. This is the first.
     public struct TouchedNodes: Equatable, Sendable {
         public var ids: Set<AgentNodeID> = []
-        /// Anything that inserted, removed or reordered a node.
-        ///
-        /// A structural step cannot be summarised as "these ids changed" — the
-        /// row index has to be rebuilt — so a consumer must take the full walk.
-        /// Defaulting this to TRUE on any doubt is what keeps the fast path
-        /// honest: the expensive answer is always correct, the cheap one is not.
+        /// The reducer's categories, retained across all mutations until drain.
+        /// A node may occur in more than one category across different steps.
+        public private(set) var inserted: Set<AgentNodeID> = []
+        public private(set) var updated: Set<AgentNodeID> = []
+        public private(set) var removed: Set<AgentNodeID> = []
+        public private(set) var moved: Set<AgentNodeID> = []
+        /// Anything that inserted, removed or reordered a node. Callers that
+        /// consume only `ids` must use a full walk for structural changes;
+        /// `surfacePatch` retains the categories for consumers that can verify
+        /// a narrower update.
         public var isStructural: Bool = false
 
         mutating func formUnion(_ patch: AgentDocumentPatch) {
+            inserted.formUnion(patch.inserted)
+            updated.formUnion(patch.updated)
+            removed.formUnion(patch.removed)
+            moved.formUnion(patch.moved)
             ids.formUnion(patch.updated)
             ids.formUnion(patch.inserted)
             ids.formUnion(patch.moved)
@@ -461,6 +479,25 @@ public struct AgentTranscriptProjection: Sendable {
             if !patch.inserted.isEmpty || !patch.removed.isEmpty || !patch.moved.isEmpty {
                 isStructural = true
             }
+        }
+
+        /// Translate the accumulated reducer steps to the surface's own single
+        /// version edge. Insert-then-update remains an insert; update-then-remove
+        /// remains a removal. A node both inserted and removed may have existed
+        /// on either side (remove/reinsert), so only a full rebuild is safe.
+        public func surfacePatch(fromVersion: UInt64) throws -> AgentDocumentPatch? {
+            guard inserted.isDisjoint(with: removed) else { return nil }
+            let structuralIDs = inserted.union(removed).union(moved)
+            guard !isStructural || !structuralIDs.isEmpty else { return nil }
+            let netMoved = moved.subtracting(inserted).subtracting(removed)
+            let netUpdated = updated.subtracting(inserted).subtracting(removed)
+            guard fromVersion < UInt64.max else {
+                return try AgentDocumentPatch.empty(fromVersion: fromVersion)
+            }
+            return try AgentDocumentPatch(
+                fromVersion: fromVersion, toVersion: fromVersion + 1,
+                inserted: Array(inserted), updated: Array(netUpdated),
+                removed: Array(removed), moved: Array(netMoved))
         }
     }
 

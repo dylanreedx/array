@@ -14,8 +14,22 @@ struct AgentMessageSenderSource: @unchecked Sendable {
     }
 
     let current: (UUID) -> Sender?
+    let subscribe: (UUID, @escaping () -> Void) -> UUID?
+    let unsubscribe: (UUID) -> Void
+    /// False for sources which provide a lookup but cannot announce changes.
+    let hasReliableNotifications: Bool
 
-    static let unavailable = AgentMessageSenderSource(current: { _ in nil })
+    init(current: @escaping (UUID) -> Sender?,
+         subscribe: @escaping (UUID, @escaping () -> Void) -> UUID? = { _, _ in nil },
+         unsubscribe: @escaping (UUID) -> Void = { _ in },
+         hasReliableNotifications: Bool = false) {
+        self.current = current
+        self.subscribe = subscribe
+        self.unsubscribe = unsubscribe
+        self.hasReliableNotifications = hasReliableNotifications
+    }
+
+    static let unavailable = AgentMessageSenderSource(current: { _ in nil }, hasReliableNotifications: true)
 }
 
 /// A turn another agent wrote, drawn as FROM that agent: its name in the
