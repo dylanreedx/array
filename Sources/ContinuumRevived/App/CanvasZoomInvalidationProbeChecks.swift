@@ -144,10 +144,10 @@ enum CanvasZoomInvalidationProbeChecks {
     /// alone cannot identify. Both native coordinate directions use the same
     /// production title-accessory bake and demotion.
     private final class AccessoryRasterPattern: NSView {
-        private let flipped: Bool
-        init(flipped: Bool) { self.flipped = flipped; super.init(frame: .zero) }
+        private let usesTopLeftOrigin: Bool
+        init(flipped: Bool) { self.usesTopLeftOrigin = flipped; super.init(frame: .zero) }
         required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-        override var isFlipped: Bool { flipped }
+        override var isFlipped: Bool { usesTopLeftOrigin }
         override var isOpaque: Bool { true }
         override var intrinsicContentSize: NSSize { NSSize(width: 271.66667, height: 18) }
         override func draw(_ dirtyRect: NSRect) {
