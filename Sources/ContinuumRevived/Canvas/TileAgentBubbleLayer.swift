@@ -420,7 +420,8 @@ final class TileAgentBubbleLayer: CALayer {
         wash.frame = bubbleStyle == .orb ? box.insetBy(dx: 0, dy: -side * 0.08) : box
         let reach = side * 1.5
         swirl.frame = CGRect(x: box.midX - reach / 2, y: box.midY - reach / 2, width: reach, height: reach)
-        sheen.frame = workingStyle == "sheen"
+        let sweepsSheen = workingStyle == "sheen" && bubbleStyle != .orb && bubbleStyle != .minimalSquircle
+        sheen.frame = sweepsSheen
             ? CGRect(x: box.minX - box.width, y: box.minY, width: box.width * 0.7, height: box.height) : box
         // A hairline edge, inside the plate (a mask strokes both ways; the
         // outer half is cut by nothing, so keep it to the line's width).
@@ -472,7 +473,9 @@ final class TileAgentBubbleLayer: CALayer {
             specularMask.lineWidth = max(1, side * 0.05)
             specularMask.lineCap = .round
         }
-        if workingStyle == "sheen" { reconcileMotion(force: true) }
+        // The moving sheen depends on its laid-out frame. Other animations
+        // reconcile only when their signature changes, including a resized Orb.
+        reconcileMotion(force: sweepsSheen)
     }
 
     // MARK: Paint
@@ -494,6 +497,7 @@ final class TileAgentBubbleLayer: CALayer {
         let minimal = bubbleStyle == .minimalSquircle
         orbitHost.isHidden = true
         sheen.isHidden = true
+        sheen.locations = nil
         wash.type = .axial
         wash.locations = nil
         wash.startPoint = CGPoint(x: 0.5, y: 0)
@@ -813,6 +817,17 @@ final class TileAgentBubbleLayer: CALayer {
     }
     var qaAnimationKeys: [String] {
         [wash, sheen, orbit, ring, swirl].flatMap { $0.animationKeys() ?? [] }
+    }
+    /// The real middle-glow geometry and gradient configuration, for transitions.
+    var qaSheenFrame: CGRect { sheen.frame }
+    var qaSheenStops: (colors: Int, locations: Int?) {
+        (sheen.colors?.count ?? 0, sheen.locations?.count)
+    }
+    /// The offsets installed on the liquid's current animation, not a recomputed plan.
+    var qaLiquidSurfaceOffsets: (from: CGFloat, to: CGFloat)? {
+        guard let animation = wash.animation(forKey: Self.motionKeyPrefix + "churn.surface") as? CABasicAnimation,
+              let from = animation.fromValue as? NSNumber, let to = animation.toValue as? NSNumber else { return nil }
+        return (CGFloat(from.doubleValue), CGFloat(to.doubleValue))
     }
     /// QA: whether the art is clipped to the plate.
     var qaArtClippedToPlate: Bool { artClip.mask === artMask && artMask.path != nil }
