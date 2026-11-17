@@ -36,67 +36,6 @@ final class AgentCharacterSpriteAtlas: @unchecked Sendable {
         (inkRect, typicalInkSide, bodyCentre) = Self.measureInk(atlas)
     }
 
-    /// The glass orb's lens: this atlas's picture with every frame seen through
-    /// a sphere centred on the body, centre magnified 1.25x and the edge
-    /// compressed, nearest-neighbour so the pixel art stays crisp. Baked on
-    /// first use (about 20 ms), cached with the atlas, so a pose animation only
-    /// steps through already-warped frames and nothing filters per frame.
-    var lensedImage: CGImage {
-        lensLock.lock()
-        defer { lensLock.unlock() }
-        if let cached = lensCache { return cached }
-        let baked = Self.bakeLens(self, magnification: Self.lensMagnification) ?? image
-        lensCache = baked
-        Self.lensBuildCount += 1
-        return baked
-    }
-    static let lensMagnification = 1.25
-    /// Every lens bake, across all atlases: a witness counts these.
-    nonisolated(unsafe) static var lensBuildCount = 0
-    private let lensLock = NSLock()
-    private var lensCache: CGImage?
-    var hasBakedLens: Bool { lensLock.lock(); defer { lensLock.unlock() }; return lensCache != nil }
-
-    /// Source radius = r (a + (1 - a) r^2), a = 1 / centre magnification.
-    private static func bakeLens(_ sprite: AgentCharacterSpriteAtlas, magnification: Double) -> CGImage? {
-        let atlas = sprite.atlas
-        let src = atlas.pixels
-        var dst = src
-        let radius = 0.63 * Double(sprite.typicalInkSide)
-        let a = 1 / magnification
-        for frame in atlas.frames {
-            let cx = Double(frame.x) + Double(sprite.bodyCentre.x)
-            let cy = Double(frame.y) + Double(sprite.bodyCentre.y)
-            let x0 = max(frame.x, Int(cx - radius) - 1), x1 = min(frame.x + frame.width, Int(cx + radius) + 2)
-            let y0 = max(frame.y, Int(cy - radius) - 1), y1 = min(frame.y + frame.height, Int(cy + radius) + 2)
-            guard x0 < x1, y0 < y1 else { continue }
-            for y in y0..<y1 {
-                for x in x0..<x1 {
-                    var ox = Double(x) + 0.5 - cx, oy = Double(y) + 0.5 - cy
-                    let rr = (ox * ox + oy * oy).squareRoot() / radius
-                    if rr > 0, rr < 1 {
-                        let k = a + (1 - a) * rr * rr
-                        ox *= k; oy *= k
-                    }
-                    let sx = Int((cx + ox).rounded(.down)), sy = Int((cy + oy).rounded(.down))
-                    let out = (y * atlas.width + x) * 4
-                    guard sx >= frame.x, sx < frame.x + frame.width, sy >= frame.y, sy < frame.y + frame.height else {
-                        for c in 0..<4 { dst[out + c] = 0 }
-                        continue
-                    }
-                    let at = (sy * atlas.width + sx) * 4
-                    for c in 0..<4 { dst[out + c] = src[at + c] }
-                }
-            }
-        }
-        guard let provider = CGDataProvider(data: Data(dst) as CFData),
-              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-        return CGImage(width: atlas.width, height: atlas.height, bitsPerComponent: 8, bitsPerPixel: 32,
-                       bytesPerRow: atlas.width * 4, space: space,
-                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                       provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
-    }
-
     /// 12 fps: the fastest any character steps (plan 110 §5.2 rule 6).
     static let minimumFrameDuration: CFTimeInterval = 1.0 / 12
 

@@ -4,7 +4,7 @@ import ContinuumRevivedCore
 import QuartzCore
 
 /// `--tile-agent-icon-styles-check`: the four tile icon styles, the icon size
-/// setting, the orb's baked lens, the working light and icons-off, on the real
+/// setting, the working light and icons-off, on the real
 /// tiles of `--tile-agent-bubble-check`'s fixture.
 ///
 /// - Every style renders and is opaque; Minimal holds the provider mark in its
@@ -13,8 +13,7 @@ import QuartzCore
 ///   and 125 % zoom, and below 80 % it tapers by `sqrt(zoom / 0.8)`.
 /// - The working light is attached while working and gone when idle or paused;
 ///   it never lays the title bar out; the provider mark never animates.
-/// - The lens is baked once per atlas (a build counter), never again for a
-///   style change, a zoom or a repaint.
+/// - No style warps the art: the sprite's contents are the atlas picture.
 /// - Icons off draw nothing in the corner, whatever the style, and the provider
 ///   mark stays beside the title.
 ///
@@ -89,34 +88,15 @@ enum TileAgentIconStyleChecks {
                          && AgentCharacterConfig.iconTaper(zoom: 0.8) == 1 && AgentCharacterConfig.iconTaper(zoom: 1.25) == 1,
                          "the taper is sqrt(zoom / 0.8) below 80% and 1 above")
 
-        // 1. The lens (first: nothing has shown an Orb yet) is baked once per atlas.
-        for style in Style.allCases where style != .orb {
+        // 1. No style bends the art: every sprite shows its atlas's own picture.
+        for style in Style.allCases {
             try show(style, views, canvas, defaults)
+            for view in views {
+                guard let layer = view.qaAgentBubble?.sprite, let atlas = layer.sprite else { continue }
+                try Check.expect((layer.contents as AnyObject?) === atlas.image, "\(style.title) shows the atlas picture, unwarped")
+            }
         }
-        let atlases = Set(views.compactMap { $0.qaAgentBubble?.sprite.sprite }.map(ObjectIdentifier.init))
-        let before = AgentCharacterSpriteAtlas.lensBuildCount
-        let unbaked = Set(views.compactMap { $0.qaAgentBubble?.sprite.sprite }.filter { !$0.hasBakedLens }.map(ObjectIdentifier.init))
-        try Check.expect(unbaked.count == atlases.count && before == AgentCharacterSpriteAtlas.lensBuildCount,
-                         "no lens is baked before an Orb shows (\(unbaked.count)/\(atlases.count))")
-        try show(.orb, views, canvas, defaults)
-        let afterFirst = AgentCharacterSpriteAtlas.lensBuildCount
-        try Check.expect(afterFirst - before == unbaked.count,
-                         "one bake per atlas: \(afterFirst - before) bakes for \(unbaked.count) atlases")
-        for view in views {
-            guard let layer = view.qaAgentBubble?.sprite, let atlas = layer.sprite else { throw Check.Failure(description: "no atlas") }
-            try Check.expect((layer.contents as AnyObject?) === atlas.lensedImage && atlas.lensedImage !== atlas.image,
-                             "the orb's sprite shows the lensed picture")
-        }
-        for style in [Style.squircle, .orb, .minimalSquircle, .orb, .inline, .orb] { try show(style, views, canvas, defaults) }
-        for zoom in [0.3, 1.25, 0.6] { settle(canvas, views, zoom: zoom, around: world) }
-        try Check.expect(AgentCharacterSpriteAtlas.lensBuildCount == afterFirst,
-                         "style changes and zooms never re-bake the lens (\(AgentCharacterSpriteAtlas.lensBuildCount - afterFirst) extra)")
-        try show(.inline, views, canvas, defaults)
-        for view in views {
-            guard let layer = view.qaAgentBubble?.sprite, let atlas = layer.sprite else { continue }
-            try Check.expect((layer.contents as AnyObject?) === atlas.image, "a plate that is not the Orb shows the plain picture")
-        }
-        report.append("lens: \(afterFirst - before) bakes for \(atlases.count) atlases, none after")
+        report.append("art: pixel-exact atlas in every style")
 
         // 1. Each style renders, opaque, in both appearances; Minimal holds the mark.
         for (theme, appearance) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {

@@ -12,8 +12,7 @@ import QuartzCore
 /// outweighs it at any zoom (`AgentCharacterConfig.BubbleStyle`):
 /// - **Inline**: a rounded square (square at Sharp corners).
 /// - **Squircle**: a superellipse, the app-icon shape.
-/// - **Orb**: a circle in glass: the art seated in a lens (magnified at the
-///   centre), an edge vignette over it, a translucent rim and a specular
+/// - **Orb**: a circle in glass: the art seated, undistorted, in glass, an edge vignette over it, a translucent rim and a specular
 ///   highlight above, over the opaque plate. Working, a light travels round
 ///   its rim.
 /// - **Minimal**: a flat squircle, an even full border, the token background
@@ -269,8 +268,6 @@ final class TileAgentBubbleLayer: CALayer {
     func setStyle(_ style: Style) {
         guard style != bubbleStyle else { return }
         bubbleStyle = style
-        // The orb alone sees the art through its lens.
-        sprite.setLens(style == .orb)
         repaint()
         // The hover look belongs to the style: an Orb's swell never outlives it,
         // and a plate hovered as it becomes an Orb swells at once.

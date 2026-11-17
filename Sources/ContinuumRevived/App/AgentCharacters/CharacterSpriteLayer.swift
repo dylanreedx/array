@@ -34,21 +34,8 @@ final class CharacterSpriteLayer: CALayer {
     /// A paused sprite holds its still frame: parked, pictured, scrolled off,
     /// in a hidden or occluded window. The plan is kept to resume with.
     private(set) var isPaused = false
-    /// Show the atlas through the orb's glass lens (`lensedImage`) instead of
-    /// the plain picture. Only the tile's orb sets it.
-    private(set) var usesLens = false
 
-    private var picture: CGImage? { sprite.map { usesLens ? $0.lensedImage : $0.image } }
-
-    func setLens(_ on: Bool) {
-        guard on != usesLens else { return }
-        usesLens = on
-        guard sprite != nil else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        contents = picture
-        CATransaction.commit()
-    }
+    private var picture: CGImage? { sprite?.image }
 
     override init() {
         super.init()
