@@ -593,6 +593,14 @@ extension SidebarOwnershipChecks {
         guard abs(windowY(try fold()) - lineY) < 0.5, try isOnScreen(cell(foldLead)) else {
             throw fail("folding back moved the line from y \(lineY) to \(windowY(try fold())) or hid its lead")
         }
+        // A folded helper failed (step 5a): the card says "N failed" once, on the
+        // lead's count line, and never again on its fold.
+        let failures = try NSRegularExpression(pattern: "\\d+ failed")
+        let card = (try cell(foldLead).visibleTextForQA + [try fold().qaTitle]).joined(separator: " | ")
+        let saidFailed = failures.numberOfMatches(in: card, range: NSRange(card.startIndex..., in: card))
+        guard saidFailed == 1, try cell(foldLead).tailTextForQA?.contains("1 failed") == true else {
+            throw fail("the card says failed \(saidFailed) times, wanted once on the count line: \(card)")
+        }
         try still("folded")
         return "\(label): \"\(restingWords)\" lights and presses like a subagent row; clicking its words opens "
             + "43 rows in the visible rows' style and order (\(openedBuilt) rows built, \(onScreen) on screen); "
