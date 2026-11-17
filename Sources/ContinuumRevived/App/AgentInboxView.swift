@@ -1403,6 +1403,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private(set) var standingLeadIDs: Set<UUID>
     /// Clear's acknowledgements: sidebar-only, persisted in the same defaults.
     private(set) var clearMarks: [UUID: SidebarClearMark]
+    /// Needs-you items dismissed, by incident id, with the fingerprint each was
+    /// dismissed at (dogfood fix). Persisted beside the Clear marks.
+    private(set) var dismissedIncidents: [String: String]
     /// The ids the toast's Undo would un-clear.
     private var pendingClearUndo: [UUID]?
     /// What Clear N acts on right now.
@@ -1429,6 +1432,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         self.sidebarLayout = SidebarLayout.resolve(in: indicatorDefaults)
         self.standingLeadIDs = SidebarStandingLeads.load(from: indicatorDefaults)
         self.clearMarks = SidebarClearMarks.load(from: indicatorDefaults)
+        self.dismissedIncidents = SidebarIncidentDismissals.load(from: indicatorDefaults)
         // The scope is a fixed-width ChoiceButton: project names can never resize the band.
         scopeButton = ChoiceButton(title: InboxScope.allTitle)
         scopeButton.translatesAutoresizingMaskIntoConstraints = false
@@ -1848,6 +1852,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         onIncidentAction?(incident)
     }
 
+    /// Dismiss one Needs-you item. It stays away until its incident changes:
+    /// another agent joins it, or one of its agents fails or asks again.
+    func dismissIncident(_ incident: SidebarIncident) {
+        dismissedIncidents[incident.id] = SidebarIncidentDismissals.fingerprint(incident, rows: allRows)
+        SidebarIncidentDismissals.save(dismissedIncidents, to: indicatorDefaults)
+        render(display(from: allRows))
+    }
+
     /// "N folded": how many the remainder holds, nothing more.
     func ledgerFoldTitle(_ remainder: FanoutRemainder) -> String {
         // Every state's number is said once, on the lead's count line; the
@@ -1886,7 +1898,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func updateSidebarCore(liveRows: [AgentInboxRow], shownIDs: Set<UUID>) {
         let standing = standingLeadIDs
         sidebarClearIDs = SidebarClear.eligibleIDs(rows: liveRows, standing: standing)
-        sidebarIncidents = SidebarIncidents.build(rows: liveRows)
+        sidebarIncidents = SidebarIncidentDismissals.visible(
+            SidebarIncidents.build(rows: liveRows), dismissed: dismissedIncidents, rows: liveRows)
         var tallies: [UUID: SidebarLeadTally] = [:]
         for lead in liveRows where lead.depth == 0 && parentsWithChildren.contains(lead.id) {
             tallies[lead.id] = SidebarLeadTally.tally(leadId: lead.id, rows: liveRows, shownIDs: shownIDs)
@@ -4405,6 +4418,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .quietNeedsYou(let incidents):
                 let cell = quietNeedsYouCell ?? SidebarQuietNeedsYouView()
                 cell.onAction = { [weak self] incident in self?.pressIncident(incident) }
+                cell.onDismiss = { [weak self] incident in self?.dismissIncident(incident) }
                 cell.apply(incidents, actionEnabled: onIncidentAction != nil)
                 quietNeedsYouCell = cell
                 return cell

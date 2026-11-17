@@ -85,7 +85,10 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
         let titleLabel = NSTextField(labelWithString: "")
         let detailLabel = NSTextField(labelWithString: "")
         let actionButton = InboxSettleNudgeButton(frame: .zero)
+        /// Every Needs-you item can be dismissed until something new happens.
+        let dismissButton = InboxSettleNudgeButton(frame: .zero)
         var onAction: (() -> Void)?
+        var onDismiss: (() -> Void)?
         private(set) var incident: SidebarIncident?
 
         override init(frame frameRect: NSRect) {
@@ -102,6 +105,16 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
             actionButton.target = self
             actionButton.action = #selector(actionPressed)
             addSubview(actionButton)
+            dismissButton.isPlain = true
+            dismissButton.title = ""
+            dismissButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
+                .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+            dismissButton.imagePosition = .imageOnly
+            dismissButton.toolTip = "Dismiss"
+            dismissButton.setAccessibilityLabel("Dismiss")
+            dismissButton.target = self
+            dismissButton.action = #selector(dismissPressed)
+            addSubview(dismissButton)
             setAccessibilityElement(true)
             setAccessibilityRole(.group)
         }
@@ -118,6 +131,7 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
             actionButton.toolTip = actionEnabled ? nil : "Not available yet"
             actionButton.setAccessibilityLabel(incident.actionTitle)
             actionButton.setAccessibilityIdentifier("ContinuumSidebarNeedsYouAction-\(incident.id)")
+            dismissButton.setAccessibilityIdentifier("ContinuumSidebarNeedsYouDismiss-\(incident.id)")
             setAccessibilityLabel("\(incident.title). \(incident.detail)")
             setAccessibilityIdentifier("ContinuumSidebarNeedsYou-\(incident.id)")
             icon.image = NSImage(systemSymbolName: incident.symbol, accessibilityDescription: nil)?
@@ -127,6 +141,7 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
         }
 
         @objc private func actionPressed() { onAction?() }
+        @objc private func dismissPressed() { onDismiss?() }
 
         /// Red for a setup or sign-in blocker, the approval accent for a raised
         /// hand, quiet for a usage pause: the symbol carries the only hue.
@@ -142,6 +157,7 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
                 icon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
             }
             actionButton.applyTokens()
+            dismissButton.applyTokens()
             actionButton.alphaValue = actionButton.isEnabled ? 1 : Opacity.receded * 0.6
         }
 
@@ -155,7 +171,11 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
             let inset = SidebarQuietNeedsYouView.contentInset
             let size = actionButton.intrinsicContentSize
             let buttonWidth = ceil(size.width), buttonHeight = InboxSettleNudgeButton.height
-            actionButton.frame = NSRect(x: bounds.maxX - inset - buttonWidth,
+            let dismissWidth: CGFloat = 18
+            dismissButton.frame = NSRect(x: bounds.maxX - inset - dismissWidth + 4,
+                                         y: floor((bounds.height - buttonHeight) / 2),
+                                         width: dismissWidth, height: buttonHeight)
+            actionButton.frame = NSRect(x: dismissButton.frame.minX - 2 - buttonWidth,
                                         y: floor((bounds.height - buttonHeight) / 2),
                                         width: buttonWidth, height: buttonHeight)
             let iconSize: CGFloat = 16
@@ -179,6 +199,7 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
     private let titleLabel = NSTextField(labelWithString: "Needs you")
     private(set) var lines: [Line] = []
     var onAction: ((SidebarIncident) -> Void)?
+    var onDismiss: ((SidebarIncident) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -204,6 +225,7 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
         for (line, incident) in zip(lines, incidents) {
             line.apply(incident, actionEnabled: actionEnabled && incident.kind == .cause(.usageLimit))
             line.onAction = { [weak self] in self?.onAction?(incident) }
+            line.onDismiss = { [weak self] in self?.onDismiss?(incident) }
         }
         setAccessibilityLabel("Needs you, \(incidents.count)")
         applyTokens()

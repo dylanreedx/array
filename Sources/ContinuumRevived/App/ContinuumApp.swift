@@ -16416,6 +16416,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.agentInbox.onIncidentAction = { [weak self] incident in
             self?.performSidebarIncident(incident)
         }
+        // A usage reading changed (or arrived): the usage items follow it live.
+        NotificationCenter.default.addObserver(
+            forName: AgentSupervisor.accountUsageDidChangeNotification, object: agentSupervisor, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.reloadWorkspaceSidebar(rebuildAgentActivity: false) }
+        }
         // P3.15: the row menu and the bulk bar reach the supervisor. Until this call
         // existed the shipped app assigned neither callback, so every destructive item
         // was greyed and a stale agent could not be removed by any route.
@@ -16716,9 +16722,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             now: now
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
-        return withExternalSessions(
+        return SidebarUsageLive.stamp(withExternalSessions(
             unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved),
-            registry: registry, now: now)
+            registry: registry, now: now), states: sidebarUsageStates(now: now))
+    }
+
+    /// Dogfood fix: each CLI's LIVE usage, from the account readings Array
+    /// already holds. Exhausted only while a window of the account in use is
+    /// spent and has not reset; Switch only when another signed-in account of
+    /// that CLI (a different login) exists. Re-pushed when a reading changes
+    /// and again at the earliest reset.
+    func sidebarUsageStates(now: Date = Date()) -> [String: SidebarUsageLive.State] {
+        var states: [String: SidebarUsageLive.State] = [:]
+        var earliestReset: Date?
+        for harness in [AgentHarness.claudeCode, .codex] {
+            let active = agentSupervisor.activeAccount(for: harness)
+            let spent = agentSupervisor.accountQuota(accountId: active.id)?.windows.filter { window in
+                guard let used = window.utilization, used >= 1, let reset = window.resetsAt else { return false }
+                return reset > now
+            } ?? []
+            if let reset = spent.compactMap(\.resetsAt).min() {
+                earliestReset = min(earliestReset ?? reset, reset)
+            }
+            let activeOrg = agentSupervisor.accountIdentity(accountId: active.id)?.organizationId
+            let canSwitch = agentSupervisor.accounts.contains { account in
+                guard account.harness == harness, account.id != active.id,
+                      let identity = agentSupervisor.accountIdentity(accountId: account.id) else { return false }
+                return activeOrg == nil || identity.organizationId != activeOrg
+            }
+            states[SidebarRecovery.providerName(harness.rawValue)] =
+                SidebarUsageLive.State(exhausted: !spent.isEmpty, canSwitch: canSwitch)
+        }
+        scheduleSidebarUsageReset(at: earliestReset)
+        return states
+    }
+
+    private func scheduleSidebarUsageReset(at reset: Date?) {
+        guard sidebarUsageResetAt != reset else { return }
+        sidebarUsageResetAt = reset
+        sidebarUsageResetTimer?.invalidate()
+        sidebarUsageResetTimer = nil
+        guard let reset else { return }
+        sidebarUsageResetTimer = Timer.scheduledTimer(
+            withTimeInterval: max(1, reset.timeIntervalSinceNow + 1), repeats: false
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.sidebarUsageResetAt = nil
+                self?.reloadWorkspaceSidebar(rebuildAgentActivity: false)
+            }
+        }
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
@@ -16923,14 +16975,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// What an incident's action did, for the witness.
     enum SidebarIncidentOutcome: Equatable {
         case openedSettings(String)
+        case revealedAgent(UUID)
         case none
     }
     private(set) var lastSidebarIncidentOutcomeForQA: SidebarIncidentOutcome = .none
+    private var sidebarUsageResetAt: Date?
+    private var sidebarUsageResetTimer: Timer?
 
     @discardableResult
     func performSidebarIncident(_ incident: SidebarIncident) -> SidebarIncidentOutcome {
         let outcome: SidebarIncidentOutcome
         switch incident.kind {
+        case .cause(.usageLimit) where incident.actionTitle == SidebarFailureCause.usageResumeTitle:
+            // One account for this CLI: Resume opens the paused agent to continue it.
+            if let owner = incident.ownerIDs.first ?? incident.agentIDs.first, revealAgentFromInbox(owner) {
+                outcome = .revealedAgent(owner)
+            } else {
+                outcome = .none
+            }
         case .cause(.usageLimit):
             openSettings(paneID: "agents")
             outcome = .openedSettings("agents")

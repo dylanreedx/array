@@ -176,7 +176,14 @@ public enum SidebarRecovery {
         }
         let outcome = row.terminalEvent?.outcome
         let failed = row.state == .failed || outcome == .failed || outcome == .runtimeError
-        if failed { return classify(row.failureDetail) ?? .taskError }
+        if failed {
+            let cause = classify(row.failureDetail) ?? .taskError
+            // A usage stop is a pause only while the CLI's live usage is still
+            // exhausted. Once usage is back (or nothing live says it is out),
+            // the old stop is an ordinary failed turn: its own words, clearable.
+            if cause == .usageLimit, !row.usageExhaustedNow { return .taskError }
+            return cause
+        }
         if outcome == .interrupted, classify(row.failureDetail) == .interruptedByRestart {
             return .interruptedByRestart
         }
@@ -448,6 +455,10 @@ public enum SidebarIncidents {
             let action: String = {
                 if group.cause == .interruptedByRestart || group.cause == .providerBusy,
                    group.rows.allSatisfy(\.resumesThroughLead) { return "Resume with lead" }
+                // Switch only when a second signed-in account of this CLI exists.
+                if group.cause == .usageLimit, !group.rows.contains(where: \.usageCanSwitchAccount) {
+                    return SidebarFailureCause.usageResumeTitle
+                }
                 return group.cause.actionTitle
             }()
             result.append(SidebarIncident(
@@ -682,5 +693,81 @@ public enum SidebarClearMarks {
                                        workspaceName: row.workspaceName, workspaceId: row.workspaceId)
         }
         return (out, released)
+    }
+}
+
+// MARK: - Dogfood fixes (0.7.53): live usage and dismissible Needs-you items
+
+extension SidebarFailureCause {
+    /// A usage pause's action when no second signed-in account of that CLI
+    /// exists: open the paused agent to continue it, never "Switch".
+    public static let usageResumeTitle = "Resume"
+}
+
+/// What the host knows LIVE about one CLI's usage: whether its account in use
+/// is exhausted right now, and whether another signed-in account exists.
+public enum SidebarUsageLive {
+    public struct State: Equatable, Sendable {
+        public var exhausted: Bool
+        public var canSwitch: Bool
+        public init(exhausted: Bool, canSwitch: Bool) {
+            self.exhausted = exhausted
+            self.canSwitch = canSwitch
+        }
+    }
+
+    /// Stamp each row with its CLI's live state, keyed by
+    /// `SidebarRecovery.providerName`. A CLI with no live reading is not
+    /// exhausted: nothing is assumed from an old failure's words.
+    public static func stamp(_ rows: [AgentInboxRow], states: [String: State]) -> [AgentInboxRow] {
+        rows.map { row in
+            let state = states[SidebarRecovery.providerName(row.harness)]
+            var stamped = row
+            stamped.usageExhaustedNow = state?.exhausted ?? false
+            stamped.usageCanSwitchAccount = state?.canSwitch ?? false
+            return stamped
+        }
+    }
+}
+
+/// Every Needs-you item can be dismissed. A dismissal remembers the incident's
+/// fingerprint (its agents and their last events), persists, and stops
+/// matching the moment something new happens: another agent joins, or one of
+/// them fails or asks again.
+public enum SidebarIncidentDismissals {
+    public static let defaultsKey = "continuum.sidebar.dismissedIncidents"
+    static let limit = 200
+
+    public static func fingerprint(_ incident: SidebarIncident, rows: [AgentInboxRow]) -> String {
+        let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let asks = incident.kind == .needsYou
+        return incident.agentIDs.map(\.uuidString).sorted().map { key -> String in
+            guard let id = UUID(uuidString: key), let row = byId[id] else { return key }
+            var part = "\(key):\(row.state.rawValue):\(row.terminalEvent?.sequence ?? 0)"
+            if asks { part += ":\(row.lastActiveAt?.timeIntervalSince1970 ?? 0)" }
+            return part
+        }.joined(separator: "|")
+    }
+
+    public static func isDismissed(_ incident: SidebarIncident, dismissed: [String: String],
+                                   rows: [AgentInboxRow]) -> Bool {
+        guard incident.isBlocking, let mark = dismissed[incident.id] else { return false }
+        return mark == fingerprint(incident, rows: rows)
+    }
+
+    public static func visible(_ incidents: [SidebarIncident], dismissed: [String: String],
+                               rows: [AgentInboxRow]) -> [SidebarIncident] {
+        guard !dismissed.isEmpty else { return incidents }
+        return incidents.filter { !isDismissed($0, dismissed: dismissed, rows: rows) }
+    }
+
+    public static func load(from defaults: UserDefaults) -> [String: String] {
+        defaults.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
+    }
+
+    public static func save(_ dismissed: [String: String], to defaults: UserDefaults) {
+        var kept = dismissed
+        while kept.count > limit, let any = kept.keys.first { kept[any] = nil }
+        defaults.set(kept, forKey: defaultsKey)
     }
 }

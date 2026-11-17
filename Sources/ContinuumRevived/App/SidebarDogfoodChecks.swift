@@ -104,6 +104,7 @@ enum SidebarDogfoodChecks {
         var reports: [String] = []
         reports.append(try checkHistoryRows())
         reports.append(try checkHistoryPaints())
+        reports.append(try checkLiveUsage())
         return "SidebarDogfoodChecks passed:\n" + reports.joined(separator: "\n")
     }
 
@@ -205,6 +206,123 @@ enum SidebarDogfoodChecks {
                    "the History rows are not on screen to check (checked \(checked), visible \(visible))")
         try expect(blank.isEmpty, "History rows drawn blank without a hover: \(blank)")
         return "History paints: \(checked.count) History rows on screen after rows changed shape, Clear, reopen and scroll, each at full strength"
+    }
+
+    // MARK: - 3. Usage items follow live usage; every Needs-you item dismisses
+
+    static func checkLiveUsage() throws -> String {
+        let h = try makeHarness("live-usage")
+        defer { h.close() }
+        let inbox = h.inbox
+        let supervisor = h.supervisor
+        // Never the real CLI folders, never a CLI probe.
+        let folders = h.fixture.tempRoot.appendingPathComponent("cli-folders", isDirectory: true)
+        supervisor.personalCodexDirectory = folders.appendingPathComponent("codex", isDirectory: true)
+        supervisor.personalClaudeDirectory = folders.appendingPathComponent("claude", isDirectory: true)
+        for dir in [supervisor.personalCodexDirectory.appendingPathComponent("sessions"),
+                    supervisor.personalClaudeDirectory.appendingPathComponent("projects")] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        supervisor.accountUsageReader = { _ in nil }
+
+        func codex(_ name: String, parent: AgentID? = nil) -> AgentID {
+            supervisor.spawn(role: nil, prompt: nil, cwd: h.fixture.pbRoot, harness: .codex,
+                             model: "openai-codex/gpt-5.6-sol", thinking: "low",
+                             projectId: h.fixture.projectPb, projectRoot: h.fixture.pbRoot,
+                             parentAgentID: parent, displayName: name)
+        }
+        let codexWords = "You've hit your usage limit. Upgrade to Pro or try again at 3:05 PM."
+        let lead = codex("Release lead")
+        let paused = (0..<2).map { codex("Overnight helper \($0 + 1)", parent: lead) }
+        h.finish(lead)
+        for id in paused { h.finish(id, failed: codexWords) }
+        h.refresh()
+
+        func box() -> SidebarQuietNeedsYouView? {
+            Q.views(in: inbox) { $0 is SidebarQuietNeedsYouView && !$0.isHiddenOrHasHiddenAncestor }.first
+                as? SidebarQuietNeedsYouView
+        }
+        func usageLine() -> SidebarQuietNeedsYouView.Line? {
+            box()?.lines.first { $0.incident?.kind == .cause(.usageLimit) }
+        }
+        func usageIncidents() -> [SidebarIncident] {
+            inbox.sidebarIncidents.filter { $0.kind == .cause(.usageLimit) }
+        }
+        let active = supervisor.activeAccount(for: .codex)
+        func reading(_ accountId: String, org: String, used: Double?) {
+            let quota = used.map { used in
+                AgentAccountQuotaSnapshot(
+                    harness: .codex,
+                    windows: [AgentQuotaWindow(kind: .fiveHour, utilization: used, resetsAt: Date().addingTimeInterval(3_600))],
+                    observedAt: Date(), source: .codexRateLimitsRead, accountId: accountId)
+            }
+            supervisor.applyAccountUsageReading(
+                .init(identity: AgentAccountIdentity(harness: .codex, email: "\(org)@example.test",
+                                                     organizationId: org, observedAt: Date()),
+                      quota: quota),
+                accountId: accountId)
+            inbox.layoutForQA()
+        }
+
+        // (a) Old failure words alone, no live reading: nothing needs you.
+        try expect(usageIncidents().isEmpty && usageLine() == nil,
+                   "(a) a usage item shows with no live reading — incidents \(inbox.sidebarIncidents.map(\.title))")
+        // Live usage NOT exhausted: still nothing, and the stops are clearable.
+        reading(active.id, org: "org-personal", used: 0.4)
+        try expect(usageIncidents().isEmpty && usageLine() == nil,
+                   "(a) a usage item shows while live usage is 40% — incidents \(inbox.sidebarIncidents.map(\.title))")
+        try expect(inbox.sidebarClearIDs.contains(lead.rawValue),
+                   "(a) with usage available, the family with old usage stops is clearable (its lead takes them) — Clear \(inbox.sidebarClearIDs.count)")
+        // Live usage exhausted: the item appears, through the reading's own notification.
+        reading(active.id, org: "org-personal", used: 1.0)
+        guard let line = usageLine() else {
+            throw Failure(description: "(a) live usage is exhausted but Needs you has no usage item — incidents \(inbox.sidebarIncidents.map(\.title))")
+        }
+        try expect(line.titleLabel.stringValue == "Codex usage ran out", "(a) the item reads '\(line.titleLabel.stringValue)'")
+        // (c, e) One Codex account: Resume, never Switch.
+        try expect(line.actionButton.title == SidebarFailureCause.usageResumeTitle,
+                   "(c) with one Codex account the action reads '\(line.actionButton.title)', wanted Resume")
+        try Q.click(line.actionButton)
+        try expect(h.delegate.lastSidebarIncidentOutcomeForQA == .revealedAgent(lead.rawValue)
+                       || paused.contains { h.delegate.lastSidebarIncidentOutcomeForQA == .revealedAgent($0.rawValue) },
+                   "(c) Resume opens the paused agent — got \(h.delegate.lastSidebarIncidentOutcomeForQA)")
+        // (c) A second folder holding the SAME login is not a second account.
+        let work = try supervisor.addAccount(harness: .codex, label: "Work")
+        reading(work.id, org: "org-personal", used: 0.1)
+        try expect(usageLine()?.actionButton.title == SidebarFailureCause.usageResumeTitle,
+                   "(c) a second folder on the same login offers '\(usageLine()?.actionButton.title ?? "nil")', wanted Resume")
+        // (c) A second signed-in account with a different login: Switch.
+        reading(work.id, org: "org-work", used: 0.1)
+        guard let switchLine = usageLine(), switchLine.actionButton.title == "Switch & resume…" else {
+            throw Failure(description: "(c) a second signed-in Codex account offers '\(usageLine()?.actionButton.title ?? "nil")', wanted Switch & resume…")
+        }
+        try Q.click(switchLine.actionButton)
+        try expect(h.delegate.lastSidebarIncidentOutcomeForQA == .openedSettings("agents"),
+                   "(c) Switch & resume… opens Settings > Agents — got \(h.delegate.lastSidebarIncidentOutcomeForQA)")
+
+        // (d) Dismiss through the drawn ×; it persists and stays away on a push.
+        try Q.click(switchLine.dismissButton)
+        inbox.layoutForQA()
+        try expect(usageLine() == nil, "(d) the dismissed usage item is still drawn")
+        try expect(SidebarIncidentDismissals.load(from: h.suite)["cause:usageLimit:Codex"] != nil,
+                   "(d) the dismissal is not persisted — \(SidebarIncidentDismissals.load(from: h.suite))")
+        h.refresh()
+        let reread = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 380, height: 600), indicatorDefaults: h.suite)
+        reread.reload(rows: inbox.allRowsForQuietCheck)
+        try expect(!reread.sidebarIncidents.contains { $0.kind == .cause(.usageLimit) },
+                   "(d) a sidebar built from the saved settings shows the dismissed item again")
+        try expect(usageLine() == nil, "(d) a push brought the dismissed item back with nothing new")
+        // (d) A new incident brings it back: another helper stops on usage.
+        let third = codex("Overnight helper 3", parent: lead)
+        h.finish(third, failed: codexWords)
+        h.refresh()
+        try expect(usageLine() != nil, "(d) a new usage stop did not bring the dismissed item back")
+
+        // (b) Usage returns: the item clears itself, through the reading alone.
+        reading(active.id, org: "org-personal", used: 0.3)
+        try expect(usageLine() == nil && usageIncidents().isEmpty,
+                   "(b) usage returned but the item stays — incidents \(inbox.sidebarIncidents.map(\.title))")
+        return "Live usage: no item from old words or at 40%; at 100% 'Codex usage ran out' with Resume (one account, or a second folder on the same login) and Switch & resume… only with a second login; × dismisses, persists, and a new stop brings it back; usage back clears it"
     }
 
     // MARK: - 1. History rows read like A

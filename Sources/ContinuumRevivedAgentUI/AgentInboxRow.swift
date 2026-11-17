@@ -1058,6 +1058,13 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// The user cleared this agent's outcome (sidebar Clear, which is Settle).
     /// A cleared helper folds inside its lead; new activity un-clears it.
     public var isCleared: Bool = false
+    /// Dogfood fix: the row's CLI has LIVE usage exhausted right now (its
+    /// account's reading, not the words of an old failure). Only then is a
+    /// usage stop a pause that needs you; stamped by the host per push.
+    public var usageExhaustedNow: Bool = false
+    /// Another signed-in account of the row's CLI exists to switch to. Never
+    /// assumed: most people have one subscription per provider.
+    public var usageCanSwitchAccount: Bool = false
     /// The user pinned this lead in Standing (a sidebar preference, per agent).
     public var isStanding: Bool = false
     /// Whether the agent has a canvas tile. A tile-less helper is drawn only as
@@ -1279,6 +1286,8 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         row.resumesThroughLead = source.resumesThroughLead
         row.isCleared = source.isCleared
         row.isStanding = source.isStanding
+        row.usageExhaustedNow = source.usageExhaustedNow
+        row.usageCanSwitchAccount = source.usageCanSwitchAccount
         return row
     }
 
