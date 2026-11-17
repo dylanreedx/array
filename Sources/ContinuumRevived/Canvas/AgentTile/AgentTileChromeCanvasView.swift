@@ -468,9 +468,12 @@ final class AgentTileChromeCanvasView: NSView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         guard isResting, let window else { return }
+        // Before asking for the host: a host of a new scale takes what rests in
+        // the old one with it, so afterwards the body is already there.
+        let previous = body.superview
         let host = restingHost.view(matching: window)
-        guard body.superview !== host else { return }
-        host.addSubview(body)
+        guard previous !== host else { return }
+        if body.superview !== host { host.addSubview(body) }
         body.frame = bounds
         forceRestingRedraw()
     }
@@ -628,6 +631,10 @@ final class RestingHost {
     private var window: NSWindow?
     private var scale: CGFloat = 0
 
+    /// Every host window alive, weakly: a closed tile's host must go with it.
+    private static let liveWindows = NSHashTable<NSWindow>.weakObjects()
+    static var qaLiveWindowCount: Int { liveWindows.allObjects.count }
+
     /// The host's content view for a tile shown in `tileWindow`. A tile that
     /// moved to a display of another scale gets a host of that scale, and
     /// whatever was resting moves with it.
@@ -647,6 +654,7 @@ final class RestingHost {
         for resting in window?.contentView?.subviews ?? [] { content.addSubview(resting) }
         window = host
         scale = wanted
+        Self.liveWindows.add(host)
         return content
     }
 
