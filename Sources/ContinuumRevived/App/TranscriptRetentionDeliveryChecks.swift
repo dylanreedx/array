@@ -44,30 +44,46 @@ enum TranscriptRetentionDeliveryChecks {
         var now = Date()
         private var operations = 0
 
-        init(_ root: URL) throws {
+        init(_ root: URL, delegated: Bool = false) throws {
             self.root = root
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             let model = AgentCatalogQAFixture.pi[0]
             let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents"))
-            lead = AgentID(rawValue: UUID()); helper = AgentID(rawValue: UUID())
-            var leadRecord = AgentRecord(id: lead, displayName: "Delivery lead", harness: .pi, model: model, thinking: "medium",
+            let leadID = AgentID(rawValue: UUID()), helperID = AgentID(rawValue: UUID())
+            lead = leadID
+            var leadRecord = AgentRecord(id: leadID, displayName: "Delivery lead", harness: .pi, model: model, thinking: "medium",
                 cwd: root.path, createdAt: Date(), lastActivityAt: Date())
             leadRecord.workspaceToolsEnabled = true
             try store.upsert(leadRecord)
-            var helperRecord = AgentRecord(id: helper, displayName: "Courier", harness: .pi, model: model, thinking: "medium",
-                cwd: root.path, parentAgentID: lead, createdAt: Date(), lastActivityAt: Date())
-            helperRecord.spawnResultHandle = "spawn-courier"
-            try store.upsert(helperRecord)
-            SpawnResultFile.write(.init(toolCallId: "spawn-courier", status: .spawned, agentId: helper.rawValue,
-                recipientId: lead.rawValue), parentCwd: root.path, warn: { _ in })
+            if !delegated {
+                var helperRecord = AgentRecord(id: helperID, displayName: "Courier", harness: .pi, model: model, thinking: "medium",
+                    cwd: root.path, parentAgentID: leadID, createdAt: Date(), lastActivityAt: Date())
+                helperRecord.spawnResultHandle = "spawn-courier"
+                try store.upsert(helperRecord)
+                SpawnResultFile.write(.init(toolCallId: "spawn-courier", status: .spawned, agentId: helperID.rawValue,
+                    recipientId: leadID.rawValue), parentCwd: root.path, warn: { _ in })
+            }
             leadRunner = Runner(autoEnd: true); helperRunner = Runner(autoEnd: false)
-            let pool: [AgentID: Runner] = [lead: leadRunner, helper: helperRunner]
+            let leadRun = leadRunner, helperRun = helperRunner
             transcriptRoot = root.appendingPathComponent("transcripts", isDirectory: true)
-            s = AgentSupervisor(store: store, makeRunner: { pool[$0.record.id]! }, warn: { _ in },
+            let supervisor = AgentSupervisor(store: store, makeRunner: { $0.record.id == leadID ? leadRun : helperRun }, warn: { _ in },
                 nameTitlerCommand: { _ in nil },
                 submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root.appendingPathComponent("drafts")),
                 transcriptStore: AgentTranscriptStore(root: transcriptRoot), maximumActiveManagedChildren: { nil })
-            _ = s.restore()
+            _ = supervisor.restore()
+            if delegated {
+                // Empty brief creates the delegated record without starting a
+                // turn. Later messages still take the real send/runner path.
+                guard let child = supervisor.handleSpawnRequest(.init(role: nil, prompt: "", isolated: false,
+                    sourceItemID: "spawn-courier", displayLabel: "Courier"), from: leadID) else {
+                    throw Failure(description: "the receipt fixture could not delegate its helper")
+                }
+                helper = child
+                supervisor.attach(agentID: child, to: UUID())
+            } else {
+                helper = helperID
+            }
+            s = supervisor
             s.helperCompletionNow = { [unowned self] in self.now }
         }
 
@@ -160,8 +176,8 @@ enum TranscriptRetentionDeliveryChecks {
         }
     }
 
-    private static func fixture(_ root: URL, _ name: String) throws -> Fixture {
-        try Fixture(root.appendingPathComponent("delivery-\(name)", isDirectory: true))
+    private static func fixture(_ root: URL, _ name: String, delegated: Bool = false) throws -> Fixture {
+        try Fixture(root.appendingPathComponent("delivery-\(name)", isDirectory: true), delegated: delegated)
     }
 
     /// A pushed result must be this turn's: its own answer, never turn A's.
@@ -440,6 +456,117 @@ enum TranscriptRetentionDeliveryChecks {
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
     }
 
+    /// C has actually ended but still awaits its archive when the lead takes
+    /// B's older, bounded result. B's receipt cannot authorize tidying C's tile.
+    static func runDeferredReceiptGeneration(root: URL) async throws {
+        let f = try fixture(root, "receipt-generation", delegated: true)
+        let gate = Gate()
+        let previousBound = AgentSupervisor.transcriptCompletionBound
+        defer {
+            AgentSupervisor.transcriptCompletionBound = previousBound
+            f.s.qaBeforeResumedTranscriptConstruction = nil
+            Task { await gate.open() }
+            f.s.stopAll()
+        }
+        f.s.helperCompletionNow = Date.init
+        AgentSupervisor.transcriptReleaseDelay = .seconds(60)
+        try await f.firstTurnThenRelease()
+        f.s.stop(f.lead)
+        f.s.qaBeforeResumedTranscriptConstruction = { agent, _ in
+            if agent == f.helper { await gate.wait() }
+        }
+        AgentSupervisor.transcriptCompletionBound = .seconds(2)
+        let handleB = try await f.message("Do task B.")
+        try await f.end("ANSWER_B")
+        let handleC = try await f.message("Do task C.")
+        // B settles while C's runner still owns its turn. C's own settlement
+        // then remains pending long enough to receive B through the real queue.
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, { f.result(handleB)?.status == .failed }) else {
+            throw Failure(description: "B's bounded result did not settle")
+        }
+        AgentSupervisor.transcriptCompletionBound = .seconds(60)
+        try await f.end("ANSWER_C")
+        guard let endedC = f.s.records[f.helper]?.latestTerminalEvent?.endedAt,
+              f.result(handleC)?.status == .spawned else {
+            throw Failure(description: "C did not end with its settlement still pending")
+        }
+        f.s.resumeQueue(for: f.lead)
+        await f.flushToLead()
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, {
+            (f.s.helperResultDeliveredAt[f.helper] ?? .distantPast) > endedC
+                && f.s.helperResultConfirmedAt(f.helper) != nil
+        }) else { throw Failure(description: "the lead did not receive and finish with B's late result") }
+        var failures: [String] = []
+        let oldReceiptRefusal = f.s.helperTileTidyRefusal(f.helper, now: Date())
+        if oldReceiptRefusal != "result not received" {
+            failures.append("B's late receipt stood in for C's pending result: \(oldReceiptRefusal ?? "tidy allowed")")
+        }
+        await gate.open()
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, { f.result(handleC)?.status == .completed }) else {
+            throw Failure(description: "C did not settle after the reload")
+        }
+        await f.flushToLead()
+        // Positive control: C's own received, successful result permits tidy.
+        if let refusal = f.s.helperTileTidyRefusal(f.helper, now: Date()) {
+            failures.append("C's own receipt did not permit tidy: \(refusal)")
+        }
+        if f.result(handleC)?.finalText?.contains("ANSWER_C") != true {
+            failures.append("C's result did not carry its own reply")
+        }
+        guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
+    }
+
+    /// A notice-only archive has never finished a turn. The person visits its
+    /// first actual completion before reload settlement; that visit keeps it.
+    static func runDeferredFirstFinishVisit(root: URL) async throws {
+        let f = try fixture(root, "first-finish-visit", delegated: true)
+        let gate = Gate()
+        let previousBound = AgentSupervisor.transcriptCompletionBound
+        defer {
+            AgentSupervisor.transcriptCompletionBound = previousBound
+            f.s.qaBeforeResumedTranscriptConstruction = nil
+            Task { await gate.open() }
+            f.s.stopAll()
+        }
+        f.s.helperCompletionNow = Date.init
+        AgentSupervisor.transcriptReleaseDelay = .zero
+        let status = AgentCommandInvocation(descriptorID: "array:status", name: "status", surface: .array)
+        guard case .accepted = await f.s.accept(.providerCommand(status), for: f.helper) else {
+            throw Failure(description: "the notice-only status command was refused")
+        }
+        await f.s.qaWaitForTranscriptPersistence(for: f.helper)
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, { f.s.isTranscriptReleased(f.helper) }),
+              f.s.helperFirstFinishedAt[f.helper] == nil else {
+            throw Failure(description: "the notice-only archive already finished a turn or did not release")
+        }
+        AgentSupervisor.transcriptReleaseDelay = .seconds(60)
+        AgentSupervisor.transcriptCompletionBound = .seconds(60)
+        f.s.qaBeforeResumedTranscriptConstruction = { agent, _ in
+            if agent == f.helper { await gate.wait() }
+        }
+        let handleC = try await f.message("Do task C.")
+        try await f.end("ANSWER_C")
+        guard f.result(handleC)?.status == .spawned else {
+            throw Failure(description: "C settled before the first-finish visit")
+        }
+        let visitedAt = Date()
+        f.s.markVisited(agentID: f.helper, now: visitedAt)
+        var failures: [String] = []
+        if f.s.helperFirstFinishedAt[f.helper].map({ $0 < visitedAt }) != true {
+            failures.append("the actual completion had no first-finish anchor before the visit")
+        }
+        await gate.open()
+        guard await waitUntil(timeout: 10, pollInterval: 0.02, { f.result(handleC)?.status == .completed }) else {
+            throw Failure(description: "C did not settle after the first-finish visit")
+        }
+        await f.flushToLead()
+        let refusal = f.s.helperTileTidyRefusal(f.helper, now: Date())
+        if refusal != "looked at since finishing" {
+            failures.append("the visit before settlement did not keep the tile: \(refusal ?? "tidy allowed")")
+        }
+        guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
+    }
+
     static func run(root: URL) async throws {
         let previousDelay = AgentSupervisor.transcriptReleaseDelay
         defer { AgentSupervisor.transcriptReleaseDelay = previousDelay }
@@ -455,6 +582,8 @@ enum TranscriptRetentionDeliveryChecks {
             ("hold under a later turn", runHoldUnderLaterTurn), ("unreadable archive", runUnreadableArchive),
             ("later report", runLaterReport), ("no-output turn", runNoOutputTurn),
             ("hold before the next start", runHoldBeforeNextStart), ("deferred hold report", runDeferredHoldReport),
+            ("deferred receipt generation", runDeferredReceiptGeneration),
+            ("deferred first-finish visit", runDeferredFirstFinishVisit),
         ]
         for (label, body) in cases {
             do { try await body(root); print("retention delivery: \(label) PASS") }
