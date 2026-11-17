@@ -123,9 +123,11 @@ extension SidebarOwnershipChecks {
             }
             inbox.layoutViewportForQA()
         }
+        // The Ledger draws and speaks the fold as "18 folded"; Quiet, "18 more".
+        let words = inbox.sidebarLayout == .ledger ? "18 folded" : "18 more"
         let collapsed = try fold()
-        guard collapsed.qaTitle == "18 more",
-              collapsed.qaAccessibilityLabel == "Show 18 more" else {
+        guard collapsed.qaTitle == words,
+              collapsed.qaAccessibilityLabel == "Show \(words)" else {
             throw Failure(description: "nested fold AX: collapsed label \(collapsed.qaAccessibilityLabel ?? "nil")")
         }
         try click(collapsed)
@@ -139,10 +141,10 @@ extension SidebarOwnershipChecks {
         }
         try click(expanded)
         let closed = try fold()
-        guard inbox.rowIdsForQA == [lead], closed.qaAccessibilityLabel == "Show 18 more" else {
+        guard inbox.rowIdsForQA == [lead], closed.qaAccessibilityLabel == "Show \(words)" else {
             throw Failure(description: "nested fold AX: pressing Show less did not fold the nested subtree")
         }
-        return "\(dark ? "dark" : "light") nested fold AX: 16 direct + 2 nested; Show 18 more → Hide 18 agents on Show less → collapsed through the real button"
+        return "\(dark ? "dark" : "light") nested fold AX: 16 direct + 2 nested; Show \(words) → Hide 18 agents on Show less → collapsed through the real button"
     }
 
     static let historyLead = 0xC00
@@ -323,10 +325,17 @@ extension SidebarOwnershipChecks {
         let resting = foldRecent.map(uuid)
         guard helpers() == resting else { throw fail("at rest the card shows \(helpers().map(name))") }
         guard lineTitles() == ["40 more, all done"] else { throw fail("the line reads \(lineTitles())") }
+        // The words the line draws: the Ledger says what it holds the way its
+        // count line does ("40 folded"); the Quiet inbox keeps "40 more, all done".
+        let ledger = inbox.sidebarLayout == .ledger
+        let restingWords = ledger ? "40 folded" : "40 more, all done"
         // The card is the list's last: its foot, the line, sits at the viewport's bottom.
         inbox.scrollToBottomForQA(materializeAll: false)
-        guard try isOnScreen(fold()), try fold().qaTitle == "40 more, all done", try isOnScreen(cell(foldRecent[2])) else {
+        guard try isOnScreen(fold()), try isOnScreen(cell(foldRecent[2])) else {
             throw fail("the card's foot is not on screen to point at")
+        }
+        guard try fold().qaTitle == restingWords else {
+            throw fail("the card's foot draws \"\(try fold().qaTitle)\", wanted \"\(restingWords)\"")
         }
 
         // Hover travels through the application, and paints only the content pill.
@@ -499,7 +508,7 @@ extension SidebarOwnershipChecks {
         let lineY = windowY(try fold())
         _ = try clickFold()
         let folded = [foldArrival] + foldRecent
-        guard helpers() == folded.map(uuid), try fold().qaTitle.hasPrefix("40 more"),
+        guard helpers() == folded.map(uuid), try fold().qaTitle.hasPrefix(ledger ? "40 folded" : "40 more"),
               !inbox.expandedFanoutParentsForQA.contains(uuid(foldLead)) else {
             throw fail("Show less left \(helpers().map(name)), line \(try fold().qaTitle)")
         }
@@ -507,7 +516,7 @@ extension SidebarOwnershipChecks {
             throw fail("folding back moved the line from y \(lineY) to \(windowY(try fold())) or hid its lead")
         }
         try still("folded")
-        return "\(label): \"40 more, all done\" lights and presses like a subagent row; clicking its words opens "
+        return "\(label): \"\(restingWords)\" lights and presses like a subagent row; clicking its words opens "
             + "43 rows in the visible rows' style and order (\(openedBuilt) rows built, \(onScreen) on screen); "
             + "\"Show less\" holds through a refresh; a folded subagent failing rebuilds nothing (\(failedBuilt) built); "
             + "a new live subagent keeps the read row still (\(arrivalBuilt) built, \(arrivalOnScreen) on screen of \(arrivalTotal)); its "
