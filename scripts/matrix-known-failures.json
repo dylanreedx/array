@@ -48,6 +48,14 @@
       "evidence": "Release lead explicitly directed confirming and recording these as pre-existing in the 2026-11-16 Wave1 brief. Rebuilt untouched7cc801d2 awake control: ~/array-scratch/release-features/release-0753-night-base-7cc801d2/; same messages on sticky branch. candidate-0753.md records exact outcomes.",
       "added": "2026-11-16",
       "expires": "2026-12-16"
+    },
+    {
+      "leg": "--agent-steering-recovery-check",
+      "kind": "flaky",
+      "reason": "The same forced-turn token assertion flakes on the documented base4c9d7495 and steady-memory f4d7e00c: base7/10 pass, branch8/10 pass in20 interleaved runs; release lead explicitly directed recording it as pre-existing.",
+      "evidence": "~/array-scratch/release-features/steady-memory.md and ~/array-scratch/steady-memory-release/steering-runs.txt plus steering-base-{5,6,7}.log / steering-branch-{6,9}.log. Raw logs verify equal failed assertions; head attribution comes from the hand-off record, not embedded binary hashes. Combined release18d0f487 steering check passed.",
+      "added": "2026-11-16",
+      "expires": "2026-12-16"
     }
   ]
 }
