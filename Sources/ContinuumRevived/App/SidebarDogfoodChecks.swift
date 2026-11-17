@@ -297,6 +297,8 @@ enum SidebarDogfoodChecks {
         guard let switchLine = usageLine(), switchLine.actionButton.title == "Switch & resume…" else {
             throw Failure(description: "(c) a second signed-in Codex account offers '\(usageLine()?.actionButton.title ?? "nil")', wanted Switch & resume…")
         }
+        inbox.scrollToTopForQA()
+        Q.photograph(h.sidebar, "dogfood-needsyou-live")
         try Q.click(switchLine.actionButton)
         try expect(h.delegate.lastSidebarIncidentOutcomeForQA == .openedSettings("agents"),
                    "(c) Switch & resume… opens Settings > Agents — got \(h.delegate.lastSidebarIncidentOutcomeForQA)")
