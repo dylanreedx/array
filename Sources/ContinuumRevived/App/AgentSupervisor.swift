@@ -8951,6 +8951,48 @@ final class AgentSupervisor {
         return helperCompletionNow().timeIntervalSince(held.since) < heldHelperCompletionCap
     }
 
+    /// Ownership of one finished helper turn while its settlement runs. A turn
+    /// whose completion waited on a transcript reload settles only the handles
+    /// that were accepted by the time it ended, under the identity it ended
+    /// with; later handles and turns are theirs.
+    private struct SettlementScope {
+        var id: AgentID
+        var identity: String
+        var completedAt: Date?
+        var transcriptUnavailable: Bool
+    }
+    private var settlementScope: SettlementScope?
+    /// Why the last reload of a released transcript failed, for the explicit
+    /// failure a bounded settlement delivers.
+    private var transcriptReloadFailureCause: [AgentID: String] = [:]
+
+    private func subscriptionsSettling(_ id: AgentID) -> [HelperMessageSubscription] {
+        let all = helperMessageSubscriptions[id] ?? []
+        guard let scope = settlementScope, scope.id == id, let completedAt = scope.completedAt else { return all }
+        return all.filter { $0.baseline <= completedAt }
+    }
+
+    private func settlementTurnIdentity(_ id: AgentID) -> String? {
+        if let scope = settlementScope, scope.id == id { return scope.identity }
+        return helperCompletionTurns[id]
+    }
+
+    private final class CompletionBox { var done = false }
+
+    private func runHelperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?, identity: String,
+                                        completedAt: Date?, unavailableCause: String?) {
+        var outcome = outcome, error = error
+        if let cause = unavailableCause {
+            if outcome == .completed { outcome = .failed }
+            error = error ?? "Array could not read this helper's saved transcript (\(cause)), so its final reply is unavailable."
+        }
+        let previous = settlementScope
+        settlementScope = SettlementScope(id: id, identity: identity, completedAt: completedAt,
+                                          transcriptUnavailable: unavailableCause != nil)
+        defer { settlementScope = previous }
+        helperTurnCompleted(id, turn: turn, outcome: outcome, error: error, identity: identity)
+    }
+
     private func settleHelperTurn(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?,
                                   statusOverride: String? = nil) {
         noteHelperCompletion(id, turn: turn, outcome: outcome, error: error, statusOverride: statusOverride)
@@ -9141,7 +9183,11 @@ final class AgentSupervisor {
     }
 
     private func settleHelperMessages(_ child: AgentID, outcome: TurnOutcome, error: String?) {
-        let subscriptions = helperMessageSubscriptions.removeValue(forKey: child) ?? []
+        let subscriptions = subscriptionsSettling(child)
+        let remaining = (helperMessageSubscriptions[child] ?? []).filter { held in
+            !subscriptions.contains { $0.handle == held.handle && $0.parent == held.parent }
+        }
+        helperMessageSubscriptions[child] = remaining.isEmpty ? nil : remaining
         for subscription in subscriptions {
             guard let cwd = records[subscription.parent]?.cwd else { continue }
             defer { SpawnResultFile.removeSubscription(parentCwd: cwd, helper: child.rawValue,
@@ -9158,7 +9204,7 @@ final class AgentSupervisor {
             let result = SpawnResultFile(toolCallId: subscription.handle, status: status,
                 agentId: child.rawValue, reason: error, finalText: text?.text,
                 finalTextTruncated: text?.truncated == true ? true : nil, endedAt: Date(), report: report,
-                turnIdentity: helperCompletionTurns[child], recipientId: subscription.parent.rawValue)
+                turnIdentity: settlementTurnIdentity(child), recipientId: subscription.parent.rawValue)
             if let context = subscription.queueContext {
                 do {
                     if var entry = try agentMessageOutbox.lookup(caller: context.caller, key: context.idempotencyKey) {
@@ -9227,7 +9273,7 @@ final class AgentSupervisor {
     /// report filed this turn. `statusOverride` replaces the no-report status.
     private func helperCompletionText(_ id: AgentID, child: AgentRecord, outcome: TurnOutcome, error: String?,
                                       statusOverride: String?) -> (text: String, capturedReport: Bool) {
-        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
+        let baseline = subscriptionsSettling(id).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let filedThisTurn = child.lastReport.map({ $0.filedAt > baseline }) == true
         let status: String
         switch outcome {
@@ -9255,14 +9301,15 @@ final class AgentSupervisor {
 
     private func noteHelperCompletion(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?,
                                       statusOverride: String? = nil) {
-        let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
+        let identity = settlementScope.flatMap { $0.id == id ? $0.identity : nil }
+            ?? runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
         guard let child = records[id], child.capabilities.locallyManaged,
               helperCompletionTurns[id] != identity else { return }
         helperCompletionTurns[id] = identity
-        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
+        let baseline = subscriptionsSettling(id).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let text = helperCompletionText(id, child: child, outcome: outcome, error: error, statusOverride: statusOverride).text
         let parents = Set([child.parentAgentID].compactMap { $0 }
-            + (helperMessageSubscriptions[id] ?? []).map(\.parent))
+            + subscriptionsSettling(id).map(\.parent))
         lastHelperDeliveryParents[id] = parents
         lateHelperText[id] = nil
         for parent in parents where records[parent] != nil && wakesForHelperCompletion(parent) {
@@ -12308,6 +12355,9 @@ final class AgentSupervisor {
     }
 
     func finalAssistantText(for id: AgentID) -> String? {
+        // A settlement delivered without its transcript has no reply to give,
+        // and must not give the previous turn's.
+        if let scope = settlementScope, scope.id == id, scope.transcriptUnavailable { return nil }
         // The resumed model comes first: while a reload replays held events the
         // released summary still exists and names the previous turn's reply.
         if let projection = transcriptProjections[id] { return projection.finalAssistantText }
@@ -12511,10 +12561,10 @@ final class AgentSupervisor {
     /// Drops the kept tool details once they pass their time to live, so a
     /// released agent holds them for no longer than a resident one would.
     private func scheduleReleasedToolDetailExpiry(_ id: AgentID) {
-        guard let released = releasedTranscripts[id], let expiresAt = released.toolDetails?.expiresAt else { return }
+        guard let released = releasedTranscripts[id], let remaining = released.toolDetails?.remaining else { return }
         let generation = released.saveGeneration
         Task { [weak self] in
-            try? await Task.sleep(for: .seconds(max(0, expiresAt.timeIntervalSinceNow)) + .milliseconds(50))
+            try? await Task.sleep(for: .seconds(max(0, remaining)) + .milliseconds(50))
             guard let self, self.releasedTranscripts[id]?.saveGeneration == generation else { return }
             self.releasedTranscripts[id]?.toolDetails = nil
         }
@@ -12614,10 +12664,18 @@ final class AgentSupervisor {
         var loadedModel: (AgentDocument, ManagedAgentTranscriptModel)?
         if case .success(let value?) = loaded { loadedModel = value }
         if loadedModel == nil, releasedTranscripts[id] != nil, records[id] != nil {
+            if case .failure(let error) = loaded { transcriptReloadFailureCause[id] = error.localizedDescription }
+            else { transcriptReloadFailureCause[id] = "the saved transcript is missing or incomplete" }
             warn("Agent \(id.rawValue.uuidString): its saved transcript could not be read back; kept released")
             return
         }
         guard let released = releasedTranscripts[id] else { return }
+        transcriptReloadFailureCause[id] = nil
+        if loadedModel != nil, records[id] != nil, let details = released.toolDetails {
+            // The records re-enter the new store, which owns their expiry.
+            await sharedTranscriptDetailCapture(for: id).restore(details)
+            guard transcriptReloadTokens[id] == token, releasedTranscripts[id] != nil else { return }
+        }
         if let (document, resumed) = loadedModel, records[id] != nil {
             // Everything just read back is the durable history. Protect the
             // entire loaded prefix, including entries saved after startup,
@@ -12627,7 +12685,6 @@ final class AgentSupervisor {
             // local-only history and a seed refuses a released transcript.
             if canonicalTranscriptSeparate.contains(id) { canonicalTranscriptProjections[id] = resumed }
             transcriptProjections[id] = resumed
-            if let details = released.toolDetails { sharedTranscriptDetailCapture(for: id).restore(details) }
         }
         var totalReplayed = 0
         var didReplay = false
@@ -14057,13 +14114,28 @@ final class AgentSupervisor {
         if case let .turnCompleted(_, turn, outcome, errorMessage) = event {
             // A released transcript holds this turn's events behind its reload, so
             // the reply read below would be the previous turn's. The completion
-            // joins the same FIFO and runs once those events are applied; the
-            // runner identity is captured now, not when it runs.
+            // joins the same FIFO and runs once those events are applied, owning
+            // the identity and the handles of the turn that ended now. If the
+            // reload cannot finish within the bound, it is delivered as an explicit
+            // failure instead: terminal delivery never depends on the archive.
             let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
-            if !deferUntilTranscriptReloaded(id, { [weak self] in
-                self?.helperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage, identity: identity)
-            }) {
-                helperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage, identity: identity)
+            let completedAt = Date()
+            let box = CompletionBox()
+            let settle: (String?, Bool) -> Void = { [weak self] cause, wasDeferred in
+                guard !box.done else { return }
+                box.done = true
+                self?.runHelperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage, identity: identity,
+                                             completedAt: wasDeferred ? completedAt : nil, unavailableCause: cause)
+            }
+            if deferUntilTranscriptReloaded(id, { settle(nil, true) }) {
+                let bound = Self.transcriptCompletionBound
+                Task { [weak self] in
+                    try? await Task.sleep(for: bound)
+                    guard !box.done, let self else { return }
+                    settle(self.transcriptReloadFailureCause[id] ?? "the read did not finish in time", true)
+                }
+            } else {
+                settle(nil, false)
             }
         }
         if case let .contentDelta(_, _, .assistant, delta) = event, !isRunning(id), helperCompletionTurns[id] != nil {
@@ -14142,7 +14214,7 @@ final class AgentSupervisor {
                 finalTextTruncated: finalTextTruncated,
                 endedAt: settledAt,
                 report: report,
-                turnIdentity: helperCompletionTurns[id],
+                turnIdentity: settlementTurnIdentity(id),
                 recipientId: parentID.rawValue
             ),
             parentCwd: parent.cwd,

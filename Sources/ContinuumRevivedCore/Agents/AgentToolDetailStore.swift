@@ -880,6 +880,16 @@ public actor AgentToolDetailStore {
         expiredAt[record.identity] = nil
     }
 
+    /// Takes back records this store handed out before (a released transcript
+    /// reloading). They keep their original update times, so they expire when
+    /// they would have, and the expiry reaper owns them again.
+    public func restore(_ records: [AgentToolDetailRecord]) -> AgentToolDetailChanges {
+        for record in records { write(record) }
+        expireLocked(at: currentDate())
+        startExpiryTaskIfNeeded()
+        return changes(since: 0)
+    }
+
     public func detail(for identity: AgentToolDetailKey) -> AgentToolDetailRecord? {
         expireLocked(at: currentDate())
         return details[identity]

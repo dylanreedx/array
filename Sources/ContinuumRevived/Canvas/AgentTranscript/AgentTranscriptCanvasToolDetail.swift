@@ -73,6 +73,8 @@ final class AgentTranscriptCanvasToolDetail {
         let identityByEntryID: [AgentNodeID: AgentToolDetailKey]
         /// When the newest record leaves its time to live.
         let expiresAt: Date
+        let clock: @Sendable () -> Date
+        var remaining: TimeInterval { expiresAt.timeIntervalSince(clock()) }
     }
 
     func releasedState() -> ReleasedState? {
@@ -81,14 +83,29 @@ final class AgentTranscriptCanvasToolDetail {
         guard let newest = live.values.map(\.updatedAt).max() else { return nil }
         return ReleasedState(details: live,
                              identityByEntryID: identityByEntryID.filter { live[$0.value] != nil },
-                             expiresAt: newest.addingTimeInterval(timeToLive ?? 0))
+                             expiresAt: newest.addingTimeInterval(timeToLive ?? 0), clock: clock)
     }
 
-    func restore(_ state: ReleasedState) {
-        details = state.details
-        identityByEntryID = state.identityByEntryID
-        presentationGeneration &+= 1
+    /// Hands the kept records to this capture's store, which owns their expiry
+    /// from their original update times, and pulls the expiry once the last of
+    /// them is due, so a quiet capture frees them without waiting for a write.
+    func restore(_ state: ReleasedState) async {
+        identityByEntryID.merge(state.identityByEntryID) { _, new in new }
+        guard let store else {
+            details.merge(state.details) { _, new in new }
+            presentationGeneration &+= 1
+            return
+        }
+        apply(await store.restore(Array(state.details.values)))
+        let wait = max(0, state.remaining)
+        reapTask?.cancel()
+        reapTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait) + .milliseconds(50))
+            guard !Task.isCancelled, let self, let store = self.store else { return }
+            self.apply(await store.changes(since: self.storeRevision))
+        }
     }
+    private var reapTask: Task<Void, Never>?
 
     // MARK: Capture
 
@@ -226,11 +243,15 @@ final class AgentTranscriptCanvasToolDetail {
 
     private func write(_ batch: [AgentToolDetailWrite]) async {
         guard let store else { return }
-        let changes = await store.record(batch, changesSince: storeRevision)
+        apply(await store.record(batch, changesSince: storeRevision))
+    }
+
+    private func apply(_ changes: AgentToolDetailChanges) {
         storeRevision = changes.revision
         guard !changes.isEmpty else { return }
         var touched = Set(changes.removed)
         for key in changes.removed { details[key] = nil }
+        if !changes.removed.isEmpty { identityByEntryID = identityByEntryID.filter { !touched.contains($0.value) } }
         for record in changes.changed { details[record.identity] = record; touched.insert(record.identity) }
         // A presentation depends on its block and its record only.
         presentedCache = presentedCache.filter { !touched.contains($0.value.identity) }
