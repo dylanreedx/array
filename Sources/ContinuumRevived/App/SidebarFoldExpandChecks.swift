@@ -79,6 +79,7 @@ extension SidebarOwnershipChecks {
         for dark in [true, false] {
             report.append(try checkFoldExpansion(dark: dark, outputDirectory: outputDirectory))
             report.append(try checkNestedFoldAccessibility(dark: dark, outputDirectory: outputDirectory))
+            report.append(try checkNeedsYouNeverFolds(dark: dark))
             report.append(try checkHistoryFooter(dark: dark))
         }
         return "SidebarFoldExpandChecks passed:\n" + report.joined(separator: "\n")
@@ -123,9 +124,11 @@ extension SidebarOwnershipChecks {
             }
             inbox.layoutViewportForQA()
         }
+        // Both layouts draw and speak the fold as "18 folded".
+        let words = "18 folded"
         let collapsed = try fold()
-        guard collapsed.qaTitle == "18 more",
-              collapsed.qaAccessibilityLabel == "Show 18 more" else {
+        guard collapsed.qaTitle == words,
+              collapsed.qaAccessibilityLabel == "Show \(words)" else {
             throw Failure(description: "nested fold AX: collapsed label \(collapsed.qaAccessibilityLabel ?? "nil")")
         }
         try click(collapsed)
@@ -139,10 +142,88 @@ extension SidebarOwnershipChecks {
         }
         try click(expanded)
         let closed = try fold()
-        guard inbox.rowIdsForQA == [lead], closed.qaAccessibilityLabel == "Show 18 more" else {
+        guard inbox.rowIdsForQA == [lead], closed.qaAccessibilityLabel == "Show \(words)" else {
             throw Failure(description: "nested fold AX: pressing Show less did not fold the nested subtree")
         }
-        return "\(dark ? "dark" : "light") nested fold AX: 16 direct + 2 nested; Show 18 more → Hide 18 agents on Show less → collapsed through the real button"
+        return "\(dark ? "dark" : "light") nested fold AX: 16 direct + 2 nested; Show \(words) → Hide 18 agents on Show less → collapsed through the real button"
+    }
+
+    /// A helper that needs you is never folded away (sidebar night fixes).
+    /// Nine helpers ask, one more than the eight-row cap, beside five long-done
+    /// ones. Before, the ninth asker went into the fold and only the For you
+    /// head named it. Now all nine are drawn rows under their lead, the lead's
+    /// count line says they need you, and the fold holds only the five done:
+    /// total = the state partition = drawn + folded.
+    static func checkNeedsYouNeverFolds(dark: Bool) throws -> String {
+        let label = "\(dark ? "dark" : "light") needs you never folds"
+        func fail(_ message: String) -> Failure { Failure(description: "\(label): \(message)") }
+        let lead = uuid(0xE00)
+        let askers = (1...9).map { uuid(0xE00 + $0) }
+        let done = (1...5).map { uuid(0xE20 + $0) }
+        func ago(_ minutes: Double) -> Date { now.addingTimeInterval(-minutes * 60) }
+        func row(_ id: UUID, _ title: String, state: InboxState, parent: UUID?, spawned: Double,
+                 ended: Double? = nil) -> AgentInboxRow {
+            AgentInboxRow(
+                id: id, title: title, projectName: "Array", projectId: uuid(0x805),
+                workspaceName: "personal", workspaceId: workspaceId, state: state, lifecycle: .active,
+                model: "claude-opus-5-5", branch: "array/integration",
+                lastActiveAt: ago(ended ?? 0), depth: 0, createdAt: ago(spawned), parentId: parent,
+                harness: "Claude Code",
+                terminalEvent: ended.map { AgentTerminalEvent(sequence: 1, turnID: nil, outcome: .succeeded, endedAt: ago($0)) },
+                terminalIsUnread: false, identityColor: parent == nil ? "purple" : nil, selfReport: nil,
+                hasTile: parent == nil, isPinned: false)
+        }
+        let fixture = [row(lead, "Ship the asking release", state: .working, parent: nil, spawned: 300)]
+            + askers.enumerated().map { i, id in
+                row(id, "Asking helper \(i + 1)", state: .input, parent: lead, spawned: 100 - Double(i)) }
+            + done.enumerated().map { i, id in
+                row(id, "Done helper \(i + 1)", state: .ready, parent: lead, spawned: 200 - Double(i), ended: 120 + Double(i)) }
+        let (inbox, window) = build(dark: dark, height: 720, rows: fixture, folds: [lead: true]) { _, _ in }
+        defer { window.orderOut(nil) }
+        inbox.layoutViewportForQA()
+
+        // Every asker is a drawn row under the lead, on screen, saying its title.
+        var drawnAskers = 0
+        for (i, id) in askers.enumerated() {
+            guard inbox.visibleAgentIdsForQA.contains(id), let cell = inbox.ownershipCellForQA(id: id) else {
+                throw fail("Asking helper \(i + 1) is not a drawn row (rows \(inbox.rowIdsForQA.count), fold \(inbox.ownershipRemaindersForQA.first?.qaTitle ?? "none"))")
+            }
+            cell.layoutSubtreeIfNeeded()
+            guard cell.qaTitle == "Asking helper \(i + 1)", cell.accessibilityLabel()?.contains("Asking helper \(i + 1)") == true else {
+                throw fail("Asking helper \(i + 1) draws \"\(cell.qaTitle)\", AX \(cell.accessibilityLabel() ?? "nil")")
+            }
+            drawnAskers += 1
+        }
+        // The fold holds only what is folded: the five done helpers, none that asks.
+        guard let fold = inbox.ownershipRemaindersForQA.first(where: { $0.qaParentID == lead }),
+              let remainder = inbox.fanoutRemaindersByParentForQA[lead] else {
+            throw fail("the five done helpers have no fold line")
+        }
+        fold.layoutSubtreeIfNeeded()
+        let words = "5 folded"
+        guard Set(remainder.hiddenDescendantIDs) == Set(done), remainder.hiddenNeedsYou == 0,
+              fold.qaTitle == words, fold.qaAccessibilityLabel?.contains("need") == false else {
+            throw fail("the fold draws \"\(fold.qaTitle)\" (AX \(fold.qaAccessibilityLabel ?? "nil")), holding \(remainder.hiddenDescendantCount) with \(remainder.hiddenNeedsYou) asking")
+        }
+        // The lead's count line carries "9 need you"; the partition reconciles
+        // with what is drawn and what is folded.
+        guard let tally = inbox.sidebarTallies[lead], let leadCell = inbox.ownershipCellForQA(id: lead) else {
+            throw fail("the lead has no tally or is not drawn")
+        }
+        leadCell.layoutSubtreeIfNeeded()
+        let needs = SidebarTallyState.needsYou.phrase(askers.count)
+        let drawnHelpers = inbox.rowIdsForQA.filter { Set(askers + done).contains($0) }.count
+        guard inbox.countLineTextForQA(id: lead)?.contains("14 helpers · \(needs)") == true,
+              leadCell.accessibilityHelp()?.contains(needs) == true else {
+            throw fail("the lead's count line reads \(inbox.countLineTextForQA(id: lead) ?? "nil"), AX \(leadCell.accessibilityHelp() ?? "nil")")
+        }
+        guard tally.reconciles, tally.total == 14, tally.count(.needsYou) == 9,
+              tally.shown == drawnHelpers, drawnHelpers == 9,
+              tally.folded == remainder.hiddenDescendantCount, tally.shown + tally.folded == tally.total else {
+            throw fail("counts do not reconcile: \(tally.accessibilityLabel) drawn \(drawnHelpers), fold \(remainder.hiddenDescendantCount)")
+        }
+        return "\(label): \(drawnAskers) asking helpers drawn under the lead (cap 8); fold \"\(fold.qaTitle)\" holds the 5 done; "
+            + "lead reads \"\(tally.countLine)\"; \(tally.total) = \(tally.shown) drawn + \(tally.folded) folded"
     }
 
     static let historyLead = 0xC00
@@ -323,10 +404,16 @@ extension SidebarOwnershipChecks {
         let resting = foldRecent.map(uuid)
         guard helpers() == resting else { throw fail("at rest the card shows \(helpers().map(name))") }
         guard lineTitles() == ["40 more, all done"] else { throw fail("the line reads \(lineTitles())") }
+        // The words the line draws, in both layouts: what it holds, "40 folded".
+        // The card's count line is the one place a failure is said.
+        let restingWords = "40 folded"
         // The card is the list's last: its foot, the line, sits at the viewport's bottom.
         inbox.scrollToBottomForQA(materializeAll: false)
-        guard try isOnScreen(fold()), try fold().qaTitle == "40 more, all done", try isOnScreen(cell(foldRecent[2])) else {
+        guard try isOnScreen(fold()), try isOnScreen(cell(foldRecent[2])) else {
             throw fail("the card's foot is not on screen to point at")
+        }
+        guard try fold().qaTitle == restingWords else {
+            throw fail("the card's foot draws \"\(try fold().qaTitle)\", wanted \"\(restingWords)\"")
         }
 
         // Hover travels through the application, and paints only the content pill.
@@ -499,15 +586,25 @@ extension SidebarOwnershipChecks {
         let lineY = windowY(try fold())
         _ = try clickFold()
         let folded = [foldArrival] + foldRecent
-        guard helpers() == folded.map(uuid), try fold().qaTitle.hasPrefix("40 more"),
+        guard helpers() == folded.map(uuid), try fold().qaTitle.hasPrefix("40 folded"),
               !inbox.expandedFanoutParentsForQA.contains(uuid(foldLead)) else {
             throw fail("Show less left \(helpers().map(name)), line \(try fold().qaTitle)")
         }
         guard abs(windowY(try fold()) - lineY) < 0.5, try isOnScreen(cell(foldLead)) else {
             throw fail("folding back moved the line from y \(lineY) to \(windowY(try fold())) or hid its lead")
         }
+        // A folded helper failed (step 5a): the card says "N failed" once, on the
+        // lead's count line, and never again on its fold.
+        let failures = try NSRegularExpression(pattern: "\\d+ failed")
+        let countLine = inbox.countLineTextForQA(id: uuid(foldLead)) ?? ""
+        let card = (try cell(foldLead).visibleTextForQA + [try fold().qaTitle]
+            + (inbox.sidebarLayout == .quietInbox ? [countLine] : [])).joined(separator: " | ")
+        let saidFailed = failures.numberOfMatches(in: card, range: NSRange(card.startIndex..., in: card))
+        guard saidFailed == 1, countLine.contains("1 failed") else {
+            throw fail("the card says failed \(saidFailed) times, wanted once on the count line: \(card)")
+        }
         try still("folded")
-        return "\(label): \"40 more, all done\" lights and presses like a subagent row; clicking its words opens "
+        return "\(label): \"\(restingWords)\" lights and presses like a subagent row; clicking its words opens "
             + "43 rows in the visible rows' style and order (\(openedBuilt) rows built, \(onScreen) on screen); "
             + "\"Show less\" holds through a refresh; a folded subagent failing rebuilds nothing (\(failedBuilt) built); "
             + "a new live subagent keeps the read row still (\(arrivalBuilt) built, \(arrivalOnScreen) on screen of \(arrivalTotal)); its "

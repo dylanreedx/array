@@ -233,7 +233,7 @@ enum SidebarLedgerChecks {
             throw fail("the card says failed more than once: '\(chip)'")
         }
         guard let help = leadCell.accessibilityHelp(),
-              help.contains("18 helpers · 12 paused · 1 failed · 2 stopped · 3 done") else {
+              help.contains("18 helpers · 12 paused · 1 failed · 2 interrupted · 3 done") else {
             throw fail("lead AX help reads '\(leadCell.accessibilityHelp() ?? "nil")'")
         }
         // Shown helpers under the lead + every drawn fold number = 18.
@@ -403,9 +403,8 @@ enum SidebarLedgerChecks {
               !quietHasLedgerHead else {
             throw fail("switching to Quiet inbox did not re-render (layout \(inbox.sidebarLayout))")
         }
-        if let quietLead = inbox.itemsForQA.firstIndex(where: { $0.agentRow?.id == uuid(lead) }),
-           let cell = inbox.cellForQA(atItem: quietLead) as? AgentInbox96CellView,
-           !cell.branchLaneTextForQA.contains("18 helpers · 12 paused · 1 failed") {
+        if inbox.itemsForQA.contains(where: { $0.agentRow?.id == uuid(lead) }),
+           inbox.countLineTextForQA(id: uuid(lead))?.contains("18 helpers · 12 paused · 1 failed") != true {
             throw fail("the Quiet inbox lost the shared count line")
         }
         defaults.set(SidebarLayout.ledger.rawValue, forKey: SidebarLayout.defaultsKey)
@@ -552,17 +551,26 @@ extension SidebarLedgerChecks {
                                             errorMessage: "You've hit your 5-hour limit · resets 4:00 AM"), to: helperID)
         f.delegate.qaRefreshAgentSurfaces()
         inbox.layoutForQA()
-        guard let usageAt = inbox.itemsForQA.firstIndex(where: {
+        // The Ledger draws the usage stop as an incident row; the Quiet inbox,
+        // as a line of its Needs you box. Either way its drawn action is pressed.
+        var usageAction: InboxSettleNudgeButton?
+        if let usageAt = inbox.itemsForQA.firstIndex(where: {
             if case .incident(let i) = $0 { return i.kind == .cause(.usageLimit) } else { return false }
-        }), let usageCell = inbox.cellForQA(atItem: usageAt) as? SidebarIncidentCellView else {
+        }), let usageCell = inbox.cellForQA(atItem: usageAt) as? SidebarIncidentCellView {
+            usageAction = usageCell.actionButton
+        } else if let box = QuickHideChecks.views(in: inbox, where: { $0 is SidebarQuietNeedsYouView && !$0.isHiddenOrHasHiddenAncestor })
+            .first as? SidebarQuietNeedsYouView {
+            usageAction = box.lines.first { $0.incident?.kind == .cause(.usageLimit) }?.actionButton
+        }
+        guard let usageAction else {
             let helperRow = inbox.allRowsForQA.first { $0.id == helperID.rawValue }
             throw Failure(description: "no usage incident drawn (helper state \(String(describing: helperRow?.state)), detail \(helperRow?.failureDetail ?? "nil"))")
         }
         window.contentView?.layoutSubtreeIfNeeded()
-        guard usageCell.actionButton.title == "Switch & resume…", usageCell.actionButton.isEnabled else {
-            throw Failure(description: "usage action reads '\(usageCell.actionButton.title)', enabled \(usageCell.actionButton.isEnabled)")
+        guard usageAction.title == "Switch & resume…", usageAction.isEnabled else {
+            throw Failure(description: "usage action reads '\(usageAction.title)', enabled \(usageAction.isEnabled)")
         }
-        try press(usageCell.actionButton, in: window, "Switch & resume…")
+        try press(usageAction, in: window, "Switch & resume…")
         guard let modal = f.delegate.qaSettingsModal, modal.isVisible, modal.model.selectedPaneID == "agents" else {
             throw Failure(description: "Switch & resume did not open Settings > Agents (modal \(f.delegate.qaSettingsModal?.isVisible == true), pane \(f.delegate.qaSettingsModal?.model.selectedPaneID ?? "nil"))")
         }
@@ -821,7 +829,7 @@ extension SidebarLedgerChecks {
                     throw Failure(description: "\(layout.title): no rendered lead")
                 }
                 let ax = card.accessibilityHelp() ?? ""
-                try expect(ax.contains("18 helpers · 12 paused · 1 failed · 2 stopped · 3 done"), "rendered AX partition: '\(ax)'")
+                try expect(ax.contains("18 helpers · 12 paused · 1 failed · 2 interrupted · 3 done"), "rendered AX partition: '\(ax)'")
                 try expect(card.visibleTextForQA.contains("18"), "rendered disclosure does not count 18: \(card.visibleTextForQA)")
                 var shown = 0, folded = 0
                 for index in (start + 1)..<inbox.itemsForQA.count {
@@ -839,6 +847,8 @@ extension SidebarLedgerChecks {
                         try expect(!(line.buttonForQA.accessibilityValue() as? String ?? "").contains("failed"),
                                    "fold AX value contradicts the reconciled family tally")
                         folded += number
+                    case .familyCause, .leadCount:
+                        continue // Quiet: the lead's count and cause lines, inside the card
                     default: return (shown, folded)
                     }
                 }
@@ -955,7 +965,7 @@ extension SidebarLedgerChecks {
             try press(inbox.undoButtonForQA, in: window, "Undo repeated Clear")
             inbox.layoutForQA()
             try checkHistoryAndStanding(layout)
-            reports.append("\(layout.title): 18 = 12 paused + 1 failed + 2 stopped + 3 done = \(count.shown) shown + \(count.folded) folded from rendered rows/AX; fold, Settings Layout, Clear and Undo used NSApp.sendEvent; blockers stayed, marks reloaded, helper activity restored its family")
+            reports.append("\(layout.title): 18 = 12 paused + 1 failed + 2 interrupted + 3 done = \(count.shown) shown + \(count.folded) folded from rendered rows/AX; fold, Settings Layout, Clear and Undo used NSApp.sendEvent; blockers stayed, marks reloaded, helper activity restored its family")
         }
         return "SidebarLayoutsChecks passed:\n" + reports.joined(separator: "\n")
     }

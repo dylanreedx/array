@@ -23,8 +23,14 @@ enum SidebarSelectionGeometryChecks {
             }), let cell = inbox.cellForQA(id: last.id),
                   let slice = inbox.ownershipSliceForQA(id: last.id),
                   let leadCell = inbox.cellForQA(id: lead) else { return }
+            // Quiet: the lead's count and cause lines are rows of the same card.
+            let inCard = inbox.familyCauseCells.values.filter { line in
+                line.window != nil && (line.countTallyForQA?.leadId == lead
+                    || line.causeIncidentForQA?.familyIDs == [lead])
+            }
             let actualHeight = leadCell.bounds.height + visible.reduce(0) { $0 + $1.bounds.height }
-                + CGFloat(visible.count) * CGFloat(AgentInboxView.rowSpacing)
+                + inCard.reduce(0) { $0 + $1.bounds.height }
+                + CGFloat(visible.count + inCard.count) * CGFloat(AgentInboxView.rowSpacing)
             guard abs(slice.groupHeight - actualHeight) < 0.5 else {
                 throw Failure(message: "group height is stale after live helper changes")
             }

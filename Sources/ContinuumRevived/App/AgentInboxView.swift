@@ -794,7 +794,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
     /// The parents drawn folded right now, derived from `foldChoices` and the
     /// rollups on every display (`isFolded`). Never written anywhere else.
-    private var collapsedParents: Set<UUID> = []
+    private(set) var collapsedParents: Set<UUID> = []
     /// What you last chose for each parent: true open, false folded. Nothing in
     /// the change set, nothing on the row; the host persists it on this Mac only
     /// (`onParentFoldChange`), because a synced fold would hide an agent on a
@@ -1410,6 +1410,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Quiet inbox: one cause chip per family.
     private(set) var sidebarFamilyChips: [SidebarQuietInbox.FamilyChip] = []
     private var quietNeedsYouCell: SidebarQuietNeedsYouView?
+    var familyCauseCells: [String: AgentInboxRemainderView] = [:]
     /// Pressed incident actions reach the host here (account sheet, sign-in,
     /// repair, retry/resume, open). nil: the action button is disabled.
     var onIncidentAction: ((SidebarIncident) -> Void)?
@@ -1843,15 +1844,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         onIncidentAction?(incident)
     }
 
-    /// "N folded · includes K stopped", over the remainder's own hidden ids.
+    /// "N folded": how many the remainder holds, nothing more.
     func ledgerFoldTitle(_ remainder: FanoutRemainder) -> String {
-        let byId = Dictionary(allRows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let stopped = remainder.hiddenDescendantIDs.filter { id in
-            byId[id].map { SidebarRecovery.state(for: $0) == .stopped } ?? false
-        }.count
-        var title = "\(remainder.hiddenDescendantCount) folded"
-        if stopped > 0 { title += " · includes \(stopped) stopped" }
-        return title
+        // Every state's number is said once, on the lead's count line; the
+        // fold says only how many it folds.
+        "\(remainder.hiddenDescendantCount) folded"
     }
 
     /// The Ledger's head: "For you" (blocking incidents, one line each) and
@@ -2514,6 +2511,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let previousRollups = rollupsByParent
         let previousTallies = sidebarTallies
         let previousByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        // The nudge is list-wide (any blocked row withdraws it), so a push that
+        // changes one row can move it on another: both rows are repainted below.
+        let previousNudge = settleNudgeTargetID(now: clock())
         let next = display(from: newRows)
         // P4.7: the identity sequence is compared over the DRAWN items, not over the
         // agent rows — the shelf header is a row in this table, and a snooze that
@@ -2575,6 +2575,21 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         setItems(next)
         // Plan 106: the same rows in the same places; their cards may have changed.
         refreshVisibleOwnership()
+        // Nudge visibility changes no row geometry: update the existing control
+        // in place rather than rebuilding an otherwise unchanged card.
+        let newNudge = settleNudgeTargetID(now: clock())
+        if previousNudge != newNudge {
+            for id in [previousNudge, newNudge].compactMap({ $0 }) {
+                guard let index = tableRow(forAgentId: id),
+                      let card = tableView.view(atColumn: 0, row: index, makeIfNecessary: false) as? AgentInbox96CellView
+                else { continue }
+                card.showSettleNudge(id == newNudge) { [weak self] in
+                    guard let self else { return }
+                    self.rowChoiceTargetIds = [id]
+                    self.performRowAction(.settle)
+                }
+            }
+        }
         let indexes = IndexSet(rows.indices.filter {
             changed.touched.contains(rows[$0].id) || !rows[$0].matchesIgnoringLiveElapsed(previous[$0])
                 || disclosureMoved.contains(rows[$0].id)
@@ -2733,6 +2748,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             built.append(contentsOf: agentItems(for: standingRows))
         }
         built.append(contentsOf: sortMode == .byProject ? projectGroupedItems(for: otherRows) : agentItems(for: otherRows))
+        built = withFamilyCauseLines(built)
         // NO HEADER FOR AN EMPTY SHELF: "Snoozed (0)" is a line of chrome about
         // nothing, and it would take a row's worth of a 320pt sidebar to say it.
         if parts.shelfCount > 0 {
@@ -2942,6 +2958,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .fanoutRemainder(let remainder):
                 depths.append(min((depthByAgent[remainder.parentId] ?? 0) + 1,
                                   AgentInboxRow.maxDepth))
+            case .familyCause(_, let leadId):
+                depths.append(min((depthByAgent[leadId] ?? 0) + 1, AgentInboxRow.maxDepth))
+            case .leadCount(let tally):
+                depths.append(min((depthByAgent[tally.leadId] ?? 0) + 1, AgentInboxRow.maxDepth))
             case .shelfHeader, .historyHeader, .shelfSpacer, .settledMore, .projectHeading,
                  .sectionLabel, .incident, .quietNeedsYou:
                 depths.append(0)
@@ -4208,7 +4228,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         guard let item = item(at: row) else { return AgentInboxView.shelfHeaderHeight }
         guard let model = item.agentRow else {
             switch item {
-            case .fanoutRemainder:
+            case .fanoutRemainder, .familyCause, .leadCount:
                 return (ownsSubagents ? InboxOwnershipChrome.subagentHeight : AgentInboxView.slimRowHeight) + groupEndGap
             case .shelfHeader, .historyHeader, .settledMore, .projectHeading:
                 return AgentInboxView.shelfHeaderHeight
@@ -4302,6 +4322,28 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 cell.apply(incident, actionEnabled: onIncidentAction != nil && incident.kind == .cause(.usageLimit))
                 incidentCells[incident.id] = cell
                 return cell
+            case .leadCount(let tally):
+                let key = "count:\(tally.leadId.uuidString)"
+                let cell = familyCauseCells[key] ?? AgentInboxRemainderView()
+                cell.activeIndicatorStyle = activeIndicatorStyle.rawValue
+                cell.identifier = NSUserInterfaceItemIdentifier("sidebar-lead-count-\(tally.leadId.uuidString)")
+                cell.setNesting(nesting(atTableRow: row))
+                if ownsSubagents { cell.setOwnership(ownership(atTableRow: row)) }
+                cell.applyCount(tally)
+                familyCauseCells[key] = cell
+                return cell
+            case .familyCause(let incident, _):
+                let cell = familyCauseCells[incident.id] ?? AgentInboxRemainderView()
+                cell.activeIndicatorStyle = activeIndicatorStyle.rawValue
+                cell.identifier = NSUserInterfaceItemIdentifier("sidebar-family-cause-\(incident.id)")
+                cell.setNesting(nesting(atTableRow: row))
+                if ownsSubagents { cell.setOwnership(ownership(atTableRow: row)) }
+                // This release only "Switch & resume…" acts, as in the Needs you box.
+                cell.applyCause(incident, actionEnabled: onIncidentAction != nil && incident.kind == .cause(.usageLimit)) {
+                    [weak self] in self?.pressIncident(incident)
+                }
+                familyCauseCells[incident.id] = cell
+                return cell
             case .quietNeedsYou(let incidents):
                 let cell = quietNeedsYouCell ?? SidebarQuietNeedsYouView()
                 cell.onAction = { [weak self] incident in self?.pressIncident(incident) }
@@ -4323,8 +4365,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 cell.onExpand = { [weak self] in self?.toggleFanout(parentId: remainder.parentId) }
                 cell.setNesting(nesting(atTableRow: row))
                 if ownsSubagents { cell.setOwnership(ownership(atTableRow: row)) }
-                cell.ledgerTitle = sidebarLayout == .ledger ? ledgerFoldTitle(remainder)
-                    : (remainder.hiddenFailed > 0 ? "\(remainder.hiddenDescendantCount) more" : nil)
+                // Both layouts: "N folded". The card's count line says "failed"
+                // once; the fold never says it again.
+                cell.ledgerTitle = ledgerFoldTitle(remainder)
                 cell.apply(remainder: remainder)
                 cell.isHovered = hoveredFanoutParentId == remainder.parentId
                 fanoutRemainderCellsByParent[remainder.parentId] = cell
@@ -7350,6 +7393,17 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var isSortHoldPendingForQA: Bool { sortHoldPending }
     /// Sidebar round: the drawn list, materialised, for the ledger witness.
     var itemsForQA: [InboxListItem] { items }
+    /// The lead's drawn count line: its own row in the Quiet inbox, line 2's
+    /// tail in the Ledger. nil when neither is drawn.
+    func countLineTextForQA(id: UUID) -> String? {
+        // Quiet, open lead: its own row. A folded lead keeps it on line 2.
+        if sidebarLayout == .quietInbox, let cell = familyCauseCells["count:\(id.uuidString)"], cell.window != nil,
+           !cell.isHiddenOrHasHiddenAncestor, cell.countTallyForQA?.leadId == id,
+           items.contains(where: { if case .leadCount(let t) = $0 { return t.leadId == id }; return false }) {
+            return cell.titleForQA
+        }
+        return ownershipCellForQA(id: id)?.tailTextForQA
+    }
     var allRowsForQA: [AgentInboxRow] { allRows }
     func cellForQA(atItem index: Int) -> NSView? {
         tableView.view(atColumn: 0, row: index, makeIfNecessary: true)
@@ -8509,13 +8563,19 @@ enum InboxListItem {
     case incident(SidebarIncident)
     /// Sidebar round, Quiet inbox: the "Needs you" box, never empty.
     case quietNeedsYou([SidebarIncident])
+    /// Quiet inbox: a family's one cause line, inside its lead's card, right
+    /// under the lead ("⚠ Codex was busy … Retry…").
+    case familyCause(SidebarIncident, leadId: UUID)
+    /// Quiet inbox: the lead's count line, its own line in the card under the
+    /// lead ("105 helpers · 5 failed · 5 interrupted"), as in variants/A.
+    case leadCount(SidebarLeadTally)
 
     /// One of the two counted, collapsible headings.
     var isShelfHeading: Bool {
         switch self {
         case .shelfHeader, .historyHeader: return true
         case .agent, .fanoutRemainder, .settledMore, .shelfSpacer, .projectHeading, .sectionLabel, .incident,
-             .quietNeedsYou: return false
+             .quietNeedsYou, .familyCause, .leadCount: return false
         }
     }
 
@@ -8552,6 +8612,10 @@ enum InboxListItem {
         case .quietNeedsYou(let incidents):
             return "needs-you:" + incidents.map { "\($0.id):\($0.title):\($0.detail):\($0.actionTitle)" }
                 .joined(separator: "|")
+        case .familyCause(let incident, let leadId):
+            return "cause:\(leadId.uuidString):\(incident.id):\(incident.detail):\(incident.actionTitle)"
+        case .leadCount(let tally):
+            return "count:\(tally.leadId.uuidString):\(tally.countLine)"
         }
     }
 }
@@ -8973,10 +9037,151 @@ final class AgentInboxRemainderView: NSTableCellView {
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        applyTokens()
+        if causeIncidentForQA != nil { applyCauseTokens() }
+        else if let tally = countTallyForQA { applyCount(tally) }
+        else { applyTokens() }
     }
 
     @objc private func expandClicked() { onExpand?() }
+
+    // Quiet inbox: the same in-card line, carrying a family's cause instead of
+    // a fold. Its icon and words on the left, its one action as plain text on
+    // the right; the line itself does not press.
+    private var causeAction: InboxSettleNudgeButton?
+    private var causeLabelWidth: NSLayoutConstraint?
+    /// The action's width, measured when its title is set, never in layout.
+    private var causeActionWidth: CGFloat = 0
+    private var onCauseAction: (() -> Void)?
+    private(set) var causeIncidentForQA: SidebarIncident?
+    /// The cause line's words, kept apart from the drawn string so redrawing
+    /// never stacks a second icon in front of them.
+    private var causeWords = ""
+    var causeActionForQA: InboxSettleNudgeButton? { causeAction }
+
+    func applyCause(_ incident: SidebarIncident, actionEnabled: Bool, onAction: @escaping () -> Void) {
+        remainder = nil
+        causeIncidentForQA = incident
+        onCauseAction = onAction
+        let action = causeAction ?? {
+            let made = InboxSettleNudgeButton(frame: .zero)
+            made.isPlain = true
+            made.imagePosition = .noImage
+            made.font = .systemFont(ofSize: Typography.style(for: .label).size, weight: .medium)
+            made.target = self
+            made.action = #selector(causePressed)
+            addSubview(made)
+            causeAction = made
+            // One line that gives way to its action: truncate, never wrap.
+            makeSingleLine()
+            return made
+        }()
+        if action.title != incident.actionTitle || causeActionWidth == 0 {
+            action.title = incident.actionTitle
+            causeActionWidth = ceil(action.intrinsicContentSize.width)
+        }
+        action.isEnabled = actionEnabled
+        action.toolTip = actionEnabled ? nil : "Not available yet"
+        action.setAccessibilityLabel(incident.actionTitle)
+        action.setAccessibilityIdentifier("ContinuumSidebarFamilyCauseAction-\(incident.id)")
+        button.isHidden = true
+        let words = AgentInboxView.causeLineText(incident) ?? incident.detail
+        causeWords = words
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("\(incident.title): \(words)")
+        setAccessibilityChildren([action])
+        applyCauseTokens()
+        needsLayout = true
+    }
+
+    @objc private func causePressed() { onCauseAction?() }
+
+    /// The lead's count line, drawn as its own line in the card: quiet ink,
+    /// "N failed" in the failed red, no action, nothing to press.
+    private(set) var countTallyForQA: SidebarLeadTally?
+    /// The drawn words fit their line whole: nothing is cut off.
+    var labelFitsForQA: Bool {
+        label.frame.width > 0 && ceil(label.attributedStringValue.size().width) <= ceil(label.frame.width) + 0.5
+    }
+    func applyCount(_ tally: SidebarLeadTally) {
+        remainder = nil
+        countTallyForQA = tally
+        button.isHidden = true
+        makeSingleLine()
+        let font = label.font ?? .token(.label)
+        let secondary = TextToken.textSecondary.color.nsColor(in: self)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let text = NSMutableAttributedString()
+        for (index, part) in tally.countLine.components(separatedBy: " · ").enumerated() {
+            if index > 0 {
+                text.append(NSAttributedString(string: " · ", attributes: [.foregroundColor: secondary.withAlphaComponent(0.6)]))
+            }
+            let ink = part.hasSuffix(" failed") ? AccentToken.accentFailed.color.nsColor(in: self) : secondary
+            text.append(NSAttributedString(string: part, attributes: [.foregroundColor: ink]))
+        }
+        text.addAttributes([.font: font, .paragraphStyle: paragraph], range: NSRange(location: 0, length: text.length))
+        label.attributedStringValue = text
+        label.toolTip = tally.fullLine
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(tally.accessibilityLabel)
+        setAccessibilityChildren([])
+        needsLayout = true
+    }
+
+    private func makeSingleLine() {
+        guard causeLabelWidth == nil else { return }
+        label.maximumNumberOfLines = 1
+        label.usesSingleLineMode = true
+        label.cell?.wraps = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let width = label.widthAnchor.constraint(lessThanOrEqualToConstant: 10_000)
+        width.isActive = true
+        causeLabelWidth = width
+    }
+
+    /// The symbol, in the incident's hue, before quiet secondary words.
+    private func applyCauseTokens() {
+        guard let incident = causeIncidentForQA else { return }
+        let secondary = TextToken.textSecondary.color.nsColor(in: self)
+        let tint: NSColor
+        switch incident.kind {
+        case .cause(.signInExpired), .cause(.couldNotStart), .cause(.taskError), .cause(.providerBusy):
+            tint = AccentToken.accentFailed.color.nsColor(in: self)
+        default:
+            tint = secondary
+        }
+        let font = label.font ?? .token(.label)
+        let text = NSMutableAttributedString()
+        if let symbol = NSImage(systemSymbolName: incident.symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: font.pointSize - 1, weight: .medium)
+                .applying(.init(paletteColors: [tint]))) {
+            let attachment = NSTextAttachment()
+            attachment.image = symbol
+            attachment.bounds = NSRect(x: 0, y: font.descender + 1, width: symbol.size.width, height: symbol.size.height)
+            text.append(NSAttributedString(attachment: attachment))
+            text.append(NSAttributedString(string: "  "))
+        }
+        text.append(NSAttributedString(string: causeWords))
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        text.addAttributes([.font: font, .foregroundColor: secondary, .paragraphStyle: paragraph],
+                           range: NSRange(location: 0, length: text.length))
+        label.attributedStringValue = text
+        causeAction?.applyTokens()
+        causeAction?.alphaValue = (causeAction?.isEnabled ?? true) ? 1 : Opacity.receded * 0.6
+    }
+
+    private func layoutCauseAction() {
+        guard let causeAction, causeIncidentForQA != nil else { return }
+        let width = causeActionWidth, height = InboxSettleNudgeButton.height
+        let right = bounds.width - CGFloat(AgentInbox96CellView.outerGutter) - 6 - 8
+        let mid = (ownership != nil ? InboxOwnershipChrome.subagentHeight : bounds.height) / 2
+        causeAction.frame = NSRect(x: right - width, y: floor(mid - height / 2), width: width, height: height)
+        let room = max(0, causeAction.frame.minX - 8 - label.frame.minX)
+        if causeLabelWidth?.constant != room { causeLabelWidth?.constant = room }
+    }
 
     /// `ChromeIconButton`'s ladder: held, the row-selected step; under the
     /// pointer, the hover step.
@@ -9023,6 +9228,7 @@ final class AgentInboxRemainderView: NSTableCellView {
 
     override func layout() {
         super.layout()
+        defer { layoutCauseAction() }
         if let ownership {
             spine.isHidden = true
             clipsToBounds = false

@@ -856,7 +856,15 @@ enum SidebarScreenshotChecks {
         // Dylan's report was "they are too different to look properly aligned because of
         // the various shapes", and the raw numbers below say why: SF Symbols share a
         // bounding box, not an optical size.
-        let statusSymbols = AgentInbox96CellView.statusSymbolsInUse
+        // Production's set plus ONE fixture-only narrow glyph. With the hand gone
+        // (Dylan: no hand) every production glyph is a circle or a triangle of one
+        // width, so centring them would scatter nothing and the floor below would
+        // be theatre. The narrow mark is drawn here only, never by the sidebar; it
+        // gives the alignment a real spread to correct.
+        let fixtureOnlyNarrowGlyph = "exclamationmark"
+        let statusSymbols = AgentInbox96CellView.statusSymbolsInUse + [fixtureOnlyNarrowGlyph]
+        try expect(!AgentInbox96CellView.statusSymbolsInUse.contains(fixtureOnlyNarrowGlyph),
+                   "the fixture's narrow glyph must not be one production draws")
         try expect(statusSymbols.count >= 2,
                    "the mock draws \(statusSymbols.count) distinct status symbols; with "
                    + "fewer than two there is no column to align and this witness is "

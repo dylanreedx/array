@@ -155,9 +155,12 @@ public enum InboxSort {
             // Keep the whole family as context when any member still matters.
             // A restored ready state alone does not establish a finished turn.
             let isQuiet = family.allSatisfy { row in
+                // An unread mark alone does not keep a finished helper whose
+                // lead is gone: with no card to sit in it drew as a loose strip.
+                // An unopened failure still stays (below); Search finds the rest.
                 guard row.id != openAgentId, !row.hasLiveRunner,
                       !row.settlementBlocked, !row.isPinned,
-                      row.attention == .none,
+                      row.attention != .woke,
                       !isUnopenedFailure(row) else { return false }
                 switch row.state {
                 case .working, .approval, .input: return false
@@ -399,7 +402,8 @@ public enum InboxSort {
     /// What a lead's card shows. Each parent's children, in this order: those
     /// that need you, then those working (both in the frozen spawn order), then
     /// those that finished within `recentSubagentWindow`, newest first, at most
-    /// `maxVisibleChildren` in all. Everything else folds into the parent's one
+    /// `maxVisibleChildren` in all, though every child that needs you is drawn
+    /// however many there are. Everything else folds into the parent's one
     /// remainder row ("N more, all done"). A child stands where the most pressing
     /// row of its subtree stands, so a finished subagent whose helper still works
     /// stays in view.
@@ -491,8 +495,12 @@ public enum InboxSort {
             let folded = ranked.filter { $0.standing.rank == 3 }.sorted {
                 $0.standing.at != $1.standing.at ? $0.standing.at > $1.standing.at : $0.index < $1.index
             }
-            let visible = shown.prefix(maxVisibleChildren).map(\.row)
-            let hidden = shown.dropFirst(maxVisibleChildren).map(\.row) + folded.map(\.row)
+            // A child that needs you (rank 0, its own ask or one below it) is
+            // never folded away: every one is drawn, and the cap spends what
+            // is left of its eight on the rest.
+            let budget = max(maxVisibleChildren, shown.prefix { $0.standing.rank == 0 }.count)
+            let visible = shown.prefix(budget).map(\.row)
+            let hidden = shown.dropFirst(budget).map(\.row) + folded.map(\.row)
             let isExpanded = expandedParents.contains(row.id)
             for child in visible { emit(child) }
             if isExpanded { for child in hidden { emit(child) } }

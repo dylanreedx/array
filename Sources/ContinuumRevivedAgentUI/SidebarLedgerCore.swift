@@ -14,7 +14,7 @@ public enum SidebarLayout: String, CaseIterable, Equatable, Sendable {
     case quietInbox
 
     public static let defaultsKey = "continuum.sidebar.layout"
-    public static let defaultLayout: SidebarLayout = .ledger
+    public static let defaultLayout: SidebarLayout = .quietInbox
 
     public var title: String {
         switch self {
@@ -47,6 +47,16 @@ public enum SidebarFailureCause: String, CaseIterable, Equatable, Sendable {
         }
     }
 
+    /// One word for a lead's status column, the tally's word for the state;
+    /// the long cause lives on the card's cause line.
+    public var shortLabel: String {
+        switch self {
+        case .usageLimit: return "Paused"
+        case .interruptedByRestart: return "Interrupted"
+        case .providerBusy, .signInExpired, .couldNotStart, .taskError: return "Failed"
+        }
+    }
+
     /// The row's word. A usage stop is a pause, never "Failed".
     public func label(harness: String?) -> String {
         switch self {
@@ -74,10 +84,10 @@ public enum SidebarFailureCause: String, CaseIterable, Equatable, Sendable {
     public var symbol: String {
         switch self {
         case .usageLimit: return "pause.circle"
-        case .providerBusy: return "icloud.slash"
-        case .signInExpired: return "key"
-        case .couldNotStart: return "wrench.and.screwdriver"
-        case .interruptedByRestart: return "arrow.clockwise.circle"
+        case .providerBusy: return "exclamationmark.triangle"
+        case .signInExpired: return "exclamationmark.triangle"
+        case .couldNotStart: return "exclamationmark.triangle"
+        case .interruptedByRestart: return "clock"
         case .taskError: return "exclamationmark.triangle"
         }
     }
@@ -98,7 +108,9 @@ public enum SidebarTallyState: String, CaseIterable, Equatable, Sendable {
         case .needsYou: return count == 1 ? "1 needs you" : "\(count) need you"
         case .paused: return "\(count) paused"
         case .failed: return "\(count) failed"
-        case .stopped: return "\(count) stopped"
+        // One word for the state on every surface: a helper whose turn was cut
+        // off (a restart, a cancel) is "interrupted", never "stopped" or "failed".
+        case .stopped: return "\(count) interrupted"
         case .done: return "\(count) done"
         }
     }
@@ -106,7 +118,7 @@ public enum SidebarTallyState: String, CaseIterable, Equatable, Sendable {
     public var symbol: String {
         switch self {
         case .working: return "arrow.triangle.2.circlepath"
-        case .needsYou: return "hand.raised"
+        case .needsYou: return "questionmark.circle"
         case .paused: return "pause.circle"
         case .failed: return "exclamationmark.triangle"
         case .stopped: return "stop.circle"
@@ -231,7 +243,7 @@ public struct SidebarLeadTally: Equatable, Sendable {
     /// or are moving; zero subsets omitted. Failure is said here and only here.
     public var countLine: String {
         var parts = [total == 1 ? "1 helper" : "\(total) helpers"]
-        for state in [SidebarTallyState.working, .needsYou, .paused, .failed] where count(state) > 0 {
+        for state in [SidebarTallyState.working, .needsYou, .paused, .failed, .stopped] where count(state) > 0 {
             parts.append(state.phrase(count(state)))
         }
         return parts.joined(separator: " · ")
@@ -248,12 +260,7 @@ public struct SidebarLeadTally: Equatable, Sendable {
 
     /// The fold: "5 folded · includes 3 stopped". It names only what the chip
     /// does not, so a failure is never said twice on one card.
-    public var foldLine: String {
-        var line = "\(folded) folded"
-        let stopped = foldedCounts[.stopped] ?? 0
-        if stopped > 0 { line += " · includes \(stopped) stopped" }
-        return line
-    }
+    public var foldLine: String { "\(folded) folded" }
 
     public var accessibilityLabel: String {
         "\(fullLine). \(shown) shown, \(folded) folded."
@@ -365,7 +372,7 @@ public enum SidebarIncidents {
         for row in asking.prefix(asking.count > maxAsksShown ? maxAsksShown - 1 : maxAsksShown) {
             let lead = family(of: row)
             result.append(SidebarIncident(
-                id: "needs:\(row.id.uuidString)", kind: .needsYou, symbol: "hand.raised.fill",
+                id: "needs:\(row.id.uuidString)", kind: .needsYou, symbol: "questionmark.circle",
                 title: row.displayTitle,
                 detail: lead.id == row.id ? "Needs you" : "\(lead.displayTitle) · needs you",
                 actionTitle: "Respond", agentIDs: [row.id], ownerIDs: [row.id],
@@ -374,7 +381,7 @@ public enum SidebarIncidents {
         if asking.count > maxAsksShown {
             let rest = Array(asking.dropFirst(maxAsksShown - 1))
             result.append(SidebarIncident(
-                id: "needs:more", kind: .needsYou, symbol: "hand.raised.fill",
+                id: "needs:more", kind: .needsYou, symbol: "questionmark.circle",
                 title: "\(rest.count) more need you", detail: rest.prefix(3).map(\.displayTitle).joined(separator: " · "),
                 actionTitle: "Respond", agentIDs: rest.map(\.id), ownerIDs: rest.map(\.id),
                 familyIDs: unique(rest.map { family(of: $0).id }), harness: nil))

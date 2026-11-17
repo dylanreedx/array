@@ -105,8 +105,14 @@ enum SidebarIndicatorTruthTableChecks {
                                        let strip = sheet.ownershipStrip {
                                         correct = correct && strip.roundsTop && strip.roundsBottom && sheet.bounds.contains(strip.rect)
                                     }
+                                    // Quiet: the lead's count and cause lines are rows of the same card.
+                                    let inCard = inbox.familyCauseCells.values.filter { line in
+                                        line.window != nil && (line.countTallyForQA?.leadId == lead
+                                            || line.causeIncidentForQA?.familyIDs == [lead])
+                                    }
                                     let actualHeight = visibleCells.reduce(CGFloat(0)) { $0 + $1.bounds.height }
-                                        + CGFloat(max(0, visibleCells.count - 1)) * CGFloat(AgentInboxView.rowSpacing)
+                                        + inCard.reduce(CGFloat(0)) { $0 + $1.bounds.height }
+                                        + CGFloat(max(0, visibleCells.count + inCard.count - 1)) * CGFloat(AgentInboxView.rowSpacing)
                                     for id in [lead, helper, arrival] {
                                         guard let cell = inbox.cellForQA(id: id), let slice = inbox.ownershipSliceForQA(id: id) else { continue }
                                         correct = correct && abs(slice.groupHeight - actualHeight) < 0.5

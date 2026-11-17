@@ -1842,12 +1842,21 @@ enum UIProbeGeometry {
         }
 
         // The layout's head for this fixture, fixed rather than read back from
-        // the list: the Quiet inbox draws 4 head rows, the Ledger 5.
-        let headRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 5 : 4
-        let expectedTableRows = expectedAgentCells + actualRemainders.count + expectedNonAgentRows + headRows
+        // the list: the Quiet inbox draws 3 chrome rows (Inbox, the Needs you
+        // box, the History note; its family rows no longer stack in the head),
+        // the Ledger 5.
+        let headRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 5 : 3
+        // Quiet draws each active lead's count as its own line in the card:
+        // one row per top-level active agent with an active helper.
+        let activeIDs = Set(rows.filter { $0.lifecycle == .active }.map(\.id))
+        let countRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 0 : rows.filter { lead in
+            lead.parentId == nil && lead.lifecycle == .active
+                && rows.contains { $0.parentId == lead.id && activeIDs.contains($0.id) }
+        }.count
+        let expectedTableRows = expectedAgentCells + actualRemainders.count + expectedNonAgentRows + headRows + countRows
         guard probe.inbox.tableRowCountForQA == expectedTableRows,
-              probe.inbox.nonAgentTableRowCountForQA == actualRemainders.count + expectedNonAgentRows + headRows else {
-            throw fail("\(label): default table rows \(probe.inbox.tableRowCountForQA) != \(expectedAgentCells) capped agent cells + \(actualRemainders.count) exact remainder rows + \(expectedNonAgentRows) shelf/paging rows + \(headRows) head rows")
+              probe.inbox.nonAgentTableRowCountForQA == actualRemainders.count + expectedNonAgentRows + headRows + countRows else {
+            throw fail("\(label): default table rows \(probe.inbox.tableRowCountForQA) != \(expectedAgentCells) capped agent cells + \(actualRemainders.count) exact remainder rows + \(expectedNonAgentRows) shelf/paging rows + \(headRows) head rows + \(countRows) count lines")
         }
     }
 
@@ -1913,8 +1922,9 @@ enum UIProbeGeometry {
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
 
-        // Fixed for this fixture: the Quiet inbox draws 2 head rows, the Ledger 1.
-        let nestedHeadRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 1 : 2
+        // Fixed for this fixture: the Quiet inbox draws 2 head rows and the
+        // root lead's count line (its own row in the card), the Ledger 1.
+        let nestedHeadRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 1 : 3
         guard probe.inbox.rowIdsForQA == bounded.rows.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == bounded.rows.count,
               probe.inbox.tableRowCountForQA == bounded.rows.count + 2 + nestedHeadRows,
@@ -2041,10 +2051,10 @@ enum UIProbeGeometry {
         // affordances through their target/action path.
         try checkNestedFanoutProbe(width: width, appearanceName: appearanceName)
 
-        // A blocked child is deliberately kept in the hidden ninth slot: the
-        // first eight siblings are given the same higher-priority human-blocked
-        // state, so this witness proves propagation from a CAPPED child rather
-        // than from a child that happened to become visible.
+        // Nine siblings ask, one more than the eight-row cap. A helper that
+        // needs you is never folded away (sidebar night fixes): all nine are
+        // drawn rows under the lead, the fold holds none of them and counts only
+        // what it folds, and the lead's tally still reconciles.
         let directChildren = rows.filter { $0.parentId == fanoutParent }
             .sorted { $0.createdAt != $1.createdAt ? $0.createdAt > $1.createdAt : $0.id.uuidString < $1.id.uuidString }
         guard directChildren.count > InboxSort.maxVisibleChildren else {
@@ -2071,10 +2081,20 @@ enum UIProbeGeometry {
         probe.inbox.layoutForQA()
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
-        guard let blockedParentGeometry = probe.inbox.qaRowGeometriesForQA.first(where: { $0.agentID == fanoutParent }),
-              blockedParentGeometry.labels.first(where: { $0.element == "meta" })?.text.contains("needs you") == true,
-              probe.inbox.fanoutRemainderAccessibilityLabelsForQA.contains(where: { $0.contains("needs you") }) else {
-            throw fail("\(label): a blocked child hidden behind the remainder did not raise the parent rollup")
+        let drawnBlocked = Set(probe.inbox.qaRowGeometriesForQA.compactMap(\.agentID)).intersection(blockedIDs)
+        let blockedRemainder = probe.inbox.fanoutRemaindersByParentForQA[fanoutParent]
+        let blockedTally = probe.inbox.sidebarTallies[fanoutParent]
+        guard drawnBlocked == blockedIDs,
+              let blockedRemainder, blockedRemainder.hiddenNeedsYou == 0,
+              Set(blockedRemainder.hiddenDescendantIDs).isDisjoint(with: blockedIDs),
+              !probe.inbox.fanoutRemainderAccessibilityLabelsForQA.contains(where: { $0.contains("need") }),
+              let blockedTally, blockedTally.reconciles,
+              blockedTally.countLine.contains(SidebarTallyState.needsYou.phrase(blockedIDs.count)),
+              blockedTally.folded == blockedRemainder.hiddenDescendantCount,
+              blockedTally.shown + blockedTally.folded == blockedTally.total else {
+            throw fail("\(label): a child that needs you was folded away or the counts stopped reconciling "
+                + "(drawn \(drawnBlocked.count) of \(blockedIDs.count), fold \(probe.inbox.fanoutRemainderAccessibilityLabelsForQA), "
+                + "tally \(blockedTally?.accessibilityLabel ?? "nil"))")
         }
         // Restore the corpus before the all-ids expansion witness. The real
         // remainder button, not a direct Set mutation, is the expansion path.
@@ -3199,8 +3219,10 @@ enum UIProbeGeometry {
             asserted += 8
 
             // P6.5 height-cache witness: keep ONE live host and a genuinely
-            // capped parent (>8 direct children). The hidden ninth child is an
-            // approval, so the real remainder rollup stays visible while the
+            // capped parent (>8 direct children). Eight approvals fill the cap and
+            // the hidden ninth child is an unopened failure (an approval is never
+            // folded away since the sidebar night fixes), so the real remainder
+            // rollup stays visible while the
             // same host crosses 320→220→280. At 280 the test presses the REAL
             // remainder affordance, then returns to 320 with the expanded parent.
             // Every number below comes from the live table rect, not a model-only
@@ -3225,8 +3247,9 @@ enum UIProbeGeometry {
                 elapsed: nil, createdAt: epoch.addingTimeInterval(20))
             let rollupChildren = rollupChildIDs.enumerated().map { index, childID in
                 AgentInboxRow(
-                    id: childID, title: "Hidden approval \(index)", state: .approval,
-                    attention: .none, model: nil, role: nil, branch: nil,
+                    id: childID, title: index == 8 ? "Hidden failure \(index)" : "Visible approval \(index)",
+                    state: index == 8 ? .failed : .approval,
+                    attention: index == 8 ? .unread : .none, model: nil, role: nil, branch: nil,
                     lastActiveAt: epoch.addingTimeInterval(Double(19 - index)),
                     depth: 1, createdAt: epoch.addingTimeInterval(Double(19 - index)),
                     parentId: rollupParentID)
@@ -3252,7 +3275,7 @@ enum UIProbeGeometry {
                     throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): capped height witness did not materialize its parent at \(phase)")
                 }
                 if remainderExpected {
-                    guard !meta.isHidden, meta.text.contains("1 needs you") else {
+                    guard !meta.isHidden, meta.text.contains("1 failed") else {
                         throw fail("sidebar-ux-check.content-height.\(appearanceName.rawValue): capped parent rollup disappeared at \(phase)")
                     }
                 } else {
@@ -3275,7 +3298,7 @@ enum UIProbeGeometry {
                 }
                 let chromeRows = transitionProbe.inbox.itemsForQA.filter { item in
                     switch item {
-                    case .sectionLabel, .incident, .quietNeedsYou: return true
+                    case .sectionLabel, .incident, .quietNeedsYou, .leadCount, .familyCause: return true
                     default: return false
                     }
                 }.count
@@ -5174,12 +5197,14 @@ enum UIProbeGeometry {
                     throw fail("\(label): P6.5 remainder did not materialize in the constrained viewport")
                 }
                 let beforeRemainderAX = accessibilityObjects(from: probe.inbox)
-                let remainderLabel = "Show \(remainder.accessibilityTitle)"
+                // Both layouts speak the fold as they draw it, "N folded".
+                let remainderWords = "\(remainder.hiddenDescendantCount) folded"
+                let remainderLabel = "Show \(remainderWords)"
                 guard let remainderButton = beforeRemainderAX.first(where: {
                     accessibilityRole(of: $0) == .button
                         && accessibilityLabel(of: $0) == remainderLabel
                 }),
-                accessibilityValueString(of: remainderButton) == remainder.accessibilityTitle else {
+                accessibilityValueString(of: remainderButton) == remainderWords else {
                     throw fail("\(label): P6.5 remainder button was not a reachable live AX child before expansion")
                 }
                 assertions += 2

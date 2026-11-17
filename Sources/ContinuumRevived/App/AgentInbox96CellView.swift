@@ -51,9 +51,15 @@ final class InboxSettleNudgeButton: NSButton, TokenThemed {
         NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
     }
 
+    /// Plain: words only, no fill or capsule at rest, pressed or hovered; the
+    /// pointer brightens the ink. The sidebar head and its actions use this.
+    var isPlain = false {
+        didSet { if oldValue != isPlain { needsLayout = true; applyTokens() } }
+    }
+
     override func layout() {
         super.layout()
-        layer?.applyCapsule()
+        if isPlain { layer?.cornerRadius = 0 } else { layer?.applyCapsule() }
     }
 
     override func updateTrackingAreas() {
@@ -79,7 +85,8 @@ final class InboxSettleNudgeButton: NSButton, TokenThemed {
     func applyTokens() {
         let role: SidebarControlRole = (cell?.isHighlighted ?? false)
             ? .pressed : (isPointerInside ? .hover : .resting)
-        layer?.backgroundColor = role.color.cgColor(in: self)
+        layer?.backgroundColor = isPlain ? nil : role.color.cgColor(in: self)
+        // Plain: bright words as in variants/A, in the primary token itself.
         let foreground = TextToken.textPrimary.color.nsColor(in: self)
         contentTintColor = foreground
         attributedTitle = NSAttributedString(
@@ -614,7 +621,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 
     static let statusSymbolsInUse = [
-        "checkmark.circle.fill", "hand.raised.fill",
+        "checkmark.circle.fill", "questionmark.circle.fill",
         "exclamationmark.triangle.fill", "stop.circle.fill", "xmark.circle.fill",
     ]
     /// Pitch and anatomy for THIS cell, handed in by whoever built it, so the Lab
@@ -950,7 +957,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     static func ledgerSymbol(_ row: AgentInboxRow) -> String? {
         switch SidebarRecovery.state(for: row) {
         case .working: return nil
-        case .needsYou: return "hand.raised.fill"
+        case .needsYou: return "questionmark.circle.fill"
         case .paused: return "pause.circle"
         case .failed: return "exclamationmark.triangle.fill"
         case .stopped: return "stop.circle"
@@ -1502,7 +1509,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         case .failed, .runtimeError:
             return "Failed"
         case .interrupted:
-            return "Stopped"
+            return "Interrupted"
         case .cancelled:
             return "Cancelled"
         }
@@ -1552,7 +1559,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 // Both layouts call known usage a pause. Ledger helpers keep
                 // their compact icon/age column; Quiet keeps its status word.
                 text = cause == .taskError && (renderedTally?.count(.failed) ?? 0) > 0
-                    ? (Self.ledgerClock(row, now: now) ?? "") : cause.label(harness: row.harness)
+                    ? (Self.ledgerClock(row, now: now) ?? "") : (sub ? cause.label(harness: row.harness) : cause.shortLabel)
             } else {
                 text = (ledger != nil && sub ? Self.ledgerClock(row, now: now)
                         : Self.ownershipClock(row, isSubagent: sub, now: now)) ?? ""
@@ -1611,7 +1618,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // that restart was a timeline defect, since fixed, so the row shows the
         // same moving gyro as the agent's own tile.
         case .working: return nil
-        case .approval, .input: return "hand.raised.fill"
+        case .approval, .input: return "questionmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
         case .ready:
             guard row.terminalIsUnread, let outcome = row.terminalEvent?.outcome else { return nil }
@@ -1718,7 +1725,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     // Plan: .plans/102-managed-agent-mode (P2b)
     static func selfReportSymbol(_ line: InboxSelfReportLine) -> String {
         switch line {
-        case .needsYou: return "hand.raised.fill"
+        case .needsYou: return "questionmark.circle.fill"
         case .now: return "text.bubble"
         case .checks: return "checklist"
         }
@@ -1898,7 +1905,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if let terminal = row.terminalEvent {
             switch terminal.outcome {
             case .failed, .runtimeError: return "Failed"
-            case .interrupted: return "Stopped"
+            case .interrupted: return "Interrupted"
             case .cancelled: return "Cancelled"
             case .succeeded:
                 if !isSubagent, row.terminalIsUnread { return "Done" }
@@ -1992,6 +1999,17 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         var facts: [NSAttributedString] = []
         // Ledger: ONE count chip carries every family number, and says "failed"
         // once. The ask stays first: it is the lead's own question.
+        // Quiet inbox: the count is its own line under the lead, so line 2 keeps
+        // the project and the branch, and carries only the lead's own ask.
+        if ledger == nil, let tally = sidebarTally, tally.total > 0, row.depth == 0,
+           shown?.disclosure != .collapsed {
+            guard let ask = ownership.raisedAsk ?? Self.ask(row) else { return nil }
+            text.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
+            if placementLabel.stringValue.isEmpty, whereLabel.isHidden {
+                text.setAttributedString(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
+            }
+            return text
+        }
         if let tally = renderedTally, tally.total > 0 {
             if let ask = ownership.raisedAsk ?? Self.ask(row) {
                 facts.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
@@ -2002,6 +2020,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 chip.append(run(part, part.hasSuffix(" failed") ? failedInk : secondary))
             }
             chip.addAttribute(.toolTip, value: tally.fullLine, range: NSRange(location: 0, length: chip.length))
+            // An open lead keeps its branch in view, after the chip and last on
+            // the line, so the tail truncation takes the branch before the chip.
+            if row.depth == 0, shown?.disclosure != .collapsed,
+               let branch = row.branch?.trimmingCharacters(in: .whitespacesAndNewlines), !branch.isEmpty {
+                chip.append(run(" · ", secondary.withAlphaComponent(0.6)))
+                chip.append(run(branch, secondary))
+            }
             facts.append(chip)
             if placementLabel.stringValue.isEmpty, whereLabel.isHidden { text.setAttributedString(NSAttributedString()) }
             for (index, fact) in facts.enumerated() {
@@ -2116,6 +2141,17 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return true
     }
     var tailTextForQA: String? { tailLabel.isHidden ? nil : tailLabel.stringValue }
+    /// The drawn tail's room, and the width its text needs from its start
+    /// through the end of `text`: what fits that room is drawn untruncated.
+    func tailFitForQA(through text: String) -> (room: CGFloat, needed: CGFloat)? {
+        guard !tailLabel.isHidden, tailLabel.frame.width > 0 else { return nil }
+        let drawn = tailLabel.attributedStringValue
+        let range = (drawn.string as NSString).range(of: text)
+        guard range.location != NSNotFound else { return nil }
+        let prefix = drawn.attributedSubstring(from: NSRange(location: 0, length: NSMaxRange(range)))
+        let inset = (tailLabel.cell?.titleRect(forBounds: tailLabel.bounds).width).map { tailLabel.bounds.width - $0 } ?? 0
+        return (tailLabel.bounds.width - inset, ceil(prefix.size().width))
+    }
     var clockTextForQA: String? { stateLabel.isHidden ? nil : stateLabel.stringValue }
     var reportPillForQA: String? { reportPillText }
     /// The drawn pill, in this cell's coordinates. nil when none is drawn.
