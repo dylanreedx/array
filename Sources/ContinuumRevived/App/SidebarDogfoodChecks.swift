@@ -171,6 +171,8 @@ enum SidebarDogfoodChecks {
             ("cleared-card", checkClearedCardAcrossPush), ("runner-quota", checkRunnerQuota),
             ("switch-identity", checkSwitchNeedsDistinctLogin), ("history-dates", checkHistoryDates),
             ("history-chatter", checkHistoryChatter), ("restored-titles", checkRestoredTitlesPublishOnce),
+            ("switch-shared-organization", checkSwitchSharedOrganization),
+            ("history-branch-search", checkHistoryBranchSearch),
         ]
         var reports: [String] = []
         var failures: [String] = []
@@ -973,6 +975,50 @@ enum SidebarDogfoodChecks {
         return "Switch: one login in two folders with no organisation id, a login naming nothing, and an organisation on one side only all offer Resume; a different email offers Switch & resume…"
     }
 
+    static func checkSwitchSharedOrganization() throws -> String {
+        let h = try makeHarness("switch-shared-organization")
+        defer { h.close() }
+        let supervisor = h.supervisor
+        try isolateAccounts(supervisor, root: h.fixture.tempRoot)
+        let lead = h.spawn("Claude lead", harness: .claudeCode)
+        let helper = h.spawn("Claude helper", parent: lead, harness: .claudeCode)
+        h.finish(lead)
+        h.finish(helper, failed: "You've hit your limit · resets 1:20 AM (America/Toronto)")
+        h.refresh()
+
+        let active = supervisor.activeAccount(for: .claudeCode)
+        let alternate = try supervisor.addAccount(harness: .claudeCode, label: "Work")
+        func reading(_ account: AgentAccount, email: String, org: String, used: Double) {
+            supervisor.applyAccountUsageReading(
+                .init(identity: AgentAccountIdentity(harness: .claudeCode, email: email,
+                                                     organizationId: org, observedAt: Date()),
+                      quota: AgentAccountQuotaSnapshot(
+                        harness: .claudeCode,
+                        windows: [AgentQuotaWindow(kind: .fiveHour, utilization: used,
+                                                   resetsAt: Date().addingTimeInterval(3_600))],
+                        observedAt: Date(), source: .claudeUsageRequest, accountId: account.id)),
+                accountId: account.id)
+            h.inbox.layoutForQA()
+        }
+        func action() -> String { usageLine(h.inbox)?.actionButton.title ?? "no usage item" }
+        reading(active, email: "personal@example.test", org: "team", used: 1.0)
+        reading(alternate, email: "work@example.test", org: "team", used: 0.1)
+        let settings = supervisor.settingsAccountRows().first { $0.id == alternate.id }
+        try expect(settings?.sameLoginAs == active.label && settings?.canSignIn == true,
+                   "Settings did not offer Sign In for the alternate in the same organization")
+        guard case .refused = supervisor.switchAccount(to: alternate.id) else {
+            throw Failure(description: "the supervisor accepted a switch within the same organization")
+        }
+        try expect(action() == SidebarFailureCause.usageResumeTitle,
+                   "the only alternate shares the active organization and Settings offers Sign In, but the sidebar draws '\(action())'; wanted Resume")
+
+        reading(alternate, email: "personal@example.test", org: "other-team", used: 0.1)
+        let eligible = supervisor.settingsAccountRows().first { $0.id == alternate.id }
+        try expect(eligible?.canSignIn == false && action() == "Switch & resume…",
+                   "the same email in a different organization should offer Switch, got '\(action())'")
+        return "The mounted Claude usage item offers Resume when Settings requires Sign In for the shared organization. A different organization offers Switch even with the same email."
+    }
+
     // MARK: - 9. History dates come from real turns and redraw when they move
 
     static func checkHistoryDates() throws -> String {
@@ -1053,10 +1099,21 @@ enum SidebarDogfoodChecks {
         }
         let worker = h.spawn("Chatty worker")
         let thread = AgentSupervisor.threadId(for: worker)
-        h.supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "t"), to: worker)
-        h.supervisor.qaDeliver(.itemStarted(threadId: thread, itemId: "warm", kind: .commandExecution, title: "cat README.md"), to: worker)
         h.refresh()
-        pump(0.5)
+        let warmDeadline = Date().addingTimeInterval(5)
+        while h.delegate.branchWarmInFlight, Date() < warmDeadline { pump(0.02) }
+        try expect(!h.delegate.branchWarmInFlight, "fixture: initial branch refresh timed out")
+        // Let the working state and its first tool event reach the row before
+        // measuring chatter, which should patch an already confirmed row.
+        h.supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "t"), to: worker)
+        let workingDeadline = Date().addingTimeInterval(5)
+        while inbox.pushedRowForQA(id: worker.rawValue)?.state != .working, Date() < workingDeadline { pump(0.02) }
+        try expect(inbox.pushedRowForQA(id: worker.rawValue)?.state == .working, "fixture: the worker did not start")
+        h.supervisor.qaDeliver(.itemStarted(threadId: thread, itemId: "warm", kind: .commandExecution, title: "cat README.md"), to: worker)
+        let chatterDeadline = Date().addingTimeInterval(5)
+        while inbox.pushedRowForQA(id: worker.rawValue)?.characterActivity?.action != .read, Date() < chatterDeadline { pump(0.02) }
+        try expect(inbox.pushedRowForQA(id: worker.rawValue)?.characterActivity?.action == .read,
+                   "fixture: the worker's warm-up tool event did not reach the sidebar")
         try expect((inbox.historyHeaderTitleForQA ?? "").hasPrefix("History"), "fixture: no History heading")
         if inbox.isHistoryExpandedForQA { try clickHistoryHeading(inbox); pump(0.3) }
         try expect(!inbox.isHistoryExpandedForQA, "fixture: History did not close")
@@ -1079,14 +1136,14 @@ enum SidebarDogfoodChecks {
             return (inbox.historyProjectionBuildCountForQA - projections, h.delegate.qaInboxRowBuildCount - rowBuilds)
         }
         let collapsed = try chatter("collapsed")
-        try expect(collapsed.projections == 0,
+        try expect(collapsed.projections == 0 && collapsed.rowBuilds == 0,
                    "collapsed: 6 chatter events rebuilt the History projection \(collapsed.projections) times (row builds \(collapsed.rowBuilds))")
         try clickHistoryHeading(inbox)
         pump(0.3)
         try expect(inbox.isHistoryExpandedForQA, "History did not open")
         let expanded = try chatter("expanded")
-        try expect(expanded.projections == 0,
-                   "expanded: 6 chatter events rebuilt the History projection \(expanded.projections) times")
+        try expect(expanded.projections == 0 && expanded.rowBuilds == 0,
+                   "expanded: 6 chatter events rebuilt the History projection \(expanded.projections) times (row builds \(expanded.rowBuilds))")
         // Positive control: a History family's change does rebuild it.
         let before = inbox.historyProjectionBuildCountForQA
         let late = h.spawn("Late family")
@@ -1095,6 +1152,72 @@ enum SidebarDogfoodChecks {
         h.refresh()
         try expect(inbox.historyProjectionBuildCountForQA > before, "control: a new History family did not rebuild the projection")
         return "History chatter: 6 chatter events with History collapsed and 6 open built the family projection 0 times (row builds \(collapsed.rowBuilds)/\(expanded.rowBuilds)); a new History family rebuilt it"
+    }
+
+    static func checkHistoryBranchSearch() throws -> String {
+        let h = try makeHarness("history-branch-search")
+        defer { h.close() }
+        let inbox = h.inbox
+        let fixture = h.fixture
+        let query = "branch-needle"
+        let ordinary = "ordinary"
+        h.supervisor.accountUsageReader = { _ in nil }
+
+        func parkedLead(_ title: String, in root: URL, project: UUID, branch: String) throws -> AgentID {
+            _ = try CandidatePrepassChecks.git(root, ["init", "-qb", branch])
+            _ = try CandidatePrepassChecks.git(root, ["commit", "--allow-empty", "-qm", "fixture"])
+            let id = h.supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: .pi,
+                                        model: "openai-codex/gpt-5.6-sol", thinking: "high",
+                                        projectId: project, projectRoot: root, displayName: title)
+            h.finish(id)
+            _ = h.supervisor.settle(agentID: id)
+            return id
+        }
+        let first = try parkedLead("First parked lead", in: fixture.paRoot, project: fixture.projectPa, branch: query)
+        let second = try parkedLead("Second parked lead", in: fixture.pcRoot, project: fixture.projectPc, branch: ordinary)
+        let worker = h.spawn("Unrelated worker")
+        let thread = AgentSupervisor.threadId(for: worker)
+        h.supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "work"), to: worker)
+        h.refresh()
+        func awaitBranchWarm() throws {
+            let deadline = Date().addingTimeInterval(5)
+            while h.delegate.branchWarmInFlight, Date() < deadline { pump(0.02) }
+            try expect(!h.delegate.branchWarmInFlight, "activation branch refresh timed out")
+            inbox.layoutForQA()
+        }
+        try awaitBranchWarm()
+        try expect(inbox.pushedRowForQA(id: first.rawValue)?.branch == query
+                   && inbox.pushedRowForQA(id: second.rawValue)?.branch == ordinary,
+                   "fixture: the initial checkout branches did not reach the sidebar")
+        inbox.setSearchForQA(query)
+        if !inbox.isHistoryExpandedForQA { try clickHistoryHeading(inbox) }
+        func drawnTitles() -> [String] {
+            inbox.layoutForQA()
+            return Q.views(in: inbox.tableForQA) { $0 is SidebarQuietHistoryEntryView }
+                .compactMap { ($0 as? SidebarQuietHistoryEntryView)?.titleForQA }
+        }
+        try expect(drawnTitles() == ["First parked lead"], "fixture: expected the first branch match, drew \(drawnTitles())")
+
+        // Leave an unrelated update as the last activity push before activation.
+        let before = inbox.pushedRowForQA(id: worker.rawValue)
+        h.supervisor.qaDeliver(.itemStarted(threadId: thread, itemId: "chatter", kind: .commandExecution,
+                                            title: "cat README.md"), to: worker)
+        let deadline = Date().addingTimeInterval(5)
+        while inbox.pushedRowForQA(id: worker.rawValue) == before, Date() < deadline { pump(0.02) }
+        try expect(inbox.pushedRowForQA(id: worker.rawValue) != before, "fixture: worker chatter did not reach the sidebar")
+
+        _ = try CandidatePrepassChecks.git(fixture.paRoot, ["branch", "-m", ordinary])
+        _ = try CandidatePrepassChecks.git(fixture.pcRoot, ["branch", "-m", query])
+        h.delegate.applicationDidBecomeActive(Notification(name: NSApplication.didBecomeActiveNotification,
+                                                            object: NSApplication.shared))
+        try awaitBranchWarm()
+        try expect(inbox.pushedRowForQA(id: first.rawValue)?.branch == ordinary
+                   && inbox.pushedRowForQA(id: second.rawValue)?.branch == query,
+                   "activation did not push both new checkout branches")
+        let titles = drawnTitles()
+        try expect(inbox.historyHeaderTitleForQA == "History (1)" && titles == ["Second parked lead"],
+                   "activation swapped the branches and left one match, but mounted History drew \(titles); wanted the second lead")
+        return "Activation refreshed two checkout branches together. One matching mounted History card replaced the other after unrelated chatter."
     }
 
     // MARK: - 11. Restored titles publish once

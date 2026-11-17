@@ -16765,29 +16765,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let reset = spent.compactMap(\.resetsAt).min() {
                 earliestReset = min(earliestReset ?? reset, reset)
             }
-            // Switch needs EVIDENCE of a different login: both identities read,
-            // and an organisation or an email known on both sides that differs.
-            // A missing field is not a difference — two folders on one login can
-            // both lack an organisation id — so unknown identity offers no Switch.
-            let activeIdentity = agentSupervisor.accountIdentity(accountId: active.id)
-            let canSwitch = activeIdentity.map { mine in
-                agentSupervisor.accounts.contains { account in
-                    guard account.harness == harness, account.id != active.id,
-                          let other = agentSupervisor.accountIdentity(accountId: account.id) else { return false }
-                    return Self.isDistinctLogin(mine, other)
-                }
-            } ?? false
+            let canSwitch = !spent.isEmpty && agentSupervisor.hasVerifiedAccountSwitch(from: active)
             states[SidebarRecovery.providerName(harness.rawValue)] =
                 SidebarUsageLive.State(exhausted: !spent.isEmpty, canSwitch: canSwitch)
         }
         scheduleSidebarUsageReset(at: earliestReset)
         return states
-    }
-
-    nonisolated static func isDistinctLogin(_ a: AgentAccountIdentity, _ b: AgentAccountIdentity) -> Bool {
-        if let x = a.organizationId, let y = b.organizationId, x != y { return true }
-        if let x = a.email?.lowercased(), let y = b.email?.lowercased(), x != y { return true }
-        return false
     }
 
     private func scheduleSidebarUsageReset(at reset: Date?) {
@@ -16885,8 +16868,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // and is populated only after readiness". `applyInbox([])` here would be the
         // "no agents" lie with a rendered empty state behind it.
         if agentActivity.isReconciled {
-            let rows = chatterOnly.flatMap(chatterPatchedInboxRows(for:)) ?? sidebarInboxRows(inputs: inputs)
-            sidebar.applyInbox(rows: rows, changed: agentActivity.lastChange)
+            if let chatterOnly, let rows = chatterPatchedInboxRows(for: chatterOnly) {
+                sidebar.applyInbox(rows: rows, changed: agentActivity.lastChange, chatterPatchedAgentIDs: chatterOnly)
+            } else {
+                sidebar.applyInbox(rows: sidebarInboxRows(inputs: inputs), changed: agentActivity.lastChange)
+            }
         }
         // The workspace tree is never shown (`isWorkspaceTreeVisibleForQA`) and an
         // agent event cannot change its shape — only a structural reload rebuilds it.

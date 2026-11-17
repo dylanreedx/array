@@ -537,6 +537,7 @@ struct SettingsAccountRow: Equatable {
     var sameLoginAs: String? = nil
     /// Offer the CLI's own sign-in for this account.
     var canSignIn: Bool { signedOut || sameLoginAs != nil }
+    var canSwitch: Bool { !canSignIn && !isActive && switchingDetail == nil }
 }
 
 /// Settings ▸ Agents ▸ Accounts: per CLI, the account in use first, then the
@@ -633,7 +634,7 @@ private struct SettingsAccountRows: View {
 
     private func actionTitle(_ row: SettingsAccountRow) -> String? {
         if row.canSignIn { return model.onSignInAccount != nil ? "Sign In…" : nil }
-        guard !row.isActive, row.switchingDetail == nil, model.onSwitchAccount != nil else { return nil }
+        guard row.canSwitch, model.onSwitchAccount != nil else { return nil }
         return "Switch to \(row.title)"
     }
 

@@ -471,8 +471,8 @@ final class WorkspaceSidebarView: NSView, NSOutlineViewDataSource, NSOutlineView
     }
 
     /// The incremental path (P2B.7): the same rows plus which agents moved.
-    func applyInbox(rows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
-        inboxView.apply(rows: rows, changed: changed)
+    func applyInbox(rows: [AgentInboxRow], changed: AgentsBoardChangeSet, chatterPatchedAgentIDs: Set<UUID>? = nil) {
+        inboxView.apply(rows: rows, changed: changed, chatterPatchedAgentIDs: chatterPatchedAgentIDs)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.8-scope-dropdown.md

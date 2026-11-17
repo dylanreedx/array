@@ -2967,7 +2967,7 @@ final class AgentSupervisor {
         // between two folders holding one login changes nothing while looking
         // like it worked (0.7.35: agents kept hitting the Team limit).
         let current = activeAccount(for: account.harness)
-        if current.id != account.id, let duplicate = sameLogin(as: account), duplicate.id == current.id {
+        if current.id != account.id, isDifferentLogin(account.id, from: current.id) == false {
             let org = accountIdentities[account.id]?.organizationName.map { " (\($0))" } ?? ""
             let provider = account.harness == .codex ? "Codex" : "Claude"
             return .refused("\(account.label) is signed in to the same \(provider) login as \(current.label)\(org). Sign in to \(account.label) with your other account first.")
@@ -3077,19 +3077,38 @@ final class AgentSupervisor {
         return "Work \(n)"
     }
 
-    /// Settings ▸ Agents ▸ Accounts: per CLI, the account in use first, then
-    /// the other saved logins.
     /// Another saved account of the same CLI signed in to the same
-    /// organisation as `account`, when both logins have been read. The email
-    /// alone cannot tell them apart: personal and team plans share one.
-    func sameLogin(as account: AgentAccount) -> AgentAccount? {
-        guard let org = accountIdentities[account.id]?.organizationId else { return nil }
-        return accounts.first {
+    /// organisation as `account`, when both logins have been read.
+    private func sameLogin(as account: AgentAccount) -> AgentAccount? {
+        accounts.first {
             $0.harness == account.harness && $0.id != account.id
-                && accountIdentities[$0.id]?.organizationId == org
+                && isDifferentLogin(account.id, from: $0.id) == false
         }
     }
 
+    /// Known organisations decide, even when emails differ. Without both
+    /// organisations, different emails establish a difference. Personal and
+    /// team plans can share an email, so a matching email leaves it unknown.
+    private func isDifferentLogin(_ accountId: String, from otherId: String) -> Bool? {
+        guard let account = accountIdentities[accountId], let other = accountIdentities[otherId] else { return nil }
+        if let org = account.organizationId, let otherOrg = other.organizationId { return org != otherOrg }
+        if let email = account.email?.lowercased(), let otherEmail = other.email?.lowercased(), email != otherEmail {
+            return true
+        }
+        return nil
+    }
+
+    /// The exhausted-usage shortcut leads to Settings, so it needs an account
+    /// Settings can switch to and evidence that the login differs.
+    func hasVerifiedAccountSwitch(from active: AgentAccount) -> Bool {
+        guard accountIdentities[active.id] != nil else { return false }
+        return settingsAccountRows().contains { row in
+            row.harness == active.harness && row.canSwitch && isDifferentLogin(row.id, from: active.id) == true
+        }
+    }
+
+    /// Settings ▸ Agents ▸ Accounts: per CLI, the account in use first, then
+    /// the other saved logins.
     func settingsAccountRows() -> [SettingsAccountRow] {
         [AgentHarness.claudeCode, .codex].flatMap { harness -> [SettingsAccountRow] in
             let active = activeAccount(for: harness)

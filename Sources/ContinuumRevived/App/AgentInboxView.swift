@@ -2472,7 +2472,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// VALUE differs from the one currently drawn — which `AgentInboxRow` being
     /// `Equatable` makes exact rather than a guess. (Found in cross-review; the
     /// change-set-only version showed a stale project name after a rename.)
-    func apply(rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
+    func apply(rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet, chatterPatchedAgentIDs: Set<UUID>? = nil) {
         if foldMotion.isAnimating {
             let byId = newRows.reduce(into: [UUID: AgentInboxRow]()) { $0[$1.id] = $1 }
             let sameGeometry = rows.allSatisfy { previous in
@@ -2503,7 +2503,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // time here would hand `applyRows` its own answer as the previous one and
         // P2D.4's disclosure-moved rows would go unredrawn.
         let lifted = liftCrossfadeGhosts(from: rows, to: newRows)
-        applyRows(newRows, changed: changed)
+        applyRows(newRows, changed: changed, chatterPatchedAgentIDs: chatterPatchedAgentIDs)
         if foldMotion.isAnimating {
             let keys = Set(foldMotion.poses.keys)
             foldMotion.cover(items.indices.compactMap { index in
@@ -2515,7 +2515,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         completePendingAdvance(selectionOnEntry: selectionOnEntry)
     }
 
-    private func applyRows(_ newRows: [AgentInboxRow], changed: AgentsBoardChangeSet) {
+    private func applyRows(_ newRows: [AgentInboxRow], changed: AgentsBoardChangeSet, chatterPatchedAgentIDs: Set<UUID>?) {
         // P3.8: the SCOPE decides what is on screen, so the diff is against the
         // filtered list — an agent that arrived in a project you are not scoped to
         // has not changed this list at all. `allRows` and the popup's menu are
@@ -2540,10 +2540,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let previousHistoryHelpers = historyEntryHelpers
         let previousHistoryDates = historyEntryDates
         let historyBuildsBefore = historyProjectionBuildCountForQA
-        // Only an update-only push may reuse the History projection: an added
-        // agent can be a new helper of a History family, a removed one a member.
-        historyReuseHint = changed.isEmpty || !changed.added.isEmpty || !changed.removed.isEmpty
-            ? nil : changed.touched
+        // Only successful chatter patches leave the rest of the row values
+        // intact. A full rebuild can change branches, scope, or family facts
+        // independently of the activity change set used to redraw cells.
+        historyReuseHint = chatterPatchedAgentIDs
         let next = display(from: newRows)
         historyReuseHint = nil
         // A History card draws its family's date and helper count, which live
@@ -2888,15 +2888,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// interleaves older families.
     private func quietHistoryFamilies(_ history: [AgentInboxRow], all: [AgentInboxRow],
                                       searching: Bool) -> [AgentInboxRow] {
-        // An unrelated push (chatter, a live agent's turn) changes nothing a
-        // History card is made of: reuse the last projection outright. The hint is
-        // the push's own change set, so the check is one pass over History's ids,
-        // never the child index, the family walk or the sort.
+        // Chatter outside History can reuse the last projection when the same
+        // History rows still match. Check their IDs before walking the families.
         if let cache = quietHistoryCache, let touched = historyReuseHint,
            cache.searching == searching, cache.openAgentId == openAgentId,
            cache.historyIDs.count == history.count,
            touched.isDisjoint(with: cache.members),
-           !history.contains(where: { touched.contains($0.id) }) {
+           history.allSatisfy({ cache.historyIDs.contains($0.id) }) {
             historyEntryHelpers = cache.helpers
             historyEntryDates = cache.dates
             return cache.families
@@ -2957,8 +2955,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let dates: [UUID: Date]
     }
     private var quietHistoryCache: QuietHistoryProjection?
-    /// Set by `applyRows` for the length of one `display`: the agents that push
-    /// named. nil means "anything may have changed" (every other caller).
+    /// Set for one `display` when the host patched only these agents' chatter.
     private var historyReuseHint: Set<UUID>?
     /// How many times the History family projection was built, for the witness.
     private(set) var historyProjectionBuildCountForQA = 0
@@ -3817,7 +3814,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func releaseSortHold() {
         guard sortHoldPending, !sortHeld else { return }
         sortHoldPending = false
-        applyRows(allRows, changed: .empty)
+        applyRows(allRows, changed: .empty, chatterPatchedAgentIDs: nil)
     }
 
     /// Select `ids` again after a full reload, the rows still drawn only, and
