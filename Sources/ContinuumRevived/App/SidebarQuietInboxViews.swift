@@ -267,7 +267,7 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
 /// then "4 helpers · Nov 10". Helpers stay with their lead, so a family is one
 /// item; clicking it opens the lead like any row.
 @MainActor
-final class SidebarQuietHistoryEntryView: NSTableCellView {
+final class SidebarQuietHistoryEntryView: NSTableCellView, AgentInboxRenameCell {
     /// A's history card (about 54pt) plus the gap to the next one.
     static let height: CGFloat = 60
     static let cardBottomGap: CGFloat = 4
@@ -314,6 +314,9 @@ final class SidebarQuietHistoryEntryView: NSTableCellView {
     required init?(coder: NSCoder) { return nil }
     override var isFlipped: Bool { true }
 
+    var titleFrame: NSRect { titleLabel.frame }
+    func acceptsRenameDoubleClick(at point: NSPoint) -> Bool { bounds.contains(point) }
+
     func apply(_ row: AgentInboxRow, helpers: Int, endedAt: Date?, now: Date) {
         titleLabel.stringValue = row.displayTitle
         shownDate = endedAt ?? Self.endedAt(row)
@@ -329,7 +332,7 @@ final class SidebarQuietHistoryEntryView: NSTableCellView {
     private(set) var shownDate: Date?
     var titleForQA: String { titleLabel.stringValue }
     var detailForQA: String { detailLabel.isHidden ? "" : detailLabel.stringValue }
-    var titleFrameForQA: NSRect { titleLabel.frame }
+    var titleFrameForQA: NSRect { titleFrame }
     var detailFrameForQA: NSRect { detailLabel.frame }
     var cardFrameForQA: NSRect { cardRect }
 

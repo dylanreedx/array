@@ -2773,7 +2773,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // P4.7. `clock()` and not `Date()`: the same injection point a parked row's
         // "in 25m" is read from, so a card whose snooze expires between two renders
         // cannot make a committed baseline flap.
-        let parts = InboxSort.partition(rows: visible, now: clock())
+        let now = clock()
+        let parts = InboxSort.partition(rows: visible, now: now)
         // Sidebar round: the layout's head (incidents), then Standing leads with
         // their families, then everything else in the sort's order.
         var standingRows: [AgentInboxRow] = []
@@ -2819,23 +2820,29 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // Quiet inbox: History counts families, the cards it draws, not
             // helpers, and leaves out agents opened and never used.
             let quiet = sidebarLayout == .quietInbox
-            let families = quiet ? quietHistoryFamilies(parts.history, all: sorted, searching: !query.isEmpty) : []
-            let historyCount = quiet ? families.count : parts.historyCount
-            if historyCount > 0 {
-            built.append(.historyHeader(count: historyCount, isExpanded: historyExpanded))
-            if historyExpanded {
-                // Quiet inbox pages by family: helpers are never drawn there, so
-                // they must not take page slots or the footer's hidden count.
-                let page = InboxSort.pageSettled(
-                    quiet ? families : parts.history,
-                    limit: settledLimit, openAgentId: openAgentId)
-                built.append(contentsOf: quiet ? page.shown.map(InboxListItem.agent) : agentItems(for: page.shown))
-                if page.hasMore {
-                    built.append(.settledMore(hidden: page.hidden))
-                }
-            } else if let open = parts.history.first(where: { $0.id == openAgentId }) {
-                built.append(.agent(open))
+            let projection = quiet
+                ? quietHistoryProjection(parts.history, all: sorted, searching: !query.isEmpty, now: now)
+                : nil
+            let historyCount = projection?.families.count ?? parts.historyCount
+            if let projection {
+                historyEntryHelpers = projection.helpers
+                historyEntryDates = projection.dates
             }
+            if historyCount > 0 {
+                built.append(.historyHeader(count: historyCount, isExpanded: historyExpanded))
+                if historyExpanded {
+                    // Quiet pages the family cards and force-includes the focused
+                    // agent's family using the same rule as an ordinary open row.
+                    let page = InboxSort.pageSettled(
+                        projection?.families ?? parts.history, limit: settledLimit,
+                        openAgentId: projection == nil ? openAgentId : projection?.openFamilyId)
+                    built.append(contentsOf: quiet ? page.shown.map(InboxListItem.agent) : agentItems(for: page.shown))
+                    if page.hasMore {
+                        built.append(.settledMore(hidden: page.hidden))
+                    }
+                } else if let open = parts.history.first(where: { $0.id == openAgentId }) {
+                    built.append(.agent(open))
+                }
             }
         }
         if foldsHistoryIntoShelf, let firstShelf = built.firstIndex(where: \.isShelfHeading) {
@@ -2886,8 +2893,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Each card says how many helpers it holds and that same date
     /// ("4 helpers · Nov 10"). Paging takes this order, so a page never
     /// interleaves older families.
-    private func quietHistoryFamilies(_ history: [AgentInboxRow], all: [AgentInboxRow],
-                                      searching: Bool) -> [AgentInboxRow] {
+    private func quietHistoryProjection(_ history: [AgentInboxRow], all: [AgentInboxRow],
+                                        searching: Bool, now: Date) -> QuietHistoryProjection {
         // Chatter outside History can reuse the last projection when the same
         // History rows still match. Check their IDs before walking the families.
         if let cache = quietHistoryCache, let touched = historyReuseHint,
@@ -2895,15 +2902,29 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
            cache.historyIDs.count == history.count,
            touched.isDisjoint(with: cache.members),
            history.allSatisfy({ cache.historyIDs.contains($0.id) }) {
-            historyEntryHelpers = cache.helpers
-            historyEntryDates = cache.dates
-            return cache.families
+            return cache
         }
         historyProjectionBuildCountForQA += 1
         let historyIDs = Set(history.map(\.id))
         var childrenOf: [UUID: [AgentInboxRow]] = [:]
         for row in all { if let parent = row.parentId, parent != row.id { childrenOf[parent, default: []].append(row) } }
         let roots = history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }
+        let openFamilyId: UUID? = {
+            guard let openAgentId else { return nil }
+            let byId = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            guard var current = byId[openAgentId],
+                  InboxSort.section(for: current.lifecycle, now: now) == .history else { return nil }
+            let rootIDs = Set(roots.map(\.id))
+            var visited: Set<UUID> = []
+            // A folded or capped helper may be absent from History's visible rows.
+            // Walk the full ancestry to the closest root that actually draws a card.
+            while visited.insert(current.id).inserted {
+                if rootIDs.contains(current.id) { return current.id }
+                guard let parentId = current.parentId, let parent = byId[parentId] else { break }
+                current = parent
+            }
+            return nil
+        }()
         var dated: [(row: AgentInboxRow, at: Date, index: Int)] = []
         var members: Set<UUID> = historyIDs
         var helpers: [UUID: Int] = [:]
@@ -2928,19 +2949,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 stack.append(contentsOf: childrenOf[next.id] ?? [])
             }
             members.formUnion(seen)
-            guard used || searching || root.id == openAgentId else { continue }
+            guard used || searching || root.id == openFamilyId else { continue }
             let at = latestTurn ?? root.createdAt
             helpers[root.id] = seen.count - 1
             dates[root.id] = at
             dated.append((root, at, index))
         }
         let families = dated.sorted { $0.at != $1.at ? $0.at > $1.at : $0.index < $1.index }.map(\.row)
-        quietHistoryCache = QuietHistoryProjection(
+        let projection = QuietHistoryProjection(
             historyIDs: historyIDs, members: members, searching: searching, openAgentId: openAgentId,
-            families: families, helpers: helpers, dates: dates)
-        historyEntryHelpers = helpers
-        historyEntryDates = dates
-        return families
+            openFamilyId: openFamilyId, families: families, helpers: helpers, dates: dates)
+        quietHistoryCache = projection
+        return projection
     }
 
     /// The last Quiet History projection and what it was built from.
@@ -2950,6 +2970,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let members: Set<UUID>
         let searching: Bool
         let openAgentId: UUID?
+        let openFamilyId: UUID?
         let families: [AgentInboxRow]
         let helpers: [UUID: Int]
         let dates: [UUID: Date]
@@ -3248,7 +3269,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // that left the list must not remain owned by a historical family.
         let liveFamilyKeys = Set(next.compactMap { item -> String? in
             switch item {
-            case .leadCount(let tally): return "count:\(tally.leadId.uuidString)"
+            case .leadCount(let tally):
+                let key = "count:\(tally.leadId.uuidString)"
+                // A fold can change the accessibility count of shown helpers
+                // while AppKit retains the line for the unchanged visible count.
+                familyCauseCells[key]?.refreshCountAccessibility(tally)
+                return key
             case .familyCause(let incident, _): return incident.id
             default: return nil
             }
@@ -5218,7 +5244,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     @objc private func rowDoubleClicked(_ sender: Any?) {
         guard let event = NSApp.currentEvent else { return }
         guard let index = rowIndex(forTableRow: tableView.clickedRow),
-              let cell = cellForRow(index) else { return }
+              let cell = renameCellForRow(index) else { return }
         _ = doubleClick(
             rowAt: index,
             pointInCell: cell.convert(event.locationInWindow, from: nil),
@@ -5239,7 +5265,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let deviceModifiers = modifiers.intersection(.deviceIndependentFlagsMask)
         guard deviceModifiers.isEmpty,
               rows.indices.contains(index),
-              let cell = cellForRow(index),
+              let cell = renameCellForRow(index),
               cell.acceptsRenameDoubleClick(at: point),
               renameField == nil,
               renamingRowId == nil else { return false }
@@ -5280,7 +5306,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// renamed. Extracted so the geometry, the styling and the state have one source
     /// of truth (`CanvasNSView.installZoneRenameField`'s precedent).
     private func installRenameField(rowAt index: Int) -> NSTextField? {
-        guard rows.indices.contains(index), let cell = cellForRow(index) else { return nil }
+        guard rows.indices.contains(index), let cell = renameCellForRow(index) else { return nil }
         let frame = cell.convert(cell.titleFrame, to: self)
         guard frame.width > 1, frame.height > 1 else { return nil }
         let field = NSTextField(frame: frame.insetBy(dx: -Space.xs, dy: -Space.xs))
@@ -5399,13 +5425,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func repositionRenameField() {
         guard let field = renameField, let rowId = renamingRowId,
               let index = rows.firstIndex(where: { $0.id == rowId }),
-              let tableRow = tableRow(forRowIndex: index),
-              let cell = cellsByRow[tableRow] else { return }
+              let cell = renameCellForRow(index, makeIfNecessary: false) else { return }
         field.frame = cell.convert(cell.titleFrame, to: self).insetBy(dx: -Space.xs, dy: -Space.xs)
     }
 
-    /// The cell drawn for a row, building it if the table has not laid it out yet —
-    /// a rename needs the label's real frame, and an unrealised row has none.
+    /// A rename needs the title frame of the mounted view, including History cards.
+    private func renameCellForRow(_ index: Int, makeIfNecessary: Bool = true) -> AgentInboxRenameCell? {
+        guard let tableRow = tableRow(forRowIndex: index) else { return nil }
+        return tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: makeIfNecessary) as? AgentInboxRenameCell
+    }
+
     private func cellForRow(_ index: Int) -> AgentInboxRowCell? {
         guard let tableRow = tableRow(forRowIndex: index) else { return nil }
         if let cell = cellsByRow[tableRow] { return cell }
@@ -8443,7 +8472,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
               let tableRow = tableRow(forRowIndex: index),
               // P4.7: the same table-row round trip `rowDoubleClicked` makes.
               let clicked = rowIndex(forTableRow: tableRow),
-              let cell = cellForRow(clicked) else {
+              let cell = renameCellForRow(clicked) else {
             return false
         }
         let point = onTitle
@@ -8509,8 +8538,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// cell rather than reconstructed from the row model.
     func titleFrameForQA(id: UUID) -> NSRect? {
         guard let index = rows.firstIndex(where: { $0.id == id }),
-              let tableRow = tableRow(forRowIndex: index),
-              let cell = cellsByRow[tableRow] else { return nil }
+              let cell = renameCellForRow(index, makeIfNecessary: false) else { return nil }
         return cell.convert(cell.titleFrame, to: self)
     }
     /// Type into the open field. Sets the text the way the field editor would leave
@@ -8816,15 +8844,23 @@ enum InboxListItem {
         case .projectHeading(let title, let count): return "project:\(count):\(title)"
         case .sectionLabel(let label): return label.identity
         case .incident(let incident):
-            return "incident:\(incident.id):\(incident.title):\(incident.detail):\(incident.actionTitle)"
+            return "incident:" + Self.incidentIdentity(incident)
         case .quietNeedsYou(let incidents):
-            return "needs-you:" + incidents.map { "\($0.id):\($0.title):\($0.detail):\($0.actionTitle)" }
-                .joined(separator: "|")
+            return "needs-you:" + incidents.map(Self.incidentIdentity).joined(separator: "|")
         case .familyCause(let incident, let leadId):
-            return "cause:\(leadId.uuidString):\(incident.id):\(incident.detail):\(incident.actionTitle)"
+            return "cause:\(leadId.uuidString):" + Self.incidentIdentity(incident)
         case .leadCount(let tally):
             return "count:\(tally.leadId.uuidString):\(tally.countLine)"
         }
+    }
+
+    /// Equal labels can hide a change to the bound agents. Keep the IDs in
+    /// order because Resume acts on the first owner.
+    private static func incidentIdentity(_ incident: SidebarIncident) -> String {
+        let labels = [incident.id, incident.symbol, incident.title, incident.detail,
+                      incident.actionTitle, incident.harness ?? ""]
+        let targets = [incident.agentIDs, incident.ownerIDs, incident.familyIDs]
+        return "\(String(reflecting: labels)):\(targets)"
     }
 }
 
@@ -9307,6 +9343,12 @@ final class AgentInboxRemainderView: NSTableCellView {
     /// The lead's count line, drawn as its own line in the card: quiet ink,
     /// "N failed" in the failed red, no action, nothing to press.
     private(set) var countTallyForQA: SidebarLeadTally?
+    func refreshCountAccessibility(_ tally: SidebarLeadTally) {
+        guard let previous = countTallyForQA, previous.countLine == tally.countLine,
+              previous.shown != tally.shown || previous.folded != tally.folded else { return }
+        countTallyForQA = tally
+        setAccessibilityLabel(tally.accessibilityLabel)
+    }
     /// The drawn words fit their line whole: nothing is cut off.
     var labelFitsForQA: Bool {
         label.frame.width > 0 && ceil(label.attributedStringValue.size().width) <= ceil(label.frame.width) + 0.5
@@ -9517,13 +9559,22 @@ private final class InboxPressReportingButton: NSButton {
     }
 }
 
+// Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
+@MainActor
+protocol AgentInboxRenameCell: NSTableCellView {
+    /// The title in the cell's coordinates, where the shared editor is placed.
+    var titleFrame: NSRect { get }
+    /// Nested controls keep their own gestures.
+    func acceptsRenameDoubleClick(at point: NSPoint) -> Bool
+}
+
 // Ticket: docs/38-tickets/90-agent-ux/P3.7-slim-rows.md
 /// The two row views the list can build, behind one call. The list decides WHICH
 /// from `AgentInboxRow.variant` and then knows nothing else about the difference —
 /// so the density rule lives in `RowVariant.forLifecycle` (P3.1), which is where
 /// it can be gated, and never in a condition scattered through the painting.
 @MainActor
-protocol AgentInboxRowCell: NSTableCellView {
+protocol AgentInboxRowCell: AgentInboxRenameCell {
     /// Supply the table column before content is applied. AppKit can build a
     /// cell with a zero frame, but tiered visibility and row height must agree
     /// from the first layout pass.
@@ -9599,13 +9650,6 @@ protocol AgentInboxRowCell: NSTableCellView {
     /// The frame of whatever this variant paints the state with — the word on a
     /// card, the glyph on a parked row — in the cell's own coordinates.
     var qaStatusFrame: NSRect { get }
-    // Ticket: docs/38-tickets/90-agent-ux/P3.13-inline-rename.md
-    /// The frame of the row's NAME in the cell's own coordinates. A production
-    /// accessor, not a `qa` one: it is where the rename field is placed.
-    var titleFrame: NSRect { get }
-    /// A double-click may begin editing only in the row body. Nested controls
-    /// (currently the disclosure button) remain owned by their own target/action.
-    func acceptsRenameDoubleClick(at point: NSPoint) -> Bool
     /// A live nested-control frame for the event witness, or nil for a row with
     /// no nested control. The check uses the same point the production hit test
     /// receives rather than asserting a private button exists.

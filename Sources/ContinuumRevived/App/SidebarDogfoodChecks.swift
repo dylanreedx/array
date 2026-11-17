@@ -173,6 +173,11 @@ enum SidebarDogfoodChecks {
             ("history-chatter", checkHistoryChatter), ("restored-titles", checkRestoredTitlesPublishOnce),
             ("switch-shared-organization", checkSwitchSharedOrganization),
             ("history-branch-search", checkHistoryBranchSearch),
+            ("usage-scope-actions", checkUsageScopeActions),
+            ("family-cause-action", checkFamilyCauseAction),
+            ("lead-count-fold", checkLeadCountFold),
+            ("history-rename", checkHistoryRename),
+            ("history-focused-helper", checkHistoryFocusedHelper),
         ]
         var reports: [String] = []
         var failures: [String] = []
@@ -1218,6 +1223,222 @@ enum SidebarDogfoodChecks {
         try expect(inbox.historyHeaderTitleForQA == "History (1)" && titles == ["Second parked lead"],
                    "activation swapped the branches and left one match, but mounted History drew \(titles); wanted the second lead")
         return "Activation refreshed two checkout branches together. One matching mounted History card replaced the other after unrelated chatter."
+    }
+
+    static func checkUsageScopeActions() throws -> String {
+        func switchedScope(layout: SidebarLayout, dismiss: Bool = false) throws -> String? {
+            let h = try makeHarness("scope-\(layout.rawValue)-\(dismiss ? "dismiss" : "resume")")
+            defer { h.close() }
+            let inbox = h.inbox
+            inbox.setSidebarLayoutForQA(layout)
+            let fixture = h.fixture
+            let first = h.supervisor.spawn(role: nil, prompt: nil, cwd: fixture.paRoot, harness: .codex,
+                                           model: "openai-codex/gpt-5.6-sol", thinking: "low",
+                                           projectId: fixture.projectPa, projectRoot: fixture.paRoot,
+                                           displayName: "Paused in Pa")
+            let second = h.spawn("Paused in Pb", harness: .codex)
+            try makeUsageLive(h.supervisor, harness: .codex, root: fixture.tempRoot, secondLogin: false)
+            for id in [first, second] { h.finish(id, failed: "You've hit your usage limit. Upgrade to Pro or try again at 3:05 PM.") }
+            h.refresh()
+
+            func quietLine() -> SidebarQuietNeedsYouView.Line? {
+                Q.views(in: inbox) { $0 is SidebarQuietNeedsYouView && !$0.isHiddenOrHasHiddenAncestor }
+                    .compactMap { $0 as? SidebarQuietNeedsYouView }.first?.lines.first
+            }
+            func resumeButton() -> NSButton? {
+                if layout == .quietInbox { return quietLine()?.actionButton }
+                return Q.views(in: inbox) { $0 is SidebarIncidentCellView && !$0.isHiddenOrHasHiddenAncestor }
+                    .compactMap { $0 as? SidebarIncidentCellView }.first?.actionButton
+            }
+            try expect(inbox.pickScopeForQA(.project("Pa")), "fixture: Pa scope unavailable")
+            inbox.scrollToTopForQA()
+            inbox.layoutForQA()
+            try expect(inbox.sidebarIncidents.first?.agentIDs == [first.rawValue] && resumeButton()?.window === h.window,
+                       "fixture: Pa usage line was not mounted")
+            try expect(inbox.pickScopeForQA(.project("Pb")), "fixture: Pb scope unavailable")
+            inbox.layoutForQA()
+            guard let current = inbox.sidebarIncidents.first(where: { $0.kind == .cause(.usageLimit) }),
+                  let resume = resumeButton(), resume.title == SidebarFailureCause.usageResumeTitle else {
+                throw Failure(description: "fixture: Pb usage line was not mounted")
+            }
+            try expect(current.agentIDs == [second.rawValue], "fixture: usage model did not switch to Pb")
+            if dismiss {
+                guard let button = quietLine()?.dismissButton else { throw Failure(description: "no mounted Dismiss button") }
+                let fingerprint = SidebarIncidentDismissals.fingerprint(current, rows: inbox.allRowsForQuietCheck)
+                try Q.click(button)
+                inbox.layoutForQA()
+                let saved = SidebarIncidentDismissals.load(from: h.suite)[current.id]
+                if saved != fingerprint || quietLine() != nil { return "Dismiss did not save Pb's fingerprint and remove its mounted usage line" }
+            } else {
+                try Q.click(resume)
+                if h.delegate.lastSidebarIncidentOutcomeForQA != .revealedAgent(second.rawValue) {
+                    return "\(layout.rawValue) Resume expected Pb's agent \(second.rawValue), got \(h.delegate.lastSidebarIncidentOutcomeForQA) (Pa's agent \(first.rawValue))"
+                }
+            }
+            return nil
+        }
+        let failures = try [switchedScope(layout: .quietInbox), switchedScope(layout: .quietInbox, dismiss: true),
+                            switchedScope(layout: .ledger)].compactMap { $0 }
+        try expect(failures.isEmpty, failures.joined(separator: "\n"))
+        return "After a same-count Pa → Pb scope change, Quiet and Ledger Resume revealed Pb's agent. Quiet Dismiss saved Pb's fingerprint and hid its line."
+    }
+
+    static func checkFamilyCauseAction() throws -> String {
+        let h = try makeHarness("family-cause-action")
+        defer { h.close() }
+        let inbox = h.inbox
+        let lead = h.spawn("Lead with paused helper")
+        let first = h.spawn("Initially paused helper", parent: lead, harness: .codex)
+        let second = h.spawn("Newly paused helper", parent: lead, harness: .codex)
+        // Standalone helper tiles make each helper its own resume owner.
+        try expect(h.delegate.revealAgentFromInbox(lead.rawValue)
+                   && h.delegate.revealAgentFromInbox(first.rawValue)
+                   && h.delegate.revealAgentFromInbox(second.rawValue), "fixture: could not pop out both helpers")
+        try makeUsageLive(h.supervisor, harness: .codex, root: h.fixture.tempRoot, secondLogin: false)
+        let words = "You've hit your usage limit. Upgrade to Pro or try again at 3:05 PM."
+        h.finish(first, failed: words)
+        h.finish(second)
+        h.refresh()
+        func causeLine() -> AgentInboxRemainderView? {
+            Q.views(in: inbox.tableForQA) { ($0 as? AgentInboxRemainderView)?.causeIncidentForQA != nil }
+                .compactMap { $0 as? AgentInboxRemainderView }.first
+        }
+        try expect(causeLine()?.causeIncidentForQA?.ownerIDs == [first.rawValue],
+                   "fixture: the mounted family cause did not target the first helper")
+        h.finish(first)
+        h.finish(second, failed: words)
+        h.refresh()
+        guard let action = causeLine()?.causeActionForQA, action.title == SidebarFailureCause.usageResumeTitle else {
+            throw Failure(description: "fixture: family Resume did not stay mounted")
+        }
+        try expect(inbox.sidebarFamilyChips.first?.incident.agentIDs == [second.rawValue],
+                   "fixture: the family cause model did not switch to the second helper")
+        try Q.click(action)
+        try expect(h.delegate.lastSidebarIncidentOutcomeForQA == .revealedAgent(second.rawValue),
+                   "family Resume targeted \(h.delegate.lastSidebarIncidentOutcomeForQA), wanted the newly paused helper \(second.rawValue)")
+        return "A family kept one paused helper as ownership changed. Its mounted Resume opened the newly paused helper."
+    }
+
+    static func checkLeadCountFold() throws -> String {
+        let h = try makeHarness("lead-count-fold")
+        defer { h.close() }
+        let inbox = h.inbox
+        let lead = h.spawn("Lead")
+        let subLead = h.spawn("Sub-lead", parent: lead)
+        _ = h.spawn("Nested helper", parent: subLead)
+        h.refresh()
+        func countCell() -> AgentInboxRemainderView? {
+            guard let index = inbox.itemsForQuietCheck.firstIndex(where: {
+                if case .leadCount(let tally) = $0 { return tally.leadId == lead.rawValue }
+                return false
+            }) else { return nil }
+            return inbox.tableForQA.view(atColumn: 0, row: index, makeIfNecessary: false) as? AgentInboxRemainderView
+        }
+        guard let openCell = countCell(), let openTally = openCell.countTallyForQA, openTally.shown == 2 else {
+            throw Failure(description: "fixture: the mounted lead count did not have two shown helpers")
+        }
+        try expect(inbox.clickDisclosureForQA(id: subLead.rawValue), "fixture: could not fold the sub-lead")
+        inbox.layoutForQA()
+        guard let foldedCell = countCell(), let folded = inbox.sidebarTallies[lead.rawValue] else {
+            throw Failure(description: "fixture: the lead count was not mounted after the fold")
+        }
+        try expect(folded.shown == 1 && folded.folded == 1 && folded.countLine == openTally.countLine,
+                   "fixture: fold did not preserve the visible helper count while hiding one nested helper")
+        try expect(foldedCell.accessibilityLabel() == folded.accessibilityLabel,
+                   "the mounted count announced '\(foldedCell.accessibilityLabel() ?? "")', wanted '\(folded.accessibilityLabel)'")
+        return "Folding a sub-lead kept the helper count and updated the mounted count line's shown/folded accessibility text."
+    }
+
+    static func checkHistoryRename() throws -> String {
+        let h = try makeHarness("history-rename")
+        defer { h.close() }
+        let inbox = h.inbox
+        let title = "Finished release notes"
+        let renamed = "Reviewed release notes"
+        let id = h.spawn(title)
+        h.finish(id)
+        try expect(h.supervisor.settle(agentID: id), "fixture: could not settle the agent")
+        h.refresh()
+        if !inbox.isHistoryExpandedForQA { try clickHistoryHeading(inbox) }
+        func card() -> SidebarQuietHistoryEntryView? {
+            guard let index = inbox.itemsForQuietCheck.firstIndex(where: { $0.agentRow?.id == id.rawValue }) else { return nil }
+            inbox.scrollItemToVisibleForQA(index)
+            inbox.layoutForQA()
+            return inbox.cellForQA(atItem: index) as? SidebarQuietHistoryEntryView
+        }
+        guard let original = card(), original.titleForQA == title else {
+            throw Failure(description: "fixture: settled History card was not mounted")
+        }
+        inbox.presentsPopoversOffscreenForQA = true
+        try Q.rightClick(original)
+        try expect(inbox.pickRowMenuItemForQA(.rename), "History card did not offer Rename")
+        try expect(inbox.renamingRowIdForQA == id.rawValue && inbox.renameFieldTextForQA == title,
+                   "History card offered Rename but did not open the shared editor")
+        let titleFrame = original.convert(original.titleFrameForQA, to: inbox)
+        try expect(inbox.renameFieldFrameForQA?.contains(titleFrame) == true,
+                   "shared editor does not cover the mounted History title")
+        try expect(inbox.typeRenameForQA(renamed) && inbox.pressKeyInRenameForQA(#selector(NSResponder.insertNewline(_:))),
+                   "shared editor did not handle Return")
+        try expect(h.supervisor.records[id]?.displayName == renamed && card()?.titleForQA == renamed,
+                   "the committed name did not reach the agent and the mounted History card")
+        try expect(inbox.doubleClickRowForQA(id: id.rawValue, onTitle: true)
+                   && inbox.renamingRowIdForQA == id.rawValue,
+                   "double-clicking the History title did not open the shared editor")
+        try expect(inbox.pressKeyInRenameForQA(#selector(NSResponder.cancelOperation(_:))), "shared editor did not handle Escape")
+        return "The mounted History card opened the shared editor from its context menu and title; Return renamed the agent and repainted the card."
+    }
+
+    static func checkHistoryFocusedHelper() throws -> String {
+        let h = try makeHarness("history-focused-helper")
+        defer { h.close() }
+        let inbox = h.inbox
+        let lead = h.spawn("Old parked family")
+        let helper = h.spawn("Focused helper", parent: lead)
+        h.finish(helper)
+        h.finish(lead)
+        try expect(h.delegate.revealAgentFromInbox(lead.rawValue) && h.delegate.revealAgentFromInbox(helper.rawValue),
+                   "fixture: could not open the lead and pop out its helper")
+        for index in 0...InboxSort.settledPageSize {
+            let newer = h.spawn("Newer parked family \(index + 1)")
+            h.finish(newer)
+            try expect(h.supervisor.settle(agentID: newer), "fixture: could not settle newer family \(index + 1)")
+        }
+        h.refresh()
+        try expect(inbox.scrollToAgentForQA(id: lead.rawValue), "fixture: live lead was not visible")
+        try expect(inbox.openRowMenuForQA(clickedRowId: lead.rawValue) && inbox.pickRowMenuItemForQA(.settle),
+                   "fixture: could not settle the lead through the sidebar")
+        try expect(h.supervisor.records[lead]?.tileId == nil && h.supervisor.records[helper]?.tileId != nil,
+                   "fixture: settling the lead did not leave only the helper's tile open")
+
+        func cardIDs() -> [UUID] {
+            inbox.itemsForQuietCheck.enumerated().compactMap { index, item in
+                guard let row = item.agentRow,
+                      inbox.tableForQA.view(atColumn: 0, row: index, makeIfNecessary: true) is SidebarQuietHistoryEntryView
+                else { return nil }
+                return row.id
+            }
+        }
+        guard let note = h.fixture.canvas.navigationTileSnapshots().first(where: { $0.kind == .note }) else {
+            throw Failure(description: "fixture: no non-agent tile to focus for the first page")
+        }
+        h.fixture.canvas.markActive(tileId: note.tileId)
+        h.refresh()
+        if !inbox.isHistoryExpandedForQA { try clickHistoryHeading(inbox) }
+        let firstPage = cardIDs()
+        try expect(firstPage.count == InboxSort.settledPageSize && !firstPage.contains(lead.rawValue),
+                   "fixture: older family was not beyond page one (\(firstPage.count) cards)")
+        try expect(h.delegate.revealAgentFromInbox(helper.rawValue), "fixture: could not focus the popped-out helper")
+        h.refresh()
+        try expect(inbox.openAgentId == helper.rawValue, "fixture: helper tile did not become the sidebar's focused agent")
+        let focusedPage = cardIDs()
+        try expect(focusedPage == firstPage + [lead.rawValue],
+                   "focusing the helper drew \(focusedPage.count) cards without appending its old family to the first page")
+        let hidden = inbox.itemsForQuietCheck.compactMap { item -> Int? in
+            if case .settledMore(let count) = item { return count }
+            return nil
+        }
+        try expect(hidden == [1], "History footer should count only the one other hidden family, got \(hidden)")
+        return "Focusing the popped-out helper drew its older family after the ten recent cards. The footer counted one other hidden family."
     }
 
     // MARK: - 11. Restored titles publish once
