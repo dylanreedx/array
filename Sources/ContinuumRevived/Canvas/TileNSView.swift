@@ -3489,21 +3489,12 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         }
         guard !isTracking(native) else { return }
         native.layoutSubtreeIfNeeded()
-        let sourceBounds = native.bounds
-        // cacheDisplay rounds its pixel cover outward. Capture that exact cover
-        // and retain its origin as well as its size: at zoom 0.3 an 18pt control
-        // can occupy 10 device pixels inside an 11px bitmap. Resizing all 11px
-        // into the native bounds filters and shifts the control a second time.
-        let capturedBounds = native.backingAlignedRect(sourceBounds, options: .alignAllEdgesOutward)
-        guard capturedBounds.width > 0, capturedBounds.height > 0,
-              let rep = native.bitmapImageRepForCachingDisplay(in: capturedBounds) else { return }
-        native.cacheDisplay(in: capturedBounds, to: rep)
+        guard let rep = native.bitmapImageRepForCachingDisplay(in: native.bounds) else { return }
+        native.cacheDisplay(in: native.bounds, to: rep)
         guard let image = rep.cgImage, !TileSurfaceStore.isUniform(rep) else { return }
-        let mapping = TileSurfaceHostView.ContentMapping(
-            sourceBounds: sourceBounds, capturedBounds: capturedBounds, sourceIsFlipped: native.isFlipped)
         let host = TileSurfaceHostView(surface: image,
-            bakedScale: CGFloat(rep.pixelsWide) / capturedBounds.width,
-            backingScale: window?.backingScaleFactor ?? 2, contentMapping: mapping)
+            bakedScale: CGFloat(rep.pixelsWide) / native.bounds.width,
+            backingScale: window?.backingScaleFactor ?? 2)
         let size = native.frame.size
         host.frame = native.frame
         host.widthAnchor.constraint(equalToConstant: size.width).isActive = true

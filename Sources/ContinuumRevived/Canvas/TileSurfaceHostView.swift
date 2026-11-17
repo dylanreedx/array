@@ -20,28 +20,6 @@ final class TileSurfaceHostView: NSView {
     /// independently.
     private static let stepsPerOctave: Double = 4
 
-    /// A title accessory's bitmap includes the outward-aligned pixel cover of
-    /// its bounds. Retain that extent and its offset instead of stretching the
-    /// padded bitmap into the smaller native bounds. Ordinary tile bodies keep
-    /// their existing unit-rectangle mapping.
-    struct ContentMapping {
-        let sourceBounds: CGRect
-        let capturedBounds: CGRect
-        let sourceIsFlipped: Bool
-
-        var contentsRect: CGRect {
-            let visualTop = sourceIsFlipped
-                ? sourceBounds.minY - capturedBounds.minY
-                : capturedBounds.maxY - sourceBounds.maxY
-            return CGRect(
-                x: (sourceBounds.minX - capturedBounds.minX) / capturedBounds.width,
-                y: visualTop / capturedBounds.height,
-                width: sourceBounds.width / capturedBounds.width,
-                height: sourceBounds.height / capturedBounds.height
-            )
-        }
-    }
-
     /// Readable so a tile can tell whether the host it already has is showing the
     /// surface it is about to be given, and skip rebuilding it. `CGImage` is a
     /// reference type, so identity is the right comparison.
@@ -51,20 +29,16 @@ final class TileSurfaceHostView: NSView {
     /// Device pixels per world point the image actually carries. Read by the
     /// canvas to decide whether this surface is still sharp enough to show.
     let bakedScale: CGFloat
-    let contentMapping: ContentMapping?
 
     private(set) var qaBackingCallbackCount = 0
     private(set) var qaContentsScaleChangeCount = 0
 
-    init(surface: CGImage, bakedScale: CGFloat, backingScale: CGFloat,
-         contentMapping: ContentMapping? = nil) {
+    init(surface: CGImage, bakedScale: CGFloat, backingScale: CGFloat) {
         self.surface = surface
         self.bakedScale = bakedScale
-        self.contentMapping = contentMapping
         super.init(frame: .zero)
         surfaceLayer.contents = surface
         surfaceLayer.contentsGravity = .resize
-        if let contentMapping { surfaceLayer.contentsRect = contentMapping.contentsRect }
         surfaceLayer.contentsScale = Self.bucket(backingScale)
         // The bake is taken from a top-left-origin flipped view, so the layer has
         // to read it the same way round or every surfaced tile is upside down.
