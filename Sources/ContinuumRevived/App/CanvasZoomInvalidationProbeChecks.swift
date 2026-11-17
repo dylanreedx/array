@@ -140,7 +140,154 @@ enum CanvasZoomInvalidationProbeChecks {
         return Result(passes: harness.canvas.qaTotalTileLayoutPassCount - before, seconds: seconds)
     }
 
+    /// Unequal corners and thin marks expose a crop/flip that glass shadows
+    /// alone cannot identify. Both native coordinate directions use the same
+    /// production title-accessory bake and demotion.
+    private final class AccessoryRasterPattern: NSView {
+        private let flipped: Bool
+        init(flipped: Bool) { self.flipped = flipped; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+        override var isFlipped: Bool { flipped }
+        override var isOpaque: Bool { true }
+        override var intrinsicContentSize: NSSize { NSSize(width: 271.66667, height: 18) }
+        override func draw(_ dirtyRect: NSRect) {
+            let halfWidth = bounds.width / 2
+            let halfHeight = bounds.height / 2
+            let top = isFlipped ? bounds.minY : bounds.midY
+            let bottom = isFlipped ? bounds.midY : bounds.minY
+            for (color, rect) in [
+                (NSColor.red, NSRect(x: 0, y: top, width: halfWidth, height: halfHeight)),
+                (NSColor.green, NSRect(x: halfWidth, y: top, width: halfWidth, height: halfHeight)),
+                (NSColor.blue, NSRect(x: 0, y: bottom, width: halfWidth, height: halfHeight)),
+                (NSColor.yellow, NSRect(x: halfWidth, y: bottom, width: halfWidth, height: halfHeight))
+            ] { color.setFill(); rect.fill() }
+            NSColor.black.setFill()
+            NSRect(x: bounds.width * 0.31, y: 0, width: 2, height: bounds.height).fill()
+            NSRect(x: 0, y: bounds.height * 0.61, width: bounds.width, height: 2).fill()
+        }
+    }
+
+    private final class AccessoryRasterTile: TileNSView {
+        override var surfacesTitleAccessory: Bool { true }
+        override var surfaceableBody: NSView? { contentView }
+        override var surfaceContentRevision: UInt64? { 1 }
+    }
+
+    private static func checkTitleAccessoryRasterPhase() throws {
+        func sameFrame(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+            abs(lhs.minX - rhs.minX) <= 0.000_001 && abs(lhs.minY - rhs.minY) <= 0.000_001
+                && abs(lhs.width - rhs.width) <= 0.000_001 && abs(lhs.height - rhs.height) <= 0.000_001
+        }
+        func capture(_ view: NSView) throws -> CGImage {
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                throw Failure(message: "missing asymmetric accessory bitmap")
+            }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            guard let image = rep.cgImage else { throw Failure(message: "empty asymmetric accessory bitmap") }
+            return image
+        }
+        func pixels(_ image: CGImage) throws -> [UInt8] {
+            guard let context = CGContext(data: nil, width: image.width, height: image.height,
+                                          bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                throw Failure(message: "missing asymmetric accessory pixel context")
+            }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            guard let data = context.data else { throw Failure(message: "missing asymmetric accessory pixels") }
+            return Array(UnsafeRawBufferPointer(start: data, count: image.width * image.height * 4))
+        }
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            for flipped in [false, true] {
+                let canvas = CanvasNSView(canvasState: CanvasState(
+                    viewport: CanvasViewport(x: 0, y: 0, zoom: 0.3), tiles: [], groups: [], lastActiveTileId: nil))
+                canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+                let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = NSAppearance(named: appearance)
+                window.contentView = canvas
+                window.orderFrontOffscreenForChecks()
+                defer { window.orderOut(nil); window.contentView = nil }
+                let tile = Tile(id: UUID(), kind: .file, title: "Accessory raster",
+                    frame: TileFrame(x: flipped ? 25.1 : 24.35, y: flipped ? 60.2 : 58.65, width: 320, height: 220),
+                    zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata())
+                let view = AccessoryRasterTile(tile: tile)
+                let body = NSView(frame: .zero)
+                body.wantsLayer = true
+                body.layer?.backgroundColor = NSColor.gray.cgColor
+                view.setContentView(body)
+                let pattern = AccessoryRasterPattern(flipped: flipped)
+                view.setTitleBarAccessory(pattern)
+                canvas.install(tileView: view, for: tile)
+                canvas.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                CATransaction.flush()
+                let before = try capture(pattern)
+                let nativeFrame = pattern.frame
+                let tileFrame = view.frame
+                let windowBounds = pattern.convert(pattern.bounds, to: nil)
+                let backingBounds = pattern.convertToBacking(pattern.bounds)
+                let alignedBounds = pattern.backingAlignedRect(pattern.bounds, options: .alignAllEdgesOutward)
+                let backing = window.backingScaleFactor
+                let nominalPixels = NSSize(width: windowBounds.width * backing, height: windowBounds.height * backing)
+                try expect(abs(CGFloat(before.width) - nominalPixels.width) > 0.01
+                           || abs(CGFloat(before.height) - nominalPixels.height) > 0.01,
+                           "asymmetric accessory must exercise outward-rounded capture pixels")
+                let park = TileSurfaceParkView(frame: .zero)
+                canvas.addSubview(park)
+                let store = TileSurfaceStore()
+                guard let revision = view.currentSurfaceRevision,
+                      let surface = store.bake(tileId: tile.id, body: body, revision: revision) else {
+                    throw Failure(message: "could not bake asymmetric accessory's real body")
+                }
+                try expect(view.demoteBodyToSurface(surface, park: park, backingScale: backing),
+                           "asymmetric accessory must traverse production demotion")
+                canvas.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                CATransaction.flush()
+                guard let host = view.qaDisplayedTitleAccessory as? TileSurfaceHostView else {
+                    throw Failure(message: "asymmetric accessory did not surface")
+                }
+                let after = try capture(host)
+                try expect(before.width == after.width && before.height == after.height,
+                           "accessory pixel dimensions changed while surfacing")
+                try expect(sameFrame(host.frame, nativeFrame) && sameFrame(host.qaSurfaceLayerFrame, host.frame)
+                           && view.frame == tileFrame,
+                           "surfacing must preserve accessory, root-layer and world frames")
+                // Exclude the one-pixel outward-capture border: its coverage lies
+                // outside the native bounds. Interior marks must retain phase.
+                let interior = CGRect(x: 1, y: 1, width: before.width - 2, height: before.height - 2)
+                guard let beforeInterior = before.cropping(to: interior),
+                      let afterInterior = after.cropping(to: interior) else {
+                    throw Failure(message: "missing asymmetric accessory interior")
+                }
+                let difference = TileSurfaceResidencyChecks.meanChannelDifference(beforeInterior, afterInterior)
+                print("Accessory raster phase: appearance=\(appearance.rawValue) flipped=\(flipped) "
+                      + "pixels=\(before.width)x\(before.height) nominal=\(nominalPixels) mean=\(difference) "
+                      + "backingBounds=\(backingBounds) alignedBounds=\(alignedBounds)")
+                try expect(difference <= 2, "asymmetric accessory lost raster phase: \(difference)")
+                let nativePixels = try pixels(before)
+                let cachedPixels = try pixels(after)
+                var cornerColors: Set<Data> = []
+                for (xFraction, yFraction) in [(0.15, 0.15), (0.85, 0.15), (0.15, 0.85), (0.85, 0.85)] {
+                    let x = Int(Double(before.width - 1) * xFraction)
+                    let y = Int(Double(before.height - 1) * yFraction)
+                    let offset = (y * before.width + x) * 4
+                    let nativeColor = Array(nativePixels[offset..<(offset + 4)])
+                    let cachedColor = Array(cachedPixels[offset..<(offset + 4)])
+                    cornerColors.insert(Data(nativeColor))
+                    try expect(zip(nativeColor, cachedColor).allSatisfy { abs(Int($0) - Int($1)) <= 1 },
+                               "asymmetric accessory corner moved or flipped")
+                }
+                try expect(cornerColors.count == 4, "asymmetric accessory must paint four different corners")
+                view.promoteBodyToNative()
+                try expect(view.qaDisplayedTitleAccessory === pattern && pattern.window === window && view.frame == tileFrame,
+                           "restoring an asymmetric accessory must preserve its owner and world frame")
+            }
+        }
+    }
+
     private static func runFileTileZoom() throws {
+        try checkTitleAccessoryRasterPhase()
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-file-zoom-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
