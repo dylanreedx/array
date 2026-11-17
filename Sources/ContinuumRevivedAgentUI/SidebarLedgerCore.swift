@@ -616,7 +616,9 @@ public enum SidebarClearMarks {
         }
         // Details can arrive lazily for this same terminal event. A newly
         // discovered blocker is never hidden behind an old acknowledgement.
-        if row.settlementBlocked || SidebarRecovery.cause(for: row)?.isBlocking == true { return false }
+        // A usage stop is not one: it blocks only while usage is out live.
+        let cause = SidebarRecovery.cause(for: row)
+        if row.settlementBlocked || (cause?.isBlocking == true && cause != .usageLimit) { return false }
         if (row.terminalEvent?.sequence ?? 0) > mark.sequence { return false }
         let activity = row.lastActiveAt ?? row.terminalEvent?.endedAt ?? row.createdAt
         return activity <= mark.activityAt.addingTimeInterval(activitySlack)
@@ -659,11 +661,12 @@ public enum SidebarClearMarks {
                     }
                     let activity = max(row.lastActiveAt ?? row.createdAt,
                                        row.terminalEvent?.endedAt ?? row.createdAt)
-                    // Released by something that HAPPENED: work, a settlement
-                    // block, or activity after the clear. Not by a cause turning
-                    // blocking on its own: a usage stop does that whenever usage
-                    // runs out live, and would bring back every cleared family.
-                    if busy || row.settlementBlocked
+                    // A blocker revealed by its own words (a lazily read
+                    // transcript) releases the mark. A usage stop does not: it
+                    // blocks only while usage is out LIVE, so it would bring
+                    // back every cleared family each time usage ran out.
+                    let cause = SidebarRecovery.cause(for: row)
+                    if busy || row.settlementBlocked || (cause?.isBlocking == true && cause != .usageLimit)
                         || activity >= mark.clearedAt { released.insert(id) }
                 }
                 ancestor = parentOf[id]

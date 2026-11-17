@@ -60,7 +60,9 @@ enum SidebarLedgerFixture {
                         harness: "codex"))
         rows.append(row(18, "Interrupted helper", parent: 1, outcome: .interrupted, endedHoursAgo: 0.2))
         rows.append(row(19, "Finished helper", parent: 1, outcome: .succeeded, endedHoursAgo: 0.1))
-        return InboxSort.sortForInbox(rows: rows)
+        // Usage is out LIVE for both CLIs here, and each has a second account.
+        return InboxSort.sortForInbox(rows: SidebarUsageLive.stamp(rows, states: [
+            "Claude": .init(exhausted: true, canSwitch: true), "Codex": .init(exhausted: true, canSwitch: true)]))
     }
 }
 
@@ -238,12 +240,49 @@ func runSidebarLedgerCoreChecks() {
     // event after Clear. It must reappear without waiting for another turn.
     let unknown = F.row(300, "Initially unknown", outcome: .failed, detail: "No details")
     let unknownMarks = [unknown.id: SidebarClearMarks.mark(for: unknown, now: F.now)]
-    for detail in [F.usage, "OAuth session expired", "Codex could not start: could not launch codex: No such file or directory (2)"] {
+    for detail in ["OAuth session expired", "Codex could not start: could not launch codex: No such file or directory (2)"] {
         var revealed = unknown
         revealed.failureDetail = detail
         let applied = SidebarClearMarks.apply(unknownMarks, to: [revealed])
         expect(applied.released.contains(unknown.id) && !applied.rows[0].isCleared,
                "a late blocking cause releases an existing Clear mark")
+    }
+    // Dogfood: a usage stop blocks only while usage is out live, so it never
+    // releases a mark on its own — with or without live usage.
+    for live in [false, true] {
+        var revealed = unknown
+        revealed.failureDetail = F.usage
+        revealed.usageExhaustedNow = live
+        let applied = SidebarClearMarks.apply(unknownMarks, to: [revealed])
+        expect(!applied.released.contains(unknown.id) && applied.rows[0].isCleared,
+               "a usage stop alone (live \(live)) does not bring a cleared row back")
+    }
+    // Dogfood: the live usage rule, pure. Old words alone are a plain failure.
+    do {
+        let stopped = F.row(400, "Old usage stop", outcome: .failed, detail: F.usage)
+        expect(SidebarRecovery.cause(for: stopped) == .taskError && SidebarRecovery.state(for: stopped) == .failed,
+               "an old usage stop with no live exhaustion is a plain failure — got \(String(describing: SidebarRecovery.cause(for: stopped)))")
+        expect(SidebarClear.refusal(for: stopped, standing: []) != .pausedOnUsage,
+               "Clear never refuses an old usage stop as paused")
+        var live = stopped
+        live.usageExhaustedNow = true
+        expect(SidebarRecovery.cause(for: live) == .usageLimit && SidebarRecovery.state(for: live) == .paused,
+               "a usage stop while usage is out live is a pause")
+        let one = SidebarIncidents.build(rows: [live]).first { $0.kind == .cause(.usageLimit) }
+        expect(one?.actionTitle == SidebarFailureCause.usageResumeTitle,
+               "one account: the usage action is Resume — got \(one?.actionTitle ?? "nil")")
+        live.usageCanSwitchAccount = true
+        let two = SidebarIncidents.build(rows: [live]).first { $0.kind == .cause(.usageLimit) }
+        expect(two?.actionTitle == "Switch & resume…", "a second signed-in account: Switch & resume…")
+        let dismissed = [two!.id: SidebarIncidentDismissals.fingerprint(two!, rows: [live])]
+        expect(SidebarIncidentDismissals.visible([two!], dismissed: dismissed, rows: [live]).isEmpty,
+               "a dismissed incident is hidden")
+        let newer = F.row(401, "New usage stop", outcome: .failed, detail: F.usage)
+        var newerLive = newer
+        newerLive.usageExhaustedNow = true
+        let grown = SidebarIncidents.build(rows: [live, newerLive]).first { $0.kind == .cause(.usageLimit) }!
+        expect(SidebarIncidentDismissals.visible([grown], dismissed: dismissed, rows: [live, newerLive]).count == 1,
+               "a new agent in the incident brings a dismissed item back")
     }
     let queued = AgentInboxRow(id: unknown.id, title: unknown.title, state: .ready,
         createdAt: unknown.createdAt, settlementBlocked: true, terminalEvent: unknown.terminalEvent)
@@ -253,7 +292,8 @@ func runSidebarLedgerCoreChecks() {
     // A subsuming root mark must release when old descendant facts become known.
     let oldChild = F.row(201, "Unknown child", parent: 200, outcome: .failed)
     let rootMark = [F.id(200): marks[F.id(200)]!]
-    for detail in [F.usage, "OAuth session expired", "Codex could not start: could not launch codex: No such file or directory (2)"] {
+    // (Dogfood: a usage stop is not a same-event blocker; it is live state.)
+    for detail in ["OAuth session expired", "Codex could not start: could not launch codex: No such file or directory (2)"] {
         var child = oldChild
         child.failureDetail = detail
         let restored = SidebarClearMarks.apply(rootMark, to: [finished[0], child])
