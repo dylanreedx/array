@@ -102,17 +102,24 @@ enum TranscriptRetentionDeliveryChecks {
         /// The lead messages the helper through the production send; the
         /// operation id is the handle its result is written under.
         @discardableResult
-        func message(_ text: String) async throws -> String {
+        func message(_ text: String, waitForStart: Bool = true) async throws -> String {
             operations += 1
             let handle = "op-\(operations)"
             let context = AgentMessageQueueContext(caller: lead, recipient: helper, operationId: handle,
                 idempotencyKey: "key-\(operations)", payloadHash: "hash-\(operations)")
             let delivery = s.deliverAgentMessage(text, from: lead, to: helper, hops: 1, context: context).delivery
             guard delivery == .delivered else { throw Failure(description: "the helper did not take \(handle) directly: \(delivery)") }
-            guard await waitUntil(timeout: 5, pollInterval: 0.02, { self.helperRunner.openTurns == 1 }) else {
+            if waitForStart, !(await waitUntil(timeout: 5, pollInterval: 0.02, { self.helperRunner.openTurns == 1 })) {
                 throw Failure(description: "the helper's turn for \(handle) did not start")
             }
             return handle
+        }
+        func fail(_ error: String) async throws {
+            helperRunner.fail(error)
+            guard await waitUntil(timeout: 5, pollInterval: 0.02, { !self.s.isRunning(self.helper) && self.helperRunner.openTurns == 0 }) else {
+                throw Failure(description: "the helper's failed turn did not end")
+            }
+            try await Task.sleep(nanoseconds: 80_000_000)
         }
         func end(_ text: String) async throws {
             helperRunner.end(saying: text)
@@ -312,6 +319,7 @@ enum TranscriptRetentionDeliveryChecks {
         try await f.firstTurnThenRelease()
         f.s.qaBeforeResumedTranscriptConstruction = { _, _ in await gate.wait() }
         let handleB = try await f.message("Do task B.")
+        guard f.s.fileReport(.init(summary: "REPORT_B"), for: f.helper) else { throw Failure(description: "B's report was refused") }
         try await f.end("ANSWER_B")
         let handleC = try await f.message("Do task C.")
         guard f.s.fileReport(.init(summary: "REPORT_C"), for: f.helper) else { throw Failure(description: "C's report was refused") }
@@ -322,13 +330,113 @@ enum TranscriptRetentionDeliveryChecks {
         await f.flushToLead()
         await f.flushToLead()
         var failures: [String] = []
-        if f.result(handleB)?.report != nil { failures.append("handle B carried \(f.result(handleB)?.report?.summary ?? "?"), filed by C") }
+        if f.result(handleB)?.report?.summary != "REPORT_B" { failures.append("handle B carried \(f.result(handleB)?.report?.summary ?? "no report"), not its own REPORT_B") }
         if f.result(handleC)?.report?.summary != "REPORT_C" { failures.append("handle C carried \(f.result(handleC)?.report?.summary ?? "no report"), not its own REPORT_C") }
         let pushed = f.results()
-        if pushed.contains(where: { $0.contains("ANSWER_B") && $0.contains("REPORT_C") }) || !pushed.contains(where: { $0.contains("ANSWER_B") }) {
-            failures.append("turn B's pushed result was not its own: \(pushed)")
+        if pushed.filter({ $0.contains("REPORT_B") && !$0.contains("REPORT_C") }).count != 1 {
+            failures.append("turn B's own report was not pushed exactly once: \(pushed)")
         }
         if pushed.filter({ $0.contains("REPORT_C") }).count != 1 { failures.append("C's report was not pushed exactly once: \(pushed)") }
+        guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
+    }
+
+    /// A turn after A fails before saying anything (a quota or no-result exit):
+    /// its result and wake say it has no reply and never carry A's. Resident,
+    /// and released with a reload that succeeds.
+    static func runNoOutputTurn(root: URL) async throws {
+        var failures: [String] = []
+        for released in [false, true] {
+            let name = released ? "released" : "resident"
+            let f = try fixture(root, "no-output-\(name)")
+            defer { f.s.stopAll() }
+            AgentSupervisor.transcriptReleaseDelay = .seconds(60)
+            if released { try await f.firstTurnThenRelease() }
+            else {
+                _ = try await f.message("Do task A.")
+                try await f.end("FIRST_ANSWER")
+                await f.flushToLead()
+            }
+            let handle = try await f.message("Do task B.")
+            try await f.fail("quota exceeded")
+            _ = await waitUntil(timeout: 10, pollInterval: 0.02, { (f.result(handle)?.status ?? .spawned) != .spawned })
+            await f.flushToLead()
+            let result = f.result(handle)
+            if result?.status != .failed || result?.finalText != nil {
+                failures.append("\(name): handle B settled as \(result?.status.rawValue ?? "nothing") with \(result?.finalText ?? "no text")")
+            }
+            let pushed = f.results()
+            if pushed.count != 2 { failures.append("\(name): \(pushed.count) results pushed, not 2: \(pushed)") }
+            else if pushed[1].contains("FIRST_ANSWER") || !pushed[1].contains("quota exceeded")
+                        || !pushed[1].contains("(no reply this turn)") {
+                failures.append("\(name): turn B pushed \(pushed[1])")
+            }
+        }
+        guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
+    }
+
+    /// B is held (background work, no report). Its background ends; C is
+    /// accepted but its provider has not started; the grace passes. B's hold
+    /// must not consume C's handle; C settles with its own answer, pushed once.
+    static func runHoldBeforeNextStart(root: URL) async throws {
+        let f = try fixture(root, "hold-before-start")
+        defer { f.helperRunner.releaseStart(); f.s.stopAll() }
+        AgentSupervisor.transcriptReleaseDelay = .seconds(60)
+        let handleB = try await f.message("Do task B.")
+        f.helperRunner.background = true
+        try await f.end("ANSWER_B")
+        await f.flushToLead()
+        guard f.s.isHelperCompletionHeld(f.helper) else { throw Failure(description: "B was not held") }
+        f.helperRunner.background = false
+        f.s.sweepHeldHelperCompletions()
+        f.helperRunner.holdNextStart()
+        let handleC = try await f.message("Do task C.", waitForStart: false)
+        f.now.addTimeInterval(f.s.heldBackgroundGrace + 1)
+        f.s.sweepHeldHelperCompletions()
+        f.now.addTimeInterval(f.s.heldHelperCompletionCap + 1)
+        f.s.sweepHeldHelperCompletions()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        var failures: [String] = []
+        if let early = f.result(handleC), early.status != .spawned {
+            failures.append("handle C settled before C started, with \(early.finalText ?? "no text")")
+        }
+        f.helperRunner.releaseStart()
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, { f.helperRunner.openTurns == 1 }) else {
+            throw Failure(description: "C's turn never started")
+        }
+        try await f.end("ANSWER_C")
+        _ = await waitUntil(timeout: 10, pollInterval: 0.02, { f.result(handleC)?.status == .completed })
+        await f.flushToLead()
+        await f.flushToLead()
+        if f.result(handleC)?.finalText?.contains("ANSWER_C") != true { failures.append("handle C settled with \(f.result(handleC)?.finalText ?? "nothing")") }
+        if (f.result(handleB)?.status ?? .spawned) == .spawned { failures.append("handle B never settled") }
+        let pushed = f.results()
+        if pushed.filter({ $0.contains("ANSWER_C") }).count != 1 { failures.append("C was not pushed exactly once: \(pushed)") }
+        if pushed.filter({ $0.contains("ANSWER_B") }).count > 1 { failures.append("B was pushed more than once: \(pushed)") }
+        guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
+    }
+
+    /// B ends behind a reload, replays into a real hold, then files a report
+    /// between turns: the release carries that report on both channels.
+    static func runDeferredHoldReport(root: URL) async throws {
+        let f = try fixture(root, "deferred-hold-report")
+        let gate = Gate()
+        defer { f.s.qaBeforeResumedTranscriptConstruction = nil; f.s.stopAll() }
+        AgentSupervisor.transcriptReleaseDelay = .seconds(60)
+        try await f.firstTurnThenRelease()
+        f.s.qaBeforeResumedTranscriptConstruction = { _, _ in await gate.wait() }
+        let handleB = try await f.message("Do task B.")
+        f.helperRunner.background = true
+        try await f.end("ANSWER_B")
+        await gate.open()
+        _ = await waitUntil(timeout: 10, pollInterval: 0.02, { f.s.isHelperCompletionHeld(f.helper) })
+        guard f.s.isHelperCompletionHeld(f.helper) else { throw Failure(description: "B was not held after its reload") }
+        f.helperRunner.background = false
+        guard f.s.fileReport(.init(summary: "REPORT_LATE"), for: f.helper) else { throw Failure(description: "the late report was refused") }
+        _ = await waitUntil(timeout: 10, pollInterval: 0.02, { (f.result(handleB)?.status ?? .spawned) != .spawned })
+        await f.flushToLead()
+        var failures: [String] = []
+        if f.result(handleB)?.report?.summary != "REPORT_LATE" { failures.append("handle B carried \(f.result(handleB)?.report?.summary ?? "no report")") }
+        if f.results().filter({ $0.contains("REPORT_LATE") }).count != 1 { failures.append("the late report was not pushed once: \(f.results())") }
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
     }
 
@@ -345,7 +453,8 @@ enum TranscriptRetentionDeliveryChecks {
             ("normal turn", runNormal), ("late reload", runLateReload),
             ("timeout then late reload", runTimeoutThenLateReload),
             ("hold under a later turn", runHoldUnderLaterTurn), ("unreadable archive", runUnreadableArchive),
-            ("later report", runLaterReport),
+            ("later report", runLaterReport), ("no-output turn", runNoOutputTurn),
+            ("hold before the next start", runHoldBeforeNextStart), ("deferred hold report", runDeferredHoldReport),
         ]
         for (label, body) in cases {
             do { try await body(root); print("retention delivery: \(label) PASS") }
