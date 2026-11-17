@@ -178,11 +178,12 @@ enum CanvasZoomInvalidationProbeChecks {
             abs(lhs.minX - rhs.minX) <= 0.000_001 && abs(lhs.minY - rhs.minY) <= 0.000_001
                 && abs(lhs.width - rhs.width) <= 0.000_001 && abs(lhs.height - rhs.height) <= 0.000_001
         }
-        func capture(_ view: NSView) throws -> CGImage {
-            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        func capture(_ view: NSView, rect: NSRect? = nil) throws -> CGImage {
+            let sourceRect = rect ?? view.bounds
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: sourceRect) else {
                 throw Failure(message: "missing asymmetric accessory bitmap")
             }
-            view.cacheDisplay(in: view.bounds, to: rep)
+            view.cacheDisplay(in: sourceRect, to: rep)
             guard let image = rep.cgImage else { throw Failure(message: "empty asymmetric accessory bitmap") }
             return image
         }
@@ -197,10 +198,14 @@ enum CanvasZoomInvalidationProbeChecks {
             guard let data = context.data else { throw Failure(message: "missing asymmetric accessory pixels") }
             return Array(UnsafeRawBufferPointer(start: data, count: image.width * image.height * 4))
         }
-        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+        var orientationsWithVerticalPadding: Set<Bool> = []
+        let configurations = [NSAppearance.Name.aqua, .darkAqua].flatMap { appearance in
+            [0.3, 0.35].map { (appearance, $0) }
+        }
+        for (appearance, zoom) in configurations {
             for flipped in [false, true] {
                 let canvas = CanvasNSView(canvasState: CanvasState(
-                    viewport: CanvasViewport(x: 0, y: 0, zoom: 0.3), tiles: [], groups: [], lastActiveTileId: nil))
+                    viewport: CanvasViewport(x: 0, y: 0, zoom: zoom), tiles: [], groups: [], lastActiveTileId: nil))
                 canvas.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
                 let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
                 window.appearance = NSAppearance(named: appearance)
@@ -221,7 +226,12 @@ enum CanvasZoomInvalidationProbeChecks {
                 canvas.layoutSubtreeIfNeeded()
                 window.displayIfNeeded()
                 CATransaction.flush()
-                let before = try capture(pattern)
+                let nativeLocal = try capture(pattern)
+                // Freeze one backing-aligned rectangle in the canvas. Native
+                // and hosted views normalize their own bitmap contexts differently.
+                let captureRect = canvas.backingAlignedRect(pattern.convert(pattern.bounds, to: canvas),
+                                                           options: .alignAllEdgesOutward)
+                let before = try capture(canvas, rect: captureRect)
                 let nativeFrame = pattern.frame
                 let tileFrame = view.frame
                 let windowBounds = pattern.convert(pattern.bounds, to: nil)
@@ -229,9 +239,12 @@ enum CanvasZoomInvalidationProbeChecks {
                 let alignedBounds = pattern.backingAlignedRect(pattern.bounds, options: .alignAllEdgesOutward)
                 let backing = window.backingScaleFactor
                 let nominalPixels = NSSize(width: windowBounds.width * backing, height: windowBounds.height * backing)
-                try expect(abs(CGFloat(before.width) - nominalPixels.width) > 0.01
-                           || abs(CGFloat(before.height) - nominalPixels.height) > 0.01,
+                try expect(abs(CGFloat(nativeLocal.width) - nominalPixels.width) > 0.01
+                           || abs(CGFloat(nativeLocal.height) - nominalPixels.height) > 0.01,
                            "asymmetric accessory must exercise outward-rounded capture pixels")
+                if CGFloat(nativeLocal.height) - nominalPixels.height > 0.05 {
+                    orientationsWithVerticalPadding.insert(flipped)
+                }
                 let park = TileSurfaceParkView(frame: .zero)
                 canvas.addSubview(park)
                 let store = TileSurfaceStore()
@@ -247,22 +260,18 @@ enum CanvasZoomInvalidationProbeChecks {
                 guard let host = view.qaDisplayedTitleAccessory as? TileSurfaceHostView else {
                     throw Failure(message: "asymmetric accessory did not surface")
                 }
-                let after = try capture(host)
+                let after = try capture(canvas, rect: captureRect)
                 try expect(before.width == after.width && before.height == after.height,
                            "accessory pixel dimensions changed while surfacing")
                 try expect(sameFrame(host.frame, nativeFrame) && sameFrame(host.qaSurfaceLayerFrame, host.frame)
                            && view.frame == tileFrame,
                            "surfacing must preserve accessory, root-layer and world frames")
-                // Exclude the one-pixel outward-capture border: its coverage lies
-                // outside the native bounds. Interior marks must retain phase.
-                let interior = CGRect(x: 1, y: 1, width: before.width - 2, height: before.height - 2)
-                guard let beforeInterior = before.cropping(to: interior),
-                      let afterInterior = after.cropping(to: interior) else {
-                    throw Failure(message: "missing asymmetric accessory interior")
-                }
-                let difference = TileSurfaceResidencyChecks.meanChannelDifference(beforeInterior, afterInterior)
-                print("Accessory raster phase: appearance=\(appearance.rawValue) flipped=\(flipped) "
+                try expect(host.qaSurfaceLayerAnimationKeys.isEmpty,
+                           "surfacing an accessory must not start an implicit image animation")
+                let difference = TileSurfaceResidencyChecks.meanChannelDifference(before, after)
+                print("Accessory raster phase: appearance=\(appearance.rawValue) flipped=\(flipped) zoom=\(zoom) "
                       + "pixels=\(before.width)x\(before.height) nominal=\(nominalPixels) mean=\(difference) "
+                      + "localPixels=\(nativeLocal.width)x\(nativeLocal.height) "
                       + "backingBounds=\(backingBounds) alignedBounds=\(alignedBounds)")
                 try expect(difference <= 2, "asymmetric accessory lost raster phase: \(difference)")
                 let nativePixels = try pixels(before)
@@ -284,6 +293,8 @@ enum CanvasZoomInvalidationProbeChecks {
                            "restoring an asymmetric accessory must preserve its owner and world frame")
             }
         }
+        try expect(orientationsWithVerticalPadding.count == 2,
+                   "asymmetric accessories must exercise vertical raster padding in both coordinate directions")
     }
 
     private static func runFileTileZoom() throws {
@@ -326,15 +337,22 @@ enum CanvasZoomInvalidationProbeChecks {
         canvas.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
         CATransaction.flush()
-        func capture(_ view: NSView?) throws -> CGImage {
-            guard let view, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+        func capture(_ view: NSView?, rect: NSRect? = nil) throws -> CGImage {
+            guard let view else { throw Failure(message: "missing view for zoom fidelity check") }
+            let sourceRect = rect ?? view.bounds
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: sourceRect) else {
                 throw Failure(message: "missing view for zoom fidelity check")
             }
-            view.cacheDisplay(in: view.bounds, to: rep)
+            view.cacheDisplay(in: sourceRect, to: rep)
             guard let image = rep.cgImage else { throw Failure(message: "empty zoom fidelity image") }
             return image
         }
-        let nativeHeader = try capture(views[0].qaDisplayedTitleAccessory)
+        guard let nativeAccessory = views[0].qaDisplayedTitleAccessory else {
+            throw Failure(message: "missing native title accessory")
+        }
+        let headerCaptureRect = canvas.backingAlignedRect(nativeAccessory.convert(nativeAccessory.bounds, to: canvas),
+                                                          options: .alignAllEdgesOutward)
+        let nativeHeader = try capture(canvas, rect: headerCaptureRect)
         let initialHeaderHeight = views[0].qaTitleBarFrame.height
         let controlPoint = views[0].qaModeControl!.convert(
             NSPoint(x: views[0].qaModeControl!.bounds.midX, y: views[0].qaModeControl!.bounds.midY), to: views[0])
@@ -366,7 +384,7 @@ enum CanvasZoomInvalidationProbeChecks {
             }
         }
         if !nativeOnly, !CommandLine.arguments.contains("--without-accessories") {
-            let cachedHeader = try capture(views[0].qaDisplayedTitleAccessory)
+            let cachedHeader = try capture(canvas, rect: headerCaptureRect)
             let difference = TileSurfaceResidencyChecks.meanChannelDifference(nativeHeader, cachedHeader)
             print("Off-screen title compositor: mean channel difference \(difference) / 255")
             for (name, image) in [("native", nativeHeader), ("cached", cachedHeader)] {
