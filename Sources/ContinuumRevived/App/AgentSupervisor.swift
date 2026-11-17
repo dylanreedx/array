@@ -4577,7 +4577,10 @@ final class AgentSupervisor {
         // P2D.2: an agent asking for another agent arrives here, out of band from
         // the event stream. Hopped to the main actor like the events are, and for
         // the same reason — the handler mutates supervisor state.
-        runner.observeSpawnRequests { [weak self] request in
+        runner.observeSpawnRequests { [weak self, weak runner] request in
+            // A runner nothing holds is neither the agent's live runner nor
+            // its pooled one, so every guard below would refuse it anyway.
+            guard let runner else { return }
             DispatchQueue.main.async {
                 guard let self,
                       self.runnerGenerationTokens[id] == runnerGeneration,
@@ -4588,7 +4591,10 @@ final class AgentSupervisor {
         // The runner emits private observations before the matching normalized
         // item event on one serial queue. Main-queue FIFO preserves that order, so
         // the generic event cannot overwrite the path-bearing local What value.
-        runner.observeRuntimeObservations { [weak self] observation in
+        runner.observeRuntimeObservations { [weak self, weak runner] observation in
+            // A runner nothing holds is neither the agent's live runner nor
+            // its pooled one, so every guard below would refuse it anyway.
+            guard let runner else { return }
             DispatchQueue.main.async {
                 guard let self,
                       self.runnerGenerationTokens[id] == runnerGeneration,
@@ -4602,7 +4608,13 @@ final class AgentSupervisor {
         // Asked for as a capability so the one-shot and scripted runners stay
         // untouched.
         if let bridging = runner as? HostToolBridging {
-            bridging.observeHostToolRequests { [weak self] call in
+            bridging.observeHostToolRequests { [weak self, weak runner] call in
+                // A runner nothing holds is neither the agent's live runner nor
+                // its pooled one, so every guard below would refuse it anyway.
+                guard let runner else {
+                    call.respond(.error("outcome_unknown", "The agent session that made this request has been replaced."))
+                    return
+                }
                 DispatchQueue.main.async {
                     guard let self,
                           self.runnerGenerationTokens[id] == runnerGeneration,
@@ -4634,7 +4646,10 @@ final class AgentSupervisor {
             // the runner's identity, not the turn's generation: adopting that
             // next turn mints a new generation while this one's frames are
             // already queued behind it.
-            observing.observeSubagentEvents { [weak self] toolUseID, event in
+            observing.observeSubagentEvents { [weak self, weak runner] toolUseID, event in
+                // A runner nothing holds is neither the agent's live runner nor
+                // its pooled one, so every guard below would refuse it anyway.
+                guard let runner else { return }
                 DispatchQueue.main.async {
                     guard let self,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner
@@ -4642,7 +4657,10 @@ final class AgentSupervisor {
                     self.deliverSubagentEvent(event, parent: id, toolUseID: toolUseID)
                 }
             }
-            observing.observeSubagentProgress { [weak self] toolUseID in
+            observing.observeSubagentProgress { [weak self, weak runner] toolUseID in
+                // A runner nothing holds is neither the agent's live runner nor
+                // its pooled one, so every guard below would refuse it anyway.
+                guard let runner else { return }
                 DispatchQueue.main.async {
                     guard let self,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner
@@ -4660,7 +4678,10 @@ final class AgentSupervisor {
         if let observing = runner as? ProviderSubagentActivityObserving {
             providerThreadAgentRoutes[id] = [:]
             pendingProviderThreadEvents[id] = [:]
-            observing.observeProviderSubagentActivity { [weak self] activity in
+            observing.observeProviderSubagentActivity { [weak self, weak runner] activity in
+                // A runner nothing holds is neither the agent's live runner nor
+                // its pooled one, so every guard below would refuse it anyway.
+                guard let runner else { return }
                 DispatchQueue.main.async {
                     guard let self,
                           self.runnerGenerationTokens[id] == runnerGeneration,
@@ -4686,7 +4707,10 @@ final class AgentSupervisor {
         // supervisor tails it. Different mechanism, same destination: the child's
         // own thread, through `deliverSubagentEvent`.
         if let reporting = runner as? ObservedRunReporting {
-            reporting.observeObservedRuns { [weak self] handle in
+            reporting.observeObservedRuns { [weak self, weak runner] handle in
+                // A runner nothing holds is neither the agent's live runner nor
+                // its pooled one, so every guard below would refuse it anyway.
+                guard let runner else { return }
                 DispatchQueue.main.async {
                     guard let self,
                           self.runnerGenerationTokens[id] == runnerGeneration,
@@ -4716,7 +4740,10 @@ final class AgentSupervisor {
         // turns it starts on its own. Accepted while this runner is the agent's,
         // bound or idle: a promoted steer is confirmed after its turn ended.
         if let steering = runner as? AgentSteeringRunning {
-            steering.observeSteerDispositions { [weak self] steerID, disposition in
+            steering.observeSteerDispositions { [weak self, weak runner] steerID, disposition in
+                // A runner nothing holds is neither the agent's live runner nor
+                // its pooled one, so every guard below would refuse it anyway.
+                guard let runner else { return }
                 DispatchQueue.main.async {
                     guard let self,
                           self.runners[id] === runner || self.idleSessionRunners[id] === runner else { return }
@@ -4725,13 +4752,18 @@ final class AgentSupervisor {
             }
         }
         if let reporting = runner as? AgentUnsolicitedTurnReporting {
-            reporting.observeUnsolicitedTurns { [weak self] in
+            reporting.observeUnsolicitedTurns { [weak self, weak reporting] in
+                guard let reporting else { return }
                 DispatchQueue.main.async { self?.adoptUnsolicitedTurn(from: reporting, for: id) }
             }
         }
         // S3 (N3): a session process that leaves between turns says so.
         if let reporting = runner as? AgentIdleExitReporting {
-            reporting.observeIdleExit { [weak self] code, tail, hadBackgroundWork in
+            reporting.observeIdleExit { [weak self, weak runner] code, tail, hadBackgroundWork in
+                // Not `guard let runner`: a session can exit as its turn ends,
+                // after the supervisor let go of the runner, and the Claude
+                // runner reports it from a global queue. A freed runner is
+                // neither live nor pooled, and its exit must still be told.
                 DispatchQueue.main.async {
                     self?.sessionProcessExitedWhileIdle(
                         runner, for: id, code: code, stderrTail: tail, hadBackgroundWork: hadBackgroundWork)
@@ -13051,10 +13083,11 @@ final class AgentSupervisor {
     /// pool (the next send starts a fresh one that resumes the conversation)
     /// and the transcript says so, with whatever the CLI said on its way out.
     private func sessionProcessExitedWhileIdle(
-        _ runner: AgentRunning, for id: AgentID, code: Int32, stderrTail: String?, hadBackgroundWork: Bool
+        _ runner: AgentRunning?, for id: AgentID, code: Int32, stderrTail: String?, hadBackgroundWork: Bool
     ) {
-        guard runners[id] !== runner else { return }  // a live turn reports its own exit
-        let wasPooled = idleSessionRunners[id] === runner
+        // nil: the runner was freed, so it is neither the live turn's nor pooled.
+        guard runner == nil || runners[id] !== runner else { return }  // a live turn reports its own exit
+        let wasPooled = runner != nil && idleSessionRunners[id] === runner
         if wasPooled {
             idleSessionRunners[id] = nil
             idleReapTokens[id] = nil
@@ -15229,6 +15262,73 @@ func runImageSupervisorProductionSeamChecks() async throws {
     }
 }
 
+private final class FreedSessionExitRunner: AgentRunning, AgentIdleExitReporting, @unchecked Sendable {
+    private let lock = NSLock()
+    private var idleExitHandler: (@Sendable (Int32, String?, Bool) -> Void)?
+    private var sessionAlive = true
+    let freed: @Sendable () -> Void
+    init(freed: @escaping @Sendable () -> Void) { self.freed = freed }
+    deinit { freed() }
+    var keepsSessionAliveBetweenTurns: Bool { true }
+    var canAcceptAnotherTurn: Bool { lock.withLock { sessionAlive } }
+    var commandCapabilities: AgentSessionCommandCapabilities { ScriptedAgentRunner(script: []).commandCapabilities }
+    func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
+        onEvent(.turnStarted(threadId: "provider", turnId: "exit-at-turn-end"))
+        onEvent(.turnCompleted(threadId: "provider", turnId: "exit-at-turn-end", outcome: .completed, errorMessage: nil))
+        // The session process leaves as the turn ends: as the Claude runner
+        // does, report it later from a global queue, holding only the handler.
+        let handler = lock.withLock { () -> (@Sendable (Int32, String?, Bool) -> Void)? in
+            sessionAlive = false
+            return idleExitHandler
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.3) { handler?(9, "killed", true) }
+    }
+    func stop() {}
+    func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
+    func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
+    func observeIdleExit(_ handler: @escaping @Sendable (Int32, String?, Bool) -> Void) {
+        lock.withLock { idleExitHandler = handler }
+    }
+}
+
+private final class FreedRunnerFlag: @unchecked Sendable { var value = false }
+
+/// A turn's runner is freed when the turn ends (nothing else holds it), and a
+/// session process that exits right then must still say so. `ClaudeAgentRunner`
+/// calls its idle-exit handler from a global queue holding only the handler, so
+/// the runner can be gone by the time the supervisor hears it; the "Session
+/// ended" notice and its background-work line must still arrive.
+@MainActor
+private func checkFreedSessionRunnerStillReportsIdleExit(
+    fail: (String) -> Error
+) async throws -> String {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("array-freed-runner-exit-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let freed = FreedRunnerFlag()
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root),
+        makeRunner: { _ in FreedSessionExitRunner(freed: { DispatchQueue.main.async { freed.value = true } }) })
+    defer { supervisor.stopAll() }
+    let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, harness: .claudeCode,
+                              model: "anthropic/claude-opus-5-5", thinking: "low")
+    var notices: [AgentLocalNotice] = []
+    _ = supervisor.addLocalNoticeObserver(for: id) { notices.append($0) }
+    guard supervisor.send("go", to: id) else { throw fail("freed runner: the turn was refused") }
+    let deadline = Date().addingTimeInterval(5)
+    while Date() < deadline, !(freed.value && notices.contains { $0.title == "Session ended" }) {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    guard freed.value else { throw fail("freed runner: a finished turn whose session died kept its runner") }
+    guard let notice = notices.first(where: { $0.title == "Session ended" }) else {
+        throw fail("freed runner: a session that exited as its turn ended said nothing once its runner was freed")
+    }
+    guard notice.body.contains("Background work it was running has stopped") else {
+        throw fail("freed runner: the exit notice lost its background-work line: \(notice.body)")
+    }
+    return "a session exiting as its turn ends reports it after the runner is freed"
+}
+
 /// Gated on `--agent-supervisor-check`.
 ///
 /// Deterministic and offline: a `ScriptedAgentRunner` replaces Pi, so what is under
@@ -15264,6 +15364,7 @@ func runAgentSupervisorChecks() async throws {
     // supervisor corpus so an unrelated later fixture cannot mask this witness.
     let retiredRunnerReport = try await checkRetiredRunnerCannotRestartTurn(fail: fail)
     print("AgentSupervisor runner generation: \(retiredRunnerReport)")
+    print("AgentSupervisor freed runner: \(try await checkFreedSessionRunnerStillReportsIdleExit(fail: fail))")
     let composerKeyAssertions = try runComposerKeyContractChecks()
     let completionAssertions = try await runCompletionComposerChecks()
     // Run the one-shot's production sync-boundary witness first so a regression

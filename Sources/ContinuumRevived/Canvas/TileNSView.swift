@@ -1888,13 +1888,17 @@ class TileNSView: NSView, TokenThemed {
         underBarDidChange()
     }
 
+    /// This tile's hidden host for resting views (`RestingHost`): its own, so
+    /// one Auto Layout engine never holds every tile's resting views.
+    let restingHost = RestingHost()
+
     /// A resting agent tile draws its pills as a picture (the accessory moves
-    /// to the hidden resting host, `AgentTileChromeCanvasView.restingHost`),
-    /// so the row costs one drawing view, not the pills' dozen.
+    /// to the tile's hidden `restingHost`), so the row costs one drawing view,
+    /// not the pills' dozen.
     func setUnderBarAccessoryResting(_ resting: Bool) {
         guard let underBar else { return }
         if resting {
-            underBar.restAccessory(in: AgentTileChromeCanvasView.restingHost(matching: window).contentView)
+            underBar.restAccessory(in: restingHost.view(matching: window))
         } else {
             underBar.wakeAccessory()
         }

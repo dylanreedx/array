@@ -48,6 +48,8 @@ enum LongTranscriptPerformanceChecks {
             if let previousRenderer { setenv(rendererKey, previousRenderer, 1) }
             else { unsetenv(rendererKey) }
         }
+        try checkDistantReleaseLocality()
+        try checkZeroWidthReleasedReplacement()
         let source = ProcessInfo.processInfo.environment["ARRAY_LONG_TRANSCRIPT_ARCHIVE"]
         var document: AgentDocument
         if let source {
@@ -172,8 +174,11 @@ enum LongTranscriptPerformanceChecks {
             throw Failure(description: "could not create the scroll drawing context")
         }
         let context = NSGraphicsContext(cgContext: cg, flipped: true)
-        let layoutBeforeScroll = canvas.qaBlockLayoutCount
+        canvas.viewWillDraw()
+        let rebuildsBeforeScroll = canvas.qaDocumentRebuildCount
+        let schedulesBeforeScroll = canvas.qaDeferredReleaseRelayoutScheduleCount
         let drawsBefore = canvas.qaDrawCount
+        var drawnLines = 0
         var scrollMs: [Double] = []
         for step in 0..<40 {
             let start = ProcessInfo.processInfo.systemUptime
@@ -182,12 +187,18 @@ enum LongTranscriptPerformanceChecks {
                        "scroll must reach the requested position")
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = context
+            canvas.viewWillDraw()
             canvas.draw(canvas.bounds)
+            drawnLines += canvas.qaLastDrawnLineCount
             NSGraphicsContext.restoreGraphicsState()
             scrollMs.append((ProcessInfo.processInfo.systemUptime - start) * 1_000)
         }
         try expect(canvas.qaDrawCount - drawsBefore == 40, "each scroll must draw the view")
-        try expect(canvas.qaBlockLayoutCount == layoutBeforeScroll, "scrolling must not re-layout transcript blocks")
+        try expect(canvas.qaDocumentRebuildCount == rebuildsBeforeScroll,
+                   "scrolling may restore released text but must not rebuild document placement")
+        try expect(canvas.qaDeferredReleaseRelayoutScheduleCount == schedulesBeforeScroll,
+                   "scrolling released text must not queue a deferred document rebuild")
+        try expect(drawnLines > 0, "scrolling released history must draw actual text")
         print(String(format: "long transcript (%@; %d entries, %d placed): append p95 %.2f ms, update p95 %.2f ms, scroll+draw p95 %.2f ms; max visited blocks %d append, %d update",
                      source == nil ? "synthetic" : "private archive", history.count + projection.document.entries.count, initialCount,
                      percentile95(appendMs), percentile95(updateMs), percentile95(scrollMs),
@@ -210,6 +221,101 @@ enum LongTranscriptPerformanceChecks {
         try TranscriptSourceInvalidationChecks.run()
         try expect((appendVisits.max() ?? 0) <= 8, "appending a message must not walk transcript history")
         try expect((updateVisits.max() ?? 0) <= 8, "updating the tail must not walk transcript history")
+    }
+
+    /// A reader remains on old history while the real reducer extends the tail.
+    /// Release work must follow that suffix, and copy must not retain its layout.
+    private static func checkDistantReleaseLocality() throws {
+        let history = (0..<600).map(entry)
+        let canvas = AgentTranscriptCanvasView()
+        canvas.frame = NSRect(x: 0, y: 0, width: 420, height: 520)
+        let host = NSView(frame: canvas.frame)
+        host.addSubview(canvas)
+        var feed = AgentTranscriptDocumentFeed()
+        var projection = AgentTranscriptProjection(threadId: "release-locality", monotonicNow: { 0 })
+        try feed.present(history, touched: [], structural: true, final: false, to: canvas)
+        canvas.flushPendingVisualUpdate()
+        host.layoutSubtreeIfNeeded()
+        canvas.scrollTranscript(toY: 0)
+        canvas.viewWillDraw()
+        try expect(canvas.qaReleasedBlockCount > 400, "release locality fixture must have distant released history")
+        var maximumReleaseVisits = 0
+        var maximumNearVisits = 0
+        func presentTail() throws {
+            let releaseBefore = canvas.qaDistantReleaseVisitedBlockCount
+            let nearBefore = canvas.qaDistantMaterializeVisitedBlockCount
+            try feed.present(history + projection.document.entries,
+                             touched: projection.drainTouchedNodes(), final: false, to: canvas)
+            canvas.flushPendingVisualUpdate()
+            host.layoutSubtreeIfNeeded()
+            canvas.viewWillDraw()
+            let releaseVisits = canvas.qaDistantReleaseVisitedBlockCount - releaseBefore
+            let nearVisits = canvas.qaDistantMaterializeVisitedBlockCount - nearBefore
+            maximumReleaseVisits = max(maximumReleaseVisits, releaseVisits)
+            maximumNearVisits = max(maximumNearVisits, nearVisits)
+            try expect(canvas.qaScrollOffset == 0, "tail changes must keep the old-history viewport")
+            try expect(releaseVisits > 0 && releaseVisits <= 8,
+                       "a fixed-viewport tail update must release only its suffix, visited \(releaseVisits) of 600 history blocks")
+            try expect(nearVisits > 0 && nearVisits <= 128,
+                       "a fixed-viewport update must materialize only its viewport neighborhood, visited \(nearVisits)")
+        }
+        for index in 0..<12 {
+            let releasedBefore = canvas.qaReleasedBlockCount
+            try projection.appendUserPrompt(id: nodeID("release-prompt-\(index)"), text: "release locality prompt \(index)")
+            try presentTail()
+            try expect(canvas.qaReleasedBlockCount > releasedBefore, "a new distant prompt must release its text layout")
+        }
+        projection.ingest(.turnStarted(threadId: "release-locality", turnId: "release-turn"))
+        projection.ingest(.contentDelta(threadId: "release-locality", turnId: "release-turn", streamKind: .assistant,
+                                        delta: "release locality stream"))
+        _ = projection.flushPendingStreamingMarkup()
+        try presentTail()
+        for _ in 0..<12 {
+            projection.ingest(.contentDelta(threadId: "release-locality", turnId: "release-turn", streamKind: .assistant,
+                                            delta: " chunk"))
+            _ = projection.flushPendingStreamingMarkup()
+            try presentTail()
+        }
+        let releasedBeforeCopy = canvas.qaReleasedBlockCount
+        canvas.selectAll(nil)
+        let copied = canvas.selectedText ?? ""
+        let streamedText = "release locality stream" + String(repeating: " chunk", count: 12)
+        try expect(copied.contains("release locality prompt 0") && copied.contains(streamedText),
+                   "copy must include both released prompts and the latest streamed answer")
+        try expect(canvas.qaReleasedBlockCount == releasedBeforeCopy, "copy must not retain distant layouts")
+        try expect(canvas.qaFreshLayoutMismatch() == nil,
+                   "tail placement must match a fresh layout even when its prefix was released")
+        print("memory + lag locality: max \(maximumReleaseVisits) suffix releases, \(maximumNearVisits) viewport visits; distant copy retained no layouts")
+    }
+
+    /// A hidden zero-width tile may receive a document replacement. Its old
+    /// released placements must wait for real width rather than queue relayouts.
+    private static func checkZeroWidthReleasedReplacement() throws {
+        let canvas = AgentTranscriptCanvasView()
+        canvas.frame = NSRect(x: 0, y: 0, width: 420, height: 520)
+        let host = NSView(frame: canvas.frame)
+        host.addSubview(canvas)
+        var feed = AgentTranscriptDocumentFeed()
+        try feed.present((0..<600).map(entry), touched: [], structural: true, final: false, to: canvas)
+        canvas.flushPendingVisualUpdate()
+        host.layoutSubtreeIfNeeded()
+        canvas.viewWillDraw()
+        try expect(canvas.qaReleasedBlockCount > 400, "zero-width replacement fixture must have released history")
+        canvas.scrollTranscript(toY: 0)
+        canvas.setFrameSize(NSSize(width: 0, height: 520))
+        let scheduledBefore = canvas.qaDeferredReleaseRelayoutScheduleCount
+        let replacement = entry(9_999)
+        try feed.present([replacement], touched: [], structural: true, final: false, to: canvas)
+        canvas.flushPendingVisualUpdate()
+        canvas.viewWillDraw()
+        try expect(canvas.qaDeferredReleaseRelayoutScheduleCount == scheduledBefore,
+                   "zero-width replacement must not queue a relayout from stale released placements")
+        canvas.setFrameSize(NSSize(width: 420, height: 520))
+        host.layoutSubtreeIfNeeded()
+        canvas.flushPendingVisualUpdate()
+        try expect(canvas.qaPlacedBlockIDs == replacement.blocks.map(\.id),
+                   "restoring width must replace stale placements with the current document")
+        print("memory + lag zero-width replacement: no stale relayout queued; restored current document")
     }
 
     /// Count actual TextKit views, not semantic blocks or retained subviews.

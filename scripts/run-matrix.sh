@@ -1900,6 +1900,11 @@ run_app_check .build/debug/Array --agent-tile-file-mention-check
 # Forty tiles on one checkout share one `@` file index: each kept its own, 76 MB
 # apiece on a 45k-file checkout, most of a 7.6 GB heap after 2.5 days (0.7.47).
 run_app_check .build/debug/Array --agent-file-index-memory-check
+# A long session holds memory to its transcripts' text: 24 agents streaming
+# for five simulated hours. 0.7.52 grew ~55 MB/h in use (5 GB after 20 h):
+# every turn's runner leaked, all resting tiles shared one Auto Layout engine,
+# and every line a transcript ever drew stayed as CoreText.
+run_app_check .build/debug/Array --long-session-memory-check
 run_app_check .build/debug/Array --agent-tile-reference-check
 # Resize, title-bar focus, Shift-select, live agent moves, header references
 # and swaps, through NSApp.sendEvent: the window hit-test and the focus monitor
