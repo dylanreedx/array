@@ -47,6 +47,16 @@ public enum SidebarFailureCause: String, CaseIterable, Equatable, Sendable {
         }
     }
 
+    /// One word for a lead's status column, the tally's word for the state;
+    /// the long cause lives on the card's cause line.
+    public var shortLabel: String {
+        switch self {
+        case .usageLimit: return "Paused"
+        case .interruptedByRestart: return "Interrupted"
+        case .providerBusy, .signInExpired, .couldNotStart, .taskError: return "Failed"
+        }
+    }
+
     /// The row's word. A usage stop is a pause, never "Failed".
     public func label(harness: String?) -> String {
         switch self {
@@ -98,7 +108,9 @@ public enum SidebarTallyState: String, CaseIterable, Equatable, Sendable {
         case .needsYou: return count == 1 ? "1 needs you" : "\(count) need you"
         case .paused: return "\(count) paused"
         case .failed: return "\(count) failed"
-        case .stopped: return "\(count) stopped"
+        // One word for the state on every surface: a helper whose turn was cut
+        // off (a restart, a cancel) is "interrupted", never "stopped" or "failed".
+        case .stopped: return "\(count) interrupted"
         case .done: return "\(count) done"
         }
     }
@@ -231,7 +243,7 @@ public struct SidebarLeadTally: Equatable, Sendable {
     /// or are moving; zero subsets omitted. Failure is said here and only here.
     public var countLine: String {
         var parts = [total == 1 ? "1 helper" : "\(total) helpers"]
-        for state in [SidebarTallyState.working, .needsYou, .paused, .failed] where count(state) > 0 {
+        for state in [SidebarTallyState.working, .needsYou, .paused, .failed, .stopped] where count(state) > 0 {
             parts.append(state.phrase(count(state)))
         }
         return parts.joined(separator: " · ")
@@ -248,12 +260,7 @@ public struct SidebarLeadTally: Equatable, Sendable {
 
     /// The fold: "5 folded · includes 3 stopped". It names only what the chip
     /// does not, so a failure is never said twice on one card.
-    public var foldLine: String {
-        var line = "\(folded) folded"
-        let stopped = foldedCounts[.stopped] ?? 0
-        if stopped > 0 { line += " · includes \(stopped) stopped" }
-        return line
-    }
+    public var foldLine: String { "\(folded) folded" }
 
     public var accessibilityLabel: String {
         "\(fullLine). \(shown) shown, \(folded) folded."

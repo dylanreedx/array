@@ -148,7 +148,8 @@ func runSidebarLedgerCoreChecks() {
            "partition 12 paused + 1 failed + 3 stopped + 2 done, got \(tally.counts)")
     expect(tally.shown == 2 && tally.folded == 16, "2 recent helpers shown, 16 folded: \(tally.shown)/\(tally.folded)")
     expect(tally.reconciles, "states sum to total and shown + folded = total: \(tally)")
-    expect(tally.countLine == "18 helpers · 12 paused · 1 failed", "count chip: \(tally.countLine)")
+    expect(tally.countLine == "18 helpers · 12 paused · 1 failed · 3 interrupted", "count chip: \(tally.countLine)")
+    expect(tally.foldLine == "\(tally.folded) folded", "the fold says only what it folds: \(tally.foldLine)")
     expect(!tally.foldLine.contains("failed"), "the fold never repeats failed: \(tally.foldLine)")
     expect(tally.shown + Set(bounded.remainders.flatMap(\.hiddenDescendantIDs)).count == 18,
            "shown + every remainder's hidden = 18 (tally shown \(tally.shown))")

@@ -1509,7 +1509,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         case .failed, .runtimeError:
             return "Failed"
         case .interrupted:
-            return "Stopped"
+            return "Interrupted"
         case .cancelled:
             return "Cancelled"
         }
@@ -1559,7 +1559,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 // Both layouts call known usage a pause. Ledger helpers keep
                 // their compact icon/age column; Quiet keeps its status word.
                 text = cause == .taskError && (renderedTally?.count(.failed) ?? 0) > 0
-                    ? (Self.ledgerClock(row, now: now) ?? "") : cause.label(harness: row.harness)
+                    ? (Self.ledgerClock(row, now: now) ?? "") : (sub ? cause.label(harness: row.harness) : cause.shortLabel)
             } else {
                 text = (ledger != nil && sub ? Self.ledgerClock(row, now: now)
                         : Self.ownershipClock(row, isSubagent: sub, now: now)) ?? ""
@@ -1905,7 +1905,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if let terminal = row.terminalEvent {
             switch terminal.outcome {
             case .failed, .runtimeError: return "Failed"
-            case .interrupted: return "Stopped"
+            case .interrupted: return "Interrupted"
             case .cancelled: return "Cancelled"
             case .succeeded:
                 if !isSubagent, row.terminalIsUnread { return "Done" }

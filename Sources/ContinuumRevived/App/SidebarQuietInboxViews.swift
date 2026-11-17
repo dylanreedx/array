@@ -50,8 +50,11 @@ extension AgentInboxView {
     static func causeLineText(_ incident: SidebarIncident) -> String? {
         guard case .cause(let cause) = incident.kind else { return nil }
         switch cause {
-        case .usageLimit, .interruptedByRestart:
+        case .usageLimit:
             return incident.detail
+        case .interruptedByRestart:
+            // The number is the count line's ("5 interrupted"); here, why.
+            return "Interrupted by restart"
         case .providerBusy, .signInExpired, .couldNotStart, .taskError:
             guard let range = incident.detail.range(of: " · ") else { return nil }
             let reason = String(incident.detail[range.upperBound...])

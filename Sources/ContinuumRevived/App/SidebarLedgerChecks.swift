@@ -233,7 +233,7 @@ enum SidebarLedgerChecks {
             throw fail("the card says failed more than once: '\(chip)'")
         }
         guard let help = leadCell.accessibilityHelp(),
-              help.contains("18 helpers · 12 paused · 1 failed · 2 stopped · 3 done") else {
+              help.contains("18 helpers · 12 paused · 1 failed · 2 interrupted · 3 done") else {
             throw fail("lead AX help reads '\(leadCell.accessibilityHelp() ?? "nil")'")
         }
         // Shown helpers under the lead + every drawn fold number = 18.
@@ -804,7 +804,7 @@ extension SidebarLedgerChecks {
                     throw Failure(description: "\(layout.title): no rendered lead")
                 }
                 let ax = card.accessibilityHelp() ?? ""
-                try expect(ax.contains("18 helpers · 12 paused · 1 failed · 2 stopped · 3 done"), "rendered AX partition: '\(ax)'")
+                try expect(ax.contains("18 helpers · 12 paused · 1 failed · 2 interrupted · 3 done"), "rendered AX partition: '\(ax)'")
                 try expect(card.visibleTextForQA.contains("18"), "rendered disclosure does not count 18: \(card.visibleTextForQA)")
                 var shown = 0, folded = 0
                 for index in (start + 1)..<inbox.itemsForQA.count {
@@ -938,7 +938,7 @@ extension SidebarLedgerChecks {
             try press(inbox.undoButtonForQA, in: window, "Undo repeated Clear")
             inbox.layoutForQA()
             try checkHistoryAndStanding(layout)
-            reports.append("\(layout.title): 18 = 12 paused + 1 failed + 2 stopped + 3 done = \(count.shown) shown + \(count.folded) folded from rendered rows/AX; fold, Settings Layout, Clear and Undo used NSApp.sendEvent; blockers stayed, marks reloaded, helper activity restored its family")
+            reports.append("\(layout.title): 18 = 12 paused + 1 failed + 2 interrupted + 3 done = \(count.shown) shown + \(count.folded) folded from rendered rows/AX; fold, Settings Layout, Clear and Undo used NSApp.sendEvent; blockers stayed, marks reloaded, helper activity restored its family")
         }
         return "SidebarLayoutsChecks passed:\n" + reports.joined(separator: "\n")
     }

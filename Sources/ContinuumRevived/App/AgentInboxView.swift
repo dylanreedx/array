@@ -1411,8 +1411,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private(set) var sidebarFamilyChips: [SidebarQuietInbox.FamilyChip] = []
     private var quietNeedsYouCell: SidebarQuietNeedsYouView?
     var familyCauseCells: [String: AgentInboxRemainderView] = [:]
-    /// Stopped helpers behind each fold, counted once per render.
-    private var foldStoppedByParent: [UUID: Int] = [:]
     /// Pressed incident actions reach the host here (account sheet, sign-in,
     /// repair, retry/resume, open). nil: the action button is disabled.
     var onIncidentAction: ((SidebarIncident) -> Void)?
@@ -1846,14 +1844,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         onIncidentAction?(incident)
     }
 
-    /// "N folded · includes K stopped", over the remainder's own hidden ids.
+    /// "N folded": how many the remainder holds, nothing more.
     func ledgerFoldTitle(_ remainder: FanoutRemainder) -> String {
-        // Counted once per render in `display` (was a dictionary over every row
-        // built again for each fold cell configured).
-        let stopped = foldStoppedByParent[remainder.parentId] ?? 0
-        var title = "\(remainder.hiddenDescendantCount) folded"
-        if stopped > 0 { title += " · includes \(stopped) stopped" }
-        return title
+        // Every state's number is said once, on the lead's count line; the
+        // fold says only how many it folds.
+        "\(remainder.hiddenDescendantCount) folded"
     }
 
     /// The Ledger's head: "For you" (blocking incidents, one line each) and
@@ -2685,12 +2680,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let bounded = InboxSort.boundedForInbox(
             rows: sorted, expandedParents: expandedFanoutParents, now: clock())
         fanoutRemaindersByParent = bounded.remainderByParent
-        let rowByID = Dictionary(sorted.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        foldStoppedByParent = Dictionary(bounded.remainders.map { remainder in
-            (remainder.parentId, remainder.hiddenDescendantIDs.reduce(into: 0) { count, id in
-                if let row = rowByID[id], SidebarRecovery.state(for: row) == .stopped { count += 1 }
-            })
-        }, uniquingKeysWith: { first, _ in first })
         // The capped fields are a presentation-only overlay on the full rollup.
         // `holdsParentOpen` and the lifecycle/action policy continue to read the
         // uncapped descendant tallies above, so a remainder cannot change resource
