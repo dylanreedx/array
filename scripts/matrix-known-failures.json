@@ -56,6 +56,14 @@
       "evidence": "Lead memory clearance identifies residency as pre-existing. Fresh source/binary-stamped baseline: ~/array-scratch/release-features/release-0753-residency-legacy-base-7cc801d2/ (QA arm assertions only), paired common-policy logs: release-0753-residency-common-policy-AB/. Independent provenance audit in candidate-0753.md. Conductor full-gate postcheck requires the default-canvas opt-out success, all exact arm counts and this specific quiet-cost failure; other failures are not accepted.",
       "added": "2026-11-17",
       "expires": "2026-12-17"
+    },
+    {
+      "leg": "--file-tile-zoom-check",
+      "kind": "known-red",
+      "reason": "Pre-existing title-accessory raster drift at fractional zoom: archived pre-feature 4c9d7495 bundle and release d165b363 both report mean channel difference 2.439717294900222 against unchanged limit2. The attempted renderer repair failed independent review and was fully reverted; defer to0.7.54. Assertions after the compositor failure are not covered by this leg.",
+      "evidence": "Lead explicitly directed deferral at06:36 EST on2026-11-17. Actual archived-base run: ~/array-scratch/release-features/release-0753-file-base-archived-4c9d7495/state.json and file-tile-zoom-check.log; bundle SHA256 a890f072150b830fc95106b9d0350310fb46e1bd33cfd9051c612a294a6f34f1, source attribution from preserved original matrix/candidate logs rather than embedded stamp. Actual unchanged release initial+serial failure: release-0753-selected-awake-d165b363-20261117T103757298988Z/. Reverts restore the entire d165 tracked tree before this exception-only edit; no tolerance change.",
+      "added": "2026-11-17",
+      "expires": "2026-12-17"
     }
   ]
 }
