@@ -186,6 +186,57 @@ enum SidebarQuietInboxChecks {
                 ($0 as? SidebarIncidentCellView)?.incident?.id.hasPrefix("family:") == true && !$0.isHiddenOrHasHiddenAncestor
             }.compactMap { $0 as? SidebarIncidentCellView }
         }
+        func causeLines() -> [AgentInboxRemainderView] {
+            Q.views(in: inbox) {
+                ($0 as? AgentInboxRemainderView)?.causeIncidentForQA != nil && !$0.isHiddenOrHasHiddenAncestor
+            }.compactMap { $0 as? AgentInboxRemainderView }
+        }
+        /// What Dylan asked of the Quiet sidebar (sidebar night fixes), read from
+        /// the drawn tree: the head and every family action are plain words
+        /// (no fill or capsule at rest or under the pointer); Clear's glyph is
+        /// the checkmark; no hand symbol and no emoji anywhere; and a card says
+        /// "N failed" at most once across its lead, its cause line and its fold.
+        func expectMinimalChrome(_ step: String) throws {
+            inbox.layoutForQA()
+            var actions: [InboxSettleNudgeButton] = []
+            if let clear = sectionCell("Inbox")?.clearButton, !clear.isHidden { actions.append(clear) }
+            actions += needsYouBox()?.lines.map(\.actionButton) ?? []
+            actions += causeLines().compactMap(\.causeActionForQA)
+            try expect(!actions.isEmpty, "\(step): there are head and family actions to read")
+            for action in actions {
+                for hovered in [false, true] {
+                    action.isPointerInside = hovered
+                    action.layoutSubtreeIfNeeded()
+                    try expect(action.isPlain && action.layer?.backgroundColor == nil && (action.layer?.cornerRadius ?? 0) == 0
+                               && !action.isBordered,
+                               "\(step): '\(action.title)' draws as a capsule or pill (hovered \(hovered)): fill \(String(describing: action.layer?.backgroundColor)), radius \(action.layer?.cornerRadius ?? 0)")
+                }
+                action.isPointerInside = false
+            }
+            try expect(SidebarSectionLabelView.clearSymbol == "checkmark" && sectionCell("Inbox")?.clearButton.image != nil,
+                       "\(step): Clear's glyph is the plain checkmark")
+            var symbols = inbox.sidebarIncidents.map(\.symbol) + causeLines().compactMap { $0.causeIncidentForQA?.symbol }
+            symbols += needsYouBox()?.lines.compactMap { $0.incident?.symbol } ?? []
+            symbols += inbox.qaMaterializedRowCells.compactMap { ($0 as? AgentInbox96CellView)?.qaGlyph }
+            symbols += SidebarTallyState.allCases.map(\.symbol) + AgentInbox96CellView.statusSymbolsInUse
+            try expect(!symbols.contains { $0.contains("hand") }, "\(step): a hand symbol is drawn — \(symbols.filter { $0.contains("hand") })")
+            let words = Q.views(in: inbox) { $0 is NSTextField && !$0.isHiddenOrHasHiddenAncestor }
+                .compactMap { ($0 as? NSTextField)?.stringValue }
+                + actions.map(\.title)
+            let emoji = words.filter { $0.unicodeScalars.contains { $0.properties.isEmojiPresentation } }
+            try expect(emoji.isEmpty, "\(step): emoji drawn in \(emoji)")
+            let failedCount = try NSRegularExpression(pattern: "\\d+ failed")
+            func failures(_ text: String) -> Int {
+                failedCount.numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text))
+            }
+            for leadRow in inbox.allRowsForQuietCheck where leadRow.depth == 0 && leadRow.parentId == nil {
+                guard let cell = inbox.cellForQA(id: leadRow.id) as? AgentInbox96CellView else { continue }
+                var card = cell.visibleTextForQA.joined(separator: " | ")
+                card += causeLines().filter { $0.causeIncidentForQA?.familyIDs == [leadRow.id] }.map { " | " + $0.titleForQA }.joined()
+                card += inbox.ownershipRemaindersForQA.filter { $0.qaParentID == leadRow.id }.map { " | " + $0.qaTitle }.joined()
+                try expect(failures(card) <= 1, "\(step): '\(leadRow.displayTitle)' says failed \(failures(card)) times: \(card)")
+            }
+        }
         func drawnAgentIDs() -> Set<UUID> {
             inbox.layoutForQA()
             return Set(inbox.qaMaterializedRowCells.compactMap { cell -> UUID? in
@@ -221,15 +272,27 @@ enum SidebarQuietInboxChecks {
         try expect(Set(clearIDs) == expectedClear,
                    "Clear takes the finished family, the finished agent and the lead's settled helpers, never the paused — got \(clearIDs.map { id in inbox.allRowsForQuietCheck.first { $0.id == id }?.displayTitle ?? "?" }); rows \(inbox.allRowsForQuietCheck.map { "\($0.displayTitle):\($0.state):\($0.lifecycle):\($0.terminalEvent.map { "\($0.outcome)" } ?? "-"):blocked=\($0.settlementBlocked)" })")
 
-        let chips = chipCells()
-        let leadChip = chips.first { $0.incident?.familyIDs == [lead.rawValue] }
-        let familyChip = chips.first { $0.incident?.familyIDs == [family.rawValue] }
-        try expect(chips.count == 2, "one chip per family with a cause — got \(chips.map(\.detailForQA))")
-        try expect(leadChip?.titleForQA == "Release lead" && leadChip?.detailForQA == "2 paused · usage"
-                   && leadChip?.actionButton.title == "Switch & resume…",
-                   "the release family's ONE chip is its usage pause — got \(leadChip?.detailForQA ?? "nil")")
-        try expect(familyChip?.detailForQA == "1 failed · \(taskWords)" && familyChip?.actionButton.title == "Open",
-                   "the failed family's chip names its reason and one action — got \(familyChip?.detailForQA ?? "nil")")
+        // Family causes sit inside their own cards, never stacked under the box.
+        try expect(chipCells().isEmpty, "no family rows stack under the Needs you box — got \(chipCells().map(\.detailForQA))")
+        let causes = causeLines()
+        let leadCause = causes.first { $0.causeIncidentForQA?.familyIDs == [lead.rawValue] }
+        let familyCause = causes.first { $0.causeIncidentForQA?.familyIDs == [family.rawValue] }
+        try expect(causes.count == 2, "one cause line per family with a cause — got \(causes.map(\.titleForQA))")
+        try expect(leadCause?.titleForQA.hasSuffix("2 paused · usage") == true
+                   && leadCause?.causeActionForQA?.title == "Switch & resume…",
+                   "the release family's ONE cause line is its usage pause — got \(leadCause?.titleForQA ?? "nil")")
+        try expect(familyCause?.titleForQA.hasSuffix(taskWords) == true && familyCause?.causeActionForQA?.title == "Open",
+                   "the failed family's cause line names its reason and one action — got \(familyCause?.titleForQA ?? "nil")")
+        // Each cause line sits in its own card: the row right after its lead.
+        for (line, leadID) in [(leadCause, lead.rawValue), (familyCause, family.rawValue)] {
+            guard let line, let leadCell = inbox.cellForQA(id: leadID) as? NSView else {
+                throw Failure(description: "a cause line or its lead is not drawn")
+            }
+            let leadFrame = leadCell.convert(leadCell.bounds, to: nil), lineFrame = line.convert(line.bounds, to: nil)
+            try expect(abs(leadFrame.minY - lineFrame.maxY - CGFloat(AgentInboxView.rowSpacing)) < 0.5,
+                       "the cause line is drawn right under its lead, in its card — lead \(leadFrame), line \(lineFrame)")
+        }
+        try expectMinimalChrome("head")
         var spoken: [String] = []
         inbox.accessibilityAnnouncementSink = { _, message in spoken.append(message) }
         finish(paused1)
@@ -257,8 +320,9 @@ enum SidebarQuietInboxChecks {
         // 3. Counts add up, read from what is drawn.
         guard let tally = inbox.sidebarTallies[lead.rawValue] else { throw Failure(description: "no tally for the lead") }
         try expect(tally.total == 4 && tally.reconciles, "the lead counts 4 helpers and reconciles — got \(tally.fullLine)")
-        let chipPaused = Int(leadChip?.detailForQA.split(separator: " ").first ?? "") ?? -1
-        try expect(chipPaused == tally.count(.paused), "the chip's paused count is the lead's tally — \(chipPaused) vs \(tally.count(.paused))")
+        let causeWords = leadCause?.titleForQA.drop { !$0.isNumber } ?? ""
+        let chipPaused = Int(causeWords.prefix { $0.isNumber }) ?? -1
+        try expect(chipPaused == tally.count(.paused), "the cause line's paused count is the lead's tally — \(chipPaused) vs \(tally.count(.paused))")
         let members: Set<UUID> = [paused1, paused2, failedHelper, doneHelper].map(\.rawValue).reduce(into: []) { $0.insert($1) }
         let drawnMembers = drawnAgentIDs().intersection(members).count
         try expect(drawnMembers + tally.folded == tally.total && drawnMembers == tally.shown,
@@ -272,15 +336,22 @@ enum SidebarQuietInboxChecks {
         inbox.reload(rows: inbox.allRowsForQuietCheck)
         inbox.layoutForQA()
         guard let liveBox = needsYouBox(), liveBox.lines.first?.actionButton.isEnabled == true,
-              let liveFamilyChip = chipCells().first(where: { $0.incident?.familyIDs == [family.rawValue] }) else {
-            throw Failure(description: "with a host, the actions are enabled")
+              let liveFamilyAction = causeLines().first(where: { $0.causeIncidentForQA?.familyIDs == [family.rawValue] })?.causeActionForQA,
+              let liveLeadAction = causeLines().first(where: { $0.causeIncidentForQA?.familyIDs == [lead.rawValue] })?.causeActionForQA,
+              liveLeadAction.isEnabled else {
+            throw Failure(description: "with a host, the usage actions are enabled")
         }
         try Q.click(liveBox.lines[0].actionButton)
-        try Q.click(liveFamilyChip.actionButton)
-        try expect(pressed.count == 1 && !liveFamilyChip.actionButton.isEnabled,
+        try Q.click(liveFamilyAction)
+        try expect(pressed.count == 1 && !liveFamilyAction.isEnabled,
                    "only usage acts; Open stays disabled — got \(pressed.count) calls")
         try expect(Set(pressed[0].agentIDs) == [paused1.rawValue, paused2.rawValue] && pressed[0].kind == .cause(.usageLimit),
                    "the box's usage action carries the paused agents")
+        // The in-card usage action, pressed through the window, reaches the same entry point.
+        try Q.click(liveLeadAction)
+        try expect(pressed.count == 2 && pressed[1].kind == .cause(.usageLimit)
+                   && Set(pressed[1].agentIDs) == [paused1.rawValue, paused2.rawValue],
+                   "the card's Switch & resume… carries that family's paused agents — got \(pressed.count) calls")
 
         // 5. Clear through the drawn control, refusing the paused; ⌘Z returns them.
         guard let clearButton = sectionCell("Inbox")?.clearButton else { throw Failure(description: "no Clear") }
@@ -332,8 +403,9 @@ enum SidebarQuietInboxChecks {
                    "switching to Ledger takes the Quiet head away live")
 
         return "Quiet inbox: the Layout setting re-renders live both ways; the head is Inbox · Clear \(clearIDs.count), "
-            + "a Needs you box with one usage line and one chip per family (2 paused · usage / 1 failed · its reason); "
-            + "the chip's count is the lead's tally and drawn helpers + folded = \(tally.total); actions carry their family; "
+            + "a Needs you box with one usage line, and one cause line inside each family's card (2 paused · usage / its reason); "
+            + "head and family actions are plain words, Clear's glyph is the checkmark, no hand or emoji, a card says failed once; "
+            + "the cause line's count is the lead's tally and drawn helpers + folded = \(tally.total); actions carry their family; "
             + "Clear takes 4 off the list and refuses the paused, ⌘Z restores; with nothing blocking there is no box"
     }
 }

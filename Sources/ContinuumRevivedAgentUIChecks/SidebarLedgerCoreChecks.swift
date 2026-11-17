@@ -286,7 +286,9 @@ func runSidebarLedgerCoreChecks() {
     // 5. Layout setting.
     let suite = "array.sidebar-ledger-core-check.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
-    expect(SidebarLayout.resolve(in: defaults) == .ledger, "Ledger is the default")
+    expect(SidebarLayout.resolve(in: defaults) == .quietInbox, "Quiet inbox is the default")
+    defaults.set("ledger", forKey: SidebarLayout.defaultsKey)
+    expect(SidebarLayout.resolve(in: defaults) == .ledger, "the Ledger stays a Settings choice")
     defaults.set("quietInbox", forKey: SidebarLayout.defaultsKey)
     expect(SidebarLayout.resolve(in: defaults) == .quietInbox, "the layout persists")
     SidebarStandingLeads.save([F.id(1)], to: defaults)

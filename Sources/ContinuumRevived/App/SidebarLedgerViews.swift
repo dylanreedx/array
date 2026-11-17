@@ -36,7 +36,8 @@ final class SidebarSectionLabelView: NSTableCellView {
         addSubview(label)
         let metaSize = Typography.style(for: .label).size
         clearButton.font = .systemFont(ofSize: metaSize, weight: .medium)
-        clearButton.image = NSImage(systemSymbolName: "tray.and.arrow.down", accessibilityDescription: nil)?
+        clearButton.isPlain = true
+        clearButton.image = NSImage(systemSymbolName: Self.clearSymbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: metaSize - 2, weight: .semibold))
         clearButton.image?.isTemplate = true
         clearButton.imagePosition = .imageLeading
@@ -61,6 +62,8 @@ final class SidebarSectionLabelView: NSTableCellView {
     }
 
     var titleForQA: String { label.stringValue }
+    /// Clear's glyph: a plain checkmark.
+    static let clearSymbol = "checkmark"
 
     @objc private func clearPressed() { onClear?() }
 
@@ -124,6 +127,7 @@ final class SidebarIncidentCellView: NSTableCellView {
         let metaSize = Typography.style(for: .label).size
         actionButton.font = .systemFont(ofSize: metaSize, weight: .medium)
         actionButton.imagePosition = .noImage
+        actionButton.isPlain = true
         actionButton.target = self
         actionButton.action = #selector(actionPressed)
         addSubview(actionButton)

@@ -14,7 +14,7 @@ public enum SidebarLayout: String, CaseIterable, Equatable, Sendable {
     case quietInbox
 
     public static let defaultsKey = "continuum.sidebar.layout"
-    public static let defaultLayout: SidebarLayout = .ledger
+    public static let defaultLayout: SidebarLayout = .quietInbox
 
     public var title: String {
         switch self {
@@ -74,10 +74,10 @@ public enum SidebarFailureCause: String, CaseIterable, Equatable, Sendable {
     public var symbol: String {
         switch self {
         case .usageLimit: return "pause.circle"
-        case .providerBusy: return "icloud.slash"
-        case .signInExpired: return "key"
-        case .couldNotStart: return "wrench.and.screwdriver"
-        case .interruptedByRestart: return "arrow.clockwise.circle"
+        case .providerBusy: return "exclamationmark.triangle"
+        case .signInExpired: return "exclamationmark.triangle"
+        case .couldNotStart: return "exclamationmark.triangle"
+        case .interruptedByRestart: return "clock"
         case .taskError: return "exclamationmark.triangle"
         }
     }
@@ -106,7 +106,7 @@ public enum SidebarTallyState: String, CaseIterable, Equatable, Sendable {
     public var symbol: String {
         switch self {
         case .working: return "arrow.triangle.2.circlepath"
-        case .needsYou: return "hand.raised"
+        case .needsYou: return "questionmark.circle"
         case .paused: return "pause.circle"
         case .failed: return "exclamationmark.triangle"
         case .stopped: return "stop.circle"
@@ -365,7 +365,7 @@ public enum SidebarIncidents {
         for row in asking.prefix(asking.count > maxAsksShown ? maxAsksShown - 1 : maxAsksShown) {
             let lead = family(of: row)
             result.append(SidebarIncident(
-                id: "needs:\(row.id.uuidString)", kind: .needsYou, symbol: "hand.raised.fill",
+                id: "needs:\(row.id.uuidString)", kind: .needsYou, symbol: "questionmark.circle",
                 title: row.displayTitle,
                 detail: lead.id == row.id ? "Needs you" : "\(lead.displayTitle) · needs you",
                 actionTitle: "Respond", agentIDs: [row.id], ownerIDs: [row.id],
@@ -374,7 +374,7 @@ public enum SidebarIncidents {
         if asking.count > maxAsksShown {
             let rest = Array(asking.dropFirst(maxAsksShown - 1))
             result.append(SidebarIncident(
-                id: "needs:more", kind: .needsYou, symbol: "hand.raised.fill",
+                id: "needs:more", kind: .needsYou, symbol: "questionmark.circle",
                 title: "\(rest.count) more need you", detail: rest.prefix(3).map(\.displayTitle).joined(separator: " · "),
                 actionTitle: "Respond", agentIDs: rest.map(\.id), ownerIDs: rest.map(\.id),
                 familyIDs: unique(rest.map { family(of: $0).id }), harness: nil))

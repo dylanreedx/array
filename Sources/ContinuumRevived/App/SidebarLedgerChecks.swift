@@ -552,17 +552,26 @@ extension SidebarLedgerChecks {
                                             errorMessage: "You've hit your 5-hour limit · resets 4:00 AM"), to: helperID)
         f.delegate.qaRefreshAgentSurfaces()
         inbox.layoutForQA()
-        guard let usageAt = inbox.itemsForQA.firstIndex(where: {
+        // The Ledger draws the usage stop as an incident row; the Quiet inbox,
+        // as a line of its Needs you box. Either way its drawn action is pressed.
+        var usageAction: InboxSettleNudgeButton?
+        if let usageAt = inbox.itemsForQA.firstIndex(where: {
             if case .incident(let i) = $0 { return i.kind == .cause(.usageLimit) } else { return false }
-        }), let usageCell = inbox.cellForQA(atItem: usageAt) as? SidebarIncidentCellView else {
+        }), let usageCell = inbox.cellForQA(atItem: usageAt) as? SidebarIncidentCellView {
+            usageAction = usageCell.actionButton
+        } else if let box = QuickHideChecks.views(in: inbox, where: { $0 is SidebarQuietNeedsYouView && !$0.isHiddenOrHasHiddenAncestor })
+            .first as? SidebarQuietNeedsYouView {
+            usageAction = box.lines.first { $0.incident?.kind == .cause(.usageLimit) }?.actionButton
+        }
+        guard let usageAction else {
             let helperRow = inbox.allRowsForQA.first { $0.id == helperID.rawValue }
             throw Failure(description: "no usage incident drawn (helper state \(String(describing: helperRow?.state)), detail \(helperRow?.failureDetail ?? "nil"))")
         }
         window.contentView?.layoutSubtreeIfNeeded()
-        guard usageCell.actionButton.title == "Switch & resume…", usageCell.actionButton.isEnabled else {
-            throw Failure(description: "usage action reads '\(usageCell.actionButton.title)', enabled \(usageCell.actionButton.isEnabled)")
+        guard usageAction.title == "Switch & resume…", usageAction.isEnabled else {
+            throw Failure(description: "usage action reads '\(usageAction.title)', enabled \(usageAction.isEnabled)")
         }
-        try press(usageCell.actionButton, in: window, "Switch & resume…")
+        try press(usageAction, in: window, "Switch & resume…")
         guard let modal = f.delegate.qaSettingsModal, modal.isVisible, modal.model.selectedPaneID == "agents" else {
             throw Failure(description: "Switch & resume did not open Settings > Agents (modal \(f.delegate.qaSettingsModal?.isVisible == true), pane \(f.delegate.qaSettingsModal?.model.selectedPaneID ?? "nil"))")
         }

@@ -240,7 +240,7 @@ enum SidebarIndicatorSettingsChecks {
 /// default (All working agents) applies. A check may change it and post the setting.
 extension SidebarLayout {
     /// The layout the legacy sidebar legs exercise. Quiet unless the run asks
-    /// for the shipped default with `ARRAY_QA_SIDEBAR_LAYOUT=ledger`.
+    /// for the Ledger option with `ARRAY_QA_SIDEBAR_LAYOUT=ledger`.
     static var legacyLegLayoutForQA: SidebarLayout {
         ProcessInfo.processInfo.environment["ARRAY_QA_SIDEBAR_LAYOUT"]
             .flatMap(SidebarLayout.init(rawValue:)) ?? .quietInbox

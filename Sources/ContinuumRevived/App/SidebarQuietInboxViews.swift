@@ -15,12 +15,48 @@ extension AgentInboxView {
     func quietInboxHead(familyChips: [SidebarQuietInbox.FamilyChip]) -> [InboxListItem] {
         let blocking = SidebarQuietInbox.needsYou(sidebarIncidents)
         let clear = sidebarClearIDs.count
-        guard clear > 0 || !blocking.isEmpty || !familyChips.isEmpty else { return [] }
+        guard clear > 0 || !blocking.isEmpty else { return [] }
         var items: [InboxListItem] = [.sectionLabel(SidebarSectionLabel(
             kind: .inbox, title: "Inbox", count: nil, clearCount: clear))]
+        // A family's cause is said inside its own card, never stacked here.
         if !blocking.isEmpty { items.append(.quietNeedsYou(blocking)) }
-        items.append(contentsOf: familyChips.map { .incident($0.incident) })
         return items
+    }
+
+    /// Quiet inbox: each family's one cause line, placed right after its lead's
+    /// own row so it draws inside that card. Any other layout, or a lead not in
+    /// the list, adds nothing.
+    func withFamilyCauseLines(_ items: [InboxListItem]) -> [InboxListItem] {
+        guard sidebarLayout == .quietInbox, !sidebarFamilyChips.isEmpty else { return items }
+        var byLead: [UUID: SidebarIncident] = [:]
+        for chip in sidebarFamilyChips where Self.causeLineText(chip.incident) != nil {
+            byLead[chip.familyId] = chip.incident
+        }
+        guard !byLead.isEmpty else { return items }
+        var result: [InboxListItem] = []
+        result.reserveCapacity(items.count + byLead.count)
+        for item in items {
+            result.append(item)
+            if case .agent(let row) = item, row.depth == 0, let incident = byLead[row.id] {
+                result.append(.familyCause(incident, leadId: row.id))
+            }
+        }
+        return result
+    }
+
+    /// The cause line's words. The lead's count line is where "N failed" is
+    /// said, so a failure's line keeps only its reason ("Codex was busy"); a
+    /// failure with no reason has no line. A pause keeps "7 paused · usage".
+    static func causeLineText(_ incident: SidebarIncident) -> String? {
+        guard case .cause(let cause) = incident.kind else { return nil }
+        switch cause {
+        case .usageLimit, .interruptedByRestart:
+            return incident.detail
+        case .providerBusy, .signInExpired, .couldNotStart, .taskError:
+            guard let range = incident.detail.range(of: " · ") else { return nil }
+            let reason = String(incident.detail[range.upperBound...])
+            return reason.isEmpty ? nil : reason.prefix(1).uppercased() + reason.dropFirst()
+        }
     }
 
     /// The History footnote: what Clear does, said where the cleared go.
@@ -56,6 +92,7 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
             for view in [icon, titleLabel, detailLabel] { addSubview(view) }
             actionButton.font = .systemFont(ofSize: Typography.style(for: .label).size, weight: .medium)
             actionButton.imagePosition = .noImage
+            actionButton.isPlain = true
             actionButton.target = self
             actionButton.action = #selector(actionPressed)
             addSubview(actionButton)

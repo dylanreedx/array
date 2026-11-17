@@ -1842,8 +1842,10 @@ enum UIProbeGeometry {
         }
 
         // The layout's head for this fixture, fixed rather than read back from
-        // the list: the Quiet inbox draws 4 head rows, the Ledger 5.
-        let headRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 5 : 4
+        // the list: the Quiet inbox draws 3 chrome rows (Inbox, the Needs you
+        // box, the History note; its family rows no longer stack in the head),
+        // the Ledger 5.
+        let headRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 5 : 3
         let expectedTableRows = expectedAgentCells + actualRemainders.count + expectedNonAgentRows + headRows
         guard probe.inbox.tableRowCountForQA == expectedTableRows,
               probe.inbox.nonAgentTableRowCountForQA == actualRemainders.count + expectedNonAgentRows + headRows else {
@@ -5187,9 +5189,8 @@ enum UIProbeGeometry {
                     throw fail("\(label): P6.5 remainder did not materialize in the constrained viewport")
                 }
                 let beforeRemainderAX = accessibilityObjects(from: probe.inbox)
-                // The Ledger speaks its fold as it draws it, "N folded".
-                let remainderWords = probe.inbox.sidebarLayout == .ledger
-                    ? "\(remainder.hiddenDescendantCount) folded" : remainder.accessibilityTitle
+                // Both layouts speak the fold as they draw it, "N folded".
+                let remainderWords = "\(remainder.hiddenDescendantCount) folded"
                 let remainderLabel = "Show \(remainderWords)"
                 guard let remainderButton = beforeRemainderAX.first(where: {
                     accessibilityRole(of: $0) == .button

@@ -124,8 +124,8 @@ extension SidebarOwnershipChecks {
             }
             inbox.layoutViewportForQA()
         }
-        // The Ledger draws and speaks the fold as "18 folded"; Quiet, "18 more".
-        let words = inbox.sidebarLayout == .ledger ? "18 folded" : "18 more"
+        // Both layouts draw and speak the fold as "18 folded".
+        let words = "18 folded"
         let collapsed = try fold()
         guard collapsed.qaTitle == words,
               collapsed.qaAccessibilityLabel == "Show \(words)" else {
@@ -200,7 +200,7 @@ extension SidebarOwnershipChecks {
             throw fail("the five done helpers have no fold line")
         }
         fold.layoutSubtreeIfNeeded()
-        let words = inbox.sidebarLayout == .ledger ? "5 folded" : "5 more, all done"
+        let words = "5 folded"
         guard Set(remainder.hiddenDescendantIDs) == Set(done), remainder.hiddenNeedsYou == 0,
               fold.qaTitle == words, fold.qaAccessibilityLabel?.contains("need") == false else {
             throw fail("the fold draws \"\(fold.qaTitle)\" (AX \(fold.qaAccessibilityLabel ?? "nil")), holding \(remainder.hiddenDescendantCount) with \(remainder.hiddenNeedsYou) asking")
@@ -404,10 +404,9 @@ extension SidebarOwnershipChecks {
         let resting = foldRecent.map(uuid)
         guard helpers() == resting else { throw fail("at rest the card shows \(helpers().map(name))") }
         guard lineTitles() == ["40 more, all done"] else { throw fail("the line reads \(lineTitles())") }
-        // The words the line draws: the Ledger says what it holds the way its
-        // count line does ("40 folded"); the Quiet inbox keeps "40 more, all done".
-        let ledger = inbox.sidebarLayout == .ledger
-        let restingWords = ledger ? "40 folded" : "40 more, all done"
+        // The words the line draws, in both layouts: what it holds, "40 folded".
+        // The card's count line is the one place a failure is said.
+        let restingWords = "40 folded"
         // The card is the list's last: its foot, the line, sits at the viewport's bottom.
         inbox.scrollToBottomForQA(materializeAll: false)
         guard try isOnScreen(fold()), try isOnScreen(cell(foldRecent[2])) else {
@@ -587,7 +586,7 @@ extension SidebarOwnershipChecks {
         let lineY = windowY(try fold())
         _ = try clickFold()
         let folded = [foldArrival] + foldRecent
-        guard helpers() == folded.map(uuid), try fold().qaTitle.hasPrefix(ledger ? "40 folded" : "40 more"),
+        guard helpers() == folded.map(uuid), try fold().qaTitle.hasPrefix("40 folded"),
               !inbox.expandedFanoutParentsForQA.contains(uuid(foldLead)) else {
             throw fail("Show less left \(helpers().map(name)), line \(try fold().qaTitle)")
         }

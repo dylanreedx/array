@@ -51,9 +51,15 @@ final class InboxSettleNudgeButton: NSButton, TokenThemed {
         NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
     }
 
+    /// Plain: words only, no fill or capsule at rest, pressed or hovered; the
+    /// pointer brightens the ink. The sidebar head and its actions use this.
+    var isPlain = false {
+        didSet { if oldValue != isPlain { needsLayout = true; applyTokens() } }
+    }
+
     override func layout() {
         super.layout()
-        layer?.applyCapsule()
+        if isPlain { layer?.cornerRadius = 0 } else { layer?.applyCapsule() }
     }
 
     override func updateTrackingAreas() {
@@ -79,8 +85,9 @@ final class InboxSettleNudgeButton: NSButton, TokenThemed {
     func applyTokens() {
         let role: SidebarControlRole = (cell?.isHighlighted ?? false)
             ? .pressed : (isPointerInside ? .hover : .resting)
-        layer?.backgroundColor = role.color.cgColor(in: self)
-        let foreground = TextToken.textPrimary.color.nsColor(in: self)
+        layer?.backgroundColor = isPlain ? nil : role.color.cgColor(in: self)
+        let foreground = isPlain && role == .resting
+            ? TextToken.textSecondary.color.nsColor(in: self) : TextToken.textPrimary.color.nsColor(in: self)
         contentTintColor = foreground
         attributedTitle = NSAttributedString(
             string: title, attributes: [.font: font as Any, .foregroundColor: foreground])
@@ -614,7 +621,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     }
 
     static let statusSymbolsInUse = [
-        "checkmark.circle.fill", "hand.raised.fill",
+        "checkmark.circle.fill", "questionmark.circle.fill",
         "exclamationmark.triangle.fill", "stop.circle.fill", "xmark.circle.fill",
     ]
     /// Pitch and anatomy for THIS cell, handed in by whoever built it, so the Lab
@@ -950,7 +957,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     static func ledgerSymbol(_ row: AgentInboxRow) -> String? {
         switch SidebarRecovery.state(for: row) {
         case .working: return nil
-        case .needsYou: return "hand.raised.fill"
+        case .needsYou: return "questionmark.circle.fill"
         case .paused: return "pause.circle"
         case .failed: return "exclamationmark.triangle.fill"
         case .stopped: return "stop.circle"
@@ -1611,7 +1618,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // that restart was a timeline defect, since fixed, so the row shows the
         // same moving gyro as the agent's own tile.
         case .working: return nil
-        case .approval, .input: return "hand.raised.fill"
+        case .approval, .input: return "questionmark.circle.fill"
         case .failed: return "exclamationmark.triangle.fill"
         case .ready:
             guard row.terminalIsUnread, let outcome = row.terminalEvent?.outcome else { return nil }
@@ -1718,7 +1725,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     // Plan: .plans/102-managed-agent-mode (P2b)
     static func selfReportSymbol(_ line: InboxSelfReportLine) -> String {
         switch line {
-        case .needsYou: return "hand.raised.fill"
+        case .needsYou: return "questionmark.circle.fill"
         case .now: return "text.bubble"
         case .checks: return "checklist"
         }
