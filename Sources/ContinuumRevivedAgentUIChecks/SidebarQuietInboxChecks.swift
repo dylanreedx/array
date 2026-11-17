@@ -62,6 +62,17 @@ func runSidebarQuietInboxChecks() {
            && failingChip?.text.hasPrefix("\(failingTally.count(.failed)) failed") == true,
            "Quiet and Ledger count one lead the same way: tally \(failingTally.countLine), chip '\(failingChip?.text ?? "none")'")
 
+    // A cause only the lead carries keeps its line (A: "Interrupted when Array
+    // restarted … Resume…") but no number, since the tally counts helpers only.
+    let leadOnly = InboxSort.sortForInbox(rows: [
+        F.row(600, "Polish sidebar card hover", outcome: .failed, detail: "Tests failed: 3 of 40"),
+        F.row(601, "Done helper", parent: 600, outcome: .succeeded),
+    ])
+    let leadOnlyChip = SidebarQuietInbox.familyChips(rows: leadOnly).first { $0.familyId == F.id(600) }
+    expect(leadOnlyChip?.count == 0 && leadOnlyChip?.text.hasPrefix("Failed · ") == true
+           && SidebarLeadTally.tally(leadId: F.id(600), rows: leadOnly, shownIDs: []).count(.failed) == 0,
+           "a lead's own cause keeps its words and says no helper count — got '\(leadOnlyChip?.text ?? "none")'")
+
     print("Sidebar quiet inbox passed: one chip per family (12 paused · usage, 12 owners), the box is blocking-only "
           + "and absent when nothing blocks, cleared helpers excluded")
 }

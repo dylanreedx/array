@@ -53,11 +53,8 @@ public enum SidebarQuietInbox {
             guard let family = byId[familyId], let rows = members[familyId] else { return nil }
             // Count by cause across providers: a family's usage pause is one
             // chip whether its helpers run on one CLI or two.
-            // Counted over the lead's members only, exactly as `SidebarLeadTally`
-            // counts them: the lead's own state is its own row's, never a
-            // helper count, so both layouts say the same number for one lead.
             var carriers: [SidebarFailureCause: [AgentInboxRow]] = [:]
-            for row in rows where row.id != familyId {
+            for row in rows {
                 if let cause = SidebarRecovery.cause(for: row) { carriers[cause, default: []].append(row) }
             }
             guard let topCause = carriers.keys.max(by: { lhs, rhs in
@@ -76,7 +73,11 @@ public enum SidebarQuietInbox {
             }
             let harnesses = Set(carrying.map { $0.harness ?? "" })
             let harness = harnesses.count == 1 ? carrying[0].harness : nil
-            let text = chipText(cause: topCause, count: carrying.count, harness: harness, rows: carrying)
+            // The number counts the lead's members only, exactly as
+            // `SidebarLeadTally` does, so both layouts say the same number for
+            // one lead. The lead's own cause still gives the line its words.
+            let members = carrying.filter { $0.id != familyId }
+            let text = chipText(cause: topCause, count: members.count, harness: harness, rows: carrying)
             let scoped = SidebarIncident(
                 id: "family:\(familyId.uuidString):\(topCause.rawValue)", kind: .cause(topCause),
                 symbol: first.symbol, title: family.displayTitle, detail: text,
@@ -85,7 +86,7 @@ public enum SidebarQuietInbox {
                 agentIDs: unique(incidents.flatMap(\.agentIDs)), ownerIDs: unique(incidents.flatMap(\.ownerIDs)),
                 familyIDs: [familyId], harness: harness)
             return FamilyChip(familyId: familyId, familyTitle: family.displayTitle, cause: topCause,
-                              count: carrying.count, text: text, incident: scoped)
+                              count: members.count, text: text, incident: scoped)
         }
     }
 
@@ -95,17 +96,20 @@ public enum SidebarQuietInbox {
         cause: SidebarFailureCause, count: Int, harness: String?, rows: [AgentInboxRow]
     ) -> String {
         let provider = SidebarRecovery.providerName(harness)
+        // No helper carries it (only the lead): the words, without a count.
+        let failed = count == 0 ? "Failed" : "\(count) failed"
         switch cause {
-        case .usageLimit: return "\(count) paused · usage"
-        case .providerBusy: return "\(count) failed · \(provider) was busy"
-        case .signInExpired: return "\(count) failed · sign-in expired"
-        case .couldNotStart: return "\(count) failed · \(provider) couldn't start"
-        case .interruptedByRestart: return "\(count) interrupted by restart"
+        case .usageLimit: return count == 0 ? "Paused · usage" : "\(count) paused · usage"
+        case .providerBusy: return "\(failed) · \(provider) was busy"
+        case .signInExpired: return "\(failed) · sign-in expired"
+        case .couldNotStart: return "\(failed) · \(provider) couldn't start"
+        case .interruptedByRestart: return count == 0 ? "Interrupted by restart" : "\(count) interrupted by restart"
         case .taskError:
-            if count == 1, let first = rows.first, let reason = SidebarRecovery.shortReason(first, maxCharacters: 48) {
-                return "1 failed · \(reason)"
+            if count <= 1, let first = rows.first(where: { SidebarRecovery.shortReason($0, maxCharacters: 48) != nil }),
+               let reason = SidebarRecovery.shortReason(first, maxCharacters: 48) {
+                return "\(failed) · \(reason)"
             }
-            return "\(count) failed"
+            return failed
         }
     }
 }
