@@ -20,24 +20,23 @@ final class TileSurfaceHostView: NSView {
     /// independently.
     private static let stepsPerOctave: Double = 4
 
-    /// A title accessory's bitmap includes the outward-aligned pixel cover of
-    /// its bounds. Retain that extent and its offset instead of stretching the
-    /// padded bitmap into the smaller native bounds. Ordinary tile bodies keep
-    /// their existing unit-rectangle mapping.
+    /// cacheDisplay allocates a local raster whose logical size may exceed the
+    /// requested bounds. Keep the whole raster, including control shadows in its
+    /// padding, at that actual size. Ordinary bodies keep their existing mapping.
     struct ContentMapping {
         let sourceBounds: CGRect
         let capturedBounds: CGRect
         let sourceIsFlipped: Bool
 
-        var contentsRect: CGRect {
+        var imageFrame: CGRect {
             let visualTop = sourceIsFlipped
-                ? sourceBounds.minY - capturedBounds.minY
-                : capturedBounds.maxY - sourceBounds.maxY
+                ? capturedBounds.minY - sourceBounds.minY
+                : sourceBounds.maxY - capturedBounds.maxY
             return CGRect(
-                x: (sourceBounds.minX - capturedBounds.minX) / capturedBounds.width,
-                y: visualTop / capturedBounds.height,
-                width: sourceBounds.width / capturedBounds.width,
-                height: sourceBounds.height / capturedBounds.height
+                x: capturedBounds.minX - sourceBounds.minX,
+                y: visualTop,
+                width: capturedBounds.width,
+                height: capturedBounds.height
             )
         }
     }
@@ -47,6 +46,7 @@ final class TileSurfaceHostView: NSView {
     /// reference type, so identity is the right comparison.
     let surface: CGImage
     private let surfaceLayer = CALayer()
+    private var accessoryImageLayer: CALayer?
 
     /// Device pixels per world point the image actually carries. Read by the
     /// canvas to decide whether this surface is still sharp enough to show.
@@ -64,12 +64,28 @@ final class TileSurfaceHostView: NSView {
         super.init(frame: .zero)
         surfaceLayer.contents = surface
         surfaceLayer.contentsGravity = .resize
-        if let contentMapping { surfaceLayer.contentsRect = contentMapping.contentsRect }
         surfaceLayer.contentsScale = Self.bucket(backingScale)
         // The bake is taken from a top-left-origin flipped view, so the layer has
         // to read it the same way round or every surfaced tile is upside down.
         surfaceLayer.isGeometryFlipped = true
         surfaceLayer.masksToBounds = true
+        if let contentMapping {
+            // Only accessories carry a local capture extent. A child preserves
+            // the full bitmap at its recorded size; cropping/stretching the root
+            // would lose shadow overflow or filter it again at fractional zoom.
+            let imageLayer = CALayer()
+            imageLayer.contents = surface
+            imageLayer.contentsGravity = .resize
+            imageLayer.contentsScale = surfaceLayer.contentsScale
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            imageLayer.frame = contentMapping.imageFrame
+            surfaceLayer.contents = nil
+            surfaceLayer.masksToBounds = false
+            surfaceLayer.addSublayer(imageLayer)
+            CATransaction.commit()
+            accessoryImageLayer = imageLayer
+        }
         layer = surfaceLayer
         wantsLayer = true
     }
@@ -116,8 +132,9 @@ final class TileSurfaceHostView: NSView {
         let desired = Self.bucket(window?.backingScaleFactor ?? 2)
         guard abs(surfaceLayer.contentsScale - desired) > 0.0001 else { return }
         surfaceLayer.contentsScale = desired
+        accessoryImageLayer?.contentsScale = desired
         qaContentsScaleChangeCount += 1
-        surfaceLayer.setNeedsDisplay()
+        (accessoryImageLayer ?? surfaceLayer).setNeedsDisplay()
     }
 
     /// Geometric and rounding DOWN, like `TileNSView.chromeScaleBucket`. Down
@@ -132,7 +149,9 @@ final class TileSurfaceHostView: NSView {
     /// this layer is the view's ROOT layer and Array owns it, so nothing in AppKit
     /// disables implicit animations on it and nothing else asserts where it sits.
     var qaSurfaceLayerFrame: CGRect { surfaceLayer.frame }
-    var qaSurfaceLayerAnimationKeys: [String] { surfaceLayer.animationKeys() ?? [] }
+    var qaSurfaceLayerAnimationKeys: [String] {
+        (surfaceLayer.animationKeys() ?? []) + (accessoryImageLayer?.animationKeys() ?? [])
+    }
 
     func qaResetCounters() {
         qaBackingCallbackCount = 0
