@@ -322,7 +322,7 @@ final class TileAgentBubbleLayer: CALayer {
     }
 
     /// How much a hovered Orb swells; every other plate holds its size.
-    static let orbHoverSwell: CGFloat = 1.06
+    static let orbHoverSwell: CGFloat = 1.04
     /// The plate's scale now: the Orb's swell while hovered, else 1. Its hit
     /// shape follows it (`TileNSView.agentBubbleContains`).
     var hoverSwell: CGFloat { bubbleStyle == .orb && isHovered ? Self.orbHoverSwell : 1 }
@@ -347,8 +347,18 @@ final class TileAgentBubbleLayer: CALayer {
         fade.fromValue = glass.presentation()?.opacity ?? glass.opacity
         glass.opacity = glassOpacity
         glass.add(fade, forKey: Self.motionKeyPrefix + "hover.glass")
-        let grow = CABasicAnimation(keyPath: "transform")
-        grow.fromValue = presentation()?.transform ?? transform
+        // The swell is a critically damped spring (damping = 2·√(k·m)): it
+        // settles without overshoot, a little quicker in than out, and starts
+        // from wherever the presentation is so a flick in and out never snaps.
+        let from = (presentation()?.value(forKeyPath: "transform.scale.x") as? CGFloat) ?? (isHovered ? 1 : Self.orbHoverSwell)
+        let stiffness: CGFloat = isHovered ? 520 : 380
+        let grow = CASpringAnimation(keyPath: "transform.scale")
+        grow.mass = 1
+        grow.stiffness = stiffness
+        grow.damping = 2 * stiffness.squareRoot()
+        grow.fromValue = from
+        grow.toValue = hoverSwell
+        grow.duration = grow.settlingDuration
         transform = swell
         add(grow, forKey: Self.motionKeyPrefix + "hover.swell")
     }
