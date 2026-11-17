@@ -273,6 +273,7 @@ final class SidebarQuietHistoryEntryView: NSTableCellView, AgentInboxRenameCell 
     static let cardBottomGap: CGFloat = 4
 
     private let card = InboxGroupBackgroundView()
+    private let selectionChrome = AgentInboxCardView()
     private let icon = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
@@ -299,6 +300,7 @@ final class SidebarQuietHistoryEntryView: NSTableCellView, AgentInboxRenameCell 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         addSubview(card)
+        addSubview(selectionChrome)
         icon.image = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 11, weight: .regular))
         icon.imageScaling = .scaleProportionallyDown
@@ -326,6 +328,13 @@ final class SidebarQuietHistoryEntryView: NSTableCellView, AgentInboxRenameCell 
         setAccessibilityIdentifier(AgentInboxView.accessibilityIdentifier(for: row))
         applyTokens()
         needsLayout = true
+    }
+
+    func applySelection(isSelected: Bool, hasKeyboardFocus: Bool, increasedContrast: Bool) {
+        selectionChrome.usesIncreasedContrast = increasedContrast
+        selectionChrome.isSelected = isSelected
+        selectionChrome.hasKeyboardFocus = hasKeyboardFocus
+        setAccessibilitySelected(isSelected)
     }
 
     /// The family's last activity this card was given (the date it shows).
@@ -358,6 +367,8 @@ final class SidebarQuietHistoryEntryView: NSTableCellView, AgentInboxRenameCell 
         let rect = cardRect
         card.frame = bounds
         card.ownershipStrip = (rect, true, true)
+        selectionChrome.frame = rect
+        selectionChrome.underlayAlpha = card.alphaUnderCard
         let pad = SidebarQuietNeedsYouView.contentInset
         let iconSize: CGFloat = 13
         let textX = rect.minX + pad + iconSize + 7

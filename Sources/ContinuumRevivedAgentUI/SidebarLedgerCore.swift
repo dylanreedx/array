@@ -737,13 +737,20 @@ public enum SidebarUsageLive {
     }
 }
 
-/// Every Needs-you item can be dismissed. A dismissal remembers the incident's
-/// fingerprint (its agents and their last events), persists, and stops
+/// Every Needs-you item can be dismissed. A dismissal is scoped to the projects
+/// it represents and remembers the incident's fingerprint (agents and events). It stops
 /// matching the moment something new happens: another agent joins, or one of
 /// them fails or asks again.
 public enum SidebarIncidentDismissals {
     public static let defaultsKey = "continuum.sidebar.dismissedIncidents"
     static let limit = 200
+
+    public static func storageKey(_ incident: SidebarIncident, rows: [AgentInboxRow]) -> String {
+        let participants = Set(incident.agentIDs)
+        let projects = Set(rows.lazy.filter { participants.contains($0.id) }
+            .map { $0.projectId?.uuidString ?? "unassigned" })
+        return "projects:\(projects.sorted().joined(separator: ",")):\(incident.id)"
+    }
 
     public static func fingerprint(_ incident: SidebarIncident, rows: [AgentInboxRow]) -> String {
         let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -758,7 +765,9 @@ public enum SidebarIncidentDismissals {
 
     public static func isDismissed(_ incident: SidebarIncident, dismissed: [String: String],
                                    rows: [AgentInboxRow]) -> Bool {
-        guard incident.isBlocking, let mark = dismissed[incident.id] else { return false }
+        // An older mark still belongs to the exact agent/event fingerprint it saved.
+        guard incident.isBlocking,
+              let mark = dismissed[storageKey(incident, rows: rows)] ?? dismissed[incident.id] else { return false }
         return mark == fingerprint(incident, rows: rows)
     }
 

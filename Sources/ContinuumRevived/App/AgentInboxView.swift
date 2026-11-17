@@ -274,7 +274,10 @@ private final class AgentInboxTableView: NSTableView {
         // Keep ordinary traversal in NSTableView so its native type-select,
         // range-selection and modifier semantics remain intact. The inbox only
         // owns the two activation keys and the post-traversal visibility guarantee.
-        if contextHandler?.handleTableActivationKey(event) == true { return }
+        if contextHandler?.handleTableActivationKey(event) == true {
+            contextHandler?.didTraverseWithKeyboard(event)
+            return
+        }
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
            event.charactersIgnoringModifiers == "z", contextHandler?.undoFromKeyboard() == true { return }
         // .plans/87: ⌫ (or ⌦) hides the selected rows, with nothing held.
@@ -1857,7 +1860,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Dismiss one Needs-you item. It stays away until its incident changes:
     /// another agent joins it, or one of its agents fails or asks again.
     func dismissIncident(_ incident: SidebarIncident) {
-        dismissedIncidents[incident.id] = SidebarIncidentDismissals.fingerprint(incident, rows: allRows)
+        let key = SidebarIncidentDismissals.storageKey(incident, rows: allRows)
+        dismissedIncidents[key] = SidebarIncidentDismissals.fingerprint(incident, rows: allRows)
         SidebarIncidentDismissals.save(dismissedIncidents, to: indicatorDefaults)
         render(display(from: allRows))
     }
@@ -2705,6 +2709,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             [row.title, row.projectName, row.workspaceName, row.model, row.branch, row.whereMarker?.text]
                 .compactMap { $0?.localizedLowercase }
                 .contains { $0.localizedCaseInsensitiveContains(query) }
+                || row.displayTitle.localizedCaseInsensitiveContains(query)
         }
         // .plans/113: under the pointer, rows already drawn keep their places.
         let holding = sortHeld && !rows.isEmpty
@@ -4462,6 +4467,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let cell = cached ?? SidebarQuietHistoryEntryView()
             cell.alphaValue = 1
             cell.apply(model, helpers: helpers, endedAt: historyEntryDates[model.id], now: clock())
+            cell.applySelection(isSelected: tableView.selectedRowIndexes.contains(row),
+                                hasKeyboardFocus: model.id == keyboardFocusAgentId,
+                                increasedContrast: prefersIncreasedContrast())
             historyEntryCells[model.id] = cell
             return cell
         }
@@ -5144,7 +5152,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func moveKeyboardSelection(toAgentPosition position: Int) -> Bool {
         guard rows.indices.contains(position), let tableRow = tableRow(forRowIndex: position) else { return false }
         tableView.selectRowIndexes(IndexSet(integer: tableRow), byExtendingSelection: false)
-        tableView.scrollRowToVisible(tableRow)
         return true
     }
 
@@ -5158,14 +5165,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         return moveKeyboardSelection(toAgentPosition: target)
     }
 
-    /// Make every native traversal key a visibility operation as well. AppKit
-    /// changes the selection during `super.keyDown`; scrolling afterwards avoids
-    /// a one-event lag where Return could act on a row that is still off-screen.
+    /// Both native arrows and the inbox's paging keys finish here, after selection.
+    /// Arm focus from the key itself so the ring follows the row Return will open.
     func didTraverseWithKeyboard(_ event: NSEvent) {
         let traversalKeys: Set<UInt16> = [115, 116, 121, 119, 126, 125]
         let row = tableView.selectedRow
         guard traversalKeys.contains(event.keyCode), row >= 0 else { return }
         tableView.scrollRowToVisible(row)
+        setKeyboardFocus(agentId: agentIdForTableRow(row))
     }
 
     /// Global shortcuts must yield to text entry. The search field and inline

@@ -167,7 +167,7 @@ enum SidebarDogfoodChecks {
         let cases: [(String, () throws -> String)] = [
             ("history-rows", checkHistoryRows), ("history-order", checkHistoryOrder),
             ("history-paints", checkHistoryPaints), ("live-usage", checkLiveUsage),
-            ("orphan-root", checkOrphanRoot), ("untitled-lead", checkUntitledLead),
+            ("orphan-root", checkOrphanRoot), ("untitled-lead", { try checkUntitledLead() }),
             ("cleared-card", checkClearedCardAcrossPush), ("runner-quota", checkRunnerQuota),
             ("switch-identity", checkSwitchNeedsDistinctLogin), ("history-dates", checkHistoryDates),
             ("history-chatter", checkHistoryChatter), ("restored-titles", checkRestoredTitlesPublishOnce),
@@ -178,6 +178,10 @@ enum SidebarDogfoodChecks {
             ("lead-count-fold", checkLeadCountFold),
             ("history-rename", checkHistoryRename),
             ("history-focused-helper", checkHistoryFocusedHelper),
+            ("usage-project-dismissals", checkUsageProjectDismissals),
+            ("history-keyboard-paint", checkHistoryKeyboardPaint),
+            ("history-manual-placeholder", { try checkUntitledLead(renameToPlaceholder: true) }),
+            ("history-display-title-search", checkHistoryDisplayTitleSearch),
         ]
         var reports: [String] = []
         var failures: [String] = []
@@ -390,10 +394,12 @@ enum SidebarDogfoodChecks {
                    "(c) Switch & resume… opens Settings > Agents — got \(h.delegate.lastSidebarIncidentOutcomeForQA)")
 
         // (d) Dismiss through the drawn ×; it persists and stays away on a push.
+        guard let dismissed = switchLine.incident else { throw Failure(description: "no usage incident to dismiss") }
         try Q.click(switchLine.dismissButton)
         inbox.layoutForQA()
         try expect(usageLine() == nil, "(d) the dismissed usage item is still drawn")
-        try expect(SidebarIncidentDismissals.load(from: h.suite)["cause:usageLimit:Codex"] != nil,
+        try expect(SidebarIncidentDismissals.isDismissed(
+            dismissed, dismissed: SidebarIncidentDismissals.load(from: h.suite), rows: inbox.allRowsForQuietCheck),
                    "(d) the dismissal is not persisted — \(SidebarIncidentDismissals.load(from: h.suite))")
         h.refresh()
         let reread = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 380, height: 600), indicatorDefaults: h.suite)
@@ -568,7 +574,7 @@ enum SidebarDogfoodChecks {
 
     // MARK: - 5. An untitled, prompted lead reads as its first prompt
 
-    static func checkUntitledLead() throws -> String {
+    static func checkUntitledLead(renameToPlaceholder: Bool = false) throws -> String {
         let untitled = AgentID(rawValue: UUID())
         let prompt = "You are working in the Array repository at: /Users/someone/Array\n\n**Fix** the flaky `login` test on CI"
         let h = try makeHarness("untitled-lead") { delegate, _ in
@@ -582,7 +588,9 @@ enum SidebarDogfoodChecks {
                 model: peer.model, thinking: peer.thinking, cwd: peer.cwd, projectId: peer.projectId,
                 createdAt: ended.addingTimeInterval(-60), lastActivityAt: ended, latestPromptAt: ended.addingTimeInterval(-50),
                 latestTerminalEvent: AgentTerminalEvent(sequence: 1, turnID: "t", outcome: .succeeded, endedAt: ended),
-                archivedAt: ended)
+                settledOverride: renameToPlaceholder ? .settled : .default,
+                settledAt: renameToPlaceholder ? ended : nil,
+                archivedAt: renameToPlaceholder ? nil : ended)
             try AgentStore(smokeTest: false).upsert(record)
             var projection = AgentTranscriptProjection(threadId: "untitled")
             projection.appendUserPrompt(prompt)
@@ -617,6 +625,24 @@ enum SidebarDogfoodChecks {
         }
         try expect(card()?.titleForQA == expected,
                    "an untitled, prompted History lead reads '\(card()?.titleForQA ?? "no card")', wanted its prompt line '\(expected)' (record \(h.supervisor.records[untitled] != nil), pushed \(inbox.pushedRowForQA(id: untitled.rawValue).map { "\($0.displayTitle) \($0.lifecycle)" } ?? "nil"), History \(inbox.historyHeaderTitleForQA ?? "nil"))")
+        if renameToPlaceholder {
+            guard let original = card(), original.window === h.window else {
+                throw Failure(description: "fixture: the prompted History card is not mounted")
+            }
+            inbox.presentsPopoversOffscreenForQA = true
+            try Q.rightClick(original)
+            let name = AgentRecord.defaultAgentName
+            try expect(inbox.pickRowMenuItemForQA(.rename) && inbox.typeRenameForQA(name)
+                       && inbox.pressKeyInRenameForQA(#selector(NSResponder.insertNewline(_:))),
+                       "fixture: could not commit the rename through the History card")
+            let stored = try AgentStore(smokeTest: false).load(id: untitled)
+            try expect(stored?.displayName == name && stored?.displayNameSource == .manual,
+                       "the shared editor did not persist the manual name")
+            inbox.layoutForQA()
+            try expect(card()?.titleForQA == name,
+                       "the settled card painted '\(card()?.titleForQA ?? "no card")' after persisting the manual name '\(name)'")
+            return "History painted the persisted manual New agent name after previously showing the first-prompt fallback."
+        }
         return "Untitled lead: a restored, prompted lead with no title draws its first prompt line '\(expected)' in History, not 'New agent'"
     }
 
@@ -1267,7 +1293,8 @@ enum SidebarDogfoodChecks {
                 let fingerprint = SidebarIncidentDismissals.fingerprint(current, rows: inbox.allRowsForQuietCheck)
                 try Q.click(button)
                 inbox.layoutForQA()
-                let saved = SidebarIncidentDismissals.load(from: h.suite)[current.id]
+                let key = SidebarIncidentDismissals.storageKey(current, rows: inbox.allRowsForQuietCheck)
+                let saved = SidebarIncidentDismissals.load(from: h.suite)[key]
                 if saved != fingerprint || quietLine() != nil { return "Dismiss did not save Pb's fingerprint and remove its mounted usage line" }
             } else {
                 try Q.click(resume)
@@ -1439,6 +1466,125 @@ enum SidebarDogfoodChecks {
         }
         try expect(hidden == [1], "History footer should count only the one other hidden family, got \(hidden)")
         return "Focusing the popped-out helper drew its older family after the ten recent cards. The footer counted one other hidden family."
+    }
+
+    static func checkUsageProjectDismissals() throws -> String {
+        let h = try makeHarness("usage-project-dismissals")
+        defer { h.close() }
+        let inbox = h.inbox
+        let fixture = h.fixture
+        let first = h.supervisor.spawn(role: nil, prompt: nil, cwd: fixture.paRoot, harness: .codex,
+                                       model: "openai-codex/gpt-5.6-sol", thinking: "low",
+                                       projectId: fixture.projectPa, projectRoot: fixture.paRoot,
+                                       displayName: "Paused in Pa")
+        let second = h.spawn("Paused in Pb", harness: .codex)
+        try makeUsageLive(h.supervisor, harness: .codex, root: fixture.tempRoot, secondLogin: false)
+        for id in [first, second] {
+            h.finish(id, failed: "You've hit your usage limit. Upgrade to Pro or try again at 3:05 PM.")
+        }
+        h.refresh()
+
+        func selectProject(_ project: String) throws {
+            try expect(inbox.pickScopeForQA(.project(project)), "fixture: \(project) scope unavailable")
+            inbox.scrollToTopForQA()
+            inbox.layoutForQA()
+        }
+        func mountedUsageLine() -> SidebarQuietNeedsYouView.Line? {
+            Q.views(in: inbox) { $0 is SidebarQuietNeedsYouView && !$0.isHiddenOrHasHiddenAncestor }
+                .compactMap { $0 as? SidebarQuietNeedsYouView }
+                .first?.lines.first { $0.incident?.kind == .cause(.usageLimit) }
+        }
+        for (project, id) in [("Pa", first), ("Pb", second)] {
+            try selectProject(project)
+            guard let line = mountedUsageLine(), line.incident?.agentIDs == [id.rawValue] else {
+                throw Failure(description: "fixture: could not find the usage line for \(project)")
+            }
+            try Q.click(line.dismissButton)
+            inbox.layoutForQA()
+            try expect(mountedUsageLine() == nil, "\(project)'s usage line did not dismiss")
+        }
+        for project in ["Pa", "Pb"] {
+            try selectProject(project)
+            try expect(mountedUsageLine() == nil, "\(project)'s dismissed usage line reappeared after switching projects")
+        }
+        let restored = AgentInboxView(frame: inbox.frame, indicatorDefaults: h.suite)
+        restored.reload(rows: inbox.allRowsForQuietCheck)
+        for project in ["Pa", "Pb"] {
+            restored.setScope(.project(project))
+            try expect(restored.sidebarIncidents.isEmpty, "a fresh inbox reloaded \(project)'s dismissed usage incident")
+        }
+        return "Dismissed Pa and Pb independently using both mounted buttons. Both stayed dismissed when revisited and from saved preferences."
+    }
+
+    static func checkHistoryKeyboardPaint() throws -> String {
+        let h = try makeHarness("history-keyboard-paint")
+        defer { h.close() }
+        let inbox = h.inbox
+        let older = h.spawn("Older finished agent")
+        let newer = h.spawn("Newer finished agent")
+        for id in [older, newer] {
+            h.finish(id)
+            try expect(h.supervisor.settle(agentID: id), "fixture: could not settle agent")
+        }
+        h.refresh()
+        if !inbox.isHistoryExpandedForQA { try clickHistoryHeading(inbox) }
+        let cards = inbox.itemsForQuietCheck.enumerated().compactMap { index, item -> (UUID, Int)? in
+            guard let row = item.agentRow,
+                  inbox.cellForQA(atItem: index) is SidebarQuietHistoryEntryView else { return nil }
+            return (row.id, index)
+        }
+        try expect(cards.map(\.0) == [newer.rawValue, older.rawValue] && inbox.focusListForQA(),
+                   "fixture: could not focus the two History cards in order")
+        func paint(_ index: Int) -> (fill: Bool, ring: Bool) {
+            inbox.layoutForQA()
+            guard let card = inbox.cellForQA(atItem: index), card.window === h.window,
+                  let chrome = Q.views(in: card, where: { $0 is AgentInboxCardView }).first as? AgentInboxCardView
+            else { return (false, false) }
+            return (chrome.layer?.backgroundColor != nil, chrome.qaIsFocusRingVisible)
+        }
+        try Q.key(119, "\u{F72B}", in: h.window) // End
+        try expect(inbox.selectedRowIdsForQA == [older.rawValue], "fixture: End did not select the older History card")
+        let end = paint(cards[1].1)
+        try Q.key(126, "\u{F700}", in: h.window) // Up
+        try expect(inbox.selectedRowIdsForQA == [newer.rawValue], "fixture: Up did not select the newer History card")
+        let up = paint(cards[0].1)
+        let previous = paint(cards[1].1)
+        try Q.key(36, "\r", in: h.window)
+        try expect(h.supervisor.records[newer]?.tileId != nil && h.supervisor.records[older]?.tileId == nil,
+                   "Return did not open the keyboard-selected History card")
+        try expect(end.fill && end.ring && up.fill && up.ring && !previous.fill && !previous.ring,
+                   "History keyboard target reached Return but paint did not follow (End \(end), Up \(up), previous \(previous))")
+        return "End and Up moved the painted selection and focus ring between mounted History cards. Return opened the painted target."
+    }
+
+    static func checkHistoryDisplayTitleSearch() throws -> String {
+        let h = try makeHarness("history-display-title-search")
+        defer { h.close() }
+        let inbox = h.inbox
+        let storedTitle = "Audit **pricing** flow"
+        let displayedTitle = "Audit pricing flow"
+        let id = h.spawn("Pricing audit")
+        h.finish(id)
+        try expect(h.supervisor.settle(agentID: id), "fixture: could not settle the search target")
+        try expect(h.supervisor.rename(agentID: id, to: storedTitle), "fixture: could not store the marked-up title")
+        h.refresh()
+        if !inbox.isHistoryExpandedForQA { try clickHistoryHeading(inbox) }
+        func mountedTitle() -> String? {
+            inbox.layoutForQA()
+            guard let index = inbox.itemsForQuietCheck.firstIndex(where: { $0.agentRow?.id == id.rawValue }),
+                  let card = inbox.cellForQA(atItem: index) as? SidebarQuietHistoryEntryView, card.window === h.window
+            else { return nil }
+            return card.titleForQA
+        }
+        try expect(inbox.pushedRowForQA(id: id.rawValue)?.title == storedTitle && mountedTitle() == displayedTitle,
+                   "fixture: the stored and painted titles did not differ")
+        inbox.setSearchForQA(storedTitle)
+        try expect(mountedTitle() == displayedTitle, "search stopped matching the stored title")
+        inbox.setSearchForQA(displayedTitle)
+        try expect(mountedTitle() == displayedTitle, "searching the painted title dropped its mounted History card")
+        inbox.setSearchForQA("unrelated audit title")
+        try expect(mountedTitle() == nil, "an unrelated title unexpectedly matched")
+        return "The mounted History card matched both the stored Markdown title and the title it paints."
     }
 
     // MARK: - 11. Restored titles publish once

@@ -2081,7 +2081,8 @@ final class AgentSupervisor {
     /// a restored agent's is read once from its transcript, off the main thread,
     /// and published through `onFailureDetailsLoaded` like a failure's words.
     func sidebarUntitledName(for id: AgentID) -> String? {
-        guard let record = records[id], record.displayName == AgentRecord.defaultAgentName,
+        guard let record = records[id], record.displayNameSource == .sentinel,
+              record.displayName == AgentRecord.defaultAgentName,
               record.latestPromptAt != nil || firstPromptByAgent[id] != nil else { return nil }
         if let live = firstPromptByAgent[id] { return AgentName.fromPrompt(live) }
         if let cached = untitledPromptNames[id] { return cached }
