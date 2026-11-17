@@ -269,6 +269,7 @@ enum SidebarQuietInboxChecks {
         settings(.ledger)
         try expect(inbox.sidebarLayout == .ledger && boxItems() == 0 && needsYouBox() == nil,
                    "Ledger draws no Quiet box")
+        try expect(inbox.familyCauseCells.isEmpty, "Ledger must release the Quiet count and cause cache")
         let rendersBefore = inbox.sidebarLayoutRenderCountForQA
         settings(.quietInbox)
         try expect(inbox.sidebarLayout == .quietInbox && inbox.sidebarLayoutRenderCountForQA == rendersBefore + 1,
@@ -451,6 +452,35 @@ enum SidebarQuietInboxChecks {
         try expect(Set(inbox.sidebarClearIDs) == expectedClear, "⌘Z brings every cleared row back to Clear's reach")
         try expect(drawnAgentIDs().isSuperset(of: [family.rawValue, solo.rawValue]), "the rows return to the list")
 
+        // Folding removes the lead's two in-card lines incrementally; the
+        // other family's actual views survive, and reopening owns four again.
+        func expectCachedFamilies(_ ids: Set<UUID>, _ step: String) throws {
+            let lines = Array(inbox.familyCauseCells.values)
+            let counts = lines.compactMap { $0.countTallyForQA?.leadId }
+            let causes = lines.compactMap { $0.causeIncidentForQA?.familyIDs.first }
+            try expect(lines.count == ids.count * 2 && counts.count == ids.count && causes.count == ids.count
+                       && Set(counts) == ids && Set(causes) == ids,
+                       "\(step): the cache must own exactly one count and cause view per live family, got \(lines.count)")
+        }
+        try expectCachedFamilies([lead.rawValue, family.rawValue], "before folding")
+        let otherLines = inbox.familyCauseCells.values.filter {
+            $0.countTallyForQA?.leadId == family.rawValue || $0.causeIncidentForQA?.familyIDs == [family.rawValue]
+        }
+        let reloadsBeforeFold = inbox.qaFullReloadCount
+        try expect(inbox.clickDisclosureForQA(id: lead.rawValue), "the lead's real fold control must press")
+        inbox.layoutForQA()
+        try expect(inbox.qaFullReloadCount == reloadsBeforeFold && inbox.collapsedParentsForQA.contains(lead.rawValue),
+                   "the family cache witness must exercise an incremental collapse")
+        try expectCachedFamilies([family.rawValue], "after folding")
+        try expect(otherLines.count == 2 && otherLines.allSatisfy { previous in
+            inbox.familyCauseCells.values.contains { $0 === previous }
+        }, "folding one lead must preserve the other family's actual line views")
+        try expect(inbox.clickDisclosureForQA(id: lead.rawValue), "the lead's real fold control must reopen")
+        inbox.layoutForQA()
+        try expect(inbox.qaFullReloadCount == reloadsBeforeFold && !inbox.collapsedParentsForQA.contains(lead.rawValue),
+                   "the family cache witness must exercise an incremental reopen")
+        try expectCachedFamilies([lead.rawValue, family.rawValue], "after reopening")
+
         // 6. Nothing blocks: no box, not an empty one. New activity on the
         // paused helpers finishes them.
         finish(paused1)
@@ -465,6 +495,7 @@ enum SidebarQuietInboxChecks {
         settings(.ledger)
         try expect(chipCells().isEmpty && sectionCell(AgentInboxView.quietHistoryNote) == nil,
                    "switching to Ledger takes the Quiet head away live")
+        try expect(inbox.familyCauseCells.isEmpty, "switching to Ledger releases every Quiet count and cause view")
 
         return "Quiet inbox: the Layout setting re-renders live both ways; the head is Inbox · Clear \(clearIDs.count), "
             + "a Needs you box with one usage line, and one cause line inside each family's card (2 paused · usage / its reason); "

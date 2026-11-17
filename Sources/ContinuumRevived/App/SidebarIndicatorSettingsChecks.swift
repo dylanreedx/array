@@ -47,6 +47,7 @@ enum SidebarIndicatorSettingsChecks {
             defaults.set("invalid", forKey: SidebarActiveIndicatorStyle.defaultsKey)
             try expect(SidebarActiveIndicatorStyle.resolve(in: defaults) == .duplex, "invalid preference must fall back to Duplex")
             defaults.removeObject(forKey: SidebarActiveIndicatorStyle.defaultsKey)
+            defaults.set(SidebarLayout.quietInbox.rawValue, forKey: SidebarLayout.defaultsKey)
             let model = SettingsModel(defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }), initialPaneID: "appearance")
             let fixture = SettingsFixtureWindow(model: model, size: NSSize(width: 1100, height: 1100), appearance: NSAppearance(named: appearance))
             defer { fixture.tearDown() }
@@ -94,8 +95,13 @@ enum SidebarIndicatorSettingsChecks {
             try expect(SidebarActiveIndicatorScope.resolve(in: defaults) == .working, "an unset scope must read as All working agents")
             let lead = AgentInboxRow(id: id, title: "Active indicator witness", state: .working, createdAt: Date(), identityColor: "teal")
             let helpers = (0..<24).map { index in
-                AgentInboxRow(id: UUID(), title: "Helper \(index)", state: .working,
-                              depth: 1, createdAt: Date(), parentId: id)
+                var row = AgentInboxRow(id: UUID(), title: "Helper \(index)", state: index == 0 ? .failed : .working,
+                                        depth: 1, createdAt: Date(), parentId: id,
+                                        terminalEvent: index == 0 ? AgentTerminalEvent(sequence: 1, turnID: nil,
+                                            outcome: .failed, endedAt: Date()) : nil,
+                                        terminalIsUnread: index == 0)
+                if index == 0 { row.failureDetail = "You've hit your 5-hour limit · resets 4:00 AM" }
+                return row
             }
             inbox.reload(rows: [lead] + helpers)
             inbox.layoutForQA()
@@ -112,6 +118,11 @@ enum SidebarIndicatorSettingsChecks {
                 throw Failure(description: "sidebar did not render the real N-more-helpers tail")
             }
             try expect(!tail.isSweepingForQA, "default Duplex left a Classic border slice on the helper tail")
+            let familyLines = inbox.familyCauseCells.values.filter { $0.window === window }
+            try expect(familyLines.count == 2
+                       && familyLines.filter { $0.countTallyForQA?.leadId == id }.count == 1
+                       && familyLines.filter { $0.causeIncidentForQA?.familyIDs == [id] }.count == 1,
+                       "the active Quiet card must draw both its count and cause lines")
             var renders: [Data] = []
             // Deliberately visit Gradient before Sheen: stale colour-stop counts
             // from a three-stop wash must not survive in a two-colour surface.
@@ -155,6 +166,14 @@ enum SidebarIndicatorSettingsChecks {
                 let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
                 try expect(tail.isSweepingForQA == (style == .classic && !reduced),
                            "the helper tail did not follow the live style's border policy")
+                for line in familyLines {
+                    try expect(line.window === window && !line.isHiddenOrHasHiddenAncestor
+                               && inbox.familyCauseCells.values.contains { $0 === line },
+                               "changing the look replaced a live count or cause line")
+                    try expect(line.activeIndicatorStyle == style.rawValue
+                               && line.isSweepingForQA == (style == .classic && !reduced),
+                               "the count or cause line did not follow the live style's border policy")
+                }
                 guard let shared = descendants(card.superview ?? card, InboxExpandedGroupLight.self).first else {
                     throw Failure(description: "expanded card has no shared light renderer")
                 }
