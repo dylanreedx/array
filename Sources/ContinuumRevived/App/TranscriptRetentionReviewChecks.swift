@@ -440,6 +440,11 @@ enum TranscriptRetentionReviewChecks {
 
     static func run(root: URL) async throws {
         var failures: [String] = []
+        do { try await TranscriptRetentionDeliveryChecks.run(root: root) } catch { failures.append("completion delivery: \(error)") }
+        if ProcessInfo.processInfo.environment["CONTINUUM_RETENTION_DELIVERY_ONLY"] != nil {
+            guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "\nFAIL: ")) }
+            return
+        }
         do { try await runCompletionBound(root: root) } catch { failures.append("completion bound: \(error)") }
         do { try await runTurnOwnership(root: root) } catch { failures.append("turn ownership: \(error)") }
         do { try await runDetailReclamation(root: root) } catch { failures.append("detail reclamation: \(error)") }
