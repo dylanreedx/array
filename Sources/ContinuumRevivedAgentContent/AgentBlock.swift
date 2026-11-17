@@ -820,6 +820,9 @@ public struct AgentBlock: Identifiable, Codable, Equatable, Sendable {
 extension AgentInline {
     /// The visible characters of this inline, without any markup — what a
     /// table's numeric-column test reads.
+    /// The visible characters, without markup.
+    public var plainText: String { plainTextForTable }
+
     var plainTextForTable: String {
         switch self {
         case let .text(text), let .code(text): return text

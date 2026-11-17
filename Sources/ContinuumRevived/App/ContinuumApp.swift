@@ -16671,7 +16671,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // R3: a record bound to a tile no document holds is a closed window,
         // derived at every build — not repaired lazily when someone clicks it.
         let reachableTiles = inputs.reachableTileIds(canvas: canvasView)
-        let records = agentSupervisor.records.values.sorted(by: AgentStore.isOrderedBefore)
+        // Dogfood fix: a prompted agent that never got a title reads as its first
+        // prompt line, never the "New agent" placeholder.
+        let records = agentSupervisor.records.values.sorted(by: AgentStore.isOrderedBefore).map { record in
+            guard let name = agentSupervisor.sidebarUntitledName(for: record.id) else { return record }
+            var named = record
+            named.displayName = name
+            return named
+        }
         var checkedOutBranches: [UUID: String] = [:]
         var attention: [UUID: InboxAttention] = [:]
         // P3.3: the supervisor's turn snapshot is the row's ONE source of state. It is

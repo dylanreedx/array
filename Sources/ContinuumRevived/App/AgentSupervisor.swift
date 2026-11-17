@@ -2074,6 +2074,49 @@ final class AgentSupervisor {
     /// Called once per batch of loaded details; the app re-pushes the rows.
     var onFailureDetailsLoaded: (() -> Void)?
 
+    /// Dogfood fix: what the sidebar calls an agent that never got a title but
+    /// WAS prompted — its first prompt line through the production resolver
+    /// (`AgentName.fromPrompt`). nil for a titled or never-prompted agent: a
+    /// fresh "New agent" stays honest. This session's first prompt is in memory;
+    /// a restored agent's is read once from its transcript, off the main thread,
+    /// and published through `onFailureDetailsLoaded` like a failure's words.
+    func sidebarUntitledName(for id: AgentID) -> String? {
+        guard let record = records[id], record.displayName == AgentRecord.defaultAgentName,
+              record.latestPromptAt != nil || firstPromptByAgent[id] != nil else { return nil }
+        if let live = firstPromptByAgent[id] { return AgentName.fromPrompt(live) }
+        if let cached = untitledPromptNames[id] { return cached }
+        guard let transcriptStore, untitledPromptLoads.insert(id).inserted else { return nil }
+        Task.detached(priority: .utility) { [weak self] in
+            let document = try? await transcriptStore.load(
+                agentID: id, sessionID: AgentTranscriptStore.canonicalSessionID(for: id))
+            let name = document.flatMap(Self.firstPromptName(in:))
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.untitledPromptLoads.remove(id)
+                self.untitledPromptNames[id] = .some(name)
+                if name != nil { self.onFailureDetailsLoaded?() }
+            }
+        }
+        return nil
+    }
+    private var untitledPromptNames: [AgentID: String?] = [:]
+    private var untitledPromptLoads: Set<AgentID> = []
+
+    /// The first person-written prompt in a transcript, named the way the
+    /// spawn funnel names it.
+    nonisolated static func firstPromptName(in document: AgentDocument) -> String? {
+        for entry in document.entries where entry.role == .user {
+            let text = entry.blocks.compactMap { block -> String? in
+                switch block.payload {
+                case .paragraph(let inlines), .heading(_, let inlines): return inlines.map(\.plainText).joined()
+                default: return nil
+                }
+            }.joined(separator: "\n")
+            if let name = AgentName.fromPrompt(text) { return name }
+        }
+        return nil
+    }
+
     /// The latest turn's failure words: the live turn's when it has some,
     /// otherwise a correlated error from that turn, loaded lazily. nil until known.
     func sidebarFailureDetail(for id: AgentID) -> String? {
