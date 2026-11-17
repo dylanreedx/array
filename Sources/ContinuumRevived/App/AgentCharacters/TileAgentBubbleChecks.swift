@@ -644,6 +644,11 @@ enum TileAgentBubbleChecks {
                                    to: URL(fileURLWithPath: path, isDirectory: true))
         }
 
+        if let path = ProcessInfo.processInfo.environment["TILE_AGENT_BUBBLE_HOVER_FILM_DIR"], !path.isEmpty {
+            notes += try writeHoverFilm(canvas: canvas, window: window, defaults: defaults, views: views,
+                                        to: URL(fileURLWithPath: path, isDirectory: true))
+        }
+
         // 8b. The orb's glass under the pointer: at rest it wears its glass
         // (or a flat plate, the other treatment), and hovered it swells a
         // little; the glass never lets the backdrop through.
@@ -1210,6 +1215,67 @@ enum TileAgentBubbleChecks {
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
         pump(0.2)
         return written.map { "wrote \($0)" }
+    }
+
+    /// Real-time frames of the Orb under a scripted pointer: hover in, hold,
+    /// out, then a fast flick in and out. Each frame is named by its wall-clock
+    /// millisecond and logs the layer's presentation scale.
+    private static func writeHoverFilm(canvas: CanvasNSView, window: NSWindow, defaults: UserDefaults,
+                                       views: [ManagedAgentTileNSView], to directory: URL) throws -> [String] {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // TILE_AGENT_BUBBLE_FILM_MODE=working films the working first agent (no
+        // pointer) for 6 s at TILE_AGENT_BUBBLE_FILM_ZOOM; else the hover script.
+        let env = ProcessInfo.processInfo.environment
+        let working = env["TILE_AGENT_BUBBLE_FILM_MODE"] == "working"
+        let zoom = Double(env["TILE_AGENT_BUBBLE_FILM_ZOOM"] ?? "") ?? 2
+        let subject = working ? views[0] : views[3]
+        setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.orb.rawValue)
+        try expect(pump(until: { showsStyle(.orb, views, canvas) }), "Orb for the hover film")
+        if env["TILE_AGENT_BUBBLE_FILM_APPEARANCE"] == "light" { window.appearance = NSAppearance(named: .aqua) }
+        if env["TILE_AGENT_BUBBLE_FILM_APPEARANCE"] != "light" { window.appearance = NSAppearance(named: .darkAqua) }
+        guard let world = canvas.allTilesInWorldFrames().first(where: { $0.id == subject.tile.id })?.frame else {
+            throw Failure(description: "no world frame for the Orb film")
+        }
+        canvas.setViewport(CanvasViewport(x: world.x - 40 / zoom * 2, y: world.y - 40 / zoom * 2, zoom: zoom))
+        canvas.layoutSubtreeIfNeeded()
+        pump(0.4)
+        guard let bubble = subject.qaAgentBubble, let frame = subject.agentBubbleFrame else {
+            throw Failure(description: "no Orb to film")
+        }
+        guard let hostView = window.contentView else { throw Failure(description: "no content view") }
+        let box = subject.convert(frame.insetBy(dx: -24, dy: -24), to: hostView)
+        // (time, hovered): hover in, hold, out; then a flick in and out.
+        let script: [(Double, Bool)] = working ? [] : [(0.4, true), (1.5, false), (2.6, true), (2.68, false), (2.76, true), (2.84, false), (3.6, true), (3.66, false)]
+        var next = 0, log = "", count = 0
+        pump(0.3)
+        let start = Date()
+        func scale() -> Double { (bubble.presentation()?.value(forKeyPath: "transform.scale.x") as? Double) ?? 1 }
+        while Date().timeIntervalSince(start) < (working ? 6.2 : 4.4) {
+            let t = Date().timeIntervalSince(start)
+            while next < script.count, script[next].0 <= t { bubble.setHovered(script[next].1); next += 1 }
+            CATransaction.flush()
+            if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+                                                   [.boundsIgnoreFraming, .bestResolution]), let host = window.contentView {
+                let k = CGFloat(image.width) / host.bounds.width
+                let r = box
+                let y = host.isFlipped ? r.minY : host.bounds.height - r.maxY
+                let want = CGRect(x: r.minX * k, y: y * k, width: r.width * k, height: r.height * k).integral
+                if count == 0 { FileHandle.standardError.write(Data("hover film crop \(want) of \(image.width)x\(image.height)\n".utf8)) }
+                if let crop = image.cropping(to: want) {
+                    let ms = Int(Date().timeIntervalSince(start) * 1000)
+                    try write(crop, to: directory.appendingPathComponent(String(format: "f%05d.png", ms)))
+                    log += "\(ms) \(scale())\n"; count += 1
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.004))
+            if count == 0, t > 0.5, t < 0.6 { FileHandle.standardError.write(Data("hover film box \(box) frame \(frame)\n".utf8)) }
+            if count == 0, t > 1 { FileHandle.standardError.write(Data("hover film: no frame by 1s\n".utf8)); break }
+        }
+        try log.write(to: directory.appendingPathComponent("scale.log"), atomically: true, encoding: .utf8)
+        bubble.setHovered(false)
+        window.appearance = nil
+        canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        return ["hover film: \(count) frames"]
     }
 
     /// Frames of the working light, every sidebar style, every icon style: a
