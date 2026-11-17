@@ -155,9 +155,12 @@ public enum InboxSort {
             // Keep the whole family as context when any member still matters.
             // A restored ready state alone does not establish a finished turn.
             let isQuiet = family.allSatisfy { row in
+                // An unread mark alone does not keep a finished helper whose
+                // lead is gone: with no card to sit in it drew as a loose strip.
+                // An unopened failure still stays (below); Search finds the rest.
                 guard row.id != openAgentId, !row.hasLiveRunner,
                       !row.settlementBlocked, !row.isPinned,
-                      row.attention == .none,
+                      row.attention != .woke,
                       !isUnopenedFailure(row) else { return false }
                 switch row.state {
                 case .working, .approval, .input: return false

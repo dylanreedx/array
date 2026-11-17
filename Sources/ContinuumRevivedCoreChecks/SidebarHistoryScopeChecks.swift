@@ -58,6 +58,8 @@ func runSidebarHistoryScopeChecks() throws {
            "an acknowledged orphan failure is finished history")
     expect(filtered([row(orphan, parent: absentParent)]).isEmpty,
            "a successful orphan must not return as a live recent after restart")
+    expect(filtered([row(orphan, parent: absentParent, attention: .unread, outcome: .succeeded, unread: true)]).isEmpty,
+           "an unread finished orphan has no card to sit in: it leaves the live list")
     let cycle = [row(orphan, parent: orphanChild), row(orphanChild, parent: orphan)]
     expect(filtered(cycle) == cycle, "corrupt cycles terminate without discarding agents")
     let sorted = InboxSort.sortForInbox(rows: actual)
@@ -114,10 +116,16 @@ func runSidebarHistoryScopeChecks() throws {
     let wokeFamily = try fromRecords([quietParent, wokeRecord])
     expect(filtered(wokeFamily) == wokeFamily,
            "a successful woke helper must preserve its orphan family as context")
-    for attention in [InboxAttention.unread, .woke] {
+    // Woke keeps an orphan family as context. An unread mark alone does not:
+    // a finished family whose lead is gone has no card to sit in (sidebar
+    // night fixes); its unopened failures still stay, checked above.
+    do {
         let family = AgentInboxRowBuilder.placingChildrenWithParents([
-            orphanFamily[0], row(orphanChild, parent: orphan, attention: attention)])
-        expect(filtered(family) == family, "any helper attention must preserve its orphan family")
+            orphanFamily[0], row(orphanChild, parent: orphan, attention: .woke)])
+        expect(filtered(family) == family, "a woke helper must preserve its orphan family")
+        let unread = AgentInboxRowBuilder.placingChildrenWithParents([
+            orphanFamily[0], row(orphanChild, parent: orphan, attention: .unread)])
+        expect(filtered(unread).isEmpty, "an unread finished orphan family leaves the live list")
     }
     print("SidebarHistoryAttention: record-backed successful wake and unread/woke family context preserved")
 
