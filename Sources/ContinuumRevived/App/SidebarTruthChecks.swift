@@ -469,14 +469,25 @@ enum SidebarTruthChecks {
         }
         // Finished work the human already said "done" to, and two agents whose
         // tiles were closed: all three are History rows.
+        // Each did real work (a finished turn) before it was parked: an agent
+        // opened and never used is not History (dogfood fix; Search finds it).
+        func worked(_ value: inout AgentRecord, endedAgo: TimeInterval) {
+            let ended = now.addingTimeInterval(-endedAgo)
+            value.latestTurnAt = ended.addingTimeInterval(-30)
+            value.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "t1", outcome: .succeeded, endedAt: ended)
+            value.acknowledgedTerminalSequence = 1
+        }
         var settled = record(settledAgent, "settled agent", project: projectA, root: rootA, tile: nil, age: 900)
+        worked(&settled, endedAgo: 120)
         settled.settledOverride = .settled
         settled.settledAt = now.addingTimeInterval(-120)
         try agentStore.upsert(settled)
         var archivedRecent = record(archivedRecentAgent, "recently closed agent", project: projectA, root: rootA, tile: nil, age: 950)
+        worked(&archivedRecent, endedAgo: 60)
         archivedRecent.archivedAt = now.addingTimeInterval(-60)
         try agentStore.upsert(archivedRecent)
         var archivedOld = record(archivedOldAgent, "long closed agent", project: projectA, root: rootA, tile: nil, age: 980)
+        worked(&archivedOld, endedAgo: 300)
         archivedOld.archivedAt = now.addingTimeInterval(-300)
         try agentStore.upsert(archivedOld)
 
@@ -643,8 +654,15 @@ enum SidebarTruthChecks {
                    "a closed tile must leave the sidebar's tree — the active project's tiles came from a snapshot frozen at boot")
         try expect(block(world, idleAgent) == nil || block(world, idleAgent) == "history",
                    "W1: closing an idle agent's tile must take its row out of the live list — drawn in \(String(describing: block(world, idleAgent)))")
-        try expect(inbox.historyHeaderTitleForQA != historyBefore,
-                   "W1: the History heading must count the closed agent — still \(String(describing: inbox.historyHeaderTitleForQA))")
+        if inbox.sidebarLayout == .quietInbox, world.supervisor.records[idleAgent]?.latestTerminalEvent == nil {
+            // Quiet inbox (dogfood fix): an agent opened and never used is not
+            // History — it leaves the live list, and Search still finds it.
+            try expect(inbox.historyHeaderTitleForQA == historyBefore,
+                       "W1 (Quiet): a closed agent that never ran must not join History — heading \(String(describing: inbox.historyHeaderTitleForQA)), was \(String(describing: historyBefore))")
+        } else {
+            try expect(inbox.historyHeaderTitleForQA != historyBefore,
+                       "W1: the History heading must count the closed agent — still \(String(describing: inbox.historyHeaderTitleForQA))")
+        }
 
         // W2 · a WORKING agent's tile.
         try expect(world.supervisor.send("keep going", to: busyAgent),
@@ -836,6 +854,18 @@ enum SidebarTruthChecks {
         inbox.prefersReducedMotion = { false }
         // Quiet inbox (dogfood fix): a History family is ONE card; its helpers
         // travel inside it and are counted on it, never drawn as stray rows.
+        let familyRan = [parentAgent, childOne, childTwo].contains {
+            world.supervisor.records[$0]?.latestTerminalEvent != nil || world.supervisor.records[$0]?.latestTurnAt != nil
+        }
+        if inbox.sidebarLayout == .quietInbox, !familyRan {
+            // A family opened and never used is not History (dogfood fix): it
+            // leaves the live list whole, no helper left behind as a stray row.
+            for agent in [parentAgent, childOne, childTwo] {
+                try expect(block(world, agent) == nil,
+                           "W4 (Quiet): a closed family that never ran must leave the live list whole — \(agent.rawValue) drawn \(String(describing: block(world, agent)))")
+            }
+            return
+        }
         if inbox.sidebarLayout == .quietInbox {
             try expect(block(world, parentAgent) == "history", "W4: the parent itself is in History")
             for child in [childOne, childTwo] {

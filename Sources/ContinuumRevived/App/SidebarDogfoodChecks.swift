@@ -192,6 +192,9 @@ enum SidebarDogfoodChecks {
         let helpers = (0..<2).map { h.spawn("Helper \($0 + 1)", parent: lead) }
         for id in returning + finished + [lead] + helpers { h.finish(id) }
         for id in returning { _ = h.supervisor.settle(agentID: id) }
+        // One finished family stays parked in History throughout, so History
+        // keeps its heading while the others work again.
+        _ = h.supervisor.settle(agentID: finished[0])
         h.refresh()
         pump(0.4)
         try clickHistory(open: true)
@@ -436,6 +439,7 @@ enum SidebarDogfoodChecks {
         let now = Date()
         func days(_ n: Double) -> Date { now.addingTimeInterval(-n * 86_400) }
         var titles: [AgentID: String] = [:]
+        var unusedID: AgentID?
         let h = try makeHarness("history-order") { delegate, _ in
             guard let peer = delegate.qaAgentSupervisor.records.values.first else {
                 throw Failure(description: "fixture agent missing")
@@ -465,6 +469,15 @@ enum SidebarDogfoodChecks {
             _ = try put("Late helper", parent: lifted, turn: days(1))
             _ = try put("Recent lead", turn: days(2))
             for n in 1...10 { _ = try put("Older family \(n)", turn: days(Double(10 + n))) }
+            // Opened and never used: no prompt, no turn, no outcome, closed.
+            var unused = AgentRecord(
+                id: AgentID(rawValue: UUID()), displayName: AgentRecord.defaultAgentName, displayNameSource: .sentinel,
+                model: peer.model, thinking: peer.thinking, cwd: peer.cwd, projectId: peer.projectId,
+                createdAt: now.addingTimeInterval(-600), lastActivityAt: now.addingTimeInterval(-600),
+                archivedAt: now.addingTimeInterval(-300))
+            unused.acknowledgedTerminalSequence = 0
+            try store.upsert(unused)
+            unusedID = unused.id
         }
         defer { h.close() }
         let inbox = h.inbox
@@ -486,10 +499,12 @@ enum SidebarDogfoodChecks {
         func describe(_ order: [(title: String, at: Date?)]) -> String {
             order.map { "\($0.title) \($0.at.map { String(format: "%.1fd", now.timeIntervalSince($0) / 86_400) } ?? "-")" }.joined(separator: ", ")
         }
-        // The fixture's own never-prompted source agent dates from its creation
-        // (now); the families under test are the rest.
+        // Agents opened and never used (the restored one and the fixture's own
+        // source agent) are not History: nothing happened there.
         let page = cards()
-        let families = page.filter { $0.title != AgentName.defaultName }
+        try expect(!page.contains { $0.title == AgentName.defaultName },
+                   "an agent opened and never used is drawn in History: \(describe(page))")
+        let families = page
         try expect(Array(families.prefix(3).map(\.title)) == ["Helper worked later", "Recent lead", "Restart-stamped family"]
                    && nonIncreasing(page),
                    "History is not newest first by last real turn: \(describe(page))")
@@ -508,7 +523,15 @@ enum SidebarDogfoodChecks {
         let all = cards()
         try expect(nonIncreasing(all) && all.count >= 13,
                    "after Show more, History is not newest first: \(describe(all))")
-        return "History order: newest first by last real turn across Show more (\(all.count) cards): \(describe(Array(all.filter { $0.title != AgentName.defaultName }.prefix(3)))); relaunch stamps on helpers did not move a family"
+        try expect(!all.contains { $0.title == AgentName.defaultName }, "after Show more, an unused agent is in History")
+        // Search still finds it.
+        inbox.setSearchForQA("New agent")
+        inbox.layoutForQA()
+        try expect(unusedID.map { id in inbox.rowIdsForQA.contains(id.rawValue) } == true,
+                   "Search no longer finds an agent opened and never used")
+        inbox.setSearchForQA("")
+        inbox.layoutForQA()
+        return "History order: unused agents left out (Search finds them); newest first by last real turn across Show more (\(all.count) cards): \(describe(Array(all.prefix(3)))); relaunch stamps on helpers did not move a family"
     }
 
     // MARK: - 5. An untitled, prompted lead reads as its first prompt
@@ -621,9 +644,10 @@ enum SidebarDogfoodChecks {
         try expect(other.isEmpty, "History draws something other than one card per family: \(other)")
         let pageCards = drawn.count
         drawn[h.fixture.agentId.rawValue] = nil  // the fixture's own parked source agent
-        // Families total: 2 + the older ones + the fixture's agent; a page of
+        // Families total: 2 + the older ones (the fixture's never-run source
+        // agent is not History: nothing happened there); a page of
         // `settledPageSize` cards, and the footer counts the families left.
-        let families = 2 + InboxSort.settledPageSize + 1
+        let families = 2 + InboxSort.settledPageSize
         try expect(pageCards == InboxSort.settledPageSize,
                    "History's first page shows \(pageCards) cards, wanted \(InboxSort.settledPageSize) families — helpers took page slots")
         let footer = items.compactMap { item -> Int? in if case .settledMore(let hidden) = item { return hidden }; return nil }.first

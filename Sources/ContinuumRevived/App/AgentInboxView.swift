@@ -2798,18 +2798,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 built.append(.settledMore(hidden: page.hidden))
             }
         } else if parts.historyCount > 0 {
-            // Quiet inbox: History counts families, the cards it draws, not helpers.
-            let historyIDs = Set(parts.history.map(\.id))
-            let historyCount = sidebarLayout == .quietInbox
-                ? parts.history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }.count
-                : parts.historyCount
+            // Quiet inbox: History counts families, the cards it draws, not
+            // helpers, and leaves out agents opened and never used.
+            let quiet = sidebarLayout == .quietInbox
+            let families = quiet ? quietHistoryFamilies(parts.history, all: sorted, searching: !query.isEmpty) : []
+            let historyCount = quiet ? families.count : parts.historyCount
+            if historyCount > 0 {
             built.append(.historyHeader(count: historyCount, isExpanded: historyExpanded))
             if historyExpanded {
                 // Quiet inbox pages by family: helpers are never drawn there, so
                 // they must not take page slots or the footer's hidden count.
-                let quiet = sidebarLayout == .quietInbox
                 let page = InboxSort.pageSettled(
-                    quiet ? quietHistoryFamilies(parts.history, all: sorted) : parts.history,
+                    quiet ? families : parts.history,
                     limit: settledLimit, openAgentId: openAgentId)
                 built.append(contentsOf: quiet ? page.shown.map(InboxListItem.agent) : agentItems(for: page.shown))
                 if page.hasMore {
@@ -2817,6 +2817,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 }
             } else if let open = parts.history.first(where: { $0.id == openAgentId }) {
                 built.append(.agent(open))
+            }
             }
         }
         if foldsHistoryIntoShelf, let firstShelf = built.firstIndex(where: \.isShelfHeading) {
@@ -2867,7 +2868,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Each card says how many helpers it holds and that same date
     /// ("4 helpers · Nov 10"). Paging takes this order, so a page never
     /// interleaves older families.
-    private func quietHistoryFamilies(_ history: [AgentInboxRow], all: [AgentInboxRow]) -> [AgentInboxRow] {
+    private func quietHistoryFamilies(_ history: [AgentInboxRow], all: [AgentInboxRow],
+                                      searching: Bool) -> [AgentInboxRow] {
         let historyIDs = Set(history.map(\.id))
         var childrenOf: [UUID: [AgentInboxRow]] = [:]
         for row in all { if let parent = row.parentId, parent != row.id { childrenOf[parent, default: []].append(row) } }
@@ -2882,12 +2884,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         for (index, root) in roots.enumerated() {
             var seen: Set<UUID> = [root.id]
             var latest = activity(root)
+            // Opened and never used (no member ever had a turn or an outcome):
+            // nothing happened there, so it is not History. Search still finds
+            // it, and the open agent always draws.
+            var used = root.lastTurnAt != nil || root.terminalEvent != nil
             var stack = childrenOf[root.id] ?? []
             while let next = stack.popLast() {
                 guard seen.insert(next.id).inserted else { continue }
                 latest = max(latest, activity(next))
+                if next.lastTurnAt != nil || next.terminalEvent != nil { used = true }
                 stack.append(contentsOf: childrenOf[next.id] ?? [])
             }
+            guard used || searching || root.id == openAgentId else { continue }
             historyEntryHelpers[root.id] = seen.count - 1
             historyEntryDates[root.id] = latest
             dated.append((root, latest, index))
