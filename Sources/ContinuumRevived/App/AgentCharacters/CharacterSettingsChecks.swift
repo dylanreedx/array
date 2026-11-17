@@ -98,7 +98,7 @@ enum CharacterSettingsChecks {
                                                 appearance: NSAppearance(named: appearance))
             defer { fixture.tearDown() }
             fixture.show(paneID: "agentCharacters")
-            let arts = try awaitCards(count: 6, in: fixture)
+            var arts = try awaitCards(count: 6, in: fixture)
             // Renamed in the UI, the page answers to its new word and its old one.
             for word in ["icon", "character"] {
                 settings.searchQuery = word
@@ -121,10 +121,10 @@ enum CharacterSettingsChecks {
             // Scrolled out of view, a card holds still and costs the render server
             // nothing; back in view, it moves again.
             let clip = pane.contentView
-            let top = clip.bounds.origin
+            let cardsTop = clip.bounds.origin
             let end = (pane.documentView?.bounds.height ?? 0) - clip.bounds.height
             try expect(end > 0, "\(label): the page scrolls")
-            clip.scroll(to: NSPoint(x: top.x, y: end))
+            clip.scroll(to: NSPoint(x: cardsTop.x, y: end))
             pane.reflectScrolledClipView(clip)
             fixture.settle(0.3)
             let hidden = fixture.descendants(AgentCharacterCardArtView.self).filter { $0.visibleRect.isEmpty }
@@ -137,10 +137,12 @@ enum CharacterSettingsChecks {
             try awaitAnimating(grid, "\(label): the every-state grid in view moves", in: fixture)
             try expect(grid.sprites.count == 2 * AgentCharacterPreviewGridView.columns.count, "\(label): the set's characters x every state")
             try SidebarCharacterChecks.capture(fixture.window, to: out.appendingPathComponent("page-end-\(label).png"))
-            clip.scroll(to: top)
+            clip.scroll(to: cardsTop)
             pane.reflectScrolledClipView(clip)
             fixture.settle(0.3)
             try expect(grid.sprites.allSatisfy { !$0.isAnimating }, "\(label): the grid out of view holds still")
+            // Reacquire actual visible views without rescuing the return scroll.
+            arts = try awaitCards(count: 6, in: fixture, revealPicker: false)
             try expect(arts.values.flatMap(\.sprites).allSatisfy(\.isAnimating), "\(label): cards moved back into view move again")
             moving += 1
 
@@ -205,13 +207,29 @@ enum CharacterSettingsChecks {
         return "Character settings checks passed: discovery through a fixture home (2 files, nothing read), folder import copies one file and selects it, a bad file shows its problems and imports nothing, the page opened in \(stills) appearances with 6 cards drawn and no whole pack parsed, cards and grid move only in view and still under Reduce Motion in \(moving) appearances, \(AgentCharacterBundled.packIDs.count) pack cards clicked: drawn, saved, speaking from their folders, each parsed once off the main thread"
     }
 
-    /// Every card's art, by set id, once `count` have their pictures.
-    private static func awaitCards(count: Int, in fixture: SettingsFixtureWindow) throws -> [String: AgentCharacterCardArtView] {
+    /// Draw every real card with the picker in view. Navigation is setup only;
+    /// return-scroll assertions inspect the current viewport without revealing it.
+    private static func awaitCards(
+        count: Int, in fixture: SettingsFixtureWindow, revealPicker: Bool = true
+    ) throws -> [String: AgentCharacterCardArtView] {
+        if revealPicker {
+            guard let entry = fixture.model.entries().first(where: { $0.anchor == "custom.agentCharacters" }) else {
+                throw Failure(description: "Settings has no Agent characters set picker entry")
+            }
+            fixture.model.reveal(entry)
+            try waitUntil(fixture, "the picker reveal highlight settles") {
+                fixture.model.highlightedEntryID == nil
+            }
+            fixture.settle(0.65) // The highlight's 0.6-second fade has finished.
+        }
         var arts: [String: AgentCharacterCardArtView] = [:]
-        try waitUntil(fixture, "\(count) cards draw") {
-            let views = fixture.descendants(AgentCharacterCardArtView.self).filter { $0.art != nil }
+        try waitUntil(fixture, "\(count) cards draw in the visible picker; loaded \(arts.keys.sorted())") {
+            let views = fixture.descendants(AgentCharacterCardArtView.self).filter {
+                $0.art != nil && $0.window === fixture.window
+                    && !$0.isHiddenOrHasHiddenAncestor && !$0.visibleRect.isEmpty
+            }
             arts = Dictionary(views.map { ($0.accessibilityIdentifier(), $0) }, uniquingKeysWith: { first, _ in first })
-            return arts.count == count
+            return arts.count == count && views.count == count
         }
         return arts
     }
