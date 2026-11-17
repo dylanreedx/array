@@ -105,7 +105,10 @@ enum SidebarIndicatorSettingsChecks {
             guard let card = descendants(inbox, AgentInboxCardView.self).first(where: { $0.isRouteActive }) else {
                 throw Failure(description: "sidebar did not render its real active card")
             }
-            guard let tail = descendants(inbox, AgentInboxRemainderView.self).first else {
+            // The fold line itself, not a Quiet count or cause line drawn by the same view.
+            guard let tail = descendants(inbox, AgentInboxRemainderView.self).first(where: {
+                $0.countTallyForQA == nil && $0.causeIncidentForQA == nil
+            }) else {
                 throw Failure(description: "sidebar did not render the real N-more-helpers tail")
             }
             try expect(!tail.isSweepingForQA, "default Duplex left a Classic border slice on the helper tail")

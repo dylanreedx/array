@@ -316,6 +316,8 @@ enum SidebarQuietInboxChecks {
             let leadFrame = leadCell.convert(leadCell.bounds, to: nil)
             let countFrame = countRow.convert(countRow.bounds, to: nil), lineFrame = line.convert(line.bounds, to: nil)
             let spacing = CGFloat(AgentInboxView.rowSpacing)
+            countRow.layoutSubtreeIfNeeded()
+            try expect(countRow.labelFitsForQA, "the count line is cut off: '\(countRow.titleForQA)'")
             try expect(abs(leadFrame.minY - countFrame.maxY - spacing) < 0.5 && abs(countFrame.minY - lineFrame.maxY - spacing) < 0.5,
                        "the count and cause lines are drawn under their lead, in its card — lead \(leadFrame), count \(countFrame), cause \(lineFrame)")
         }

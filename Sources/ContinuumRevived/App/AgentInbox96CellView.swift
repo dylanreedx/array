@@ -86,9 +86,8 @@ final class InboxSettleNudgeButton: NSButton, TokenThemed {
         let role: SidebarControlRole = (cell?.isHighlighted ?? false)
             ? .pressed : (isPointerInside ? .hover : .resting)
         layer?.backgroundColor = isPlain ? nil : role.color.cgColor(in: self)
-        // Plain: bright words as in variants/A; the pointer takes them to full ink.
-        let primary = TextToken.textPrimary.color.nsColor(in: self)
-        let foreground = isPlain && role == .resting ? primary.withAlphaComponent(0.85) : primary
+        // Plain: bright words as in variants/A, in the primary token itself.
+        let foreground = TextToken.textPrimary.color.nsColor(in: self)
         contentTintColor = foreground
         attributedTitle = NSAttributedString(
             string: title, attributes: [.font: font as Any, .foregroundColor: foreground])
@@ -2002,7 +2001,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // once. The ask stays first: it is the lead's own question.
         // Quiet inbox: the count is its own line under the lead, so line 2 keeps
         // the project and the branch, and carries only the lead's own ask.
-        if ledger == nil, let tally = sidebarTally, tally.total > 0, row.depth == 0 {
+        if ledger == nil, let tally = sidebarTally, tally.total > 0, row.depth == 0,
+           shown?.disclosure != .collapsed {
             guard let ask = ownership.raisedAsk ?? Self.ask(row) else { return nil }
             text.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
             if placementLabel.stringValue.isEmpty, whereLabel.isHidden {

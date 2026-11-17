@@ -794,7 +794,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     // Ticket: docs/38-tickets/90-agent-ux/P2D.4-parent-child-nesting.md
     /// The parents drawn folded right now, derived from `foldChoices` and the
     /// rollups on every display (`isFolded`). Never written anywhere else.
-    private var collapsedParents: Set<UUID> = []
+    private(set) var collapsedParents: Set<UUID> = []
     /// What you last chose for each parent: true open, false folded. Nothing in
     /// the change set, nothing on the row; the host persists it on this Mac only
     /// (`onParentFoldChange`), because a synced fold would hide an agent on a
@@ -9098,6 +9098,10 @@ final class AgentInboxRemainderView: NSTableCellView {
     /// The lead's count line, drawn as its own line in the card: quiet ink,
     /// "N failed" in the failed red, no action, nothing to press.
     private(set) var countTallyForQA: SidebarLeadTally?
+    /// The drawn words fit their line whole: nothing is cut off.
+    var labelFitsForQA: Bool {
+        label.frame.width > 0 && ceil(label.attributedStringValue.size().width) <= ceil(label.frame.width) + 0.5
+    }
     func applyCount(_ tally: SidebarLeadTally) {
         remainder = nil
         countTallyForQA = tally

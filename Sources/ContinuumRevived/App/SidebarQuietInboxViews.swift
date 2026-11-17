@@ -36,7 +36,8 @@ extension AgentInboxView {
         result.reserveCapacity(items.count + byLead.count + sidebarTallies.count)
         for item in items {
             result.append(item)
-            guard case .agent(let row) = item, row.depth == 0 else { continue }
+            // A folded lead is a one-row card: its count stays on line 2.
+            guard case .agent(let row) = item, row.depth == 0, !collapsedParents.contains(row.id) else { continue }
             // A's line 3: the lead's count, its own line under the lead.
             if row.lifecycle == .active, let tally = sidebarTallies[row.id], tally.total > 0 {
                 result.append(.leadCount(tally))
