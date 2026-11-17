@@ -2408,6 +2408,11 @@ run_app_check .build/debug/Array --helper-tile-tidy-check
 # that works), never as user prompts; the parent's row reads "Messaged …"; a
 # restore of the child's session file draws the identical cards.
 run_app_check .build/debug/Array --agent-message-card-check
+# An agent's message echoed mid-reply waits for the reply's block boundary:
+# one reply entry and one drawn run, the card after it, and the card's edges
+# draw the same pixels left and right in light and dark (no one-sided bar).
+run_app_check .build/debug/Array --agent-message-placement-check
+run_app_check .build/debug/Array --agent-message-border-check
 # Agent permissions (Settings ▸ Agents), Free within a project by default:
 # delegate and message any agent in the project without a prompt, while
 # cross-project reach asks or is refused, the per-agent switch revokes, an

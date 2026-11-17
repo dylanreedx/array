@@ -19,7 +19,7 @@ struct AgentMessageSenderSource: @unchecked Sendable {
 }
 
 /// A turn another agent wrote, drawn as FROM that agent: its name in the
-/// header, its identity colour down the leading edge, and its words as the
+/// header, its identity colour around the full border, and its words as the
 /// card's body. Never a user bubble — the user did not type it.
 ///
 /// The same grammar as the task card beside it (an artifact-surface card with a
@@ -53,7 +53,6 @@ final class AgentMessageRenderer: AgentBlockRendering {
 final class AgentMessageCardView: NSView {
     // Metrics at 100%, each scaled by the tile's page zoom.
     private static func padding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
-    private static func accentWidth(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(3)) }
     private static func headerHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(18)) }
     private static func headerGap(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.xs)) }
     private static func glyphSide(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(12)) }
@@ -66,7 +65,7 @@ final class AgentMessageCardView: NSView {
     }
 
     private static func bodyWidth(cardWidth: CGFloat, zoom: AgentPageZoom) -> CGFloat {
-        max(1, cardWidth - accentWidth(zoom: zoom) - padding(zoom: zoom) * 2)
+        max(1, cardWidth - padding(zoom: zoom) * 2)
     }
 
     /// Measured by a wrapping label cell, the same cell kind that draws it, so
@@ -98,7 +97,6 @@ final class AgentMessageCardView: NSView {
     }()
 
     private let card = NSView(frame: .zero)
-    private let accent = CALayer()
     let senderButton = AgentMessageSenderButton(frame: .zero)
     let bodyLabel = NSTextField(wrappingLabelWithString: "")
     private var zoom: AgentPageZoom = .default
@@ -111,7 +109,6 @@ final class AgentMessageCardView: NSView {
         card.wantsLayer = true
         card.layer?.borderWidth = CGFloat(LineWidth.hairline)
         card.layer?.masksToBounds = true
-        card.layer?.addSublayer(accent)
         addSubview(card)
         card.addSubview(senderButton)
         bodyLabel.isSelectable = true
@@ -140,10 +137,8 @@ final class AgentMessageCardView: NSView {
 
         card.layer?.cornerRadius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
         card.layer?.backgroundColor = tokens.artifactSurface.color.cgColor(for: appearance)
-        card.layer?.borderColor = tokens.decorativeLine.color.cgColor(for: appearance)
-        // A sender with no colour keeps the card's own quiet edge, never a
-        // stand-in hue that would read as somebody's identity.
-        accent.backgroundColor = (accentColor ?? tokens.decorativeLine.color.nsColor(for: appearance)).cgColor
+        // Identity colour uses the full hairline; an unknown sender keeps the line token.
+        card.layer?.borderColor = (accentColor ?? tokens.decorativeLine.color.nsColor(for: appearance)).cgColor
 
         let revealable = payload.origin == .array && sender?.hasTile == true
         senderButton.apply(
@@ -191,16 +186,8 @@ final class AgentMessageCardView: NSView {
         let width = Self.cardWidth(rowWidth: bounds.width, zoom: zoom)
         let cardFrame = NSRect(x: 0, y: inset, width: width, height: max(0, bounds.height - inset * 2))
         if card.frame != cardFrame { card.frame = cardFrame }
-        let accentWidth = Self.accentWidth(zoom: zoom)
-        let accentFrame = CGRect(x: 0, y: 0, width: accentWidth, height: cardFrame.height)
-        if accent.frame != accentFrame {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            accent.frame = accentFrame
-            CATransaction.commit()
-        }
         let padding = Self.padding(zoom: zoom)
-        let x = accentWidth + padding
+        let x = padding
         let contentWidth = Self.bodyWidth(cardWidth: width, zoom: zoom)
         let headerHeight = Self.headerHeight(zoom: zoom)
         // `card` is not flipped: y grows upward inside it.

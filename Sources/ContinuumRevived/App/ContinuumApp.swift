@@ -3640,6 +3640,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // An agent's message never splits a streaming reply, and its card has
+        // an even border in light and dark (AgentMessagePlacementChecks).
+        if CommandLine.arguments.contains("--agent-message-placement-check") || CommandLine.arguments.contains("--agent-message-border-check") {
+            do {
+                _ = NSApplication.shared
+                try AgentMessagePlacementChecks.run(borderOnly: CommandLine.arguments.contains("--agent-message-border-check"))
+                print("AgentMessagePlacementChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         // A live replay pilot run (benchmarks/replay/run_pilot.py), not a check:
         // it spends real provider usage and is never run by the matrix.
         if CommandLine.arguments.contains("--replay-live-run") {

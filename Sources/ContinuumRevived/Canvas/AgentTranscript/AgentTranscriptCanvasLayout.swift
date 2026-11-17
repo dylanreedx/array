@@ -1129,14 +1129,14 @@ extension AgentTranscriptCanvasView {
     // MARK: Agent messages (AgentMessageRenderer)
 
     func messageBody(_ block: AgentBlock, message: AgentMessagePayload, width: CGFloat) -> Body {
-        let rowInset = S(7), padding = S(Space.m), accentWidth = S(3)
+        let rowInset = S(7), padding = S(Space.m)
         let cardWidth = min(width, S(640))
         let sender = message.senderAgentID.flatMap { renderContext.agentMessageSenders.current($0) }
         let accent = sender?.identityColorName.map { ZoneChromeNSView.color(named: $0) }
         let label = NSFont.token(.label, zoom: zoom)
         let bodyFont = NSFont.token(.body, zoom: zoom)
-        let contentX = accentWidth + padding
-        let bodyWidth = max(1, cardWidth - accentWidth - 2 * padding)
+        let contentX = padding
+        let bodyWidth = max(1, cardWidth - 2 * padding)
         let headerTop = rowInset + padding
         let headerHeight = S(18)
         let text = NSAttributedString(string: message.text, attributes: [.font: bodyFont, .foregroundColor: primary])
@@ -1147,9 +1147,9 @@ extension AgentTranscriptCanvasView {
         var body = Body(height: ceil(cardHeight + 2 * rowInset))
         let radius = CGFloat(zoom.scaled(AgentTileRadius.artifact))
         body.builder.decorations.append(.fill(card, renderContext.tokens.artifactSurface.color.cgColor(for: theme), radius: radius))
-        body.builder.decorations.append(.fill(CGRect(x: 0, y: rowInset + radius / 2, width: accentWidth, height: cardHeight - radius),
-                                              (accent ?? renderContext.tokens.decorativeLine.color.nsColor(for: theme)).cgColor, radius: 0))
-        body.builder.decorations.append(.stroke(card, renderContext.tokens.decorativeLine.color.cgColor(for: theme), radius: radius, width: hairline))
+        // The same artifact surface and even hairline as the other transcript cards.
+        body.builder.decorations.append(.stroke(card, (accent ?? renderContext.tokens.decorativeLine.color.nsColor(for: theme)).cgColor,
+                                                radius: radius, width: hairline))
         var x = contentX
         // Plan 110: an Array sender's own character, else the bubble.
         let senderCharacter = message.origin == .array ? message.senderAgentID : nil

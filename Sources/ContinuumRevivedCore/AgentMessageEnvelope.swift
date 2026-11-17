@@ -47,6 +47,14 @@ public enum AgentMessageEnvelope {
         /// app's `<side-sessions-event>`): neither the user nor an agent wrote
         /// it, so it is a quiet notice carrying its first sentence.
         case hostNote(String)
+
+        /// Another agent's words, alone or batched.
+        public var isAgentMessage: Bool {
+            switch self {
+            case .agentMessage, .agentMessages: return true
+            case .prompt, .hostNote: return false
+            }
+        }
     }
 
     /// The text the receiving agent's model is given. The name is reduced to
@@ -251,6 +259,28 @@ public enum AgentMessageEnvelope {
         let collapsed = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         guard !collapsed.isEmpty else { return nil }
         return collapsed.count > 80 ? String(collapsed.prefix(79)) + "…" : collapsed
+    }
+
+    /// `text` within `limit` characters, never cut inside a word: the whole
+    /// sentences that fit, else the words that fit, then "…" so the reader can
+    /// see it was shortened. Text within the limit comes back unchanged.
+    public static func excerpt(_ text: String, limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        guard text.count > limit else { return text }
+        guard limit > 2 else { return "…" }
+        let budget = limit - 2 // " …"
+        var kept = text.startIndex
+        text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .bySentences) { _, range, _, stop in
+            if text.distance(from: text.startIndex, to: range.upperBound) <= budget { kept = range.upperBound } else { stop = true }
+        }
+        if kept == text.startIndex {
+            let head = text.prefix(budget)
+            // The word in progress at the cut is dropped unless the cut fell on a space.
+            let next = text.index(text.startIndex, offsetBy: budget)
+            kept = text[next].isWhitespace ? head.endIndex : (head.lastIndex(where: \.isWhitespace) ?? text.startIndex)
+        }
+        let cut = text[..<kept].trimmingCharacters(in: .whitespacesAndNewlines)
+        return cut.isEmpty ? "…" : cut + " …"
     }
 
     /// "None of the sessions you started is working now; their notes are

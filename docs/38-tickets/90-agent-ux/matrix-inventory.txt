@@ -21,8 +21,10 @@ check --agent-input-check
 check --agent-inventory-wiring-check
 check --agent-jump-composer-check
 check --agent-local-file-link-check
+check --agent-message-border-check
 check --agent-message-bus-check
 check --agent-message-card-check
+check --agent-message-placement-check
 check --agent-native-menu-check
 check --agent-notice-order-check
 check --agent-notify-check
@@ -555,8 +557,10 @@ leg run_app_check .build/debug/Array --agent-input-check
 leg run_app_check .build/debug/Array --agent-inventory-wiring-check
 leg run_app_check .build/debug/Array --agent-jump-composer-check
 leg run_app_check .build/debug/Array --agent-local-file-link-check
+leg run_app_check .build/debug/Array --agent-message-border-check
 leg run_app_check .build/debug/Array --agent-message-bus-check
 leg run_app_check .build/debug/Array --agent-message-card-check
+leg run_app_check .build/debug/Array --agent-message-placement-check
 leg run_app_check .build/debug/Array --agent-native-menu-check
 leg run_app_check .build/debug/Array --agent-notice-order-check
 leg run_app_check .build/debug/Array --agent-notify-check
@@ -1124,7 +1128,7 @@ count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 24
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 210
+count ContinuumRevivedCoreChecks 211
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
