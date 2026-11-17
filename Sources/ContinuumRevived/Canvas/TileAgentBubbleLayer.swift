@@ -420,7 +420,8 @@ final class TileAgentBubbleLayer: CALayer {
         wash.frame = bubbleStyle == .orb ? box.insetBy(dx: 0, dy: -side * 0.08) : box
         let reach = side * 1.5
         swirl.frame = CGRect(x: box.midX - reach / 2, y: box.midY - reach / 2, width: reach, height: reach)
-        sheen.frame = workingStyle == "sheen"
+        let sweepsSheen = workingStyle == "sheen" && bubbleStyle != .orb && bubbleStyle != .minimalSquircle
+        sheen.frame = sweepsSheen
             ? CGRect(x: box.minX - box.width, y: box.minY, width: box.width * 0.7, height: box.height) : box
         // A hairline edge, inside the plate (a mask strokes both ways; the
         // outer half is cut by nothing, so keep it to the line's width).
@@ -472,7 +473,9 @@ final class TileAgentBubbleLayer: CALayer {
             specularMask.lineWidth = max(1, side * 0.05)
             specularMask.lineCap = .round
         }
-        if workingStyle == "sheen" { reconcileMotion(force: true) }
+        // The moving sheen depends on its laid-out frame. Other animations
+        // reconcile only when their signature changes, including a resized Orb.
+        reconcileMotion(force: sweepsSheen)
     }
 
     // MARK: Paint
@@ -494,6 +497,7 @@ final class TileAgentBubbleLayer: CALayer {
         let minimal = bubbleStyle == .minimalSquircle
         orbitHost.isHidden = true
         sheen.isHidden = true
+        sheen.locations = nil
         wash.type = .axial
         wash.locations = nil
         wash.startPoint = CGPoint(x: 0.5, y: 0)
