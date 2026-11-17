@@ -241,10 +241,19 @@ enum SidebarQuietInboxChecks {
             }
             for leadRow in inbox.allRowsForQuietCheck where leadRow.depth == 0 && leadRow.parentId == nil {
                 guard let cell = inbox.cellForQA(id: leadRow.id) as? AgentInbox96CellView else { continue }
-                var card = cell.visibleTextForQA.joined(separator: " | ")
+                var card = (cell.visibleTextForQA + [inbox.countLineTextForQA(id: leadRow.id) ?? ""]).joined(separator: " | ")
                 card += causeLines().filter { $0.causeIncidentForQA?.familyIDs == [leadRow.id] }.map { " | " + $0.titleForQA }.joined()
                 card += inbox.ownershipRemaindersForQA.filter { $0.qaParentID == leadRow.id }.map { " | " + $0.qaTitle }.joined()
                 try expect(failures(card) <= 1, "\(step): '\(leadRow.displayTitle)' says failed \(failures(card)) times: \(card)")
+                // One word per state: an interrupted helper is never "stopped", and
+                // the fold names no state, so each number is said once.
+                try expect(!card.localizedCaseInsensitiveContains("stopped"),
+                           "\(step): '\(leadRow.displayTitle)' names a state with a second word: \(card)")
+                for fold in inbox.ownershipRemaindersForQA where fold.qaParentID == leadRow.id {
+                    let title = fold.qaTitle
+                    try expect(title == "Show less" || title.range(of: "^\\d+ folded$", options: .regularExpression) != nil,
+                               "\(step): '\(leadRow.displayTitle)''s fold says more than what it folds: '\(title)'")
+                }
             }
         }
         func drawnAgentIDs() -> Set<UUID> {
@@ -293,14 +302,22 @@ enum SidebarQuietInboxChecks {
                    "the release family's ONE cause line is its usage pause — got \(leadCause?.titleForQA ?? "nil")")
         try expect(familyCause?.titleForQA.hasSuffix(taskWords) == true && familyCause?.causeActionForQA?.title == "Open",
                    "the failed family's cause line names its reason and one action — got \(familyCause?.titleForQA ?? "nil")")
-        // Each cause line sits in its own card: the row right after its lead.
+        // Each card, as variants/A: the lead (project and branch on line 2),
+        // its count line, its cause line, each drawn right under the one before.
         for (line, leadID) in [(leadCause, lead.rawValue), (familyCause, family.rawValue)] {
-            guard let line, let leadCell = inbox.cellForQA(id: leadID) as? NSView else {
-                throw Failure(description: "a cause line or its lead is not drawn")
+            let items = inbox.itemsForQuietCheck
+            guard let line, let at = items.firstIndex(where: { $0.agentRow?.id == leadID }), at + 2 < items.count,
+                  case .leadCount(let tally) = items[at + 1], tally.leadId == leadID,
+                  case .familyCause = items[at + 2],
+                  let countRow = inbox.familyCauseCells["count:\(leadID.uuidString)"],
+                  let leadCell = inbox.cellForQA(id: leadID) as? NSView else {
+                throw Failure(description: "a card is not lead, count line, cause line in order")
             }
-            let leadFrame = leadCell.convert(leadCell.bounds, to: nil), lineFrame = line.convert(line.bounds, to: nil)
-            try expect(abs(leadFrame.minY - lineFrame.maxY - CGFloat(AgentInboxView.rowSpacing)) < 0.5,
-                       "the cause line is drawn right under its lead, in its card — lead \(leadFrame), line \(lineFrame)")
+            let leadFrame = leadCell.convert(leadCell.bounds, to: nil)
+            let countFrame = countRow.convert(countRow.bounds, to: nil), lineFrame = line.convert(line.bounds, to: nil)
+            let spacing = CGFloat(AgentInboxView.rowSpacing)
+            try expect(abs(leadFrame.minY - countFrame.maxY - spacing) < 0.5 && abs(countFrame.minY - lineFrame.maxY - spacing) < 0.5,
+                       "the count and cause lines are drawn under their lead, in its card — lead \(leadFrame), count \(countFrame), cause \(lineFrame)")
         }
         try expectMinimalChrome("head")
         var spoken: [String] = []
@@ -323,7 +340,7 @@ enum SidebarQuietInboxChecks {
             try expect(cell.accessibilityLabel()?.contains("Paused · usage") == true,
                        "known usage row's AX must also say Paused · usage")
         }
-        try expect(inbox.cellForQA(id: lead.rawValue)?.branchLaneTextForQA.contains("4 helpers · 2 paused · 1 failed") == true,
+        try expect(inbox.countLineTextForQA(id: lead.rawValue)?.contains("4 helpers · 2 paused · 1 failed") == true,
                    "Quiet's rendered lead must reconcile paused and failed in one count line")
         Q.photograph(sidebar, "quiet-1-head")
 
@@ -344,10 +361,11 @@ enum SidebarQuietInboxChecks {
             inbox.layoutForQA()
             var lines: [UUID: String] = [:]
             for (id, tally) in inbox.sidebarTallies {
-                guard let text = inbox.cellForQA(id: id)?.branchLaneTextForQA else { continue }
+                guard let text = inbox.countLineTextForQA(id: id) else { continue }
                 try expect(text.contains(tally.countLine),
                            "\(inbox.sidebarLayout.title): a lead's drawn line carries its tally — '\(text)' vs '\(tally.countLine)'")
-                lines[id] = text
+                // The Ledger's line 2 leads with its separator; the words are the same.
+                lines[id] = text.trimmingCharacters(in: CharacterSet(charactersIn: " ·"))
             }
             return lines
         }

@@ -213,9 +213,9 @@ extension SidebarOwnershipChecks {
         leadCell.layoutSubtreeIfNeeded()
         let needs = SidebarTallyState.needsYou.phrase(askers.count)
         let drawnHelpers = inbox.rowIdsForQA.filter { Set(askers + done).contains($0) }.count
-        guard leadCell.tailTextForQA?.contains("14 helpers · \(needs)") == true,
+        guard inbox.countLineTextForQA(id: lead)?.contains("14 helpers · \(needs)") == true,
               leadCell.accessibilityHelp()?.contains(needs) == true else {
-            throw fail("the lead's count line reads \(leadCell.tailTextForQA ?? "nil"), AX \(leadCell.accessibilityHelp() ?? "nil")")
+            throw fail("the lead's count line reads \(inbox.countLineTextForQA(id: lead) ?? "nil"), AX \(leadCell.accessibilityHelp() ?? "nil")")
         }
         guard tally.reconciles, tally.total == 14, tally.count(.needsYou) == 9,
               tally.shown == drawnHelpers, drawnHelpers == 9,
@@ -596,9 +596,11 @@ extension SidebarOwnershipChecks {
         // A folded helper failed (step 5a): the card says "N failed" once, on the
         // lead's count line, and never again on its fold.
         let failures = try NSRegularExpression(pattern: "\\d+ failed")
-        let card = (try cell(foldLead).visibleTextForQA + [try fold().qaTitle]).joined(separator: " | ")
+        let countLine = inbox.countLineTextForQA(id: uuid(foldLead)) ?? ""
+        let card = (try cell(foldLead).visibleTextForQA + [try fold().qaTitle]
+            + (inbox.sidebarLayout == .quietInbox ? [countLine] : [])).joined(separator: " | ")
         let saidFailed = failures.numberOfMatches(in: card, range: NSRange(card.startIndex..., in: card))
-        guard saidFailed == 1, try cell(foldLead).tailTextForQA?.contains("1 failed") == true else {
+        guard saidFailed == 1, countLine.contains("1 failed") else {
             throw fail("the card says failed \(saidFailed) times, wanted once on the count line: \(card)")
         }
         try still("folded")

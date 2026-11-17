@@ -1846,10 +1846,17 @@ enum UIProbeGeometry {
         // box, the History note; its family rows no longer stack in the head),
         // the Ledger 5.
         let headRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 5 : 3
-        let expectedTableRows = expectedAgentCells + actualRemainders.count + expectedNonAgentRows + headRows
+        // Quiet draws each active lead's count as its own line in the card:
+        // one row per top-level active agent with an active helper.
+        let activeIDs = Set(rows.filter { $0.lifecycle == .active }.map(\.id))
+        let countRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 0 : rows.filter { lead in
+            lead.parentId == nil && lead.lifecycle == .active
+                && rows.contains { $0.parentId == lead.id && activeIDs.contains($0.id) }
+        }.count
+        let expectedTableRows = expectedAgentCells + actualRemainders.count + expectedNonAgentRows + headRows + countRows
         guard probe.inbox.tableRowCountForQA == expectedTableRows,
-              probe.inbox.nonAgentTableRowCountForQA == actualRemainders.count + expectedNonAgentRows + headRows else {
-            throw fail("\(label): default table rows \(probe.inbox.tableRowCountForQA) != \(expectedAgentCells) capped agent cells + \(actualRemainders.count) exact remainder rows + \(expectedNonAgentRows) shelf/paging rows + \(headRows) head rows")
+              probe.inbox.nonAgentTableRowCountForQA == actualRemainders.count + expectedNonAgentRows + headRows + countRows else {
+            throw fail("\(label): default table rows \(probe.inbox.tableRowCountForQA) != \(expectedAgentCells) capped agent cells + \(actualRemainders.count) exact remainder rows + \(expectedNonAgentRows) shelf/paging rows + \(headRows) head rows + \(countRows) count lines")
         }
     }
 
@@ -1915,8 +1922,9 @@ enum UIProbeGeometry {
         probe.host.layoutSubtreeIfNeeded()
         probe.inbox.layoutForQA()
 
-        // Fixed for this fixture: the Quiet inbox draws 2 head rows, the Ledger 1.
-        let nestedHeadRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 1 : 2
+        // Fixed for this fixture: the Quiet inbox draws 2 head rows and the
+        // root lead's count line (its own row in the card), the Ledger 1.
+        let nestedHeadRows = SidebarLayout.legacyLegLayoutForQA == .ledger ? 1 : 3
         guard probe.inbox.rowIdsForQA == bounded.rows.map(\.id),
               probe.inbox.qaMaterializedRowCellCount == bounded.rows.count,
               probe.inbox.tableRowCountForQA == bounded.rows.count + 2 + nestedHeadRows,
@@ -3290,7 +3298,7 @@ enum UIProbeGeometry {
                 }
                 let chromeRows = transitionProbe.inbox.itemsForQA.filter { item in
                     switch item {
-                    case .sectionLabel, .incident, .quietNeedsYou: return true
+                    case .sectionLabel, .incident, .quietNeedsYou, .leadCount, .familyCause: return true
                     default: return false
                     }
                 }.count

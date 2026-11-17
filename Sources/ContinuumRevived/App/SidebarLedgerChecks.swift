@@ -403,9 +403,8 @@ enum SidebarLedgerChecks {
               !quietHasLedgerHead else {
             throw fail("switching to Quiet inbox did not re-render (layout \(inbox.sidebarLayout))")
         }
-        if let quietLead = inbox.itemsForQA.firstIndex(where: { $0.agentRow?.id == uuid(lead) }),
-           let cell = inbox.cellForQA(atItem: quietLead) as? AgentInbox96CellView,
-           !cell.branchLaneTextForQA.contains("18 helpers · 12 paused · 1 failed") {
+        if inbox.itemsForQA.contains(where: { $0.agentRow?.id == uuid(lead) }),
+           inbox.countLineTextForQA(id: uuid(lead))?.contains("18 helpers · 12 paused · 1 failed") != true {
             throw fail("the Quiet inbox lost the shared count line")
         }
         defaults.set(SidebarLayout.ledger.rawValue, forKey: SidebarLayout.defaultsKey)

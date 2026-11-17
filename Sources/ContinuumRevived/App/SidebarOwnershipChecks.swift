@@ -209,12 +209,20 @@ enum SidebarOwnershipChecks {
 
             // 4. Line 2 per state: folded facts, an open lead's branch, a report pill.
             let folded = try cell(collab)
-            guard folded.tailTextForQA?.contains("3 working") == true else {
-                throw Failure(description: "\(label): the folded lead does not speak for its subagents: \(folded.tailTextForQA ?? "nil")")
+            guard inbox.countLineTextForQA(id: uuid(collab))?.contains("3 working") == true else {
+                throw Failure(description: "\(label): the folded lead does not speak for its subagents: \(inbox.countLineTextForQA(id: uuid(collab)) ?? "nil") / \(folded.visibleTextForQA)")
             }
-            // The open lead draws its branch after the chip, in the drawn text
-            // and not only in AX, and it fits whole at this width.
+            // The open lead draws its branch in the drawn text, not only in AX.
+            // Quiet: on line 2 beside the project, its count its own line
+            // below (variants/A). Ledger: after the count chip, fitting whole.
             let open = try cell(verify)
+            if inbox.sidebarLayout == .quietInbox {
+                guard open.branchLaneTextForQA.contains("array/integration"), open.visibleTextForQA.contains("Array"),
+                      inbox.countLineTextForQA(id: uuid(verify))?.contains("5 helpers · 2 working") == true,
+                      open.accessibilityLabel()?.contains("branch array/integration") == true else {
+                    throw Failure(description: "\(label): Quiet's open lead must draw project and branch on line 2 and its count below: \(open.visibleTextForQA) / \(inbox.countLineTextForQA(id: uuid(verify)) ?? "nil")")
+                }
+            } else {
             guard open.tailTextForQA?.contains("5 helpers · 2 working · array/integration") == true,
                   open.accessibilityLabel()?.contains("branch array/integration") == true,
                   let branchFit = open.tailFitForQA(through: "array/integration"), branchFit.needed <= branchFit.room else {
@@ -231,6 +239,7 @@ enum SidebarOwnershipChecks {
             }
             window.setContentSize(wide)
             inbox.layoutForQA()
+            }
             // A finished helper's report check that did not pass is a NEUTRAL
             // pill: the agent did not fail, so no failure red is drawn.
             let reportCell = try cell(reporter)
@@ -552,7 +561,7 @@ enum SidebarOwnershipChecks {
                 throw Failure(description: "\(label), \(step): no lead row")
             }
             lead.layoutSubtreeIfNeeded()
-            return lead.tailTextForQA ?? ""
+            return inbox.countLineTextForQA(id: uuid(busyLead)) ?? ""
         }
         // Through the window, the way a click arrives.
         func click(_ lead: Int, _ step: String) throws {

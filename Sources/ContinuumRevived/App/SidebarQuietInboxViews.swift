@@ -27,19 +27,21 @@ extension AgentInboxView {
     /// own row so it draws inside that card. Any other layout, or a lead not in
     /// the list, adds nothing.
     func withFamilyCauseLines(_ items: [InboxListItem]) -> [InboxListItem] {
-        guard sidebarLayout == .quietInbox, !sidebarFamilyChips.isEmpty else { return items }
+        guard sidebarLayout == .quietInbox else { return items }
         var byLead: [UUID: SidebarIncident] = [:]
         for chip in sidebarFamilyChips where Self.causeLineText(chip.incident) != nil {
             byLead[chip.familyId] = chip.incident
         }
-        guard !byLead.isEmpty else { return items }
         var result: [InboxListItem] = []
-        result.reserveCapacity(items.count + byLead.count)
+        result.reserveCapacity(items.count + byLead.count + sidebarTallies.count)
         for item in items {
             result.append(item)
-            if case .agent(let row) = item, row.depth == 0, let incident = byLead[row.id] {
-                result.append(.familyCause(incident, leadId: row.id))
+            guard case .agent(let row) = item, row.depth == 0 else { continue }
+            // A's line 3: the lead's count, its own line under the lead.
+            if row.lifecycle == .active, let tally = sidebarTallies[row.id], tally.total > 0 {
+                result.append(.leadCount(tally))
             }
+            if let incident = byLead[row.id] { result.append(.familyCause(incident, leadId: row.id)) }
         }
         return result
     }
