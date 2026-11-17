@@ -212,11 +212,25 @@ enum SidebarOwnershipChecks {
             guard folded.tailTextForQA?.contains("3 working") == true else {
                 throw Failure(description: "\(label): the folded lead does not speak for its subagents: \(folded.tailTextForQA ?? "nil")")
             }
+            // The open lead draws its branch after the chip, in the drawn text
+            // and not only in AX, and it fits whole at this width.
             let open = try cell(verify)
-            guard open.tailTextForQA?.contains("5 helpers · 2 working") == true,
-                  open.accessibilityLabel()?.contains("branch array/integration") == true else {
-                throw Failure(description: "\(label): the open lead must keep its shared count and expose its branch to AX: \(open.visibleTextForQA)")
+            guard open.tailTextForQA?.contains("5 helpers · 2 working · array/integration") == true,
+                  open.accessibilityLabel()?.contains("branch array/integration") == true,
+                  let branchFit = open.tailFitForQA(through: "array/integration"), branchFit.needed <= branchFit.room else {
+                throw Failure(description: "\(label): the open lead must draw its shared count then its branch: \(open.visibleTextForQA), fit \(String(describing: open.tailFitForQA(through: "array/integration")))")
             }
+            // Narrow, the branch gives way first: the chip still fits whole.
+            let wide = window.frame.size
+            window.setContentSize(NSSize(width: 330, height: wide.height))
+            inbox.layoutForQA()
+            let narrow = try cell(verify)
+            guard let chipFit = narrow.tailFitForQA(through: "2 working"), chipFit.needed <= chipFit.room,
+                  let narrowBranch = narrow.tailFitForQA(through: "array/integration"), narrowBranch.needed > narrowBranch.room else {
+                throw Failure(description: "\(label): at 330pt the branch must truncate before the chip: chip \(String(describing: narrow.tailFitForQA(through: "2 working"))), branch \(String(describing: narrow.tailFitForQA(through: "array/integration")))")
+            }
+            window.setContentSize(wide)
+            inbox.layoutForQA()
             // A finished helper's report check that did not pass is a NEUTRAL
             // pill: the agent did not fail, so no failure red is drawn.
             let reportCell = try cell(reporter)

@@ -2002,6 +2002,13 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 chip.append(run(part, part.hasSuffix(" failed") ? failedInk : secondary))
             }
             chip.addAttribute(.toolTip, value: tally.fullLine, range: NSRange(location: 0, length: chip.length))
+            // An open lead keeps its branch in view, after the chip and last on
+            // the line, so the tail truncation takes the branch before the chip.
+            if row.depth == 0, shown?.disclosure != .collapsed,
+               let branch = row.branch?.trimmingCharacters(in: .whitespacesAndNewlines), !branch.isEmpty {
+                chip.append(run(" · ", secondary.withAlphaComponent(0.6)))
+                chip.append(run(branch, secondary))
+            }
             facts.append(chip)
             if placementLabel.stringValue.isEmpty, whereLabel.isHidden { text.setAttributedString(NSAttributedString()) }
             for (index, fact) in facts.enumerated() {
@@ -2116,6 +2123,17 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return true
     }
     var tailTextForQA: String? { tailLabel.isHidden ? nil : tailLabel.stringValue }
+    /// The drawn tail's room, and the width its text needs from its start
+    /// through the end of `text`: what fits that room is drawn untruncated.
+    func tailFitForQA(through text: String) -> (room: CGFloat, needed: CGFloat)? {
+        guard !tailLabel.isHidden, tailLabel.frame.width > 0 else { return nil }
+        let drawn = tailLabel.attributedStringValue
+        let range = (drawn.string as NSString).range(of: text)
+        guard range.location != NSNotFound else { return nil }
+        let prefix = drawn.attributedSubstring(from: NSRange(location: 0, length: NSMaxRange(range)))
+        let inset = (tailLabel.cell?.titleRect(forBounds: tailLabel.bounds).width).map { tailLabel.bounds.width - $0 } ?? 0
+        return (tailLabel.bounds.width - inset, ceil(prefix.size().width))
+    }
     var clockTextForQA: String? { stateLabel.isHidden ? nil : stateLabel.stringValue }
     var reportPillForQA: String? { reportPillText }
     /// The drawn pill, in this cell's coordinates. nil when none is drawn.
