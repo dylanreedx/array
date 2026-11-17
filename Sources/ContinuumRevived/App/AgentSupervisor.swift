@@ -11543,9 +11543,12 @@ final class AgentSupervisor {
         scheduleTranscriptPersist(for: id, final: Self.isTranscriptPersistBoundary(event))
     }
 
+    /// QA: the time to live of a newly created tool-detail store.
+    var qaToolDetailTimeToLive: TimeInterval = 60 * 60
+
     private func sharedTranscriptDetailCapture(for id: AgentID) -> AgentTranscriptCanvasToolDetail {
         if let existing = sharedTranscriptDetails[id] { return existing }
-        let capture = AgentTranscriptCanvasToolDetail(store: AgentToolDetailStore())
+        let capture = AgentTranscriptCanvasToolDetail(store: AgentToolDetailStore(timeToLive: qaToolDetailTimeToLive))
         capture.bind(agentID: id)
         capture.onRefresh = { [weak self] in
             guard let self else { return }
@@ -11997,6 +12000,10 @@ final class AgentSupervisor {
         /// exist nowhere else once the capture is dropped.
         var toolDetails: AgentTranscriptCanvasToolDetail.ReleasedState?
     }
+
+    /// How long a finished helper's settlement may wait for its released
+    /// transcript to reload before it is delivered without it.
+    static var transcriptCompletionBound: Duration = .seconds(20)
 
     /// How long an agent must sit idle and unwatched before its transcript is
     /// released. Checks set it to zero.

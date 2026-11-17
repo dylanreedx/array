@@ -243,6 +243,9 @@ final class AgentTranscriptCanvasToolDetail {
         while let running = refreshTask { await running.value }
     }
 
+    /// Witness only: how many detail records this capture holds.
+    var qaHeldRecordCount: Int { details.count }
+
     /// Witness only: the records this capture holds, and its store's own.
     func qaDetailsMatchStore() async -> (held: Int, stored: Int, equal: Bool) {
         guard let store else { return (details.count, 0, details.isEmpty) }

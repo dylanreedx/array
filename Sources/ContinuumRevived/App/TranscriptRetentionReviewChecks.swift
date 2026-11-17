@@ -264,8 +264,185 @@ enum TranscriptRetentionReviewChecks {
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
     }
 
+    // MARK: Re-review: bounded settlement, turn ownership, reclamation
+
+    private static func snapshotURL(_ root: URL, _ id: AgentID) -> URL? {
+        let agentRoot = root.appendingPathComponent(id.rawValue.uuidString)
+        guard let enumerator = FileManager.default.enumerator(at: agentRoot, includingPropertiesForKeys: nil) else { return nil }
+        return enumerator.allObjects.compactMap { $0 as? URL }.first { $0.lastPathComponent == "snapshot.json" }
+    }
+
+    @MainActor private struct Pair {
+        let supervisor: AgentSupervisor
+        let parent: AgentID
+        let child: AgentID
+        let parentCwd: URL
+        let transcriptRoot: URL
+        func thread() -> String { AgentSupervisor.threadId(for: child) }
+        func turn(_ number: Int, answer: String) {
+            let id = "dl-\(number)"
+            supervisor.qaDeliver(.turnStarted(threadId: thread(), turnId: id), to: child)
+            supervisor.qaDeliver(.contentDelta(threadId: thread(), turnId: id, streamKind: .assistant, delta: answer), to: child)
+            supervisor.qaDeliver(.turnCompleted(threadId: thread(), turnId: id, outcome: .completed, errorMessage: nil), to: child)
+        }
+        func result(_ handle: String) -> SpawnResultFile? { SpawnResultFile.read(parentCwd: parentCwd.path, handle: handle) }
+        func wakeTurns() -> Set<String> {
+            Set(((try? SpawnResultFile.deliveries(parentCwd: parentCwd.path, recipient: parent.rawValue)) ?? [])
+                .filter { $0.helper == child.rawValue }.map(\.turn))
+        }
+    }
+
+    private static func makePair(_ root: URL, _ name: String, handle: String?) throws -> Pair {
+        let fixture = root.appendingPathComponent(name, isDirectory: true)
+        let parentCwd = fixture.appendingPathComponent("parent", isDirectory: true)
+        try FileManager.default.createDirectory(at: parentCwd, withIntermediateDirectories: true)
+        let agents = AgentStore(applicationSupportDirectory: fixture.appendingPathComponent("agents"))
+        let parent = AgentID(rawValue: UUID()), child = AgentID(rawValue: UUID())
+        try agents.upsert(record(parent, name: "Lead", cwd: parentCwd.path))
+        var childRecord = record(child, name: "Helper", cwd: fixture.path)
+        childRecord.parentAgentID = parent
+        childRecord.spawnResultHandle = handle
+        try agents.upsert(childRecord)
+        let transcriptRoot = fixture.appendingPathComponent("transcripts", isDirectory: true)
+        let supervisor = AgentSupervisor(
+            store: agents, makeRunner: { _ in ScriptedAgentRunner(script: []) }, warn: { _ in },
+            nameTitlerCommand: { _ in nil }, transcriptStore: AgentTranscriptStore(root: transcriptRoot))
+        _ = supervisor.restore()
+        supervisor.helperCompletionEnabled = { _ in true }
+        return Pair(supervisor: supervisor, parent: parent, child: child, parentCwd: parentCwd, transcriptRoot: transcriptRoot)
+    }
+
+    /// The archive cannot be read (corrupt, missing, unreadable, or the read
+    /// never returns): the helper's result and the lead's wake still arrive
+    /// within the bound, name the cause, and never carry the previous reply.
+    static func runCompletionBound(root: URL) async throws {
+        var failures: [String] = []
+        for variant in ["corrupt", "missing", "permission", "hung"] {
+            let pair = try makePair(root, "review-bound-\(variant)", handle: "bound-\(variant)")
+            let supervisor = pair.supervisor
+            let previousDelay = AgentSupervisor.transcriptReleaseDelay
+            let previousBound = AgentSupervisor.transcriptCompletionBound
+            AgentSupervisor.transcriptReleaseDelay = .zero
+            AgentSupervisor.transcriptCompletionBound = .seconds(2)
+            let gate = Gate()
+            defer {
+                AgentSupervisor.transcriptReleaseDelay = previousDelay
+                AgentSupervisor.transcriptCompletionBound = previousBound
+                supervisor.qaBeforeResumedTranscriptConstruction = nil
+                supervisor.stopAll()
+            }
+            pair.turn(1, answer: "FIRST_ANSWER")
+            guard await settle({ supervisor.isTranscriptReleased(pair.child) }) else {
+                failures.append("\(variant): the helper did not release"); continue
+            }
+            AgentSupervisor.transcriptReleaseDelay = .seconds(60)
+            try? FileManager.default.removeItem(at: SpawnResultFile.url(parentCwd: pair.parentCwd.path, handle: "bound-\(variant)"))
+            if let snapshot = snapshotURL(pair.transcriptRoot, pair.child) {
+                let backups = snapshot.deletingLastPathComponent().appendingPathComponent("backups")
+                try? FileManager.default.removeItem(at: backups)
+                switch variant {
+                case "corrupt": try Data("unreadable".utf8).write(to: snapshot)
+                case "missing": try FileManager.default.removeItem(at: snapshot)
+                case "permission": try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: snapshot.path)
+                default: supervisor.qaBeforeResumedTranscriptConstruction = { _, _ in await gate.wait() }
+                }
+            } else { failures.append("\(variant): no archive to damage"); continue }
+            pair.turn(2, answer: "SECOND_ANSWER")
+            let started = ContinuousClock.now
+            let delivered = await settle({ pair.result("bound-\(variant)") != nil && pair.wakeTurns().contains("dl-2") })
+            let elapsed = ContinuousClock.now - started
+            let file = pair.result("bound-\(variant)")
+            if !delivered { failures.append("\(variant): no result and wake within the bound (result \(file?.status.rawValue ?? "none"), wakes \(pair.wakeTurns()))") }
+            else {
+                if elapsed > .seconds(10) { failures.append("\(variant): settled after \(elapsed), over the bound") }
+                if file?.status == .completed || file?.finalText?.contains("FIRST_ANSWER") == true
+                    || (file?.reason ?? "").isEmpty {
+                    failures.append("\(variant): the result was \(file?.status.rawValue ?? "?") / \(file?.finalText ?? "no text") / \(file?.reason ?? "no reason"), not an explicit failure naming the cause")
+                }
+            }
+            await gate.open()
+        }
+        guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
+    }
+
+    /// Turn C starts while B's completion waits on the reload: B's handle
+    /// settles with B's answer, C's with C's, and each turn wakes the lead.
+    static func runTurnOwnership(root: URL) async throws {
+        let pair = try makePair(root, "review-ownership", handle: nil)
+        let supervisor = pair.supervisor
+        let previousDelay = AgentSupervisor.transcriptReleaseDelay
+        AgentSupervisor.transcriptReleaseDelay = .zero
+        defer {
+            AgentSupervisor.transcriptReleaseDelay = previousDelay
+            supervisor.qaBeforeResumedTranscriptConstruction = nil
+            supervisor.stopAll()
+        }
+        pair.turn(1, answer: "FIRST_ANSWER")
+        guard await settle({ supervisor.isTranscriptReleased(pair.child) }) else { throw Failure(description: "the helper did not release") }
+        AgentSupervisor.transcriptReleaseDelay = .seconds(60)
+        let gate = Gate()
+        supervisor.qaBeforeResumedTranscriptConstruction = { _, _ in await gate.wait() }
+        supervisor.trackHelperMessage(pair.child, from: pair.parent, handle: "handle-b")
+        pair.turn(2, answer: "ANSWER_B")
+        try? await Task.sleep(for: .milliseconds(50))
+        // A message accepted while B's completion still waits: its own turn.
+        supervisor.trackHelperMessage(pair.child, from: pair.parent, handle: "handle-c")
+        pair.turn(3, answer: "ANSWER_C")
+        try? await Task.sleep(for: .milliseconds(100))
+        await gate.open()
+        let done = await settle({ pair.result("handle-b")?.status == .completed && pair.result("handle-c")?.status == .completed && pair.wakeTurns().isSuperset(of: ["dl-2", "dl-3"]) })
+        var failures: [String] = []
+        let b = pair.result("handle-b")?.finalText ?? "nothing", c = pair.result("handle-c")?.finalText ?? "nothing"
+        if !b.contains("ANSWER_B") { failures.append("handle B settled with \(b)") }
+        if !c.contains("ANSWER_C") { failures.append("handle C settled with \(c), not its own answer") }
+        if !pair.wakeTurns().isSuperset(of: ["dl-2", "dl-3"]) { failures.append("the lead was woken for \(pair.wakeTurns()), not both turns") }
+        if !done && failures.isEmpty { failures.append("settlement did not finish") }
+        guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
+    }
+
+    /// A restored tool-detail payload is reclaimed when its time to live ends,
+    /// with no further tool write to trigger it.
+    static func runDetailReclamation(root: URL) async throws {
+        let fixture = root.appendingPathComponent("review-reclaim", isDirectory: true)
+        let agents = AgentStore(applicationSupportDirectory: fixture.appendingPathComponent("agents"))
+        let id = AgentID(rawValue: UUID())
+        try agents.upsert(record(id, name: "Reclaim", cwd: fixture.path))
+        let supervisor = AgentSupervisor(
+            store: agents, makeRunner: { _ in ScriptedAgentRunner(script: []) }, warn: { _ in },
+            nameTitlerCommand: { _ in nil },
+            transcriptStore: AgentTranscriptStore(root: fixture.appendingPathComponent("transcripts", isDirectory: true)))
+        _ = supervisor.restore()
+        supervisor.qaToolDetailTimeToLive = 4
+        let previousDelay = AgentSupervisor.transcriptReleaseDelay
+        AgentSupervisor.transcriptReleaseDelay = .zero
+        defer { AgentSupervisor.transcriptReleaseDelay = previousDelay; supervisor.stopAll() }
+        let thread = AgentSupervisor.threadId(for: id)
+        supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "r1"), to: id)
+        supervisor.qaDeliver(.itemStarted(threadId: thread, itemId: "r-call", kind: .commandExecution, title: "ls"), to: id)
+        supervisor.qaObserveSharedTranscript(.toolDetail(itemId: "r-call", detail: AgentToolDetailObservation(
+            phase: .ended, outputPreview: "RECLAIM_OUTPUT", exitCode: 0, observedAt: Date())), for: id)
+        supervisor.qaDeliver(.itemCompleted(threadId: thread, itemId: "r-call", kind: .commandExecution, status: .completed), to: id)
+        supervisor.qaDeliver(.contentDelta(threadId: thread, turnId: "r1", streamKind: .assistant, delta: "Done."), to: id)
+        supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: "r1", outcome: .completed, errorMessage: nil), to: id)
+        await supervisor.qaSharedTranscriptToolDetail(for: id)?.qaWaitForRefresh()
+        guard await settle({ supervisor.isTranscriptReleased(id) }) else { throw Failure(description: "the agent did not release") }
+        AgentSupervisor.transcriptReleaseDelay = .seconds(60)
+        let attachment = supervisor.transcriptAttachment(for: id, reboundTo: "reclaim-view")
+        let view = Task { for await _ in attachment.tail {} }
+        if let reload = attachment.reload { await reload.value }
+        defer { view.cancel() }
+        let restored = supervisor.qaSharedTranscriptToolDetail(for: id)?.qaHeldRecordCount ?? 0
+        guard restored > 0 else { throw Failure(description: "the reopened capture held no restored records (\(restored))") }
+        try? await Task.sleep(for: .seconds(6))
+        let held = supervisor.qaSharedTranscriptToolDetail(for: id)?.qaHeldRecordCount ?? 0
+        guard held == 0 else { throw Failure(description: "\(held) restored tool-detail records were still held after their time to live") }
+    }
+
     static func run(root: URL) async throws {
         var failures: [String] = []
+        do { try await runCompletionBound(root: root) } catch { failures.append("completion bound: \(error)") }
+        do { try await runTurnOwnership(root: root) } catch { failures.append("turn ownership: \(error)") }
+        do { try await runDetailReclamation(root: root) } catch { failures.append("detail reclamation: \(error)") }
         do { try await runResultBinding(root: root) } catch { failures.append("result binding: \(error)") }
         do { try await runToolDetails(root: root) } catch { failures.append("tool details: \(error)") }
         do { try await runDiscovery() } catch { failures.append("discovery: \(error)") }
