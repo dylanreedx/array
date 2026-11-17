@@ -659,7 +659,11 @@ public enum SidebarClearMarks {
                     }
                     let activity = max(row.lastActiveAt ?? row.createdAt,
                                        row.terminalEvent?.endedAt ?? row.createdAt)
-                    if busy || row.settlementBlocked || SidebarRecovery.cause(for: row)?.isBlocking == true
+                    // Released by something that HAPPENED: work, a settlement
+                    // block, or activity after the clear. Not by a cause turning
+                    // blocking on its own: a usage stop does that whenever usage
+                    // runs out live, and would bring back every cleared family.
+                    if busy || row.settlementBlocked
                         || activity >= mark.clearedAt { released.insert(id) }
                 }
                 ancestor = parentOf[id]

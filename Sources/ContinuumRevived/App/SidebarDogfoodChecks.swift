@@ -325,7 +325,24 @@ enum SidebarDogfoodChecks {
         reading(active.id, org: "org-personal", used: 0.3)
         try expect(usageLine() == nil && usageIncidents().isEmpty,
                    "(b) usage returned but the item stays — incidents \(inbox.sidebarIncidents.map(\.title))")
-        return "Live usage: no item from old words or at 40%; at 100% 'Codex usage ran out' with Resume (one account, or a second folder on the same login) and Switch & resume… only with a second login; × dismisses, persists, and a new stop brings it back; usage back clears it"
+        // Cleared stays cleared when usage later runs out: nothing happened to
+        // those agents, so the old stop must not bring the family back.
+        guard let clear = (Q.views(in: inbox) {
+            ($0 as? SidebarSectionLabelView)?.titleForQA.hasPrefix("Inbox") == true && !$0.isHiddenOrHasHiddenAncestor
+        }.first as? SidebarSectionLabelView)?.clearButton, !clear.isHidden,
+              inbox.sidebarClearIDs.contains(lead.rawValue) else {
+            throw Failure(description: "with usage back, the family is not offered to Clear — Clear \(inbox.sidebarClearIDs.count)")
+        }
+        try Q.click(clear)
+        inbox.layoutForQA()
+        func drawnLive() -> Bool {
+            inbox.itemsForQuietCheck.contains { $0.agentRow?.id == lead.rawValue && $0.agentRow?.isCleared == false }
+        }
+        try expect(!drawnLive(), "Clear left the family in the live list")
+        reading(active.id, org: "org-personal", used: 1.0)
+        try expect(!drawnLive() && usageLine() == nil,
+                   "usage running out again brought a cleared family back (live \(drawnLive()), item \(usageLine() != nil))")
+        return "Live usage: no item from old words or at 40%; at 100% 'Codex usage ran out' with Resume (one account, or a second folder on the same login) and Switch & resume… only with a second login; × dismisses, persists, and a new stop brings it back; usage back clears it; a family cleared while usage was back stays cleared when it runs out again"
     }
 
     // MARK: - 4. An orphan whose lead is gone is its own root card
