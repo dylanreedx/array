@@ -12,8 +12,13 @@ import QuartzCore
 /// outweighs it at any zoom (`AgentCharacterConfig.BubbleStyle`):
 /// - **Inline**: a rounded square (square at Sharp corners).
 /// - **Squircle**: a superellipse, the app-icon shape.
-/// - **Orb**: a circle in glass: a translucent rim, a specular highlight and a
-///   lens edge over the opaque plate.
+/// - **Orb**: a circle in glass: the art seated in a lens (magnified at the
+///   centre), an edge vignette over it, a translucent rim and a specular
+///   highlight above, over the opaque plate. Working, a light travels round
+///   its rim.
+/// - **Minimal**: a flat squircle, an even full border, the token background
+///   and the provider mark inside it. Working, a highlight sweeps round the
+///   whole border; the mark itself never moves.
 ///
 /// Hosted by a view in the world plane (`TileAgentBubbleView`) stacked above
 /// every tile, so nothing on its tile or a neighbour's draws over it.
@@ -62,6 +67,10 @@ final class TileAgentBubbleLayer: CALayer {
         static func hangs(_ style: Style) -> Bool { style != .inline }
         /// A hanging plate's side as a multiple of the title's point size.
         static let hangRatio: CGFloat = 1.75
+        /// The Orb's art, as a fraction of the plate: seated inside the glass.
+        static let orbArtScale: CGFloat = 0.74
+        /// The circle the Orb's art is clipped to, inset by this fraction of the side.
+        static let orbArtInset: CGFloat = 0.07
         /// A hanging plate's side never exceeds this multiple of the bar.
         static let hangMaxBarRatio: CGFloat = 1.3
         /// How much of a hanging plate's side lies past the tile's top and left
@@ -79,7 +88,7 @@ final class TileAgentBubbleLayer: CALayer {
             switch style {
             case .orb:
                 return CGPath(ellipseIn: r, transform: nil)
-            case .squircle:
+            case .squircle, .minimalSquircle:
                 return superellipse(in: r, exponent: squircleExponent)
             case .inline:
                 guard tileRadius > 0 else { return CGPath(rect: r, transform: nil) }
@@ -125,24 +134,21 @@ final class TileAgentBubbleLayer: CALayer {
     /// plate at rest).
     nonisolated(unsafe) static var orbGlassAtRest = true
 
-    // Design-round only. Set by the opt-in real-window capture harness; no
-    // persisted setting or normal app path enables these studies.
-    nonisolated(unsafe) static var qaRoundSizeMultiplier: CGFloat = 1
-    var qaRoundStudy: String? {
-        didSet { repaint(); setNeedsLayout(); reconcileMotion(force: true) }
+    /// Minimal's provider mark, inside the plate. Never animated.
+    private let markLayer = CALayer()
+    private var markSource: NSImage?
+    private var markCache: (source: ObjectIdentifier, color: NSColor, image: CGImage)?
+    /// QA: where the provider mark sits in this layer.
+    var qaMarkFrame: CGRect { markLayer.frame }
+    var qaMarkAnimationKeys: [String] { markLayer.animationKeys() ?? [] }
+    var qaMarkShown: Bool { !markLayer.isHidden && markLayer.contents != nil }
+
+    /// The provider mark Minimal draws in its plate; nil for every other style.
+    func setMark(_ image: NSImage?) {
+        guard image !== markSource else { return }
+        markSource = image
+        repaint()
     }
-    private let studyMark = CALayer()
-    private let insideTint = CALayer()
-    /// Harness only: freezes each study animation at this many seconds in, so a
-    /// clip can be rendered frame-exact from the real layer animation.
-    var qaMotionTime: Double?
-    var qaMarkFrame: CGRect { studyMark.frame }
-    func qaSeekMotion(_ seconds: Double?) { qaMotionTime = seconds; reconcileMotion(force: true) }
-    /// Design round 2: "a", "b" or "c" seats the art inside the glass.
-    var qaInside: String? {
-        didSet { repaint(); setNeedsLayout() }
-    }
-    var qaRoundMark: CGImage? { didSet { studyMark.contents = qaRoundMark } }
 
     /// The tokens the bubble paints from, resolved by its host for the current
     /// appearance (the layer itself never reads an appearance).
@@ -152,6 +158,7 @@ final class TileAgentBubbleLayer: CALayer {
         var tileBody: NSColor
         var textPrimary: NSColor
         var textSecondary: NSColor
+        var providerForeground: NSColor
     }
     private var palette: Palette?
 
@@ -189,6 +196,8 @@ final class TileAgentBubbleLayer: CALayer {
     private let specular = CAGradientLayer()
 
     static let motionKeyPrefix = "tileAgentBubble."
+    /// Seconds for the rim light to travel once round the Orb or Minimal's edge.
+    static let rimPeriod: CFTimeInterval = 5
 
     init(sprite: CharacterSpriteLayer) {
         self.sprite = sprite
@@ -242,13 +251,11 @@ final class TileAgentBubbleLayer: CALayer {
         clip.addSublayer(sheen)
         addSublayer(artClip)
         artClip.addSublayer(sprite)
-        artClip.addSublayer(studyMark)
-        studyMark.actions = Self.still
-        studyMark.contentsGravity = .resizeAspect
+        addSublayer(markLayer)
+        markLayer.actions = Self.still
+        markLayer.contentsGravity = .resizeAspect
+        markLayer.isHidden = true
         addSublayer(glass)
-        insideTint.actions = Self.still
-        insideTint.isHidden = true
-        glass.addSublayer(insideTint)
         glass.addSublayer(lens)
         glass.addSublayer(rim)
         glass.addSublayer(specular)
@@ -262,6 +269,8 @@ final class TileAgentBubbleLayer: CALayer {
     func setStyle(_ style: Style) {
         guard style != bubbleStyle else { return }
         bubbleStyle = style
+        // The orb alone sees the art through its lens.
+        sprite.setLens(style == .orb)
         repaint()
         // The hover look belongs to the style: an Orb's swell never outlives it,
         // and a plate hovered as it becomes an Orb swells at once.
@@ -368,10 +377,6 @@ final class TileAgentBubbleLayer: CALayer {
     /// The plate's outline in this layer's (flipped) coordinates.
     var platePath: CGPath {
         let box = CGRect(origin: .zero, size: bounds.size)
-        if qaRoundStudy == "minimal-circle" { return CGPath(ellipseIn: box, transform: nil) }
-        if qaRoundStudy == "minimal-square" {
-            return CGPath(roundedRect: box, cornerWidth: box.width * 0.22, cornerHeight: box.height * 0.22, transform: nil)
-        }
         return Plate.path(bubbleStyle, in: box, tileRadius: tileRadius)
     }
 
@@ -416,30 +421,25 @@ final class TileAgentBubbleLayer: CALayer {
         orbit.frame = CGRect(x: box.midX - diagonal / 2, y: box.midY - diagonal / 2, width: diagonal, height: diagonal)
         orbitMask.path = shape
         orbitMask.lineWidth = max(1.25, side * 0.08) * 2
-        if qaRoundStudy != nil {
-            studyMark.frame = box.insetBy(dx: side * 0.23, dy: side * 0.23)
+        markLayer.frame = box.insetBy(dx: side * 0.23, dy: side * 0.23)
+        artClip.sublayerTransform = CATransform3DIdentity
+        if bubbleStyle == .orb || bubbleStyle == .minimalSquircle {
+            // The rim light's track: a hairline just inside the edge, lit by a
+            // band that turns inside it.
             let width = bubbleStyle == .orb ? max(1.25, side * 0.07) : max(0.65, side / 28)
-            let inset = box.insetBy(dx: width / 2, dy: width / 2)
-            let path: CGPath
-            if qaRoundStudy == "minimal-circle" || bubbleStyle == .orb {
-                path = CGPath(ellipseIn: inset, transform: nil)
-            } else if qaRoundStudy == "minimal-square" {
-                path = CGPath(roundedRect: inset, cornerWidth: inset.width * 0.22, cornerHeight: inset.height * 0.22, transform: nil)
-            } else { path = Plate.path(bubbleStyle, in: inset, tileRadius: tileRadius) }
+            let path = Plate.path(bubbleStyle, in: box.insetBy(dx: width / 2, dy: width / 2), tileRadius: tileRadius)
             ringMask.path = path
             orbitMask.path = path
             ringMask.lineWidth = width
             orbitMask.lineWidth = width * 1.4
         }
-        insideTint.frame = box
-        if let inside = qaInside, bubbleStyle == .orb {
-            let k: CGFloat = inside == "a" ? 0.74 : inside == "b" ? 0.8 : 0.7
+        if bubbleStyle == .orb {
+            // Treatment A: the art sits inside the glass, clipped to a circle
+            // inset from the rim, with the specular above it.
+            let k = Plate.orbArtScale
             artClip.sublayerTransform = CATransform3DMakeScale(k, k, 1)
-            artMask.path = CGPath(ellipseIn: box.insetBy(dx: side * 0.07, dy: side * 0.07), transform: nil)
-            specular.frame = CGRect(x: box.minX + side * 0.2, y: box.minY + side * 0.05,
-                                    width: side * 0.6, height: side * (inside == "b" ? 0.34 : 0.28))
-        } else {
-            artClip.sublayerTransform = CATransform3DIdentity
+            artMask.path = CGPath(ellipseIn: box.insetBy(dx: side * Plate.orbArtInset, dy: side * Plate.orbArtInset), transform: nil)
+            specular.frame = CGRect(x: box.minX + side * 0.2, y: box.minY + side * 0.05, width: side * 0.6, height: side * 0.28)
         }
         if workingStyle == "sheen" { reconcileMotion(force: true) }
     }
@@ -460,6 +460,7 @@ final class TileAgentBubbleLayer: CALayer {
         let tinted = tint.map(srgb)
         let working = isWorking
         let orb = bubbleStyle == .orb
+        let minimal = bubbleStyle == .minimalSquircle
         orbitHost.isHidden = true
         sheen.isHidden = true
         wash.type = .axial
@@ -472,7 +473,9 @@ final class TileAgentBubbleLayer: CALayer {
         // stronger than the bar's 30 % wash so it stands clear of a tinted bar;
         // with no colour, a neutral clearly lighter (dark) or darker (light)
         // than the bar.
-        let fill = Self.plateFill(tint: tinted, chrome: chrome, dark: dark)
+        // Minimal is the flat token background, never an identity colour.
+        let fill = minimal ? srgb(palette.tileBody).withAlphaComponent(1)
+                           : Self.plateFill(tint: tinted, chrome: chrome, dark: dark)
         plate.colors = flat(fill)
         plate.startPoint = CGPoint(x: 0.5, y: 0)
         plate.endPoint = CGPoint(x: 0.5, y: 1)
@@ -490,10 +493,12 @@ final class TileAgentBubbleLayer: CALayer {
         if orb {
             // The lens: clear in the middle, the plate's colour deepening into
             // the edge, as glass thickens towards its rim.
-            let deep = mix(fill, .black, dark ? 0.55 : 0.35)
+            // Over the art (treatment A): a vignette that darkens the character
+            // towards the rim while its own colours hold in the middle.
+            let deep = mix(fill, .black, dark ? 0.7 : 0.5)
             lens.colors = [deep.withAlphaComponent(0).cgColor, deep.withAlphaComponent(0).cgColor,
-                           deep.withAlphaComponent(dark ? 0.55 : 0.4).cgColor]
-            lens.locations = [0, 0.72, 1]
+                           deep.withAlphaComponent(0.6).cgColor]
+            lens.locations = [0, 0.55, 1]
             lens.startPoint = CGPoint(x: 0.5, y: 0.5)
             lens.endPoint = CGPoint(x: 1, y: 1)
             // The rim: bright where the light comes in (top left), fading
@@ -505,14 +510,15 @@ final class TileAgentBubbleLayer: CALayer {
             rim.startPoint = CGPoint(x: 0.15, y: 0)
             rim.endPoint = CGPoint(x: 0.85, y: 1)
             // The specular: a soft oval of light high on the left.
-            specular.colors = [NSColor.white.withAlphaComponent(dark ? 0.5 : 0.6).cgColor,
+            specular.colors = [NSColor.white.withAlphaComponent(dark ? 0.6 : 0.7).cgColor,
                                NSColor.white.withAlphaComponent(0).cgColor]
             specular.startPoint = CGPoint(x: 0.5, y: 0.5)
             specular.endPoint = CGPoint(x: 1, y: 1)
         }
 
-        // Working, every plate takes the sidebar's light.
-        if working {
+        // Working, Inline and Squircle take the sidebar's light; the Orb and
+        // Minimal run their own light round the rim, below.
+        if working && !orb && !minimal {
             switch workingStyle {
             case "gradient":
                 let alpha: CGFloat = dark ? 0.42 : 0.3
@@ -550,52 +556,27 @@ final class TileAgentBubbleLayer: CALayer {
                 sheen.colors = [hue.withAlphaComponent(dark ? 0.6 : 0.45).cgColor, hue.withAlphaComponent(0).cgColor]
             }
         }
-        if let study = qaRoundStudy {
-            let minimal = study.hasPrefix("minimal-")
-            sprite.isHidden = minimal
-            studyMark.isHidden = !minimal
-            wash.isHidden = true
-            sheen.isHidden = true
-            shadowCaster.isHidden = minimal
-            glass.isHidden = minimal
-            ring.isHidden = false
+        if orb || minimal {
+            // The rim light: a hairline track just inside the edge, a band of
+            // light turning inside it while the agent works.
+            let light = tint ?? palette.textPrimary
+            ring.isHidden = orb && !working
             ring.opacity = 1
-            ring.colors = flat(palette.textSecondary.withAlphaComponent(dark ? 0.60 : 0.65))
-            if minimal { plate.colors = flat(palette.tileBody.withAlphaComponent(1)) }
-            orbitHost.isHidden = !working || study == "minimal-circle" || study == "orb-breath"
+            ring.colors = flat(orb ? light.withAlphaComponent(0.22)
+                                   : palette.textSecondary.withAlphaComponent(dark ? 0.60 : 0.65))
+            orbitHost.isHidden = !working
             orbit.startPoint = CGPoint(x: 0.5, y: 0.5)
             orbit.endPoint = CGPoint(x: 0.5, y: 0)
-            let light = tint ?? palette.textPrimary
             orbit.colors = [light.withAlphaComponent(0.15).cgColor, light.withAlphaComponent(0.25).cgColor,
                             light.withAlphaComponent(0.95).cgColor, light.withAlphaComponent(0.25).cgColor,
                             light.withAlphaComponent(0.15).cgColor]
             orbit.locations = [0, 0.45, 0.68, 0.9, 1]
-            if bubbleStyle == .orb { ring.colors = flat(light.withAlphaComponent(study == "orb-breath" ? 0.9 : 0.22)) }
-            if study == "orb-current" {
-                orbitHost.isHidden = true
-                wash.isHidden = !working
-                wash.type = .conic
-                wash.startPoint = CGPoint(x: 0.5, y: 0.5)
-                wash.endPoint = CGPoint(x: 0.5, y: 0)
-                wash.colors = [light.withAlphaComponent(0.04).cgColor, light.withAlphaComponent(0.7).cgColor,
-                               light.withAlphaComponent(0.04).cgColor, light.withAlphaComponent(0.45).cgColor,
-                               light.withAlphaComponent(0.04).cgColor]
-            }
-            if let inside = qaInside, bubbleStyle == .orb {
-                let deep = mix(fill, .black, dark ? 0.7 : 0.5)
-                let edge: CGFloat = inside == "a" ? 0.6 : inside == "b" ? 0.78 : 0.7
-                let start: Double = inside == "c" ? 0.38 : inside == "b" ? 0.46 : 0.55
-                lens.colors = [deep.withAlphaComponent(0).cgColor, deep.withAlphaComponent(0).cgColor,
-                               deep.withAlphaComponent(edge).cgColor]
-                lens.locations = [0, NSNumber(value: start), 1]
-                lens.startPoint = CGPoint(x: 0.5, y: 0.5)
-                lens.endPoint = CGPoint(x: 1, y: 1)
-                specular.colors = [NSColor.white.withAlphaComponent(dark ? 0.6 : 0.7).cgColor,
-                                   NSColor.white.withAlphaComponent(0).cgColor]
-                insideTint.isHidden = inside == "a"
-                insideTint.backgroundColor = hue.withAlphaComponent(inside == "c" ? 0.24 : 0.14).cgColor
-            } else { insideTint.isHidden = true }
-        } else { studyMark.isHidden = true; insideTint.isHidden = true }
+        }
+        // Minimal: the provider mark in the token foreground, flat on the plate.
+        markLayer.isHidden = !minimal || markSource == nil
+        if minimal, let source = markSource {
+            markLayer.contents = Self.tintedMark(source, color: palette.providerForeground, cache: &markCache)
+        }
         setNeedsLayout()
         reconcileMotion(force: false)
     }
@@ -633,6 +614,23 @@ final class TileAgentBubbleLayer: CALayer {
         return (max(x, y) + 0.05) / (min(x, y) + 0.05)
     }
 
+    /// The template mark filled with `color`, as a bitmap the render server draws
+    /// as is. Rebuilt only when the mark or its colour changes.
+    private static func tintedMark(_ source: NSImage, color: NSColor,
+                                   cache: inout (source: ObjectIdentifier, color: NSColor, image: CGImage)?) -> CGImage? {
+        if let cache, cache.source == ObjectIdentifier(source), cache.color == color { return cache.image }
+        let side: CGFloat = 128
+        let result = NSImage(size: NSSize(width: side, height: side))
+        result.lockFocus()
+        source.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
+        color.setFill()
+        NSRect(x: 0, y: 0, width: side, height: side).fill(using: .sourceIn)
+        result.unlockFocus()
+        guard let image = result.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        cache = (ObjectIdentifier(source), color, image)
+        return image
+    }
+
     private static func srgb(_ color: NSColor) -> NSColor { color.usingColorSpace(.sRGB) ?? color }
 
     private static func mix(_ a: NSColor, _ b: NSColor, _ t: CGFloat) -> NSColor {
@@ -665,35 +663,21 @@ final class TileAgentBubbleLayer: CALayer {
 
     private func reconcileMotion(force: Bool) {
         let moving = isWorking && !isPaused && !isHidden && !reduceMotion()
-        let signature = moving ? "\(workingStyle):\(bubbleStyle):\(bounds.size):\(qaRoundStudy ?? "normal")" : nil
+        let signature = moving ? "\(workingStyle):\(bubbleStyle):\(bounds.size)" : nil
         guard force || signature != motionSignature else { return }
         for layer in [wash, sheen, orbit, ring] { layer.removeAllAnimations() }
         motionSignature = signature
         guard moving else { return }
-        if let study = qaRoundStudy {
-            func freeze(_ animation: CAAnimation) {
-                guard let time = qaMotionTime else { return }
-                animation.speed = 0
-                animation.timeOffset = time
-            }
-            if study == "minimal-circle" || study == "orb-breath" {
-                let pulse = CAKeyframeAnimation(keyPath: "opacity")
-                pulse.values = [0.35, 1, 0.35]
-                pulse.keyTimes = [0, 0.5, 1]
-                pulse.timingFunctions = [CAMediaTimingFunction(name: .easeInEaseOut), CAMediaTimingFunction(name: .easeInEaseOut)]
-                pulse.duration = 4
-                pulse.repeatCount = .infinity
-                freeze(pulse)
-                ring.add(pulse, forKey: Self.motionKeyPrefix + "study.breath")
-            } else {
-                let turn = CABasicAnimation(keyPath: "transform.rotation.z")
-                turn.fromValue = 0
-                turn.toValue = 2 * Double.pi
-                turn.duration = study == "orb-current" ? 7 : 5
-                turn.repeatCount = .infinity
-                freeze(turn)
-                (study == "orb-current" ? wash : orbit).add(turn, forKey: Self.motionKeyPrefix + "study.drift")
-            }
+        if bubbleStyle == .orb || bubbleStyle == .minimalSquircle {
+            // The rim light: one turn every 5 s, on the shared clock so a
+            // re-install never jumps. A render-server animation: nothing per frame.
+            let turn = CABasicAnimation(keyPath: "transform.rotation.z")
+            turn.fromValue = 0
+            turn.toValue = 2 * Double.pi
+            turn.duration = Self.rimPeriod
+            turn.repeatCount = .infinity
+            turn.beginTime = Self.beginTime(period: Self.rimPeriod, phase: phase, in: orbit)
+            orbit.add(turn, forKey: Self.motionKeyPrefix + "rim")
             Self.motionInstallCount += 1
             return
         }

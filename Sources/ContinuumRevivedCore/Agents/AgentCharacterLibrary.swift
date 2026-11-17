@@ -185,14 +185,52 @@ public enum AgentCharacterConfig {
         case squircle
         /// A circle in glass, hanging off the tile's top-left corner.
         case orb
+        /// A flat squircle with an even border and the provider mark inside it,
+        /// hanging off the tile's top-left corner. The raw value is not
+        /// `minimal`: 0.7.50 stored that for a circle that no longer exists.
+        case minimalSquircle
 
         public var title: String {
             switch self {
             case .inline: return "Inline"
             case .squircle: return "Squircle"
             case .orb: return "Orb"
+            case .minimalSquircle: return "Minimal"
             }
         }
+    }
+    /// How big the hanging icon plate is (Squircle, Orb, Minimal): a multiple of
+    /// its normal size. Inline sits on the title's line and holds its size.
+    public static let iconScaleKey = "agentCharacters.iconScale"
+    public enum IconScale: String, CaseIterable, Sendable {
+        case small, standard, large
+
+        public var factor: Double {
+            switch self {
+            case .small: return 0.8
+            case .standard: return 1
+            case .large: return 1.2
+            }
+        }
+
+        public var title: String {
+            switch self {
+            case .small: return "Small"
+            case .standard: return "Default"
+            case .large: return "Large"
+            }
+        }
+    }
+    public static let defaultIconScale = IconScale.standard
+    public static func iconScale(_ defaults: UserDefaults) -> IconScale {
+        defaults.string(forKey: iconScaleKey).flatMap(IconScale.init(rawValue:)) ?? defaultIconScale
+    }
+    /// Below this canvas zoom a hanging plate shrinks by `sqrt(zoom / 0.8)`, so
+    /// it keeps shrinking, slower than the tile, instead of dominating it.
+    public static let iconTaperZoom = 0.8
+    public static func iconTaper(zoom: Double) -> Double {
+        guard zoom.isFinite, zoom > 0 else { return 1 }
+        return min(1, (zoom / iconTaperZoom).squareRoot())
     }
     public static let defaultBubbleStyle = BubbleStyle.inline
     /// The stored style; anything else, including 0.7.50's `minimal` (its
