@@ -196,6 +196,8 @@ enum TileAgentIconStyleChecks {
             report.append("\(style.title): rim light attached working, removed idle/paused, no layout, mark still")
         }
 
+        report.append(try checkWorkingStyleTransitions(canvas: canvas, window: window, defaults: defaults, views: views))
+
         // 5. Stills of every style, size and appearance.
         if let stills {
             let rect = NSRect(x: 0, y: 0, width: 820, height: 460)
@@ -255,5 +257,118 @@ enum TileAgentIconStyleChecks {
         report.append("icons off: no plate, no hanging icon, provider mark beside the title, corner identical in all styles")
 
         return (["PASS tile agent icon styles"] + report).joined(separator: "\n")
+    }
+
+    /// Sidebar light choices do not remove the Orb's static liquid glow or
+    /// strand gradient stops in another style. A live size change must also
+    /// update the installed liquid movement to the icon that is actually drawn.
+    private static func checkWorkingStyleTransitions(canvas: CanvasNSView, window: NSWindow, defaults: UserDefaults,
+                                                     views: [ManagedAgentTileNSView]) throws -> String {
+        var failures: [String] = []
+        func verdict(_ condition: Bool, _ message: String) {
+            print("icon transition \(condition ? "PASS" : "FAIL"): \(message)")
+            if !condition { failures.append(message) }
+        }
+        defer {
+            window.appearance = nil
+            setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, "classic")
+            setting(defaults, AgentCharacterConfig.iconScaleKey, AgentCharacterConfig.IconScale.standard.rawValue)
+            setting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.inline.rawValue)
+        }
+        let idle = views[1], working = views[0]
+        guard let idleWorld = canvas.allTilesInWorldFrames().first(where: { $0.id == idle.tile.id })?.frame,
+              let workingWorld = canvas.allTilesInWorldFrames().first(where: { $0.id == working.tile.id })?.frame else {
+            throw Check.Failure(description: "working-style transitions require real installed tiles")
+        }
+        func light(_ value: String) throws {
+            setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, value)
+            try Check.expect(Check.pump(until: {
+                views.allSatisfy { $0.qaAgentBubble?.workingStyle == value }
+            }), "the \(value) light choice reaches every real icon")
+        }
+
+        // At rest only the Orb's own liquid/glass is visible. The sidebar's
+        // Sheen choice must render the same globe as Classic, in both themes.
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            window.appearance = NSAppearance(named: appearance)
+            try show(.orb, views, canvas, defaults)
+            try light("classic")
+            settle(canvas, views, zoom: 1.25, around: idleWorld)
+            guard let bubble = idle.qaAgentBubble else { throw Check.Failure(description: "no idle globe") }
+            try Check.expect(!bubble.isWorking && bubble.qaParts.sheenShown,
+                             "\(name): the idle globe is a positive control with a visible middle glow")
+            let centre = CGPoint(x: bubble.bounds.midX, y: bubble.bounds.midY)
+            try Check.expect(bubble.qaSheenFrame.contains(centre), "\(name): Classic's liquid glow covers the globe's middle")
+            let classic = try modelPicture(idle)
+            try light("sheen")
+            settle(canvas, views, zoom: 1.25, around: idleWorld)
+            verdict(bubble.qaSheenFrame.contains(centre), "\(name): Orb under Sheen keeps the liquid glow in the globe")
+            let sheen = try modelPicture(idle)
+            let delta = try Check.largestChannelChange(classic, sheen)
+            verdict(delta <= 1, "\(name): Orb's static rendered glow survives the Sheen setting (pixel change \(delta))")
+        }
+
+        // Leaving the Orb's two-stop radial glow must not leave those locations
+        // on the different highlight used by the working Inline or Squircle.
+        try light("sheen")
+        for style in [Style.inline, .squircle] {
+            try show(.orb, views, canvas, defaults)
+            settle(canvas, views, zoom: 1.25, around: workingWorld)
+            try show(style, views, canvas, defaults)
+            settle(canvas, views, zoom: 1.25, around: workingWorld)
+            guard let bubble = working.qaAgentBubble else { throw Check.Failure(description: "no working icon") }
+            try Check.expect(bubble.isWorking && bubble.qaParts.sheenShown, "\(style.title): the working Sheen highlight is present")
+            let stops = bubble.qaSheenStops
+            verdict(stops.colors >= 2 && (stops.locations == nil || stops.locations == stops.colors),
+                    "Orb → \(style.title) Sheen has compatible gradient stops (\(stops.colors) colors, \(String(describing: stops.locations)) locations)")
+        }
+
+        // Both choices used to skip motion reconciliation on ordinary bounds
+        // changes. Drive the actual icon-size setting while the Orb is working.
+        for choice in ["classic", "gradient"] {
+            try light(choice)
+            try show(.orb, views, canvas, defaults)
+            settle(canvas, views, zoom: 1.25, around: workingWorld)
+            guard let bubble = working.qaAgentBubble else { throw Check.Failure(description: "no working globe") }
+            try Check.expect(bubble.isWorking && !bubble.isPaused, "\(choice): the globe must be working and visible")
+            var sizes: [CGFloat] = []
+            for size in [AgentCharacterConfig.IconScale.small, .large] {
+                try choose(size: size, views, canvas, defaults)
+                settle(canvas, views, zoom: 1.25, around: workingWorld)
+                sizes.append(bubble.bounds.height)
+                guard let offsets = bubble.qaLiquidSurfaceOffsets else {
+                    throw Check.Failure(description: "\(choice): the working globe has no installed liquid movement")
+                }
+                let amplitude = bubble.bounds.height * 0.02
+                verdict(abs(offsets.from + amplitude) < 0.0001 && abs(offsets.to - amplitude) < 0.0001,
+                        "\(choice) live \(size.title): installed liquid offsets \(offsets.from)/\(offsets.to) fit current \(bubble.bounds.height)pt globe")
+            }
+            try Check.expect(sizes.count == 2 && sizes[1] > sizes[0] * 1.2,
+                             "\(choice): the real size setting must resize the globe, not just its expected amplitude")
+        }
+        try Check.expect(failures.isEmpty, "working-style transitions: \(failures.joined(separator: "; "))")
+        return "working-style transitions: static glow in light/dark, valid Orb→Sheen stops, live resized liquid movement"
+    }
+
+    /// Render the actual icon's model layer tree so comparison is independent of
+    /// render-server animation phase while retaining its real masks and gradients.
+    private static func modelPicture(_ view: ManagedAgentTileNSView) throws -> CGImage {
+        guard let host = view.agentBubbleView, let layer = host.layer,
+              host.bounds.width > 0, host.bounds.height > 0 else {
+            throw Check.Failure(description: "no real icon layer to render")
+        }
+        view.qaAgentBubble?.layoutIfNeeded()
+        let scale: CGFloat = 4
+        let width = Int(ceil(host.bounds.width * scale)), height = Int(ceil(host.bounds.height * scale))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw Check.Failure(description: "could not allocate the icon comparison")
+        }
+        context.clear(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        context.scaleBy(x: scale, y: scale)
+        layer.render(in: context)
+        guard let image = context.makeImage() else { throw Check.Failure(description: "could not render the real icon") }
+        return image
     }
 }

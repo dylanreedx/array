@@ -814,6 +814,17 @@ final class TileAgentBubbleLayer: CALayer {
     var qaAnimationKeys: [String] {
         [wash, sheen, orbit, ring, swirl].flatMap { $0.animationKeys() ?? [] }
     }
+    /// The real middle-glow geometry and gradient configuration, for transitions.
+    var qaSheenFrame: CGRect { sheen.frame }
+    var qaSheenStops: (colors: Int, locations: Int?) {
+        (sheen.colors?.count ?? 0, sheen.locations?.count)
+    }
+    /// The offsets installed on the liquid's current animation, not a recomputed plan.
+    var qaLiquidSurfaceOffsets: (from: CGFloat, to: CGFloat)? {
+        guard let animation = wash.animation(forKey: Self.motionKeyPrefix + "churn.surface") as? CABasicAnimation,
+              let from = animation.fromValue as? NSNumber, let to = animation.toValue as? NSNumber else { return nil }
+        return (CGFloat(from.doubleValue), CGFloat(to.doubleValue))
+    }
     /// QA: whether the art is clipped to the plate.
     var qaArtClippedToPlate: Bool { artClip.mask === artMask && artMask.path != nil }
     /// QA: the outline the plate is actually masked to, in this layer.
