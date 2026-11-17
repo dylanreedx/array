@@ -8862,16 +8862,19 @@ final class AgentSupervisor {
     /// work is still running. Each hold is also a durable delivery record
     /// flagged `held`, so a relaunch, which no longer holds it, replays it once.
     private struct HeldHelperCompletion {
-        var turn: String
-        var outcome: TurnOutcome
-        var error: String?
+        /// The held turn, exactly as it ended: its release settles this and
+        /// nothing the helper has done since.
+        var completion: HelperTurnCompletion
+        var turn: String { completion.turn }
+        var outcome: TurnOutcome { completion.outcome }
+        var error: String? { completion.error }
         /// The first hold of this run of held turns, on the wall clock that
         /// message subscriptions are stamped with.
         var heldAt: Date
         /// The same moment on `helperCompletionNow`, which the cap counts from.
         var since: Date
         /// The runner generation the held turn ran in: its delivery records' key.
-        var identity: String
+        var identity: String { completion.identity }
         var recipients: Set<AgentID>
         var backgroundEndedAt: Date? = nil
         var turnInFlight = false
@@ -8932,8 +8935,8 @@ final class AgentSupervisor {
     /// The report baseline `noteHelperCompletion` uses: a report counts for
     /// this turn only if filed after it.
     private func helperFiledReportThisTurn(_ id: AgentID) -> Bool {
-        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
-        return records[id]?.lastReport.map { $0.filedAt > baseline } ?? false
+        let baseline = subscriptionsSettling(id).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
+        return settlementReport(id).map { $0.filedAt > baseline } ?? false
     }
 
     private func helperParents(_ id: AgentID) -> Set<AgentID> {
@@ -8951,25 +8954,50 @@ final class AgentSupervisor {
         return helperCompletionNow().timeIntervalSince(held.since) < heldHelperCompletionCap
     }
 
-    /// Ownership of one finished helper turn while its settlement runs. A turn
-    /// whose completion waited on a transcript reload settles only the handles
-    /// that were accepted by the time it ended, under the identity it ended
-    /// with; later handles and turns are theirs.
-    private struct SettlementScope {
+    /// One finished helper turn, fixed when its completion is settled: the
+    /// identity it ended with, its reply as captured once from its own applied
+    /// events (or none, when its transcript could not be read), and for a
+    /// completion that waited, the cutoff past which handles and reports belong
+    /// to later turns. Every delivery of the turn (at once, behind a reload, at
+    /// the bound, or from a hold's release) settles inside `withSettlement` of
+    /// this value, and only this value: nothing re-reads the agent's latest
+    /// reply to build its result, its pushed wake, or a refresh of that wake.
+    private struct HelperTurnCompletion {
         var id: AgentID
+        var turn: String
         var identity: String
-        var completedAt: Date?
+        var outcome: TurnOutcome
+        var error: String?
+        var cutoff: Date?
+        var reply: String?
         var transcriptUnavailable: Bool
     }
-    private var settlementScope: SettlementScope?
+    private var settlementScope: HelperTurnCompletion?
+    /// Each helper's latest settled completion. A wake refresh reads its reply
+    /// only for the same identity; same-turn late output extends it.
+    private var settledHelperCompletions: [AgentID: HelperTurnCompletion] = [:]
     /// Why the last reload of a released transcript failed, for the explicit
     /// failure a bounded settlement delivers.
     private var transcriptReloadFailureCause: [AgentID: String] = [:]
 
     private func subscriptionsSettling(_ id: AgentID) -> [HelperMessageSubscription] {
         let all = helperMessageSubscriptions[id] ?? []
-        guard let scope = settlementScope, scope.id == id, let completedAt = scope.completedAt else { return all }
-        return all.filter { $0.baseline <= completedAt }
+        guard let scope = settlementScope, scope.id == id, let cutoff = scope.cutoff else { return all }
+        return all.filter { $0.baseline <= cutoff }
+    }
+
+    /// The report a settlement may carry: none filed after its turn's cutoff.
+    private func settlementReport(_ id: AgentID) -> AgentFiledReport? {
+        guard let filed = records[id]?.lastReport else { return nil }
+        if let scope = settlementScope, scope.id == id, let cutoff = scope.cutoff, filed.filedAt > cutoff { return nil }
+        return filed
+    }
+
+    private func withSettlement(_ completion: HelperTurnCompletion, _ body: () -> Void) {
+        let previous = settlementScope
+        settlementScope = completion
+        defer { settlementScope = previous }
+        body()
     }
 
     private func settlementTurnIdentity(_ id: AgentID) -> String? {
@@ -8986,11 +9014,12 @@ final class AgentSupervisor {
             if outcome == .completed { outcome = .failed }
             error = error ?? "Array could not read this helper's saved transcript (\(cause)), so its final reply is unavailable."
         }
-        let previous = settlementScope
-        settlementScope = SettlementScope(id: id, identity: identity, completedAt: completedAt,
-                                          transcriptUnavailable: unavailableCause != nil)
-        defer { settlementScope = previous }
-        helperTurnCompleted(id, turn: turn, outcome: outcome, error: error, identity: identity)
+        // Captured here, once: the turn's own events are applied (a deferred
+        // completion runs behind them), and a later turn's are not.
+        let reply = unavailableCause == nil ? transcriptProjections[id]?.finalAssistantText : nil
+        let completion = HelperTurnCompletion(id: id, turn: turn, identity: identity, outcome: outcome, error: error,
+            cutoff: completedAt, reply: reply, transcriptUnavailable: unavailableCause != nil)
+        withSettlement(completion) { helperTurnCompleted(completion) }
     }
 
     private func settleHelperTurn(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?,
@@ -9000,14 +9029,20 @@ final class AgentSupervisor {
         writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: error)
     }
 
-    private func helperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?, identity: String) {
+    private func helperTurnCompleted(_ completion: HelperTurnCompletion) {
+        let id = completion.id
         let previous = heldHelperCompletions[id]
-        if let previous, previous.identity != identity { removeHeldRecords(previous, helper: id) }
-        if holdsHelperCompletion(id, outcome: outcome) {
+        if let previous, previous.identity != completion.identity { removeHeldRecords(previous, helper: id) }
+        // A completion that waited while the helper started another turn is not
+        // the helper's current state: holding it would put it under that turn,
+        // whose background work and handles are not its own. It settles now.
+        let superseded = completion.cutoff != nil && (isRunning(id)
+            || runnerGenerationTokens[id].map { $0.rawValue.uuidString != completion.identity } == true)
+        if !superseded, holdsHelperCompletion(id, outcome: completion.outcome) {
             let recipients = helperParents(id).filter { records[$0] != nil && wakesForHelperCompletion($0) }
-            let held = HeldHelperCompletion(turn: turn, outcome: outcome, error: error,
+            let held = HeldHelperCompletion(completion: completion,
                 heldAt: previous?.heldAt ?? Date(), since: previous?.since ?? helperCompletionNow(),
-                identity: identity, recipients: recipients)
+                recipients: recipients)
             heldHelperCompletions[id] = held
             persistHeldRecords(held, helper: id)
             if let text = finalAssistantText(for: id), !text.isEmpty {
@@ -9017,7 +9052,7 @@ final class AgentSupervisor {
             return
         }
         heldHelperCompletions[id] = nil
-        settleHelperTurn(id, turn: turn, outcome: outcome, error: error)
+        settleHelperTurn(id, turn: completion.turn, outcome: completion.outcome, error: completion.error)
     }
 
     /// The held turn is delivered as it stands. A held turn whose helper has
@@ -9026,7 +9061,9 @@ final class AgentSupervisor {
     private func releaseHeldHelperCompletion(_ id: AgentID, statusOverride: String? = nil) {
         guard let held = heldHelperCompletions[id], !held.turnInFlight else { return }
         heldHelperCompletions[id] = nil
-        settleHelperTurn(id, turn: held.turn, outcome: held.outcome, error: held.error, statusOverride: statusOverride)
+        withSettlement(held.completion) {
+            settleHelperTurn(id, turn: held.turn, outcome: held.outcome, error: held.error, statusOverride: statusOverride)
+        }
     }
 
     /// The durable half of a hold: a delivery record carrying the text a
@@ -9200,7 +9237,7 @@ final class AgentSupervisor {
             }
             let finalText: String? = finalAssistantText(for: child)
             let text = finalText.map { SpawnResultFile.cappedFinalText($0) }
-            let report = records[child]?.lastReport.flatMap { $0.filedAt > subscription.baseline ? $0.report : nil }
+            let report = settlementReport(child).flatMap { $0.filedAt > subscription.baseline ? $0.report : nil }
             let result = SpawnResultFile(toolCallId: subscription.handle, status: status,
                 agentId: child.rawValue, reason: error, finalText: text?.text,
                 finalTextTruncated: text?.truncated == true ? true : nil, endedAt: Date(), report: report,
@@ -9274,7 +9311,7 @@ final class AgentSupervisor {
     private func helperCompletionText(_ id: AgentID, child: AgentRecord, outcome: TurnOutcome, error: String?,
                                       statusOverride: String?) -> (text: String, capturedReport: Bool) {
         let baseline = subscriptionsSettling(id).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
-        let filedThisTurn = child.lastReport.map({ $0.filedAt > baseline }) == true
+        let filedThisTurn = settlementReport(id).map({ $0.filedAt > baseline }) == true
         let status: String
         switch outcome {
         // A turn end without a report is not "succeeded": the lead should
@@ -9291,7 +9328,7 @@ final class AgentSupervisor {
         case .interrupted, .cancelled: status = "stopped"
         }
         let report: String
-        if let filed = child.lastReport, filed.filedAt > baseline {
+        if let filed = settlementReport(id), filed.filedAt > baseline {
             report = Self.helperCompletionReportText(filed.report)
         } else {
             report = String((finalAssistantText(for: id) ?? "").prefix(2400))
@@ -9306,6 +9343,7 @@ final class AgentSupervisor {
         guard let child = records[id], child.capabilities.locallyManaged,
               helperCompletionTurns[id] != identity else { return }
         helperCompletionTurns[id] = identity
+        if let scope = settlementScope, scope.id == id { settledHelperCompletions[id] = scope }
         let baseline = subscriptionsSettling(id).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let text = helperCompletionText(id, child: child, outcome: outcome, error: error, statusOverride: statusOverride).text
         let parents = Set([child.parentAgentID].compactMap { $0 }
@@ -9320,7 +9358,7 @@ final class AgentSupervisor {
                 do {
                     var pending = SpawnResultFile.Delivery(helper: id.rawValue, turn: identity,
                         recipient: parent.rawValue, wakeID: batch.id, text: text, now: helperCompletionNow())
-                    pending.capturedReport = child.lastReport.map { $0.filedAt > baseline } ?? false
+                    pending.capturedReport = settlementReport(id).map { $0.filedAt > baseline } ?? false
                     try SpawnResultFile.saveDelivery(pending, parentCwd: cwd)
                 } catch { warn("Helper completion journal unavailable; retaining in-memory retry") }
             }
@@ -9447,9 +9485,14 @@ final class AgentSupervisor {
                                     header = String(header.dropLast(noReport.count)) + "succeeded"
                                 }
                             }
-                            else if state.capturedReport == true {
+                            else if state.capturedReport != true, let settled = settledHelperCompletions[update.0],
+                                    settled.identity == state.turn {
+                                // This turn's own reply, never the transcript's latest: a
+                                // turn settled without its transcript stays textless.
+                                body = String((settled.reply ?? "").prefix(2400))
+                            } else {
                                 body = (state.text ?? update.1).components(separatedBy: "\n").dropFirst().joined(separator: "\n")
-                            } else { body = String((finalAssistantText(for: update.0) ?? "").prefix(2400)) }
+                            }
                             state.text = header + "\n" + body
                         }
                         // Persist prompt eligibility with staging so restart
@@ -12355,9 +12398,9 @@ final class AgentSupervisor {
     }
 
     func finalAssistantText(for id: AgentID) -> String? {
-        // A settlement delivered without its transcript has no reply to give,
-        // and must not give the previous turn's.
-        if let scope = settlementScope, scope.id == id, scope.transcriptUnavailable { return nil }
+        // Inside a settlement, the turn's own captured reply (none when its
+        // transcript was unavailable), never the previous turn's.
+        if let scope = settlementScope, scope.id == id { return scope.reply }
         // The resumed model comes first: while a reload replays held events the
         // released summary still exists and names the previous turn's reply.
         if let projection = transcriptProjections[id] { return projection.finalAssistantText }
@@ -14140,6 +14183,13 @@ final class AgentSupervisor {
         }
         if case let .contentDelta(_, _, .assistant, delta) = event, !isRunning(id), helperCompletionTurns[id] != nil {
             lateHelperText[id, default: ""] += delta
+            // Same-turn late output, already applied to a resident transcript,
+            // extends that turn's captured reply; any other turn's never does.
+            if releasedTranscripts[id] == nil, var settled = settledHelperCompletions[id], !settled.transcriptUnavailable,
+               settled.identity == runnerGenerationTokens[id]?.rawValue.uuidString {
+                settled.reply = transcriptProjections[id]?.finalAssistantText
+                settledHelperCompletions[id] = settled
+            }
             noteLateHelperOutput(id, text: lateHelperText[id] ?? "")
         }
 
@@ -14197,12 +14247,14 @@ final class AgentSupervisor {
         // P2a: the report this turn filed, and only this turn's.
         let settledAt = Date()
         var report: AgentReport?
-        if let filed = child.lastReport, filed.filedAt > (lastSettledAt[id] ?? reportTurnBaseline) { report = filed.report }
+        if let filed = settlementReport(id), filed.filedAt > (lastSettledAt[id] ?? reportTurnBaseline) { report = filed.report }
         if var carried = report {
             carried.commandEvidence = HelperCommandGuard.leadFacing(carried.commandEvidence)
             report = carried
         }
-        lastSettledAt[id] = settledAt
+        // A deferred turn consumed reports only up to its own end; a later
+        // turn's report stays that turn's.
+        lastSettledAt[id] = settlementScope.flatMap { $0.id == id ? $0.cutoff : nil } ?? settledAt
         SpawnResultFile.write(
             SpawnResultFile(
                 toolCallId: handle,

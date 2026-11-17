@@ -302,6 +302,36 @@ enum TranscriptRetentionDeliveryChecks {
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
     }
 
+    /// C files its report while B's completion still waits on the reload: B's
+    /// result and wake carry no report of C's, and C's carry its own.
+    static func runLaterReport(root: URL) async throws {
+        let f = try fixture(root, "later-report")
+        let gate = Gate()
+        defer { f.s.qaBeforeResumedTranscriptConstruction = nil; f.s.stopAll() }
+        AgentSupervisor.transcriptReleaseDelay = .seconds(60)
+        try await f.firstTurnThenRelease()
+        f.s.qaBeforeResumedTranscriptConstruction = { _, _ in await gate.wait() }
+        let handleB = try await f.message("Do task B.")
+        try await f.end("ANSWER_B")
+        let handleC = try await f.message("Do task C.")
+        guard f.s.fileReport(.init(summary: "REPORT_C"), for: f.helper) else { throw Failure(description: "C's report was refused") }
+        await gate.open()
+        _ = await waitUntil(timeout: 10, pollInterval: 0.02, { (f.result(handleB)?.status ?? .spawned) != .spawned })
+        try await f.end("ANSWER_C")
+        _ = await waitUntil(timeout: 10, pollInterval: 0.02, { f.result(handleC)?.status == .completed })
+        await f.flushToLead()
+        await f.flushToLead()
+        var failures: [String] = []
+        if f.result(handleB)?.report != nil { failures.append("handle B carried \(f.result(handleB)?.report?.summary ?? "?"), filed by C") }
+        if f.result(handleC)?.report?.summary != "REPORT_C" { failures.append("handle C carried \(f.result(handleC)?.report?.summary ?? "no report"), not its own REPORT_C") }
+        let pushed = f.results()
+        if pushed.contains(where: { $0.contains("ANSWER_B") && $0.contains("REPORT_C") }) || !pushed.contains(where: { $0.contains("ANSWER_B") }) {
+            failures.append("turn B's pushed result was not its own: \(pushed)")
+        }
+        if pushed.filter({ $0.contains("REPORT_C") }).count != 1 { failures.append("C's report was not pushed exactly once: \(pushed)") }
+        guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "; ")) }
+    }
+
     static func run(root: URL) async throws {
         let previousDelay = AgentSupervisor.transcriptReleaseDelay
         defer { AgentSupervisor.transcriptReleaseDelay = previousDelay }
@@ -315,6 +345,7 @@ enum TranscriptRetentionDeliveryChecks {
             ("normal turn", runNormal), ("late reload", runLateReload),
             ("timeout then late reload", runTimeoutThenLateReload),
             ("hold under a later turn", runHoldUnderLaterTurn), ("unreadable archive", runUnreadableArchive),
+            ("later report", runLaterReport),
         ]
         for (label, body) in cases {
             do { try await body(root); print("retention delivery: \(label) PASS") }
