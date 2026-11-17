@@ -2878,11 +2878,27 @@ enum TileSurfaceResidencyChecks {
             } else {
                 world.settle()
             }
+            let expectedNative = residency ? liveCount : tileCount
+            let expectedSurfaced = tileCount - expectedNative
+            func assertArmCounts(_ stage: String) throws -> String {
+                let native = world.agentViews.values.filter { $0.surfaceResidency == .native }.count
+                let surfaced = world.canvas.qaSurfacedTileViews.count
+                let parked = world.canvas.qaParkedBodyCount
+                let farParked = world.canvas.qaFarParkedTileCount
+                let installed = world.canvas.qaTotalInstalledTileCount
+                let actual = "native \(native), surfaced \(surfaced), parked \(parked), far parked \(farParked), installed \(installed)"
+                try expect(native == expectedNative && surfaced == expectedSurfaced
+                           && parked == expectedSurfaced && farParked == 0 && installed == tileCount,
+                           "cost arm \(stage): expected \(expectedNative) native and \(expectedSurfaced) surfaced/parked; got \(actual)")
+                return actual
+            }
+            let preparedCounts = try assertArmCounts("prepared")
             // Drain the first rasterisation and any symbol-cache population before the
             // clock: a cold first step belongs to construction.
             world.cameraStep(toZoom: 0.95)
             world.pump()
             CATransaction.flush()
+            let startingCounts = try assertArmCounts("before timing")
 
             var steps: [Double] = []
             var flushes: [Double] = []
@@ -2902,6 +2918,8 @@ enum TileSurfaceResidencyChecks {
                 // felt cost was never in Array's camera path.
                 flushes.append(milliseconds { CATransaction.flush() })
             }
+            let endingCounts = try assertArmCounts("after timing")
+            print("tile-surface-residency cost arm: residency=\(residency), requested live=\(liveCount) | prepared [\(preparedCounts)] | start [\(startingCounts)] | end [\(endingCounts)]")
             let sorted = steps.sorted()
             let sortedFlushes = flushes.sorted()
             return (sorted[sorted.count / 2], sortedFlushes[sortedFlushes.count / 2])
