@@ -16420,8 +16420,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         NotificationCenter.default.addObserver(
             forName: AgentSupervisor.accountUsageDidChangeNotification, object: agentSupervisor, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.reloadWorkspaceSidebar(rebuildAgentActivity: false) }
+            MainActor.assumeIsolated { self?.refreshSidebarUsageIfChanged() }
         }
+        // A live runner's own quota reading writes the same account snapshot
+        // without posting that notification: it reaches the usage items here.
+        agentSupervisor.onAccountQuotaObserved = { [weak self] _ in self?.refreshSidebarUsageIfChanged() }
         // P3.15: the row menu and the bulk bar reach the supervisor. Until this call
         // existed the shipped app assigned neither callback, so every destructive item
         // was greyed and a stale agent could not be removed by any route.
@@ -16729,9 +16732,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             now: now
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
+        let usage = sidebarUsageStates(now: now)
+        lastStampedSidebarUsageStates = usage
         return SidebarUsageLive.stamp(withExternalSessions(
             unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved),
-            registry: registry, now: now), states: sidebarUsageStates(now: now))
+            registry: registry, now: now), states: usage)
+    }
+
+    /// A usage reading arrived (a probe, or a live runner's quota). The rows are
+    /// re-pushed only when a CLI's live state actually moved — exhausted,
+    /// recovered, or Switch appearing — so a runner reporting the same window
+    /// every turn costs one comparison, not a sidebar rebuild.
+    func refreshSidebarUsageIfChanged() {
+        guard sidebarUsageStates() != lastStampedSidebarUsageStates else { return }
+        reloadWorkspaceSidebar(rebuildAgentActivity: false)
     }
 
     /// Dogfood fix: each CLI's LIVE usage, from the account readings Array
@@ -16751,17 +16765,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             if let reset = spent.compactMap(\.resetsAt).min() {
                 earliestReset = min(earliestReset ?? reset, reset)
             }
-            let activeOrg = agentSupervisor.accountIdentity(accountId: active.id)?.organizationId
-            let canSwitch = agentSupervisor.accounts.contains { account in
-                guard account.harness == harness, account.id != active.id,
-                      let identity = agentSupervisor.accountIdentity(accountId: account.id) else { return false }
-                return activeOrg == nil || identity.organizationId != activeOrg
-            }
+            // Switch needs EVIDENCE of a different login: both identities read,
+            // and an organisation or an email known on both sides that differs.
+            // A missing field is not a difference — two folders on one login can
+            // both lack an organisation id — so unknown identity offers no Switch.
+            let activeIdentity = agentSupervisor.accountIdentity(accountId: active.id)
+            let canSwitch = activeIdentity.map { mine in
+                agentSupervisor.accounts.contains { account in
+                    guard account.harness == harness, account.id != active.id,
+                          let other = agentSupervisor.accountIdentity(accountId: account.id) else { return false }
+                    return Self.isDistinctLogin(mine, other)
+                }
+            } ?? false
             states[SidebarRecovery.providerName(harness.rawValue)] =
                 SidebarUsageLive.State(exhausted: !spent.isEmpty, canSwitch: canSwitch)
         }
         scheduleSidebarUsageReset(at: earliestReset)
         return states
+    }
+
+    nonisolated static func isDistinctLogin(_ a: AgentAccountIdentity, _ b: AgentAccountIdentity) -> Bool {
+        if let x = a.organizationId, let y = b.organizationId, x != y { return true }
+        if let x = a.email?.lowercased(), let y = b.email?.lowercased(), x != y { return true }
+        return false
     }
 
     private func scheduleSidebarUsageReset(at reset: Date?) {
@@ -16987,6 +17013,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
     private(set) var lastSidebarIncidentOutcomeForQA: SidebarIncidentOutcome = .none
     private var sidebarUsageResetAt: Date?
+    /// The live usage the rows were last stamped with.
+    private var lastStampedSidebarUsageStates: [String: SidebarUsageLive.State] = [:]
     private var sidebarUsageResetTimer: Timer?
 
     @discardableResult

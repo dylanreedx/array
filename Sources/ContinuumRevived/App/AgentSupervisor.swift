@@ -2727,6 +2727,7 @@ final class AgentSupervisor {
             accountQuotas[accountId] = snapshot
             accountQuotaStore?.save(accountQuotas)
             notifyQuotaObservers(observation, accountId: accountId, source: id)
+            onAccountQuotaObserved?(accountId)
             return
         }
         // S3: a provider retry is turn presence ("Retrying (2/5)"), then the
@@ -2801,6 +2802,10 @@ final class AgentSupervisor {
     private var accountUsageLastStarted: [String: Date] = [:]
     private var accountUsagePollTimer: Timer?
     static let accountUsageDidChangeNotification = Notification.Name("AgentSupervisor.accountUsageDidChange")
+    /// A live runner reported its account's quota (`.accountQuota`). Tiles hear
+    /// it through their observers; the sidebar's usage items hear it here, so an
+    /// exhausted or replenished window reaches Needs you without a probe.
+    var onAccountQuotaObserved: ((String) -> Void)?
 
     /// Saved logins and the account each CLI uses, beside the agent store (so
     /// channel-split, and a check's temp store gets its own).
