@@ -53,8 +53,11 @@ public enum SidebarQuietInbox {
             guard let family = byId[familyId], let rows = members[familyId] else { return nil }
             // Count by cause across providers: a family's usage pause is one
             // chip whether its helpers run on one CLI or two.
+            // Counted over the lead's members only, exactly as `SidebarLeadTally`
+            // counts them: the lead's own state is its own row's, never a
+            // helper count, so both layouts say the same number for one lead.
             var carriers: [SidebarFailureCause: [AgentInboxRow]] = [:]
-            for row in rows {
+            for row in rows where row.id != familyId {
                 if let cause = SidebarRecovery.cause(for: row) { carriers[cause, default: []].append(row) }
             }
             guard let topCause = carriers.keys.max(by: { lhs, rhs in
