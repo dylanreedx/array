@@ -2802,8 +2802,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 : parts.historyCount
             built.append(.historyHeader(count: historyCount, isExpanded: historyExpanded))
             if historyExpanded {
+                // Quiet inbox pages by family: helpers are never drawn there, so
+                // they must not take page slots or the footer's hidden count.
                 let page = InboxSort.pageSettled(
-                    parts.history, limit: settledLimit, openAgentId: openAgentId)
+                    sidebarLayout == .quietInbox
+                        ? parts.history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }
+                        : parts.history,
+                    limit: settledLimit, openAgentId: openAgentId)
                 built.append(contentsOf: sidebarLayout == .quietInbox
                     ? quietHistoryItems(for: page.shown, family: sorted)
                     : agentItems(for: page.shown))

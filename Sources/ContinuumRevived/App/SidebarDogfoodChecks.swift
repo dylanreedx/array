@@ -365,6 +365,14 @@ enum SidebarDogfoodChecks {
         let lead = h.spawn("Conduct overnight UX checks")
         let helpers = (0..<4).map { h.spawn("Overnight helper \($0 + 1)", parent: lead) }
         let solo = h.spawn("Draft the release notes")
+        // More families than one History page holds, each with helpers.
+        var extra: [AgentID] = []
+        for index in 0..<InboxSort.settledPageSize {
+            let family = h.spawn("Older family \(index + 1)")
+            extra.append(family)
+            extra.append(contentsOf: (0..<2).map { h.spawn("Older helper \(index + 1).\($0 + 1)", parent: family) })
+        }
+        for id in extra { h.finish(id) }
         for id in [lead, solo] + helpers { h.finish(id) }
         h.refresh()
         // Clear through the drawn control: both families go to History.
@@ -403,11 +411,20 @@ enum SidebarDogfoodChecks {
             }
         }
         try expect(other.isEmpty, "History draws something other than one card per family: \(other)")
+        let pageCards = drawn.count
         drawn[h.fixture.agentId.rawValue] = nil  // the fixture's own parked source agent
-        try expect(Set(drawn.keys) == [lead.rawValue, solo.rawValue],
-                   "History holds the two families, helpers inside their lead — got \(drawn.values.map(\.titleForQA))")
-        try expect(inbox.historyHeaderTitleForQA == "History (3)",
-                   "the History heading counts its cards (2 families + the fixture's agent), not helpers — got '\(inbox.historyHeaderTitleForQA ?? "nil")'")
+        // Families total: 2 + the older ones + the fixture's agent; a page of
+        // `settledPageSize` cards, and the footer counts the families left.
+        let families = 2 + InboxSort.settledPageSize + 1
+        try expect(pageCards == InboxSort.settledPageSize,
+                   "History's first page shows \(pageCards) cards, wanted \(InboxSort.settledPageSize) families — helpers took page slots")
+        let footer = items.compactMap { item -> Int? in if case .settledMore(let hidden) = item { return hidden }; return nil }.first
+        try expect(footer == families - InboxSort.settledPageSize,
+                   "the History footer hides \(footer.map(String.init) ?? "nil"), wanted \(families - InboxSort.settledPageSize) families (no helpers)")
+        try expect(drawn.keys.contains(lead.rawValue) && drawn.keys.contains(solo.rawValue),
+                   "History holds the newest families as cards, helpers inside their lead — got \(drawn.values.map(\.titleForQA))")
+        try expect(inbox.historyHeaderTitleForQA == "History (\(families))",
+                   "the History heading counts families (\(families)), not helpers — got '\(inbox.historyHeaderTitleForQA ?? "nil")'")
         let formatter = DateFormatter()
         formatter.locale = Locale.current
         formatter.setLocalizedDateFormatFromTemplate("MMMd")
