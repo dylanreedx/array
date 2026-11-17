@@ -18,14 +18,6 @@
       "expires": "2026-12-15"
     },
     {
-      "leg": "--lead-checkout-ledger-check",
-      "kind": "known-red",
-      "reason": "The full ledger lifetime/count fixture remains red under this Mac's FSEvents load; reproduced before the checkout exclusions change. The new exclusions and teardown controls pass separately.",
-      "evidence": "Pre-existing in the 0.7.52 gate, nightly d0663181 and app-source-equivalent fast-ship c5d07ef6. Release lead explicitly approved this entry in release board card 27539BBC comment 1ABE0D7C on 2026-11-16; focus-steal legs must remain unclassified.",
-      "added": "2026-11-16",
-      "expires": "2026-12-16"
-    },
-    {
       "leg": "--perf-budget-zoom-check",
       "kind": "known-red",
       "reason": "Zoom performs 127 tile layout passes against a budget of12 on untouched release base7cc801d2; not introduced by sticky icons.",
