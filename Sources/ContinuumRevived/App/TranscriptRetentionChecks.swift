@@ -56,6 +56,12 @@ enum TranscriptRetentionChecks {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("transcript-retention-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        // Iteration aid: only the review-finding witnesses, without the 2,300-agent fixture.
+        if ProcessInfo.processInfo.environment["CONTINUUM_RETENTION_REVIEW_ONLY"] != nil {
+            try await TranscriptRetentionReviewChecks.run(root: root)
+            print("PASS: retention review witnesses")
+            return
+        }
         let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("agents"))
         let project = UUID()
         var ids: [AgentID] = []
@@ -394,6 +400,11 @@ enum TranscriptRetentionChecks {
             try await ProviderHistoryAfterStatusChecks.run(root: root)
         } catch {
             failures.append("provider history after status: \(error)")
+        }
+        do {
+            try await TranscriptRetentionReviewChecks.run(root: root)
+        } catch {
+            failures.append("retention review: \(error)")
         }
 
         guard failures.isEmpty else { throw Failure(description: failures.joined(separator: "\nFAIL: ")) }
