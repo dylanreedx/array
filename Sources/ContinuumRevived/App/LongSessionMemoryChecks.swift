@@ -280,10 +280,11 @@ enum LongSessionMemoryChecks {
             let copied = oldest.selectedText ?? ""
             try expect(copied.contains("That fixes turn 0 for agent"),
                        "a copy of the whole transcript includes its released first turn (\(copied.count) characters copied)")
-            oldest.select(range: NSRange(location: 0, length: 0))
-            oldest.releasingDistantLayout()
+            // Straight after the copy, with no release pass in between: a
+            // copy that kept what it laid out shows as fewer released blocks.
             try expect(oldest.qaReleasedBlockCount >= before,
                        "copying lays released blocks out without keeping them: \(before) released before, \(oldest.qaReleasedBlockCount) after")
+            oldest.select(range: NSRange(location: 0, length: 0))
         }
         // A closed tile's hidden resting host goes with it.
         try expect(RestingHost.qaLiveWindowCount <= live.count,
@@ -297,7 +298,7 @@ enum LongSessionMemoryChecks {
         // views, and what the first idle settles (resting chrome, tool detail).
         // After it, what grows must be the transcripts' own text and its
         // structure, both copies of it (the supervisor's and the tile's), and
-        // a placement per block: under 18 times the text streamed. Before the
+        // a placement per block: well under 25 times the text streamed. Before the
         // fixes it was 58 times (runners, CoreText for every line ever
         // drawn, one Auto Layout engine for every resting tile).
         let warmHours = min(2, samples.count - 1)
@@ -314,6 +315,9 @@ enum LongSessionMemoryChecks {
         return report
     }
 
-    /// Retained bytes per byte of streamed text, after warm-up.
-    static let steadyBudgetRatio = 18.0
+    /// Retained bytes per byte of streamed text, after warm-up. Fixed builds
+    /// measure 9-19x run to run; every regressed build measured 52-58x. The
+    /// specific regressions are asserted directly above (runners alive,
+    /// blocks released, copy keeping layout, resting hosts freed).
+    static let steadyBudgetRatio = 25.0
 }

@@ -875,7 +875,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private var releasedGeneration = -1
     private var releasedAtOffset: CGFloat = 0
     private var relayoutAfterReleaseScheduled = false
-    private(set) var qaReleasedBlockCount = 0
+    /// Counted now, not remembered from the last release pass: a reader that
+    /// lays released blocks out and keeps them shows here at once.
+    var qaReleasedBlockCount: Int { placed.reduce(0) { $0 + ($1.block.isReleased ? 1 : 0) } }
 
     /// How far around the viewport blocks stay laid out: at least a screenful.
     private var layoutSpan: CGFloat { max(bounds.height, 400) }
@@ -960,17 +962,14 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         releasedAtOffset = scrollOffset
         let keepLow = scrollOffset - 3 * span
         let keepHigh = scrollOffset + bounds.height + 3 * span
-        var released = 0
         for index in placed.indices {
             let item = placed[index]
-            if item.block.isReleased { released += 1; continue }
+            if item.block.isReleased { continue }
             guard item.y + item.block.height < keepLow || item.y > keepHigh else { continue }
             let stub = item.block.released()
             cache[item.blockID] = stub
             placed[index] = Placed(block: stub, y: item.y, textStart: item.textStart, blockID: item.blockID, entryIndex: item.entryIndex)
-            released += 1
         }
-        qaReleasedBlockCount = released
     }
 
     override func viewWillDraw() {
