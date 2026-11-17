@@ -847,7 +847,9 @@ enum ContinuumApp {
         // Headless per-step zoom cost: an off-screen window, never the screen.
         if CommandLine.arguments.contains("--canvas-zoom-step-cost-check") {
             _ = NSApplication.shared
-            NSApp.setActivationPolicy(.accessory)
+            // These headless rendering checks run AppKit's event loop, but an
+            // accessory app can still become frontmost during native launch.
+            NSApp.setActivationPolicy(.prohibited)
             Task { @MainActor in
                 do {
                     try await CanvasZoomStepCostChecks.run()
@@ -3050,7 +3052,7 @@ enum ContinuumApp {
         // view's frame changes: the motion scene, off-screen.
         if CommandLine.arguments.contains("--markdown-frame-observer-check") {
             _ = NSApplication.shared
-            NSApp.setActivationPolicy(.accessory)
+            NSApp.setActivationPolicy(.prohibited)
             Task { @MainActor in
                 do {
                     try await MarkdownFrameObserverChecks.run()
@@ -3069,7 +3071,7 @@ enum ContinuumApp {
         // in the motion workload's real scene, off-screen.
         if CommandLine.arguments.contains("--markdown-visible-rows-zoom-cost-check") {
             _ = NSApplication.shared
-            NSApp.setActivationPolicy(.accessory)
+            NSApp.setActivationPolicy(.prohibited)
             Task { @MainActor in
                 do {
                     try await CanvasZoomStepCostChecks.runVisibleRowsComparison()
