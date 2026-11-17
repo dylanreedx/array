@@ -74,7 +74,7 @@ enum TileAgentIconStyleChecks {
         let controller = AgentCharacterController.shared
         let stills = ProcessInfo.processInfo.environment["ARRAY_AGENT_ICON_STILLS_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
         if let stills { try FileManager.default.createDirectory(at: stills, withIntermediateDirectories: true) }
-        setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, "classic")
+        setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, SidebarActiveIndicatorStyle.classic.rawValue)
 
         // 0. Defaults: nothing about a fresh install changed.
         try Check.expect(AgentCharacterConfig.defaultBubbleStyle == .inline, "the default style is still Inline")
@@ -182,10 +182,10 @@ enum TileAgentIconStyleChecks {
             try Check.expect(subject.qaTitleBarLayoutPasses == layouts, "\(style.title): the working light must not lay out the title bar")
             try Check.expect(bubble.qaMarkAnimationKeys.isEmpty && bubble.qaMarkFrame == markFrame,
                              "\(style.title): the provider mark never animates")
-            bubble.setWorking(false, style: "classic", phase: phase)
+            bubble.setWorking(false, style: SidebarActiveIndicatorStyle.classic.rawValue, phase: phase)
             try Check.expect(!bubble.isMoving && bubble.qaAnimationKeys.isEmpty && !bubble.qaParts.orbitShown,
                              "\(style.title): idle removes every layer animation (\(bubble.qaAnimationKeys))")
-            bubble.setWorking(true, style: "classic", phase: phase)
+            bubble.setWorking(true, style: SidebarActiveIndicatorStyle.classic.rawValue, phase: phase)
             bubble.setPaused(true)
             try Check.expect(bubble.qaAnimationKeys.isEmpty, "\(style.title): paused removes every layer animation")
             bubble.setPaused(false)
@@ -219,10 +219,10 @@ enum TileAgentIconStyleChecks {
                     settle(canvas, views, zoom: 1.25, around: world)
                     let bubble = subject.qaAgentBubble!
                     let phase = bubble.phase
-                    bubble.setWorking(false, style: "classic", phase: phase)
+                    bubble.setWorking(false, style: SidebarActiveIndicatorStyle.classic.rawValue, phase: phase)
                     try Check.write(try Check.capture(canvas, window, rect: rect),
                                     to: stills.appendingPathComponent("\(style.rawValue)-idle-125-\(theme).png"))
-                    bubble.setWorking(true, style: "classic", phase: phase)
+                    bubble.setWorking(true, style: SidebarActiveIndicatorStyle.classic.rawValue, phase: phase)
                 }
             }
             window.appearance = nil
@@ -271,7 +271,7 @@ enum TileAgentIconStyleChecks {
         }
         defer {
             window.appearance = nil
-            setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, "classic")
+            setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, SidebarActiveIndicatorStyle.classic.rawValue)
             setting(defaults, AgentCharacterConfig.iconScaleKey, AgentCharacterConfig.IconScale.standard.rawValue)
             setting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.inline.rawValue)
         }
@@ -280,11 +280,14 @@ enum TileAgentIconStyleChecks {
               let workingWorld = canvas.allTilesInWorldFrames().first(where: { $0.id == working.tile.id })?.frame else {
             throw Check.Failure(description: "working-style transitions require real installed tiles")
         }
-        func light(_ value: String) throws {
-            setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, value)
+        func light(_ value: SidebarActiveIndicatorStyle) throws {
+            setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, value.rawValue)
             try Check.expect(Check.pump(until: {
-                views.allSatisfy { $0.qaAgentBubble?.workingStyle == value }
-            }), "the \(value) light choice reaches every real icon")
+                canvas.layoutSubtreeIfNeeded()
+                for view in views { view.layoutSubtreeIfNeeded(); view.placeAgentBubble() }
+                return AgentCharacterController.shared.workingStyle == value
+                    && views.allSatisfy { $0.qaAgentBubble?.workingStyle == value.rawValue }
+            }), "the \(value.title) light choice reaches every real icon")
         }
 
         // At rest only the Orb's own liquid/glass is visible. The sidebar's
@@ -292,7 +295,7 @@ enum TileAgentIconStyleChecks {
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             window.appearance = NSAppearance(named: appearance)
             try show(.orb, views, canvas, defaults)
-            try light("classic")
+            try light(.classic)
             settle(canvas, views, zoom: 1.25, around: idleWorld)
             guard let bubble = idle.qaAgentBubble else { throw Check.Failure(description: "no idle globe") }
             try Check.expect(!bubble.isWorking && bubble.qaParts.sheenShown,
@@ -300,7 +303,7 @@ enum TileAgentIconStyleChecks {
             let centre = CGPoint(x: bubble.bounds.midX, y: bubble.bounds.midY)
             try Check.expect(bubble.qaSheenFrame.contains(centre), "\(name): Classic's liquid glow covers the globe's middle")
             let classic = try modelPicture(idle)
-            try light("sheen")
+            try light(.sheen)
             settle(canvas, views, zoom: 1.25, around: idleWorld)
             verdict(bubble.qaSheenFrame.contains(centre), "\(name): Orb under Sheen keeps the liquid glow in the globe")
             let sheen = try modelPicture(idle)
@@ -310,7 +313,7 @@ enum TileAgentIconStyleChecks {
 
         // Leaving the Orb's two-stop radial glow must not leave those locations
         // on the different highlight used by the working Inline or Squircle.
-        try light("sheen")
+        try light(.sheen)
         for style in [Style.inline, .squircle] {
             try show(.orb, views, canvas, defaults)
             settle(canvas, views, zoom: 1.25, around: workingWorld)
@@ -325,26 +328,26 @@ enum TileAgentIconStyleChecks {
 
         // Both choices used to skip motion reconciliation on ordinary bounds
         // changes. Drive the actual icon-size setting while the Orb is working.
-        for choice in ["classic", "gradient"] {
+        for choice in [SidebarActiveIndicatorStyle.classic, .gradient] {
             try light(choice)
             try show(.orb, views, canvas, defaults)
             settle(canvas, views, zoom: 1.25, around: workingWorld)
             guard let bubble = working.qaAgentBubble else { throw Check.Failure(description: "no working globe") }
-            try Check.expect(bubble.isWorking && !bubble.isPaused, "\(choice): the globe must be working and visible")
+            try Check.expect(bubble.isWorking && !bubble.isPaused, "\(choice.title): the globe must be working and visible")
             var sizes: [CGFloat] = []
             for size in [AgentCharacterConfig.IconScale.small, .large] {
                 try choose(size: size, views, canvas, defaults)
                 settle(canvas, views, zoom: 1.25, around: workingWorld)
                 sizes.append(bubble.bounds.height)
                 guard let offsets = bubble.qaLiquidSurfaceOffsets else {
-                    throw Check.Failure(description: "\(choice): the working globe has no installed liquid movement")
+                    throw Check.Failure(description: "\(choice.title): the working globe has no installed liquid movement")
                 }
                 let amplitude = bubble.bounds.height * 0.02
                 verdict(abs(offsets.from + amplitude) < 0.0001 && abs(offsets.to - amplitude) < 0.0001,
-                        "\(choice) live \(size.title): installed liquid offsets \(offsets.from)/\(offsets.to) fit current \(bubble.bounds.height)pt globe")
+                        "\(choice.title) live \(size.title): installed liquid offsets \(offsets.from)/\(offsets.to) fit current \(bubble.bounds.height)pt globe")
             }
             try Check.expect(sizes.count == 2 && sizes[1] > sizes[0] * 1.2,
-                             "\(choice): the real size setting must resize the globe, not just its expected amplitude")
+                             "\(choice.title): the real size setting must resize the globe, not just its expected amplitude")
         }
         try Check.expect(failures.isEmpty, "working-style transitions: \(failures.joined(separator: "; "))")
         return "working-style transitions: static glow in light/dark, valid Orb→Sheen stops, live resized liquid movement"
