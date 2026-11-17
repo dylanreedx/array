@@ -4370,7 +4370,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let item = item(at: row) else { return nil }
         if let model = item.agentRow, let helpers = historyEntryHelpers[model.id] {
-            let cell = historyEntryCells[model.id] ?? SidebarQuietHistoryEntryView()
+            // A History card fading out as a crossfade ghost is not free to draw
+            // this row: lending it back would let the ghost's teardown take the
+            // live row with it.
+            let cached = historyEntryCells[model.id].flatMap { cached in
+                crossfadingCells.values.contains { $0 === cached } ? nil : cached
+            }
+            let cell = cached ?? SidebarQuietHistoryEntryView()
             cell.alphaValue = 1
             cell.apply(model, helpers: helpers, endedAt: historyEntryDates[model.id], now: clock())
             historyEntryCells[model.id] = cell
@@ -4509,6 +4515,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
            !crossfadingCells.values.contains(where: { $0 === cached }) {
             cell = cached
             reusesRecentCell = true
+            // Whatever fade it last took part in, a lent cell draws at full strength.
+            cached.alphaValue = 1
         } else {
             switch model.variant {
             case .card: cell = cardStyleOverride?.makeCell() ?? AgentInboxCellView()
@@ -6427,24 +6435,38 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// rect is somebody else's. `makeIfNecessary: false` throughout — a row that is
     /// scrolled out of view has no view to fade and must not be given one.
     private func liftCrossfadeGhosts(from previous: [AgentInboxRow], to next: [AgentInboxRow])
-        -> [(id: UUID, view: NSView, frame: NSRect)]
+        -> [CrossfadeCandidate]
     {
         guard !prefersReducedMotion() else { return [] }
         var variantByPrevious: [UUID: RowVariant] = [:]
         for row in previous { variantByPrevious[row.id] = row.variant }
-        var lifted: [(id: UUID, view: NSView, frame: NSRect)] = []
+        var lifted: [CrossfadeCandidate] = []
+        var drawn: [UUID: Int]?
         for row in next {
             // An agent that was not on screen has no previous variant, so a fresh
             // push that brings in a whole list crossfades nothing — which is the
             // packet's "do not animate during a full reload", enforced by the diff
             // rather than by guessing which reload path is about to run.
-            guard let was = variantByPrevious[row.id], was != row.variant,
-                  let tableRow = tableRowByAgentId[row.id],
+            //
+            // This raw diff only NOMINATES a row. A Clear mark draws an active row
+            // settled, so a cleared card's raw variant differs from its drawn one on
+            // every push; `startCrossfades` confirms against what is drawn after.
+            guard let was = variantByPrevious[row.id], was != row.variant else { continue }
+            if drawn == nil { drawn = tableRowByAgentId }
+            guard let tableRow = drawn?[row.id],
                   let view = tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false)
             else { continue }
-            lifted.append((row.id, view, tableView.rect(ofRow: tableRow)))
+            lifted.append(CrossfadeCandidate(id: row.id, view: view, frame: tableView.rect(ofRow: tableRow), was: was))
         }
         return lifted
+    }
+
+    struct CrossfadeCandidate {
+        let id: UUID
+        let view: NSView
+        let frame: NSRect
+        /// The variant the row was DRAWN as before the push.
+        let was: RowVariant
     }
 
     /// Fade the old view out where it stood, and the new one in where the row now
@@ -6461,11 +6483,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// the content it belongs to instead of hanging in the sidebar; the clip view
     /// bounds it, so a ghost lifted from a row you then scroll away from is clipped
     /// exactly like the row would have been.
-    private func startCrossfades(_ lifted: [(id: UUID, view: NSView, frame: NSRect)]) {
+    private func startCrossfades(_ lifted: [CrossfadeCandidate]) {
         guard !lifted.isEmpty else { return }
         tableView.layoutSubtreeIfNeeded()
         let drawn = tableRowByAgentId
-        for (id, view, frame) in lifted {
+        var drawnVariant: [UUID: RowVariant] = [:]
+        for row in rows { drawnVariant[row.id] = row.variant }
+        for candidate in lifted {
+            let (id, view, frame) = (candidate.id, candidate.view, candidate.frame)
+            // Only a row whose DRAWN shape changed crossfades. A cleared card keeps
+            // its drawn shape across an unrelated push while its raw row stays
+            // active; fading it would lift the very view the table still shows.
+            guard let now = drawnVariant[id], now != candidate.was else { continue }
             // A CROSSFADE NEEDS TWO VIEWS. The diff above reads the raw push, where a
             // row's id and variant are exact but its VISIBILITY is not: `display` can
             // take the new row off screen entirely — a snooze into a collapsed shelf,
@@ -6476,10 +6505,19 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             guard let arriving = drawn[id].flatMap({
                 tableView.view(atColumn: 0, row: $0, makeIfNecessary: false)
             }) else { continue }
+            // A crossfade needs two DIFFERENT views. The table keeping (or lending
+            // back) the outgoing view for the arriving row means there is nothing
+            // to fade between, and lifting it would take the live row with it.
+            guard arriving !== view else { continue }
             view.removeFromSuperview()
             view.frame = frame
             view.autoresizingMask = []
-            crossfadingCells[id]?.removeFromSuperview()
+            // A superseded ghost leaves through the same cleanup as any other, at
+            // full strength — unless the table has already lent it back as this
+            // row's arriving view, in which case it is live and stays put.
+            if let superseded = crossfadingCells[id], superseded !== view, superseded !== arriving {
+                retireGhost(superseded)
+            }
             crossfadingCells[id] = view
             tableView.addSubview(view)
             // The incoming view fades UP from nothing rather than being cut in over
