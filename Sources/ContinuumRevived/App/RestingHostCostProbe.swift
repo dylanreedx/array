@@ -19,6 +19,7 @@ enum RestingHostCostProbe {
     private static func now() -> Double { ProcessInfo.processInfo.systemUptime }
 
     static func run() async throws -> String {
+        setlinebuf(stdout)
         var lines: [String] = []
         for count in [24, 72] {
             lines.append(try await measure(tiles: count))
@@ -62,6 +63,8 @@ enum RestingHostCostProbe {
 
         await settle()
         let baseline = LongSessionMemoryChecks.mallocBytesInUse()
+        let baselineFootprint = AgentFileIndexMemoryChecks.physFootprint()
+        let baselineWindows = NSApp.windows.count
         // Attach.
         var views: [ManagedAgentTileNSView] = []
         var attach = 0.0
@@ -104,6 +107,12 @@ enum RestingHostCostProbe {
         await settle()
         // Everything the resting tiles hold, from before the first attached.
         let restBytes = LongSessionMemoryChecks.mallocBytesInUse() - baseline
+        let restFootprint = AgentFileIndexMemoryChecks.physFootprint() - baselineFootprint
+        let restWindows = NSApp.windows.count - baselineWindows
+        if let pause = ProcessInfo.processInfo.environment["ARRAY_RESTING_HOST_PAUSE_SECONDS"].flatMap(Double.init) {
+            print("resting-host probe: \(count) tiles resting, pid \(getpid()), paused \(Int(pause))s")
+            _ = await waitUntil(timeout: pause, pollInterval: 0.5) { false }
+        }
 
         // Pan and zoom with every tile resting.
         func cameraStep(_ viewport: CanvasViewport) -> Double {
@@ -146,6 +155,6 @@ enum RestingHostCostProbe {
         await settle()
 
         let n = Double(count)
-        return "\(count) tiles: attach \(ms(attach / n))/tile, rest \(ms(rest / n))/tile (\(rested) rested, \(restBytes / count / 1024) KB/tile held at rest), wake \(ms(wake / n))/tile, detach \(ms(detach / n))/tile; pan median \(ms(median(pan))) p95 \(ms(p95(pan))), zoom median \(ms(median(zoom))) p95 \(ms(p95(zoom)))"
+        return "\(count) tiles: attach \(ms(attach / n))/tile, rest \(ms(rest / n))/tile (\(rested) rested, \(restBytes / count / 1024) KB/tile held at rest, footprint +\(restFootprint / count / 1024) KB/tile, +\(restWindows) windows), wake \(ms(wake / n))/tile, detach \(ms(detach / n))/tile; pan median \(ms(median(pan))) p95 \(ms(p95(pan))), zoom median \(ms(median(zoom))) p95 \(ms(p95(zoom)))"
     }
 }
