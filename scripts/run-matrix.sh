@@ -2702,6 +2702,7 @@ run_app_check .build/debug/Array --file-markdown-preview-check
 run_app_check .build/debug/Array --editor-web-bridge-check
 run_app_check .build/debug/Array --file-initial-load-check
 run_app_check .build/debug/Array --file-image-check
+run_app_check .build/debug/Array --file-tile-zoom-check
 run_app_check .build/debug/Array --file-data-grid-check
 run_app_check .build/debug/Array --file-formats-scene-check
 run_app_check .build/debug/Array --editor-navigation-check
