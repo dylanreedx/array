@@ -2870,8 +2870,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let historyIDs = Set(history.map(\.id))
         var childrenOf: [UUID: [AgentInboxRow]] = [:]
         for row in all { if let parent = row.parentId, parent != row.id { childrenOf[parent, default: []].append(row) } }
+        // Closing or settling a family is activity too: the latest thing that
+        // happened to it, so a family closed a minute ago reads a minute ago.
         func activity(_ row: AgentInboxRow) -> Date {
-            [row.lastActiveAt, row.terminalEvent?.endedAt].compactMap { $0 }.max() ?? row.createdAt
+            [row.lastActiveAt, row.terminalEvent?.endedAt, row.lifecycle.endedAt].compactMap { $0 }.max() ?? row.createdAt
         }
         let roots = history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }
         var dated: [(row: AgentInboxRow, at: Date, index: Int)] = []
