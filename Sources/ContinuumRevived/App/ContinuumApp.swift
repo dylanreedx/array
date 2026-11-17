@@ -41328,7 +41328,8 @@ extension AppDelegate {
 
     // VACUITY FIRST. Every assertion below is about a two-level group followed by an
     // unrelated root; if the fixture did not draw one, they are all about a flat list.
-    let treeDepths = tree.nestingsForQA.map(\.depth)
+    // Agent rows only: the Quiet inbox also draws a lead's count line in its card.
+    let treeDepths = zip(tree.itemsForQA, tree.nestingsForQA).filter { $0.0.agentRow != nil }.map(\.1.depth)
     try expect(tree.rowIdsForQA.count == 5 && treeDepths.count == 5,
                "the tree fixture must draw five rows — got \(tree.rowIdsForQA.count)/\(treeDepths.count)")
     try expect(treeDepths.first == 0 && treeDepths.contains(1) && treeDepths.contains(2),
@@ -41341,7 +41342,7 @@ extension AppDelegate {
     // last direct subagent, a helper's own short stem under its parent subagent,
     // all inside the lead's card — and nothing reaches the next lead.
     if SidebarDensityProposal.production.isTwoLine {
-        let treeRowRects = tree.tableRowRectsForQA
+        let treeRowRects = zip(tree.itemsForQA, tree.tableRowRectsForQA).filter { $0.0.agentRow != nil }.map(\.1)
         let siblingRect = treeRowRects[siblingRow]
         func slice(_ id: UUID) -> InboxOwnershipSlice? { tree.ownershipSliceForQA(id: id) }
         let lanes = tree.rowIdsForQA.map { id in slice(id).map { ($0.leadLane, $0.helperLane) } }
@@ -41380,7 +41381,7 @@ extension AppDelegate {
         tree.layoutForQA()
     } else {
     let treePainting = tree.spinePaintingForQA
-    let treeRowRects = tree.tableRowRectsForQA
+    let treeRowRects = zip(tree.itemsForQA, tree.tableRowRectsForQA).filter { $0.0.agentRow != nil }.map(\.1)
     let siblingRect = treeRowRects[siblingRow]
     // 1 · THE GROUP IS DRAWN AS A GROUP. Every row of it carries connector ink.
     let treeInkedRows = Set(treePainting.map(\.tableRow))

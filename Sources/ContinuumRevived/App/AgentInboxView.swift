@@ -7396,9 +7396,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The lead's drawn count line: its own row in the Quiet inbox, line 2's
     /// tail in the Ledger. nil when neither is drawn.
     func countLineTextForQA(id: UUID) -> String? {
-        if sidebarLayout == .quietInbox {
-            guard let cell = familyCauseCells["count:\(id.uuidString)"], cell.window != nil,
-                  !cell.isHiddenOrHasHiddenAncestor, cell.countTallyForQA?.leadId == id else { return nil }
+        // Quiet, open lead: its own row. A folded lead keeps it on line 2.
+        if sidebarLayout == .quietInbox, let cell = familyCauseCells["count:\(id.uuidString)"], cell.window != nil,
+           !cell.isHiddenOrHasHiddenAncestor, cell.countTallyForQA?.leadId == id,
+           items.contains(where: { if case .leadCount(let t) = $0 { return t.leadId == id }; return false }) {
             return cell.titleForQA
         }
         return ownershipCellForQA(id: id)?.tailTextForQA
