@@ -1199,9 +1199,10 @@ private func runInboxFanoutCheck() {
            && tiedBounded.remainders.first?.hiddenChildIDs == Array(tiedChildIDs.suffix(2)),
            "equal-priority/equal-activity fan-out uses the ascending stable-id tie-break")
 
-    // A hidden blocker has its own separate rollup axis. Make enough direct
-    // siblings blocked that one still falls behind the eight-row budget; the
-    // parent itself remains `working` and its attention mark is not mutated.
+    // A child that needs you is never folded away (sidebar night fixes). All
+    // ten direct children ask, two more than the eight-row budget: every one is
+    // drawn, the fold (if any) holds no asker, and the parent itself remains
+    // `working` with its attention mark not mutated.
     let blockedRows = inputRows.map { row -> AgentInboxRow in
         guard childIDs.contains(row.id) else { return row }
         return AgentInboxRow(
@@ -1210,12 +1211,12 @@ private func runInboxFanoutCheck() {
     }
     let blockedSorted = InboxSort.sortForInbox(rows: blockedRows)
     let blocked = InboxSort.boundedForInbox(rows: blockedSorted, now: now)
-    guard let blockedRemainder = blocked.remainders.first else {
-        fputs("FAIL: P6.5 hidden-attention remainder missing\n", stderr)
-        Foundation.exit(1)
-    }
-    expect(blockedRemainder.hiddenNeedsYou > 0 && blockedRemainder.hasAttention,
-           "a blocked child that loses the cap raises the remainder's separate attention axis")
+    let blockedShown = Set(blocked.rows.map(\.id))
+    expect(childIDs.allSatisfy(blockedShown.contains)
+           && blocked.remainders.allSatisfy { $0.hiddenNeedsYou == 0 && Set($0.hiddenChildIDs).isDisjoint(with: childIDs) },
+           "every child that needs you is drawn past the eight-row cap, none folded: shown \(childIDs.filter(blockedShown.contains).count) of \(childIDs.count)")
+    expect(blocked.accountedIDs(for: blockedSorted) == Set(blockedSorted.map(\.id)),
+           "with every asker drawn, every row stays accounted")
     expect(blockedSorted.first(where: { $0.id == parentID })?.attention == InboxAttention.none,
            "descendant attention does not overwrite the parent's own attention watermark")
 
