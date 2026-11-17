@@ -802,17 +802,43 @@ enum SidebarDogfoodChecks {
         }
 
         // (b) Rapid reversal: a History card works, settles, works and settles
-        // again faster than one crossfade. Each lend of a cached card must come
-        // back drawn in its row at full strength.
+        // again faster than one crossfade. The live cell can be lent back while
+        // each parked card must be drawn in its own row at full strength.
+        let table = inbox.tableForQA
+        func reversingCell() -> NSView? {
+            guard let row = inbox.itemsForQuietCheck.firstIndex(where: { $0.agentRow?.id == reversing.rawValue }) else {
+                return nil
+            }
+            return table.view(atColumn: 0, row: row, makeIfNecessary: false)
+        }
+        var previousLiveCell: NSView?
         let back = AgentSupervisor.threadId(for: reversing)
         for round in 0..<3 {
+            guard let outgoing = reversingCell() as? SidebarQuietHistoryEntryView else {
+                throw Failure(description: "(b) reversal \(round + 1): the outgoing History card is not mounted")
+            }
             h.supervisor.qaDeliver(.turnStarted(threadId: back, turnId: "r\(round)"), to: reversing)
             h.delegate.qaRefreshAgentSurfaces()
+            try expect(inbox.crossfadeGhostFrameForQA(id: reversing.rawValue) != nil && outgoing.superview === table,
+                       "(b) reversal \(round + 1): the History-to-live fade did not start")
+            guard let liveCell = reversingCell(), liveCell !== outgoing else {
+                throw Failure(description: "(b) reversal \(round + 1): the live cell did not arrive")
+            }
+            if let previousLiveCell {
+                try expect(liveCell === previousLiveCell, "(b) reversal \(round + 1): the live cell was not reused")
+            }
+            previousLiveCell = liveCell
             pump(0.03)
             h.supervisor.qaDeliver(.turnCompleted(threadId: back, turnId: "r\(round)", outcome: .completed,
                                                   errorMessage: nil), to: reversing)
             _ = h.supervisor.settle(agentID: reversing)
+            try expect(inbox.crossfadeGhostFrameForQA(id: reversing.rawValue) != nil,
+                       "(b) reversal \(round + 1): the original fade ended before the return to History")
             h.delegate.qaRefreshAgentSurfaces()
+            try expect(reversingCell() is SidebarQuietHistoryEntryView,
+                       "(b) reversal \(round + 1): the new History card did not arrive")
+            try expect(outgoing.superview == nil && outgoing.alphaValue == 1,
+                       "(b) reversal \(round + 1): the outgoing History ghost was not retired at full strength")
             pump(0.03)
         }
         pump(0.6)
@@ -824,7 +850,7 @@ enum SidebarDogfoodChecks {
         }
         try expect(problems.isEmpty, "(b) after a rapid reversal: \(problems)")
         try expect(inbox.crossfadingRowCountForQA == 0, "(b) \(inbox.crossfadingRowCountForQA) ghosts still held after every fade ended")
-        return "Cleared card: 5 unrelated pushes lifted no ghost and left the cleared History card in its row at full strength; 3 History→live→History reversals inside one crossfade left both cards in their rows, opaque, no ghosts held"
+        return "Cleared card: 5 unrelated pushes lifted no ghost and left the cleared History card in its row at full strength; 3 rapid reversals started real fades, reused the live cell, and left both History cards in their rows, opaque, with no ghosts held"
     }
 
     // MARK: - 7. A live runner's quota reaches Needs you, both ways
@@ -840,8 +866,8 @@ enum SidebarDogfoodChecks {
         h.finish(lead)
         for id in paused { h.finish(id, failed: codexUsageWords) }
         h.refresh()
-        inbox.qaRecordsStatusAnnouncements = true
-        inbox.accessibilityAnnouncementSink = { _, _ in }
+        var announcements: [String] = []
+        inbox.accessibilityAnnouncementSink = { _, message in announcements.append(message) }
         let active = supervisor.activeAccount(for: .codex)
         let runnerAccount = supervisor.account(forAgent: lead)?.id ?? AgentAccount.defaultAccountId(for: .codex)
         try expect(runnerAccount == active.id, "fixture: the runner's account \(runnerAccount) is not the one in use \(active.id)")
@@ -858,7 +884,7 @@ enum SidebarDogfoodChecks {
         try expect(usageLine(inbox) == nil, "fixture: a usage item shows at 40%")
 
         let pausedLabel = SidebarFailureCause.usageLimit.label(harness: "codex")
-        func announced(since start: Int) -> [String] { inbox.qaStatusAnnouncements.dropFirst(start).map(\.message) }
+        func announced(since start: Int) -> [String] { Array(announcements.dropFirst(start)) }
         /// The runner's own `.accountQuota` observation, as a live codex turn hands it over.
         func runner(_ used: Double, resetsIn: TimeInterval = 3_600) {
             supervisor.qaObserveSharedTranscript(.accountQuota(AgentAccountQuotaSnapshot(
@@ -869,7 +895,7 @@ enum SidebarDogfoodChecks {
         }
 
         // Entry: the runner reports the window spent.
-        var mark = inbox.qaStatusAnnouncements.count
+        var mark = announcements.count
         runner(1.0)
         guard let line = usageLine(inbox) else {
             throw Failure(description: "entry: a runner-delivered exhausted quota did not reach Needs you — incidents \(inbox.sidebarIncidents.map(\.title))")
@@ -879,14 +905,14 @@ enum SidebarDogfoodChecks {
         try expect(paused.allSatisfy { id in entered.contains { $0.hasPrefix("Quota helper \(paused.firstIndex(of: id)! + 1): ") && $0.hasSuffix(pausedLabel) } },
                    "entry: MAC-15 did not announce '\(pausedLabel)' for each paused helper — \(entered)")
         // Quiet: the runner reports the same spent window again.
-        mark = inbox.qaStatusAnnouncements.count
+        mark = announcements.count
         let buildsBefore = h.delegate.qaInboxRowBuildCount
         runner(1.0)
         try expect(announced(since: mark).isEmpty, "quiet: a repeated reading announced \(announced(since: mark))")
         try expect(h.delegate.qaInboxRowBuildCount == buildsBefore,
                    "quiet: a repeated reading rebuilt the sidebar rows \(h.delegate.qaInboxRowBuildCount - buildsBefore) times")
         // Recovery: the runner reports the window replenished.
-        mark = inbox.qaStatusAnnouncements.count
+        mark = announcements.count
         runner(0.2)
         try expect(usageLine(inbox) == nil, "recovery: a runner-delivered replenished quota left the usage item drawn")
         let recovered = announced(since: mark)
@@ -895,7 +921,7 @@ enum SidebarDogfoodChecks {
         // Time-only expiry: spent until a reset 1.5 s ahead, then no reading at all.
         runner(1.0, resetsIn: 1.5)
         try expect(usageLine(inbox) != nil, "expiry: the spent window did not draw the usage item")
-        mark = inbox.qaStatusAnnouncements.count
+        mark = announcements.count
         let deadline = Date().addingTimeInterval(6)
         while usageLine(inbox) != nil, Date() < deadline { pump(0.1); inbox.layoutForQA() }
         try expect(usageLine(inbox) == nil, "expiry: the window's reset passed but the usage item stayed")
@@ -976,6 +1002,7 @@ enum SidebarDogfoodChecks {
         }
         defer { h.close() }
         let inbox = h.inbox
+        inbox.clock = { now }
         h.refresh()
         if !inbox.isHistoryExpandedForQA { _ = inbox.clickHistoryDisclosureForQA() }
         inbox.layoutForQA()
@@ -988,7 +1015,8 @@ enum SidebarDogfoodChecks {
         }
         func age(_ date: Date?) -> String { date.map { String(format: "%.2fd", now.timeIntervalSince($0) / 86_400) } ?? "nil" }
         guard let first = card() else { throw Failure(description: "no History card for the family") }
-        try expect(first.shownDate.map { abs($0.timeIntervalSince(days(3))) < 1 } == true,
+        let firstDetail = SidebarQuietHistoryEntryView.detail(helpers: 2, endedAt: days(3), now: now)
+        try expect(first.shownDate.map { abs($0.timeIntervalSince(days(3))) < 1 } == true && first.detailForQA == firstDetail,
                    "(i) an unused helper moved the family's date: shows \(age(first.shownDate)) ago, wanted the root's real turn 3.00d")
 
         // (ii) A helper's later real turn reaches the mounted card. The helper is
@@ -1005,7 +1033,8 @@ enum SidebarDogfoodChecks {
               let mounted = table.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarQuietHistoryEntryView else {
             throw Failure(description: "(ii) the family's card is not mounted after the push")
         }
-        try expect(mounted.shownDate.map { abs($0.timeIntervalSince(days(1))) < 1 } == true,
+        let updatedDetail = SidebarQuietHistoryEntryView.detail(helpers: 2, endedAt: days(1), now: now)
+        try expect(mounted.shownDate.map { abs($0.timeIntervalSince(days(1))) < 1 } == true && mounted.detailForQA == updatedDetail,
                    "(ii) a helper's later turn left the mounted card showing \(age(mounted.shownDate)) ago, wanted 1.00d")
         return "History dates: an unused helper made today left the family at its real 3-day-old turn; a helper's later turn redrew the mounted card to 1 day ago"
     }
