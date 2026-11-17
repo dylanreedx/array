@@ -7423,6 +7423,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         tableView.view(atColumn: 0, row: index, makeIfNecessary: true)
     }
     func scrollItemToVisibleForQA(_ index: Int) { tableView.scrollRowToVisible(index) }
+    /// Stills: put table row `index` at the top of the viewport.
+    func scrollItemToTopForQA(_ index: Int) {
+        let clip = scrollView.contentView
+        clip.scroll(to: NSPoint(x: clip.bounds.minX, y: tableView.rect(ofRow: index).minY))
+        scrollView.reflectScrolledClipView(clip)
+    }
     /// Sidebar round, Quiet inbox witness: the drawn list and the rows it was built from.
     var itemsForQuietCheck: [InboxListItem] { items }
     var allRowsForQuietCheck: [AgentInboxRow] { allRows }

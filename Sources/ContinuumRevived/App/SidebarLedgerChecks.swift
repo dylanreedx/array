@@ -1027,8 +1027,17 @@ extension SidebarLedgerChecks {
                     inbox.layoutForQA()
                     let name = "real-\(layout.rawValue)-\(dark ? "dark" : "light").png"
                     try still(window: window, inbox: inbox, to: output.appendingPathComponent(name))
-                    window.orderOut(nil)
                     written.append(name)
+                    // History, opened through its own heading and scrolled to the top.
+                    if layout == .quietInbox, inbox.clickHistoryDisclosureForQA() {
+                        inbox.layoutForQA()
+                        if let header = inbox.historyHeaderTableRowForQA { inbox.scrollItemToTopForQA(header) }
+                        inbox.layoutForQA()
+                        let historyName = "real-\(layout.rawValue)-history-\(dark ? "dark" : "light").png"
+                        try still(window: window, inbox: inbox, to: output.appendingPathComponent(historyName))
+                        written.append(historyName)
+                    }
+                    window.orderOut(nil)
                 }
             }
         }
