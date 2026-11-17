@@ -2932,7 +2932,7 @@ run_app_check .build/debug/Array --tile-agent-bubble-check
 run_app_check .build/debug/Array --tile-agent-bubble-drag-check
 # Tile icon styles and size: every style opaque, Minimal holds the provider mark,
 # the size setting changes the on-screen side at 30/80/125%, the rim light attaches
-# only while working, the orb's lens bakes once per atlas, icons off draw nothing.
+# only while working, Orb art stays unwarped, icons off draw nothing.
 run_app_check .build/debug/Array --tile-agent-icon-styles-check
 # Plan 110: other agents'' characters in a lead's drawn transcript: each child's
 # chip in that child's pose, a sender's card, a Task row, off-viewport slots own
