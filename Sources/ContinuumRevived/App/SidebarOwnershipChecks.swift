@@ -525,7 +525,10 @@ enum SidebarOwnershipChecks {
         func fold(_ lead: Int) -> AgentInboxRemainderView? {
             inbox.ownershipRemaindersForQA.first { $0.qaParentID == uuid(lead) }
         }
-        func expectFold(_ lead: Int, _ text: String, _ step: String) throws {
+        func expectFold(_ lead: Int, _ quietText: String, _ step: String) throws {
+            // The Ledger draws a closed fold as "N folded" (none here is stopped).
+            let text = inbox.sidebarLayout == .ledger && quietText != "Show less"
+                ? "\(quietText.prefix { $0.isNumber }) folded" : quietText
             guard let row = fold(lead), row.qaTitle == text else {
                 throw Failure(description: "\(label), \(step): \(name(uuid(lead)))'s fold row reads \(fold(lead)?.qaTitle ?? "nothing"), wanted \"\(text)\"")
             }
