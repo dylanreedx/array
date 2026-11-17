@@ -4696,6 +4696,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if let slim = cell as? AgentInboxSlimCellView {
             return (slim.qaHoverActionShown, slim.qaHoverActionTitles)
         }
+        // A Quiet History card offers no hover actions (its menu still does).
+        if cell is SidebarQuietHistoryEntryView { return (false, []) }
         return nil
     }
 

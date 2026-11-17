@@ -140,8 +140,8 @@ enum SidebarQuietInboxChecks {
         // finished helper; a finished family whose helper failed; a finished
         // top-level agent. (A provider-busy failure is retried by the
         // supervisor, so it would read as working here.)
-        func spawn(_ name: String, parent: AgentID? = nil) -> AgentID {
-            supervisor.spawn(role: nil, prompt: nil, cwd: fixture.pbRoot, harness: .pi,
+        func spawn(_ name: String, parent: AgentID? = nil, harness: AgentHarness = .pi) -> AgentID {
+            supervisor.spawn(role: nil, prompt: nil, cwd: fixture.pbRoot, harness: harness,
                              model: "openai-codex/gpt-5.6-sol", thinking: "high",
                              projectId: fixture.projectPb, projectRoot: fixture.pbRoot,
                              parentAgentID: parent, displayName: name)
@@ -156,8 +156,11 @@ enum SidebarQuietInboxChecks {
                                                 errorMessage: words), to: id)
         }
         let lead = spawn("Release lead")
-        let paused1 = spawn("Overnight helper", parent: lead)
-        let paused2 = spawn("Sidebar helper", parent: lead)
+        // The paused helpers run on Codex, whose usage is out LIVE with a second
+        // login to switch to (old failure words alone are no longer a pause).
+        try SidebarDogfoodChecks.makeUsageLive(supervisor, harness: .codex, root: fixture.tempRoot, secondLogin: true)
+        let paused1 = spawn("Overnight helper", parent: lead, harness: .codex)
+        let paused2 = spawn("Sidebar helper", parent: lead, harness: .codex)
         let failedHelper = spawn("Retry the bench", parent: lead)
         let doneHelper = spawn("Write the ledger row", parent: lead)
         let family = spawn("Assess app progress")

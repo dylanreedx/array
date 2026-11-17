@@ -268,12 +268,22 @@ enum SidebarTruthChecks {
             inbox.prefersReducedMotion = { true }
             inbox.foldsHistoryIntoShelf = true
             inbox.layoutForQA()
-            try expect(inbox.historyHeaderTitleForQA == "History (4)",
-                       "history visibility: expected History (4), got \(inbox.historyHeaderTitleForQA ?? "none")")
+            // Quiet inbox counts History by family (dogfood fix); the bare list by row.
+            let historyTitle = inbox.sidebarLayout == .quietInbox ? "History (2)" : "History (4)"
+            try expect(inbox.historyHeaderTitleForQA == historyTitle,
+                       "history visibility: expected \(historyTitle), got \(inbox.historyHeaderTitleForQA ?? "none")")
             if !inbox.isHistoryExpandedForQA { _ = inbox.clickHistoryDisclosureForQA() }
             inbox.layoutForQA()
-            try expect(Set(inbox.rowIdsForQA) == expected,
-                       "history visibility: omit quiet orphans, retain raised hand and own snoozed/unknown families")
+            // Quiet inbox: a History family is one card; its helper is counted
+            // on the card ("1 helper · …"), not drawn as its own row.
+            let quiet = inbox.sidebarLayout == .quietInbox
+            let expectedRows = quiet ? expected.subtracting([id(0xE06), id(0xE08)]) : expected
+            if quiet {
+                try expect(inbox.historyEntryHelpers[id(0xE05)] == 1 && inbox.historyEntryHelpers[id(0xE07)] == 1,
+                           "history visibility: each History family carries its own helper — got \(inbox.historyEntryHelpers)")
+            }
+            try expect(Set(inbox.rowIdsForQA) == expectedRows,
+                       "history visibility: omit quiet orphans, retain raised hand and own snoozed/unknown families — got \(Set(inbox.rowIdsForQA).symmetricDifference(expectedRows).map { String($0.uuidString.suffix(4)) })")
             let args = CommandLine.arguments
             if let flag = args.firstIndex(of: "--render-dir"), args.indices.contains(flag + 1) {
                 let directory = URL(fileURLWithPath: args[flag + 1], isDirectory: true)
@@ -284,12 +294,16 @@ enum SidebarTruthChecks {
             }
             inbox.setSearchForQA("Hidden quiet")
             inbox.layoutForQA()
-            try expect(Set(inbox.rowIdsForQA) == Set([id(0xE02), id(0xE03)])
-                       && inbox.historyHeaderTitleForQA == "History (2)",
+            // Quiet: the recovered orphan family is one card holding its helper.
+            try expect(quiet
+                       ? Set(inbox.rowIdsForQA) == Set([id(0xE02)]) && inbox.historyHeaderTitleForQA == "History (1)"
+                           && inbox.historyEntryHelpers[id(0xE02)] == 1
+                       : Set(inbox.rowIdsForQA) == Set([id(0xE02), id(0xE03)])
+                           && inbox.historyHeaderTitleForQA == "History (2)",
                        "history visibility: search must recover both quiet orphan records")
             inbox.setSearchForQA("")
             inbox.layoutForQA()
-            try expect(Set(inbox.rowIdsForQA) == expected,
+            try expect(Set(inbox.rowIdsForQA) == expectedRows,
                        "history visibility: clearing search must restore the protected default list")
 
             let workspace = id(0xEFC), otherWorkspace = id(0xEFD)
@@ -820,6 +834,18 @@ enum SidebarTruthChecks {
                    && inbox.qaLastRowMotion.exiting == motionBefore.exiting,
                    "Reduce Motion: a row leaves without a fade — ghosts \(inbox.qaLiveExitGhostCount)")
         inbox.prefersReducedMotion = { false }
+        // Quiet inbox (dogfood fix): a History family is ONE card; its helpers
+        // travel inside it and are counted on it, never drawn as stray rows.
+        if inbox.sidebarLayout == .quietInbox {
+            try expect(block(world, parentAgent) == "history", "W4: the parent itself is in History")
+            for child in [childOne, childTwo] {
+                try expect(block(world, child) == nil,
+                           "W4: a closed parent's subagent must travel inside its History card, never a stray row — drawn \(String(describing: block(world, child)))")
+            }
+            try expect(inbox.historyEntryHelpers[parentAgent.rawValue] == 2,
+                       "W4: the History card counts its 2 helpers — got \(String(describing: inbox.historyEntryHelpers[parentAgent.rawValue]))")
+            return
+        }
         for child in [childOne, childTwo] {
             let drawn = block(world, child)
             try expect(drawn == "history",

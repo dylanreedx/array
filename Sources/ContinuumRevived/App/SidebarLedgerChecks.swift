@@ -100,7 +100,9 @@ enum SidebarLedgerChecks {
         out.append(row(35, "Redesign tile agent bubble", state: .approval, outcome: nil))
         out.append(row(36, "Explain integral fields", outcome: .failed,
                        detail: "Claude Code reported an error without details.", lifecycle: life(36)))
-        return out
+        // Usage is out LIVE for both CLIs, each with a second login to switch to.
+        return SidebarUsageLive.stamp(out, states: [
+            "Claude": .init(exhausted: true, canSwitch: true), "Codex": .init(exhausted: true, canSwitch: true)])
     }
 
     /// Helpers 18, 19, 20 under the lead; 12 under sub-lead 7; leads 30,
@@ -470,7 +472,7 @@ extension SidebarLedgerChecks {
             lead.acknowledgedTerminalSequence = 1
             lead.runCompletedAt = ended
             try store.upsert(lead)
-            var helper = AgentRecord(id: AgentID(rawValue: UUID()), displayName: "Finished helper", harness: .pi,
+            var helper = AgentRecord(id: AgentID(rawValue: UUID()), displayName: "Finished helper", harness: .codex,
                 model: lead.model, thinking: lead.thinking, cwd: lead.cwd, projectId: lead.projectId,
                 parentAgentID: lead.id, createdAt: ended.addingTimeInterval(-60), lastActivityAt: ended)
             helper.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "t", outcome: .succeeded, endedAt: ended)
@@ -545,6 +547,7 @@ extension SidebarLedgerChecks {
         guard let helperID = supervisor.records.values.first(where: { $0.parentAgentID == leadID })?.id else {
             throw Failure(description: "the fixture helper is missing")
         }
+        try SidebarDogfoodChecks.makeUsageLive(supervisor, harness: .codex, root: f.tempRoot, secondLogin: true)
         let thread = AgentSupervisor.threadId(for: helperID)
         supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "usage"), to: helperID)
         supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: "usage", outcome: .failed,
@@ -951,16 +954,18 @@ extension SidebarLedgerChecks {
                        "precondition: the root must hold the only family Clear mark")
             let revealed = rows().map { r -> AgentInboxRow in
                 var next = r
-                if r.id == uuid(36) || r.id == uuid(31) { next.failureDetail = usage }
+                // A blocker the words reveal late (sign-in). A usage stop is live
+                // state, not a same-event blocker, so it is not used here.
+                if r.id == uuid(36) || r.id == uuid(31) { next.failureDetail = "OAuth session expired" }
                 return next
             }
             inbox.reload(rows: revealed)
             inbox.layoutForQA()
             try expect(inbox.clearMarks[uuid(36)] == nil && liveIDs().contains(uuid(36)),
-                       "same-event usage detail left a blocker hidden by Clear")
+                       "same-event sign-in detail left a blocker hidden by Clear")
             try expect(inbox.clearMarks[uuid(30)] == nil && liveIDs().contains(uuid(30)),
                        "same-event descendant blocker left its root hidden by Clear")
-            try expect(inbox.sidebarIncidents.contains { $0.kind == .cause(.usageLimit) && $0.agentIDs.contains(uuid(31)) },
+            try expect(inbox.sidebarIncidents.contains { $0.kind == .cause(.signInExpired) && $0.agentIDs.contains(uuid(31)) },
                        "late descendant blocker did not reach the rendered incident list")
             try press(inbox.undoButtonForQA, in: window, "Undo repeated Clear")
             inbox.layoutForQA()

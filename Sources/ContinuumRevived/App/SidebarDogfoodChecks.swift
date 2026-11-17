@@ -96,6 +96,39 @@ enum SidebarDogfoodChecks {
         return Harness(fixture: fixture, suite: suite, window: window, sidebar: sidebar)
     }
 
+    /// Make one CLI's usage LIVE-exhausted through the supervisor's real
+    /// reading path (CLI folders under `root`, no CLI probe), optionally with a
+    /// second signed-in login to switch to. Legs that model "usage ran out"
+    /// owe this: since the dogfood fix, old failure words alone are not a pause.
+    static func makeUsageLive(_ supervisor: AgentSupervisor, harness: AgentHarness, root: URL,
+                              secondLogin: Bool) throws {
+        let folders = root.appendingPathComponent("cli-folders-\(UUID().uuidString)", isDirectory: true)
+        supervisor.personalCodexDirectory = folders.appendingPathComponent("codex", isDirectory: true)
+        supervisor.personalClaudeDirectory = folders.appendingPathComponent("claude", isDirectory: true)
+        for dir in [supervisor.personalCodexDirectory.appendingPathComponent("sessions"),
+                    supervisor.personalClaudeDirectory.appendingPathComponent("projects")] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        supervisor.accountUsageReader = { _ in nil }
+        func read(_ accountId: String, org: String, used: Double) {
+            supervisor.applyAccountUsageReading(
+                .init(identity: AgentAccountIdentity(harness: harness, email: "\(org)@example.test",
+                                                     organizationId: org, observedAt: Date()),
+                      quota: AgentAccountQuotaSnapshot(
+                        harness: harness,
+                        windows: [AgentQuotaWindow(kind: .fiveHour, utilization: used,
+                                                   resetsAt: Date().addingTimeInterval(3_600))],
+                        observedAt: Date(), source: harness == .codex ? .codexRateLimitsRead : .claudeUsageRequest,
+                        accountId: accountId)),
+                accountId: accountId)
+        }
+        read(supervisor.activeAccount(for: harness).id, org: "org-in-use", used: 1.0)
+        if secondLogin {
+            let other = try supervisor.addAccount(harness: harness, label: supervisor.nextAccountLabel(for: harness))
+            read(other.id, org: "org-other", used: 0.1)
+        }
+    }
+
     static func pump(_ seconds: TimeInterval) {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
