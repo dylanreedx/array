@@ -264,6 +264,32 @@ enum LongSessionMemoryChecks {
             idleGrowth = mallocBytesInUse() - idleStart
         }
 
+        // Windowed history, witnessed: distant blocks are released, and a
+        // copy of the whole transcript still holds its first turn (laid out
+        // for the copy, and released again).
+        func transcripts(in view: NSView) -> [AgentTranscriptCanvasView] {
+            (view as? AgentTranscriptCanvasView).map { [$0] } ?? view.subviews.flatMap(transcripts(in:))
+        }
+        let canvases = live.compactMap { canvas.tileView(for: $0.tile.id) }.flatMap(transcripts(in:))
+        try expect(canvases.count == live.count, "every live tile draws its transcript, \(canvases.count) of \(live.count)")
+        let released = canvases.map(\.qaReleasedBlockCount).reduce(0, +)
+        try expect(released > 0, "transcripts release the layout of blocks far from what they show, 0 released")
+        if let oldest = canvases.first(where: { $0.qaReleasedBlockCount > 0 }) {
+            let before = oldest.qaReleasedBlockCount
+            oldest.selectAll(nil)
+            let copied = oldest.selectedText ?? ""
+            try expect(copied.contains("That fixes turn 0 for agent"),
+                       "a copy of the whole transcript includes its released first turn (\(copied.count) characters copied)")
+            oldest.select(range: NSRange(location: 0, length: 0))
+            oldest.releasingDistantLayout()
+            try expect(oldest.qaReleasedBlockCount >= before,
+                       "copying lays released blocks out without keeping them: \(before) released before, \(oldest.qaReleasedBlockCount) after")
+        }
+        // A closed tile's hidden resting host goes with it.
+        try expect(RestingHost.qaLiveWindowCount <= live.count,
+                   "closed tiles free their resting hosts: \(RestingHost.qaLiveWindowCount) host windows for \(live.count) open tiles")
+        print("long-session memory: \(released) blocks released across \(canvases.count) transcripts, \(RestingHost.qaLiveWindowCount) resting hosts")
+
         let streamed = turnByAgent.values.reduce(0, +)
         try expect(streamed >= turnCount,
                    "every turn streamed through a runner: \(streamed) runs for \(turnCount) turns")
@@ -271,8 +297,8 @@ enum LongSessionMemoryChecks {
         // views, and what the first idle settles (resting chrome, tool detail).
         // After it, what grows must be the transcripts' own text and its
         // structure, both copies of it (the supervisor's and the tile's), and
-        // a placement per block: well under 20 times the text streamed. Before the
-        // fixes it was about 50 times (runners, CoreText for every line ever
+        // a placement per block: under 18 times the text streamed. Before the
+        // fixes it was 58 times (runners, CoreText for every line ever
         // drawn, one Auto Layout engine for every resting tile).
         let warmHours = min(2, samples.count - 1)
         let warm = warmHours > 0 ? samples[warmHours - 1] : 0
@@ -289,5 +315,5 @@ enum LongSessionMemoryChecks {
     }
 
     /// Retained bytes per byte of streamed text, after warm-up.
-    static let steadyBudgetRatio = 20.0
+    static let steadyBudgetRatio = 18.0
 }
