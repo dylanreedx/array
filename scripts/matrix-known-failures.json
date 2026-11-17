@@ -52,10 +52,18 @@
     {
       "leg": "--agent-steering-recovery-check",
       "kind": "flaky",
-      "reason": "The same forced-turn token assertion flakes on the documented base4c9d7495 and steady-memory f4d7e00c: base7/10 pass, branch8/10 pass in20 interleaved runs; release lead explicitly directed recording it as pre-existing.",
+      "reason": "The same forced-turn token assertion flakes on documented base 4c9d7495 and steady-memory f4d7e00c: base 7/10 pass, branch 8/10 pass in 20 interleaved runs. Release lead explicitly directed recording it as pre-existing.",
       "evidence": "~/array-scratch/release-features/steady-memory.md and ~/array-scratch/steady-memory-release/steering-runs.txt plus steering-base-{5,6,7}.log / steering-branch-{6,9}.log. Raw logs verify equal failed assertions; head attribution comes from the hand-off record, not embedded binary hashes. Combined release18d0f487 steering check passed.",
       "added": "2026-11-16",
       "expires": "2026-12-16"
+    },
+    {
+      "leg": "--tile-surface-residency-check",
+      "kind": "known-red",
+      "reason": "Legacy list-renderer quiet camera cost already exceeds the unchanged 8.3 ms limit on pre-Wave1/2 base 7cc801d2. Fresh common-policy runs: base 21.57 ms, combined release 20.61 ms, all five arm populations correct. This documents the quiet-cost failure only; earlier behavioral failures remain release blockers.",
+      "evidence": "Lead memory clearance identifies residency as pre-existing. Fresh source/binary-stamped baseline: ~/array-scratch/release-features/release-0753-residency-legacy-base-7cc801d2/ (QA arm assertions only), paired common-policy logs: release-0753-residency-common-policy-AB/. Independent provenance audit in candidate-0753.md. Conductor full-gate postcheck requires the default-canvas opt-out success, all exact arm counts and this specific quiet-cost failure; other failures are not accepted.",
+      "added": "2026-11-17",
+      "expires": "2026-12-17"
     }
   ]
 }
