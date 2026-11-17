@@ -1223,14 +1223,20 @@ enum TileAgentBubbleChecks {
     private static func writeHoverFilm(canvas: CanvasNSView, window: NSWindow, defaults: UserDefaults,
                                        views: [ManagedAgentTileNSView], to directory: URL) throws -> [String] {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let subject = views[3]
+        // TILE_AGENT_BUBBLE_FILM_MODE=working films the working first agent (no
+        // pointer) for 6 s at TILE_AGENT_BUBBLE_FILM_ZOOM; else the hover script.
+        let env = ProcessInfo.processInfo.environment
+        let working = env["TILE_AGENT_BUBBLE_FILM_MODE"] == "working"
+        let zoom = Double(env["TILE_AGENT_BUBBLE_FILM_ZOOM"] ?? "") ?? 2
+        let subject = working ? views[0] : views[3]
         setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.orb.rawValue)
         try expect(pump(until: { showsStyle(.orb, views, canvas) }), "Orb for the hover film")
-        window.appearance = NSAppearance(named: .darkAqua)
+        if env["TILE_AGENT_BUBBLE_FILM_APPEARANCE"] == "light" { window.appearance = NSAppearance(named: .aqua) }
+        if env["TILE_AGENT_BUBBLE_FILM_APPEARANCE"] != "light" { window.appearance = NSAppearance(named: .darkAqua) }
         guard let world = canvas.allTilesInWorldFrames().first(where: { $0.id == subject.tile.id })?.frame else {
             throw Failure(description: "no world frame for the Orb film")
         }
-        canvas.setViewport(CanvasViewport(x: world.x - 40, y: world.y - 40, zoom: 2))
+        canvas.setViewport(CanvasViewport(x: world.x - 40 / zoom * 2, y: world.y - 40 / zoom * 2, zoom: zoom))
         canvas.layoutSubtreeIfNeeded()
         pump(0.4)
         guard let bubble = subject.qaAgentBubble, let frame = subject.agentBubbleFrame else {
@@ -1239,12 +1245,12 @@ enum TileAgentBubbleChecks {
         guard let hostView = window.contentView else { throw Failure(description: "no content view") }
         let box = subject.convert(frame.insetBy(dx: -24, dy: -24), to: hostView)
         // (time, hovered): hover in, hold, out; then a flick in and out.
-        let script: [(Double, Bool)] = [(0.4, true), (1.5, false), (2.6, true), (2.68, false), (2.76, true), (2.84, false), (3.6, true), (3.66, false)]
+        let script: [(Double, Bool)] = working ? [] : [(0.4, true), (1.5, false), (2.6, true), (2.68, false), (2.76, true), (2.84, false), (3.6, true), (3.66, false)]
         var next = 0, log = "", count = 0
         pump(0.3)
         let start = Date()
         func scale() -> Double { (bubble.presentation()?.value(forKeyPath: "transform.scale.x") as? Double) ?? 1 }
-        while Date().timeIntervalSince(start) < 4.4 {
+        while Date().timeIntervalSince(start) < (working ? 6.2 : 4.4) {
             let t = Date().timeIntervalSince(start)
             while next < script.count, script[next].0 <= t { bubble.setHovered(script[next].1); next += 1 }
             CATransaction.flush()

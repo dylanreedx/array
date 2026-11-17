@@ -173,8 +173,8 @@ enum TileAgentIconStyleChecks {
             let bubble = subject.qaAgentBubble!
             let phase = bubble.phase
             try Check.expect(bubble.isWorking, "\(style.title): the fixture's first agent is working")
-            try Check.expect(bubble.isMoving && bubble.qaAnimationKeys.contains(TileAgentBubbleLayer.motionKeyPrefix + "rim"),
-                             "\(style.title): the rim light is attached while working (\(bubble.qaAnimationKeys))")
+            try Check.expect(bubble.isMoving && bubble.qaAnimationKeys.contains(TileAgentBubbleLayer.motionKeyPrefix + (style == .orb ? "churn.current" : "rim")),
+                             "\(style.title): the working light is attached while working (\(bubble.qaAnimationKeys))")
             try Check.expect(bubble.qaParts.orbitShown, "\(style.title): the rim light is visible while working")
             let layouts = subject.qaTitleBarLayoutPasses
             let markFrame = bubble.qaMarkFrame

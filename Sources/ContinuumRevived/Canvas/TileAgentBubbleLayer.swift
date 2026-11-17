@@ -193,10 +193,16 @@ final class TileAgentBubbleLayer: CALayer {
     private let rim = CAGradientLayer()
     private let rimMask = CAShapeLayer()
     private let specular = CAGradientLayer()
+    private let specularMask = CAShapeLayer()
+    /// The globe's slow current: a soft conic wash turning inside the liquid
+    /// while the agent works; hidden and unanimated at rest.
+    private let swirl = CAGradientLayer()
 
     static let motionKeyPrefix = "tileAgentBubble."
     /// Seconds for the rim light to travel once round the Orb or Minimal's edge.
     static let rimPeriod: CFTimeInterval = 5
+    /// Seconds for the globe's current to turn once.
+    static let churnPeriod: CFTimeInterval = 16
 
     init(sprite: CharacterSpriteLayer) {
         self.sprite = sprite
@@ -223,17 +229,19 @@ final class TileAgentBubbleLayer: CALayer {
         actions = Self.still
         for layer in [shadowCaster, plate, plateMask, clip, clipMask, wash, sheen, ring, ringMask,
                       orbitHost, orbitMask, orbit, artClip, artMask, glass, glassMask, lens, rim, rimMask,
-                      specular] as [CALayer] {
+                      specular, specularMask, swirl] as [CALayer] {
             layer.actions = Self.still
         }
         isHidden = true
         shadowCaster.shadowColor = NSColor.black.cgColor
         orbit.type = .conic
         lens.type = .radial
-        specular.type = .radial
+        specular.type = .axial
+        swirl.type = .conic
+        swirl.isHidden = true
         // A mask paints only its alpha; black is just "opaque".
         for mask in [plateMask, clipMask, artMask, glassMask] { mask.fillColor = NSColor.black.cgColor }
-        for mask in [ringMask, orbitMask, rimMask] {
+        for mask in [ringMask, orbitMask, rimMask, specularMask] {
             mask.fillColor = nil
             mask.strokeColor = NSColor.black.cgColor
         }
@@ -242,11 +250,13 @@ final class TileAgentBubbleLayer: CALayer {
         ring.mask = ringMask
         orbitHost.mask = orbitMask
         glass.mask = glassMask
+        specular.mask = specularMask
         rim.mask = rimMask
         addSublayer(shadowCaster)
         addSublayer(plate)
         addSublayer(clip)
         clip.addSublayer(wash)
+        clip.addSublayer(swirl)
         clip.addSublayer(sheen)
         addSublayer(artClip)
         artClip.addSublayer(sprite)
@@ -405,7 +415,11 @@ final class TileAgentBubbleLayer: CALayer {
         artClip.mask = artMask
         artMask.path = shape
         glassMask.path = shape
-        wash.frame = box
+        // The liquid is taller than the plate so its surface can slosh without
+        // ever baring an edge; the plate's circle crops it.
+        wash.frame = bubbleStyle == .orb ? box.insetBy(dx: 0, dy: -side * 0.08) : box
+        let reach = side * 1.5
+        swirl.frame = CGRect(x: box.midX - reach / 2, y: box.midY - reach / 2, width: reach, height: reach)
         sheen.frame = workingStyle == "sheen"
             ? CGRect(x: box.minX - box.width, y: box.minY, width: box.width * 0.7, height: box.height) : box
         // A hairline edge, inside the plate (a mask strokes both ways; the
@@ -417,7 +431,7 @@ final class TileAgentBubbleLayer: CALayer {
         lens.frame = box
         rim.frame = box
         rimMask.frame = box
-        let rimWidth = max(0.75, side * 0.085)
+        let rimWidth = max(0.75, side * (bubbleStyle == .orb ? 0.07 : 0.085))
         rimMask.path = Plate.path(bubbleStyle, in: box.insetBy(dx: rimWidth / 2, dy: rimWidth / 2), tileRadius: tileRadius)
         rimMask.lineWidth = rimWidth
         specular.frame = CGRect(x: box.minX + side * 0.14, y: box.minY + side * 0.07,
@@ -446,7 +460,17 @@ final class TileAgentBubbleLayer: CALayer {
             let k = Plate.orbArtScale
             artClip.sublayerTransform = CATransform3DMakeScale(k, k, 1)
             artMask.path = CGPath(ellipseIn: box.insetBy(dx: side * Plate.orbArtInset, dy: side * Plate.orbArtInset), transform: nil)
-            specular.frame = CGRect(x: box.minX + side * 0.2, y: box.minY + side * 0.05, width: side * 0.6, height: side * 0.28)
+            // A crisp curved highlight on the upper left: a short arc of the
+            // glass's own curve, stroked with a round cap and fading out.
+            specular.frame = box
+            specularMask.frame = box
+            let arc = CGMutablePath()
+            let radius = side * 0.36
+            arc.addArc(center: CGPoint(x: box.midX, y: box.midY), radius: radius,
+                       startAngle: 192 * .pi / 180, endAngle: 262 * .pi / 180, clockwise: false)
+            specularMask.path = arc
+            specularMask.lineWidth = max(1, side * 0.05)
+            specularMask.lineCap = .round
         }
         if workingStyle == "sheen" { reconcileMotion(force: true) }
     }
@@ -497,30 +521,52 @@ final class TileAgentBubbleLayer: CALayer {
         // The glass's target opacity for the style and hover: the same value
         // a hover fade animates to, so setting it never fights the fade.
         glass.opacity = orb && (Self.orbGlassAtRest || isHovered) ? 1 : 0
+        swirl.isHidden = true
         if orb {
-            // The lens: clear in the middle, the plate's colour deepening into
-            // the edge, as glass thickens towards its rim.
-            // Over the art (treatment A): a vignette that darkens the character
-            // towards the rim while its own colours hold in the middle.
-            let deep = mix(fill, .black, dark ? 0.7 : 0.5)
-            lens.colors = [deep.withAlphaComponent(0).cgColor, deep.withAlphaComponent(0).cgColor,
-                           deep.withAlphaComponent(0.6).cgColor]
-            lens.locations = [0, 0.55, 1]
+            // A globe: dark glass in a thin dark metal rim, holding a liquid in
+            // the agent's colour, deep at the bottom and edges, bright towards
+            // the middle and the surface. The character sits in the liquid,
+            // under the glass's vignette and highlight.
+            let liquid = tint != nil ? hue : srgb(palette.textSecondary)
+            let empty = mix(liquid, .black, 0.9)
+            let surface = mix(liquid, .white, 0.5)
+            wash.type = .axial
+            wash.startPoint = CGPoint(x: 0.5, y: 0)
+            wash.endPoint = CGPoint(x: 0.5, y: 1)
+            wash.colors = [empty, empty, mix(liquid, .black, 0.55), surface, mix(liquid, .white, 0.14),
+                           mix(liquid, .black, 0.2), mix(liquid, .black, 0.7), mix(liquid, .black, 0.9)].map(\.cgColor)
+            wash.locations = [0, 0.2, 0.225, 0.245, 0.3, 0.52, 0.85, 1]
+            // Brighter toward the middle of the liquid.
+            sheen.isHidden = false
+            sheen.type = .radial
+            sheen.startPoint = CGPoint(x: 0.5, y: 0.55)
+            sheen.endPoint = CGPoint(x: 1, y: 1.05)
+            sheen.colors = [mix(liquid, .white, 0.35).withAlphaComponent(0.55).cgColor,
+                            liquid.withAlphaComponent(0).cgColor]
+            sheen.locations = [0, 1]
+            // The glass's thickness: clear in the middle, near black at the edge.
+            lens.colors = [NSColor.black.withAlphaComponent(0).cgColor, NSColor.black.withAlphaComponent(0).cgColor,
+                           NSColor.black.withAlphaComponent(0.8).cgColor]
+            lens.locations = [0, 0.42, 1]
             lens.startPoint = CGPoint(x: 0.5, y: 0.5)
             lens.endPoint = CGPoint(x: 1, y: 1)
-            // The rim: bright where the light comes in (top left), fading
-            // round, and a weaker return at the bottom right.
-            rim.colors = [NSColor.white.withAlphaComponent(dark ? 0.75 : 0.9).cgColor,
-                          NSColor.white.withAlphaComponent(0.08).cgColor,
-                          NSColor.white.withAlphaComponent(dark ? 0.35 : 0.5).cgColor]
-            rim.locations = [0, 0.55, 1]
+            // The rim: dark metal, lit from the top left, a weaker return below right.
+            rim.colors = [NSColor(white: 0.62, alpha: 1).cgColor, NSColor(white: 0.2, alpha: 1).cgColor,
+                          NSColor(white: 0.07, alpha: 1).cgColor, NSColor(white: 0.3, alpha: 1).cgColor]
+            rim.locations = [0, 0.35, 0.7, 1]
             rim.startPoint = CGPoint(x: 0.15, y: 0)
             rim.endPoint = CGPoint(x: 0.85, y: 1)
-            // The specular: a soft oval of light high on the left.
-            specular.colors = [NSColor.white.withAlphaComponent(dark ? 0.6 : 0.7).cgColor,
-                               NSColor.white.withAlphaComponent(0).cgColor]
-            specular.startPoint = CGPoint(x: 0.5, y: 0.5)
-            specular.endPoint = CGPoint(x: 1, y: 1)
+            // The specular: a crisp curved highlight, brightest at its upper left.
+            specular.colors = [NSColor.white.withAlphaComponent(0.85).cgColor, NSColor.white.withAlphaComponent(0.25).cgColor]
+            specular.startPoint = CGPoint(x: 0.2, y: 0.1)
+            specular.endPoint = CGPoint(x: 0.6, y: 0.6)
+            // The current: soft arms of light turning through the liquid.
+            let arm = mix(liquid, .white, 0.5).withAlphaComponent(0.13).cgColor, none = liquid.withAlphaComponent(0).cgColor
+            swirl.colors = [none, arm, none, arm, none, arm, none]
+            swirl.locations = [0, 0.1, 0.3, 0.5, 0.68, 0.84, 1]
+            swirl.startPoint = CGPoint(x: 0.5, y: 0.5)
+            swirl.endPoint = CGPoint(x: 0.5, y: 0)
+            swirl.isHidden = !working
         }
 
         // Working, Inline and Squircle take the sidebar's light; the Orb and
@@ -567,11 +613,11 @@ final class TileAgentBubbleLayer: CALayer {
             // The rim light: a hairline track just inside the edge, a band of
             // light turning inside it while the agent works.
             let light = tint ?? palette.textPrimary
-            ring.isHidden = orb && !working
+            ring.isHidden = orb
             ring.opacity = 1
             ring.colors = flat(orb ? light.withAlphaComponent(0.22)
                                    : palette.textSecondary.withAlphaComponent(dark ? 0.60 : 0.65))
-            orbitHost.isHidden = !working
+            orbitHost.isHidden = orb || !working
             orbit.startPoint = CGPoint(x: 0.5, y: 0.5)
             orbit.endPoint = CGPoint(x: 0.5, y: 0)
             orbit.colors = [light.withAlphaComponent(0.15).cgColor, light.withAlphaComponent(0.25).cgColor,
@@ -672,10 +718,33 @@ final class TileAgentBubbleLayer: CALayer {
         let moving = isWorking && !isPaused && !isHidden && !reduceMotion()
         let signature = moving ? "\(workingStyle):\(bubbleStyle):\(bounds.size)" : nil
         guard force || signature != motionSignature else { return }
-        for layer in [wash, sheen, orbit, ring] { layer.removeAllAnimations() }
+        for layer in [wash, sheen, orbit, ring, swirl] { layer.removeAllAnimations() }
         motionSignature = signature
         guard moving else { return }
-        if bubbleStyle == .orb || bubbleStyle == .minimalSquircle {
+        if bubbleStyle == .orb {
+            // The globe's churn: the current turns once in 16 s and the liquid
+            // rises and settles by a hair every 5 s. Render-server animations on
+            // the shared clock; nothing per frame, nothing at rest.
+            let turn = CABasicAnimation(keyPath: "transform.rotation.z")
+            turn.fromValue = 0
+            turn.toValue = 2 * Double.pi
+            turn.duration = Self.churnPeriod
+            turn.repeatCount = .infinity
+            turn.beginTime = Self.beginTime(period: Self.churnPeriod, phase: phase, in: swirl)
+            swirl.add(turn, forKey: Self.motionKeyPrefix + "churn.current")
+            let rise = CABasicAnimation(keyPath: "transform.translation.y")
+            rise.fromValue = -bounds.height * 0.02
+            rise.toValue = bounds.height * 0.02
+            rise.duration = 2.5
+            rise.autoreverses = true
+            rise.repeatCount = .infinity
+            rise.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            rise.beginTime = Self.beginTime(period: 5, phase: phase, in: wash)
+            wash.add(rise, forKey: Self.motionKeyPrefix + "churn.surface")
+            Self.motionInstallCount += 1
+            return
+        }
+        if bubbleStyle == .minimalSquircle {
             // The rim light: one turn every 5 s, on the shared clock so a
             // re-install never jumps. A render-server animation: nothing per frame.
             let turn = CABasicAnimation(keyPath: "transform.rotation.z")
@@ -740,10 +809,10 @@ final class TileAgentBubbleLayer: CALayer {
 
     /// QA: the parts' state, for the witnesses.
     var qaParts: (plateShown: Bool, ringShown: Bool, glassShown: Bool, orbitShown: Bool, sheenShown: Bool) {
-        (!plate.isHidden, !ring.isHidden, !glass.isHidden && glass.opacity > 0, !orbitHost.isHidden, !sheen.isHidden)
+        (!plate.isHidden, !ring.isHidden, !glass.isHidden && glass.opacity > 0, !orbitHost.isHidden || !swirl.isHidden, !sheen.isHidden)
     }
     var qaAnimationKeys: [String] {
-        [wash, sheen, orbit, ring].flatMap { $0.animationKeys() ?? [] }
+        [wash, sheen, orbit, ring, swirl].flatMap { $0.animationKeys() ?? [] }
     }
     /// QA: whether the art is clipped to the plate.
     var qaArtClippedToPlate: Bool { artClip.mask === artMask && artMask.path != nil }
