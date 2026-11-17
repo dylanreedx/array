@@ -3332,7 +3332,8 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
             tileBody: SurfaceToken.tileBody.color.nsColor(for: theme),
             textPrimary: TextToken.textPrimary.color.nsColor(for: theme),
             textSecondary: TextToken.textSecondary.color.nsColor(for: theme),
-            providerForeground: BrandToken.providerForeground.nsColor(for: theme)))
+            providerForeground: BrandToken.providerForeground.nsColor(for: theme),
+            orbRimColors: AgentIconMaterialToken.orbRimCGColors))
         if let titleEditor { styleTitleEditor(titleEditor) }
         needsDisplay = true
     }

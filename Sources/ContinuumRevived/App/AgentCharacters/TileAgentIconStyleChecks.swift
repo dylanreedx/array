@@ -113,6 +113,11 @@ enum TileAgentIconStyleChecks {
                     try Check.expect(!host.isHidden && bubble.qaPlateColors.count == 2 && bubble.qaPlateColors.allSatisfy { $0.alpha == 1 },
                                      "\(label): the plate is not opaque")
                     try Check.expect(bubble.qaPlateMaskPath != nil && bubble.qaParts.plateShown, "\(label): no plate")
+                    if style == .orb {
+                        let approvedRim = [0.62, 0.2, 0.07, 0.3].map { NSColor(white: CGFloat($0), alpha: 1).cgColor }
+                        try Check.expect(bubble.qaOrbRimColors == approvedRim,
+                                         "\(label): the metal rim keeps its approved Gamma 2.2 gray stops")
+                    }
                     if style == .minimalSquircle {
                         try Check.expect(bubble.qaMarkShown, "\(label): Minimal holds the provider mark")
                         try Check.expect(view.qaProviderMarkRect == nil, "\(label): the title's own mark steps aside")

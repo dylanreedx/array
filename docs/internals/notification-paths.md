@@ -150,7 +150,45 @@ one lead prompt; each result becomes its own existing transcript card. The
 busy preview names the helper count rather than claiming the first helper
 sent every result. Single-result wakes retain their existing attribution.
 Rejected admission retains the whole batch for retry; a collect-channel
-recipient (0.7.44) is never woken. Timing, alert suppression and recipient policies are unchanged.
+recipient (0.7.44) is never woken. Recipient selection and OS alert suppression
+remain as described here; a released transcript has the settlement rules below.
+
+For **SRC-01**, an accepted helper turn records its runner generation and the
+last assistant entry before its own output (the reply floor). Its completion
+retains that identity, its turn-end subscription cutoff and its captured report.
+Only an assistant entry after the floor supplies its final reply; a turn with no
+reply carries no `finalText`. Without an owned report, its wake says
+`(no reply this turn)`. When an idle
+transcript was released, the floor, events and completion join the same reload
+FIFO: the completion captures its reply after its own events, before later
+turns' events. Subscriptions accepted after its cutoff belong to a later turn;
+a later report cannot replace this completion's report.
+
+A helper completion waiting on a released transcript has a 20-second local
+settlement deadline. If the archive has not been successfully reloaded by then,
+a would-be successful completion settles as an explicit failure naming the
+unavailable transcript, with no final reply; it never substitutes the previous
+answer. Successful reload and deadline settlement share
+one local completion guard, so recovery after that failure does not settle it
+again. A pending wake refresh uses only the still-current generation's captured
+reply or same-turn late report. These are local settlement/attribution rules,
+not an exactly-once transport or model-consumption guarantee; the recoverable
+delivery limits below still apply. The bound does not drain a failed reload's
+queued writes: that FIFO remains unbounded under continued work. Bounded admission
+or durable overflow is proposed work, not implemented recovery.
+
+An already held B is protected as soon as C is accepted, before C's first
+provider event; B cannot release into C's startup. C's eventual completion
+supersedes the hold and decides the still-pending B subscriptions together with
+C's, using C's outcome, reply, report and identity under the existing hold policy.
+A report filed between turns can update a genuine hold before releasing it.
+An old B completion merely delayed by reload settles under B's captured scope;
+it does not inherit C's background-work hold. These internal messages add no OS
+sender, recipient surface or tap action. Offline behavioral witnesses:
+`--transcript-retention-check` (`TranscriptRetentionDeliveryChecks`: reload,
+read failure/deadline, no-output turns, reply/report/subscription ownership,
+held startup and late reports, receipt generations and visit anchors) and
+`--helper-completion-check` (holds, queue custody and wake refresh).
 
 For **SRC-01**, each helper runner
 turn plus authenticated recipient has a persistent delivery record in the
@@ -223,7 +261,8 @@ ONE result is delivered, headed `ended its turn with background work still
 running` and carrying the helper's last message (a dev-server helper that
 answers in prose without a report). Each hold is a durable delivery record
 flagged `held`: the holding process skips it during recovery and delivers it on
-release; a relaunch, which holds nothing, replays it exactly once. A completed
+release; a relaunch, which holds nothing, replays its record through the
+recoverable delivery path above. A completed
 turn without a report is headed `<name> finished: ended its turn without filing a
 report`; a same-turn report refreshed before admission restores `succeeded`. A
 helper note left in a queue does not keep a relaunched lead's queue paused.

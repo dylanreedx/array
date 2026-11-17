@@ -94,6 +94,14 @@ extension TokenColor {
     func nsColor(in view: NSView) -> NSColor { nsColor(for: view.effectiveTokenTheme) }
 }
 
+extension AgentIconMaterialToken {
+    /// Preserve the Orb's original `NSColor(white:alpha:)` color space and
+    /// components once for all headers; the `TokenColor` bridge is sRGB.
+    @MainActor static let orbRimCGColors: [CGColor] = {
+        orbRimGray.map { CGColor(genericGrayGamma2_2Gray: CGFloat($0), alpha: 1) }
+    }()
+}
+
 // Ticket: docs/38-tickets/90-agent-ux/P1.10-adopt-tokens-tile.md
 //
 // `Typography` and `Metrics` are Foundation-only on purpose — both files say

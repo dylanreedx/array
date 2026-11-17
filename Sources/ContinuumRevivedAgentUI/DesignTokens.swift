@@ -120,6 +120,13 @@ public enum BrandToken {
         dark: ChipColor(r: 1, g: 1, b: 1))
 }
 
+/// Decorative materials used by agent icons. The Orb's metal shading is fixed
+/// in both appearances. These are Generic Gamma 2.2 Gray components, preserving
+/// the approved material separately from the sRGB `ChipColor` token leaves.
+public enum AgentIconMaterialToken {
+    public static let orbRimGray: [Double] = [0.62, 0.2, 0.07, 0.3]
+}
+
 /// Lines. Two are gated; one is an explicit, reasoned exemption.
 public enum LineToken: String, CaseIterable, Sendable {
     /// The outline of an object — a tile, a dock, a text field. Delineates, so

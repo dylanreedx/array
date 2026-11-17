@@ -158,6 +158,7 @@ final class TileAgentBubbleLayer: CALayer {
         var textPrimary: NSColor
         var textSecondary: NSColor
         var providerForeground: NSColor
+        var orbRimColors: [CGColor]
     }
     private var palette: Palette?
 
@@ -555,8 +556,7 @@ final class TileAgentBubbleLayer: CALayer {
             lens.startPoint = CGPoint(x: 0.5, y: 0.5)
             lens.endPoint = CGPoint(x: 1, y: 1)
             // The rim: dark metal, lit from the top left, a weaker return below right.
-            rim.colors = [NSColor(white: 0.62, alpha: 1).cgColor, NSColor(white: 0.2, alpha: 1).cgColor,
-                          NSColor(white: 0.07, alpha: 1).cgColor, NSColor(white: 0.3, alpha: 1).cgColor]
+            rim.colors = palette.orbRimColors
             rim.locations = [0, 0.35, 0.7, 1]
             rim.startPoint = CGPoint(x: 0.15, y: 0)
             rim.endPoint = CGPoint(x: 0.85, y: 1)
@@ -835,6 +835,8 @@ final class TileAgentBubbleLayer: CALayer {
     var qaPlateMaskPath: CGPath? { plateMask.path }
     /// QA: the plate's fill stops, which must all be opaque.
     var qaPlateColors: [CGColor] { (plate.colors as? [CGColor]) ?? [] }
+    /// The Orb's actual metal gradient, including its original gray color space.
+    var qaOrbRimColors: [CGColor] { (rim.colors as? [CGColor]) ?? [] }
 }
 
 /// The bubble's host and the plate's cursor: a small view in the world plane,
