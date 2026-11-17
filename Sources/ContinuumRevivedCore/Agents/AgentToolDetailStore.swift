@@ -629,7 +629,16 @@ public struct AgentToolDetailSanitizer: Sendable {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let digest = HMAC<SHA256>.authenticationCode(for: Data(trimmed.utf8), using: fingerprintKey)
-        return "\(trimmed.utf8.count):" + digest.map { String(format: "%02x", $0) }.joined()
+        // Each SHA-256 byte is two lowercase hexadecimal digits. Avoid one
+        // Foundation formatter invocation per byte in every substring window.
+        let alphabet = Array("0123456789abcdef".utf8)
+        var encoded: [UInt8] = []
+        encoded.reserveCapacity(64)
+        for byte in digest {
+            encoded.append(alphabet[Int(byte >> 4)])
+            encoded.append(alphabet[Int(byte & 0x0f)])
+        }
+        return "\(trimmed.utf8.count):" + String(decoding: encoded, as: UTF8.self)
     }
 
     private static func sanitizedFileURL(_ file: URL, explicitSecrets: [String]) -> URL? {
