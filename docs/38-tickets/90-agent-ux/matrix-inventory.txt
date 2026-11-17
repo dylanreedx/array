@@ -40,6 +40,7 @@ check --agent-stop-outcome-check
 check --agent-supervisor-check
 check --agent-tile-binding-check
 check --agent-tile-chrome-consolidation-check
+check --agent-tile-click-focus-check
 check --agent-tile-file-mention-check
 check --agent-tile-fit-check
 check --agent-tile-reference-check
@@ -212,6 +213,7 @@ check --lead-character-check
 check --lead-checkout-ledger-check
 check --leader-activation-check
 check --leader-jump-check
+check --leader-jump-framing-check
 check --leader-jump-visible-indicators-check
 check --leader-modal-recovery-check
 check --leader-snap-check
@@ -253,15 +255,18 @@ check --palette-browser-spawn-check
 check --palette-duplicate-root-check
 check --palette-first-responder-restore-check
 check --palette-jump-check
+check --palette-jump-framing-check
 check --palette-zone-check
 check --parser-identity-prefix-check
 check --part-contract-check
 check --perf-budget-camera-slope-check
 check --perf-budget-check
 check --perf-budget-geometry-hold-probe-check
+check --perf-budget-magnify-slope-check
 check --perf-budget-raster-check
 check --perf-budget-surface-host-slope-check
 check --perf-budget-transcript-delta-check
+check --perf-budget-zoom-check
 check --persistence-crash-safe-check
 check --personal-rules-delegation-check
 check --pi-extension-load-check
@@ -361,6 +366,7 @@ check --spawn-rate-limit-check
 check --spawn-sizing-check
 check --standards-resolution-check
 check --startup-branch-warm-check
+check --sticky-head-performance-check
 check --stranded-tile-recovery-check
 check --stray-window-audit-check
 check --streaming-ingest-check
@@ -572,6 +578,7 @@ leg run_app_check .build/debug/Array --agent-stop-outcome-check
 leg run_app_check .build/debug/Array --agent-supervisor-check
 leg run_app_check .build/debug/Array --agent-tile-binding-check
 leg run_app_check .build/debug/Array --agent-tile-chrome-consolidation-check
+leg run_app_check .build/debug/Array --agent-tile-click-focus-check
 leg run_app_check .build/debug/Array --agent-tile-file-mention-check
 leg run_app_check .build/debug/Array --agent-tile-fit-check
 leg run_app_check .build/debug/Array --agent-tile-reference-check
@@ -731,6 +738,7 @@ leg run_app_check .build/debug/Array --lead-character-check
 leg run_app_check .build/debug/Array --lead-checkout-ledger-check
 leg run_app_check .build/debug/Array --leader-activation-check
 leg run_app_check .build/debug/Array --leader-jump-check
+leg run_app_check .build/debug/Array --leader-jump-framing-check
 leg run_app_check .build/debug/Array --leader-jump-visible-indicators-check
 leg run_app_check .build/debug/Array --leader-modal-recovery-check
 leg run_app_check .build/debug/Array --leader-snap-check
@@ -770,15 +778,18 @@ leg run_app_check .build/debug/Array --palette-browser-spawn-check
 leg run_app_check .build/debug/Array --palette-duplicate-root-check
 leg run_app_check .build/debug/Array --palette-first-responder-restore-check
 leg run_app_check .build/debug/Array --palette-jump-check
+leg run_app_check .build/debug/Array --palette-jump-framing-check
 leg run_app_check .build/debug/Array --palette-zone-check
 leg run_app_check .build/debug/Array --part-contract-check
 leg run_app_check .build/debug/Array --perf-budget-camera-slope-check
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.fractional-pan
 leg run_app_check .build/debug/Array --perf-budget-check --scenario canvas.pan
 leg run_app_check .build/debug/Array --perf-budget-geometry-hold-probe-check
+leg run_app_check .build/debug/Array --perf-budget-magnify-slope-check
 leg run_app_check .build/debug/Array --perf-budget-raster-check
 leg run_app_check .build/debug/Array --perf-budget-surface-host-slope-check
 leg run_app_check .build/debug/Array --perf-budget-transcript-delta-check
+leg run_app_check .build/debug/Array --perf-budget-zoom-check
 leg run_app_check .build/debug/Array --persistence-crash-safe-check
 leg run_app_check .build/debug/Array --personal-rules-delegation-check
 leg run_app_check .build/debug/Array --pi-extension-load-check
@@ -869,6 +880,7 @@ leg run_app_check .build/debug/Array --spawn-rate-limit-check
 leg run_app_check .build/debug/Array --spawn-sizing-check
 leg run_app_check .build/debug/Array --standards-resolution-check
 leg run_app_check .build/debug/Array --startup-branch-warm-check
+leg run_app_check .build/debug/Array --sticky-head-performance-check
 leg run_app_check .build/debug/Array --stranded-tile-recovery-check
 leg run_app_check .build/debug/Array --stray-window-audit-check
 leg run_app_check .build/debug/Array --streaming-ingest-check
@@ -1124,7 +1136,7 @@ count ContinuumRevivedAgentContentChecks 24
 count ContinuumRevivedAgentUIChecks 24
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 210
+count ContinuumRevivedCoreChecks 211
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

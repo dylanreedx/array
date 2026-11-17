@@ -206,7 +206,20 @@ class TileNSView: NSView, TokenThemed {
     /// line inside the bar (Inline), or hanging off the top-left corner.
     var agentBubbleFrame: NSRect? {
         guard let titleBar, let rect = titleBar.qaBubbleRect else { return nil }
-        return titleBar.convert(rect, to: self)
+        return placedAgentBubbleRect(rect, bar: titleBar)
+    }
+
+    /// One placement for painting, the plane's icon index, and hit testing. Move
+    /// the real header's existing view/layer: its style, tint and animation keep
+    /// the same owner. Hanging plates keep their leading overhang, but sit fully
+    /// below the viewport edge while pinned instead of being clipped above it.
+    private func placedAgentBubbleRect(_ rect: NSRect, bar: TitleBarView) -> NSRect {
+        var frame = bar.convert(rect, to: self)
+        if let top = stickyHeadTop {
+            frame.origin.y = top + (TileAgentBubbleLayer.Plate.hangs(bar.bubble.bubbleStyle)
+                ? max(0, (bar.bounds.height - rect.height) / 2) : rect.minY)
+        }
+        return frame
     }
 
     /// Whether `local` (tile coordinates) is on the bubble: its plate's visible
@@ -231,9 +244,10 @@ class TileNSView: NSView, TokenThemed {
             return
         }
         if bubbleView.superview !== host { host.addSubview(bubbleView, positioned: .above, relativeTo: nil) }
-        bubbleView.adoptBubble()
-        let target = titleBar.convert(rect, to: host)
-        if bubbleView.frame != target { bubbleView.frame = target }
+        if bubbleView.bubble.superlayer !== bubbleView.layer { bubbleView.adoptBubble() }
+        let target = convert(placedAgentBubbleRect(rect, bar: titleBar), to: host)
+        if bubbleView.frame.size != target.size { bubbleView.setFrameSize(target.size) }
+        if bubbleView.frame.origin != target.origin { bubbleView.setFrameOrigin(target.origin) }
         if bubbleView.isHidden != isHidden { bubbleView.isHidden = isHidden }
     }
 
@@ -484,7 +498,7 @@ class TileNSView: NSView, TokenThemed {
     /// where ⋯ has left a narrow band, this is how its menu stays reachable.
     override func menu(for event: NSEvent) -> NSMenu? {
         let local = convert(event.locationInWindow, from: nil)
-        guard let titleBar, local.y < grabHeightInLocalCoordinates else { return super.menu(for: event) }
+        guard let titleBar, local.y < grabHeightInLocalCoordinates || agentBubbleContains(local) else { return super.menu(for: event) }
         return titleBar.makeTileContextMenu()
     }
 
@@ -494,6 +508,10 @@ class TileNSView: NSView, TokenThemed {
             return
         }
         let local = convert(event.locationInWindow, from: nil)
+        if tile.kind == .managedAgent, agentBubbleContains(local), let titleBar {
+            titleBar.showStyledContextActions(at: local, anchor: self)
+            return
+        }
         if tile.kind == .managedAgent, local.y >= 0, local.y < grabHeightInLocalCoordinates, let titleBar {
             titleBar.showStyledContextActions(at: titleBar.convert(event.locationInWindow, from: nil))
             return
@@ -1060,10 +1078,10 @@ class TileNSView: NSView, TokenThemed {
             // Medium or Large bar can keep its height while the scale moves.
             titleBar?.needsLayout = true
             titleBar?.invalidateChrome()
+            if stickyHeadTop != nil { layoutStickyHead() }
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
         titleBar?.applyOverflowGlyphWidth(overflowGlyphWorldWidth)
-        layoutStickyHead()
         layoutUnderBar()
         // Repair the bar-above-body z-order only when it is actually wrong.
         // `addSubview(_:positioned:)` is a remove+insert that reorders the
@@ -1122,6 +1140,10 @@ class TileNSView: NSView, TokenThemed {
     /// `top` is the tile-local y of the top of the tile's visible part; nil hides
     /// the head. Writes nothing when nothing moved.
     func setStickyHeadTop(_ top: CGFloat?) {
+        // The plane's bounds origin round-trips through its zoom scale. Treat
+        // subpixel float noise as the same offset, just like the camera writer:
+        // an unchanged world Y must not reframe heads on every zoom tick.
+        if let top, let previous = stickyHeadTop, abs(top - previous) < 0.001 { return }
         guard top != stickyHeadTop else { return }
         stickyHeadTop = top
         if top != nil, stickyHead == nil, let titleBar {
@@ -1135,14 +1157,24 @@ class TileNSView: NSView, TokenThemed {
     }
 
     private func layoutStickyHead() {
+        if StickyHeadWorkCounters.isEnabled {
+            StickyHeadWorkCounters.layoutRequests += 1
+            if stickyHeadTop == nil { StickyHeadWorkCounters.unpinnedLayoutRequests += 1 }
+        }
         guard let stickyHead else { return }
+        defer { placeAgentBubble() }
         guard let top = stickyHeadTop, let titleBar else {
             if !stickyHead.isHidden { stickyHead.isHidden = true }
             return
         }
         let frame = NSRect(x: titleBar.frame.minX, y: top, width: titleBar.frame.width, height: titleBar.frame.height)
         if stickyHead.frame.size != frame.size { stickyHead.needsDisplay = true }
-        if stickyHead.frame != frame { stickyHead.frame = frame }
+        if stickyHead.frame != frame {
+            if StickyHeadWorkCounters.isEnabled { StickyHeadWorkCounters.frameWrites += 1 }
+            // Moving a retained head does not resize its backing or its tile.
+            if stickyHead.frame.size != frame.size { stickyHead.setFrameSize(frame.size) }
+            if stickyHead.frame.origin != frame.origin { stickyHead.setFrameOrigin(frame.origin) }
+        }
         if stickyHead.isHidden {
             stickyHead.isHidden = false
             stickyHead.needsDisplay = true
@@ -1154,7 +1186,10 @@ class TileNSView: NSView, TokenThemed {
         guard let stickyHead, !stickyHead.isHidden, let titleBar else { return nil }
         return (stickyHead.frame, titleBar.snapshot.title)
     }
-    var qaStickyHeadView: NSView? { stickyHead.flatMap { $0.isHidden ? nil : $0 } }
+    /// The floating icon takes the same press route as the pinned label. This
+    /// bypasses a managed tile's resting-control redelivery outside its bounds.
+    var pinnedHeaderPressTarget: NSView? { stickyHead.flatMap { $0.isHidden ? nil : $0 } }
+    var qaStickyHeadView: NSView? { pinnedHeaderPressTarget }
     var qaStickyHeadForwardedPresses: Int { stickyHead?.qaForwardedPressCount ?? 0 }
 
     /// The header's own press handling, for the pinned head: what a press on the
@@ -3702,6 +3737,8 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// floors legitimately overflow the bar, and an empty title rect whose origin
     /// sits right of the dots still reads as "title under the handle" to the
     /// pill-layout census. The clamp only moves rects that are already empty.
+    private var drawingStickyHead = false
+
     private func titleRect(theme: TokenTheme) -> NSRect {
         let scale = chromeScale
         // `+ Space.s`: the gap ⋯ has always kept from the drag dots, so a band
@@ -3712,6 +3749,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let limit = max(0, blockedFrom - CGFloat(Space.s) * scale)
         let leading = min(titleLeadingX, limit)
         let available = max(0, limit - leading)
+        if drawingStickyHead && StickyHeadWorkCounters.isEnabled { StickyHeadWorkCounters.textMeasurements += 1 }
         let height = ("X" as NSString).size(withAttributes: titleAttributes(theme: theme)).height
         return NSRect(
             x: leading, y: max(0, (bounds.height - height) / 2),
@@ -3786,9 +3824,11 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// The pinned head's picture of this bar, drawn live in the head's own
     /// `draw` at this bar's size: its fill and identity tint, the provider mark
     /// (the harness), and the headline. Not the drag dots, the controls, the
-    /// character or the bottom hairline — the head is a label to read and a
-    /// handle to press, nothing more.
+    /// bottom hairline. The character's existing world-plane view is positioned
+    /// beside the head by `placeAgentBubble`, using the header's own layers.
     fileprivate func drawStickyHead(in context: CGContext, theme: TokenTheme) {
+        drawingStickyHead = true
+        defer { drawingStickyHead = false }
         SurfaceToken.tileChrome.color.nsColor(for: theme).setFill()
         bounds.fill()
         if let identityTint {
@@ -3892,6 +3932,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let theme = effectiveTokenTheme
         let color = display.accent.nsColor(for: theme)
         let textAttributes = statusPillTextAttributes(theme: theme)
+        if drawingStickyHead && StickyHeadWorkCounters.isEnabled { StickyHeadWorkCounters.textMeasurements += 1 }
         let textSize = (label as NSString).size(withAttributes: textAttributes)
         let dot = Self.statusPillDotDiameter
         let pillHeight = Self.statusPillHeight
@@ -4446,6 +4487,7 @@ private final class TileStickyHeadView: NSView {
         self.tile = tile
         self.bar = bar
         super.init(frame: .zero)
+        if StickyHeadWorkCounters.isEnabled { StickyHeadWorkCounters.allocations += 1 }
         wantsLayer = true
         setAccessibilityElement(false)
     }
@@ -4456,7 +4498,13 @@ private final class TileStickyHeadView: NSView {
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
 
+    override func layout() {
+        if StickyHeadWorkCounters.isEnabled { StickyHeadWorkCounters.headLayouts += 1 }
+        super.layout()
+    }
+
     override func draw(_ dirtyRect: NSRect) {
+        if StickyHeadWorkCounters.isEnabled { StickyHeadWorkCounters.draws += 1 }
         guard let bar, let context = NSGraphicsContext.current?.cgContext else { return }
         bar.drawStickyHead(in: context, theme: effectiveTokenTheme)
     }
