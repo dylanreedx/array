@@ -2537,7 +2537,23 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // The nudge is list-wide (any blocked row withdraws it), so a push that
         // changes one row can move it on another: both rows are repainted below.
         let previousNudge = settleNudgeTargetID(now: clock())
+        let previousHistoryHelpers = historyEntryHelpers
+        let previousHistoryDates = historyEntryDates
+        let historyBuildsBefore = historyProjectionBuildCountForQA
+        // Only an update-only push may reuse the History projection: an added
+        // agent can be a new helper of a History family, a removed one a member.
+        historyReuseHint = changed.isEmpty || !changed.added.isEmpty || !changed.removed.isEmpty
+            ? nil : changed.touched
         let next = display(from: newRows)
+        historyReuseHint = nil
+        // A History card draws its family's date and helper count, which live
+        // beside the row model: a helper's later turn moves the date without
+        // changing the root row, so those cards are stale too.
+        // A reused projection is the previous one: nothing to compare.
+        let historyPresentationChanged = historyProjectionBuildCountForQA == historyBuildsBefore
+            ? Set<UUID>() : Set(historyEntryHelpers.keys.filter {
+            previousHistoryHelpers[$0] != historyEntryHelpers[$0] || previousHistoryDates[$0] != historyEntryDates[$0]
+        })
         // P4.7: the identity sequence is compared over the DRAWN items, not over the
         // agent rows — the shelf header is a row in this table, and a snooze that
         // changed the count in it (or brought the header into existence at all) has
@@ -2551,7 +2567,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                     previousByID[row.id].map { !row.matchesIgnoringLiveElapsed($0) } ?? true
                 }.map(\.id))
                 if applyScopeIncrementally(next, previousRollups: previousRollups,
-                    changedAgentIDs: changed.touched.union(changedValues), previousTallies: previousTallies,
+                    changedAgentIDs: changed.touched.union(changedValues).union(historyPresentationChanged),
+                    previousTallies: previousTallies,
                     preservingAgentRows: true) {
                     return
                 }
@@ -2618,6 +2635,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 || disclosureMoved.contains(rows[$0].id)
                 || previousRollups[rows[$0].id] != rollupsByParent[rows[$0].id]
                 || previousTallies[rows[$0].id] != sidebarTallies[rows[$0].id]
+                || historyPresentationChanged.contains(rows[$0].id)
         }.compactMap(tableRow(forRowIndex:)))
         guard !indexes.isEmpty else { return }
         // P3.7: a lifecycle move changes the row's VARIANT, and a variant is a
@@ -2870,20 +2888,36 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// interleaves older families.
     private func quietHistoryFamilies(_ history: [AgentInboxRow], all: [AgentInboxRow],
                                       searching: Bool) -> [AgentInboxRow] {
+        // An unrelated push (chatter, a live agent's turn) changes nothing a
+        // History card is made of: reuse the last projection outright. The hint is
+        // the push's own change set, so the check is one pass over History's ids,
+        // never the child index, the family walk or the sort.
+        if let cache = quietHistoryCache, let touched = historyReuseHint,
+           cache.searching == searching, cache.openAgentId == openAgentId,
+           cache.historyIDs.count == history.count,
+           touched.isDisjoint(with: cache.members),
+           !history.contains(where: { touched.contains($0.id) }) {
+            historyEntryHelpers = cache.helpers
+            historyEntryDates = cache.dates
+            return cache.families
+        }
+        historyProjectionBuildCountForQA += 1
         let historyIDs = Set(history.map(\.id))
         var childrenOf: [UUID: [AgentInboxRow]] = [:]
         for row in all { if let parent = row.parentId, parent != row.id { childrenOf[parent, default: []].append(row) } }
-        // The last REAL turn (a prompt or a turn start). A relaunch restamps
-        // every helper's activity and run-completed time; interrupts, Clear,
-        // archive and read marks move other stamps. None of them is work.
-        func activity(_ row: AgentInboxRow) -> Date {
-            row.lastTurnAt ?? row.createdAt
-        }
         let roots = history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }
         var dated: [(row: AgentInboxRow, at: Date, index: Int)] = []
+        var members: Set<UUID> = historyIDs
+        var helpers: [UUID: Int] = [:]
+        var dates: [UUID: Date] = [:]
         for (index, root) in roots.enumerated() {
             var seen: Set<UUID> = [root.id]
-            var latest = activity(root)
+            // The last REAL turn (a prompt or a turn start) across the family.
+            // A relaunch restamps every helper's activity and run-completed time;
+            // interrupts, Clear, archive and read marks move other stamps; a helper
+            // opened and never used has only its creation. None of them is work, so
+            // the creation date is a fallback only when no member ever had a turn.
+            var latestTurn = root.lastTurnAt
             // Opened and never used (no member ever had a turn or an outcome):
             // nothing happened there, so it is not History. Search still finds
             // it, and the open agent always draws.
@@ -2891,17 +2925,43 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             var stack = childrenOf[root.id] ?? []
             while let next = stack.popLast() {
                 guard seen.insert(next.id).inserted else { continue }
-                latest = max(latest, activity(next))
+                if let turn = next.lastTurnAt { latestTurn = max(latestTurn ?? turn, turn) }
                 if next.lastTurnAt != nil || next.terminalEvent != nil { used = true }
                 stack.append(contentsOf: childrenOf[next.id] ?? [])
             }
+            members.formUnion(seen)
             guard used || searching || root.id == openAgentId else { continue }
-            historyEntryHelpers[root.id] = seen.count - 1
-            historyEntryDates[root.id] = latest
-            dated.append((root, latest, index))
+            let at = latestTurn ?? root.createdAt
+            helpers[root.id] = seen.count - 1
+            dates[root.id] = at
+            dated.append((root, at, index))
         }
-        return dated.sorted { $0.at != $1.at ? $0.at > $1.at : $0.index < $1.index }.map(\.row)
+        let families = dated.sorted { $0.at != $1.at ? $0.at > $1.at : $0.index < $1.index }.map(\.row)
+        quietHistoryCache = QuietHistoryProjection(
+            historyIDs: historyIDs, members: members, searching: searching, openAgentId: openAgentId,
+            families: families, helpers: helpers, dates: dates)
+        historyEntryHelpers = helpers
+        historyEntryDates = dates
+        return families
     }
+
+    /// The last Quiet History projection and what it was built from.
+    private struct QuietHistoryProjection {
+        let historyIDs: Set<UUID>
+        /// Every agent whose facts went into it: History's rows and each family's members.
+        let members: Set<UUID>
+        let searching: Bool
+        let openAgentId: UUID?
+        let families: [AgentInboxRow]
+        let helpers: [UUID: Int]
+        let dates: [UUID: Date]
+    }
+    private var quietHistoryCache: QuietHistoryProjection?
+    /// Set by `applyRows` for the length of one `display`: the agents that push
+    /// named. nil means "anything may have changed" (every other caller).
+    private var historyReuseHint: Set<UUID>?
+    /// How many times the History family projection was built, for the witness.
+    private(set) var historyProjectionBuildCountForQA = 0
 
     private func agentItems(for sectionRows: [AgentInboxRow]) -> [InboxListItem] {
         var result: [InboxListItem] = []

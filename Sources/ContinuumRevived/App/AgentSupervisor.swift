@@ -2085,22 +2085,47 @@ final class AgentSupervisor {
               record.latestPromptAt != nil || firstPromptByAgent[id] != nil else { return nil }
         if let live = firstPromptByAgent[id] { return AgentName.fromPrompt(live) }
         if let cached = untitledPromptNames[id] { return cached }
-        guard let transcriptStore, untitledPromptLoads.insert(id).inserted else { return nil }
-        Task.detached(priority: .utility) { [weak self] in
-            let document = try? await transcriptStore.load(
-                agentID: id, sessionID: AgentTranscriptStore.canonicalSessionID(for: id))
-            let name = document.flatMap(Self.firstPromptName(in:))
-            await MainActor.run { [weak self] in
-                guard let self else { return }
-                self.untitledPromptLoads.remove(id)
-                self.untitledPromptNames[id] = .some(name)
-                if name != nil { self.onFailureDetailsLoaded?() }
+        guard transcriptStore != nil, untitledPromptLoads.insert(id).inserted else { return nil }
+        // One batch per row build: every untitled record the build asks about is
+        // read by ONE off-main task, which publishes once. A restore with many
+        // untitled records otherwise rebuilt every row once per record.
+        if untitledPromptQueue.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated { self?.loadQueuedUntitledNames() }
             }
         }
+        untitledPromptQueue.append(id)
         return nil
     }
     private var untitledPromptNames: [AgentID: String?] = [:]
     private var untitledPromptLoads: Set<AgentID> = []
+    private var untitledPromptQueue: [AgentID] = []
+    /// How many times a batch of restored titles was published, for the witness.
+    private(set) var untitledNamePublishCountForQA = 0
+
+    private func loadQueuedUntitledNames() {
+        let ids = untitledPromptQueue
+        untitledPromptQueue.removeAll()
+        guard let transcriptStore, !ids.isEmpty else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            var names: [(AgentID, String?)] = []
+            for id in ids {
+                let document = try? await transcriptStore.load(
+                    agentID: id, sessionID: AgentTranscriptStore.canonicalSessionID(for: id))
+                names.append((id, document.flatMap(Self.firstPromptName(in:))))
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                for (id, name) in names {
+                    self.untitledPromptLoads.remove(id)
+                    self.untitledPromptNames[id] = .some(name)
+                }
+                guard names.contains(where: { $0.1 != nil }) else { return }
+                self.untitledNamePublishCountForQA += 1
+                self.onFailureDetailsLoaded?()
+            }
+        }
+    }
 
     /// The first person-written prompt in a transcript, named the way the
     /// spawn funnel names it.
