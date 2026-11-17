@@ -1903,6 +1903,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         for tail in fanoutRemainderCellsByParent.values {
             tail.activeIndicatorStyle = next.rawValue
         }
+        for line in familyCauseCells.values {
+            line.activeIndicatorStyle = next.rawValue
+        }
         // Update existing views in place; no row rebuild, selection or scroll change.
         for row in 0..<tableView.numberOfRows {
             if let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInboxRowCell {
@@ -2408,6 +2411,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         sectionLabelCells.removeAll()
         incidentCells.removeAll()
         quietNeedsYouCell = nil
+        familyCauseCells.removeAll()
         settledMoreCell = nil
         fanoutRemainderCellsByParent.removeAll()
         updateShelfSpacerHeight()
@@ -3111,6 +3115,16 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     private func setItems(_ next: [InboxListItem]) {
         items = next
+        // Incremental folds and pushes keep surviving line views, but a line
+        // that left the list must not remain owned by a historical family.
+        let liveFamilyKeys = Set(next.compactMap { item -> String? in
+            switch item {
+            case .leadCount(let tally): return "count:\(tally.leadId.uuidString)"
+            case .familyCause(let incident, _): return incident.id
+            default: return nil
+            }
+        })
+        familyCauseCells = familyCauseCells.filter { liveFamilyKeys.contains($0.key) }
         if !next.contains(where: { if case .historyHeader = $0 { return true }; return false }) { historyHeaderCell = nil }
         if !next.contains(where: { if case .shelfHeader = $0 { return true }; return false }) { shelfHeaderCell = nil }
         rows = next.compactMap(\.agentRow)
