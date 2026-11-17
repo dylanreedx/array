@@ -240,3 +240,106 @@ final class SidebarQuietNeedsYouView: NSTableCellView {
         }
     }
 }
+
+/// Quiet inbox, variants/A: one History item. A card with a clock, the title,
+/// then "4 helpers · Nov 10". Helpers stay with their lead, so a family is one
+/// item; clicking it opens the lead like any row.
+@MainActor
+final class SidebarQuietHistoryEntryView: NSTableCellView {
+    /// A's history card (about 54pt) plus the gap to the next one.
+    static let height: CGFloat = 60
+    static let cardBottomGap: CGFloat = 4
+
+    private let card = InboxGroupBackgroundView()
+    private let icon = NSImageView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let detailLabel = NSTextField(labelWithString: "")
+
+    /// "4 helpers · Nov 10", "1 helper · Nov 10", or just the date.
+    static func detail(helpers: Int, endedAt: Date?, now: Date, calendar: Calendar = .current) -> String {
+        var parts: [String] = []
+        if helpers > 0 { parts.append(helpers == 1 ? "1 helper" : "\(helpers) helpers") }
+        if let endedAt {
+            let formatter = DateFormatter()
+            formatter.locale = Locale.current
+            formatter.setLocalizedDateFormatFromTemplate(
+                calendar.isDate(endedAt, equalTo: now, toGranularity: .year) ? "MMMd" : "MMMdyyyy")
+            parts.append(formatter.string(from: endedAt))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// When the row's work ended, as History sorts it.
+    static func endedAt(_ row: AgentInboxRow) -> Date? {
+        row.terminalEvent?.endedAt ?? row.lifecycle.endedAt ?? row.lastActiveAt ?? row.createdAt
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        addSubview(card)
+        icon.image = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .regular))
+        icon.imageScaling = .scaleProportionallyDown
+        titleLabel.font = .systemFont(ofSize: Typography.style(for: .body).size, weight: .medium)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        detailLabel.font = .token(.label)
+        detailLabel.lineBreakMode = .byTruncatingTail
+        for view in [icon, titleLabel, detailLabel] { addSubview(view) }
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+    }
+
+    required init?(coder: NSCoder) { return nil }
+    override var isFlipped: Bool { true }
+
+    func apply(_ row: AgentInboxRow, helpers: Int, now: Date) {
+        titleLabel.stringValue = row.displayTitle
+        detailLabel.stringValue = Self.detail(helpers: helpers, endedAt: Self.endedAt(row), now: now)
+        detailLabel.isHidden = detailLabel.stringValue.isEmpty
+        setAccessibilityLabel([row.displayTitle, detailLabel.stringValue].filter { !$0.isEmpty }.joined(separator: ", "))
+        setAccessibilityIdentifier(AgentInboxView.accessibilityIdentifier(for: row))
+        applyTokens()
+        needsLayout = true
+    }
+
+    var titleForQA: String { titleLabel.stringValue }
+    var detailForQA: String { detailLabel.isHidden ? "" : detailLabel.stringValue }
+    var titleFrameForQA: NSRect { titleLabel.frame }
+    var detailFrameForQA: NSRect { detailLabel.frame }
+    var cardFrameForQA: NSRect { cardRect }
+
+    private func applyTokens() {
+        titleLabel.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        detailLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
+        icon.contentTintColor = TextToken.textSecondary.color.nsColor(in: self)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    private var cardRect: NSRect {
+        let gutter = SidebarQuietNeedsYouView.gutter
+        return NSRect(x: gutter, y: 0, width: max(0, bounds.width - gutter * 2),
+                      height: max(0, bounds.height - Self.cardBottomGap))
+    }
+
+    override func layout() {
+        super.layout()
+        let rect = cardRect
+        card.frame = bounds
+        card.ownershipStrip = (rect, true, true)
+        let pad = SidebarQuietNeedsYouView.contentInset
+        let iconSize: CGFloat = 13
+        let textX = rect.minX + pad + iconSize + 7
+        let width = max(0, rect.maxX - pad - textX)
+        let titleHeight = ceil(titleLabel.intrinsicContentSize.height)
+        let detailHeight = detailLabel.isHidden ? 0 : ceil(detailLabel.intrinsicContentSize.height)
+        let gap: CGFloat = detailLabel.isHidden ? 0 : 3
+        let top = rect.minY + floor((rect.height - titleHeight - gap - detailHeight) / 2)
+        titleLabel.frame = NSRect(x: textX, y: top, width: width, height: titleHeight)
+        detailLabel.frame = NSRect(x: textX, y: top + titleHeight + gap, width: width, height: detailHeight)
+        icon.frame = NSRect(x: rect.minX + pad, y: titleLabel.frame.midY - iconSize / 2, width: iconSize, height: iconSize)
+    }
+}

@@ -210,6 +210,70 @@ enum SidebarDogfoodChecks {
     // MARK: - 1. History rows read like A
 
     static func checkHistoryRows() throws -> String {
-        "History rows: not yet"
+        let h = try makeHarness("history-rows")
+        defer { h.close() }
+        let inbox = h.inbox
+        let lead = h.spawn("Conduct overnight UX checks")
+        let helpers = (0..<4).map { h.spawn("Overnight helper \($0 + 1)", parent: lead) }
+        let solo = h.spawn("Draft the release notes")
+        for id in [lead, solo] + helpers { h.finish(id) }
+        h.refresh()
+        // Clear through the drawn control: both families go to History.
+        guard let clear = (Q.views(in: inbox) {
+            ($0 as? SidebarSectionLabelView)?.titleForQA.hasPrefix("Inbox") == true && !$0.isHiddenOrHasHiddenAncestor
+        }.first as? SidebarSectionLabelView)?.clearButton, !clear.isHidden else {
+            throw Failure(description: "no Clear to press")
+        }
+        try Q.click(clear)
+        inbox.layoutForQA()
+        guard let header = inbox.historyHeaderViewForQA else { throw Failure(description: "no History heading") }
+        try Q.click(header)
+        inbox.layoutForQA()
+        try expect(inbox.isHistoryExpandedForQA, "History did not open")
+        Q.photograph(h.sidebar, "dogfood-history")
+
+        let table = inbox.tableForQA
+        let items = inbox.itemsForQuietCheck
+        guard let headerRow = items.firstIndex(where: { if case .historyHeader = $0 { return true }; return false }) else {
+            throw Failure(description: "History heading left the list")
+        }
+        var drawn: [UUID: SidebarQuietHistoryEntryView] = [:]
+        var other: [String] = []
+        for row in (headerRow + 1)..<items.count {
+            guard case .agent(let model) = items[row] else {
+                if case .fanoutRemainder = items[row] { other.append("fold line under History") }
+                continue
+            }
+            let view = table.view(atColumn: 0, row: row, makeIfNecessary: true)
+            if let entry = view as? SidebarQuietHistoryEntryView {
+                drawn[model.id] = entry
+                try expect(abs(table.rect(ofRow: row).height - table.intercellSpacing.height - SidebarQuietHistoryEntryView.height) < 0.5,
+                           "History row '\(model.displayTitle)' is \(table.rect(ofRow: row).height)pt, wanted A's \(SidebarQuietHistoryEntryView.height)")
+            } else {
+                other.append("\(model.displayTitle) as \(type(of: view))")
+            }
+        }
+        try expect(other.isEmpty, "History draws something other than one card per family: \(other)")
+        drawn[h.fixture.agentId.rawValue] = nil  // the fixture's own parked source agent
+        try expect(Set(drawn.keys) == [lead.rawValue, solo.rawValue],
+                   "History holds the two families, helpers inside their lead — got \(drawn.values.map(\.titleForQA))")
+        try expect(inbox.historyHeaderTitleForQA == "History (3)",
+                   "the History heading counts its cards (2 families + the fixture's agent), not helpers — got '\(inbox.historyHeaderTitleForQA ?? "nil")'")
+        let formatter = DateFormatter()
+        formatter.locale = Locale.current
+        formatter.setLocalizedDateFormatFromTemplate("MMMd")
+        let today = formatter.string(from: Date())
+        let leadCard = drawn[lead.rawValue]!, soloCard = drawn[solo.rawValue]!
+        try expect(leadCard.titleForQA == "Conduct overnight UX checks" && leadCard.detailForQA == "4 helpers · \(today)",
+                   "the lead's History card reads '\(leadCard.titleForQA)' / '\(leadCard.detailForQA)', wanted A's title / '4 helpers · \(today)'")
+        try expect(soloCard.detailForQA == today, "a family with no helpers reads its date only — got '\(soloCard.detailForQA)'")
+        for card in [leadCard, soloCard] {
+            try expect(!card.detailForQA.contains("folded"), "a History card says 'folded': \(card.detailForQA)")
+            let t = card.titleFrameForQA, d = card.detailFrameForQA, c = card.cardFrameForQA
+            try expect(t.maxY <= d.minY + 0.5 && c.contains(t) && c.contains(d) && t.height >= 14 && d.height >= 12,
+                       "History card lines overlap or leave the card: title \(t), detail \(d), card \(c)")
+            try expect(c.height >= 50 && c.height <= 58, "History card is \(c.height)pt tall, wanted A's ~54")
+        }
+        return "History rows: one card per family at \(SidebarQuietHistoryEntryView.height)pt; '\(leadCard.titleForQA)' / '\(leadCard.detailForQA)', solo '\(soloCard.detailForQA)'; helpers stay inside their lead"
     }
 }

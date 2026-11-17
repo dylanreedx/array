@@ -1058,6 +1058,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The History heading's cell (.plans/05-close-to-history.md). Cached
     /// separately from the shelf's: both headings can be on screen at once.
     private var historyHeaderCell: AgentInboxShelfHeaderView?
+    /// Quiet inbox (variants/A): the History rows drawn as one two-line card
+    /// per family, with how many helpers each holds. Set by `display`.
+    private(set) var historyEntryHelpers: [UUID: Int] = [:]
+    private var historyEntryCells: [UUID: SidebarQuietHistoryEntryView] = [:]
     /// .plans/113: one heading cell per project group in `By project`.
     private var projectHeadingCells: [String: AgentInboxShelfHeaderView] = [:]
     // Ticket: docs/38-tickets/90-agent-ux/P4.8-settled-tail-paging.md
@@ -2746,6 +2750,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             if row.depth == 0 { inStanding = row.isStanding }
             if inStanding { standingRows.append(row) } else { otherRows.append(row) }
         }
+        historyEntryHelpers = [:]
         var built = sidebarHeadItems()
         if !standingRows.isEmpty {
             built.append(.sectionLabel(SidebarSectionLabel(kind: .standing, title: "Standing", count: nil, clearCount: 0)))
@@ -2777,11 +2782,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 built.append(.settledMore(hidden: page.hidden))
             }
         } else if parts.historyCount > 0 {
-            built.append(.historyHeader(count: parts.historyCount, isExpanded: historyExpanded))
+            // Quiet inbox: History counts families, the cards it draws, not helpers.
+            let historyIDs = Set(parts.history.map(\.id))
+            let historyCount = sidebarLayout == .quietInbox
+                ? parts.history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }.count
+                : parts.historyCount
+            built.append(.historyHeader(count: historyCount, isExpanded: historyExpanded))
             if historyExpanded {
                 let page = InboxSort.pageSettled(
                     parts.history, limit: settledLimit, openAgentId: openAgentId)
-                built.append(contentsOf: agentItems(for: page.shown))
+                built.append(contentsOf: sidebarLayout == .quietInbox
+                    ? quietHistoryItems(for: page.shown, family: sorted)
+                    : agentItems(for: page.shown))
                 if page.hasMore {
                     built.append(.settledMore(hidden: page.hidden))
                 }
@@ -2831,6 +2843,29 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// after the visible end of its live parent's subtree. `display(from:)`
     /// already excludes a folded parent and re-anchors an ancestor's remainder
     /// when a nested fold removes the model's original anchor.
+    /// Quiet inbox History: one item per family, its lead only. Helpers stay
+    /// with their lead; the card says how many ("4 helpers · Nov 10").
+    private func quietHistoryItems(for page: [AgentInboxRow], family all: [AgentInboxRow]) -> [InboxListItem] {
+        var childrenOf: [UUID: [UUID]] = [:]
+        for row in all { if let parent = row.parentId, parent != row.id { childrenOf[parent, default: []].append(row.id) } }
+        func descendants(of id: UUID) -> Int {
+            var seen: Set<UUID> = [id]
+            var stack = childrenOf[id] ?? []
+            while let next = stack.popLast() {
+                guard seen.insert(next).inserted else { continue }
+                stack.append(contentsOf: childrenOf[next] ?? [])
+            }
+            return seen.count - 1
+        }
+        let shown = Set(page.map(\.id))
+        return page.compactMap { row in
+            // A helper whose lead is drawn here travels inside that card.
+            if let parent = row.parentId, shown.contains(parent) { return nil }
+            historyEntryHelpers[row.id] = descendants(of: row.id)
+            return .agent(row)
+        }
+    }
+
     private func agentItems(for sectionRows: [AgentInboxRow]) -> [InboxListItem] {
         var result: [InboxListItem] = []
         for row in sectionRows {
@@ -3128,6 +3163,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if !next.contains(where: { if case .historyHeader = $0 { return true }; return false }) { historyHeaderCell = nil }
         if !next.contains(where: { if case .shelfHeader = $0 { return true }; return false }) { shelfHeaderCell = nil }
         rows = next.compactMap(\.agentRow)
+        if !historyEntryCells.isEmpty { historyEntryCells = historyEntryCells.filter { historyEntryHelpers[$0.key] != nil } }
         if updatingFold { foldRenderNudge = settleNudgeTargetID(now: clock()) }
         nestingByTableRow = AgentInboxView.nestings(for: next)
         ownershipByTableRow = ownsSubagents ? ownershipSlices() : []
@@ -4240,6 +4276,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             ? AgentInbox96CellView.ownershipTrailingGap(for: nesting(atTableRow: row))
             : AgentInbox96CellView.trailingGap(for: nesting(atTableRow: row)))
         guard let item = item(at: row) else { return AgentInboxView.shelfHeaderHeight }
+        if let id = item.agentRow?.id, historyEntryHelpers[id] != nil { return SidebarQuietHistoryEntryView.height }
         guard let model = item.agentRow else {
             switch item {
             case .fanoutRemainder, .familyCause, .leadCount:
@@ -4295,6 +4332,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let item = item(at: row) else { return nil }
+        if let model = item.agentRow, let helpers = historyEntryHelpers[model.id] {
+            let cell = historyEntryCells[model.id] ?? SidebarQuietHistoryEntryView()
+            cell.alphaValue = 1
+            cell.apply(model, helpers: helpers, now: clock())
+            historyEntryCells[model.id] = cell
+            return cell
+        }
         guard let model = item.agentRow else {
             switch item {
             case .shelfHeader(let count, let isExpanded):
