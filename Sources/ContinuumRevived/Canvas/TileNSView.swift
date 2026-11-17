@@ -3023,20 +3023,15 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
     /// the bar has laid it out or shown it: its view is placed from this.
     var bubbleRectInBar: NSRect? { bubbleRect }
     var qaProviderMarkRect: NSRect? { providerMarkView.isHidden ? nil : providerMarkView.frame }
-    /// Minimal draws the provider mark inside its plate, so the one beside the
-    /// title steps aside; every other style, and icons off, keep it.
-    private var markInPlate: Bool { characterSize != nil && bubble.bubbleStyle == .minimalSquircle }
-
+    /// The provider mark beside the title shows in every style (Minimal's plate
+    /// holds the agent's character, like the Orb and Squircle).
     private func syncProviderMark() {
-        let inPlate = markInPlate
-        let hidden = providerMarkView.image == nil || inPlate
-        bubble.setMark(inPlate ? providerMarkView.image : nil)
+        let hidden = providerMarkView.image == nil
         guard providerMarkView.isHidden != hidden else { return }
         providerMarkView.isHidden = hidden
         needsLayout = true
         invalidateChrome()
     }
-    var qaMarkInPlate: Bool { markInPlate }
 
     func setCharacter(agentID: UUID?, snapshot: AgentCharacterSnapshot?, characterName: String?,
                       shared: (set: SharedAgentCharacterSet, assignment: AgentCharacterAssignment)? = nil, now: Date) {
@@ -3167,7 +3162,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
 
     func reconcileCharacterVisibility() {
         let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
-        characterLayer.setPaused(characterHeld || !visible || isHiddenOrHasHiddenAncestor || markInPlate)
+        characterLayer.setPaused(characterHeld || !visible || isHiddenOrHasHiddenAncestor)
         bubble.setPaused(characterHeld || !visible || isHiddenOrHasHiddenAncestor)
     }
 
@@ -3404,8 +3399,7 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
                 onBubbleChange?()
             }
             if characterLayer.frame != local { characterLayer.frame = local }
-            // Minimal holds the provider mark, not the character.
-            if characterLayer.isHidden == !markInPlate { characterLayer.isHidden = markInPlate }
+            if characterLayer.isHidden { characterLayer.isHidden = false }
             CATransaction.commit()
             bubble.setShown(true)
             characterLayer.refreshOrientation()

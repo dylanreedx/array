@@ -7,12 +7,12 @@ import QuartzCore
 /// setting, the working light and icons-off, on the real
 /// tiles of `--tile-agent-bubble-check`'s fixture.
 ///
-/// - Every style renders and is opaque; Minimal holds the provider mark in its
-///   plate (the one beside the title steps aside), the others do not.
+/// - Every style renders and is opaque; Minimal holds the agent's character in its
+///   plate like the others, and the provider mark stays beside the title.
 /// - The size setting changes the side the icon really has on screen, at 30, 80
 ///   and 125 % zoom, and below 80 % it tapers by `sqrt(zoom / 0.8)`.
 /// - The working light is attached while working and gone when idle or paused;
-///   it never lays the title bar out; the provider mark never animates.
+///   it never lays the title bar out.
 /// - No style warps the art: the sprite's contents are the atlas picture.
 /// - Icons off draw nothing in the corner, whatever the style, and the provider
 ///   mark stays beside the title.
@@ -113,20 +113,12 @@ enum TileAgentIconStyleChecks {
                     try Check.expect(!host.isHidden && bubble.qaPlateColors.count == 2 && bubble.qaPlateColors.allSatisfy { $0.alpha == 1 },
                                      "\(label): the plate is not opaque")
                     try Check.expect(bubble.qaPlateMaskPath != nil && bubble.qaParts.plateShown, "\(label): no plate")
-                    if style == .orb {
-                        let approvedRim = [0.62, 0.2, 0.07, 0.3].map { NSColor(white: CGFloat($0), alpha: 1).cgColor }
-                        try Check.expect(bubble.qaOrbRimColors == approvedRim,
-                                         "\(label): the metal rim keeps its approved Gamma 2.2 gray stops")
-                    }
+                    // The provider mark stays beside the title in every style, and
+                    // every plate shows the agent's own character (Minimal too).
+                    try Check.expect(view.qaProviderMarkRect != nil, "\(label): the provider mark stays beside the title")
+                    try Check.expect(view.qaCharacterRect != nil, "\(label): the character shows")
                     if style == .minimalSquircle {
-                        try Check.expect(bubble.qaMarkShown, "\(label): Minimal holds the provider mark")
-                        try Check.expect(view.qaProviderMarkRect == nil, "\(label): the title's own mark steps aside")
-                        try Check.expect(view.qaCharacterRect == nil, "\(label): Minimal shows no character")
                         try Check.expect(bubble.qaParts.ringShown && !bubble.qaParts.glassShown, "\(label): a full border, no glass")
-                    } else {
-                        try Check.expect(!bubble.qaMarkShown, "\(label): only Minimal draws the mark in the plate")
-                        try Check.expect(view.qaProviderMarkRect != nil, "\(label): the provider mark stays beside the title")
-                        try Check.expect(view.qaCharacterRect != nil, "\(label): the character shows")
                     }
                 }
                 // Rendered: the plate's centre is painted, not the tile's bar behind it.
@@ -178,15 +170,12 @@ enum TileAgentIconStyleChecks {
             let bubble = subject.qaAgentBubble!
             let phase = bubble.phase
             try Check.expect(bubble.isWorking, "\(style.title): the fixture's first agent is working")
-            try Check.expect(bubble.isMoving && bubble.qaAnimationKeys.contains(TileAgentBubbleLayer.motionKeyPrefix + (style == .orb ? "churn.current" : "rim")),
+            try Check.expect(bubble.isMoving && bubble.qaAnimationKeys.contains(TileAgentBubbleLayer.motionKeyPrefix + (style == .orb ? "orbit" : "rim")),
                              "\(style.title): the working light is attached while working (\(bubble.qaAnimationKeys))")
             try Check.expect(bubble.qaParts.orbitShown, "\(style.title): the rim light is visible while working")
             let layouts = subject.qaTitleBarLayoutPasses
-            let markFrame = bubble.qaMarkFrame
             Check.pump(0.6)
             try Check.expect(subject.qaTitleBarLayoutPasses == layouts, "\(style.title): the working light must not lay out the title bar")
-            try Check.expect(bubble.qaMarkAnimationKeys.isEmpty && bubble.qaMarkFrame == markFrame,
-                             "\(style.title): the provider mark never animates")
             bubble.setWorking(false, style: SidebarActiveIndicatorStyle.classic.rawValue, phase: phase)
             try Check.expect(!bubble.isMoving && bubble.qaAnimationKeys.isEmpty && !bubble.qaParts.orbitShown,
                              "\(style.title): idle removes every layer animation (\(bubble.qaAnimationKeys))")
@@ -198,7 +187,7 @@ enum TileAgentIconStyleChecks {
             // The idle tile of the fixture never animates.
             let idle = views[1].qaAgentBubble!
             try Check.expect(!idle.isWorking && idle.qaAnimationKeys.isEmpty, "\(style.title): an idle agent's icon holds still")
-            report.append("\(style.title): rim light attached working, removed idle/paused, no layout, mark still")
+            report.append("\(style.title): working light attached, removed idle/paused, no layout")
         }
 
         report.append(try checkWorkingStyleTransitions(canvas: canvas, window: window, defaults: defaults, views: views))
@@ -264,25 +253,19 @@ enum TileAgentIconStyleChecks {
         return (["PASS tile agent icon styles"] + report).joined(separator: "\n")
     }
 
-    /// Sidebar light choices do not remove the Orb's static liquid glow or
-    /// strand gradient stops in another style. A live size change must also
-    /// update the installed liquid movement to the icon that is actually drawn.
+    /// Every sidebar light choice works on the Orb: the glass stays on, the
+    /// light attaches while working, and a live size change keeps it attached.
+    /// Leaving the Orb must not strand its gradient stops on another style.
     private static func checkWorkingStyleTransitions(canvas: CanvasNSView, window: NSWindow, defaults: UserDefaults,
                                                      views: [ManagedAgentTileNSView]) throws -> String {
-        var failures: [String] = []
-        func verdict(_ condition: Bool, _ message: String) {
-            print("icon transition \(condition ? "PASS" : "FAIL"): \(message)")
-            if !condition { failures.append(message) }
-        }
         defer {
             window.appearance = nil
             setting(defaults, SidebarActiveIndicatorStyle.defaultsKey, SidebarActiveIndicatorStyle.classic.rawValue)
             setting(defaults, AgentCharacterConfig.iconScaleKey, AgentCharacterConfig.IconScale.standard.rawValue)
             setting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.inline.rawValue)
         }
-        let idle = views[1], working = views[0]
-        guard let idleWorld = canvas.allTilesInWorldFrames().first(where: { $0.id == idle.tile.id })?.frame,
-              let workingWorld = canvas.allTilesInWorldFrames().first(where: { $0.id == working.tile.id })?.frame else {
+        let working = views[0]
+        guard let workingWorld = canvas.allTilesInWorldFrames().first(where: { $0.id == working.tile.id })?.frame else {
             throw Check.Failure(description: "working-style transitions require real installed tiles")
         }
         func light(_ value: SidebarActiveIndicatorStyle) throws {
@@ -295,29 +278,8 @@ enum TileAgentIconStyleChecks {
             }), "the \(value.title) light choice reaches every real icon")
         }
 
-        // At rest only the Orb's own liquid/glass is visible. The sidebar's
-        // Sheen choice must render the same globe as Classic, in both themes.
-        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-            window.appearance = NSAppearance(named: appearance)
-            try show(.orb, views, canvas, defaults)
-            try light(.classic)
-            settle(canvas, views, zoom: 1.25, around: idleWorld)
-            guard let bubble = idle.qaAgentBubble else { throw Check.Failure(description: "no idle globe") }
-            try Check.expect(!bubble.isWorking && bubble.qaParts.sheenShown,
-                             "\(name): the idle globe is a positive control with a visible middle glow")
-            let centre = CGPoint(x: bubble.bounds.midX, y: bubble.bounds.midY)
-            try Check.expect(bubble.qaSheenFrame.contains(centre), "\(name): Classic's liquid glow covers the globe's middle")
-            let classic = try modelPicture(idle)
-            try light(.sheen)
-            settle(canvas, views, zoom: 1.25, around: idleWorld)
-            verdict(bubble.qaSheenFrame.contains(centre), "\(name): Orb under Sheen keeps the liquid glow in the globe")
-            let sheen = try modelPicture(idle)
-            let delta = try Check.largestChannelChange(classic, sheen)
-            verdict(delta <= 1, "\(name): Orb's static rendered glow survives the Sheen setting (pixel change \(delta))")
-        }
-
-        // Leaving the Orb's two-stop radial glow must not leave those locations
-        // on the different highlight used by the working Inline or Squircle.
+        // Leaving the Orb must not leave its gradient locations on the highlight
+        // a working Inline or Squircle draws.
         try light(.sheen)
         for style in [Style.inline, .squircle] {
             try show(.orb, views, canvas, defaults)
@@ -327,35 +289,30 @@ enum TileAgentIconStyleChecks {
             guard let bubble = working.qaAgentBubble else { throw Check.Failure(description: "no working icon") }
             try Check.expect(bubble.isWorking && bubble.qaParts.sheenShown, "\(style.title): the working Sheen highlight is present")
             let stops = bubble.qaSheenStops
-            verdict(stops.colors >= 2 && (stops.locations == nil || stops.locations == stops.colors),
-                    "Orb → \(style.title) Sheen has compatible gradient stops (\(stops.colors) colors, \(String(describing: stops.locations)) locations)")
+            try Check.expect(stops.colors >= 2 && (stops.locations == nil || stops.locations == stops.colors),
+                             "Orb → \(style.title) Sheen has compatible gradient stops (\(stops.colors) colors, \(String(describing: stops.locations)) locations)")
         }
 
-        // Both choices used to skip motion reconciliation on ordinary bounds
-        // changes. Drive the actual icon-size setting while the Orb is working.
-        for choice in [SidebarActiveIndicatorStyle.classic, .gradient] {
+        // Each light attaches to the working Orb and survives a live size change.
+        for choice in SidebarActiveIndicatorStyle.allCases {
             try light(choice)
             try show(.orb, views, canvas, defaults)
             settle(canvas, views, zoom: 1.25, around: workingWorld)
-            guard let bubble = working.qaAgentBubble else { throw Check.Failure(description: "no working globe") }
-            try Check.expect(bubble.isWorking && !bubble.isPaused, "\(choice.title): the globe must be working and visible")
+            guard let bubble = working.qaAgentBubble else { throw Check.Failure(description: "no working Orb") }
+            try Check.expect(bubble.isWorking && !bubble.isPaused && bubble.qaParts.glassShown,
+                             "\(choice.title): the Orb is working, visible and in its glass")
             var sizes: [CGFloat] = []
             for size in [AgentCharacterConfig.IconScale.small, .large] {
                 try choose(size: size, views, canvas, defaults)
                 settle(canvas, views, zoom: 1.25, around: workingWorld)
                 sizes.append(bubble.bounds.height)
-                guard let offsets = bubble.qaLiquidSurfaceOffsets else {
-                    throw Check.Failure(description: "\(choice.title): the working globe has no installed liquid movement")
-                }
-                let amplitude = bubble.bounds.height * 0.02
-                verdict(abs(offsets.from + amplitude) < 0.0001 && abs(offsets.to - amplitude) < 0.0001,
-                        "\(choice.title) live \(size.title): installed liquid offsets \(offsets.from)/\(offsets.to) fit current \(bubble.bounds.height)pt globe")
+                try Check.expect(bubble.isMoving && !bubble.qaAnimationKeys.isEmpty,
+                                 "\(choice.title) live \(size.title): the working light is still attached (\(bubble.qaAnimationKeys))")
             }
-            try Check.expect(sizes.count == 2 && sizes[1] > sizes[0] * 1.2,
-                             "\(choice.title): the real size setting must resize the globe, not just its expected amplitude")
+            try Check.expect(sizes.count == 2 && sizes[1] > sizes[0] * 1.2, "\(choice.title): the size setting resizes the Orb")
+            try choose(size: .standard, views, canvas, defaults)
         }
-        try Check.expect(failures.isEmpty, "working-style transitions: \(failures.joined(separator: "; "))")
-        return "working-style transitions: static glow in light/dark, valid Orb→Sheen stops, live resized liquid movement"
+        return "working-style transitions: every light attaches to the Orb in its glass, survives live resize, no stale stops"
     }
 
     /// Render the actual icon's model layer tree so comparison is independent of

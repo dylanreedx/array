@@ -413,9 +413,9 @@ enum TileAgentBubbleChecks {
                     }
                     try expect(bubble.qaPlateColors.count >= 2 && bubble.qaPlateColors.allSatisfy { $0.alpha >= 0.999 },
                                "\(label): the plate's fill is opaque (\(bubble.qaPlateColors.map(\.alpha)))")
-                    // Minimal holds the provider mark, not the character.
+                    // Minimal holds the agent's character, like every other plate.
                     let fill = view.qaArtFill ?? 0
-                    if style != .minimalSquircle { try expect(fill >= 0.85, "\(label): the art fills its plate (\(fill) of the side)") }
+                    try expect(fill >= 0.85, "\(label): the art fills its plate (\(fill) of the side)")
                     // Opaque, witnessed: the plate's own layer tree, rendered
                     // over magenta and over green, shows neither inside its outline.
                     guard let host = view.agentBubbleView, let hostLayer = host.layer else {
@@ -720,13 +720,13 @@ enum TileAgentBubbleChecks {
         }
         try expect(view.qaDragKindIsMove(at: NSPoint(x: frame.midX, y: frame.midY)), "\(label): the icon is a grab")
         // The art: its typical pose fitted to the plate, never under a device
-        // pixel per art pixel, its body on the plate's centre. (Minimal has no art.)
-        if style != .minimalSquircle, let art = view.qaArtScale, let fill = view.qaArtFill {
+        // pixel per art pixel, its body on the plate's centre.
+        if let art = view.qaArtScale, let fill = view.qaArtFill {
             let onScreen = art.perArt * art.backing * CGFloat(zoom)
             try expect(onScreen >= 0.999 && (abs(fill - TileAgentBubbleLayer.Plate.artFit) < 0.01 || fill > TileAgentBubbleLayer.Plate.artFit),
                        "\(label): the art's typical pose fills \(fill) of the plate, \(onScreen) device px per art px on screen")
         }
-        if style != .minimalSquircle {
+        do {
         guard let body = view.qaCharacterBody else { throw Failure(description: "\(label): no art") }
         try expect(abs(body.body.x - body.target.x) <= pixel && abs(body.body.y - body.target.y) <= pixel,
                    "\(label): the art's body \(body.body) is centred on its plate \(body.target)")
@@ -1226,11 +1226,16 @@ enum TileAgentBubbleChecks {
         // TILE_AGENT_BUBBLE_FILM_MODE=working films the working first agent (no
         // pointer) for 6 s at TILE_AGENT_BUBBLE_FILM_ZOOM; else the hover script.
         let env = ProcessInfo.processInfo.environment
-        let working = env["TILE_AGENT_BUBBLE_FILM_MODE"] == "working"
+        let mode = env["TILE_AGENT_BUBBLE_FILM_MODE"]
+        let working = mode == "working" || mode == "idle"
+        let filmStyle = Style(rawValue: env["TILE_AGENT_BUBBLE_FILM_STYLE"] ?? "") ?? .orb
+        TileAgentBubbleLayer.orbTreatment = env["TILE_AGENT_BUBBLE_FILM_TREATMENT"] == "inset" ? .inset : .classic
+        let seconds = Double(env["TILE_AGENT_BUBBLE_FILM_SECONDS"] ?? "") ?? (working ? 6.2 : 4.4)
         let zoom = Double(env["TILE_AGENT_BUBBLE_FILM_ZOOM"] ?? "") ?? 2
-        let subject = working ? views[0] : views[3]
-        setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.orb.rawValue)
-        try expect(pump(until: { showsStyle(.orb, views, canvas) }), "Orb for the hover film")
+        let subject = mode == "idle" ? views[1] : (working ? views[0] : views[3])
+        setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, filmStyle.rawValue)
+        try expect(pump(until: { showsStyle(filmStyle, views, canvas) }), "\(filmStyle.title) for the hover film")
+        for view in views { view.qaAgentBubble?.qaRepaint() }
         if env["TILE_AGENT_BUBBLE_FILM_APPEARANCE"] == "light" { window.appearance = NSAppearance(named: .aqua) }
         if env["TILE_AGENT_BUBBLE_FILM_APPEARANCE"] != "light" { window.appearance = NSAppearance(named: .darkAqua) }
         guard let world = canvas.allTilesInWorldFrames().first(where: { $0.id == subject.tile.id })?.frame else {
@@ -1250,7 +1255,7 @@ enum TileAgentBubbleChecks {
         pump(0.3)
         let start = Date()
         func scale() -> Double { (bubble.presentation()?.value(forKeyPath: "transform.scale.x") as? Double) ?? 1 }
-        while Date().timeIntervalSince(start) < (working ? 6.2 : 4.4) {
+        while Date().timeIntervalSince(start) < seconds {
             let t = Date().timeIntervalSince(start)
             while next < script.count, script[next].0 <= t { bubble.setHovered(script[next].1); next += 1 }
             CATransaction.flush()
