@@ -1016,6 +1016,18 @@ enum ContinuumApp {
                 }
             }
         }
+        if CommandLine.arguments.contains("--sidebar-dogfood-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarDogfoodChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-quiet-inbox-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {

@@ -6443,13 +6443,22 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func endCrossfade(id: UUID, view: NSView) {
         guard crossfadingCells[id] === view else { return }
         crossfadingCells.removeValue(forKey: id)
+        retireGhost(view)
+    }
+
+    /// A ghost is a REAL cell: it stays in `recentCells` under its old shape and
+    /// is lent again the next time the row draws that shape. Faded to nothing,
+    /// it would come back invisible (History rows blank until hovered), so it
+    /// leaves the table at full strength.
+    private func retireGhost(_ view: NSView) {
         view.removeFromSuperview()
+        view.alphaValue = 1
     }
 
     /// Drop every ghost immediately. The list they were lifted out of is gone, so
     /// there is nothing left for them to be fading away from.
     private func cancelCrossfades() {
-        for view in crossfadingCells.values { view.removeFromSuperview() }
+        for view in crossfadingCells.values { retireGhost(view) }
         crossfadingCells.removeAll()
     }
 
