@@ -64,7 +64,8 @@ extension WorkspaceAPIService {
             facts.append(AgentFindCandidateFacts(
                 identity: identity,
                 taskTitle: document.flatMap(Self.promptTitle(from:)),
-                referencedFiles: document.map { Self.referencedFiles(from: $0, checkoutRoot: candidate.checkoutRoot) } ?? [],
+                referencedFiles: supervisor.releasedTranscriptDiscovery(for: candidate.id)?.referencedFiles
+                    ?? document.map { Self.referencedFiles(from: $0, checkoutRoot: candidate.checkoutRoot) } ?? [],
                 evidenceAvailable: document != nil,
                 isCaller: candidate.id == agentId))
         }
@@ -187,8 +188,10 @@ extension WorkspaceAPIService {
                 maxItems: request.effectiveMaxEvents,
                 byteCeiling: AgentInspectResponse.excerptByteCeiling)
             response.recentEvents = bounded.items
-            response.recentEventsTruncated = bounded.truncated
-            response.referencedFiles = Self.referencedFiles(from: document, checkoutRoot: target.checkoutRoot)
+            let released = supervisor.releasedTranscriptDiscovery(for: target.id)
+            response.recentEventsTruncated = bounded.truncated || released?.evidenceCut == true
+            response.referencedFiles = released?.referencedFiles
+                ?? Self.referencedFiles(from: document, checkoutRoot: target.checkoutRoot)
         }
         // Whole-response ceiling: shed the oldest evidence first, then file names;
         // identity and status are never cut.

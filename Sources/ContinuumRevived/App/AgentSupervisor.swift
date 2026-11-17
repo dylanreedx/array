@@ -2515,7 +2515,11 @@ final class AgentSupervisor {
         // The projector and the transcript list consume the same sanitized,
         // non-Codable side channel. Observers are host-local and scoped by the
         // immutable agent ID; no raw runtime payload or path enters the event log.
-        sharedTranscriptDetails[id]?.captureRuntimeObservation(observation)
+        // Behind a reload, in order with the events that created the capture:
+        // the capture does not exist yet, and an observation sent now is lost.
+        if !deferUntilTranscriptReloaded(id, { [weak self] in self?.sharedTranscriptDetails[id]?.captureRuntimeObservation(observation) }) {
+            sharedTranscriptDetails[id]?.captureRuntimeObservation(observation)
+        }
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
 
@@ -8954,8 +8958,7 @@ final class AgentSupervisor {
         writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: error)
     }
 
-    private func helperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {
-        let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
+    private func helperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?, identity: String) {
         let previous = heldHelperCompletions[id]
         if let previous, previous.identity != identity { removeHeldRecords(previous, helper: id) }
         if holdsHelperCompletion(id, outcome: outcome) {
@@ -9938,6 +9941,13 @@ final class AgentSupervisor {
     /// QA: the final assistant text the supervisor's copy holds now — what a
     /// spawned child's result carries back and the sidebar hover card reads.
     func qaFinalAssistantText(for id: AgentID) -> String? { finalAssistantText(for: id) }
+
+    /// What a released agent knew before its evidence was cut to two entries:
+    /// the files its whole transcript referenced, and that entries were dropped.
+    func releasedTranscriptDiscovery(for id: AgentID) -> (referencedFiles: [String], evidenceCut: Bool)? {
+        guard let released = releasedTranscripts[id] else { return nil }
+        return (released.referencedFiles, released.entryCount > released.evidence.entries.count)
+    }
 
     func transcriptDocumentProjection(for id: AgentID) -> AgentDocument? {
         if let released = releasedTranscripts[id] { return released.evidence }
@@ -11512,18 +11522,7 @@ final class AgentSupervisor {
         if !bypassReload, deferUntilTranscriptReloaded(id, { [weak self] in self?.ingestTranscriptEvent(event, for: id, bypassReload: true) }) { return }
         recordCanonicalTranscriptMutation(for: id) { $0.ingest(event); return true }
         if transcriptProjections[id] == nil { transcriptProjections[id] = transcriptProjection(for: id) }
-        let capture: AgentTranscriptCanvasToolDetail
-        if let existing = sharedTranscriptDetails[id] { capture = existing }
-        else {
-            capture = AgentTranscriptCanvasToolDetail(store: AgentToolDetailStore())
-            capture.bind(agentID: id)
-            capture.onRefresh = { [weak self] in
-                guard let self else { return }
-                self.sharedTranscriptDetailRevisions[id, default: 0] &+= 1
-                self.sharedTranscriptDetailObservers[id]?.values.forEach { $0() }
-            }
-            sharedTranscriptDetails[id] = capture
-        }
+        let capture = sharedTranscriptDetailCapture(for: id)
         let identity = capture.captureRuntimeEvent(event)
         let previous = identity == nil ? Set<AgentNodeID>() : Set(transcriptProjections[id]!.document.entries.map(\.id))
         // In place: a copy mutated while the dictionary still held the original
@@ -11542,6 +11541,19 @@ final class AgentSupervisor {
             if candidates.count == 1 { _ = capture.bindIdentity(identity, to: candidates[0].id) }
         }
         scheduleTranscriptPersist(for: id, final: Self.isTranscriptPersistBoundary(event))
+    }
+
+    private func sharedTranscriptDetailCapture(for id: AgentID) -> AgentTranscriptCanvasToolDetail {
+        if let existing = sharedTranscriptDetails[id] { return existing }
+        let capture = AgentTranscriptCanvasToolDetail(store: AgentToolDetailStore())
+        capture.bind(agentID: id)
+        capture.onRefresh = { [weak self] in
+            guard let self else { return }
+            self.sharedTranscriptDetailRevisions[id, default: 0] &+= 1
+            self.sharedTranscriptDetailObservers[id]?.values.forEach { $0() }
+        }
+        sharedTranscriptDetails[id] = capture
+        return capture
     }
 
     /// Echoes the user's own prompt into the durable document. `send` used to
@@ -11977,6 +11989,13 @@ final class AgentSupervisor {
         /// The last user prompt and the last reply, so finding or inspecting an
         /// idle agent still has evidence without the whole transcript.
         var evidence: AgentDocument
+        /// Checkout-relative files the whole transcript referenced (capped), and
+        /// how many entries it had, because `evidence` keeps only two of them.
+        var referencedFiles: [String]
+        var entryCount: Int
+        /// The presented tool details, kept until their time to live ends: they
+        /// exist nowhere else once the capture is dropped.
+        var toolDetails: AgentTranscriptCanvasToolDetail.ReleasedState?
     }
 
     /// How long an agent must sit idle and unwatched before its transcript is
@@ -12282,8 +12301,10 @@ final class AgentSupervisor {
     }
 
     func finalAssistantText(for id: AgentID) -> String? {
-        if let released = releasedTranscripts[id] { return released.finalAssistantText }
-        return transcriptProjections[id]?.finalAssistantText
+        // The resumed model comes first: while a reload replays held events the
+        // released summary still exists and names the previous turn's reply.
+        if let projection = transcriptProjections[id] { return projection.finalAssistantText }
+        return releasedTranscripts[id]?.finalAssistantText
     }
 
     func isTranscriptReleased(_ id: AgentID) -> Bool { releasedTranscripts[id] != nil }
@@ -12468,12 +12489,28 @@ final class AgentSupervisor {
             finalAssistantText: projection.finalAssistantText,
             savedVersion: projection.document.version,
             saveGeneration: generation,
-            evidence: Self.transcriptEvidence(projection.document))
+            evidence: Self.transcriptEvidence(projection.document),
+            referencedFiles: records[id].map { WorkspaceAPIService.referencedFiles(from: projection.document, checkoutRoot: $0.checkoutRoot) } ?? [],
+            entryCount: projection.document.entries.count,
+            toolDetails: sharedTranscriptDetails[id]?.releasedState())
+        scheduleReleasedToolDetailExpiry(id)
         transcriptProjections[id] = nil
         canonicalTranscriptProjections[id] = nil
         rehydratedTranscripts[id] = nil
         sharedTranscriptDetails[id] = nil
         trimHistoryToSummary(id)
+    }
+
+    /// Drops the kept tool details once they pass their time to live, so a
+    /// released agent holds them for no longer than a resident one would.
+    private func scheduleReleasedToolDetailExpiry(_ id: AgentID) {
+        guard let released = releasedTranscripts[id], let expiresAt = released.toolDetails?.expiresAt else { return }
+        let generation = released.saveGeneration
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, expiresAt.timeIntervalSinceNow)) + .milliseconds(50))
+            guard let self, self.releasedTranscripts[id]?.saveGeneration == generation else { return }
+            self.releasedTranscripts[id]?.toolDetails = nil
+        }
     }
 
     /// Keeps only the last terminal event: what recovery and status read.
@@ -12583,6 +12620,7 @@ final class AgentSupervisor {
             // local-only history and a seed refuses a released transcript.
             if canonicalTranscriptSeparate.contains(id) { canonicalTranscriptProjections[id] = resumed }
             transcriptProjections[id] = resumed
+            if let details = released.toolDetails { sharedTranscriptDetailCapture(for: id).restore(details) }
         }
         var totalReplayed = 0
         var didReplay = false
@@ -14010,7 +14048,16 @@ final class AgentSupervisor {
             scheduleHelperCompletionFlush()
         }
         if case let .turnCompleted(_, turn, outcome, errorMessage) = event {
-            helperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage)
+            // A released transcript holds this turn's events behind its reload, so
+            // the reply read below would be the previous turn's. The completion
+            // joins the same FIFO and runs once those events are applied; the
+            // runner identity is captured now, not when it runs.
+            let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
+            if !deferUntilTranscriptReloaded(id, { [weak self] in
+                self?.helperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage, identity: identity)
+            }) {
+                helperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage, identity: identity)
+            }
         }
         if case let .contentDelta(_, _, .assistant, delta) = event, !isRunning(id), helperCompletionTurns[id] != nil {
             lateHelperText[id, default: ""] += delta

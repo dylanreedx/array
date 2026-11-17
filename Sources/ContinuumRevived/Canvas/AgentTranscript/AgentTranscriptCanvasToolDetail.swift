@@ -64,6 +64,32 @@ final class AgentTranscriptCanvasToolDetail {
         return existing == identity
     }
 
+    /// What a released agent keeps of its tool presentation: the detail records
+    /// still inside their time to live and the entry bindings they present
+    /// through. The records are host-local and never persisted (they may have
+    /// held secrets before sanitising), so the archive cannot rebuild them.
+    struct ReleasedState: Sendable {
+        let details: [AgentToolDetailKey: AgentToolDetailRecord]
+        let identityByEntryID: [AgentNodeID: AgentToolDetailKey]
+        /// When the newest record leaves its time to live.
+        let expiresAt: Date
+    }
+
+    func releasedState() -> ReleasedState? {
+        let now = clock()
+        let live = details.filter { timeToLive == nil || now.timeIntervalSince($0.value.updatedAt) < timeToLive! }
+        guard let newest = live.values.map(\.updatedAt).max() else { return nil }
+        return ReleasedState(details: live,
+                             identityByEntryID: identityByEntryID.filter { live[$0.value] != nil },
+                             expiresAt: newest.addingTimeInterval(timeToLive ?? 0))
+    }
+
+    func restore(_ state: ReleasedState) {
+        details = state.details
+        identityByEntryID = state.identityByEntryID
+        presentationGeneration &+= 1
+    }
+
     // MARK: Capture
 
     @discardableResult
