@@ -327,6 +327,40 @@ enum SidebarQuietInboxChecks {
         let drawnMembers = drawnAgentIDs().intersection(members).count
         try expect(drawnMembers + tally.folded == tally.total && drawnMembers == tally.shown,
                    "drawn helper rows + folded = total — \(drawnMembers) + \(tally.folded) vs \(tally.total)")
+        // One count function: every lead draws the same partition in both
+        // layouts, read from the drawn line, and a cause line's number is that
+        // lead's tally for its state.
+        func drawnCountLines() throws -> [UUID: String] {
+            inbox.layoutForQA()
+            var lines: [UUID: String] = [:]
+            for (id, tally) in inbox.sidebarTallies {
+                guard let text = inbox.cellForQA(id: id)?.branchLaneTextForQA else { continue }
+                try expect(text.contains(tally.countLine),
+                           "\(inbox.sidebarLayout.title): a lead's drawn line carries its tally — '\(text)' vs '\(tally.countLine)'")
+                lines[id] = text
+            }
+            return lines
+        }
+        let quietCounts = try drawnCountLines()
+        settings(.ledger)
+        let ledgerCounts = try drawnCountLines()
+        settings(.quietInbox)
+        try expect(!quietCounts.isEmpty && quietCounts == ledgerCounts,
+                   "Quiet and Ledger draw the same partition per lead — Quiet \(quietCounts.values.sorted()), Ledger \(ledgerCounts.values.sorted())")
+        for line in causeLines() {
+            guard let incident = line.causeIncidentForQA, let leadID = incident.familyIDs.first,
+                  let leadTally = inbox.sidebarTallies[leadID], case .cause(let cause) = incident.kind else { continue }
+            let state: SidebarTallyState = cause == .usageLimit ? .paused : cause == .interruptedByRestart ? .stopped : .failed
+            // One icon, then the words; a failure's line carries its reason, no count.
+            try expect(line.titleForQA.filter { $0 == "\u{FFFC}" }.count == 1,
+                       "a cause line draws exactly one icon — '\(line.titleForQA)'")
+            guard state != .failed else { continue }
+            let words = line.titleForQA.drop { !$0.isNumber }
+            if let number = Int(words.prefix { $0.isNumber }) {
+                try expect(number <= leadTally.count(state) && (cause == .interruptedByRestart || number == leadTally.count(state)),
+                           "a cause line's count is its lead's tally — '\(line.titleForQA)' vs \(leadTally.fullLine)")
+            }
+        }
         try expect(usageLine.accessibilityLabel()?.contains("2 agents paused") == true,
                    "the box's AX says the same 2 paused — got \(usageLine.accessibilityLabel() ?? "")")
 

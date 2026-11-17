@@ -9025,6 +9025,9 @@ final class AgentInboxRemainderView: NSTableCellView {
     private var causeLabelWidth: NSLayoutConstraint?
     private var onCauseAction: (() -> Void)?
     private(set) var causeIncidentForQA: SidebarIncident?
+    /// The cause line's words, kept apart from the drawn string so redrawing
+    /// never stacks a second icon in front of them.
+    private var causeWords = ""
     var causeActionForQA: InboxSettleNudgeButton? { causeAction }
 
     func applyCause(_ incident: SidebarIncident, actionEnabled: Bool, onAction: @escaping () -> Void) {
@@ -9057,7 +9060,7 @@ final class AgentInboxRemainderView: NSTableCellView {
         action.setAccessibilityIdentifier("ContinuumSidebarFamilyCauseAction-\(incident.id)")
         button.isHidden = true
         let words = AgentInboxView.causeLineText(incident) ?? incident.detail
-        label.stringValue = words
+        causeWords = words
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
         setAccessibilityLabel("\(incident.title): \(words)")
@@ -9090,7 +9093,7 @@ final class AgentInboxRemainderView: NSTableCellView {
             text.append(NSAttributedString(attachment: attachment))
             text.append(NSAttributedString(string: "  "))
         }
-        text.append(NSAttributedString(string: label.stringValue))
+        text.append(NSAttributedString(string: causeWords))
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         text.addAttributes([.font: font, .foregroundColor: secondary, .paragraphStyle: paragraph],
