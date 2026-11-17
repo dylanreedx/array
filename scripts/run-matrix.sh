@@ -1669,6 +1669,9 @@ run_leg .build/debug/ContinuumRevivedCollaborationChecks
 run_leg .build/debug/ContinuumRevivedCollaborationServiceChecks
 run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check
 run_leg .build/debug/ContinuumRevivedCoreChecks
+# CLI compatibility data must be checked by its focused witnesses too.
+run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-history-scope-check
 # Live-usage profile 2026-11-12: the activity fold copied every agent entry per
