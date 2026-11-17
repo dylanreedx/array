@@ -1446,6 +1446,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--sticky-head-performance-check") {
+            do {
+                _ = NSApplication.shared
+                print(try StickyHeadPerformanceChecks.run())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-jump-composer-check") {
             do {
                 _ = NSApplication.shared

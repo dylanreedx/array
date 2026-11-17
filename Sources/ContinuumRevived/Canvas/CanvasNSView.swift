@@ -7218,11 +7218,21 @@ final class CanvasNSView: NSView, TokenThemed {
     /// visibility index for a one-unit strip along the top edge, the same index
     /// `visibleTileViews` answers from.
     private func updateStickyTileHeads() {
+        let started = StickyHeadWorkCounters.isEnabled ? ProcessInfo.processInfo.systemUptime : 0
+        defer {
+            if StickyHeadWorkCounters.isEnabled {
+                StickyHeadWorkCounters.updateDurationMS += (ProcessInfo.processInfo.systemUptime - started) * 1_000
+            }
+        }
         var next: [ObjectIdentifier: TileNSView] = [:]
         if AgentJumpConfig.composerFirst(defaults: agentJumpDefaults) {
             let visible = worldPlane.bounds
             let strip = CGRect(x: visible.minX, y: visible.minY, width: visible.width, height: 1)
-            for view in worldPlane.tileViews(intersecting: strip) where view.tile.kind == .managedAgent {
+            let visitsBefore = worldPlane.qaVisibilityCandidateVisits
+            let candidates = worldPlane.tileViews(intersecting: strip)
+            if StickyHeadWorkCounters.isEnabled { StickyHeadWorkCounters.indexVisits += worldPlane.qaVisibilityCandidateVisits - visitsBefore }
+            for view in candidates where view.tile.kind == .managedAgent {
+                if StickyHeadWorkCounters.isEnabled { StickyHeadWorkCounters.candidateVisits += 1 }
                 if let top = stickyHeadTop(for: view) {
                     view.setStickyHeadTop(top)
                     next[ObjectIdentifier(view)] = view
