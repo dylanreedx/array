@@ -2862,7 +2862,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// already excludes a folded parent and re-anchors an ancestor's remainder
     /// when a nested fold removes the model's original anchor.
     /// Quiet inbox History: one card per family, its lead only, newest first by
-    /// the family's last activity (the latest across the lead and its helpers).
+    /// the family's last real turn (the latest prompt or turn start across
+    /// the lead and its helpers).
     /// Each card says how many helpers it holds and that same date
     /// ("4 helpers · Nov 10"). Paging takes this order, so a page never
     /// interleaves older families.
@@ -2870,10 +2871,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let historyIDs = Set(history.map(\.id))
         var childrenOf: [UUID: [AgentInboxRow]] = [:]
         for row in all { if let parent = row.parentId, parent != row.id { childrenOf[parent, default: []].append(row) } }
-        // Closing or settling a family is activity too: the latest thing that
-        // happened to it, so a family closed a minute ago reads a minute ago.
+        // The last REAL turn (a prompt or a turn start). A relaunch restamps
+        // every helper's activity and run-completed time; interrupts, Clear,
+        // archive and read marks move other stamps. None of them is work.
         func activity(_ row: AgentInboxRow) -> Date {
-            [row.lastActiveAt, row.terminalEvent?.endedAt, row.lifecycle.endedAt].compactMap { $0 }.max() ?? row.createdAt
+            row.lastTurnAt ?? row.createdAt
         }
         let roots = history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }
         var dated: [(row: AgentInboxRow, at: Date, index: Int)] = []

@@ -130,6 +130,19 @@ enum SidebarDogfoodChecks {
         }
     }
 
+    /// Press the History heading the way a person does: scrolled into view,
+    /// then clicked through the window.
+    static func clickHistoryHeading(_ inbox: AgentInboxView) throws {
+        guard let row = inbox.historyHeaderTableRowForQA else { throw Failure(description: "no History heading") }
+        inbox.scrollItemToVisibleForQA(row)
+        inbox.layoutForQA()
+        guard let header = inbox.historyHeaderViewForQA, header.window != nil else {
+            throw Failure(description: "the History heading is not drawn after scrolling to it")
+        }
+        try Q.click(header)
+        inbox.layoutForQA()
+    }
+
     static func pump(_ seconds: TimeInterval) {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
@@ -137,6 +150,7 @@ enum SidebarDogfoodChecks {
     static func run() throws -> String {
         var reports: [String] = []
         reports.append(try checkHistoryRows())
+        reports.append(try checkHistoryOrder())
         reports.append(try checkHistoryPaints())
         reports.append(try checkLiveUsage())
         reports.append(try checkOrphanRoot())
@@ -164,8 +178,8 @@ enum SidebarDogfoodChecks {
         defer { h.close() }
         let inbox = h.inbox
         func clickHistory(open: Bool) throws {
-            if inbox.isHistoryExpandedForQA != open, let header = inbox.historyHeaderViewForQA {
-                try Q.click(header)
+            if inbox.isHistoryExpandedForQA != open {
+                try clickHistoryHeading(inbox)
                 pump(0.4)
                 inbox.layoutForQA()
             }
@@ -209,6 +223,8 @@ enum SidebarDogfoodChecks {
         }
         // Open History and scroll it, as Dylan did.
         try clickHistory(open: true)
+        if let headerRow = inbox.historyHeaderTableRowForQA { inbox.scrollItemToTopForQA(headerRow) }
+        pump(0.1)
         inbox.scrollForQA(byPoints: 80)
         pump(0.2)
         inbox.scrollForQA(byPoints: -80)
@@ -410,11 +426,96 @@ enum SidebarDogfoodChecks {
         return "Orphan root: '\(row.displayTitle)' with its lead deleted draws as its own root card (depth 0, no parent)"
     }
 
+    // MARK: - 1b. History is newest first by the last REAL turn
+
+    /// Restored records, the shape found in Dylan's store: a relaunch stamps
+    /// every helper's activity, run-completed and terminal times with "now",
+    /// while its real turns are days old. Restored records emit no helper
+    /// results, so no lead wakes and the order is deterministic.
+    static func checkHistoryOrder() throws -> String {
+        let now = Date()
+        func days(_ n: Double) -> Date { now.addingTimeInterval(-n * 86_400) }
+        var titles: [AgentID: String] = [:]
+        let h = try makeHarness("history-order") { delegate, _ in
+            guard let peer = delegate.qaAgentSupervisor.records.values.first else {
+                throw Failure(description: "fixture agent missing")
+            }
+            let store = AgentStore(smokeTest: false)
+            func put(_ title: String, parent: AgentID? = nil, turn: Date, stamp: Date? = nil) throws -> AgentID {
+                let id = AgentID(rawValue: UUID())
+                let touched = stamp ?? turn.addingTimeInterval(60)
+                var record = AgentRecord(
+                    id: id, displayName: title, model: peer.model, thinking: peer.thinking, cwd: peer.cwd,
+                    projectId: peer.projectId, parentAgentID: parent,
+                    createdAt: turn.addingTimeInterval(-60), lastActivityAt: touched, latestPromptAt: parent == nil ? turn : nil,
+                    latestTurnAt: turn,
+                    latestTerminalEvent: AgentTerminalEvent(sequence: 1, turnID: "t", outcome: .succeeded, endedAt: touched),
+                    archivedAt: max(touched, turn.addingTimeInterval(120)))
+                record.runCompletedAt = touched
+                record.acknowledgedTerminalSequence = 1
+                try store.upsert(record)
+                titles[id] = title
+                return id
+            }
+            // Real turns 5 days ago; a relaunch stamped its helpers "now".
+            let stamped = try put("Restart-stamped family", turn: days(5))
+            for n in 1...2 { _ = try put("Stamped helper \(n)", parent: stamped, turn: days(5), stamp: now) }
+            // Lead 3 days ago, its helper really worked 1 day ago.
+            let lifted = try put("Helper worked later", turn: days(3))
+            _ = try put("Late helper", parent: lifted, turn: days(1))
+            _ = try put("Recent lead", turn: days(2))
+            for n in 1...10 { _ = try put("Older family \(n)", turn: days(Double(10 + n))) }
+        }
+        defer { h.close() }
+        let inbox = h.inbox
+        h.refresh()
+        if !inbox.isHistoryExpandedForQA { _ = inbox.clickHistoryDisclosureForQA() }
+        inbox.layoutForQA()
+        try expect(inbox.isHistoryExpandedForQA, "History did not open")
+        let table = inbox.tableForQA
+        func cards() -> [(title: String, at: Date?)] {
+            inbox.itemsForQuietCheck.indices.compactMap { row -> (String, Date?)? in
+                guard let entry = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarQuietHistoryEntryView
+                else { return nil }
+                return (entry.titleForQA, entry.shownDate)
+            }
+        }
+        func nonIncreasing(_ order: [(title: String, at: Date?)]) -> Bool {
+            zip(order, order.dropFirst()).allSatisfy { ($0.at ?? .distantPast) >= ($1.at ?? .distantPast) }
+        }
+        func describe(_ order: [(title: String, at: Date?)]) -> String {
+            order.map { "\($0.title) \($0.at.map { String(format: "%.1fd", now.timeIntervalSince($0) / 86_400) } ?? "-")" }.joined(separator: ", ")
+        }
+        // The fixture's own never-prompted source agent dates from its creation
+        // (now); the families under test are the rest.
+        let page = cards()
+        let families = page.filter { $0.title != AgentName.defaultName }
+        try expect(Array(families.prefix(3).map(\.title)) == ["Helper worked later", "Recent lead", "Restart-stamped family"]
+                   && nonIncreasing(page),
+                   "History is not newest first by last real turn: \(describe(page))")
+        guard let stampedAt = page.first(where: { $0.title == "Restart-stamped family" })?.at,
+              abs(stampedAt.timeIntervalSince(days(5))) < 1 else {
+            throw Failure(description: "a relaunch's stamps moved the family's date: \(describe(page))")
+        }
+        guard let liftedAt = families.first?.at, abs(liftedAt.timeIntervalSince(days(1))) < 1 else {
+            throw Failure(description: "a helper's later real turn is not its family's date: \(describe(page))")
+        }
+        guard let more = Q.views(in: inbox, where: { $0 is AgentInboxSettledMoreView && !$0.isHiddenOrHasHiddenAncestor }).first else {
+            throw Failure(description: "no Show more under History (\(page.count) cards)")
+        }
+        try Q.click(more)
+        inbox.layoutForQA()
+        let all = cards()
+        try expect(nonIncreasing(all) && all.count >= 13,
+                   "after Show more, History is not newest first: \(describe(all))")
+        return "History order: newest first by last real turn across Show more (\(all.count) cards): \(describe(Array(all.filter { $0.title != AgentName.defaultName }.prefix(3)))); relaunch stamps on helpers did not move a family"
+    }
+
     // MARK: - 5. An untitled, prompted lead reads as its first prompt
 
     static func checkUntitledLead() throws -> String {
         let untitled = AgentID(rawValue: UUID())
-        let prompt = "Investigate the flaky login test on CI"
+        let prompt = "You are working in the Array repository at: /Users/someone/Array\n\n**Fix** the flaky `login` test on CI"
         let h = try makeHarness("untitled-lead") { delegate, _ in
             // A restored lead that was prompted but never named, closed to History.
             let ended = Date().addingTimeInterval(-3_600)
@@ -454,11 +555,11 @@ enum SidebarDogfoodChecks {
         }
         // The transcript is read off the main thread; the sidebar re-pushes when it lands.
         let deadline = Date().addingTimeInterval(10)
-        while card()?.titleForQA != AgentName.fromPrompt(prompt), Date() < deadline {
+        let expected = "Fix the flaky login test on CI"
+        while card()?.titleForQA != expected, Date() < deadline {
             pump(0.05)
             inbox.layoutForQA()
         }
-        let expected = AgentName.fromPrompt(prompt) ?? prompt
         try expect(card()?.titleForQA == expected,
                    "an untitled, prompted History lead reads '\(card()?.titleForQA ?? "no card")', wanted its prompt line '\(expected)' (record \(h.supervisor.records[untitled] != nil), pushed \(inbox.pushedRowForQA(id: untitled.rawValue).map { "\($0.displayTitle) \($0.lifecycle)" } ?? "nil"), History \(inbox.historyHeaderTitleForQA ?? "nil"))")
         return "Untitled lead: a restored, prompted lead with no title draws its first prompt line '\(expected)' in History, not 'New agent'"
@@ -480,13 +581,8 @@ enum SidebarDogfoodChecks {
             extra.append(family)
             extra.append(contentsOf: (0..<2).map { h.spawn("Older helper \(index + 1).\($0 + 1)", parent: family) })
         }
-        // Family 4's helper finishes LAST: its family's last activity is the
-        // newest, so it must lead History although its lead finished early.
-        let lateHelper = extra[3 * 3 + 1]  // "Older helper 4.1"
-        for id in extra where id != lateHelper { h.finish(id) }
+        for id in extra { h.finish(id) }
         for id in [lead, solo] + helpers { h.finish(id) }
-        pump(0.05)
-        h.finish(lateHelper)
         h.refresh()
         // Clear through the drawn control: both families go to History.
         guard let clear = (Q.views(in: inbox) {
@@ -496,8 +592,7 @@ enum SidebarDogfoodChecks {
         }
         try Q.click(clear)
         inbox.layoutForQA()
-        guard let header = inbox.historyHeaderViewForQA else { throw Failure(description: "no History heading") }
-        try Q.click(header)
+        try clickHistoryHeading(inbox)
         inbox.layoutForQA()
         try expect(inbox.isHistoryExpandedForQA, "History did not open")
         Q.photograph(h.sidebar, "dogfood-history")
@@ -525,20 +620,6 @@ enum SidebarDogfoodChecks {
         }
         try expect(other.isEmpty, "History draws something other than one card per family: \(other)")
         let pageCards = drawn.count
-        // Newest first by family activity, and the card shows that same date.
-        func drawnOrder() -> [(title: String, at: Date?)] {
-            inbox.itemsForQuietCheck.indices.compactMap { row -> (String, Date?)? in
-                guard let entry = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarQuietHistoryEntryView
-                else { return nil }
-                return (entry.titleForQA, entry.shownDate)
-            }
-        }
-        func nonIncreasing(_ order: [(title: String, at: Date?)]) -> Bool {
-            zip(order, order.dropFirst()).allSatisfy { ($0.at ?? .distantPast) >= ($1.at ?? .distantPast) }
-        }
-        let firstPage = drawnOrder()
-        try expect(firstPage.first?.title == "Older family 4" && nonIncreasing(firstPage),
-                   "History is not newest-first by family activity: \(firstPage.map { "\($0.title) \($0.at.map { String(format: "%.3f", $0.timeIntervalSince1970) } ?? "-")" })")
         drawn[h.fixture.agentId.rawValue] = nil  // the fixture's own parked source agent
         // Families total: 2 + the older ones + the fixture's agent; a page of
         // `settledPageSize` cards, and the footer counts the families left.
@@ -567,15 +648,6 @@ enum SidebarDogfoodChecks {
                        "History card lines overlap or leave the card: title \(t), detail \(d), card \(c)")
             try expect(c.height >= 50 && c.height <= 58, "History card is \(c.height)pt tall, wanted A's ~54")
         }
-        // "Show more" through its drawn control keeps the order.
-        guard let more = Q.views(in: inbox, where: { $0 is AgentInboxSettledMoreView && !$0.isHiddenOrHasHiddenAncestor }).first else {
-            throw Failure(description: "no Show more under History")
-        }
-        try Q.click(more)
-        inbox.layoutForQA()
-        let allPages = drawnOrder()
-        try expect(allPages.count == families && nonIncreasing(allPages),
-                   "after Show more, History is not newest-first (\(allPages.count) cards): \(allPages.map(\.title))")
-        return "History rows: newest first by family activity across Show more (\(allPages.count) cards, '\(firstPage.first?.title ?? "")' first by its late helper); one card per family at \(SidebarQuietHistoryEntryView.height)pt; '\(leadCard.titleForQA)' / '\(leadCard.detailForQA)', solo '\(soloCard.detailForQA)'; helpers stay inside their lead"
+        return "History rows: one card per family at \(SidebarQuietHistoryEntryView.height)pt; '\(leadCard.titleForQA)' / '\(leadCard.detailForQA)', solo '\(soloCard.detailForQA)'; helpers stay inside their lead"
     }
 }

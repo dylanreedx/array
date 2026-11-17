@@ -257,6 +257,17 @@ func runSidebarLedgerCoreChecks() {
         expect(!applied.released.contains(unknown.id) && applied.rows[0].isCleared,
                "a usage stop alone (live \(live)) does not bring a cleared row back")
     }
+    // Dogfood: titles read clean on every surface (one resolver).
+    for (raw, want) in [
+        ("Safest merge **Add RED cases** to `--x-check`", "Safest merge Add RED cases to --x-check"),
+        ("You are working in the Array repository at: Implement and verify a fix", "Implement and verify a fix"),
+        ("## Plan the release", "Plan the release"),
+        ("Investigate   the\nflaky test", "Investigate the flaky test"),
+    ] {
+        expect(AgentName.displayTitle(raw) == want, "displayTitle(\(raw)) = \(AgentName.displayTitle(raw)), wanted \(want)")
+    }
+    expect(AgentName.fromPrompt("You are working in the Array repository at: /Users/x/Array\n\n**Fix** the `login` test") == "Fix the login test",
+           "fromPrompt skips the boilerplate line and markup — got \(AgentName.fromPrompt("You are working in the Array repository at: /Users/x/Array\n\n**Fix** the `login` test") ?? "nil")")
     // Dogfood: the live usage rule, pure. Old words alone are a plain failure.
     do {
         let stopped = F.row(400, "Old usage stop", outcome: .failed, detail: F.usage)

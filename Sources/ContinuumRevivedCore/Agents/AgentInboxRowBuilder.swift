@@ -330,6 +330,7 @@ public enum AgentInboxRowBuilder {
             built.failureDetail = failureDetail
         }
         if let record {
+            built.lastTurnAt = [record.latestPromptAt, record.latestTurnAt].compactMap { $0 }.max()
             built.resumesThroughLead = record.parentAgentID != nil && !record.capabilities.locallyManaged
             built.isCleared = record.parentAgentID != nil && record.settledOverride == .settled
         }

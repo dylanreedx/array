@@ -49,7 +49,44 @@ public enum AgentName {
     }
 
     public static func fromPrompt(_ prompt: String) -> String? {
-        normalizedLabel(prompt)
+        // Leading lines that say nothing (a "You are working in … repository
+        // at:" preamble, a bare path, markup only) are skipped; the title starts
+        // at the first meaningful line.
+        var lines = prompt.components(separatedBy: .newlines)
+        while let first = lines.first, isEmptyTitleLine(first) { lines.removeFirst() }
+        return normalizedLabel(cleanedTitle(lines.joined(separator: "\n")))
+    }
+
+    /// A title as people read it: markdown emphasis and code marks removed, a
+    /// leading heading/quote/bullet marker dropped, a "You are working in …
+    /// repository at: <path>" preamble skipped, whitespace collapsed. Shared by
+    /// `fromPrompt` (new names) and `displayTitle` (every painted title, so the
+    /// live list and History agree on names stored before this existed).
+    public static func cleanedTitle(_ raw: String) -> String {
+        var text = raw
+        for mark in ["**", "__", "`"] { text = text.replacingOccurrences(of: mark, with: "") }
+        text = text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
+        var changed = true
+        while changed {
+            changed = false
+            if let range = text.range(of: #"^(#{1,6}|>|[-*+])\s+"#, options: .regularExpression) {
+                text.removeSubrange(range); changed = true
+            }
+            if let range = text.range(of: boilerplatePattern, options: [.regularExpression, .caseInsensitive]) {
+                text.removeSubrange(range); changed = true
+            }
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// "You are working in the Array repository at: /path/to/checkout" and its
+    /// short forms, with the path when one follows.
+    static let boilerplatePattern =
+        #"^you are working in (the )?[^:]{0,60}?\b(repository|repo|project|workspace|checkout|worktree)( at)?:?\s*([~/]\S*\s*)?"#
+
+    private static func isEmptyTitleLine(_ line: String) -> Bool {
+        let cleaned = cleanedTitle(line)
+        return cleaned.isEmpty || cleaned.hasPrefix("/") || cleaned.hasPrefix("~/")
     }
 
     /// A source ticket/queue identifier is a name seed, not an opaque fallback.
@@ -185,8 +222,8 @@ public enum AgentName {
         role: String? = nil,
         id: UUID? = nil
     ) -> String {
-        guard let label = displayLabel(raw),
-              !isIdentifier(raw, model: model, role: role, id: id) else {
+        guard !isIdentifier(raw, model: model, role: role, id: id),
+              let label = displayLabel(cleanedTitle(raw)) ?? displayLabel(raw) else {
             return defaultName
         }
         return label
@@ -1065,6 +1102,10 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// Another signed-in account of the row's CLI exists to switch to. Never
     /// assumed: most people have one subscription per provider.
     public var usageCanSwitchAccount: Bool = false
+    /// The last REAL turn: the latest prompt or turn start. Unlike
+    /// `lastActiveAt` and the terminal stamp, a relaunch, an interrupt, Clear,
+    /// archive or a read mark never moves it. History orders and dates by it.
+    public var lastTurnAt: Date?
     /// The user pinned this lead in Standing (a sidebar preference, per agent).
     public var isStanding: Bool = false
     /// Whether the agent has a canvas tile. A tile-less helper is drawn only as
@@ -1288,6 +1329,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         row.isStanding = source.isStanding
         row.usageExhaustedNow = source.usageExhaustedNow
         row.usageCanSwitchAccount = source.usageCanSwitchAccount
+        row.lastTurnAt = source.lastTurnAt
         return row
     }
 
