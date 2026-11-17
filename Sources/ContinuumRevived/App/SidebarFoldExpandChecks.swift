@@ -246,7 +246,11 @@ extension SidebarOwnershipChecks {
                 row(historySnoozed, "Wait for the relay deploy", lifecycle: .snoozed(until: now.addingTimeInterval(3600)),
                     spawned: 40)]
             + historyClosed.enumerated().map { i, n in
-                row(n, "Closed review \(i + 1)", lifecycle: .settled(at: ago(60 + Double(i))), spawned: 120 + Double(i))
+                // Each did a real turn: an agent opened and never used is not
+                // History (dogfood fix).
+                var closed = row(n, "Closed review \(i + 1)", lifecycle: .settled(at: ago(60 + Double(i))), spawned: 120 + Double(i))
+                closed.lastTurnAt = ago(115 + Double(i))
+                return closed
             }
     }
 

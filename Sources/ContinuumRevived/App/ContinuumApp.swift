@@ -42366,10 +42366,16 @@ extension AppDelegate {
     // A headless agent belonging to the OTHER project — the case cross-review
     // raised: the app has one spawner, bound to the active project, so its view
     // cannot land in its own project's canvas today.
-    try revealAgentStore.upsert(AgentRecord(
+    // It did a real, read turn: an agent opened and never used is not History
+    // (sidebar dogfood fix), and 3c below closes it into History.
+    var elsewhereRecord = AgentRecord(
         id: elsewhereAgent, displayName: "elsewhere agent", role: "orchestrator",
         model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: thereRoot.path,
-        projectId: thereProjectId, createdAt: now, lastActivityAt: now))
+        projectId: thereProjectId, createdAt: now, lastActivityAt: now)
+    elsewhereRecord.latestTurnAt = now
+    elsewhereRecord.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "t0", outcome: .succeeded, endedAt: now)
+    elsewhereRecord.acknowledgedTerminalSequence = 1
+    try revealAgentStore.upsert(elsewhereRecord)
 
     let revealApp = AppDelegate()
     // A scripted turn, so the unread mark below is EARNED by a completed turn
@@ -44228,11 +44234,17 @@ extension AppDelegate {
     //     … tail []".
     let settledAgent = AgentID(rawValue: UUID(uuidString: "3B900000-0000-4000-8000-0000000000BF")!)
     let filedOn = now.addingTimeInterval(-3_600)
-    try revealAgentStore.upsert(AgentRecord(
+    // It did a real, read turn before it was filed: an agent opened and never
+    // used is not History (sidebar dogfood fix).
+    var filedRecord = AgentRecord(
         id: settledAgent, displayName: "filed agent", role: "reviewer",
         model: "openai-codex/gpt-5.6-sol", thinking: "medium", cwd: hereRoot.path,
         projectId: hereProjectId, createdAt: filedOn, lastActivityAt: filedOn,
-        settledOverride: .settled, settledAt: filedOn))
+        settledOverride: .settled, settledAt: filedOn)
+    filedRecord.latestTurnAt = filedOn
+    filedRecord.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "t0", outcome: .succeeded, endedAt: filedOn)
+    filedRecord.acknowledgedTerminalSequence = 1
+    try revealAgentStore.upsert(filedRecord)
     // Adopted from the STORE, like P4.4's own fixtures: a settled agent this process
     // never settled itself is what a relaunched one is.
     revealSupervisor.restore()
