@@ -4331,6 +4331,10 @@ final class AgentSupervisor {
         piConversationLossNotices.remove(id)
         runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
+        // Accepted, not yet started: a held turn is already this turn's to
+        // decide, and nothing in the transcript so far is this turn's reply.
+        heldHelperCompletions[id]?.turnInFlight = true
+        markTurnReplyFloor(id)
         notifyTurnCapabilitiesChanged(id)
         // P2D.2: an agent asking for another agent arrives here, out of band from
         // the event stream. Hopped to the main actor like the events are, and for
@@ -7299,7 +7303,10 @@ final class AgentSupervisor {
         // A report filed between turns is a result: it releases a turn held
         // as progress, or follows a result already delivered as a note.
         if !isRunning(id) {
-            if heldHelperCompletions[id] != nil { releaseHeldHelperCompletion(id) }
+            if heldHelperCompletions[id] != nil {
+                if heldHelperCompletions[id]?.turnInFlight == false { heldHelperCompletions[id]?.completion.report = record.lastReport }
+                releaseHeldHelperCompletion(id)
+            }
             else { noteLateHelperOutput(id, text: Self.helperCompletionReportText(report)) }
         }
         return true
@@ -8971,8 +8978,27 @@ final class AgentSupervisor {
         var cutoff: Date?
         var reply: String?
         var transcriptUnavailable: Bool
+        /// The report this turn filed, captured when it ended (or filed between
+        /// turns while it was held). A later turn's report never replaces it.
+        var report: AgentFiledReport?
     }
     private var settlementScope: HelperTurnCompletion?
+    /// The last assistant entry when each turn was accepted. A reply at or
+    /// before it is an earlier turn's, never the accepted turn's own.
+    private struct TurnReplyFloor { var entryID: AgentNodeID? }
+    private var turnReplyFloors: [AgentID: TurnReplyFloor] = [:]
+
+    /// Behind a reload when the transcript is released, so it lands after the
+    /// previous turn's events and before this turn's.
+    private func markTurnReplyFloor(_ id: AgentID, bypassReload: Bool = false) {
+        if !bypassReload, deferUntilTranscriptReloaded(id, { [weak self] in self?.markTurnReplyFloor(id, bypassReload: true) }) { return }
+        turnReplyFloors[id] = TurnReplyFloor(entryID: lastAssistantEntryID(id))
+    }
+
+    private func lastAssistantEntryID(_ id: AgentID) -> AgentNodeID? {
+        transcriptProjections[id]?.document.entries.last(where: { $0.role == .assistant })?.id
+    }
+    static let helperNoReplyText = "(no reply this turn)"
     /// Each helper's latest settled completion. A wake refresh reads its reply
     /// only for the same identity; same-turn late output extends it.
     private var settledHelperCompletions: [AgentID: HelperTurnCompletion] = [:]
@@ -8988,9 +9014,8 @@ final class AgentSupervisor {
 
     /// The report a settlement may carry: none filed after its turn's cutoff.
     private func settlementReport(_ id: AgentID) -> AgentFiledReport? {
-        guard let filed = records[id]?.lastReport else { return nil }
-        if let scope = settlementScope, scope.id == id, let cutoff = scope.cutoff, filed.filedAt > cutoff { return nil }
-        return filed
+        if let scope = settlementScope, scope.id == id { return scope.report }
+        return records[id]?.lastReport
     }
 
     private func withSettlement(_ completion: HelperTurnCompletion, _ body: () -> Void) {
@@ -9008,7 +9033,7 @@ final class AgentSupervisor {
     private final class CompletionBox { var done = false }
 
     private func runHelperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?, identity: String,
-                                        completedAt: Date?, unavailableCause: String?) {
+                                        completedAt: Date?, report: AgentFiledReport?, unavailableCause: String?) {
         var outcome = outcome, error = error
         if let cause = unavailableCause {
             if outcome == .completed { outcome = .failed }
@@ -9016,9 +9041,13 @@ final class AgentSupervisor {
         }
         // Captured here, once: the turn's own events are applied (a deferred
         // completion runs behind them), and a later turn's are not.
-        let reply = unavailableCause == nil ? transcriptProjections[id]?.finalAssistantText : nil
+        // Only a reply after the turn's own floor is the turn's: a turn that
+        // failed or was stopped before speaking has none, and must not borrow one.
+        let last = lastAssistantEntryID(id)
+        let owned = last != nil && turnReplyFloors[id].map { $0.entryID != last } != false
+        let reply = unavailableCause == nil && owned ? transcriptProjections[id]?.finalAssistantText : nil
         let completion = HelperTurnCompletion(id: id, turn: turn, identity: identity, outcome: outcome, error: error,
-            cutoff: completedAt, reply: reply, transcriptUnavailable: unavailableCause != nil)
+            cutoff: completedAt, reply: reply, transcriptUnavailable: unavailableCause != nil, report: report)
         withSettlement(completion) { helperTurnCompleted(completion) }
     }
 
@@ -9036,8 +9065,9 @@ final class AgentSupervisor {
         // A completion that waited while the helper started another turn is not
         // the helper's current state: holding it would put it under that turn,
         // whose background work and handles are not its own. It settles now.
-        let superseded = completion.cutoff != nil && (isRunning(id)
-            || runnerGenerationTokens[id].map { $0.rawValue.uuidString != completion.identity } == true)
+        // (A later accepted turn mints a new generation; a one-shot runner is
+        // still bound while its own completion is delivered, so not isRunning.)
+        let superseded = runnerGenerationTokens[id].map { $0.rawValue.uuidString != completion.identity } == true
         if !superseded, holdsHelperCompletion(id, outcome: completion.outcome) {
             let recipients = helperParents(id).filter { records[$0] != nil && wakesForHelperCompletion($0) }
             let held = HeldHelperCompletion(completion: completion,
@@ -9331,7 +9361,7 @@ final class AgentSupervisor {
         if let filed = settlementReport(id), filed.filedAt > baseline {
             report = Self.helperCompletionReportText(filed.report)
         } else {
-            report = String((finalAssistantText(for: id) ?? "").prefix(2400))
+            report = String((finalAssistantText(for: id) ?? Self.helperNoReplyText).prefix(2400))
         }
         return ("\(String(child.humanDisplayName.prefix(80))) finished: \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(report)", filedThisTurn)
     }
@@ -9489,7 +9519,7 @@ final class AgentSupervisor {
                                     settled.identity == state.turn {
                                 // This turn's own reply, never the transcript's latest: a
                                 // turn settled without its transcript stays textless.
-                                body = String((settled.reply ?? "").prefix(2400))
+                                body = String((settled.reply ?? Self.helperNoReplyText).prefix(2400))
                             } else {
                                 body = (state.text ?? update.1).components(separatedBy: "\n").dropFirst().joined(separator: "\n")
                             }
@@ -14162,23 +14192,26 @@ final class AgentSupervisor {
             // reload cannot finish within the bound, it is delivered as an explicit
             // failure instead: terminal delivery never depends on the archive.
             let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
+            // Its end is its cutoff on every path, held or not: handles accepted
+            // later, and reports filed later, are a later turn's.
             let completedAt = Date()
+            let report = records[id]?.lastReport
             let box = CompletionBox()
-            let settle: (String?, Bool) -> Void = { [weak self] cause, wasDeferred in
+            let settle: (String?) -> Void = { [weak self] cause in
                 guard !box.done else { return }
                 box.done = true
                 self?.runHelperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage, identity: identity,
-                                             completedAt: wasDeferred ? completedAt : nil, unavailableCause: cause)
+                                             completedAt: completedAt, report: report, unavailableCause: cause)
             }
-            if deferUntilTranscriptReloaded(id, { settle(nil, true) }) {
+            if deferUntilTranscriptReloaded(id, { settle(nil) }) {
                 let bound = Self.transcriptCompletionBound
                 Task { [weak self] in
                     try? await Task.sleep(for: bound)
                     guard !box.done, let self else { return }
-                    settle(self.transcriptReloadFailureCause[id] ?? "the read did not finish in time", true)
+                    settle(self.transcriptReloadFailureCause[id] ?? "the read did not finish in time")
                 }
             } else {
-                settle(nil, false)
+                settle(nil)
             }
         }
         if case let .contentDelta(_, _, .assistant, delta) = event, !isRunning(id), helperCompletionTurns[id] != nil {
@@ -14254,7 +14287,9 @@ final class AgentSupervisor {
         }
         // A deferred turn consumed reports only up to its own end; a later
         // turn's report stays that turn's.
-        lastSettledAt[id] = settlementScope.flatMap { $0.id == id ? $0.cutoff : nil } ?? settledAt
+        lastSettledAt[id] = settlementScope.flatMap { scope in
+            scope.id == id ? max(scope.cutoff ?? settledAt, scope.report?.filedAt ?? .distantPast) : nil
+        } ?? settledAt
         SpawnResultFile.write(
             SpawnResultFile(
                 toolCallId: handle,
