@@ -4379,6 +4379,20 @@ enum ContinuumApp {
             RunLoop.main.run()
             return
         }
+        if CommandLine.arguments.contains("--resting-host-cost-probe") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await RestingHostCostProbe.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains("--long-session-memory-check") {
             _ = NSApplication.shared
             Task { @MainActor in
