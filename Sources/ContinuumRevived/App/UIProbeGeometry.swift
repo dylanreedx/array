@@ -6318,15 +6318,30 @@ enum UIProbeGeometry {
     /// where truncation is most obviously wrong, and the long title is what makes
     /// the deficit visible.
     private static func checkWideTileFooterTriggers() throws {
-        let previousPi = AgentModelCatalog.shared.snapshot(for: .pi)
-        defer { AgentModelCatalog.shared.resetForQA(snapshot: previousPi) }
-        AgentModelCatalog.shared.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
+        let catalog = AgentModelCatalog.shared
+        let previousPiSnapshot = catalog.snapshot(for: .pi)
+        // snapshot(for:) omits effort levels; retain the exact prior capabilities too.
+        let previousPiEfforts: [String: [String]] = Dictionary(uniqueKeysWithValues:
+            previousPiSnapshot.models.compactMap { model in
+                catalog.efforts(for: model, harness: .pi).map { (model, $0) }
+            })
+        let previousPi = AgentHarnessCatalogSnapshot(
+            harness: .pi, readiness: previousPiSnapshot.readiness,
+            models: previousPiSnapshot.models, displayNames: previousPiSnapshot.displayNames,
+            contextWindows: previousPiSnapshot.contextWindows, effortLevels: previousPiEfforts,
+            refreshedAt: previousPiSnapshot.refreshedAt, defaultModel: previousPiSnapshot.defaultModel)
+        defer { catalog.resetForQA(snapshot: previousPi) }
+        catalog.resetForQA(snapshot: AgentHarnessCatalogSnapshot(
             harness: .pi, readiness: .ready,
             models: ["openai-codex/gpt-5.6-sol", "anthropic/claude-fable-5"],
             displayNames: [
                 "openai-codex/gpt-5.6-sol": "GPT-5.6 Sol",
                 "anthropic/claude-fable-5": "Claude Fable 5",
-            ]))
+            ], effortLevels: ["openai-codex/gpt-5.6-sol": ["low", "medium", "high"]]))
+        guard AgentModelConfig.supportedEffort(
+            "high", model: "openai-codex/gpt-5.6-sol", harness: .pi) == "high" else {
+            throw fail("wide footer fixture must advertise the exact model's high effort")
+        }
         for width in [CGFloat(900), 1250] {
             for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
                 let label = "managedAgent.wideFooter@\(Int(width))pt.\(appearanceName.rawValue)"

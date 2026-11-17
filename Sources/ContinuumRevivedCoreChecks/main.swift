@@ -3057,6 +3057,25 @@ do {
     )
     expect(runId == "qa-reviewer-20251213T000000Z-abc123", "HarnessRoleRunBuilder makes deterministic run ids")
 
+    let catalog = AgentModelCatalog.shared
+    let previousPiSnapshot = catalog.snapshot(for: .pi)
+    // snapshot(for:) omits effort levels; retain the exact prior capabilities too.
+    let previousPiEfforts: [String: [String]] = Dictionary(uniqueKeysWithValues:
+        previousPiSnapshot.models.compactMap { model in
+            catalog.efforts(for: model, harness: .pi).map { (model, $0) }
+        })
+    let previousPi = AgentHarnessCatalogSnapshot(
+        harness: .pi, readiness: previousPiSnapshot.readiness,
+        models: previousPiSnapshot.models, displayNames: previousPiSnapshot.displayNames,
+        contextWindows: previousPiSnapshot.contextWindows, effortLevels: previousPiEfforts,
+        refreshedAt: previousPiSnapshot.refreshedAt, defaultModel: previousPiSnapshot.defaultModel)
+    defer { catalog.resetForQA(snapshot: previousPi) }
+    let roleModel = "openai-codex/gpt-5.5"
+    catalog.resetForQA(snapshot: .init(
+        harness: .pi, readiness: .ready, models: [roleModel],
+        effortLevels: [roleModel: ["medium"]]))
+    expect(AgentModelConfig.supportedEffort("medium", model: roleModel, harness: .pi) == "medium",
+           "HarnessRoleRunBuilder positive fixture advertises its exact Pi effort")
     let profile = HarnessRoleRunBuilder.buildLaunchProfile(
         role: qaRole,
         prompt: "Review CON-94",
@@ -3066,6 +3085,11 @@ do {
     expect(profile.command == "/usr/bin/env", "HarnessRoleRunBuilder routes through env pi command")
     expect(profile.arguments.prefix(4).elementsEqual(["CONTINUUM_HARNESS_RUN_ID=\(runId)", "python3", "-c", HarnessRoleRunBuilder.processGroupControlScript(runId: runId)]), "HarnessRoleRunBuilder wraps pi in a process-group control script")
     expect(Array(profile.arguments.dropFirst(4)) == ["pi", "--mode", "json", "-p", "--no-session", "--model", "openai-codex/gpt-5.5", "--thinking", "medium", "--tools", "read, bash", "--system-prompt", qaPath, "Review CON-94"], "HarnessRoleRunBuilder builds documented pi role invocation without executing it")
+    catalog.resetForQA(snapshot: .init(
+        harness: .pi, readiness: .ready, models: [roleModel], effortLevels: [:]))
+    let unsupportedEffortProfile = HarnessRoleRunBuilder.buildLaunchProfile(
+        role: qaRole, prompt: "Review CON-94", projectRoot: "/repo", runId: runId)
+    expect(Array(unsupportedEffortProfile.arguments.dropFirst(4)) == ["pi", "--mode", "json", "-p", "--no-session", "--model", "openai-codex/gpt-5.5", "--tools", "read, bash", "--system-prompt", qaPath, "Review CON-94"], "HarnessRoleRunBuilder omits unadvertised Pi effort without changing the role invocation")
     expect(profile.cwd == "/repo", "HarnessRoleRunBuilder binds cwd to project root")
     expect(profile.arguments[3].contains("os.setsid()") && profile.arguments[3].contains("control.json"), "HarnessRoleRunBuilder persists a process-group kill handle before exec")
     let controlDir = temp.appendingPathComponent("control-run")

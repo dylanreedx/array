@@ -315,6 +315,20 @@ enum TileSurfaceResidencyChecks {
     // MARK: - Run
 
     static func run() throws {
+        // The dedicated bake timing arm must retain its clean-heap setup.
+        if !CommandLine.arguments.contains("--bake-cost-only") {
+            try checkDrawnBodiesOptOutOfSnapshots()
+        }
+        // These snapshot/native-tree witnesses exercise the supported row-list
+        // renderer. The drawn default deliberately has no surfaceableBody and
+        // does not carry the legacy backing cascade these controls measure.
+        let rendererKey = AgentTranscriptCanvasView.rendererEnvironmentKey
+        let previousRenderer = ProcessInfo.processInfo.environment[rendererKey]
+        setenv(rendererKey, "list", 1)
+        defer {
+            if let previousRenderer { setenv(rendererKey, previousRenderer, 1) }
+            else { unsetenv(rendererKey) }
+        }
         if CommandLine.arguments.contains("--bake-cost-only") { try checkBakeCost(); return }
         try checkDefaultIsOff()
         try checkFlagOffChangesNothing()
@@ -602,6 +616,65 @@ enum TileSurfaceResidencyChecks {
     }
 
 
+    /// The drawn default stays live even when legacy snapshot residency is on.
+    /// This arm runs before the list-only probes so their explicit selection
+    /// cannot hide an accidental opt-in by the canvas renderer.
+    private static func checkDrawnBodiesOptOutOfSnapshots() throws {
+        let rendererKey = AgentTranscriptCanvasView.rendererEnvironmentKey
+        let previousRenderer = ProcessInfo.processInfo.environment[rendererKey]
+        setenv(rendererKey, "canvas", 1)
+        defer {
+            if let previousRenderer { setenv(rendererKey, previousRenderer, 1) }
+            else { unsetenv(rendererKey) }
+        }
+        let world = World(tileCount: 3)
+        defer { world.teardown() }
+        world.canvas.farParkingEnabled = false
+        world.canvas.surfaceResidencyEnabled = true
+        world.canvas.qaResetSurfaceResidencyCounters()
+        var bodies: [UUID: NSView] = [:]
+        var transcripts: [UUID: AgentTranscriptCanvasView] = [:]
+        for tile in world.tiles {
+            guard let view = world.agentViews[tile.id],
+                  let transcript = view.qaCanvasTranscript,
+                  let body = view.farParkableBody else {
+                throw Failure(message: "drawn opt-out requires a real canvas transcript and live body")
+            }
+            try expect(view.surfaceableBody == nil,
+                       "a canvas transcript must not opt into legacy snapshot residency")
+            bodies[tile.id] = body
+            transcripts[tile.id] = transcript
+        }
+        func expectLive(_ stage: String) throws {
+            for tile in world.tiles {
+                guard let view = world.agentViews[tile.id], let body = bodies[tile.id] else {
+                    throw Failure(message: "drawn opt-out lost a fixture body")
+                }
+                try expect(view.surfaceResidency == .native && view.surfaceableBody == nil
+                           && view.farParkableBody === body && body.window === world.window
+                           && view.qaCanvasTranscript === transcripts[tile.id],
+                           "drawn opt-out \(stage): the real canvas body was replaced or detached")
+            }
+            try expect(world.canvas.tileSurfaceStore.qaBakeCount == 0
+                       && world.canvas.qaSurfaceDemotionCount == 0
+                       && world.canvas.qaParkedBodyCount == 0,
+                       "drawn opt-out \(stage): snapshot residency baked, demoted or parked a canvas body")
+        }
+        world.quiesceAndSurface()
+        try expectLive("quiet")
+        let cameraBefore = world.canvas.qaViewportApplyCount
+        for step in 1...8 {
+            try expect(world.cameraStep(toZoom: 1.0 - 0.08 * Double(step)),
+                       "drawn opt-out camera fixture did not issue a real zoom step")
+            world.pump()
+        }
+        try expect(world.canvas.qaViewportApplyCount - cameraBefore == 8,
+                   "drawn opt-out requires eight real production camera commits")
+        world.quiesceAndSurface()
+        try expectLive("after zoom and quiet")
+        print("drawn residency: three real canvas bodies stayed native through quiet and eight camera commits, no bakes or demotions")
+    }
+
     /// The flag ships OFF. Asserted rather than assumed: a default flipped by
     /// accident is how an experiment becomes everyone's problem.
     private static func checkDefaultIsOff() throws {
@@ -623,6 +696,9 @@ enum TileSurfaceResidencyChecks {
     private static func checkFlagOffChangesNothing() throws {
         let world = World(tileCount: 6)
         defer { world.teardown() }
+        try expect(world.agentViews.values.allSatisfy {
+            $0.qaTranscriptForChecks != nil && $0.surfaceableBody != nil
+        }, "the native cascade control requires real surfaceable row-list bodies")
         world.canvas.surfaceResidencyEnabled = false
         world.canvas.qaResetSurfaceResidencyCounters()
         let layoutsBefore = world.transcriptLayoutPasses

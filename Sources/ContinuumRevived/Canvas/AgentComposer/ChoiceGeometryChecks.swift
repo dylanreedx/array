@@ -293,8 +293,25 @@ enum ChoiceGeometryChecks {
         // Medium" into "Claude / claude-sonnet-4-5 / Med" a point below the full
         // fit, menu rows included, though each menu sizes to its own content.
         let model = "anthropic/claude-sonnet-4-5"
-        AgentModelCatalog.shared.resetForQA(options: [model], displayNames: [:])
-        defer { AgentModelCatalog.shared.resetForQA() }
+        let fixtureEfforts = ["low", "medium", "high"]
+        let catalog = AgentModelCatalog.shared
+        let previousClaudeSnapshot = catalog.snapshot(for: .claudeCode)
+        // snapshot(for:) omits effort levels; retain the exact prior capabilities too.
+        let previousClaudeEfforts: [String: [String]] = Dictionary(uniqueKeysWithValues:
+            previousClaudeSnapshot.models.compactMap { model in
+                catalog.efforts(for: model, harness: .claudeCode).map { (model, $0) }
+            })
+        let previousClaude = AgentHarnessCatalogSnapshot(
+            harness: .claudeCode, readiness: previousClaudeSnapshot.readiness,
+            models: previousClaudeSnapshot.models, displayNames: previousClaudeSnapshot.displayNames,
+            contextWindows: previousClaudeSnapshot.contextWindows, effortLevels: previousClaudeEfforts,
+            refreshedAt: previousClaudeSnapshot.refreshedAt, defaultModel: previousClaudeSnapshot.defaultModel)
+        defer { catalog.resetForQA(snapshot: previousClaude) }
+        catalog.resetForQA(snapshot: .init(
+            harness: .claudeCode, readiness: .ready, models: [model],
+            effortLevels: [model: fixtureEfforts]))
+        try expect(AgentModelConfig.thinkingOptions(for: model, harness: .claudeCode) == fixtureEfforts,
+                   "the shortened-row fixture must advertise its Claude effort menu")
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 120),
@@ -330,7 +347,7 @@ enum ChoiceGeometryChecks {
                        && footer.modelButton.items.allSatisfy {
                            !$0.id.contains("/") || $0.title != AgentComposerFooterView.abbreviatedModel($0.id)
                        }
-                       && footer.qaEffortTitles == AgentModelConfig.thinkingOptions.map(\.capitalized),
+                       && footer.qaEffortTitles == fixtureEfforts.map(\.capitalized),
                    "a shortened trigger shortened its menu rows too: harness \(footer.harnessButton.items.map(\.title)), "
                    + "model \(footer.qaModelTitles), effort \(footer.qaEffortTitles)")
         for (label, button) in [("harness", footer.harnessButton), ("effort", footer.effortButton)] {

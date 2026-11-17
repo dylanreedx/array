@@ -1325,6 +1325,16 @@ enum PerfScenarios {
     /// bounds held, then pays one final bake. The result is an upper bound on the
     /// geometry/backing work a supported presentation mechanism may recover.
     static func canvasGeometryHoldProbe() throws -> PerfScenarioResult {
+        // These snapshot/native-tree witnesses exercise the supported row-list
+        // renderer. The drawn default deliberately has no surfaceableBody and
+        // does not carry the legacy backing cascade these controls measure.
+        let rendererKey = AgentTranscriptCanvasView.rendererEnvironmentKey
+        let previousRenderer = ProcessInfo.processInfo.environment[rendererKey]
+        setenv(rendererKey, "list", 1)
+        defer {
+            if let previousRenderer { setenv(rendererKey, previousRenderer, 1) }
+            else { unsetenv(rendererKey) }
+        }
         // Defaults preserve the gating witness. The opt-in overrides let the
         // architecture probe measure the final one-bake slope at realistic
         // workspace sizes without cloning a second, subtly different harness.
@@ -1379,6 +1389,9 @@ enum PerfScenarios {
             view.renderRehydratedPreviousSession(
                 transcriptFixture(threadId: "geometry-hold-\(index)", turns: turnsPerAgent)
             )
+            guard view.qaTranscriptForChecks != nil, view.surfaceableBody != nil else {
+                throw Failure(message: "geometry-hold requires real surfaceable row-list bodies")
+            }
             layer.tileViews[tile.id] = view
         }
         canvas.setZones([layer])
@@ -2046,6 +2059,16 @@ enum PerfScenarios {
     /// dirty regions, no promotion, no interaction. It measures the camera under
     /// Shape A geometry and nothing else.
     static func canvasSurfaceHostSlope() throws -> PerfScenarioResult {
+        // These snapshot/native-tree witnesses exercise the supported row-list
+        // renderer. The drawn default deliberately has no surfaceableBody and
+        // does not carry the legacy backing cascade these controls measure.
+        let rendererKey = AgentTranscriptCanvasView.rendererEnvironmentKey
+        let previousRenderer = ProcessInfo.processInfo.environment[rendererKey]
+        setenv(rendererKey, "list", 1)
+        defer {
+            if let previousRenderer { setenv(rendererKey, previousRenderer, 1) }
+            else { unsetenv(rendererKey) }
+        }
         let environment = ProcessInfo.processInfo.environment
         // The default sweep stops at 50 because every host needs its OWN baked
         // surface to keep the texture count honest, and a bake needs a real agent
@@ -2247,6 +2270,9 @@ enum PerfScenarios {
                 view.renderRehydratedPreviousSession(
                     transcriptFixture(threadId: threadId, turns: turnsPerAgent)
                 )
+                guard view.qaTranscriptForChecks != nil, view.surfaceableBody != nil else {
+                    throw Failure(message: "surface-host requires real surfaceable row-list bodies")
+                }
                 // `_installLayer` (the setZones path) does not set this; only
                 // `install(tileView:for:)` and `installProjectTile` do. Without it
                 // `canvas` is nil, every chrome floor collapses to its unfloored

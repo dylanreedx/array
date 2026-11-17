@@ -24,6 +24,30 @@
       "evidence": "Pre-existing in the 0.7.52 gate, nightly d0663181 and app-source-equivalent fast-ship c5d07ef6. Release lead explicitly approved this entry in release board card 27539BBC comment 1ABE0D7C on 2026-11-16; focus-steal legs must remain unclassified.",
       "added": "2026-11-16",
       "expires": "2026-12-16"
+    },
+    {
+      "leg": "--perf-budget-zoom-check",
+      "kind": "known-red",
+      "reason": "Zoom performs 127 tile layout passes against a budget of12 on untouched release base7cc801d2; not introduced by sticky icons.",
+      "evidence": "Release lead explicitly directed confirming and recording these as pre-existing in the 2026-11-16 Wave1 brief. Rebuilt untouched7cc801d2 awake control: ~/array-scratch/release-features/release-0753-night-base-7cc801d2/; same messages on sticky branch. candidate-0753.md records exact outcomes.",
+      "added": "2026-11-16",
+      "expires": "2026-12-16"
+    },
+    {
+      "leg": "--perf-budget-magnify-slope-check",
+      "kind": "known-red",
+      "reason": "Installed-tile magnify duration slope is4.079ms against0.500ms on untouched release base7cc801d2; not introduced by sticky icons.",
+      "evidence": "Release lead explicitly directed confirming and recording these as pre-existing in the 2026-11-16 Wave1 brief. Rebuilt untouched7cc801d2 awake control: ~/array-scratch/release-features/release-0753-night-base-7cc801d2/; same messages on sticky branch. candidate-0753.md records exact outcomes.",
+      "added": "2026-11-16",
+      "expires": "2026-12-16"
+    },
+    {
+      "leg": "--agent-tile-click-focus-check",
+      "kind": "known-red",
+      "reason": "Padding click leaves NSWindow as first responder on untouched release base7cc801d2; same failure reported by sticky feature control.",
+      "evidence": "Release lead explicitly directed confirming and recording these as pre-existing in the 2026-11-16 Wave1 brief. Rebuilt untouched7cc801d2 awake control: ~/array-scratch/release-features/release-0753-night-base-7cc801d2/; same messages on sticky branch. candidate-0753.md records exact outcomes.",
+      "added": "2026-11-16",
+      "expires": "2026-12-16"
     }
   ]
 }
