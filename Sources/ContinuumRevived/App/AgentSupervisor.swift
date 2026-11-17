@@ -9,6 +9,27 @@ import Foundation
 import ImageIO
 import os
 
+private typealias CanonicalTranscriptMutation = @MainActor @Sendable (inout ManagedAgentTranscriptModel) -> Bool
+private typealias DeferredTranscriptWrite = @MainActor @Sendable () -> Void
+
+/// The queued mutations capture Sendable values only. They execute on the main
+/// actor, but when the preflight has consumed them their captured buffers can be
+/// released away from a UI frame.
+private final class CanonicalTranscriptMutationReaper: @unchecked Sendable {
+    private var mutations: [CanonicalTranscriptMutation]
+    init(_ mutations: [CanonicalTranscriptMutation]) { self.mutations = mutations }
+    func discard() { mutations.removeAll() }
+}
+
+/// Deferred writes capture only value payloads and the supervisor weakly. Keep
+/// actor-owned objects out of these closures: the reaper releases their storage
+/// off actor, but never executes the MainActor-isolated writes.
+private final class DeferredTranscriptWriteReaper: @unchecked Sendable {
+    private var writes: [DeferredTranscriptWrite]
+    init(_ writes: [DeferredTranscriptWrite]) { self.writes = writes }
+    func discard() { writes.removeAll() }
+}
+
 // Ticket: docs/38-tickets/90-agent-ux/P2A.3-agent-supervisor.md
 //
 // THE AGENT IS THE ENTITY; A TILE IS ONE VIEW OF IT (locked decision, _RUNBOOK.md).
@@ -1218,6 +1239,9 @@ final class AgentSupervisor {
     /// per-agent projection below is skipped entirely rather than adding
     /// per-event cost to hundreds of unrelated fixtures.
     private let transcriptStore: AgentTranscriptStore?
+    /// Interactive startup supplies its single retained legacy-migration task;
+    /// QA supervisors without that startup path leave this provider empty.
+    private let transcriptMigrationTaskProvider: @MainActor () -> Task<AgentTranscriptStore.MigrationReport, Error>?
     /// Applies only to child turns whose runner Array creates. `nil` means
     /// unlimited. Provider-owned observed children never consult this value.
     private let maximumActiveManagedChildren: () -> Int?
@@ -1314,7 +1338,12 @@ final class AgentSupervisor {
         guard !characterPacksScheduled else { return }
         characterPacksScheduled = true
         DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated { self?.publishCharacterPacks() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let start = self.qaSaveTimingStart()
+                self.publishCharacterPacks()
+                self.qaSaveTimingEnd(start, phase: .characterPackCallback, id: nil)
+            }
         }
     }
 
@@ -1522,6 +1551,8 @@ final class AgentSupervisor {
     /// The original transcript/session survives either recovery choice.
     /// Returning a new id lets the host reveal the summary session.
     func recoverContextFull(_ action: AgentContextFullRecovery.Action, for id: AgentID, blockID: AgentNodeID? = nil) async -> AgentID? {
+        if releasedTranscripts[id] != nil { await startTranscriptReload(for: id).value }
+        guard releasedTranscripts[id] == nil else { return nil }
         if let blockID {
             guard let block = transcriptProjections[id]?.document.entries.flatMap(\.blocks).last(where: {
                       if case .error = $0.payload { return true }; return false
@@ -2141,6 +2172,7 @@ final class AgentSupervisor {
     /// command: a second `/status` in one transcript printed nothing at all,
     /// and a second `/clear` ran its whole transaction and left no boundary.
     private var arrayOwnedNoticeCounts: [AgentID: Int] = [:]
+    private let arrayOwnedNoticeEpoch = UUID().uuidString
     /// Restore-time Codex rollout lookup. Injected in checks so repair is
     /// deterministic and never depends on a developer's real ~/.codex tree.
     private let codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)?
@@ -2161,6 +2193,7 @@ final class AgentSupervisor {
         submissionRecoveryStore: AgentComposerDraftStore? = nil,
         codexRestoredContextSnapshot: (@Sendable (AgentRecord) -> AgentContextWindowSnapshot?)? = nil,
         transcriptStore: AgentTranscriptStore? = nil,
+        transcriptMigrationTaskProvider: @escaping @MainActor () -> Task<AgentTranscriptStore.MigrationReport, Error>? = { nil },
         maximumActiveManagedChildren: @escaping () -> Int? = {
             AgentSpawnLimitConfig.maximumActiveChildren()
         },
@@ -2183,6 +2216,7 @@ final class AgentSupervisor {
         self.submissionRecoveryStore = submissionRecoveryStore
         self.agentMessageOutbox = AgentMessageOutbox(applicationSupportDirectory: store.layout.applicationSupportDirectory)
         self.transcriptStore = transcriptStore
+        self.transcriptMigrationTaskProvider = transcriptMigrationTaskProvider
         self.maximumActiveManagedChildren = maximumActiveManagedChildren
         self.codexRestoredContextSnapshot = codexRestoredContextSnapshot
         startHelperWatchdog()
@@ -2686,7 +2720,11 @@ final class AgentSupervisor {
         // The projector and the transcript list consume the same sanitized,
         // non-Codable side channel. Observers are host-local and scoped by the
         // immutable agent ID; no raw runtime payload or path enters the event log.
-        sharedTranscriptDetails[id]?.captureRuntimeObservation(observation)
+        // Behind a reload, in order with the events that created the capture:
+        // the capture does not exist yet, and an observation sent now is lost.
+        if !deferUntilTranscriptReloaded(id, { [weak self] in self?.sharedTranscriptDetails[id]?.captureRuntimeObservation(observation) }) {
+            sharedTranscriptDetails[id]?.captureRuntimeObservation(observation)
+        }
         runtimeObservationObservers[id]?.values.forEach { $0(observation) }
     }
 
@@ -3669,9 +3707,31 @@ final class AgentSupervisor {
     /// print the placeholder underneath it.
     func needsPreviousSessionNotice(_ id: AgentID) -> Bool {
         restoredIDs.contains(id) && (history[id]?.isEmpty ?? true) && rehydratedTranscripts[id] == nil
+            && releasedTranscripts[id] == nil
     }
 
     // MARK: - Transcript rehydration (.plans/03-transcript-rehydration.md)
+
+    /// A provider read is pinned before leaving MainActor so a saved model
+    /// cannot be released while that read is in flight. Existing released
+    /// models require a separate composition path and cannot be pinned here.
+    func beginProviderHistoryRead(for id: AgentID, allowReleased: Bool = false) -> UUID? {
+        guard records[id] != nil, allowReleased || releasedTranscripts[id] == nil else { return nil }
+        let token = UUID()
+        providerHistoryReadPins[id, default: []].insert(token)
+        transcriptReleaseTimers.removeValue(forKey: id)?.cancel()
+        return token
+    }
+
+    func endProviderHistoryRead(_ token: UUID, for id: AgentID) {
+        guard providerHistoryReadPins[id]?.remove(token) != nil else { return }
+        if providerHistoryReadPins[id]?.isEmpty == true { providerHistoryReadPins[id] = nil }
+        scheduleTranscriptRelease(for: id)
+    }
+
+    func isProviderHistoryReadActive(_ token: UUID, for id: AgentID) -> Bool {
+        records[id] != nil && providerHistoryReadPins[id]?.contains(token) == true
+    }
 
     /// Seeds a restored agent's prior transcript for DISPLAY ONLY. Stored in a
     /// buffer the tile reads directly (`rehydratedTranscript(for:)`); it is
@@ -3683,7 +3743,30 @@ final class AgentSupervisor {
     /// `needsPreviousSessionNotice` false, so the plain placeholder is not also
     /// shown, and lets any tile that later attaches rehydrate the same content.
     func seedRehydratedTranscript(_ transcript: RehydratedTranscript, for id: AgentID) {
+        // No production read starts or finishes for a released transcript, and
+        // a reload drain has no position that is after its archive and before
+        // its queued writes (.plans/transcript-retention-reattach.md).
+        guard releasedTranscripts[id] == nil else {
+            warn("Agent \(id.rawValue.uuidString): provider history arrived for a released transcript; not shown")
+            return
+        }
+        separateCanonicalTranscriptIfNeeded(id)
+        transcriptHasLocalOnlyHistory.insert(id)
         rehydratedTranscripts[id] = transcript
+        // A projection made before the read (a `/status` notice) is what a
+        // later tile installs. Add the history where the live tile drew it,
+        // and keep it out of sharing as the tile-only render did. Anything but
+        // notices could hold a live stream; no production seed reaches that.
+        if var projection = transcriptProjections[id],
+           projection.document.entries.allSatisfy({ if case .localNotice = $0.provenance { return true }; return false }) {
+            let before = Set(projection.document.entries.map(\.id))
+            projection.appendNotice(id: "notice-previous-session", title: "previous session", text: transcript.boundaryNoticeText)
+            Self.replay(transcript, into: &projection, threadId: Self.threadId(for: id))
+            transcriptProjections[id] = projection
+            unsharedProviderEntryIDs[id] = Set(projection.document.entries.map(\.id)).subtracting(before)
+        }
+        // A provider read may finish after its tile has detached.
+        defer { scheduleTranscriptRelease(for: id) }
         guard var record = records[id],
               let journal = record.inFlightCompaction,
               journal.phase == .indeterminate,
@@ -4573,6 +4656,10 @@ final class AgentSupervisor {
         piConversationLossNotices.remove(id)
         runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
+        // Accepted, not yet started: a held turn is already this turn's to
+        // decide, and nothing in the transcript so far is this turn's reply.
+        heldHelperCompletions[id]?.turnInFlight = true
+        markTurnReplyFloor(id)
         notifyTurnCapabilitiesChanged(id)
         // P2D.2: an agent asking for another agent arrives here, out of band from
         // the event stream. Hopped to the main actor like the events are, and for
@@ -5664,6 +5751,8 @@ final class AgentSupervisor {
         record.externalSession = link
         setRecord(record, for: id)
         persist(record)
+        if link == nil { scheduleTranscriptRelease(for: id) }
+        else { transcriptReleaseTimers.removeValue(forKey: id)?.cancel() }
         notifyTurnCapabilitiesChanged(id)
     }
 
@@ -5681,6 +5770,7 @@ final class AgentSupervisor {
         record.latestTurnAt = max(record.latestTurnAt ?? .distantPast, Date())
         setRecord(record, for: id)
         persist(record)
+        scheduleTranscriptRelease(for: id)
         notifyTurnCapabilitiesChanged(id)
     }
 
@@ -5702,15 +5792,27 @@ final class AgentSupervisor {
     /// one opened later, showed the conversation with a hole in it.
     /// Display-only like a restore: never delivered, so never re-synced.
     func appendOutsideTurns(
-        _ transcript: RehydratedTranscript, boundaryText: String, symbolName: String?, for id: AgentID
+        _ transcript: RehydratedTranscript, boundaryText: String, symbolName: String?, for id: AgentID,
+        bypassReload: Bool = false
     ) {
         guard transcriptStore != nil, records[id] != nil, !transcript.steps.isEmpty else { return }
+        if !bypassReload, deferUntilTranscriptReloaded(id, { [weak self] in
+            self?.appendOutsideTurns(transcript, boundaryText: boundaryText, symbolName: symbolName, for: id, bypassReload: true)
+        }) { return }
         let threadId = Self.threadId(for: id)
+        let boundaryID = "outside-\(UUID().uuidString)"
         var projection = transcriptProjection(for: id)
         projection.appendSessionBoundary(
-            id: "outside-\(UUID().uuidString)", text: boundaryText, symbolName: symbolName)
+            id: boundaryID, text: boundaryText, symbolName: symbolName)
         Self.replay(transcript, into: &projection, threadId: threadId)
         transcriptProjections[id] = projection
+        // Preserve the existing durable outside-turn contract. The separate
+        // provider restore, unlike these later turns, remains local-only.
+        recordCanonicalTranscriptMutation(for: id) { model in
+            model.appendSessionBoundary(id: boundaryID, text: boundaryText, symbolName: symbolName)
+            Self.replay(transcript, into: &model, threadId: threadId)
+            return true
+        }
         scheduleTranscriptPersist(for: id, final: true)
     }
 
@@ -5718,20 +5820,34 @@ final class AgentSupervisor {
     /// A tile opened during the read receives the same restore as later tiles.
     private var adoptingSessionHistory: Set<AgentID> = []
 
-    func beginAdoptingSessionHistory(for id: AgentID) {
+    func beginAdoptingSessionHistory(for id: AgentID) -> UUID {
+        let token = beginProviderHistoryRead(for: id, allowReleased: true) ?? UUID()
         adoptingSessionHistory.insert(id)
+        transcriptReleaseTimers.removeValue(forKey: id)?.cancel()
         notifyTurnCapabilitiesChanged(id)
+        return token
     }
 
-    func finishAdoptingSessionHistory(_ transcript: RehydratedTranscript, for id: AgentID, url: URL, offset: UInt64) {
-        guard adoptingSessionHistory.remove(id) != nil else { return }
-        defer { notifyTurnCapabilitiesChanged(id) }
-        guard records[id] != nil else { return }
+    @discardableResult
+    func finishAdoptingSessionHistory(_ transcript: RehydratedTranscript, for id: AgentID, token: UUID, url: URL, offset: UInt64) -> Bool {
+        guard isProviderHistoryReadActive(token, for: id) else { return false }
+        guard adoptingSessionHistory.remove(id) != nil else {
+            endProviderHistoryRead(token, for: id)
+            return false
+        }
+        defer {
+            endProviderHistoryRead(token, for: id)
+            notifyTurnCapabilitiesChanged(id)
+            scheduleTranscriptRelease(for: id)
+        }
+        guard records[id] != nil else { return false }
         setSessionFileMark(id, url: url, offset: offset)
-        if rehydratedTranscripts[id] == nil, !transcript.steps.isEmpty {
+        // A released transcript refuses the seed; a tile must not draw it either.
+        if rehydratedTranscripts[id] == nil, releasedTranscripts[id] == nil, !transcript.steps.isEmpty {
             seedRehydratedTranscript(transcript, for: id)
             outsideHistoryObservers[id]?.values.forEach { $0(.restored(transcript)) }
         }
+        return true
     }
 
     // MARK: - Turns Array did not run: one rule for history (.plans/79 review)
@@ -5817,6 +5933,7 @@ final class AgentSupervisor {
     /// transcript of its own, or a live event.
     private func hasLoadedHistory(_ id: AgentID) -> Bool {
         transcriptProjections[id] != nil || rehydratedTranscripts[id] != nil || !(history[id]?.isEmpty ?? true)
+            || releasedTranscripts[id] != nil
     }
 
     /// What a tile following the agent appends, exactly as the transcript did.
@@ -5919,10 +6036,13 @@ final class AgentSupervisor {
     ) {
         let prefix = hasLoadedHistory(id) ? nil : (url: url, offset: offset)
         let threadId = Self.threadId(for: id)
+        guard let readPin = beginProviderHistoryRead(for: id, allowReleased: true) else { return completion(0) }
         Task.detached(priority: .userInitiated) { [weak self] in
             let read = Self.readOutsideTurns(segments: [(url, offset)], prefixBefore: prefix, provider: provider, threadId: threadId)
             await MainActor.run {
-                guard let self, self.records[id] != nil else { return completion(0) }
+                guard let self else { return completion(0) }
+                defer { self.endProviderHistoryRead(readPin, for: id) }
+                guard self.isProviderHistoryReadActive(readPin, for: id) else { return completion(0) }
                 self.applyOutsideRead(read, for: id, place: place)
                 completion(read.lines.count)
             }
@@ -5985,6 +6105,10 @@ final class AgentSupervisor {
         let prefix = hasLoadedHistory(id) ? nil : segments.first.map { (url: $0.url, offset: state.sessionFileOffset) }
         let threadId = Self.threadId(for: id)
         let faceTile = watch?.tileId ?? tileId
+        guard let readPin = beginProviderHistoryRead(for: id, allowReleased: true) else {
+            endingTerminalFaces.remove(id)
+            return
+        }
         Task.detached(priority: .userInitiated) { [weak self] in
             let read = Self.readOutsideTurns(
                 segments: segments, prefixBefore: prefix,
@@ -5993,6 +6117,8 @@ final class AgentSupervisor {
             let model = ClaudeTerminalFace.lastModel(in: read.lines)
             await MainActor.run {
                 guard let self else { return }
+                defer { self.endProviderHistoryRead(readPin, for: id) }
+                guard self.isProviderHistoryReadActive(readPin, for: id) else { return }
                 self.endingTerminalFaces.remove(id)
                 if let watch, self.terminalFaceWatches[id] === watch { self.terminalFaceWatches[id] = nil }
                 if let faceTile { self.endedTerminalFaceTiles.insert(faceTile) }
@@ -7536,7 +7662,10 @@ final class AgentSupervisor {
         // A report filed between turns is a result: it releases a turn held
         // as progress, or follows a result already delivered as a note.
         if !isRunning(id) {
-            if heldHelperCompletions[id] != nil { releaseHeldHelperCompletion(id) }
+            if heldHelperCompletions[id] != nil {
+                if heldHelperCompletions[id]?.turnInFlight == false { heldHelperCompletions[id]?.completion.report = record.lastReport }
+                releaseHeldHelperCompletion(id)
+            }
             else { noteLateHelperOutput(id, text: Self.helperCompletionReportText(report)) }
         }
         return true
@@ -8111,16 +8240,66 @@ final class AgentSupervisor {
         transcriptPersistDebounce.removeValue(forKey: id)
         transcriptPersistDeadline.removeValue(forKey: id)
         transcriptSaveWanted.remove(id)
-        transcriptPersistenceTasks[id]?.cancel()
-        transcriptPersistenceTasks.removeValue(forKey: id)
+        let pendingTranscriptSave = transcriptPersistenceTasks.removeValue(forKey: id)
+        pendingTranscriptSave?.cancel()
         transcriptProjections.removeValue(forKey: id)
+        canonicalTranscriptProjections.removeValue(forKey: id)
+        canonicalTranscriptPreflights.removeValue(forKey: id)?.cancel()
+        canonicalTranscriptPreflightTokens.removeValue(forKey: id)
+        if var pending = canonicalTranscriptPending.removeValue(forKey: id), !pending.isEmpty {
+            let reaper = CanonicalTranscriptMutationReaper(pending)
+            pending = []
+            let afterDiscard = qaAfterArchivedCanonicalDiscard
+            Task.detached(priority: .utility) {
+                reaper.discard()
+                afterDiscard?(id)
+            }
+            qaAfterArchivedCanonicalDiscardScheduled?(id)
+        }
+        canonicalTranscriptReady.remove(id)
+        canonicalTranscriptSeparate.remove(id)
+        canonicalTranscriptArchiveProofs.removeValue(forKey: id)
+        canonicalTranscriptProtectedPrefix.removeValue(forKey: id)
+        canonicalTranscriptPreflightFailures.remove(id)
+        canonicalTranscriptRecoveryAwaitingSave.remove(id)
+        transcriptHasLocalOnlyHistory.remove(id)
+        unsharedProviderEntryIDs.removeValue(forKey: id)
+        providerHistoryReadPins.removeValue(forKey: id)
+        adoptingSessionHistory.remove(id)
+        transcriptReloads.removeValue(forKey: id)?.cancel()
+        transcriptReloadTokens.removeValue(forKey: id)
+        releasedTranscripts.removeValue(forKey: id)
+        transcriptReloadObservers.removeValue(forKey: id)
+        savedTranscriptVersions.removeValue(forKey: id)
+        savedTranscriptGenerations.removeValue(forKey: id)
+        transcriptSaveProofs.removeValue(forKey: id)
+        transcriptPersistenceBlocked.remove(id)
+        transcriptReadAt.removeValue(forKey: id)
+        transcriptReleaseTimers.removeValue(forKey: id)?.cancel()
+        if var writes = writesAwaitingTranscriptReload.removeValue(forKey: id), !writes.isEmpty {
+            let reaper = DeferredTranscriptWriteReaper(writes)
+            writes = []
+            let afterDiscard = qaAfterArchivedReloadDiscard
+            Task.detached(priority: .utility) { reaper.discard(); afterDiscard?(id) }
+            qaAfterArchivedReloadDiscardScheduled?(id)
+        }
         sharedTranscriptDetails.removeValue(forKey: id)
         sharedTranscriptDetailRevisions.removeValue(forKey: id)
         sharedTranscriptDetailObservers.removeValue(forKey: id)
         sharedTranscriptImageCache.removeValue(forKey: id)
         sharedDiffLineCounts.removeValue(forKey: id)
         if let transcriptStore {
-            Task.detached { _ = await transcriptStore.quarantineTranscript(agentID: id) }
+            let quarantineStarted = qaQuarantineStarted
+            let quarantineFinished = qaQuarantineFinished
+            Task.detached {
+                quarantineStarted?()
+                // Cancellation does not cancel a detached file write already
+                // in progress. Await its owner before moving the archive so a
+                // late write cannot recreate the source after quarantine.
+                await pendingTranscriptSave?.value
+                _ = await transcriptStore.quarantineTranscript(agentID: id)
+                quarantineFinished?()
+            }
         }
         // P6.4: the in-memory watermark throttle goes with the agent. The durable
         // watermark is deleted with the record, and a recycled id must not inherit
@@ -9200,16 +9379,19 @@ final class AgentSupervisor {
     /// work is still running. Each hold is also a durable delivery record
     /// flagged `held`, so a relaunch, which no longer holds it, replays it once.
     private struct HeldHelperCompletion {
-        var turn: String
-        var outcome: TurnOutcome
-        var error: String?
+        /// The held turn, exactly as it ended: its release settles this and
+        /// nothing the helper has done since.
+        var completion: HelperTurnCompletion
+        var turn: String { completion.turn }
+        var outcome: TurnOutcome { completion.outcome }
+        var error: String? { completion.error }
         /// The first hold of this run of held turns, on the wall clock that
         /// message subscriptions are stamped with.
         var heldAt: Date
         /// The same moment on `helperCompletionNow`, which the cap counts from.
         var since: Date
         /// The runner generation the held turn ran in: its delivery records' key.
-        var identity: String
+        var identity: String { completion.identity }
         var recipients: Set<AgentID>
         var backgroundEndedAt: Date? = nil
         var turnInFlight = false
@@ -9270,8 +9452,8 @@ final class AgentSupervisor {
     /// The report baseline `noteHelperCompletion` uses: a report counts for
     /// this turn only if filed after it.
     private func helperFiledReportThisTurn(_ id: AgentID) -> Bool {
-        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
-        return records[id]?.lastReport.map { $0.filedAt > baseline } ?? false
+        let baseline = subscriptionsSettling(id).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
+        return settlementReport(id).map { $0.filedAt > baseline } ?? false
     }
 
     private func helperParents(_ id: AgentID) -> Set<AgentID> {
@@ -9289,6 +9471,96 @@ final class AgentSupervisor {
         return helperCompletionNow().timeIntervalSince(held.since) < heldHelperCompletionCap
     }
 
+    /// One finished helper turn, fixed when its completion is settled: the
+    /// identity it ended with, its reply as captured once from its own applied
+    /// events (or none, when its transcript could not be read), and for a
+    /// completion that waited, the cutoff past which handles and reports belong
+    /// to later turns. Every delivery of the turn (at once, behind a reload, at
+    /// the bound, or from a hold's release) settles inside `withSettlement` of
+    /// this value, and only this value: nothing re-reads the agent's latest
+    /// reply to build its result, its pushed wake, or a refresh of that wake.
+    private struct HelperTurnCompletion {
+        var id: AgentID
+        var turn: String
+        var identity: String
+        var outcome: TurnOutcome
+        var error: String?
+        var cutoff: Date?
+        var reply: String?
+        var transcriptUnavailable: Bool
+        /// The report this turn filed, captured when it ended (or filed between
+        /// turns while it was held). A later turn's report never replaces it.
+        var report: AgentFiledReport?
+    }
+    private var settlementScope: HelperTurnCompletion?
+    /// The last assistant entry when each turn was accepted. A reply at or
+    /// before it is an earlier turn's, never the accepted turn's own.
+    private struct TurnReplyFloor { var entryID: AgentNodeID? }
+    private var turnReplyFloors: [AgentID: TurnReplyFloor] = [:]
+
+    /// Behind a reload when the transcript is released, so it lands after the
+    /// previous turn's events and before this turn's.
+    private func markTurnReplyFloor(_ id: AgentID, bypassReload: Bool = false) {
+        if !bypassReload, deferUntilTranscriptReloaded(id, { [weak self] in self?.markTurnReplyFloor(id, bypassReload: true) }) { return }
+        turnReplyFloors[id] = TurnReplyFloor(entryID: lastAssistantEntryID(id))
+    }
+
+    private func lastAssistantEntryID(_ id: AgentID) -> AgentNodeID? {
+        transcriptProjections[id]?.document.entries.last(where: { $0.role == .assistant })?.id
+    }
+    static let helperNoReplyText = "(no reply this turn)"
+    /// Each helper's latest settled completion. A wake refresh reads its reply
+    /// only for the same identity; same-turn late output extends it.
+    private var settledHelperCompletions: [AgentID: HelperTurnCompletion] = [:]
+    /// Why the last reload of a released transcript failed, for the explicit
+    /// failure a bounded settlement delivers.
+    private var transcriptReloadFailureCause: [AgentID: String] = [:]
+
+    private func subscriptionsSettling(_ id: AgentID) -> [HelperMessageSubscription] {
+        let all = helperMessageSubscriptions[id] ?? []
+        guard let scope = settlementScope, scope.id == id, let cutoff = scope.cutoff else { return all }
+        return all.filter { $0.baseline <= cutoff }
+    }
+
+    /// The report a settlement may carry: none filed after its turn's cutoff.
+    private func settlementReport(_ id: AgentID) -> AgentFiledReport? {
+        if let scope = settlementScope, scope.id == id { return scope.report }
+        return records[id]?.lastReport
+    }
+
+    private func withSettlement(_ completion: HelperTurnCompletion, _ body: () -> Void) {
+        let previous = settlementScope
+        settlementScope = completion
+        defer { settlementScope = previous }
+        body()
+    }
+
+    private func settlementTurnIdentity(_ id: AgentID) -> String? {
+        if let scope = settlementScope, scope.id == id { return scope.identity }
+        return helperCompletionTurns[id]
+    }
+
+    private final class CompletionBox { var done = false }
+
+    private func runHelperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?, identity: String,
+                                        completedAt: Date?, report: AgentFiledReport?, unavailableCause: String?) {
+        var outcome = outcome, error = error
+        if let cause = unavailableCause {
+            if outcome == .completed { outcome = .failed }
+            error = error ?? "Array could not read this helper's saved transcript (\(cause)), so its final reply is unavailable."
+        }
+        // Captured here, once: the turn's own events are applied (a deferred
+        // completion runs behind them), and a later turn's are not.
+        // Only a reply after the turn's own floor is the turn's: a turn that
+        // failed or was stopped before speaking has none, and must not borrow one.
+        let last = lastAssistantEntryID(id)
+        let owned = last != nil && turnReplyFloors[id].map { $0.entryID != last } != false
+        let reply = unavailableCause == nil && owned ? transcriptProjections[id]?.finalAssistantText : nil
+        let completion = HelperTurnCompletion(id: id, turn: turn, identity: identity, outcome: outcome, error: error,
+            cutoff: completedAt, reply: reply, transcriptUnavailable: unavailableCause != nil, report: report)
+        withSettlement(completion) { helperTurnCompleted(completion) }
+    }
+
     private func settleHelperTurn(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?,
                                   statusOverride: String? = nil) {
         noteHelperCompletion(id, turn: turn, outcome: outcome, error: error, statusOverride: statusOverride)
@@ -9296,26 +9568,32 @@ final class AgentSupervisor {
         writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: error)
     }
 
-    private func helperTurnCompleted(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?) {
+    private func helperTurnCompleted(_ completion: HelperTurnCompletion) {
+        let id = completion.id
         helperTurnsFinished[id, default: 0] += 1
-        let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
         let previous = heldHelperCompletions[id]
-        if let previous, previous.identity != identity { removeHeldRecords(previous, helper: id) }
-        if holdsHelperCompletion(id, outcome: outcome) {
+        if let previous, previous.identity != completion.identity { removeHeldRecords(previous, helper: id) }
+        // A completion that waited while the helper started another turn is not
+        // the helper's current state: holding it would put it under that turn,
+        // whose background work and handles are not its own. It settles now.
+        // (A later accepted turn mints a new generation; a one-shot runner is
+        // still bound while its own completion is delivered, so not isRunning.)
+        let superseded = runnerGenerationTokens[id].map { $0.rawValue.uuidString != completion.identity } == true
+        if !superseded, holdsHelperCompletion(id, outcome: completion.outcome) {
             let recipients = helperParents(id).filter { records[$0] != nil && wakesForHelperCompletion($0) }
-            let held = HeldHelperCompletion(turn: turn, outcome: outcome, error: error,
+            let held = HeldHelperCompletion(completion: completion,
                 heldAt: previous?.heldAt ?? Date(), since: previous?.since ?? helperCompletionNow(),
-                identity: identity, recipients: recipients)
+                recipients: recipients)
             heldHelperCompletions[id] = held
             persistHeldRecords(held, helper: id)
-            if let text = transcriptProjections[id]?.finalAssistantText, !text.isEmpty {
+            if let text = finalAssistantText(for: id), !text.isEmpty {
                 for parent in recipients { upsertHelperNote(.progress, helper: id, lead: parent, text: text) }
             }
             startHeldSweep()
             return
         }
         heldHelperCompletions[id] = nil
-        settleHelperTurn(id, turn: turn, outcome: outcome, error: error)
+        settleHelperTurn(id, turn: completion.turn, outcome: completion.outcome, error: completion.error)
     }
 
     /// The held turn is delivered as it stands. A held turn whose helper has
@@ -9324,7 +9602,9 @@ final class AgentSupervisor {
     private func releaseHeldHelperCompletion(_ id: AgentID, statusOverride: String? = nil) {
         guard let held = heldHelperCompletions[id], !held.turnInFlight else { return }
         heldHelperCompletions[id] = nil
-        settleHelperTurn(id, turn: held.turn, outcome: held.outcome, error: held.error, statusOverride: statusOverride)
+        withSettlement(held.completion) {
+            settleHelperTurn(id, turn: held.turn, outcome: held.outcome, error: held.error, statusOverride: statusOverride)
+        }
     }
 
     /// The durable half of a hold: a delivery record carrying the text a
@@ -9481,7 +9761,11 @@ final class AgentSupervisor {
     }
 
     private func settleHelperMessages(_ child: AgentID, outcome: TurnOutcome, error: String?) {
-        let subscriptions = helperMessageSubscriptions.removeValue(forKey: child) ?? []
+        let subscriptions = subscriptionsSettling(child)
+        let remaining = (helperMessageSubscriptions[child] ?? []).filter { held in
+            !subscriptions.contains { $0.handle == held.handle && $0.parent == held.parent }
+        }
+        helperMessageSubscriptions[child] = remaining.isEmpty ? nil : remaining
         for subscription in subscriptions {
             guard let cwd = records[subscription.parent]?.cwd else { continue }
             defer { SpawnResultFile.removeSubscription(parentCwd: cwd, helper: child.rawValue,
@@ -9492,13 +9776,13 @@ final class AgentSupervisor {
             case .failed: status = .failed
             case .interrupted, .cancelled: status = .interrupted
             }
-            let finalText: String? = transcriptProjections[child]?.finalAssistantText
+            let finalText: String? = finalAssistantText(for: child)
             let text = finalText.map { SpawnResultFile.cappedFinalText($0) }
-            let report = records[child]?.lastReport.flatMap { $0.filedAt > subscription.baseline ? $0.report : nil }
+            let report = settlementReport(child).flatMap { $0.filedAt > subscription.baseline ? $0.report : nil }
             let result = SpawnResultFile(toolCallId: subscription.handle, status: status,
                 agentId: child.rawValue, reason: error, finalText: text?.text,
                 finalTextTruncated: text?.truncated == true ? true : nil, endedAt: Date(), report: report,
-                turnIdentity: helperCompletionTurns[child], recipientId: subscription.parent.rawValue)
+                turnIdentity: settlementTurnIdentity(child), recipientId: subscription.parent.rawValue)
             if let context = subscription.queueContext {
                 do {
                     if var entry = try agentMessageOutbox.lookup(caller: context.caller, key: context.idempotencyKey) {
@@ -9567,8 +9851,8 @@ final class AgentSupervisor {
     /// report filed this turn. `statusOverride` replaces the no-report status.
     private func helperCompletionText(_ id: AgentID, child: AgentRecord, outcome: TurnOutcome, error: String?,
                                       statusOverride: String?) -> (text: String, capturedReport: Bool) {
-        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
-        let filedThisTurn = child.lastReport.map({ $0.filedAt > baseline }) == true
+        let baseline = subscriptionsSettling(id).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
+        let filedThisTurn = settlementReport(id).map({ $0.filedAt > baseline }) == true
         let status: String
         switch outcome {
         // A turn end without a report is not "succeeded": the lead should
@@ -9585,26 +9869,28 @@ final class AgentSupervisor {
         case .interrupted, .cancelled: status = "stopped"
         }
         let report: String
-        if let filed = child.lastReport, filed.filedAt > baseline {
+        if let filed = settlementReport(id), filed.filedAt > baseline {
             report = Self.helperCompletionReportText(filed.report)
         } else {
-            report = String((transcriptProjections[id]?.finalAssistantText ?? "").prefix(2400))
+            report = String((finalAssistantText(for: id) ?? Self.helperNoReplyText).prefix(2400))
         }
         return ("\(String(child.humanDisplayName.prefix(80))) finished: \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(report)", filedThisTurn)
     }
 
     private func noteHelperCompletion(_ id: AgentID, turn: String, outcome: TurnOutcome, error: String?,
                                       statusOverride: String? = nil) {
-        let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
+        let identity = settlementScope.flatMap { $0.id == id ? $0.identity : nil }
+            ?? runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
         guard let child = records[id], child.capabilities.locallyManaged,
               helperCompletionTurns[id] != identity else { return }
         helperCompletionTurns[id] = identity
         helperCompletionGeneration[identity] = helperTurnsFinished[id, default: 0]
         if helperFirstFinishedAt[id] == nil { helperFirstFinishedAt[id] = helperCompletionNow() }
-        let baseline = (helperMessageSubscriptions[id] ?? []).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
+        if let scope = settlementScope, scope.id == id { settledHelperCompletions[id] = scope }
+        let baseline = subscriptionsSettling(id).map(\.baseline).min() ?? (lastSettledAt[id] ?? reportTurnBaseline)
         let text = helperCompletionText(id, child: child, outcome: outcome, error: error, statusOverride: statusOverride).text
         let parents = Set([child.parentAgentID].compactMap { $0 }
-            + (helperMessageSubscriptions[id] ?? []).map(\.parent))
+            + subscriptionsSettling(id).map(\.parent))
         lastHelperDeliveryParents[id] = parents
         lateHelperText[id] = nil
         for parent in parents where records[parent] != nil && wakesForHelperCompletion(parent) {
@@ -9615,7 +9901,7 @@ final class AgentSupervisor {
                 do {
                     var pending = SpawnResultFile.Delivery(helper: id.rawValue, turn: identity,
                         recipient: parent.rawValue, wakeID: batch.id, text: text, now: helperCompletionNow())
-                    pending.capturedReport = child.lastReport.map { $0.filedAt > baseline } ?? false
+                    pending.capturedReport = settlementReport(id).map { $0.filedAt > baseline } ?? false
                     try SpawnResultFile.saveDelivery(pending, parentCwd: cwd)
                 } catch { warn("Helper completion journal unavailable; retaining in-memory retry") }
             }
@@ -9709,8 +9995,10 @@ final class AgentSupervisor {
         guard !helperCompletionFlushInFlight else { return }
         helperCompletionFlushInFlight = true
         defer { helperCompletionFlushInFlight = false; scheduleHelperCompletionFlush() }
+        let recoveryStart = qaSaveTimingStart()
         let recovering = records.keys.filter { wakesForHelperCompletion($0) && !helperDeliveryJournalsRead.contains($0) }
         recoverHelperCompletionBatches(for: recovering)
+        qaSaveTimingEnd(recoveryStart, phase: .helperCompletionRecovery, id: nil)
         for parent in Array(helperCompletionBatches.keys) {
             // A deleted lead, or one Array can no longer push into: nothing will
             // ever take this batch, and keeping it re-armed the timer every
@@ -9750,9 +10038,14 @@ final class AgentSupervisor {
                                     header = String(header.dropLast(noReport.count)) + "succeeded"
                                 }
                             }
-                            else if state.capturedReport == true {
+                            else if state.capturedReport != true, let settled = settledHelperCompletions[update.0],
+                                    settled.identity == state.turn {
+                                // This turn's own reply, never the transcript's latest: a
+                                // turn settled without its transcript stays textless.
+                                body = String((settled.reply ?? Self.helperNoReplyText).prefix(2400))
+                            } else {
                                 body = (state.text ?? update.1).components(separatedBy: "\n").dropFirst().joined(separator: "\n")
-                            } else { body = String((transcriptProjections[update.0]?.finalAssistantText ?? "").prefix(2400)) }
+                            }
                             state.text = header + "\n" + body
                         }
                         // Persist prompt eligibility with staging so restart
@@ -10297,10 +10590,18 @@ final class AgentSupervisor {
     func qaTranscriptParseCount(for id: AgentID) -> Int { transcriptProjections[id]?.streamingMarkupParseCount ?? 0 }
     /// QA: the final assistant text the supervisor's copy holds now — what a
     /// spawned child's result carries back and the sidebar hover card reads.
-    func qaFinalAssistantText(for id: AgentID) -> String? { transcriptProjections[id]?.finalAssistantText }
+    func qaFinalAssistantText(for id: AgentID) -> String? { finalAssistantText(for: id) }
+
+    /// What a released agent knew before its evidence was cut to two entries:
+    /// the files its whole transcript referenced, and that entries were dropped.
+    func releasedTranscriptDiscovery(for id: AgentID) -> (referencedFiles: [String], evidenceCut: Bool)? {
+        guard let released = releasedTranscripts[id] else { return nil }
+        return (released.referencedFiles, released.entryCount > released.evidence.entries.count)
+    }
 
     func transcriptDocumentProjection(for id: AgentID) -> AgentDocument? {
-        transcriptProjections[id]?.document
+        if let released = releasedTranscripts[id] { return released.evidence }
+        return transcriptProjections[id]?.document
     }
 
     func stageBrowserScreenshot(_ data: Data, for id: AgentID) async throws -> AgentComposerStoredAttachment {
@@ -10322,9 +10623,29 @@ final class AgentSupervisor {
     func publishBrowserScreenshot(_ metadata: AgentImageAttachmentMetadata, for id: AgentID) throws {
         let noticeID = "browser-screenshot-\(UUID().uuidString)"
         guard transcriptStore != nil else { throw AgentComposerAttachmentStoreError.storageReadFailed("transcript unavailable") }
+        if deferUntilTranscriptReloaded(id, { [weak self] in
+            guard let self else { return }
+            var projection = self.transcriptProjection(for: id)
+            guard (try? projection.appendBrowserScreenshot(id: noticeID, metadata: metadata)) != nil else { return }
+            self.transcriptProjections[id] = projection
+            self.recordCanonicalTranscriptMutation(for: id) { model in
+                do { try model.appendBrowserScreenshot(id: noticeID, metadata: metadata); return true }
+                catch { return false }
+            }
+            self.scheduleTranscriptPersist(for: id, final: true)
+        }) {
+            for observe in (localNoticeObservers[id] ?? [:]).values {
+                observe(AgentLocalNotice(id: noticeID, title: "", body: "", screenshot: metadata, afterEvent: tailEventCount[id] ?? 0))
+            }
+            return
+        }
         var projection = transcriptProjection(for: id)
         try projection.appendBrowserScreenshot(id: noticeID, metadata: metadata)
         transcriptProjections[id] = projection
+        recordCanonicalTranscriptMutation(for: id) { model in
+            do { try model.appendBrowserScreenshot(id: noticeID, metadata: metadata); return true }
+            catch { return false }
+        }
         scheduleTranscriptPersist(for: id, final: true)
         for observe in (localNoticeObservers[id] ?? [:]).values {
             observe(AgentLocalNotice(id: noticeID, title: "", body: "", screenshot: metadata,
@@ -10338,7 +10659,7 @@ final class AgentSupervisor {
     /// included, so a working agent shows what it is saying now); nil when no
     /// assistant text has reached it in this session.
     func latestAssistantLine(for id: AgentID) -> String? {
-        guard let text = transcriptProjections[id]?.finalAssistantText else { return nil }
+        guard let text = finalAssistantText(for: id) else { return nil }
         for line in text.split(whereSeparator: \.isNewline).reversed()
         where !line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
             let trimmed = line.drop { "#>*-+` \t".contains($0) }.trimmingCharacters(in: .whitespaces)
@@ -11573,6 +11894,10 @@ final class AgentSupervisor {
         /// The `tailEventCount` the tail's first event follows: a reader that
         /// counts from here knows how far it has read in notice stamps.
         var tailBase: UInt64 = 0
+        /// Set when the agent's transcript was released while it sat idle with no
+        /// view: the snapshot is nil until this finishes, and a view attaches again
+        /// once it has, to install the reloaded transcript.
+        var reload: Task<Void, Never>? = nil
     }
 
     /// Whether `transcriptAttachment` returns a semantic snapshot boundary. Without
@@ -11595,7 +11920,13 @@ final class AgentSupervisor {
     /// what has streamed first. The publisher reads at most four times a second,
     /// the supervisor's own parse rate.
     func transcriptDocument(for id: AgentID) -> AgentDocument? {
+        guard releasedTranscripts[id] == nil else { return nil }
+        let rejected = transcriptProjections[id]?.rejectedMutationCount
         _ = transcriptProjections[id]?.flushPendingStreamingMarkup()
+        if canonicalTranscriptReady.contains(id), !canonicalTranscriptSeparate.contains(id),
+           transcriptProjections[id]?.rejectedMutationCount != rejected {
+            blockTranscriptPersistence(for: id)
+        }
         return transcriptProjections[id]?.document
     }
 
@@ -11607,6 +11938,7 @@ final class AgentSupervisor {
     func removeSharedTranscriptDetailObserver(_ token: UUID, for id: AgentID) {
         sharedTranscriptDetailObservers[id]?[token] = nil
         if sharedTranscriptDetailObservers[id]?.isEmpty == true { sharedTranscriptDetailObservers[id] = nil }
+        scheduleTranscriptRelease(for: id)
     }
 
     func sharedTranscriptPresentedBlock(for id: AgentID, block: AgentBlock, entry: AgentEntry) -> AgentBlock? {
@@ -11722,8 +12054,12 @@ final class AgentSupervisor {
     /// `AgentSupervisor` is main-actor isolated, so no delivery can interleave the
     /// snapshot read and continuation registration.
     func transcriptAttachment(for id: AgentID, reboundTo threadId: String) -> TranscriptAttachment {
-        let snapshot = transcriptProjections[id]?.rebound(to: threadId)
-        let recent = history[id] ?? []
+        // A later explicit view can retry a failed read after storage returns.
+        // This never retries a mutation or partial-save fault.
+        if canonicalTranscriptPreflightFailures.contains(id) { startCanonicalTranscriptPreflight(for: id) }
+        let reload = releasedTranscripts[id] == nil ? nil : startTranscriptReload(for: id)
+        let snapshot = reload == nil ? transcriptProjections[id]?.rebound(to: threadId) : nil
+        let recent = reload == nil ? (history[id] ?? []) : []
         let tail = AsyncStream<AgentRuntimeEvent> { continuation in
             // Compatibility supervisors without a transcript store still use the
             // historical snapshot-then-tail contract. Production has `snapshot`
@@ -11739,7 +12075,7 @@ final class AgentSupervisor {
         }
         // A compatibility replay is counted as already read: at worst a notice
         // shows a few replayed events early, as it did before, never late.
-        return TranscriptAttachment(snapshot: snapshot, tail: tail, tailBase: tailEventCount[id] ?? 0)
+        return TranscriptAttachment(snapshot: snapshot, tail: tail, tailBase: tailEventCount[id] ?? 0, reload: reload)
     }
 
     /// Snapshot-then-tail, per `ActivityStore.subscribe()`: the buffered history is
@@ -11817,6 +12153,7 @@ final class AgentSupervisor {
     private func removeSubscriber(_ token: UUID, for id: AgentID) {
         subscribers[id]?.removeValue(forKey: token)
         if subscribers[id]?.isEmpty == true { subscribers.removeValue(forKey: id) }
+        scheduleTranscriptRelease(for: id)
     }
 
     // MARK: - Transcript persistence (C4)
@@ -11830,26 +12167,22 @@ final class AgentSupervisor {
     /// (`.plans/84`).
     static let transcriptStreamingParsesPerSecond: Double = 4
 
-    private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID) {
+    private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID, bypassReload: Bool = false) {
         guard transcriptStore != nil else { return }
+        if !bypassReload, deferUntilTranscriptReloaded(id, { [weak self] in self?.ingestTranscriptEvent(event, for: id, bypassReload: true) }) { return }
+        recordCanonicalTranscriptMutation(for: id) { $0.ingest(event); return true }
         if transcriptProjections[id] == nil { transcriptProjections[id] = transcriptProjection(for: id) }
-        let capture: AgentTranscriptCanvasToolDetail
-        if let existing = sharedTranscriptDetails[id] { capture = existing }
-        else {
-            capture = AgentTranscriptCanvasToolDetail(store: AgentToolDetailStore())
-            capture.bind(agentID: id)
-            capture.onRefresh = { [weak self] in
-                guard let self else { return }
-                self.sharedTranscriptDetailRevisions[id, default: 0] &+= 1
-                self.sharedTranscriptDetailObservers[id]?.values.forEach { $0() }
-            }
-            sharedTranscriptDetails[id] = capture
-        }
+        let capture = sharedTranscriptDetailCapture(for: id)
         let identity = capture.captureRuntimeEvent(event)
         let previous = identity == nil ? Set<AgentNodeID>() : Set(transcriptProjections[id]!.document.entries.map(\.id))
         // In place: a copy mutated while the dictionary still held the original
         // duplicated the whole transcript's storage on every streamed chunk.
+        let rejected = transcriptProjections[id]!.rejectedMutationCount
         transcriptProjections[id]!.ingest(event)
+        if canonicalTranscriptReady.contains(id), !canonicalTranscriptSeparate.contains(id),
+           transcriptProjections[id]!.rejectedMutationCount != rejected {
+            blockTranscriptPersistence(for: id)
+        }
         if let identity, case let .itemStarted(_, itemID, _, _) = event {
             let candidates = transcriptProjections[id]!.document.entries.filter { entry in
                 guard !previous.contains(entry.id), case let .providerItem(provider, providerID) = entry.provenance else { return false }
@@ -11860,12 +12193,33 @@ final class AgentSupervisor {
         scheduleTranscriptPersist(for: id, final: Self.isTranscriptPersistBoundary(event))
     }
 
+    /// QA: the time to live of a newly created tool-detail store.
+    var qaToolDetailTimeToLive: TimeInterval = 60 * 60
+
+    private func sharedTranscriptDetailCapture(for id: AgentID) -> AgentTranscriptCanvasToolDetail {
+        if let existing = sharedTranscriptDetails[id] { return existing }
+        let capture = AgentTranscriptCanvasToolDetail(store: AgentToolDetailStore(timeToLive: qaToolDetailTimeToLive))
+        capture.bind(agentID: id)
+        capture.onRefresh = { [weak self] in
+            guard let self else { return }
+            self.sharedTranscriptDetailRevisions[id, default: 0] &+= 1
+            self.sharedTranscriptDetailObservers[id]?.values.forEach { $0() }
+        }
+        sharedTranscriptDetails[id] = capture
+        return capture
+    }
+
     /// Echoes the user's own prompt into the durable document. `send` used to
     /// rely entirely on the tile calling `appendUserPrompt` for this; a
     /// tile-less agent (fan-out's common case) never had a tile to ask.
-    private func recordTranscriptUserPrompt(_ prompt: AgentPrompt, for id: AgentID) {
+    private func recordTranscriptUserPrompt(_ prompt: AgentPrompt, for id: AgentID, bypassReload: Bool = false) {
         guard transcriptStore != nil else { return }
+        if !bypassReload, deferUntilTranscriptReloaded(id, { [weak self] in self?.recordTranscriptUserPrompt(prompt, for: id, bypassReload: true) }) { return }
         guard let promptID = AgentNodeID(rawValue: "supervisor-prompt-\(UUID().uuidString)") else { return }
+        recordCanonicalTranscriptMutation(for: id) { model in
+            do { try model.appendUserPromptChecked(id: promptID, prompt: prompt); return true }
+            catch { return false }
+        }
         var projection = transcriptProjection(for: id)
         projection.appendUserPrompt(id: promptID, prompt: prompt)
         transcriptProjections[id] = projection
@@ -12012,17 +12366,34 @@ final class AgentSupervisor {
     /// QA: how many Array-owned notices this agent has been sent this session.
     func qaArrayOwnedNoticeCount(for id: AgentID) -> Int { arrayOwnedNoticeCounts[id] ?? 0 }
 
-    private func appendLocalNotice(id: AgentID, key: String, title: String, body: String) {
+    private func appendLocalNotice(id: AgentID, key: String, title: String, body: String, persistCanonical: Bool = true) {
         let ordinal = (arrayOwnedNoticeCounts[id] ?? 0) + 1
         arrayOwnedNoticeCounts[id] = ordinal
-        let noticeID = "\(key)#\(ordinal)"
+        // Ordinals restart with this supervisor; an epoch keeps a notice on a
+        // restored canonical transcript from colliding with an earlier launch.
+        let noticeID = "\(key)#\(arrayOwnedNoticeEpoch)-\(ordinal)"
         // S3: the live tile hears it now. This used to reach only the
         // persisted projection, so `/status` showed a bubble, dropped the gyro
         // and said nothing until the tile next re-attached.
         for observe in (localNoticeObservers[id] ?? [:]).values {
             observe(AgentLocalNotice(id: noticeID, title: title, body: body, afterEvent: tailEventCount[id] ?? 0))
         }
+        if !persistCanonical {
+            var projection = transcriptProjection(for: id)
+            projection.appendNotice(id: noticeID, title: title, text: body)
+            transcriptProjections[id] = projection
+            return
+        }
         guard transcriptStore != nil else { return }
+        if deferUntilTranscriptReloaded(id, { [weak self] in
+            guard let self else { return }
+            self.recordCanonicalTranscriptMutation(for: id) { $0.appendNotice(id: noticeID, title: title, text: body); return true }
+            var projection = self.transcriptProjection(for: id)
+            projection.appendNotice(id: noticeID, title: title, text: body)
+            self.transcriptProjections[id] = projection
+            self.scheduleTranscriptPersist(for: id, final: true)
+        }) { return }
+        recordCanonicalTranscriptMutation(for: id) { $0.appendNotice(id: noticeID, title: title, text: body); return true }
         var projection = transcriptProjection(for: id)
         projection.appendNotice(id: noticeID, title: title, text: body)
         transcriptProjections[id] = projection
@@ -12121,14 +12492,31 @@ final class AgentSupervisor {
 
     private func scheduleTranscriptPersist(for id: AgentID, final: Bool) {
         guard transcriptStore != nil else { return }
+        // A reload installs an internal model before draining its FIFO. Never
+        // persist a partial replay; its final boundary is saved after the drain.
+        if releasedTranscripts[id] != nil {
+            transcriptSaveWanted.insert(id)
+            return
+        }
         // Assistant/reasoning content deltas parse into blocks off a scheduled
         // deadline (the tile drove that off a real `RunLoop` timer); nothing
         // here runs that clock, so a boundary write must flush the pending
         // streaming markup itself or the just-streamed reply is silently
         // absent from what gets saved.
         if final, var projection = transcriptProjections[id] {
+            let rejected = projection.rejectedMutationCount
             _ = projection.flushPendingStreamingMarkup()
             transcriptProjections[id] = projection
+            if canonicalTranscriptReady.contains(id), !canonicalTranscriptSeparate.contains(id),
+               projection.rejectedMutationCount != rejected { blockTranscriptPersistence(for: id); return }
+        }
+        if final, canonicalTranscriptProjections[id] != nil {
+            let rejected = canonicalTranscriptProjections[id]!.rejectedMutationCount
+            _ = canonicalTranscriptProjections[id]!.flushPendingStreamingMarkup()
+            if canonicalTranscriptProjections[id]!.rejectedMutationCount != rejected {
+                canonicalTranscriptProjections[id] = nil
+                blockTranscriptPersistence(for: id); return
+            }
         }
         guard transcriptProjections[id] != nil else { return }
         if final {
@@ -12144,13 +12532,20 @@ final class AgentSupervisor {
         transcriptPersistDebounce[id] = Task { [weak self] in
             while let self, !Task.isCancelled, let deadline = self.transcriptPersistDeadline[id] {
                 if ContinuousClock.now >= deadline {
+                    let completionStart = self.qaSaveTimingStart()
                     self.transcriptPersistDeadline[id] = nil
                     self.saveTranscript(for: id)
+                    self.qaSaveTimingEnd(completionStart, phase: .debounceCompletion, id: id)
                     break
                 }
                 try? await Task.sleep(until: deadline)
             }
-            self?.transcriptPersistDebounce[id] = nil
+            if let self {
+                let cleanupStart = self.qaSaveTimingStart()
+                self.transcriptPersistDebounce[id] = nil
+                self.scheduleTranscriptRelease(for: id)
+                self.qaSaveTimingEnd(cleanupStart, phase: .debounceCleanup, id: id)
+            }
         }
     }
 
@@ -12160,21 +12555,798 @@ final class AgentSupervisor {
     /// whole document: every later event copied the transcript again, and the
     /// copies were freed on the main thread as the saves ended.
     private func saveTranscript(for id: AgentID) {
+        let setupStart = qaSaveTimingStart()
+        defer { qaSaveTimingEnd(setupStart, phase: .saveSetup, id: id) }
         guard let store = transcriptStore else { return }
+        if transcriptPersistenceBlocked.contains(id) {
+            // A final boundary is a bounded, explicit retry trigger. A failed
+            // attempt never schedules itself again.
+            if canonicalTranscriptPreflightFailures.contains(id) {
+                transcriptSaveWanted.insert(id)
+                startCanonicalTranscriptPreflight(for: id)
+            }
+            return
+        }
         transcriptSaveWanted.insert(id)
+        guard releasedTranscripts[id] == nil else { return }
+        guard canonicalTranscriptReady.contains(id) else { startCanonicalTranscriptPreflight(for: id); return }
         guard transcriptPersistenceTasks[id] == nil else { return }
         let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
         transcriptPersistenceTasks[id] = Task { [weak self] in
             while let self, !Task.isCancelled, self.transcriptSaveWanted.remove(id) != nil,
                   self.transcriptProjections[id] != nil {
+                let preparationStart = self.qaSaveTimingStart()
                 // The detached task owns the copy and frees it, off the main thread.
-                await Task.detached(priority: .utility) { [document = self.transcriptProjections[id]?.document] in
-                    guard let document else { return }
-                    try? await store.saveSnapshot(agentID: id, sessionID: sessionID, document: document)
+                let document = self.canonicalTranscriptSeparate.contains(id)
+                    ? self.canonicalTranscriptProjections[id]?.document : self.transcriptProjections[id]?.document
+                let version = document?.version
+                let proof = self.transcriptSaveProofs[id]
+                let archiveProof = self.canonicalTranscriptArchiveProofs[id]
+                let protectedPrefix = self.canonicalTranscriptProtectedPrefix[id]
+                let beforeSave = self.qaBeforeTranscriptSave
+                // A failed save may already have replaced the snapshot before
+                // its journal write failed. The previous generation is no
+                // longer proof that this version is safely on disk.
+                self.savedTranscriptVersions[id] = nil
+                self.savedTranscriptGenerations[id] = nil
+                self.qaSaveTimingEnd(preparationStart, phase: .savePreparation, id: id)
+                let result = await Task.detached(priority: .utility) {
+                    guard let document else { return Result<UUID, Error>.failure(AgentTranscriptStoreError.unownedArchive) }
+                    do {
+                        await beforeSave?()
+                        return .success(try await store.saveGuardedSnapshot(agentID: id, sessionID: sessionID, document: document,
+                                                                            expectedVersion: proof?.version, expectedGeneration: proof?.generation,
+                                                                            expectedArchiveProof: archiveProof, protectedPrefixCount: protectedPrefix))
+                    } catch { return .failure(error) }
                 }.value
+                let completionStart = self.qaSaveTimingStart()
+                defer { self.qaSaveTimingEnd(completionStart, phase: .saveCompletion, id: id) }
+                guard !Task.isCancelled, self.records[id] != nil else { return }
+                if case .success(let generation) = result, let version {
+                    self.savedTranscriptVersions[id] = version
+                    self.savedTranscriptGenerations[id] = generation
+                    self.transcriptSaveProofs[id] = (version, generation)
+                    self.canonicalTranscriptArchiveProofs[id] = nil
+                    if self.canonicalTranscriptRecoveryAwaitingSave.remove(id) != nil {
+                        self.appendLocalNotice(id: id, key: "transcript-save-recovered", title: "Transcript saving resumed",
+                                               body: "The saved transcript was read and new transcript content was saved.",
+                                               persistCanonical: false)
+                    }
+                } else {
+                    self.transcriptPersistenceTasks[id] = nil
+                    self.transcriptSaveWanted.remove(id)
+                    self.blockTranscriptPersistence(for: id)
+                    return
+                }
             }
             self?.transcriptPersistenceTasks[id] = nil
+            self?.scheduleTranscriptRelease(for: id)
         }
+    }
+
+    // MARK: - Releasing idle transcripts (memory at thousands of agents)
+    //
+    // Every agent that ran this launch used to keep its whole semantic transcript,
+    // a 500-event replay buffer and a tool-detail capture here until it was
+    // removed. After days up with thousands of helpers that was the largest live
+    // heap in the app. An agent that has finished and that no view follows now
+    // has its transcript saved and dropped; what stays is the summary the rest of
+    // the app reads (status, last reply, the last terminal event). Any write, a
+    // view attaching, or a recovery reloads it from the saved document first.
+
+    struct ReleasedTranscript {
+        var status: AgentStatus
+        var finalAssistantText: String?
+        var savedVersion: UInt64
+        var saveGeneration: UUID
+        /// The last user prompt and the last reply, so finding or inspecting an
+        /// idle agent still has evidence without the whole transcript.
+        var evidence: AgentDocument
+        /// Checkout-relative files the whole transcript referenced (capped), and
+        /// how many entries it had, because `evidence` keeps only two of them.
+        var referencedFiles: [String]
+        var entryCount: Int
+        /// The presented tool details, kept until their time to live ends: they
+        /// exist nowhere else once the capture is dropped.
+        var toolDetails: AgentTranscriptCanvasToolDetail.ReleasedState?
+    }
+
+    /// How long a finished helper's settlement may wait for its released
+    /// transcript to reload before it is delivered without it.
+    static var transcriptCompletionBound: Duration = .seconds(20)
+
+    /// How long an agent must sit idle and unwatched before its transcript is
+    /// released. Checks set it to zero.
+    static var transcriptReleaseDelay: Duration = .seconds(30)
+    private var releasedTranscripts: [AgentID: ReleasedTranscript] = [:]
+    private var providerHistoryReadPins: [AgentID: Set<UUID>] = [:]
+    private var transcriptReleaseTimers: [AgentID: Task<Void, Never>] = [:]
+    private var transcriptReloads: [AgentID: Task<Void, Never>] = [:]
+    private var transcriptReloadTokens: [AgentID: UUID] = [:]
+    private var transcriptReloadObservers: [AgentID: [UUID: () -> Void]] = [:]
+    private var writesAwaitingTranscriptReload: [AgentID: [DeferredTranscriptWrite]] = [:]
+    /// The document version each agent's last completed save wrote.
+    private var savedTranscriptVersions: [AgentID: UInt64] = [:]
+    private var savedTranscriptGenerations: [AgentID: UUID] = [:]
+    private var canonicalTranscriptProjections: [AgentID: ManagedAgentTranscriptModel] = [:]
+    private var canonicalTranscriptPending: [AgentID: [CanonicalTranscriptMutation]] = [:]
+    private var canonicalTranscriptPreflights: [AgentID: Task<Void, Never>] = [:]
+    private var canonicalTranscriptPreflightTokens: [AgentID: UUID] = [:]
+    private var canonicalTranscriptReady: Set<AgentID> = []
+    private var canonicalTranscriptSeparate: Set<AgentID> = []
+    private var canonicalTranscriptArchiveProofs: [AgentID: AgentTranscriptArchiveProof] = [:]
+    private var canonicalTranscriptProtectedPrefix: [AgentID: Int] = [:]
+    /// Only a failed preflight is eligible for a later read retry. Save and
+    /// mutation failures may have partial writes and remain fail-closed.
+    private var canonicalTranscriptPreflightFailures: Set<AgentID> = []
+    private var canonicalTranscriptRecoveryAwaitingSave: Set<AgentID> = []
+    private var transcriptHasLocalOnlyHistory: Set<AgentID> = []
+    /// Provider history merged into an existing notice-only projection. Shown
+    /// locally, never published (`sharedTranscriptDocument`).
+    private var unsharedProviderEntryIDs: [AgentID: Set<AgentNodeID>] = [:]
+    /// The last complete archive this process wrote, even if a subsequent save
+    /// failed. Unlike this ownership proof, the release receipt is invalidated
+    /// before each attempted save.
+    private var transcriptSaveProofs: [AgentID: (version: UInt64, generation: UUID)] = [:]
+    private var transcriptPersistenceBlocked: Set<AgentID> = []
+    /// Witness seam: pause after a save starts but before it reaches the store.
+    var qaBeforeTranscriptSave: (@Sendable () async -> Void)?
+    var qaQuarantineStarted: (@Sendable () -> Void)?
+    var qaQuarantineFinished: (@Sendable () -> Void)?
+    /// Witness seams for the absent-archive FIFO ownership transfer.
+    var qaAfterAbsentCanonicalDiscard: (@Sendable (AgentID) -> Void)?
+    var qaAfterAbsentCanonicalDiscardScheduled: (@MainActor (AgentID) async -> Void)?
+    var qaAfterArchivedCanonicalDiscard: (@Sendable (AgentID) -> Void)?
+    var qaAfterArchivedCanonicalDiscardScheduled: (@MainActor (AgentID) -> Void)?
+    /// Witness seam: invoked synchronously before the real inter-chunk yield.
+    var qaAfterCanonicalReplayChunk: (@MainActor (AgentID, Int) -> Void)?
+    var qaAfterTranscriptReloadChunk: (@MainActor (AgentID, Int) -> Void)?
+    var qaAfterReloadBatchDiscard: (@Sendable (AgentID) -> Void)?
+    var qaAfterReloadBatchDiscardScheduled: (@MainActor (AgentID) -> Void)?
+    var qaAfterArchivedReloadDiscard: (@Sendable (AgentID) -> Void)?
+    var qaAfterArchivedReloadDiscardScheduled: (@MainActor (AgentID) -> Void)?
+    /// Optional CPU attribution for the replay performance witness.
+    var qaCanonicalReplayPhaseCPU: (@MainActor (String, UInt64) -> Void)?
+    /// Runs on the construction worker immediately before resuming a model.
+    var qaBeforeResumedTranscriptConstruction: (@Sendable (AgentID, Bool) async -> Void)?
+    var qaOnResumedTranscriptConstruction: (@Sendable (AgentID, Bool, Bool) -> Void)?
+    nonisolated private static func qaIsMainThread() -> Bool { Thread.isMainThread }
+    var qaSaveAttribution: (@MainActor (TranscriptSaveAttributionPhase, AgentID?, UInt64, UInt64, UInt64, UInt64) -> Void)?
+
+    private func qaSaveTimingStart() -> (UInt64, UInt64)? {
+        guard qaSaveAttribution != nil else { return nil }
+        return (DispatchTime.now().uptimeNanoseconds, clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID))
+    }
+
+    private func qaSaveTimingEnd(_ start: (UInt64, UInt64)?, phase: TranscriptSaveAttributionPhase, id: AgentID?) {
+        guard let start, let sink = qaSaveAttribution else { return }
+        sink(phase, id, start.0, DispatchTime.now().uptimeNanoseconds,
+             start.1, clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID))
+    }
+
+    func qaCanonicalPreflightTask(for id: AgentID) -> Task<Void, Never>? { canonicalTranscriptPreflights[id] }
+    func qaTranscriptReloadTask(for id: AgentID) -> Task<Void, Never>? { transcriptReloads[id] }
+
+    func qaCanonicalPreflightIsRunning(_ id: AgentID) -> Bool {
+        canonicalTranscriptPreflights[id] != nil && !canonicalTranscriptReady.contains(id)
+    }
+    /// When a shared agent's publisher last read its transcript.
+    private var transcriptReadAt: [AgentID: ContinuousClock.Instant] = [:]
+
+    private func separateCanonicalTranscriptIfNeeded(_ id: AgentID) {
+        guard canonicalTranscriptReady.contains(id), !canonicalTranscriptSeparate.contains(id) else { return }
+        let model = transcriptProjections[id] ?? ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+        canonicalTranscriptProjections[id] = model
+        canonicalTranscriptSeparate.insert(id)
+    }
+
+    private func recordCanonicalTranscriptMutation(for id: AgentID, _ mutation: @escaping CanonicalTranscriptMutation) {
+        guard !transcriptPersistenceBlocked.contains(id) || canonicalTranscriptPreflightFailures.contains(id) else { return }
+        if canonicalTranscriptReady.contains(id) {
+            guard canonicalTranscriptSeparate.contains(id), canonicalTranscriptProjections[id] != nil else { return }
+            let rejected = canonicalTranscriptProjections[id]!.rejectedMutationCount
+            // Mutate the dictionary's sole value in place. Holding a local
+            // model copy as well makes every streamed token copy the complete
+            // canonical document before changing it.
+            let accepted = mutation(&canonicalTranscriptProjections[id]!)
+            guard accepted, canonicalTranscriptProjections[id]!.rejectedMutationCount == rejected else {
+                // A rejected multi-step mutation may have partly changed the
+                // mirror. It must never be persisted; the local display and
+                // previously saved archive remain available.
+                canonicalTranscriptProjections[id] = nil
+                blockTranscriptPersistence(for: id)
+                return
+            }
+            return
+        }
+        let timestamp = AgentTranscriptClock.entryDate()
+        canonicalTranscriptPending[id, default: []].append { model in
+            AgentTranscriptClock.withWallClock(timestamp) { mutation(&model) }
+        }
+        if !transcriptPersistenceBlocked.contains(id) { startCanonicalTranscriptPreflight(for: id) }
+    }
+
+    /// Enqueues a captured lifetime probe through the production FIFO in QA.
+    func qaEnqueueCanonicalReleaseProbe(for id: AgentID, _ probe: @escaping @Sendable () -> Void) {
+        recordCanonicalTranscriptMutation(for: id) { _ in probe(); return true }
+    }
+
+    func qaEnqueueReloadReleaseProbe(for id: AgentID, _ probe: @escaping @Sendable () -> Void) {
+        _ = deferUntilTranscriptReloaded(id) { probe() }
+    }
+
+    private func startCanonicalTranscriptPreflight(for id: AgentID) {
+        guard !canonicalTranscriptReady.contains(id), canonicalTranscriptPreflights[id] == nil,
+              (!transcriptPersistenceBlocked.contains(id) || canonicalTranscriptPreflightFailures.contains(id)),
+              let store = transcriptStore else { return }
+        let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+        let retryAfterFailure = canonicalTranscriptPreflightFailures.contains(id)
+        let migration = transcriptMigrationTaskProvider()
+        let token = UUID()
+        canonicalTranscriptPreflightTokens[id] = token
+        canonicalTranscriptPreflights[id] = Task { [weak self] in
+            let result: Result<AgentTranscriptArchivePreflight, Error>
+            do {
+                var migrationFailed = false
+                if let migration {
+                    do { _ = try await migration.value }
+                    catch { migrationFailed = true }
+                }
+                let archive = try await store.preflightGuardedArchive(agentID: id, sessionID: sessionID)
+                // A global migration failure does not invalidate an individual
+                // archive that strict primary-file preflight can prove. It
+                // does make apparent absence ambiguous, however: never start
+                // a new archive until the migration has completed cleanly.
+                if migrationFailed, case .absent = archive { throw AgentTranscriptStoreError.unownedArchive }
+                result = .success(archive)
+            }
+            catch { result = .failure(error) }
+            let continuationStart = self?.qaSaveTimingStart()
+            guard let self, !Task.isCancelled, self.records[id] != nil,
+                  self.canonicalTranscriptPreflightTokens[id] == token else { return }
+            defer {
+                if self.canonicalTranscriptPreflightTokens[id] == token {
+                    self.canonicalTranscriptPreflights[id] = nil
+                    self.canonicalTranscriptPreflightTokens[id] = nil
+                }
+            }
+            if case .failure = result {
+                self.canonicalTranscriptPreflightFailures.insert(id)
+                self.blockTranscriptPersistence(for: id)
+                return
+            }
+            if retryAfterFailure, case .success(.absent) = result {
+                // Once a read failed, absence is ambiguous: the older archive
+                // may merely be inaccessible or temporarily moved away.
+                self.blockTranscriptPersistence(for: id)
+                return
+            }
+            let prior: AgentDocument?
+            switch result {
+            case .failure:
+                return // handled before removing the pending FIFO
+            case .success(.absent): prior = nil
+            case let .success(.present(document, proof)):
+                prior = document
+                self.canonicalTranscriptArchiveProofs[id] = proof
+                self.canonicalTranscriptProtectedPrefix[id] = document.entries.count
+            }
+            self.qaSaveTimingEnd(continuationStart, phase: .preflightContinuation, id: id)
+            let separate = prior != nil || self.transcriptHasLocalOnlyHistory.contains(id)
+            if separate {
+                let timing = self.qaCanonicalReplayPhaseCPU
+                var model: ManagedAgentTranscriptModel
+                if let prior {
+                    let threadID = Self.threadId(for: id)
+                    let rate = Self.transcriptStreamingParsesPerSecond
+                    let beforeConstruction = self.qaBeforeResumedTranscriptConstruction
+                    let onConstruction = self.qaOnResumedTranscriptConstruction
+                    let measure = timing != nil
+                    let built = await Task.detached(priority: .utility) {
+                        await beforeConstruction?(id, true)
+                        let start = measure ? clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) : 0
+                        // Give the resumed reducer its own entry buffer while
+                        // the source document is still retained by preflight.
+                        var copy = prior
+                        copy.entries = prior.entries.map { $0 }
+                        onConstruction?(id, true, Self.qaIsMainThread())
+                        var value = ManagedAgentTranscriptModel(threadId: threadID, resuming: copy,
+                                                               status: .idle, finalAssistantSource: nil)
+                        value.streamingParsesPerSecond = rate
+                        let elapsed = measure ? clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) &- start : 0
+                        return (value, elapsed)
+                    }.value
+                    guard !Task.isCancelled, self.records[id] != nil,
+                          self.canonicalTranscriptPreflightTokens[id] == token else { return }
+                    model = built.0
+                    if let timing { timing("initialization worker", built.1) }
+                } else {
+                    model = ManagedAgentTranscriptModel(threadId: Self.threadId(for: id))
+                    model.streamingParsesPerSecond = Self.transcriptStreamingParsesPerSecond
+                }
+                var totalReplayed = 0
+                while true {
+                    // Take one batch. New writes during a yield go into a new
+                    // batch and must run after every item already taken here.
+                    var pending = self.canonicalTranscriptPending.removeValue(forKey: id) ?? []
+                    guard !pending.isEmpty else { break }
+                    defer {
+                        let reaper = CanonicalTranscriptMutationReaper(pending)
+                        pending = []
+                        Task.detached(priority: .utility) { reaper.discard() }
+                    }
+                    var chunkStart = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+                    var chunkCount = 0
+                    for (index, mutation) in pending.enumerated() {
+                        let mutationStart = timing == nil ? 0 : clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+                        let rejected = model.rejectedMutationCount
+                        let accepted = mutation(&model)
+                        if let timing { timing("mutation", clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) &- mutationStart) }
+                        if !accepted || model.rejectedMutationCount != rejected {
+                            self.canonicalTranscriptPreflightFailures.remove(id)
+                            self.blockTranscriptPersistence(for: id)
+                            return
+                        }
+                        totalReplayed += 1
+                        chunkCount += 1
+                        let moreInBatch = index + 1 < pending.count
+                        let moreQueued = !(self.canonicalTranscriptPending[id]?.isEmpty ?? true)
+                        if (moreInBatch || moreQueued),
+                           (chunkCount >= 32 || clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) &- chunkStart >= 1_000_000) {
+                            if let timing { timing("chunk", clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) &- chunkStart) }
+                            self.qaAfterCanonicalReplayChunk?(id, totalReplayed)
+                            // Give the main actor enough time between CPU-limited
+                            // chunks for rendering and input to make progress.
+                            try? await Task.sleep(for: .milliseconds(6))
+                            guard !Task.isCancelled, self.records[id] != nil,
+                                  self.canonicalTranscriptPreflightTokens[id] == token else { return }
+                            chunkStart = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+                            chunkCount = 0
+                        }
+                    }
+                }
+                let finishStart = timing == nil ? 0 : clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+                if self.transcriptSaveWanted.contains(id) {
+                    let rejected = model.rejectedMutationCount
+                    _ = model.flushPendingStreamingMarkup()
+                    guard model.rejectedMutationCount == rejected else {
+                        self.canonicalTranscriptPreflightFailures.remove(id)
+                        self.blockTranscriptPersistence(for: id)
+                        return
+                    }
+                }
+                // No await between observing an empty FIFO and installing the
+                // model: an arriving event cannot fall into a replay gap.
+                self.canonicalTranscriptProjections[id] = model
+                self.canonicalTranscriptSeparate.insert(id)
+                if let timing { timing("flush and install", clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) &- finishStart) }
+            } else {
+                // No prior archive or local-only provider history: the local
+                // model already owns all queued writes and can persist as-is.
+                let handoffStart = self.qaSaveTimingStart()
+                if var pending = self.canonicalTranscriptPending.removeValue(forKey: id), !pending.isEmpty {
+                    let reaper = CanonicalTranscriptMutationReaper(pending)
+                    pending = []
+                    let afterDiscard = self.qaAfterAbsentCanonicalDiscard
+                    Task.detached(priority: .utility) {
+                        reaper.discard()
+                        afterDiscard?(id)
+                    }
+                    self.qaSaveTimingEnd(handoffStart, phase: .absentHandoff, id: id)
+                    if let checkpoint = self.qaAfterAbsentCanonicalDiscardScheduled { await checkpoint(id) }
+                } else {
+                    self.qaSaveTimingEnd(handoffStart, phase: .absentHandoff, id: id)
+                }
+            }
+            // A replay failure is not retryable. Clear the preflight failure
+            // marker only once all queued writes have been applied.
+            self.canonicalTranscriptPreflightFailures.remove(id)
+            self.canonicalTranscriptReady.insert(id)
+            if retryAfterFailure {
+                self.transcriptPersistenceBlocked.remove(id)
+                self.canonicalTranscriptRecoveryAwaitingSave.insert(id)
+                self.transcriptSaveWanted.insert(id)
+            }
+            self.canonicalTranscriptPreflights[id] = nil
+            self.canonicalTranscriptPreflightTokens[id] = nil
+            let timing = self.qaCanonicalReplayPhaseCPU
+            let saveStart = timing == nil ? 0 : clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+            if self.transcriptSaveWanted.contains(id) { self.saveTranscript(for: id) }
+            else { self.scheduleTranscriptRelease(for: id) }
+            if let timing { timing("save setup", clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) &- saveStart) }
+        }
+    }
+
+    func finalAssistantText(for id: AgentID) -> String? {
+        // Inside a settlement, the turn's own captured reply (none when its
+        // transcript was unavailable), never the previous turn's.
+        if let scope = settlementScope, scope.id == id { return scope.reply }
+        // The resumed model comes first: while a reload replays held events the
+        // released summary still exists and names the previous turn's reply.
+        if let projection = transcriptProjections[id] { return projection.finalAssistantText }
+        return releasedTranscripts[id]?.finalAssistantText
+    }
+
+    func isTranscriptReleased(_ id: AgentID) -> Bool { releasedTranscripts[id] != nil }
+
+    /// Run the same idle-release decision without waiting for the timer in QA.
+    func qaReleaseTranscriptIfDormant(_ id: AgentID) { releaseTranscriptIfDormant(id) }
+
+    /// Exercise a save of the current projection, including its completion.
+    func qaSaveTranscript(for id: AgentID) async {
+        saveTranscript(for: id)
+        await canonicalTranscriptPreflights[id]?.value
+        await transcriptPersistenceTasks[id]?.value
+    }
+
+    func qaWaitForTranscriptPersistence(for id: AgentID) async {
+        await canonicalTranscriptPreflights[id]?.value
+        await transcriptPersistenceTasks[id]?.value
+    }
+
+    func qaTranscriptPersistenceIsBlocked(_ id: AgentID) -> Bool { transcriptPersistenceBlocked.contains(id) }
+
+    /// Observe only the integer identity and size of the canonical entries
+    /// buffer. No array or pointer escapes the call; this must finish before
+    /// the next mutation so the observation itself cannot force COW.
+    @inline(never)
+    func qaCanonicalEntryStorage(for id: AgentID) -> (address: UInt, count: Int, capacity: Int)? {
+        guard let model = canonicalTranscriptProjections[id] else { return nil }
+        let entries = model.document.entries
+        return entries.withUnsafeBufferPointer { buffer in
+            guard let base = buffer.baseAddress else { return nil }
+            return (UInt(bitPattern: base), entries.count, entries.capacity)
+        }
+    }
+
+    private func blockTranscriptPersistence(for id: AgentID) {
+        guard transcriptPersistenceBlocked.insert(id).inserted else { return }
+        transcriptReleaseTimers.removeValue(forKey: id)?.cancel()
+        let message = "The saved transcript could not be safely updated. Earlier history was kept; new transcript content may be lost when Array quits."
+        warn("Agent \(id.rawValue.uuidString): \(message)")
+        appendLocalNotice(id: id, key: "transcript-save-blocked", title: "Transcript not saved", body: message,
+                          persistCanonical: false)
+    }
+
+    /// An attached tile that could not read its history waits for any later
+    /// successful reload, including one started by a headless write.
+    func addTranscriptReloadObserver(for id: AgentID, _ observer: @escaping () -> Void) -> UUID {
+        let token = UUID()
+        transcriptReloadObservers[id, default: [:]][token] = observer
+        return token
+    }
+
+    func removeTranscriptReloadObserver(_ token: UUID, for id: AgentID) {
+        transcriptReloadObservers[id]?[token] = nil
+        if transcriptReloadObservers[id]?.isEmpty == true { transcriptReloadObservers[id] = nil }
+    }
+
+    /// What a shared agent's publisher reads each tick. Polling holds no
+    /// observer, so a read keeps the transcript resident for one release delay,
+    /// and a read of a released one brings it back for the next tick.
+    func sharedTranscriptDocument(for id: AgentID) -> AgentDocument? {
+        transcriptReadAt[id] = .now
+        if releasedTranscripts[id] != nil { _ = startTranscriptReload(for: id); return nil }
+        guard var document = transcriptDocument(for: id) else { return nil }
+        if let unshared = unsharedProviderEntryIDs[id] { document.entries.removeAll { unshared.contains($0.id) } }
+        return document
+    }
+
+    /// Nothing is reading or about to write this agent's transcript.
+    private func transcriptIsDormant(_ id: AgentID) -> Bool {
+        transcriptStore != nil && records[id] != nil && !isRunning(id)
+            && records[id]?.externalSession == nil && (providerHistoryReadPins[id]?.isEmpty ?? true)
+            && (subscribers[id]?.isEmpty ?? true)
+            && sharedTranscriptDetailObservers[id] == nil
+            && outsideHistoryObservers[id] == nil
+            && (localNoticeObservers[id]?.isEmpty ?? true)
+            && !adoptingSessionHistory.contains(id) && !terminalFaceAgents.contains(id)
+            && !compactingAgents.contains(id) && !activeCompactionOperations.contains(id)
+            && !contextRecoveryInFlight.contains(id)
+            && transcriptPersistenceTasks[id] == nil && transcriptPersistDebounce[id] == nil
+            && transcriptReloads[id] == nil
+            && canonicalTranscriptPreflights[id] == nil
+            && (transcriptProjections[id].map { $0.activeToolCount == 0 } ?? true)
+    }
+
+    private func scheduleTranscriptRelease(for id: AgentID) {
+        guard !transcriptPersistenceBlocked.contains(id), !transcriptHasLocalOnlyHistory.contains(id),
+              transcriptProjections[id] != nil || sharedTranscriptDetails[id] != nil,
+              transcriptIsDormant(id) else { return }
+        transcriptReleaseTimers[id]?.cancel()
+        let delay = Self.transcriptReleaseDelay
+        transcriptReleaseTimers[id] = Task { [weak self] in
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            // A publisher still reading it: wait until it has stopped.
+            while let read = self?.transcriptReadAt[id], read + delay > .now, !Task.isCancelled {
+                try? await Task.sleep(until: read + delay)
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.transcriptReleaseTimers[id] = nil
+            self.releaseTranscriptIfDormant(id)
+        }
+    }
+
+    /// Saves the agent's transcript, then drops it once the save has landed and
+    /// nothing has touched the transcript since.
+    private func releaseTranscriptIfDormant(_ id: AgentID) {
+        guard !transcriptPersistenceBlocked.contains(id), !transcriptHasLocalOnlyHistory.contains(id),
+              canonicalTranscriptReady.contains(id), transcriptIsDormant(id), let store = transcriptStore else { return }
+        guard var projection = transcriptProjections[id] else {
+            // A provider restore has no Array projection yet. Keep it for a
+            // later headless write; replacing an existing saved transcript with
+            // this potentially bounded history would risk losing older data.
+            sharedTranscriptDetails[id] = nil
+            trimHistoryToSummary(id)
+            return
+        }
+        let rejected = projection.rejectedMutationCount
+        if projection.flushPendingStreamingMarkup() { transcriptProjections[id] = projection }
+        if !canonicalTranscriptSeparate.contains(id), projection.rejectedMutationCount != rejected {
+            blockTranscriptPersistence(for: id); return
+        }
+        if canonicalTranscriptProjections[id] != nil {
+            let rejected = canonicalTranscriptProjections[id]!.rejectedMutationCount
+            _ = canonicalTranscriptProjections[id]!.flushPendingStreamingMarkup()
+            if canonicalTranscriptProjections[id]!.rejectedMutationCount != rejected {
+                canonicalTranscriptProjections[id] = nil
+                blockTranscriptPersistence(for: id); return
+            }
+        }
+        let savedProjection = canonicalTranscriptSeparate.contains(id) ? canonicalTranscriptProjections[id] : projection
+        guard let savedProjection else { return }
+        if savedTranscriptVersions[id] == savedProjection.document.version, let generation = savedTranscriptGenerations[id] {
+            dropTranscript(id, releasing: savedProjection, generation: generation)
+            return
+        }
+        let document = savedProjection.document
+        let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+        let proof = transcriptSaveProofs[id]
+        let archiveProof = canonicalTranscriptArchiveProofs[id]
+        let protectedPrefix = canonicalTranscriptProtectedPrefix[id]
+        let beforeSave = qaBeforeTranscriptSave
+        savedTranscriptVersions[id] = nil
+        savedTranscriptGenerations[id] = nil
+        // Held as the persistence task, so no other save interleaves and the
+        // agent is not dormant again until this one is done.
+        transcriptPersistenceTasks[id] = Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                do {
+                    await beforeSave?()
+                    return Result<UUID, Error>.success(try await store.saveGuardedSnapshot(
+                        agentID: id, sessionID: sessionID, document: document,
+                        expectedVersion: proof?.version, expectedGeneration: proof?.generation,
+                        expectedArchiveProof: archiveProof, protectedPrefixCount: protectedPrefix))
+                } catch { return .failure(error) }
+            }.value
+            guard let self, !Task.isCancelled, self.records[id] != nil else { return }
+            self.transcriptPersistenceTasks[id] = nil
+            guard case .success(let generation) = result else {
+                self.transcriptSaveWanted.remove(id)
+                self.blockTranscriptPersistence(for: id)
+                return
+            }
+            self.transcriptSaveProofs[id] = (document.version, generation)
+            self.canonicalTranscriptArchiveProofs[id] = nil
+            // A save asked for meanwhile runs now; its end tries again.
+            if self.transcriptSaveWanted.contains(id) { self.saveTranscript(for: id); return }
+            let current = self.canonicalTranscriptSeparate.contains(id)
+                ? self.canonicalTranscriptProjections[id] : self.transcriptProjections[id]
+            guard let current, current.document.version == document.version,
+                  self.transcriptIsDormant(id) else {
+                self.scheduleTranscriptRelease(for: id)
+                return
+            }
+            self.savedTranscriptVersions[id] = document.version
+            self.savedTranscriptGenerations[id] = generation
+            self.dropTranscript(id, releasing: current, generation: generation)
+        }
+    }
+
+    private func dropTranscript(_ id: AgentID, releasing projection: ManagedAgentTranscriptModel, generation: UUID) {
+        releasedTranscripts[id] = ReleasedTranscript(
+            status: projection.currentStatus,
+            finalAssistantText: projection.finalAssistantText,
+            savedVersion: projection.document.version,
+            saveGeneration: generation,
+            evidence: Self.transcriptEvidence(projection.document),
+            referencedFiles: records[id].map { WorkspaceAPIService.referencedFiles(from: projection.document, checkoutRoot: $0.checkoutRoot) } ?? [],
+            entryCount: projection.document.entries.count,
+            toolDetails: sharedTranscriptDetails[id]?.releasedState())
+        scheduleReleasedToolDetailExpiry(id)
+        transcriptProjections[id] = nil
+        canonicalTranscriptProjections[id] = nil
+        rehydratedTranscripts[id] = nil
+        sharedTranscriptDetails[id] = nil
+        trimHistoryToSummary(id)
+    }
+
+    /// Drops the kept tool details once they pass their time to live, so a
+    /// released agent holds them for no longer than a resident one would.
+    private func scheduleReleasedToolDetailExpiry(_ id: AgentID) {
+        guard let released = releasedTranscripts[id], let remaining = released.toolDetails?.remaining else { return }
+        let generation = released.saveGeneration
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, remaining)) + .milliseconds(50))
+            guard let self, self.releasedTranscripts[id]?.saveGeneration == generation else { return }
+            self.releasedTranscripts[id]?.toolDetails = nil
+        }
+    }
+
+    /// Keeps only the last terminal event: what recovery and status read.
+    private func trimHistoryToSummary(_ id: AgentID) {
+        guard let buffer = history[id], buffer.count > 1 else { return }
+        let terminal = buffer.last(where: { if case .turnCompleted = $0 { return true }; return false })
+        history[id] = [terminal ?? buffer[buffer.count - 1]]
+    }
+
+    private static func transcriptEvidence(_ document: AgentDocument) -> AgentDocument {
+        var evidence = document
+        let lastUser = document.entries.lastIndex(where: { $0.role == .user })
+        let lastReply = document.entries.lastIndex(where: { $0.role == .assistant })
+        evidence.entries = document.entries.indices
+            .filter { $0 == lastUser || $0 == lastReply }
+            .map { document.entries[$0] }
+        return evidence
+    }
+
+    /// Queues `write` behind a reload when the transcript was released.
+    private func deferUntilTranscriptReloaded(_ id: AgentID, _ write: @escaping DeferredTranscriptWrite) -> Bool {
+        transcriptReleaseTimers.removeValue(forKey: id)?.cancel()
+        guard releasedTranscripts[id] != nil else { return false }
+        writesAwaitingTranscriptReload[id, default: []].append(write)
+        _ = startTranscriptReload(for: id)
+        return true
+    }
+
+    @discardableResult
+    private func startTranscriptReload(for id: AgentID) -> Task<Void, Never> {
+        transcriptReleaseTimers.removeValue(forKey: id)?.cancel()
+        if let running = transcriptReloads[id] { return running }
+        let store = transcriptStore
+        let token = UUID()
+        transcriptReloadTokens[id] = token
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.transcriptReloadTokens[id] == token {
+                    self.transcriptReloads[id] = nil
+                    self.transcriptReloadTokens[id] = nil
+                    if self.releasedTranscripts[id] == nil { self.scheduleTranscriptRelease(for: id) }
+                }
+            }
+            let sessionID = AgentTranscriptStore.canonicalSessionID(for: id)
+            guard let store, let released = self.releasedTranscripts[id] else {
+                await self.finishTranscriptReload(id, token: token, loaded: .success(nil))
+                return
+            }
+            let savedVersion = released.savedVersion
+            let generation = released.saveGeneration
+            let status = released.status
+            let finalText = released.finalAssistantText
+            let threadID = Self.threadId(for: id)
+            let rate = Self.transcriptStreamingParsesPerSecond
+            let beforeConstruction = self.qaBeforeResumedTranscriptConstruction
+            let onConstruction = self.qaOnResumedTranscriptConstruction
+            let loaded: Result<(AgentDocument, ManagedAgentTranscriptModel)?, Error>
+            do {
+                let document = try await store.loadReleased(agentID: id, sessionID: sessionID, expectedVersion: savedVersion, expectedGeneration: generation)
+                guard !Task.isCancelled, self.records[id] != nil,
+                      self.transcriptReloadTokens[id] == token else { return }
+                let model = await Task.detached(priority: .utility) { () -> ManagedAgentTranscriptModel? in
+                    await beforeConstruction?(id, false)
+                    guard (try? document.validateIdentityInvariants()) != nil else { return nil }
+                    var copy = document
+                    copy.entries = document.entries.map { $0 }
+                    onConstruction?(id, false, Self.qaIsMainThread())
+                    var value = ManagedAgentTranscriptModel(threadId: threadID, resuming: copy,
+                                                           status: status, finalAssistantSource: finalText)
+                    value.streamingParsesPerSecond = rate
+                    return value
+                }.value
+                loaded = .success(model.map { (document, $0) })
+            }
+            catch { loaded = .failure(error) }
+            guard !Task.isCancelled, self.records[id] != nil,
+                  self.transcriptReloadTokens[id] == token,
+                  let current = self.releasedTranscripts[id], current.savedVersion == savedVersion,
+                  current.saveGeneration == generation else { return }
+            await self.finishTranscriptReload(id, token: token, loaded: loaded)
+        }
+        transcriptReloads[id] = task
+        return task
+    }
+
+    private func finishTranscriptReload(_ id: AgentID, token: UUID,
+                                        loaded: Result<(AgentDocument, ManagedAgentTranscriptModel)?, Error>) async {
+        guard transcriptReloadTokens[id] == token else { return }
+        // Release follows a save that landed, and nothing deletes a saved
+        // transcript, so a missing or unreadable one is a fault. It stays
+        // released with its writes queued: resuming from the summary would save
+        // two entries over the whole history. The next write or view reads again.
+        var loadedModel: (AgentDocument, ManagedAgentTranscriptModel)?
+        if case .success(let value?) = loaded { loadedModel = value }
+        if loadedModel == nil, releasedTranscripts[id] != nil, records[id] != nil {
+            if case .failure(let error) = loaded { transcriptReloadFailureCause[id] = error.localizedDescription }
+            else { transcriptReloadFailureCause[id] = "the saved transcript is missing or incomplete" }
+            warn("Agent \(id.rawValue.uuidString): its saved transcript could not be read back; kept released")
+            return
+        }
+        guard let released = releasedTranscripts[id] else { return }
+        transcriptReloadFailureCause[id] = nil
+        if loadedModel != nil, records[id] != nil, let details = released.toolDetails {
+            // The records re-enter the new store, which owns their expiry.
+            await sharedTranscriptDetailCapture(for: id).restore(details)
+            guard transcriptReloadTokens[id] == token, releasedTranscripts[id] != nil else { return }
+        }
+        if let (document, resumed) = loadedModel, records[id] != nil {
+            // Everything just read back is the durable history. Protect the
+            // entire loaded prefix, including entries saved after startup,
+            // against any later mutation following a failed reload.
+            canonicalTranscriptProtectedPrefix[id] = document.entries.count
+            // A released transcript holds no provider history: release refuses
+            // local-only history and a seed refuses a released transcript.
+            if canonicalTranscriptSeparate.contains(id) { canonicalTranscriptProjections[id] = resumed }
+            transcriptProjections[id] = resumed
+        }
+        var totalReplayed = 0
+        var didReplay = false
+        while true {
+            // Reverse each captured batch so each closure is released as it is
+            // consumed. Later arrivals queue behind the whole captured batch.
+            var writes = writesAwaitingTranscriptReload.removeValue(forKey: id) ?? []
+            guard !writes.isEmpty else { break }
+            defer {
+                if !writes.isEmpty {
+                    let reaper = DeferredTranscriptWriteReaper(writes)
+                    writes = []
+                    let afterDiscard = qaAfterReloadBatchDiscard
+                    Task.detached(priority: .utility) { reaper.discard(); afterDiscard?(id) }
+                    qaAfterReloadBatchDiscardScheduled?(id)
+                }
+            }
+            writes.reverse()
+            var chunkStart = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+            var chunkCount = 0
+            while let write = writes.popLast() {
+                write()
+                guard !Task.isCancelled, records[id] != nil,
+                      transcriptReloadTokens[id] == token,
+                      let current = releasedTranscripts[id], current.savedVersion == released.savedVersion,
+                      current.saveGeneration == released.saveGeneration else { return }
+                didReplay = true
+                totalReplayed += 1
+                chunkCount += 1
+                if (!writes.isEmpty || !(writesAwaitingTranscriptReload[id]?.isEmpty ?? true)),
+                   (chunkCount >= 32 || clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) &- chunkStart >= 500_000) {
+                    qaAfterTranscriptReloadChunk?(id, totalReplayed)
+                    try? await Task.sleep(for: .milliseconds(8))
+                    guard !Task.isCancelled, records[id] != nil,
+                          transcriptReloadTokens[id] == token,
+                          let current = releasedTranscripts[id], current.savedVersion == released.savedVersion,
+                          current.saveGeneration == released.saveGeneration else { return }
+                    chunkStart = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+                    chunkCount = 0
+                }
+            }
+        }
+        // No suspension between observing the empty FIFO and publishing the
+        // snapshot: later writes now apply to the complete model normally.
+        releasedTranscripts[id] = nil
+        if didReplay || transcriptSaveWanted.contains(id) { scheduleTranscriptPersist(for: id, final: true) }
+        if loadedModel != nil, records[id] != nil {
+            for observer in Array((transcriptReloadObservers[id] ?? [:]).values) { observer() }
+        }
+    }
+
+    /// QA: what this supervisor holds decoded across every agent.
+    var qaHeldTranscripts: (projections: Int, rehydrated: Int, toolDetails: Int, events: Int, released: Int) {
+        (transcriptProjections.count + canonicalTranscriptProjections.count, rehydratedTranscripts.count, sharedTranscriptDetails.count,
+         history.values.reduce(0) { $0 + $1.count }
+            + transcriptProjections.values.reduce(0) { $0 + $1.events.count }
+            + canonicalTranscriptProjections.values.reduce(0) { $0 + $1.events.count }
+            + rehydratedTranscripts.values.reduce(0) { $0 + $1.steps.count },
+         releasedTranscripts.count)
     }
 
     // MARK: - B4 follow-up queue
@@ -13550,10 +14722,44 @@ final class AgentSupervisor {
             scheduleHelperCompletionFlush()
         }
         if case let .turnCompleted(_, turn, outcome, errorMessage) = event {
-            helperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage)
+            // A released transcript holds this turn's events behind its reload, so
+            // the reply read below would be the previous turn's. The completion
+            // joins the same FIFO and runs once those events are applied, owning
+            // the identity and the handles of the turn that ended now. If the
+            // reload cannot finish within the bound, it is delivered as an explicit
+            // failure instead: terminal delivery never depends on the archive.
+            let identity = runnerGenerationTokens[id]?.rawValue.uuidString ?? turn
+            // Its end is its cutoff on every path, held or not: handles accepted
+            // later, and reports filed later, are a later turn's.
+            let completedAt = Date()
+            let report = records[id]?.lastReport
+            let box = CompletionBox()
+            let settle: (String?) -> Void = { [weak self] cause in
+                guard !box.done else { return }
+                box.done = true
+                self?.runHelperTurnCompleted(id, turn: turn, outcome: outcome, error: errorMessage, identity: identity,
+                                             completedAt: completedAt, report: report, unavailableCause: cause)
+            }
+            if deferUntilTranscriptReloaded(id, { settle(nil) }) {
+                let bound = Self.transcriptCompletionBound
+                Task { [weak self] in
+                    try? await Task.sleep(for: bound)
+                    guard !box.done, let self else { return }
+                    settle(self.transcriptReloadFailureCause[id] ?? "the read did not finish in time")
+                }
+            } else {
+                settle(nil)
+            }
         }
         if case let .contentDelta(_, _, .assistant, delta) = event, !isRunning(id), helperCompletionTurns[id] != nil {
             lateHelperText[id, default: ""] += delta
+            // Same-turn late output, already applied to a resident transcript,
+            // extends that turn's captured reply; any other turn's never does.
+            if releasedTranscripts[id] == nil, var settled = settledHelperCompletions[id], !settled.transcriptUnavailable,
+               settled.identity == runnerGenerationTokens[id]?.rawValue.uuidString {
+                settled.reply = transcriptProjections[id]?.finalAssistantText
+                settledHelperCompletions[id] = settled
+            }
             noteLateHelperOutput(id, text: lateHelperText[id] ?? "")
         }
 
@@ -13603,7 +14809,7 @@ final class AgentSupervisor {
         }
         var finalText: String?
         var finalTextTruncated: Bool?
-        if status == .completed, let text = transcriptProjections[id]?.finalAssistantText {
+        if status == .completed, let text = finalAssistantText(for: id) {
             let capped = SpawnResultFile.cappedFinalText(text)
             finalText = capped.text
             finalTextTruncated = capped.truncated ? true : nil
@@ -13611,12 +14817,16 @@ final class AgentSupervisor {
         // P2a: the report this turn filed, and only this turn's.
         let settledAt = Date()
         var report: AgentReport?
-        if let filed = child.lastReport, filed.filedAt > (lastSettledAt[id] ?? reportTurnBaseline) { report = filed.report }
+        if let filed = settlementReport(id), filed.filedAt > (lastSettledAt[id] ?? reportTurnBaseline) { report = filed.report }
         if var carried = report {
             carried.commandEvidence = HelperCommandGuard.leadFacing(carried.commandEvidence)
             report = carried
         }
-        lastSettledAt[id] = settledAt
+        // A deferred turn consumed reports only up to its own end; a later
+        // turn's report stays that turn's.
+        lastSettledAt[id] = settlementScope.flatMap { scope in
+            scope.id == id ? max(scope.cutoff ?? settledAt, scope.report?.filedAt ?? .distantPast) : nil
+        } ?? settledAt
         SpawnResultFile.write(
             SpawnResultFile(
                 toolCallId: handle,
@@ -13628,7 +14838,7 @@ final class AgentSupervisor {
                 finalTextTruncated: finalTextTruncated,
                 endedAt: settledAt,
                 report: report,
-                turnIdentity: helperCompletionTurns[id],
+                turnIdentity: settlementTurnIdentity(id),
                 recipientId: parentID.rawValue
             ),
             parentCwd: parent.cwd,
@@ -13801,6 +15011,7 @@ final class AgentSupervisor {
         if runnerGenerationTokens[id] == generation, runners[id] === runner {
             runners[id] = nil
             settleHelperReceipts(lead: id, run: generation)
+            scheduleTranscriptRelease(for: id)
             markOwnClaudeTurn(for: id)
             interruptingAgents.remove(id)
             openToolItems[id] = nil

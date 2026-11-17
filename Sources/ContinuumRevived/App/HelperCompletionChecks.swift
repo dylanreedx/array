@@ -668,6 +668,10 @@ enum HelperCompletionChecks {
         private var unsolicited = false
         private var running = false
         private var ends = true
+        /// Turns that end failed with this error and no assistant output.
+        private var failures: [String?] = []
+        /// Held before the next turn's first event, as a slow provider start is.
+        private var startHold: DispatchSemaphore?
         init(autoEnd: Bool) { ends = autoEnd }
         var prompts: [String] { lock.withLock { promptLog } }
         var steers: [String] { lock.withLock { steerLog } }
@@ -686,9 +690,23 @@ enum HelperCompletionChecks {
         var hasBackgroundWork: Bool { background }
         var hasUnsolicitedTurn: Bool { lock.withLock { unsolicited } }
         func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
-            lock.withLock { promptLog.append(prompt.text) }
+            let hold = lock.withLock { () -> DispatchSemaphore? in
+                promptLog.append(prompt.text)
+                defer { startHold = nil }
+                return startHold
+            }
+            hold?.wait()
             turn(onEvent)
         }
+        /// The next turn emits nothing until `releaseStart()`.
+        func holdNextStart() {
+            lock.withLock {
+                let hold = DispatchSemaphore(value: 0)
+                startHold = hold; heldStarts.append(hold)
+            }
+        }
+        private var heldStarts: [DispatchSemaphore] = []
+        func releaseStart() { lock.withLock { heldStarts.forEach { $0.signal() }; heldStarts = [] } }
         func continueUnsolicitedTurn(onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
             lock.withLock { unsolicited = false }
             turn(onEvent)
@@ -702,17 +720,30 @@ enum HelperCompletionChecks {
             let turnID = UUID().uuidString, itemID = "assistant-\(turnID)"
             onEvent(.turnStarted(threadId: "", turnId: turnID))
             if !auto { gate.wait() }
-            let text = lock.withLock { () -> String in
+            let (text, failure) = lock.withLock { () -> (String, String?) in
                 currentEmit = nil
-                return finalTexts.isEmpty ? "Lead turn done." : finalTexts.removeFirst()
+                let text = finalTexts.isEmpty ? "Lead turn done." : finalTexts.removeFirst()
+                return (text, failures.isEmpty ? nil : failures.removeFirst())
+            }
+            if let failure {
+                onEvent(.turnCompleted(threadId: "", turnId: turnID, outcome: .failed, errorMessage: failure))
+                return
             }
             onEvent(.itemStarted(threadId: "", itemId: itemID, kind: .assistantMessage, title: nil))
             onEvent(.contentDelta(threadId: "", turnId: turnID, streamKind: .assistant, delta: text))
             onEvent(.itemCompleted(threadId: "", itemId: itemID, kind: .assistantMessage, status: .completed))
             onEvent(.turnCompleted(threadId: "", turnId: turnID, outcome: .completed, errorMessage: nil))
         }
+        /// Ends the open turn failed, before any assistant output.
+        func fail(_ error: String) {
+            lock.withLock {
+                finalTexts.append(""); failures.append(error)
+                if !gates.isEmpty { gates.removeFirst().signal() }
+            }
+        }
         func end(saying text: String) {
             lock.withLock {
+                failures.append(nil)
                 finalTexts.append(text)
                 if !gates.isEmpty { gates.removeFirst().signal() }
             }

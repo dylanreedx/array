@@ -12,6 +12,7 @@ public enum ManagedTranscriptCardProjection {
         _ document: AgentDocument,
         itemKindsByItemID: [String: ItemKind],
         itemStatusesByItemID: [String: ItemStatus] = [:],
+        currentItemEntries: [String: AgentNodeID]? = nil,
         rawMarkupSourcesByEntryID: [AgentNodeID: String] = [:]
     ) -> [ManagedTranscriptCard] {
         // Request entries are v2 semantic blocks (P5.4). The legacy card stack
@@ -34,12 +35,12 @@ public enum ManagedTranscriptCardProjection {
                 itemKind: itemKind(
                     entry: entry,
                     block: primary,
-                    itemKindsByItemID: itemKindsByItemID
+                    itemKindsByItemID: itemKindsByItemID, currentItemEntries: currentItemEntries
                 ),
                 status: status(
                     entry: entry,
                     block: primary,
-                    itemStatusesByItemID: itemStatusesByItemID
+                    itemStatusesByItemID: itemStatusesByItemID, currentItemEntries: currentItemEntries
                 )
             )
         }
@@ -118,9 +119,10 @@ public enum ManagedTranscriptCardProjection {
     private static func itemKind(
         entry: AgentEntry,
         block: AgentBlock?,
-        itemKindsByItemID: [String: ItemKind]
+        itemKindsByItemID: [String: ItemKind], currentItemEntries: [String: AgentNodeID]?
     ) -> ItemKind? {
         if case .providerItem(_, let itemID?) = entry.provenance,
+           (currentItemEntries == nil || currentItemEntries?[itemID] == entry.id),
            let legacyKind = itemKindsByItemID[itemID] {
             return legacyKind
         }
@@ -138,13 +140,14 @@ public enum ManagedTranscriptCardProjection {
     private static func status(
         entry: AgentEntry,
         block: AgentBlock?,
-        itemStatusesByItemID: [String: ItemStatus]
+        itemStatusesByItemID: [String: ItemStatus], currentItemEntries: [String: AgentNodeID]?
     ) -> ItemStatus? {
         guard let block else { return nil }
         // Runtime completion is the exact legacy fact. In particular, diff and
         // error payloads cannot encode failed/declined/completed distinctions,
         // so deriving those statuses from entry lifecycle loses information.
         if case .providerItem(_, let itemID?) = entry.provenance,
+           (currentItemEntries == nil || currentItemEntries?[itemID] == entry.id),
            let legacyStatus = itemStatusesByItemID[itemID] {
             return legacyStatus
         }

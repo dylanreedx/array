@@ -27,15 +27,21 @@ public struct AgentDocumentReducer: Sendable {
     /// run, which is what every existing witness compares. Production opts in by
     /// injecting a real clock from `AgentTranscriptProjection`.
     private let createdAtProvider: @Sendable () -> Date?
+    /// Entries loaded as durable history cannot be reopened by later runtime
+    /// events whose provider identifiers happen to collide with them.
+    private let frozenEntryPrefixCount: Int
 
     public init(
         document: AgentDocument = AgentDocument(),
-        createdAtProvider: @escaping @Sendable () -> Date? = { nil }
+        createdAtProvider: @escaping @Sendable () -> Date? = { nil },
+        frozenEntryPrefixCount: Int = 0
     ) {
         do { try document.validateIdentityInvariants() }
         catch { preconditionFailure("AgentDocumentReducer requires a valid document: \(error)") }
+        precondition(frozenEntryPrefixCount >= 0 && frozenEntryPrefixCount <= document.entries.count)
         self.document = document
         self.createdAtProvider = createdAtProvider
+        self.frozenEntryPrefixCount = frozenEntryPrefixCount
         rebuildIndexes()
     }
 
@@ -43,6 +49,7 @@ public struct AgentDocumentReducer: Sendable {
     public mutating func apply(_ mutation: AgentDocumentMutation) throws -> AgentDocumentPatch {
         let before = document.version
         guard before < .max else { throw AgentDocumentMutationError.documentVersionOverflow(current: before) }
+        if frozenEntryPrefixCount > 0 { try rejectFrozenTarget(mutation) }
 
         var inserted: [AgentNodeID] = []
         var updated: [AgentNodeID] = []
@@ -280,6 +287,32 @@ public struct AgentDocumentReducer: Sendable {
     private func requireEntry(_ id: AgentNodeID, _ operation: AgentDocumentMutationOperation) throws -> Int {
         guard let index = entryIndexes[id] else { throw AgentDocumentMutationError.unknownEntry(entryID: id, operation: operation) }
         return index
+    }
+
+    private func rejectFrozenTarget(_ mutation: AgentDocumentMutation) throws {
+        let entry: AgentNodeID?
+        let operation: AgentDocumentMutationOperation
+        switch mutation {
+        case .beginEntry: return // duplicate identities are already rejected below
+        case let .appendMarkup(id, _): entry = id; operation = .appendMarkup
+        case let .replaceMarkup(id, _): entry = id; operation = .replaceMarkup
+        case let .upsertStructured(id, _): entry = id; operation = .upsertStructured
+        case let .completeBlock(id, _): entry = blockOwners[id]; operation = .completeBlock
+        case let .finishEntry(id): entry = id; operation = .finishEntry
+        case let .completeTurn(id, _): entry = id; operation = .completeTurn
+        case let .removeEntry(id): entry = id; operation = .removeEntry
+        }
+        if let entry, let index = entryIndexes[entry], index < frozenEntryPrefixCount {
+            throw AgentDocumentMutationError.frozenEntry(entryID: entry, operation: operation)
+        }
+    }
+
+    /// O(1) identity check used by the resumed projection when a provider
+    /// reuses an entry or block ID from its frozen history.
+    public func isFrozenNode(_ id: AgentNodeID) -> Bool {
+        let owner = entryIndexes[id] == nil ? blockOwners[id] : id
+        guard let owner, let index = entryIndexes[owner] else { return false }
+        return index < frozenEntryPrefixCount
     }
 
     private func markupID(entryID: AgentNodeID) throws -> AgentNodeID {

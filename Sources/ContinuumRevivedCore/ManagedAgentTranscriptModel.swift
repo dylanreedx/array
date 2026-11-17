@@ -91,6 +91,7 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
             document,
             itemKindsByItemID: legacyItemKindsByItemID,
             itemStatusesByItemID: legacyItemStatusesByItemID,
+            currentItemEntries: semanticProjection.currentItemEntryIDs,
             rawMarkupSourcesByEntryID: semanticProjection.compatibilityMarkupSourcesByEntryID
         )
     }
@@ -112,6 +113,9 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         return semanticProjection.compatibilityMarkupSourcesByEntryID[entry.id]
     }
     public var activeToolCount: Int { semanticProjection.activeToolCount }
+    /// A rejected reducer mutation means the projection may no longer be a
+    /// faithful continuation of the document it resumed from.
+    public var rejectedMutationCount: Int { semanticProjection.rejectedMutationCount }
     public var streamingMarkupParseCount: Int { semanticProjection.streamingMarkupParseCount }
     /// See `AgentTranscriptProjection.streamingParsesPerSecond`. Takes effect at the
     /// next stream; `rebound(to:)` restores the view rate.
@@ -174,17 +178,20 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
             threadId: threadId, monotonicNow: monotonicNow, wallClockNow: wallClockNow)
     }
 
+    /// A settled transcript resumed from its saved document (see
+    /// `AgentTranscriptProjection.init(threadId:resuming:status:finalAssistantSource:)`).
+    public init(threadId: String, resuming document: AgentDocument, status: AgentStatus, finalAssistantSource: String?) {
+        semanticProjection = AgentTranscriptProjection(
+            threadId: threadId, resuming: document, status: status, finalAssistantSource: finalAssistantSource)
+        hasSeenTurnStart = true
+    }
+
     public mutating func ingest(_ event: AgentRuntimeEvent) {
-        switch event {
-        case .itemStarted(let tid, let itemID, let kind, _) where tid == threadId:
-            legacyItemKindsByItemID[itemID] = kind
-            legacyItemStatusesByItemID[itemID] = .inProgress
-        case .itemCompleted(let tid, let itemID, let kind, let status) where tid == threadId:
-            legacyItemKindsByItemID[itemID] = kind
-            legacyItemStatusesByItemID[itemID] = status
-        default:
-            break
-        }
+        let rejectedBefore = semanticProjection.rejectedMutationCount
+        let wasTracked: Bool
+        if case let .itemStarted(_, itemID, _, _) = event {
+            wasTracked = semanticProjection.tracksCurrentItem(itemID)
+        } else { wasTracked = false }
         if case .turnStarted(let tid, _) = event, tid == threadId {
             hasSeenTurnStart = true
         }
@@ -204,6 +211,23 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         } else {
             semanticProjection.ingest(event)
         }
+        // Legacy card metadata is keyed by provider item ID. Apply it only
+        // after this launch has accepted that item; a reused frozen ID must
+        // not change the kind or status of a historical card.
+        switch event {
+        case .itemStarted(let tid, let itemID, let kind, _)
+            where tid == threadId && !wasTracked && semanticProjection.rejectedMutationCount == rejectedBefore
+                && semanticProjection.tracksCurrentItem(itemID):
+            legacyItemKindsByItemID[itemID] = kind
+            legacyItemStatusesByItemID[itemID] = .inProgress
+        case .itemCompleted(let tid, let itemID, let kind, let status)
+            where tid == threadId && semanticProjection.rejectedMutationCount == rejectedBefore
+                && semanticProjection.tracksCurrentItem(itemID):
+            legacyItemKindsByItemID[itemID] = kind
+            legacyItemStatusesByItemID[itemID] = status
+        default:
+            break
+        }
     }
 
     public mutating func appendUserPrompt(_ text: String) {
@@ -217,6 +241,12 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
     public mutating func appendUserPrompt(id: AgentNodeID, prompt: AgentPrompt) {
         do { _ = try semanticProjection.appendUserPrompt(id: id, prompt: prompt) }
         catch { /* fail closed; provider events remain authoritative */ }
+    }
+
+    /// Canonical persistence must observe a failed prompt mutation rather than
+    /// silently saving a document that omitted the accepted prompt.
+    public mutating func appendUserPromptChecked(id: AgentNodeID, prompt: AgentPrompt) throws {
+        _ = try semanticProjection.appendUserPrompt(id: id, prompt: prompt)
     }
 
     public mutating func appendNotice(id: String, title: String, text: String) {

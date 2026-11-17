@@ -36,6 +36,7 @@ public enum AgentDocumentMutationOperation: String, Codable, Equatable, Sendable
 /// Invalid input is never represented by a successful empty patch.
 public enum AgentDocumentMutationError: Error, Equatable, Sendable {
     case duplicateBegin(entryID: AgentNodeID)
+    case frozenEntry(entryID: AgentNodeID, operation: AgentDocumentMutationOperation)
     case unknownEntry(entryID: AgentNodeID, operation: AgentDocumentMutationOperation)
     case unknownBlock(blockID: AgentNodeID, operation: AgentDocumentMutationOperation)
     case duplicateNodeID(id: AgentNodeID)

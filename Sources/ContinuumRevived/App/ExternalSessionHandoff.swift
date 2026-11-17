@@ -3,6 +3,12 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Darwin
 
+/// Test-only suspension before reading an adopted session. Nil in production.
+@MainActor
+enum AdoptedTranscriptReadCheckHooks {
+    static var beforeRead: (@Sendable (AgentID) async -> Void)?
+}
+
 // Plan: .plans/79-session-handoff/README.md, phase 2.
 //
 // What happens to a session another app holds, after the sidebar's click or
@@ -207,15 +213,21 @@ extension AppDelegate {
         let url = URL(fileURLWithPath: path)
         let threadId = "rehydrated-\(agentId.rawValue.uuidString)"
         let provider = link.provider
-        agentSupervisor.beginAdoptingSessionHistory(for: agentId)
+        let supervisor = agentSupervisor
+        let adoptionToken = supervisor.beginAdoptingSessionHistory(for: agentId)
+        let beforeRead = AdoptedTranscriptReadCheckHooks.beforeRead
         Task.detached(priority: .utility) { [weak self] in
+            await beforeRead?(agentId)
             let tail = SessionFileTail.tail(in: url, maxBytes: RehydrationLimits().maxBytes)
             let transcript = provider == .claude
                 ? ClaudeSessionTranscriptReader.parse(lines: tail.lines, threadId: threadId, truncated: tail.truncated)
                 : CodexSessionTranscriptReader.parse(lines: tail.lines, threadId: threadId, truncated: tail.truncated)
             await MainActor.run {
-                self?.agentSupervisor.finishAdoptingSessionHistory(transcript, for: agentId, url: url, offset: tail.end)
-                self?.offerClaudeSessionEducation(agentId)
+                let accepted = supervisor.finishAdoptingSessionHistory(
+                    transcript, for: agentId, token: adoptionToken, url: url, offset: tail.end)
+                if accepted, let self, self.agentSupervisor === supervisor {
+                    self.offerClaudeSessionEducation(agentId)
+                }
             }
         }
     }
