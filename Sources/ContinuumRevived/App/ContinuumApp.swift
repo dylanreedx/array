@@ -13179,14 +13179,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// ⌥⌫/⌥⌦ (word deletes), and ⌥↩ in a composer holding a draft — that ⌥↩ is
     /// a queue (or send) the user would otherwise lose. An EMPTY composer's ⌥↩
     /// only inserted a newline, which is why ⌥↩ "did nothing" over an agent.
+    ///
+    /// Only a composer hands its arrows and empty ⌥↩ to the leader (holding ⌥ over
+    /// an agent is how you navigate from one). Every other text input — notes,
+    /// the code editor, rename fields — keeps ⌥-arrows as word jumps and ⌥↩ as
+    /// its own, so a slow ⌥ never steals ordinary editing.
     private func leaderKeyBelongsToText(_ event: NSEvent) -> Bool {
         guard focusedResponderIsTextInput() else { return false }
         if event.keyCode == 51 || event.keyCode == 117 { return true }
-        if event.keyCode == 36 || event.keyCode == 76,
-           let composer = window?.firstResponder as? ComposerTextView {
-            return composer.composerOwnsReturn(event)
+        let returnKey = event.keyCode == 36 || event.keyCode == 76
+        guard let composer = window?.firstResponder as? ComposerTextView else {
+            return returnKey || (123...126).contains(event.keyCode)
         }
-        return false
+        return returnKey && composer.composerOwnsReturn(event)
     }
 
     /// Cancel a pending dwell and exit the leader if open (modifier released or a
