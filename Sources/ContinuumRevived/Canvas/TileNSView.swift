@@ -620,7 +620,57 @@ class TileNSView: NSView, TokenThemed {
     /// being visible on the active space (and again when it returns). Base is a
     /// no-op; families that own render loops (terminals) override it to pause
     /// them — a fully occluded window should cost nothing to composite.
-    func windowOcclusionChanged(visible: Bool) {}
+    func windowOcclusionChanged(visible: Bool) {
+        windowVisibleState = visible
+        refreshRendererVisibility()
+    }
+
+    // MARK: - Renderer visibility (window AND viewport)
+
+    private(set) var windowVisibleState = true
+    private(set) var viewportVisibleState = true
+    private var appliedRendererVisibility = true
+    private var rendererVisibilityListeners: [(token: ObjectIdentifier, apply: (Bool) -> Void)] = []
+
+    /// A GPU renderer runs only while the window can be seen AND the tile is
+    /// near the viewport. Output keeps flowing into the terminal while hidden,
+    /// so the first frame after a reveal is current.
+    var rendererVisible: Bool { windowVisibleState && viewportVisibleState }
+
+    /// Ghostty runtimes this tile hosts; the base class drives their occlusion.
+    var ghosttyRuntimesForVisibility: [GhosttyTerminalRuntime] { [] }
+
+    /// Does this tile host a Ghostty surface at all? Lets the canvas skip the rest.
+    var hostsGhosttySurface: Bool { !ghosttyRuntimesForVisibility.isEmpty || !rendererVisibilityListeners.isEmpty }
+
+    /// The canvas's viewport signal (margin included). Called on edges only.
+    final func setViewportVisible(_ visible: Bool) {
+        guard visible != viewportVisibleState else { return }
+        viewportVisibleState = visible
+        refreshRendererVisibility()
+    }
+
+    /// Re-assert the combined state, for hosts that appear after the tile.
+    final func refreshRendererVisibility(force: Bool = false) {
+        let visible = rendererVisible
+        guard force || visible != appliedRendererVisibility else { return }
+        appliedRendererVisibility = visible
+        for runtime in ghosttyRuntimesForVisibility { runtime.setRendererOccluded(!visible) }
+        for listener in rendererVisibilityListeners { listener.apply(visible) }
+    }
+
+    /// A view inside this tile that owns its own surface (the shared mirror).
+    final func addRendererVisibilityListener(_ owner: AnyObject, apply: @escaping (Bool) -> Void) {
+        let token = ObjectIdentifier(owner)
+        rendererVisibilityListeners.removeAll { $0.token == token }
+        rendererVisibilityListeners.append((token, apply))
+        apply(rendererVisible)
+    }
+
+    final func removeRendererVisibilityListener(_ owner: AnyObject) {
+        let token = ObjectIdentifier(owner)
+        rendererVisibilityListeners.removeAll { $0.token == token }
+    }
 
     /// Re-assert the window's CURRENT occlusion the moment this tile joins a
     /// window.

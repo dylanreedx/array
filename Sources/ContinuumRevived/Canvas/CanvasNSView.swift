@@ -1781,6 +1781,7 @@ final class CanvasNSView: NSView, TokenThemed {
         updateContextualAgentLineageGeometry()
         // Every camera commit AND a window resize: both change what is visible.
         returnFarParkedTiles(offscreenBudget: Self.maxFarReturnsPerStep)
+        updateRendererViewportVisibility(full: false)
     }
 
     /// Every installed tile view in BACK-TO-FRONT paint order, read from the view
@@ -3130,6 +3131,8 @@ final class CanvasNSView: NSView, TokenThemed {
             canvasHistories[workspaceId]?.record(transaction)
         }
         notifyGeometryCommit(transaction)
+        // A drag can end with a tile far outside (or back inside) the viewport.
+        updateRendererViewportVisibility(full: true)
         if !pending.programmatic,
            [.moveTile, .resizeTile, .dockTile, .resizeTileToPreset].contains(pending.action) {
             let handled = pending.subjectTileIds.filter { id in
@@ -4721,6 +4724,7 @@ final class CanvasNSView: NSView, TokenThemed {
         enforceSurfaceSharpness()
         evaluateTileResidency()
         returnFarParkedTiles(offscreenBudget: .max)
+        updateRendererViewportVisibility(full: true)
         scheduleFarParkingPass()
         logGestureCost()
     }
@@ -5617,6 +5621,44 @@ final class CanvasNSView: NSView, TokenThemed {
     private(set) var qaFarReturnDeferredCount = 0
     var qaFarParkedTileCount: Int { tileViewsInVisualOrder.filter(\.isFarParked).count }
     private var farParkingPassScheduled = false
+
+    // MARK: - Renderer viewport visibility
+
+    /// How far past the viewport (in viewports) a Ghostty surface keeps rendering,
+    /// so it is already drawing before it pans into view.
+    static let rendererViewportMargin: CGFloat = 0.5
+    private let rendererVisibleTiles = NSHashTable<TileNSView>.weakObjects()
+    private(set) var qaRendererViewportEdges = 0
+
+    /// Tell every Ghostty-hosting tile whether the viewport (plus margin) can
+    /// see it. `full` also sweeps tiles that were never near (install, settle);
+    /// the per-camera-step form is O(nearby) and only touches edges.
+    func updateRendererViewportVisibility(full: Bool) {
+        guard window != nil else { return }
+        let visible = worldPlane.bounds
+        let lead = visible.insetBy(
+            dx: -visible.width * Self.rendererViewportMargin,
+            dy: -visible.height * Self.rendererViewportMargin)
+        var near = Set<ObjectIdentifier>()
+        for view in worldPlane.tileViews(intersecting: lead) where view.hostsGhosttySurface {
+            near.insert(ObjectIdentifier(view))
+            if !view.viewportVisibleState { qaRendererViewportEdges += 1 }
+            view.setViewportVisible(true)
+            rendererVisibleTiles.add(view)
+        }
+        for view in rendererVisibleTiles.allObjects where !near.contains(ObjectIdentifier(view)) {
+            qaRendererViewportEdges += 1
+            view.setViewportVisible(false)
+            rendererVisibleTiles.remove(view)
+        }
+        if full {
+            for view in tileViewsInVisualOrder
+            where view.hostsGhosttySurface && !near.contains(ObjectIdentifier(view)) {
+                if view.viewportVisibleState { qaRendererViewportEdges += 1 }
+                view.setViewportVisible(false)
+            }
+        }
+    }
 
     /// Bring parked bodies back before they reach the screen. Per camera step, so
     /// it asks the visibility index: O(nearby), never O(installed).
@@ -8181,6 +8223,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // A fresh scene has not settled yet; without this its first gesture would
         // pay for every far tile.
         scheduleFarParkingPass()
+        updateRendererViewportVisibility(full: true)
     }
 
     /// Take every installed layer off the canvas WITHOUT retiring its views, and

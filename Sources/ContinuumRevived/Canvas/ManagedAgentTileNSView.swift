@@ -669,6 +669,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return terminalFaceSession == nil ? chromeCanvas : nil
     }
 
+    override var ghosttyRuntimesForVisibility: [GhosttyTerminalRuntime] {
+        terminalFaceSession.map { [$0.runtime] } ?? []
+    }
+
     /// The Array face's body: the drawn chrome when it is in use.
     private var arrayFaceBody: NSView { chromeCanvas ?? contentBackdrop }
 
@@ -1659,6 +1663,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         terminalFaceSession = surface
         setContentView(surface.hostView)
         if start { surface.start() }
+        refreshRendererVisibility(force: true)
         refreshFaceSwitch()
         if window?.firstResponder === v2Composer?.textView || window?.firstResponder == nil {
             surface.runtime.focus()

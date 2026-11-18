@@ -129,6 +129,22 @@ final class SharedTerminalMirrorView: NSView {
         }
     }
 
+    private weak var hostingTile: TileNSView?
+    private var rendererVisible = true
+
+    private func enclosingTileView() -> TileNSView? {
+        var view: NSView? = superview
+        while let current = view { if let tile = current as? TileNSView { return tile }; view = current.superview }
+        return nil
+    }
+
+    /// Window AND viewport visibility from the hosting tile. The stream keeps
+    /// feeding the surface while hidden, so a reveal draws the current screen.
+    func setRendererVisible(_ visible: Bool) {
+        rendererVisible = visible
+        terminal?.setSnapshotOccluded(!visible)
+    }
+
     /// Ends the surface and its pipe; the next screen starts a new one.
     func tearDown() {
         stop()
@@ -143,6 +159,12 @@ final class SharedTerminalMirrorView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         teardown?.cancel(); teardown = nil
+        hostingTile?.removeRendererVisibilityListener(self)
+        hostingTile = nil
+        if window != nil, let tile = enclosingTileView() {
+            hostingTile = tile
+            tile.addRendererVisibilityListener(self) { [weak self] visible in self?.setRendererVisible(visible) }
+        }
         if window == nil, terminal != nil {
             teardown = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(5))
@@ -219,7 +241,7 @@ final class SharedTerminalMirrorView: NSView {
         box.addSubview(view)
         view.frame = NSRect(origin: .zero, size: natural == .zero ? NSSize(width: 640, height: 400) : natural)
         view.setGhosttyFocus(true)
-        view.setSnapshotOccluded(false)
+        view.setSnapshotOccluded(!rendererVisible)
         resize()
     }
 
@@ -272,6 +294,7 @@ final class SharedTerminalMirrorView: NSView {
     // MARK: QA
 
     var qaTerminalView: GhosttyTerminalView? { terminal }
+    var qaRendererVisible: Bool { rendererVisible }
     var qaScreenText: String { terminal?.visibleText() ?? "" }
     /// The screen row by row (a rectangle, so a soft-wrapped line stays on
     /// its rows), as tmux's own capture of the host's pane has it.
