@@ -1323,7 +1323,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     var openAgentId: UUID? {
         didSet {
             guard openAgentId != oldValue else { return }
-            let next = display(from: allRows)
+            let next = display(from: latestPushedRows)
             if next.map(\.identity) == items.map(\.identity) {
                 // The route can change without changing table membership. Refresh
                 // the shared family light alongside the row's interaction state.
@@ -1337,7 +1337,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             } else {
                 // Membership changed (a closed tile's row leaving as focus clears):
                 // the full push path, so departing rows fade out from their place.
-                reload(rows: allRows)
+                reload(rows: latestPushedRows)
             }
         }
     }
@@ -1357,7 +1357,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         didSet {
             guard workspaceColourNames != oldValue else { return }
             updateScopeMenu()
-            if marksWorkspaces { reload(rows: allRows) }
+            if marksWorkspaces { reload(rows: latestPushedRows) }
         }
     }
     /// A colour was chosen for a workspace from its `…`. The registry is the
@@ -1372,13 +1372,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // drives filtering; the name is menu presentation and must not make
             // a workspace switch rebuild the list twice.
             guard currentWorkspaceId == nil, currentWorkspaceName != oldValue else { return }
-            reload(rows: allRows)
+            reload(rows: latestPushedRows)
         }
     }
     var currentWorkspaceId: UUID? {
         didSet {
             guard currentWorkspaceId != oldValue else { return }
-            reload(rows: allRows)
+            reload(rows: latestPushedRows)
         }
     }
 
@@ -2370,7 +2370,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         } else {
             // This fallback is only for a view without its host; the shipped app
             // supplies `onWakeRerender` so raw records are re-derived at expiry.
-            reload(rows: allRows)
+            reload(rows: latestPushedRows)
         }
     }
 
@@ -2480,6 +2480,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         var holdStartedAt: TimeInterval?
     }
     private var pendingOffMain: PendingOffMainApply?
+    /// The newest push, including one still on the off-main queue. A view-state
+    /// re-render must start from this: `reload` cancels the pending push, so
+    /// re-rendering `allRows` would throw the newer rows away.
+    private var latestPushedRows: [AgentInboxRow] { pendingOffMain?.rows ?? allRows }
     private let offMainLatest = InboxDisplayLatest()
     private static let displayQueue = DispatchQueue(label: "dev.arrayapp.sidebar-display", qos: .userInitiated)
     /// Bumped by every synchronous derivation: view state (scope, search, folds,

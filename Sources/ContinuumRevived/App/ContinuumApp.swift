@@ -47258,6 +47258,32 @@ extension AppDelegate {
             }
             inbox.holdsDisplaySwap = previousHold
         }
+        // A focus change while a push is in flight must not drop it: the open
+        // agent changes membership (a scope that hides everything force-includes
+        // it), which re-renders, and that re-render must carry the pending rows.
+        do {
+            var cameraMoving = true
+            let previousHold = inbox.holdsDisplaySwap
+            let previousScope = inbox.scope
+            let previousOpen = inbox.openAgentId
+            inbox.holdsDisplaySwap = { cameraMoving }
+            inbox.setScope(.project("does-not-exist"))
+            let changed = streaming[1]
+            supervisor.qaDeliver(.turnCompleted(threadId: thread(changed), turnId: "t-focus", outcome: .completed, errorMessage: nil), to: changed)
+            spin(0.3)
+            if !inbox.hasPendingOffMainApply { failures.append("focus: the status push never reached the off-main queue") }
+            inbox.openAgentId = changed.rawValue
+            cameraMoving = false
+            spin(0.5)
+            let fresh = app.sidebarInboxRows().first { $0.id == changed.rawValue }
+            let shown = inbox.pushedRowForQA(id: changed.rawValue)
+            if shown?.state == .working || fresh.map({ shown?.matchesIgnoringLiveElapsed($0) != true }) ?? true {
+                failures.append("focus: a focus change mid-push dropped the push (row shows \(String(describing: shown?.state)), full build \(String(describing: fresh?.state)))")
+            }
+            inbox.openAgentId = previousOpen
+            inbox.setScope(previousScope)
+            inbox.holdsDisplaySwap = previousHold
+        }
         if builds > 6 { failures.append("\(steps) steps over \(restoredCount + streamingCount) agents built every sidebar row \(builds) times (limit 6)") }
         // The view's own apply (re-sort, re-render of a moved row) is still O(rows); this bound
         // guards the row-build half, which took the legacy push from ~24 s to ~12 s here.

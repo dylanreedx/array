@@ -1978,6 +1978,9 @@ run_app_check .build/debug/Array --sidebar-liveness-check
 # rows and a focus move between read agents only moves the open row; neither
 # builds every sidebar row.
 run_app_check .build/debug/Array --sidebar-event-cost-check
+# 2,000+ agents streaming: a long list derives off main, a camera gesture holds
+# the swap, and a focus change mid-push carries the pending rows, never drops them.
+run_app_check .build/debug/Array --sidebar-stream-cost-check
 # Live-usage sample 2026-11-14: every app switch re-read every project's stores
 # and rebuilt every sidebar row (24.5% of main at ~2,400 agents). A switch now
 # reads nothing and builds rows only when the clock has moved one.
