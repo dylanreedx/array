@@ -38,11 +38,9 @@ final class TerminalTileNSView: TileNSView {
         hostView.applyTerminalBackground(color)
     }
 
-    /// A covered window's terminal has nothing to draw for. Renderer only —
-    /// focus and visibility are untouched, so a space round-trip is invisible.
-    override func windowOcclusionChanged(visible: Bool) {
-        runtime.setRendererOccluded(!visible)
-    }
+    /// Renderer only — focus and visibility are untouched, so a space round-trip
+    /// is invisible. The base class combines window and viewport visibility.
+    override var ghosttyRuntimesForVisibility: [GhosttyTerminalRuntime] { [runtime] }
 
     override func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
