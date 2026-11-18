@@ -4693,7 +4693,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         var sortMode: InboxSortMode
         var layout: SidebarLayout
         var marksWorkspaces: Bool
-        var jumpHints: Bool
+        /// The ⌘N pill text, not just whether pills show: a moved card changes N.
+        var jumpHint: String?
         var parentsWithChildren: Bool
 
         /// Equal, ignoring the live elapsed time (a timer redraws that).
@@ -4702,7 +4703,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 && disclosure == other.disclosure && nesting == other.nesting && ownership == other.ownership
                 && selected == other.selected && interacting == other.interacting
                 && sortMode == other.sortMode && layout == other.layout
-                && marksWorkspaces == other.marksWorkspaces && jumpHints == other.jumpHints
+                && marksWorkspaces == other.marksWorkspaces && jumpHint == other.jumpHint
                 && parentsWithChildren == other.parentsWithChildren
         }
     }
@@ -4716,7 +4717,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             ownership: ownsSubagents ? ownership(atTableRow: row) : InboxOwnershipSlice(),
             selected: tableView.selectedRowIndexes.contains(row), interacting: isInteracting(row: row),
             sortMode: sortMode, layout: sidebarLayout, marksWorkspaces: marksWorkspaces,
-            jumpHints: jumpHintsVisible, parentsWithChildren: parentsWithChildren.contains(model.id))
+            jumpHint: jumpHintsVisible ? rowIndex(forTableRow: row).flatMap(AgentInboxView.jumpHintText(forRowIndex:)) : nil,
+            parentsWithChildren: parentsWithChildren.contains(model.id))
     }
 
     /// Give an agent row that is already drawn its new facts without asking the
