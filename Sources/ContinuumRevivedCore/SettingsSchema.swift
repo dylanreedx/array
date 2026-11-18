@@ -338,6 +338,9 @@ public enum SettingsSchema {
                 SettingsRow(.number(key: AgentSpawnLimitConfig.maximumActiveChildrenKey, label: "Sub-agents at once", range: Double(AgentSpawnLimitConfig.supportedRange.lowerBound)...Double(AgentSpawnLimitConfig.supportedRange.upperBound), default: Double(AgentSpawnLimitConfig.defaultMaximumActiveChildren), unit: "agents", step: 1),
                             help: "How many child agents one agent may run at the same time.",
                             keywords: ["children", "spawn", "limit", "max"], zeroTitle: "No limit"),
+                SettingsRow(.number(key: AgentIdleSessionConfig.minutesKey, label: "Stop idle sessions after", range: AgentIdleSessionConfig.supportedRange, default: AgentIdleSessionConfig.defaultMinutes, unit: "min", step: 1),
+                            help: "An agent's CLI keeps running for this long after its turn ends, then stops to free memory. Your next message resumes the same conversation. Sessions running a shell job or helpers are kept.",
+                            keywords: ["idle", "memory", "hibernate", "session", "timeout", "reap"]),
                 SettingsRow(.toggle(key: AgentShortReportConfig.enabledKey, label: "Ask helpers for short reports",
                                     default: AgentShortReportConfig.enabledDefault),
                             help: "A helper agent whose final message runs over \(AgentShortReportConfig.pushBackWordLimit) words is asked once to cut it to about \(AgentShortReportConfig.targetWords) and save the rest to a file. The agent that delegated the work gets the helper's short report instead of its full reply. The push-back works with Claude agents for now.",
@@ -500,6 +503,9 @@ public enum SettingsSchema {
                             keywords: ["hydration", "budget", "max"]),
                 SettingsRow(.toggle(key: ZoneRuntimeBudgetConfig.closeOnZeroKey, label: "Close a project's runtime when it has no zones on the canvas", default: ZoneRuntimeBudgetConfig.defaultCloseOnZero),
                             keywords: ["memory", "unused"]),
+                SettingsRow(.toggle(key: IOSPreviewReclaimConfig.enabledKey, label: "Shut down simulators no preview is showing", default: IOSPreviewReclaimConfig.defaultEnabled),
+                            help: "Only simulators Array started. Each one holds 2–3 GB. After 2 minutes with its preview off screen or closed, Array shuts it down, and starts it again when the preview comes back.",
+                            keywords: ["ios", "simulator", "memory", "shutdown", "preview"]),
             ]),
         ])
     }

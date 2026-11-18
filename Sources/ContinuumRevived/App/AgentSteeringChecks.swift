@@ -33,7 +33,8 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
         var eventTask: Task<Void, Never>?
 
         @MainActor
-        init(_ kind: AgentSteeringQAFakes.Harness, idleTimeout: TimeInterval = AgentSupervisor.defaultIdleRunnerTimeout) throws {
+        init(_ kind: AgentSteeringQAFakes.Harness, idleTimeout: TimeInterval = AgentSupervisor.defaultIdleRunnerTimeout,
+             hiddenTimeout: TimeInterval = AgentSupervisor.defaultIdleHiddenRunnerTimeout) throws {
             root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("array-steering-\(kind.rawValue)-\(UUID().uuidString)", isDirectory: true)
             bin = root.appendingPathComponent("bin", isDirectory: true)
@@ -44,7 +45,7 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
                 store: AgentStore(applicationSupportDirectory: root),
                 makeRunner: AgentSupervisor.productionRunner,
                 submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0),
-                idleRunnerTimeout: idleTimeout)
+                idleRunnerTimeout: idleTimeout, idleHiddenRunnerTimeout: hiddenTimeout)
             supervisor.interruptGrace = 3
             let (harness, model): (AgentHarness, String) = switch kind {
             case .claude: (.claudeCode, "anthropic/claude-haiku-4-5-20251001")
@@ -428,6 +429,50 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
         try await eventually("reap: an idle session with no background work must be reaped after the timeout", timeout: 5) {
             session.map { kill($0, 0) != 0 } ?? false
         }
+    }
+
+    // 5b. One reap rule: the setting (here a fixed 4 s) governs a visible
+    //     agent, a hidden idle one closes at min(setting, hidden cap = 1 s), and
+    //     a message to a reaped agent is delivered once, in order, on a resumed
+    //     session. The spawned claude also carries the two memory env vars.
+    for visible in [false, true] {
+        let h = try Harness(.claude, idleTimeout: 4, hiddenTimeout: 1.0)
+        defer { h.tearDown() }
+        onPath(h)
+        h.supervisor.agentVisibleProvider = { _ in visible }
+        try expect(h.supervisor.send("hello", to: h.id), "smart-reap: seed refused")
+        try await eventually("smart-reap: turn done") { !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed] }
+        let envs = AgentSteeringQAFakes.memoryEnvironments(in: h.bin)
+        try expect(envs.count == 1
+                   && envs[0]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+                   && envs[0]["CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL"] == "1",
+                   "claude-env: the spawned claude must carry both memory env vars, got \(envs)")
+        let session = AgentSteeringQAFakes.latestPid(in: h.bin)
+        try expect(session.map { kill($0, 0) == 0 } == true, "smart-reap: the session lives after its turn")
+        try await Task.sleep(for: .milliseconds(2200))
+        let alive = session.map { kill($0, 0) == 0 } == true
+        if visible {
+            try expect(alive && h.supervisor.qaHasIdleSession(h.id), "smart-reap: a visible agent must keep its session past the hidden timeout")
+            try await eventually("smart-reap: a visible agent is reaped after the setting", timeout: 6) {
+                session.map { kill($0, 0) != 0 } ?? false
+            }
+        } else {
+            try expect(!alive && !h.supervisor.qaHasIdleSession(h.id) && h.supervisor.qaIdleReapCount == 1,
+                       "smart-reap: a hidden idle agent must be reaped after the hidden timeout (alive \(alive), reaps \(h.supervisor.qaIdleReapCount))")
+        }
+        let before = h.spawns
+        try expect(h.supervisor.send("second", to: h.id), "smart-reap: message to a reaped agent refused")
+        try await eventually("smart-reap: the message to the reaped agent must complete") {
+            !h.supervisor.isRunning(h.id) && h.completedTurns.count == 2
+        }
+        try expect(h.supervisor.send("third", to: h.id), "smart-reap: second message refused")
+        try await eventually("smart-reap: both messages must complete") {
+            !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed, .completed, .completed]
+        }
+        try expect(h.promptTexts == ["hello", "second", "third"],
+                   "smart-reap: delivered once and in order, prompts \(h.promptTexts)")
+        try expect(h.spawns == before + 1 && AgentSteeringQAFakes.argv(in: h.bin).contains("--resume"),
+                   "smart-reap: one resumed process serves both messages, spawns \(h.spawns - before)")
     }
 
     // 6. A claude crash closes the turn; the next send respawns with --resume.

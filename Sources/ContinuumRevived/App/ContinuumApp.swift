@@ -1863,6 +1863,16 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--ios-preview-reclaim-check") {
+            do {
+                _ = NSApplication.shared
+                try IOSPreviewReclaimChecks.run()
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--ios-preview-tile-check") {
             do {
                 _ = NSApplication.shared
@@ -10209,6 +10219,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return facts
     }
 
+    /// Whether the agent's tile is inside the canvas viewport of a visible
+    /// window. The idle reaper keeps such sessions for the longer timeout.
+    func agentTileIsOnScreen(_ id: AgentID) -> Bool {
+        guard let tileId = agentSupervisor.records[id]?.tileId,
+              let canvasView, let tileView = canvasView.tileView(for: tileId),
+              tileView.window != nil, canvasView.awarenessWindowVisibility() else { return false }
+        let tileRect = tileView.convert(tileView.bounds, to: nil)
+        let canvasRect = canvasView.convert(canvasView.bounds, to: nil)
+        return tileRect.intersects(canvasRect)
+    }
+
     /// Wires the supervisor's awareness seams. Folded into
     /// `installAcceptedTileFocusHook` so no boot path or fixture can wire the
     /// focus bridge and forget the awareness one.
@@ -10216,6 +10237,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         installAgentActivityObserver()
         agentSupervisor.activeViewFactsProvider = { [weak self] agentID in
             self?.activeViewFacts(forAgent: agentID) ?? .away
+        }
+        agentSupervisor.agentVisibleProvider = { [weak self] agentID in
+            self?.agentTileIsOnScreen(agentID) ?? false
         }
         agentSupervisor.onWatchedTerminalArrival = { [weak self] _, tileID, _, decision in
             guard let self, let tileID else { return }

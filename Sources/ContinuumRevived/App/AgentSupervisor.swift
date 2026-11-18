@@ -2275,9 +2275,13 @@ final class AgentSupervisor {
         maximumActiveManagedChildren: @escaping () -> Int? = {
             AgentSpawnLimitConfig.maximumActiveChildren()
         },
-        idleRunnerTimeout: TimeInterval = AgentSupervisor.defaultIdleRunnerTimeout
+        idleRunnerTimeout: TimeInterval? = nil,
+        idleHiddenRunnerTimeout: TimeInterval = AgentSupervisor.defaultIdleHiddenRunnerTimeout,
+        idleSessionDefaults: UserDefaults = .standard
     ) {
         self.idleRunnerTimeout = idleRunnerTimeout
+        self.idleHiddenRunnerTimeout = idleHiddenRunnerTimeout
+        self.idleSessionDefaults = idleSessionDefaults
         self.store = store
         self.runLedger = ManagedRunLedger(support: store.layout.applicationSupportDirectory)
         self.makeRunner = makeRunner
@@ -13874,8 +13878,20 @@ final class AgentSupervisor {
     // MARK: - T5 steering, force send, interrupt, idle reaping
 
     /// How long an idle provider session may sit before it is reaped (D3).
-    nonisolated static let defaultIdleRunnerTimeout: TimeInterval = 600
-    private let idleRunnerTimeout: TimeInterval
+    nonisolated static let defaultIdleRunnerTimeout: TimeInterval = AgentIdleSessionConfig.defaultMinutes * 60
+    /// Idle sessions nobody can see close sooner: at most this long, and never
+    /// later than the setting. 300 s is the Claude prompt-cache lifetime: past it
+    /// the next turn re-reads the transcript anyway, so closing the process costs
+    /// no extra tokens, only the cold start.
+    nonisolated static let defaultIdleHiddenRunnerTimeout: TimeInterval = 300
+    /// A fixed timeout for checks; `nil` reads Settings › Agents at every turn end.
+    private let idleRunnerTimeout: TimeInterval?
+    private let idleHiddenRunnerTimeout: TimeInterval
+    /// Whether an agent's tile is on screen right now. Installed by the app;
+    /// absent (headless, fixtures) means not visible.
+    var agentVisibleProvider: ((AgentID) -> Bool)?
+    private(set) var qaIdleReapCount = 0
+    private let idleSessionDefaults: UserDefaults
     private var idleReapTokens: [AgentID: UUID] = [:]
     /// QA: runs inside `accept(.queue)`/`accept(.steer)` after admission and
     /// before the store write, so a check can end the turn in that gap.
@@ -14440,21 +14456,37 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
     }
 
-    /// D3 — an idle provider session is reaped after `idleRunnerTimeout`,
-    /// unless it reports background work still running.
-    private func scheduleIdleReap(for id: AgentID, runner: AgentRunning) {
+    /// D3 — an idle provider session is reaped after the idle-session setting
+    /// (or a check's fixed `idleRunnerTimeout`) while its tile is on screen, and
+    /// after `min(setting, idleHiddenRunnerTimeout)` while it is not, unless it
+    /// reports background work still running.
+    private func scheduleIdleReap(for id: AgentID, runner: AgentRunning, since: Date = Date(), visibleTimeout: TimeInterval? = nil) {
         let token = UUID()
         idleReapTokens[id] = token
-        DispatchQueue.main.asyncAfter(deadline: .now() + idleRunnerTimeout) { [weak self] in
+        let visibleTimeout = visibleTimeout
+            ?? idleRunnerTimeout ?? AgentIdleSessionConfig.timeout(defaults: idleSessionDefaults)
+        let hiddenTimeout = min(visibleTimeout, idleHiddenRunnerTimeout)
+        let waited = Date().timeIntervalSince(since)
+        let isVisible = agentVisibleProvider?(id) == true
+        let delay = max(0, (isVisible ? visibleTimeout : hiddenTimeout) - waited)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.idleReapTokens[id] == token, self.idleSessionRunners[id] === runner else { return }
             // A running shell job (a dev server) or child keeps the session;
             // only children, never shell jobs, decide when children close.
             if (runner as? AgentSteeringRunning)?.hasBackgroundWork == true {
-                self.scheduleIdleReap(for: id, runner: runner)
+                self.scheduleIdleReap(for: id, runner: runner, since: Date(), visibleTimeout: visibleTimeout)
+                return
+            }
+            // Visibility is judged when the timer fires: a tile on screen keeps
+            // its session for the full setting.
+            let waited = Date().timeIntervalSince(since)
+            if self.agentVisibleProvider?(id) == true, waited < visibleTimeout {
+                self.scheduleIdleReap(for: id, runner: runner, since: since, visibleTimeout: visibleTimeout)
                 return
             }
             self.idleReapTokens[id] = nil
             self.idleSessionRunners[id] = nil
+            self.qaIdleReapCount &+= 1
             runner.stop()
             self.interruptWorkingClaudeMirroredChildren(of: id)
             self.returnDeliveringSteers(for: id)

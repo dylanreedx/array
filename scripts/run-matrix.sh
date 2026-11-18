@@ -1498,6 +1498,7 @@ if [[ "$IOS_PREVIEW_TILE_ONLY" -eq 1 ]]; then
   run swift build --disable-sandbox --skip-update --product ContinuumRevivedCoreChecks
   run swift build --disable-sandbox --skip-update --product array-workspace-mcp
   run_app_check .build/debug/Array --ios-preview-tile-check
+  run_app_check .build/debug/Array --ios-preview-reclaim-check
   run_app_check .build/debug/Array --workspace-api-device-check
   run_app_check .build/debug/Array --workspace-mcp-host-check
   run_app_check .build/debug/Array --workspace-mcp-disconnect-check
@@ -2345,6 +2346,7 @@ run_leg python3 scripts/check-collaboration-pair.py
 # calls, and never install(into:).
 run_app_check .build/debug/Array --workspace-scene-owner-check
 run_app_check .build/debug/Array --ios-preview-tile-check
+run_app_check .build/debug/Array --ios-preview-reclaim-check
 run_app_check .build/debug/Array --workspace-api-device-check
 run_leg node Tools/IOSPreviewProof/check-bridge.cjs
 run_leg python3 Tools/IOSPreviewProof/check-command-process-tree.py
