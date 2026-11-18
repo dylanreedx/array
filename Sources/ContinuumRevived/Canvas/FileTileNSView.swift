@@ -61,6 +61,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private let initialLoader: @Sendable (String) -> FileDocumentInitialLoad
     private let asynchronousLoadOverride: Bool?
     var qaHasDocumentSession: Bool { documentSession != nil }
+    func qaSetDocumentTransitionPending(_ value: Bool) { documentTransitionPending = value }
+    func qaSimulateEditorProcessTermination() { codeEditor?.onProcessTerminated?() }
     var qaPendingFileLoad: Task<Void, Never>? { fileLoadTask }
     private var bridgeDocumentID: String { (filePath ?? "") + "#" + documentGeneration.uuidString }
     private var documentTransitionPending = false
@@ -116,9 +118,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private(set) var hasExternalConflict = false
     private var savedText: String?
     private var loadedFileSignature: FileSignature?
-    private var externalChangeTimer: Timer?
     private(set) var qaExternalPollCount = 0
-    // Keep repeated polling failures from replacing the same visible actions.
+    // Keep repeated refresh failures from replacing the same visible actions.
     private weak var missingFileActionsBody: NSView?
     private var missingFileActionsCanRestore = false
     private var showingMissingFileActions: Bool {
@@ -222,8 +223,6 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         if window == nil {
             FileContentObservation.shared.remove(contentObserver); contentObserver = nil
             cancelRichRefresh()
-            externalChangeTimer?.invalidate()
-            externalChangeTimer = nil
         } else if richSuspended {
             richSuspended = false
             loadFile()
@@ -249,8 +248,6 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
 
     override func prepareForRemovalFromScene() {
         cancelFileLoad()
-        externalChangeTimer?.invalidate()
-        externalChangeTimer = nil
         flushRecoveryDraft()
         editorStateSaveTimer?.invalidate()
         persistEditorState()
@@ -463,6 +460,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         documentTransitionPending = false
         restoreCurrentFileSelection()
         codeEditor?.runCommand(documentID: bridgeDocumentID, command: "resumeEditing")
+        refreshFromDisk(observedChange: true)
     }
 
     private func saveFromEditor() {
@@ -504,7 +502,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             }
             self.recoverySaveTimer?.invalidate()
             self.editorStateSaveTimer?.invalidate()
-            self.externalChangeTimer?.invalidate()
+            FileContentObservation.shared.remove(self.contentObserver); self.contentObserver = nil
             self.discardRecoveryDraft()
             if let path = self.filePath { self.onLanguageDocumentClose?(URL(fileURLWithPath: path)) }
             self.onLanguageDocumentChange = nil
@@ -870,6 +868,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             if !richSuspended { loadFile() }
         } else {
             configureCodeEditorIfNeeded()
+            startExternalChangeMonitoring()
         }
         setDirty(replacement?.isDirty ?? false)
         if let languageServiceManager { connectLanguageServices(languageServiceManager) }
@@ -889,6 +888,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             ) ?? trashRoot)
         }
         showMissingFileActions("File moved to Trash. Your editor draft is preserved.")
+        startExternalChangeMonitoring()
     }
 
     private func showMissingFileActions(_ message: String) {
@@ -998,6 +998,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         tile.title = URL(fileURLWithPath: mapped).lastPathComponent
         canvas?.updateTile(tile, recalculateZoneBounds: false)
         configureCodeEditorIfNeeded()
+        startExternalChangeMonitoring()
         setDirty(replacement.isDirty)
         if let manager = languageServiceManager { connectLanguageServices(manager) }
     }
@@ -1083,7 +1084,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
 
     /// Reloads external edits only while the tile has no local draft. A dirty
     /// draft is never overwritten; it is marked conflicted for the next save.
-    func refreshFromDisk(force: Bool = false) {
+    func refreshFromDisk(force: Bool = false, observedChange: Bool = false) {
         guard !documentTransitionPending || force else { return }
         if richKind != nil {
             if force || observedStamp != filePath.map({ FileContentObservation.Stamp(path: $0) }) { loadFile() }
@@ -1094,7 +1095,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         // A moved-away file can return with its original inode, timestamp and
         // bytes. Even then, the missing-actions body must reconcile with disk.
         let wasShowingMissingActions = showingMissingFileActions
-        guard force || signature != loadedFileSignature || wasShowingMissingActions else { return }
+        guard force || observedChange || signature != loadedFileSignature || wasShowingMissingActions else { return }
         let result = session.refreshFromDisk()
         switch result {
         case .unchanged:
@@ -1441,7 +1442,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         layoutSubtreeIfNeeded()
         return !codeEditor.isHidden && codeEditor.frame.width > 0 && codeEditor.frame.height > 0
     }
-    var qaExternalChangeMonitoringActive: Bool { externalChangeTimer?.isValid == true }
+    var qaExternalChangeMonitoringActive: Bool { richKind == nil && contentObserver != nil }
     var qaRecoveryURL: URL? { recoveryURL }
     func qaFlushRecoveryDraft() { flushRecoveryDraft() }
     var qaSyntaxForegroundCount: Int {
@@ -1743,7 +1744,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     private func loadRichContent(path: String, kind: FileContentKind) {
         richKind = kind
         documentSession = nil; loadedText = nil; savedText = nil
-        externalChangeTimer?.invalidate(); externalChangeTimer = nil
+        FileContentObservation.shared.remove(contentObserver); contentObserver = nil
         codeEditor?.tearDown(); codeEditor?.removeFromSuperview(); codeEditor = nil
         markdownSurface = nil
         modeControl = nil; markdownFormatControl = nil; languageLabel = nil
@@ -2059,6 +2060,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
                 language: self.presentation == .markdown ? "markdown" : Self.codeMirrorLanguage(self.sourceLanguage),
                 revision: session.revision
             )
+            self.refreshFromDisk(observedChange: true)
         }
         editor.onSaveRequest = { [weak self] in self?.saveFromEditor() }
         editor.onVimModeChange = { [weak self] mode in
@@ -2323,16 +2325,15 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     }
 
     private func startExternalChangeMonitoring() {
-        guard window != nil, externalChangeTimer == nil else { return }
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+        guard window != nil, contentObserver == nil, let filePath else { return }
+        contentObserver = FileContentObservation.shared.observe(
+            path: filePath, stamp: .init(path: filePath)) { [weak self] in
                 guard let self else { return }
                 self.qaExternalPollCount += 1
-                self.refreshFromDisk()
+                self.refreshFromDisk(observedChange: true)
             }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        externalChangeTimer = timer
+        // A detached tile may have missed changes while not being observed.
+        refreshFromDisk(observedChange: true)
     }
 
     private var recoveryURL: URL? {
