@@ -1030,6 +1030,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         noticesAheadOfTail.removeAll()
         let subscriptionGeneration = UUID()
         eventSubscriptionGeneration = subscriptionGeneration
+        supervisor.setEventsPresented(!isFarParked, for: agentID)
         eventSubscription = Task { @MainActor [weak self] in
             for await event in stream {
                 if let pause = self?.qaBeforeTailEvent { await pause(event) }
@@ -2171,6 +2172,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     var isAttachedToAgent: Bool { attachedAgentID != nil }
 
+    override func farParkStateDidChange() {
+        guard let agentID = attachedAgentID, eventSubscription != nil else { return }
+        agentSource?.setEventsPresented(!isFarParked, for: agentID)
+    }
+
     func detach() {
         if let leadPlanObserverToken { agentSource?.removeLeadPlanObserver(leadPlanObserverToken) }
         leadPlanObserverToken = nil
@@ -2198,6 +2204,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         eventSubscriptionGeneration = nil
         eventSubscription?.cancel()
         eventSubscription = nil
+        if let agentID = attachedAgentID { agentSource?.setEventsPresented(false, for: agentID) }
         if let transcriptReloadObserverToken, let agentID = attachedAgentID {
             agentSource?.removeTranscriptReloadObserver(transcriptReloadObserverToken, for: agentID)
         }

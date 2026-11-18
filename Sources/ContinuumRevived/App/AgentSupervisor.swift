@@ -1495,6 +1495,15 @@ final class AgentSupervisor {
         didSet { quotaObservationIndexDirty = true }
     }
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
+
+    /// Which agents have a tile someone can see. Hidden agents' streamed text is
+    /// batched at 4 Hz on the producer thread instead of crossing to main per
+    /// token (`AgentEventCoalescer`).
+    let eventPresentation = AgentEventPresentation()
+
+    func setEventsPresented(_ presented: Bool, for id: AgentID) {
+        eventPresentation.setPresented(presented, for: id.rawValue)
+    }
     /// How many events each agent's tails have been sent. A local notice is
     /// stamped with it, so a tile still reading its tail can place the notice
     /// after exactly the events that preceded it (`AgentLocalNotice.afterEvent`).
@@ -4950,7 +4959,19 @@ final class AgentSupervisor {
                 }
             }
         }
+        let presentation = eventPresentation
+        let coalescer = AgentEventCoalescer(
+            isPresented: { presentation.isPresented(id.rawValue) },
+            emit: { bound in
+                DispatchQueue.main.async { [weak self] in
+                    if case .turnCompleted = bound { sawTurnCompleted.set() }
+                    if case .turnCompleted(_, _, .failed, _) = bound { sawFailedTurn.set() }
+                    self?.deliver(bound, from: runner, generation: runnerGeneration, to: id)
+                }
+            })
+        presentation.register(coalescer, for: id.rawValue)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer { presentation.unregister(coalescer, for: id.rawValue) }
             do {
                 try operation { event in
                     let bound = event.withThreadId(threadId)
@@ -4964,13 +4985,10 @@ final class AgentSupervisor {
                     default:
                         break
                     }
-                    DispatchQueue.main.async {
-                        if case .turnCompleted = bound { sawTurnCompleted.set() }
-                        if case .turnCompleted(_, _, .failed, _) = bound { sawFailedTurn.set() }
-                        self?.deliver(
-                            bound, from: runner, generation: runnerGeneration, to: id)
-                    }
+                    coalescer.submit(bound)
                 }
+                // Anything still pending goes ahead of the end-of-run hop below.
+                coalescer.flush()
                 // Dispatched from the same runner thread AFTER `run` returned, so
                 // main-queue FIFO serializes this behind every queued delivery.
                 DispatchQueue.main.async {
@@ -4998,6 +5016,7 @@ final class AgentSupervisor {
                         to: id)
                 }
             } catch {
+                coalescer.flush()
                 // S3: the words a person reads, not a Swift error value; the
                 // detailed form still goes to the diagnostics log below.
                 let diagnostic = SecretRedactor.redactLocalDiagnostics(String(describing: error))
@@ -14473,6 +14492,30 @@ final class AgentSupervisor {
         to id: AgentID,
         // The app's elapsed clock (`Date()` outside the film build).
         now: Date = AgentElapsedClock.now()
+    ) {
+        if qaMeasureDeliver {
+            let started = DispatchTime.now().uptimeNanoseconds
+            defer {
+                qaDeliverNanos[id, default: 0] &+= DispatchTime.now().uptimeNanoseconds &- started
+                qaDeliverCalls[id, default: 0] &+= 1
+            }
+            deliverCounted(event, from: runner, generation: generation, to: id, now: now)
+            return
+        }
+        deliverCounted(event, from: runner, generation: generation, to: id, now: now)
+    }
+
+    /// Checks only: main-thread time and call count spent in the producer's delivery.
+    var qaMeasureDeliver = false
+    var qaDeliverNanos: [AgentID: UInt64] = [:]
+    var qaDeliverCalls: [AgentID: Int] = [:]
+
+    private func deliverCounted(
+        _ event: AgentRuntimeEvent,
+        from runner: AgentRunning,
+        generation: RunnerGenerationToken,
+        to id: AgentID,
+        now: Date
     ) {
         // Keep the latest generation after its live slot clears. A nil `runners`
         // entry is not evidence that any retired terminal event is valid: an old

@@ -6331,6 +6331,22 @@ enum ContinuumApp {
         }
 
         #if ARRAY_CHECKS
+        if CommandLine.arguments.contains("--hidden-agent-ingest-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HiddenAgentIngestChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApplication.shared.run()
+        }
+        #endif
+
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--agent-first-paint-check") {
             do {
                 _ = NSApplication.shared
