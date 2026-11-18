@@ -285,14 +285,8 @@ public enum AgentLocationStatusPresenter {
         }
     }
 
-    /// One value-type style, not a new `ISO8601DateFormatter` per call: building
-    /// that formatter opens an ICU formatter, and the status row asks for this on
-    /// every refresh of every streaming agent (8% of the main thread at 24 agents).
-    /// Same output: GMT, `yyyy-MM-dd'T'HH:mm:ss'Z'`.
-    private static let timestampStyle = Date.ISO8601FormatStyle()
-
     private static func timestamp(_ date: Date) -> String {
-        date.formatted(timestampStyle)
+        ISO8601DateFormatter().string(from: date)
     }
 
     private static func boundedPath(_ path: String) -> String {
