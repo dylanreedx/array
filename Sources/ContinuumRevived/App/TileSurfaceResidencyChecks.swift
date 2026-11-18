@@ -812,9 +812,7 @@ enum TileSurfaceResidencyChecks {
             }
             if farParked {
                 world.canvas.surfaceResidencyEnabled = false
-                let park = NSView(frame: NSRect(x: 50_000, y: 50_000, width: 500, height: 500))
-                world.canvas.addSubview(park)
-                try expect(tile.parkBodyFarOffscreen(park: park), "fixture could not park the body")
+                try expect(tile.parkBodyFarOffscreen(park: world.canvas.surfaceParkView), "fixture could not park the body")
             } else {
                 world.canvas.surfaceResidencyEnabled = true
                 world.quiesceAndSurface()

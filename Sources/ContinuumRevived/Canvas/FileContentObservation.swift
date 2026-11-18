@@ -73,6 +73,7 @@ final class FileContentObservation {
     private var qaSuppressedCallbackPaths: Set<String> = []
     private var qaSuppressedCallbackCounts: [String: Int] = [:]
     var qaObserverCount: Int { entries.count }
+    var qaObserverPaths: [String] { entries.values.map(\.path) }
     private static func qaPathKey(_ path: String) -> String {
         path.hasPrefix("/var/") || path.hasPrefix("/tmp/") ? "/private" + path : path
     }
