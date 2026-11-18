@@ -834,8 +834,22 @@ final class GhosttyRuntimeContext {
                 }
             },
             action_cb: { _, target, action in
-                // Intercept GHOSTTY_ACTION_PWD (OSC 7): deliver the reported cwd to the
-                // surface's view so GhosttyTerminalRuntime.capturedCwd can read it.
+                // Ghostty emits this for both abnormal and normal exits. Defer
+                // freeing the surface until after Ghostty returns from its action.
+                if action.tag == GHOSTTY_ACTION_SHOW_CHILD_EXITED,
+                   target.tag == GHOSTTY_TARGET_SURFACE,
+                   let surface = Optional(target.target.surface),
+                   let userdata = ghostty_surface_userdata(surface) {
+                    let surfaceAddress = UInt(bitPattern: surface)
+                    let userdataAddress = UInt(bitPattern: userdata)
+                    DispatchQueue.main.async {
+                        GhosttyTerminalView.handleGhosttyChildExited(
+                            userdataAddress: userdataAddress, surfaceAddress: surfaceAddress
+                        )
+                    }
+                    return true
+                }
+                // Deliver OSC 7 cwd updates to the owning surface.
                 if action.tag == GHOSTTY_ACTION_PWD,
                    target.tag == GHOSTTY_TARGET_SURFACE,
                    let surface = Optional(target.target.surface) {
@@ -932,8 +946,7 @@ private func scheduleGhosttyPwd(userdata: UnsafeMutableRawPointer?, pwd: UnsafeP
     let path = String(cString: pwd)
     let userdataAddress = UInt(bitPattern: userdata)
     DispatchQueue.main.async {
-        guard let pointer = UnsafeMutableRawPointer(bitPattern: userdataAddress) else { return }
-        let view = Unmanaged<GhosttyTerminalView>.fromOpaque(pointer).takeUnretainedValue()
+        guard let view = GhosttyTerminalView.view(forSurfaceUserdata: UnsafeMutableRawPointer(bitPattern: userdataAddress)) else { return }
         view.applyPwdAction(path)
     }
 }

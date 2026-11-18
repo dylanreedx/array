@@ -133,6 +133,71 @@ enum TerminalInputConfidenceChecks {
         return url
     }
 
+    /// Real surface: an idle shell must not wake an exit poller, and its
+    /// eventual exit must still reach the runtime exactly once.
+    static func runProcessExitEventCheck() throws -> URL {
+        let (clipboard, standard, selection) = privateClipboard { _, _, _, decide in decide(false) }
+        defer { standard.releaseGlobally(); selection.releaseGlobally() }
+        let fixture = try Fixture(command: "/bin/sh", arguments: ["-c", "read line"], clipboard: clipboard)
+        defer { fixture.tearDown() }
+        guard let view = fixture.terminalView, view.surface != nil else {
+            throw CheckError(message: "exit: terminal surface missing")
+        }
+        var exits = 0
+        fixture.runtime.onRuntimeExited = { _, _ in exits += 1 }
+        try fixture.pump(1.25)
+        let idleObservations = view.qaProcessExitObservationCount
+        try expect(idleObservations == 0, "exit: idle surface made \(idleObservations) exit observations")
+        try expect(exits == 0 && view.surface != nil, "exit: idle shell exited early")
+        fixture.runtime.sendInput(Data("done\n".utf8))
+        let exited = try fixture.pump(until: 5) { exits == 1 && view.surface == nil }
+        try expect(exited, "exit: shell termination was not delivered and closed")
+        try fixture.pump(0.2)
+        try expect(exits == 1, "exit: shell termination was delivered \(exits) times")
+
+        // Ghostty takes a separate action path when a command exits quickly.
+        let quick = try Fixture(command: "/bin/sh", arguments: ["-c", "exit 0"], clipboard: clipboard)
+        defer { quick.tearDown() }
+        var quickExits = 0
+        quick.runtime.onRuntimeExited = { _, _ in quickExits += 1 }
+        let quickExited = try quick.pump(until: 5) {
+            quickExits == 1 && quick.terminalView?.surface == nil
+        }
+        try expect(quickExited, "exit: quick command termination was not delivered and closed")
+        try quick.pump(0.2)
+        try expect(quickExits == 1, "exit: quick command termination was delivered \(quickExits) times")
+
+        // A Ghostty close already queued for a retired surface must not close
+        // a replacement created in the same NSView before that block runs.
+        let race = try Fixture(command: "/bin/sh", arguments: ["-c", "read line"], clipboard: clipboard)
+        defer { race.tearDown() }
+        guard let raceView = race.terminalView, let oldSurface = raceView.surface,
+              let oldUserdata = ghostty_surface_userdata(oldSurface),
+              let container = raceView.superview else {
+            throw CheckError(message: "exit: lifecycle race surface missing")
+        }
+        let oldAddress = UInt(bitPattern: oldUserdata)
+        DispatchQueue.main.async {
+            GhosttyTerminalView.handleGhosttyClose(
+                userdata: UnsafeMutableRawPointer(bitPattern: oldAddress), processAlive: false
+            )
+        }
+        raceView.requestClose(force: true)
+        raceView.removeFromSuperview()
+        container.addSubview(raceView)
+        try expect(raceView.surface != nil, "exit: replacement surface was not created")
+        try race.pump(0.2)
+        try expect(raceView.surface != nil, "exit: stale close callback closed replacement surface")
+        return try artifact("terminal-process-exit-event", [
+            "idleSeconds": 1.25,
+            "idleExitObservations": idleObservations,
+            "exitCallbacks": exits,
+            "quickExitCallbacks": quickExits,
+            "staleClosePreservedReplacement": raceView.surface != nil,
+            "surfaceClosed": view.surface == nil
+        ])
+    }
+
     // MARK: - Clipboard
 
     static func runClipboardCheck() throws -> URL {

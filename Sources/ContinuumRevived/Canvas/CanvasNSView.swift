@@ -4642,7 +4642,10 @@ final class CanvasNSView: NSView, TokenThemed {
         //   `layoutChrome` compares the bar's frame before writing it, so at a
         //   constant zoom every visible tile is a no-op and `pan.chromeRedraws`
         //   and `pan.tileLayoutPasses` both stay at 0 — which the budgets assert.
-        for view in visibleTileViews { view.refreshZoomDependentChrome() }
+        for view in visibleTileViews {
+            view.refreshZoomDependentChrome()
+            (view as? ManagedAgentTileNSView)?.transcriptVisibilityMayHaveChanged()
+        }
         updateStickyTileHeads()
         // Sharpness is enforced HERE, per step, and not once per gesture.
         //
@@ -7125,6 +7128,9 @@ final class CanvasNSView: NSView, TokenThemed {
         // the camera has to be re-applied — a window resize genuinely changes how
         // much world is visible. Tiles still hold world frames and are untouched.
         syncWorldPlaneToCamera()
+        for case let agent as ManagedAgentTileNSView in visibleTileViews {
+            agent.transcriptVisibilityMayHaveChanged()
+        }
         layoutNavModeOverlay()
         layoutFrameHUD()
     }

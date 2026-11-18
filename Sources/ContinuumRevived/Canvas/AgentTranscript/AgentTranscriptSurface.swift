@@ -12,6 +12,7 @@ protocol AgentTranscriptSurface: NSView {
     func enqueue(document: AgentDocument, patch: AgentDocumentPatch, final: Bool) throws
     func jumpToLatest()
     func flushPendingVisualUpdate()
+    func visibilityMayHaveChanged()
     func updateRenderContext(_ context: AgentRenderContext) throws
 
     func bindToolDetailAgent(_ agentID: AgentID?)

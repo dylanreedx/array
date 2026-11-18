@@ -1962,17 +1962,21 @@ enum FileOpenChecks {
                    "unchanged missing-file polls must retain their action body and avoid Markdown re-rendering")
         try expect(missingTile.qaExternalChangeMonitoringActive,
                    "the mounted missing-file fixture must keep its production monitor")
+        // Let pending file-operation events settle, then count real monitor
+        // callbacks over more than two of the old one-second polling periods.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
         let priorPolls = missingTile.qaExternalPollCount
-        let missingTimerDeadline = Date().addingTimeInterval(3)
-        while missingTile.qaExternalPollCount == priorPolls, Date() < missingTimerDeadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        }
-        try expect(missingTile.qaExternalPollCount > priorPolls,
-                   "the production missing-file timer must actually poll")
+        let priorWatcherEvents = FileContentObservation.shared.qaEventCount
+        RunLoop.main.run(until: Date().addingTimeInterval(2.3))
+        let idleCallbacks = missingTile.qaExternalPollCount - priorPolls
+        let idleWatcherEvents = FileContentObservation.shared.qaEventCount - priorWatcherEvents
+        print("file tile idle callbacks over 2.3 seconds: \(idleCallbacks); shared watcher events: \(idleWatcherEvents)")
+        try expect(idleCallbacks == 0 && idleWatcherEvents == 0,
+                   "unchanged mounted files must not wake their tile or shared watcher")
         try expect(missingTile.qaActiveBody === firstMissingBody
                    && unchangedDocument.qaThemeApplicationCount == missingThemeCount
                    && unchangedDocument.qaMarkdownApplyCount == missingRenderCount,
-                   "the mounted production timer must retain the same missing action body")
+                   "idle observation must retain the same missing action body")
 
         // A different failure must update the visible explanation, and a
         // subsequent missing result must be retryable rather than cached away.
@@ -1992,7 +1996,10 @@ enum FileOpenChecks {
                    && missingTile.qaParkedBody === lastMissingBody,
                    "the missing action body must be parkable before recovery")
         try fileManager.moveItem(at: heldURL, to: missingURL)
-        missingTile.refreshFromDisk()
+        let restorationDeadline = Date().addingTimeInterval(3)
+        while missingTile.qaActiveBody !== editorBody, Date() < restorationDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
         try expect(missingTile.qaActiveBody === editorBody && missingTile.loadedText == missingText
                    && missingTile.surfaceResidency == .native && missingTile.qaParkedBody == nil,
                    "restoring the original file must promote and reattach its unchanged editor")
@@ -2087,7 +2094,7 @@ enum FileOpenChecks {
         try expect(swiftTile.textView.string == sameSizeEdit,
                    "a same-size atomic replacement with a preserved timestamp must still refresh")
 
-        // Drive the mounted production timer instead of calling refresh directly.
+        // Drive the mounted production observer instead of calling refresh directly.
         try expect(swiftTile.qaExternalChangeMonitoringActive,
                    "a mounted file tile must actively monitor external edits")
         let timerEdit = "let agentChangedThix = true\n"
@@ -2101,6 +2108,138 @@ enum FileOpenChecks {
         }
         try expect(swiftTile.textView.string == timerEdit,
                    "the mounted tile's production monitor must display an atomic agent edit without manual reload")
+        // In-place writes do not necessarily change the parent directory.
+        let inPlaceEdit = "let editedInPlace = true\n"
+        let handle = try FileHandle(forWritingTo: swiftURL)
+        try handle.truncate(atOffset: 0)
+        try handle.write(contentsOf: Data(inPlaceEdit.utf8))
+        try handle.close()
+        let inPlaceDeadline = Date().addingTimeInterval(3)
+        while swiftTile.textView.string != inPlaceEdit, Date() < inPlaceDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(swiftTile.textView.string == inPlaceEdit,
+                   "the mounted monitor must reload an in-place edit")
+        // A transition suppresses refresh; an editor-process termination must
+        // reconcile an event consumed while the transition was pending.
+        swiftTile.qaSetDocumentTransitionPending(true)
+        let priorTransitionEvents = swiftTile.qaExternalPollCount
+        let afterTransition = "let afterEditorTermination = true\n"
+        try afterTransition.write(to: swiftURL, atomically: true, encoding: .utf8)
+        let transitionDeadline = Date().addingTimeInterval(3)
+        while swiftTile.qaExternalPollCount == priorTransitionEvents, Date() < transitionDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(swiftTile.qaExternalPollCount > priorTransitionEvents && swiftTile.textView.string == inPlaceEdit,
+                   "the external event must arrive while the editor transition suppresses reload")
+        swiftTile.qaSimulateEditorProcessTermination()
+        try expect(swiftTile.textView.string == afterTransition,
+                   "editor termination must reconcile the suppressed external edit")
+
+        // A link's own metadata does not change when its target is edited or
+        // replaced in another directory; both changes must reload the tile.
+        let targetDirectory = tempRoot.appendingPathComponent("watch-target", isDirectory: true)
+        try fileManager.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+        let targetURL = targetDirectory.appendingPathComponent("target.txt")
+        let linkURL = tempRoot.appendingPathComponent("watch-link.txt")
+        let intermediateLink = targetDirectory.appendingPathComponent("intermediate.txt")
+        try "link initial".write(to: targetURL, atomically: true, encoding: .utf8)
+        try fileManager.createSymbolicLink(atPath: intermediateLink.path, withDestinationPath: targetURL.path)
+        try fileManager.createSymbolicLink(atPath: linkURL.path, withDestinationPath: intermediateLink.path)
+        let linkedTile = makeTile(path: linkURL.path)
+        let linkHandle = try FileHandle(forWritingTo: targetURL)
+        try linkHandle.truncate(atOffset: 0)
+        try linkHandle.write(contentsOf: Data("link in place".utf8))
+        try linkHandle.close()
+        let linkWriteDeadline = Date().addingTimeInterval(3)
+        while linkedTile.loadedText != "link in place", Date() < linkWriteDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(linkedTile.loadedText == "link in place", "linked target writes must reload")
+        try "link replaced".write(to: targetURL, atomically: true, encoding: .utf8)
+        let linkReplaceDeadline = Date().addingTimeInterval(3)
+        while linkedTile.loadedText != "link replaced", Date() < linkReplaceDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(linkedTile.loadedText == "link replaced", "linked target replacement must reload")
+        try fileManager.removeItem(at: targetURL)
+        let linkMissingDeadline = Date().addingTimeInterval(3)
+        let linkedBody = linkedTile.qaActiveBody
+        while linkedTile.qaActiveBody === linkedBody, Date() < linkMissingDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(linkedTile.qaActiveBody !== linkedBody, "a linked target removal must be observed")
+        try "link restored".write(to: targetURL, atomically: true, encoding: .utf8)
+        let linkRestoreDeadline = Date().addingTimeInterval(3)
+        while linkedTile.loadedText != "link restored", Date() < linkRestoreDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(linkedTile.loadedText == "link restored", "a linked target recreation must reload")
+
+        // Moving an ancestor (not just the immediate parent) invalidates the
+        // document path and restoring that ancestor must resume monitoring.
+        let outer = tempRoot.appendingPathComponent("watch-outer", isDirectory: true)
+        let heldOuter = tempRoot.appendingPathComponent("watch-outer-held", isDirectory: true)
+        let inner = outer.appendingPathComponent("inner", isDirectory: true)
+        let ancestorFile = inner.appendingPathComponent("file.txt")
+        try fileManager.createDirectory(at: inner, withIntermediateDirectories: true)
+        try "ancestor original".write(to: ancestorFile, atomically: true, encoding: .utf8)
+        let ancestorTile = makeTile(path: ancestorFile.path)
+        let ancestorBody = ancestorTile.qaActiveBody
+        try fileManager.moveItem(at: outer, to: heldOuter)
+        let ancestorMissingDeadline = Date().addingTimeInterval(3)
+        while ancestorTile.qaActiveBody === ancestorBody, Date() < ancestorMissingDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(ancestorTile.qaActiveBody !== ancestorBody, "moving an ancestor must mark the file missing")
+        try fileManager.moveItem(at: heldOuter, to: outer)
+        let ancestorRestoreDeadline = Date().addingTimeInterval(3)
+        while ancestorTile.qaActiveBody !== ancestorBody, Date() < ancestorRestoreDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(ancestorTile.qaActiveBody === ancestorBody, "restoring an ancestor must restore its editor")
+        try "ancestor updated".write(to: ancestorFile, atomically: true, encoding: .utf8)
+        let ancestorUpdateDeadline = Date().addingTimeInterval(3)
+        while ancestorTile.loadedText != "ancestor updated", Date() < ancestorUpdateDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(ancestorTile.loadedText == "ancestor updated", "an ancestor restore must rearm file updates")
+
+        // Two hosts share observation; replacing a removed parent must rearm
+        // the path, and removing one host must not detach the other.
+        let nestedDirectory = tempRoot.appendingPathComponent("watch-nested", isDirectory: true)
+        let nestedFile = nestedDirectory.appendingPathComponent("shared.txt")
+        try fileManager.createDirectory(at: nestedDirectory, withIntermediateDirectories: true)
+        try "first".write(to: nestedFile, atomically: true, encoding: .utf8)
+        let firstShared = makeTile(path: nestedFile.path)
+        let secondShared = makeTile(path: nestedFile.path)
+        let firstBody = firstShared.qaActiveBody
+        let secondBody = secondShared.qaActiveBody
+        try fileManager.removeItem(at: nestedDirectory)
+        let missingDeadline = Date().addingTimeInterval(3)
+        while (firstShared.qaActiveBody === firstBody || secondShared.qaActiveBody === secondBody),
+              Date() < missingDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(firstShared.qaActiveBody !== firstBody && secondShared.qaActiveBody !== secondBody,
+                   "both shared observers must see their parent disappear")
+        try fileManager.createDirectory(at: nestedDirectory, withIntermediateDirectories: true)
+        try "restored".write(to: nestedFile, atomically: true, encoding: .utf8)
+        let sharedDeadline = Date().addingTimeInterval(3)
+        while (firstShared.loadedText != "restored" || secondShared.loadedText != "restored"),
+              Date() < sharedDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(firstShared.loadedText == "restored" && secondShared.loadedText == "restored",
+                   "both shared observers must reload after their parent returns")
+        firstShared.removeFromSuperview()
+        try "remaining".write(to: nestedFile, atomically: true, encoding: .utf8)
+        let remainingDeadline = Date().addingTimeInterval(3)
+        while secondShared.loadedText != "remaining", Date() < remainingDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        try expect(secondShared.loadedText == "remaining",
+                   "removing one observer must leave the other subscribed")
         try longSource.write(to: swiftURL, atomically: true, encoding: .utf8)
 
         let decoyTile = makeTile(path: decoyURL.path)

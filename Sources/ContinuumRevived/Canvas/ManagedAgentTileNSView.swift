@@ -5022,6 +5022,26 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     func qaRefreshThinkingIndicatorForChecks() {
         refreshTranscriptThinkingIndicator()
     }
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        let changed = frame.origin != newOrigin
+        super.setFrameOrigin(newOrigin)
+        if changed { transcriptVisibilityMayHaveChanged() }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = frame.size != newSize
+        super.setFrameSize(newSize)
+        if changed { transcriptVisibilityMayHaveChanged() }
+    }
+
+    override func bodyDidPromoteToNative() {
+        transcriptVisibilityMayHaveChanged()
+    }
+
+    func transcriptVisibilityMayHaveChanged() {
+        transcriptCollectionFixture?.visibilityMayHaveChanged()
+    }
+
     var qaTranscriptForChecks: AgentTranscriptListView? { listTranscript }
     /// Whichever renderer this tile installed.
     var qaTranscriptSurface: (any AgentTranscriptSurface)? { transcriptCollectionFixture }

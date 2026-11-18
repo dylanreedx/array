@@ -43,7 +43,12 @@ enum FileFormatsChecks {
 
     private static func runDocument(name: String, bytes: Data) async throws {
         let budgetBefore = FileContentBudget.shared.retainedBytes
-        let observationsBefore = FileContentObservation.shared.qaObserverCount
+        // The fixture's own markdown text tiles legitimately hold shared
+        // observers while mounted; only the document under test must release.
+        func documentObservers() -> Int {
+            FileContentObservation.shared.qaObserverPaths.filter { !$0.hasSuffix(".md") }.count
+        }
+        let observationsBefore = documentObservers()
         let f = try WorkspaceAPIChecks.makeFixture()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 2000, height: 1200),
                               styleMask: [.borderless], backing: .buffered, defer: false)
@@ -449,11 +454,11 @@ enum FileFormatsChecks {
         try expect(restored.qaRenderer == nil && !restored.qaRichLoading, "\(name): tile removal retained a renderer")
         do {
             try await eventually("\(name): file resources or observers were not released", {
-                FileContentBudget.shared.retainedBytes == budgetBefore && FileContentObservation.shared.qaObserverCount == observationsBefore
+                FileContentBudget.shared.retainedBytes == budgetBefore && documentObservers() == observationsBefore
             })
         } catch {
             let work = await FileGridWorkScheduler.shared.qaCounts
-            throw Failure(description: "\(name): resources: budget \(FileContentBudget.shared.retainedBytes)/\(budgetBefore), observers \(FileContentObservation.shared.qaObserverCount)/\(observationsBefore), retiredRendererAlive=\(restored.qaRetiredRendererAlive), workers=\(work)")
+            throw Failure(description: "\(name): resources: budget \(FileContentBudget.shared.retainedBytes)/\(budgetBefore), observers \(documentObservers())/\(observationsBefore), retiredRendererAlive=\(restored.qaRetiredRendererAlive), workers=\(work)")
         }
     }
 
