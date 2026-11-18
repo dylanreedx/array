@@ -51,6 +51,7 @@ enum HiddenAgentIngestChecks {
             throw Failure(description: "agent \(i) transcript differs after being hidden at \(at) (\(a.count) vs \(b.count) chars):\nhidden:  \(around(a))\ncontrol: \(around(b))")
         }
         try await checkRevealFlushes()
+        try await checkHiddenSaveDebounce()
         print("hidden-agent-ingest: PASS")
     }
 
@@ -166,6 +167,68 @@ enum HiddenAgentIngestChecks {
         await pump(0.05)
         guard (supervisor.qaDeliverCalls[id] ?? 0) == before + 1 else {
             throw Failure(description: "reveal: revealing the agent did not deliver the held delta")
+        }
+    }
+
+    private final class SaveCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func bump() { lock.lock(); n += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return n }
+    }
+
+    /// A hidden agent's text arrives in 250 ms flushes; the 200 ms save debounce
+    /// used to fire after each (about 4 whole-transcript writes a second). Asserts
+    /// writes per second, and that a turn end and a reveal still write at once.
+    private static func checkHiddenSaveDebounce() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hidden-ingest-save-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runners = Runners()
+        let supervisor = makeSupervisor(root: root, runners: runners)
+        defer { supervisor.stopAll() }
+        let saves = SaveCounter()
+        supervisor.qaBeforeTranscriptSave = { saves.bump() }
+        let config = AgentModelConfig.resolvedFromDefaults()
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, model: config.model, thinking: config.thinking)
+        guard supervisor.send("go", to: id) else { throw Failure(description: "save-debounce: send refused") }
+        let runner = runners.make(for: id)
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline, runner.runCount == 0 { await pump(0.01) }
+        await pump(0.3)
+        let base = saves.value
+        let seconds = 6.0, tokens = 120
+        let begin = Date()
+        for n in 0..<tokens {
+            _ = runner.emit(.contentDelta(threadId: "t", turnId: "turn", streamKind: .assistant, delta: "w\(n) "))
+            await pump(seconds / Double(tokens))
+        }
+        let streamed = saves.value - base
+        let elapsed = Date().timeIntervalSince(begin)
+        print(String(format: "hidden-agent-ingest: hidden streaming agent wrote %d transcripts in %.1f s (%.2f/s)", streamed, elapsed, Double(streamed) / elapsed))
+        guard Double(streamed) <= elapsed / 2 + 1 else {
+            throw Failure(description: "a hidden streaming agent wrote its transcript \(streamed) times in \(elapsed) s (budget one per 2 s)")
+        }
+        // Reveal: the pending write lands at once.
+        let beforeReveal = saves.value
+        _ = runner.emit(.contentDelta(threadId: "t", turnId: "turn", streamKind: .assistant, delta: "last "))
+        await pump(0.4)
+        supervisor.setEventsPresented(true, for: id)
+        await pump(0.3)
+        guard saves.value > beforeReveal else { throw Failure(description: "save-debounce: revealing the agent did not write the pending transcript") }
+        // Turn end: written at once, whatever the window.
+        supervisor.setEventsPresented(false, for: id)
+        _ = runner.emit(.contentDelta(threadId: "t", turnId: "turn", streamKind: .assistant, delta: "tail"))
+        await pump(0.4)
+        let beforeEnd = saves.value
+        _ = runner.emit(.itemCompleted(threadId: "t", itemId: "msg", kind: .assistantMessage, status: .completed))
+        _ = runner.emit(.turnCompleted(threadId: "t", turnId: "turn", outcome: .completed, errorMessage: nil))
+        await pump(0.5)
+        guard saves.value > beforeEnd else { throw Failure(description: "save-debounce: a turn end did not write the transcript at once") }
+        let snapshot = supervisor.transcriptAttachment(for: id, reboundTo: "t").snapshot
+        let text = String(decoding: (try? JSONEncoder().encode(snapshot?.document.entries.map(\.blocks))) ?? Data(), as: UTF8.self)
+        guard text.contains("tail"), text.contains("w\(tokens - 1) ") else {
+            throw Failure(description: "save-debounce: final transcript is missing streamed text")
         }
     }
 }

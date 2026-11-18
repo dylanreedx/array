@@ -1503,6 +1503,13 @@ final class AgentSupervisor {
 
     func setEventsPresented(_ presented: Bool, for id: AgentID) {
         eventPresentation.setPresented(presented, for: id.rawValue)
+        // A save a hidden agent was still waiting out is written now.
+        if presented, transcriptPersistDeadline[id] != nil { scheduleTranscriptPersist(for: id, final: true) }
+    }
+
+    /// Writes every transcript still waiting out a debounce (app quit).
+    func flushPendingTranscriptSaves() {
+        for id in Array(transcriptPersistDeadline.keys) { scheduleTranscriptPersist(for: id, final: true) }
     }
     /// How many events each agent's tails have been sent. A local notice is
     /// stamped with it, so a tile still reading its tail can place the notice
@@ -5632,6 +5639,7 @@ final class AgentSupervisor {
     /// without this its Pi process outlives the session that started it. Iterates a
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
+        flushPendingTranscriptSaves()
         wakeupScheduler?.stop()
         for id in Array(helperProviderRetryErrors.keys) { stop(id) }
         for id in Array(runners.keys) { stop(id) }
@@ -12653,6 +12661,8 @@ final class AgentSupervisor {
         }
     }
 
+    static let hiddenTranscriptPersistWindow: Duration = .seconds(2)
+
     private func scheduleTranscriptPersist(for id: AgentID, final: Bool) {
         guard transcriptStore != nil else { return }
         // A reload installs an internal model before draining its FIFO. Never
@@ -12690,7 +12700,15 @@ final class AgentSupervisor {
         // Trailing debounce: 200 ms after the last streamed event. One timer per
         // agent follows a moving deadline; a task per event left a burst's worth
         // of cancelled timers to run on the main thread after it.
-        transcriptPersistDeadline[id] = .now + .milliseconds(200)
+        // A hidden agent's text reaches here in 250 ms flushes, so a trailing
+        // 200 ms timer fired after every one: a full-transcript write 4x a
+        // second per streaming agent. Hidden agents save on a fixed 2 s window
+        // instead (not trailing, so a long stream still lands on disk).
+        if eventPresentation.isPresented(id.rawValue) {
+            transcriptPersistDeadline[id] = .now + .milliseconds(200)
+        } else if transcriptPersistDeadline[id] == nil {
+            transcriptPersistDeadline[id] = .now + Self.hiddenTranscriptPersistWindow
+        }
         guard transcriptPersistDebounce[id] == nil else { return }
         transcriptPersistDebounce[id] = Task { [weak self] in
             while let self, !Task.isCancelled, let deadline = self.transcriptPersistDeadline[id] {
