@@ -23,4 +23,19 @@ extension NSView {
         }
         for child in subviews { child.stopTextViewsObservingEveryViewFrame() }
     }
+
+    /// Stop a chrome subtree posting `NSView.frameDidChangeNotification`.
+    ///
+    /// Every `setFrame` on a view that posts walks AppKit's notification registrar,
+    /// whatever the observers are. A tile's title bar and under-bar hold about 29
+    /// labels, badges and buttons that nothing observes, and a zoom step re-frames
+    /// them on every tile: on a quiet 12-tile canvas those posts were ~8 of the
+    /// ~11 ms layout pass (`--tile-surface-residency-check`, 10.8 -> 2.6 ms per
+    /// step). Scroll and clip views are left alone, since their owners observe them.
+    func silenceFrameChangeNotifications() {
+        if !(self is NSScrollView), !(self is NSClipView), postsFrameChangedNotifications {
+            postsFrameChangedNotifications = false
+        }
+        for child in subviews { child.silenceFrameChangeNotifications() }
+    }
 }

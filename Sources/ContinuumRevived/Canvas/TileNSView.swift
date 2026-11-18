@@ -1081,6 +1081,7 @@ class TileNSView: NSView, TokenThemed {
             if stickyHeadTop != nil { layoutStickyHead() }
         }
         titleBar?.applyCloseButtonSizing(buttonSize: closeButtonWorldSize, glyphPointSize: closeGlyphWorldPointSize)
+        titleBar?.silenceFrameChangeNotifications()
         titleBar?.applyOverflowGlyphWidth(overflowGlyphWorldWidth)
         layoutUnderBar()
         // Repair the bar-above-body z-order only when it is actually wrong.
@@ -1974,6 +1975,7 @@ class TileNSView: NSView, TokenThemed {
         // The agent's bubble stays within the bar's height, so the row keeps
         // its whole width.
         underBar.place(frame: NSRect(x: 0, y: bar, width: bounds.width, height: base * scale), unscaledHeight: base)
+        underBar.silenceFrameChangeNotifications()
     }
 
     func setOwnershipMark(_ mark: OwnershipMark?) {
