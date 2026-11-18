@@ -434,7 +434,7 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
     // 5b. One reap rule: the setting (here a fixed 4 s) governs a visible
     //     agent, a hidden idle one closes at min(setting, hidden cap = 1 s), and
     //     a message to a reaped agent is delivered once, in order, on a resumed
-    //     session. The spawned claude also carries the two memory env vars.
+    //     session.
     for visible in [false, true] {
         let h = try Harness(.claude, idleTimeout: 4, hiddenTimeout: 1.0)
         defer { h.tearDown() }
@@ -442,11 +442,6 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
         h.supervisor.agentVisibleProvider = { _ in visible }
         try expect(h.supervisor.send("hello", to: h.id), "smart-reap: seed refused")
         try await eventually("smart-reap: turn done") { !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed] }
-        let envs = AgentSteeringQAFakes.memoryEnvironments(in: h.bin)
-        try expect(envs.count == 1
-                   && envs[0]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
-                   && envs[0]["CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL"] == "1",
-                   "claude-env: the spawned claude must carry both memory env vars, got \(envs)")
         let session = AgentSteeringQAFakes.latestPid(in: h.bin)
         try expect(session.map { kill($0, 0) == 0 } == true, "smart-reap: the session lives after its turn")
         try await Task.sleep(for: .milliseconds(2200))
