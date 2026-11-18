@@ -804,6 +804,11 @@ enum ContinuumApp {
     @MainActor
     private static var delegate: AppDelegate?
 
+    // Not optimized: this body is the 7,000-line `--*-check` flag cascade. Under
+    // whole-module optimization the inliner is superlinear in function size, and
+    // this one function held the release compile on one core for most of its
+    // run. Everything it calls is a separate function and stays optimized.
+    @_optimize(none)
     @MainActor
     static func main() {
         // Plan 110: the character-set validator agents call. First, so it never
