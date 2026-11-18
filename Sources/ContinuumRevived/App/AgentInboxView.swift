@@ -732,6 +732,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private(set) var qaWakeRerenderCount = 0
     /// Plan 87: whole-table reloads (cards built are `cellBuildCountForQA`).
     private(set) var qaFullReloadCount = 0
+    private(set) var qaIncrementalReorderCount = 0
     private static let wakeTimerMinimumDelay: TimeInterval = 0.05
     private static let wakeTimerMaximumDelay: TimeInterval = 24 * 60 * 60
     /// Production uses `Timer` when this is nil. The injected scheduler is a
@@ -2581,6 +2582,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             // is: a subagent arriving at the top of an open 40-row group otherwise
             // pushed everything under the pointer down a row. (`render` does not
             // animate rows above `rowMotionRowLimit`, so nothing else moves them.)
+            if next.count > Self.rowMotionRowLimit {
+                let changedValues = Set(next.compactMap(\.agentRow).filter { row in
+                    previousByID[row.id].map { !row.matchesIgnoringLiveElapsed($0) } ?? true
+                }.map(\.id))
+                let keptSelection = selectedRows.map(\.id)
+                if applyScopeIncrementally(next, previousRollups: previousRollups,
+                    changedAgentIDs: changed.touched.union(changedValues), previousTallies: previousTallies,
+                    preservingAgentRows: true, allowingMoves: true) {
+                    if !keptSelection.isEmpty { restoreSelection(ids: keptSelection) }
+                    return
+                }
+            }
             let anchor = next.count > Self.rowMotionRowLimit
                 ? visibleScrollAnchor(excluding: changed.touched) : nil
             // .plans/113: a re-sort moves rows; they slide to their new places.
@@ -3501,14 +3514,34 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func applyScopeIncrementally(
         _ next: [InboxListItem], previousRollups: [UUID: ChildRollup],
         changedAgentIDs: Set<UUID> = [], previousTallies: [UUID: SidebarLeadTally]? = nil,
-        preservingAgentRows: Bool = false
+        preservingAgentRows: Bool = false, allowingMoves: Bool = false
     ) -> Bool {
         let old = items.map(\.identity), new = next.map(\.identity)
         let oldSet = Set(old), newSet = Set(new)
-        guard oldSet.count == old.count, newSet.count == new.count,
-              old.filter(newSet.contains) == new.filter(oldSet.contains) else { return false }
-        let removed = IndexSet(old.indices.filter { !newSet.contains(old[$0]) })
-        let inserted = IndexSet(new.indices.filter { !oldSet.contains(new[$0]) })
+        guard oldSet.count == old.count, newSet.count == new.count else { return false }
+        // A row that changed sort place is, to the table, one row removed and the
+        // same identity inserted again: every other row keeps its cell. A few moves
+        // are applied that way; a re-sort that moves many is a whole-list change.
+        var moved: Set<String> = []
+        if old.filter(newSet.contains) != new.filter(oldSet.contains) {
+            guard allowingMoves else { return false }
+            let difference = new.difference(from: old)
+            guard difference.count <= Self.incrementalMoveLimit else { return false }
+            var leaving: Set<String> = [], arriving: Set<String> = []
+            for change in difference {
+                switch change {
+                case .remove(_, let identity, _): leaving.insert(identity)
+                case .insert(_, let identity, _): arriving.insert(identity)
+                }
+            }
+            moved = leaving.intersection(arriving)
+            let stayedOld = old.filter { newSet.contains($0) && !moved.contains($0) }
+            let stayedNew = new.filter { oldSet.contains($0) && !moved.contains($0) }
+            guard stayedOld == stayedNew else { return false }
+            qaIncrementalReorderCount += 1
+        }
+        let removed = IndexSet(old.indices.filter { !newSet.contains(old[$0]) || moved.contains(old[$0]) })
+        let inserted = IndexSet(new.indices.filter { !oldSet.contains(new[$0]) || moved.contains(new[$0]) })
         let oldNesting = Dictionary(zip(old, nestingByTableRow)) { first, _ in first }
         let renderNow = clock()
         let oldNudge = settleNudgeTargetID(now: renderNow)
@@ -3529,7 +3562,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if !preservingAgentRows { endRename(commit: true) }
         cancelCrossfades()
         let previousCells = Dictionary(cellsByRow.compactMap { index, cell in
-            items.indices.contains(index) ? (items[index].identity, cell) : nil
+            items.indices.contains(index) && !moved.contains(items[index].identity)
+                ? (items[index].identity, cell) : nil
         }, uniquingKeysWith: { first, _ in first })
         setItems(next)
         cellsByRow = Dictionary(uniqueKeysWithValues: next.enumerated().compactMap { index, item in
@@ -6440,6 +6474,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     static let rowMotionDuration: TimeInterval = 0.15
     static let rowMotionRowLimit = 40
+    /// Most rows a push may move before the list is rendered whole.
+    static let incrementalMoveLimit = 128
     /// What the most recent animated render moved, for the witness.
     private(set) var qaLastRowMotion: (exiting: Set<UUID>, entering: Set<UUID>) = ([], [])
     private var exitGhostViews: [NSView] = []
