@@ -39,6 +39,16 @@ final class GhosttyTerminalView: NSView {
     /// free any a teardown missed. Weak: a view that died with a live surface
     /// cannot be reached, and is why the count stays the authority.
     private static let liveSurfaceViews = NSHashTable<GhosttyTerminalView>.weakObjects()
+    // Ghostty treats userdata as opaque. Give each surface a never-reused token
+    // so a delayed callback cannot be mistaken for a replacement surface.
+    private static var nextSurfaceToken: UInt = 1
+    private var surfaceToken: UInt?
+
+    static func view(forSurfaceUserdata userdata: UnsafeMutableRawPointer?) -> GhosttyTerminalView? {
+        guard let userdata else { return nil }
+        let token = UInt(bitPattern: userdata)
+        return liveSurfaceViews.allObjects.first { $0.surfaceToken == token && $0.surface != nil }
+    }
 
     /// Free every surface of `app` still alive, loudly, and report how many live
     /// surfaces no view can reach any more (their view is gone). Called by
@@ -52,7 +62,7 @@ final class GhosttyTerminalView: NSView {
         for view in views { view.closeSurface() }
         return liveSurfaceCount - liveSurfaceViews.allObjects.count
     }
-    private var processExitPoller: Timer?
+    private(set) var qaProcessExitObservationCount = 0
     private var previousModifierFlags: NSEvent.ModifierFlags = []
     private var markedText = NSMutableAttributedString()
     private var keyTextAccumulator: [String]?
@@ -582,13 +592,10 @@ final class GhosttyTerminalView: NSView {
     }
 
     static func handleGhosttyClose(userdata: UnsafeMutableRawPointer?, processAlive: Bool) {
-        guard let userdata else { return }
-        let view = Unmanaged<GhosttyTerminalView>.fromOpaque(userdata).takeUnretainedValue()
-        DispatchQueue.main.async {
-            if processAlive, !view.closeRequestedByArray { return }
-            view.statusChanged(.exited(exitCode: nil))
-            view.closeSurface()
-        }
+        guard let view = view(forSurfaceUserdata: userdata) else { return }
+        if processAlive, !view.closeRequestedByArray { return }
+        view.statusChanged(.exited(exitCode: nil))
+        view.closeSurface()
     }
 
     private static func commandLine(for launchProfile: LaunchProfile) -> String {
@@ -603,13 +610,17 @@ final class GhosttyTerminalView: NSView {
     }
 
     private func createSurface(app: ghostty_app_t) {
+        closeRequestedByArray = false
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         var config = ghostty_surface_config_new()
         config.platform_tag = GHOSTTY_PLATFORM_MACOS
         config.platform = ghostty_platform_u(
             macos: ghostty_platform_macos_s(nsview: Unmanaged.passUnretained(self).toOpaque())
         )
-        config.userdata = Unmanaged.passUnretained(self).toOpaque()
+        precondition(Self.nextSurfaceToken < UInt.max, "Ghostty surface token exhausted")
+        surfaceToken = Self.nextSurfaceToken
+        Self.nextSurfaceToken += 1
+        config.userdata = UnsafeMutableRawPointer(bitPattern: surfaceToken!)
         config.scale_factor = scale
         let configuredFontSize = TerminalDisplayConfig.surfaceFontSize(defaults: displayDefaults)
         config.font_size = configuredFontSize
@@ -630,6 +641,7 @@ final class GhosttyTerminalView: NSView {
         }
 
         guard surface != nil else {
+            surfaceToken = nil
             statusChanged(.error(message: "ghostty_surface_new returned nil"))
             return
         }
@@ -639,40 +651,23 @@ final class GhosttyTerminalView: NSView {
         statusChanged(.running)
         applyRequestedOcclusion()
         updateSurfaceSize()
-        startProcessExitPoller()
     }
 
-    private func startProcessExitPoller() {
-        // Poll ghostty_surface_process_exited at 250ms intervals. The
-        // close_surface_cb path is only triggered by explicit requestClose
-        // calls in this Ghostty build; natural shell exits (e.g. `exit`
-        // typed at the prompt) are only observable via this polling API.
-        // The exit code is delivered via the action_cb's child_exited message
-        // (currently a no-op); until that's wired through, we stamp nil.
-        // TODO: route action_cb's GHOSTTY_ACTION_CHILD_EXITED to capture the code.
-        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let surface = self.surface else { return }
-                if ghostty_surface_process_exited(surface) {
-                    self.processExitPoller?.invalidate()
-                    self.processExitPoller = nil
-                    self.statusChanged(.exited(exitCode: nil))
-                    self.closeSurface()
-                }
-            }
-        }
-        // .common mode keeps the timer firing during modal tracking, drag
-        // gestures, and menu sessions. Default scheduledTimer uses .default
-        // which would miss exits while the user holds a drag.
-        RunLoop.main.add(timer, forMode: .common)
-        processExitPoller = timer
+    /// Deliver only to the surface that emitted the event. The main queue may
+    /// run after a surface was explicitly closed or replaced; never dereference
+    /// a retired userdata token after that point.
+    static func handleGhosttyChildExited(userdataAddress: UInt, surfaceAddress: UInt) {
+        guard let view = view(forSurfaceUserdata: UnsafeMutableRawPointer(bitPattern: userdataAddress)),
+              view.surface.map({ UInt(bitPattern: $0) }) == surfaceAddress else { return }
+        view.qaProcessExitObservationCount += 1
+        view.statusChanged(.exited(exitCode: nil))
+        view.closeSurface()
     }
 
     private func closeSurface() {
-        processExitPoller?.invalidate()
-        processExitPoller = nil
         guard let surface else { return }
         self.surface = nil
+        surfaceToken = nil
         retireGhosttyLayer()
         ghostty_surface_free(surface)
         Self.liveSurfaceCount -= 1

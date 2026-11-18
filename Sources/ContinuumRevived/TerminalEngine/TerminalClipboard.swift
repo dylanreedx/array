@@ -109,7 +109,7 @@ final class TerminalClipboard {
 }
 
 /// Ghostty's C clipboard callbacks. `userdata` is the surface's userdata, the
-/// unretained `GhosttyTerminalView`. Ghostty raises these on the app thread
+/// unique surface token. Ghostty raises these on the app thread
 /// (key handling and `ghostty_app_tick` both run on main), so the view is
 /// reached synchronously; a stray off-main call is hopped to main.
 enum GhosttyClipboardBridge {
@@ -122,8 +122,7 @@ enum GhosttyClipboardBridge {
         let viewAddress = UInt(bitPattern: userdata)
         let stateAddress = state.map { UInt(bitPattern: $0) }
         return MainActor.assumeIsolated {
-            guard let pointer = UnsafeMutableRawPointer(bitPattern: viewAddress) else { return false }
-            let view = Unmanaged<GhosttyTerminalView>.fromOpaque(pointer).takeUnretainedValue()
+            guard let view = GhosttyTerminalView.view(forSurfaceUserdata: UnsafeMutableRawPointer(bitPattern: viewAddress)) else { return false }
             return view.completeClipboardRead(
                 location: location,
                 state: stateAddress.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
@@ -142,8 +141,7 @@ enum GhosttyClipboardBridge {
         let viewAddress = UInt(bitPattern: userdata)
         let stateAddress = state.map { UInt(bitPattern: $0) }
         MainActor.assumeIsolated {
-            guard let pointer = UnsafeMutableRawPointer(bitPattern: viewAddress) else { return }
-            let view = Unmanaged<GhosttyTerminalView>.fromOpaque(pointer).takeUnretainedValue()
+            guard let view = GhosttyTerminalView.view(forSurfaceUserdata: UnsafeMutableRawPointer(bitPattern: viewAddress)) else { return }
             view.confirmClipboardRead(
                 text: text,
                 state: stateAddress.flatMap { UnsafeMutableRawPointer(bitPattern: $0) },
@@ -172,8 +170,7 @@ enum GhosttyClipboardBridge {
         guard let text else { return }
         let address = UInt(bitPattern: userdata)
         let deliver: @MainActor () -> Void = {
-            guard let pointer = UnsafeMutableRawPointer(bitPattern: address) else { return }
-            let view = Unmanaged<GhosttyTerminalView>.fromOpaque(pointer).takeUnretainedValue()
+            guard let view = GhosttyTerminalView.view(forSurfaceUserdata: UnsafeMutableRawPointer(bitPattern: address)) else { return }
             view.writeClipboard(text, location: location, confirm: confirm)
         }
         if Thread.isMainThread {

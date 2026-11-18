@@ -385,6 +385,7 @@ check --terminal-clipboard-check
 check --terminal-cmd-w-check
 check --terminal-fills-tile-check
 check --terminal-focus-grab-check
+check --terminal-process-exit-event-check
 check --terminal-snapshot-tier-check
 check --terminal-theme-fidelity-check
 check --terminal-tmux-ambient-workspace-check
@@ -907,6 +908,7 @@ leg run_app_check .build/debug/Array --terminal-clipboard-check
 leg run_app_check .build/debug/Array --terminal-cmd-w-check
 leg run_app_check .build/debug/Array --terminal-fills-tile-check
 leg run_app_check .build/debug/Array --terminal-focus-grab-check
+leg run_app_check .build/debug/Array --terminal-process-exit-event-check
 leg run_app_check .build/debug/Array --terminal-snapshot-tier-check
 leg run_app_check .build/debug/Array --terminal-theme-fidelity-check
 leg run_app_check .build/debug/Array --terminal-tmux-ambient-workspace-check
