@@ -3131,6 +3131,8 @@ final class CanvasNSView: NSView, TokenThemed {
             canvasHistories[workspaceId]?.record(transaction)
         }
         notifyGeometryCommit(transaction)
+        // A drag can end with a tile far outside (or back inside) the viewport.
+        updateRendererViewportVisibility(full: true)
         if !pending.programmatic,
            [.moveTile, .resizeTile, .dockTile, .resizeTileToPreset].contains(pending.action) {
             let handled = pending.subjectTileIds.filter { id in

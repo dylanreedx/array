@@ -294,6 +294,7 @@ final class SharedTerminalMirrorView: NSView {
     // MARK: QA
 
     var qaTerminalView: GhosttyTerminalView? { terminal }
+    var qaRendererVisible: Bool { rendererVisible }
     var qaScreenText: String { terminal?.visibleText() ?? "" }
     /// The screen row by row (a rectangle, so a soft-wrapped line stays on
     /// its rows), as tmux's own capture of the host's pane has it.

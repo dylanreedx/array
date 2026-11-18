@@ -7562,7 +7562,8 @@ enum ContinuumApp {
             application.setActivationPolicy(.accessory)
             do {
                 let summary = try TerminalViewportVisibilityChecks.run()
-                print("ContinuumRevivedTerminalViewportVisibilityChecks passed: \(summary)")
+                let faces = try TerminalViewportVisibilityChecks.runFacesAndMirror()
+                print("ContinuumRevivedTerminalViewportVisibilityChecks passed: \(summary); \(faces)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

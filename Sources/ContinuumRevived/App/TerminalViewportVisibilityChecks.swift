@@ -132,4 +132,66 @@ enum TerminalViewportVisibilityChecks {
         }
         return summary + String(format: "; revealed %d draws/s, newest tick %d", reveal[1].draws, newest)
     }
+
+    /// Agent terminal faces and shared mirrors hear the same viewport signal.
+    /// The mirror is mounted inside a real tile so the production listener path
+    /// (`viewDidMoveToWindow` → enclosing tile) is what delivers it.
+    static func runFacesAndMirror() throws -> String {
+        let ghostty = try GhosttyRuntimeContext()
+        defer { ghostty.shutdown() }
+        let fixture = try AgentFaceChecks.Fixture(windowSize: NSSize(width: 1400, height: 900), ghostty: ghostty)
+        defer { fixture.tearDown() }
+        let command = try AgentFaceChecks.installWaitingClaude(in: fixture.bin)
+        let environment = fixture.environment(tmuxPath: nil, command: command)
+
+        let face = fixture.makeTile(width: 700, environment: environment)
+        defer { if face.face == .terminal { face.prepareForRemovalFromScene() } }
+        guard face.toggleFace(), fixture.pump(until: { !face.ghosttyRuntimesForVisibility.isEmpty }, timeout: 5) else {
+            throw CheckError(description: "agent tile never opened its terminal face")
+        }
+
+        let mirrorTile = Tile(
+            id: UUID(), kind: .note, title: "MIRROR",
+            frame: TileFrame(x: 760, y: 40, width: 500, height: 400),
+            zPosition: .fromLegacyRank(2), runtimeRef: nil, metadata: TileMetadata())
+        let mirrorHost = TileNSView(tile: mirrorTile)
+        fixture.canvas.install(tileView: mirrorHost, for: mirrorTile)
+        let mirror = SharedTerminalMirrorView()
+        mirror.frame = NSRect(x: 0, y: 0, width: 300, height: 200)
+        mirrorHost.addSubview(mirror)
+        guard mirror.qaRendererVisible else { throw CheckError(description: "mounted mirror starts hidden") }
+
+        func faceVisible() -> Bool? { face.ghosttyRuntimesForVisibility.first?.qaTerminalView?.qaLastAppliedGhosttyVisibility }
+        fixture.canvas.updateRendererViewportVisibility(full: true)
+        guard faceVisible() == true else { throw CheckError(description: "on-screen agent face is not visible") }
+
+        // Camera far away: neither is near the viewport any more.
+        fixture.canvas.setViewport(CanvasViewport(x: 20000, y: 0, zoom: 1))
+        fixture.canvas.updateRendererViewportVisibility(full: true)
+        fixture.pump(0.2)
+        guard faceVisible() == false else { throw CheckError(description: "off-screen agent face still renders") }
+        guard !mirror.qaRendererVisible else { throw CheckError(description: "off-screen shared mirror still renders") }
+
+        // Camera back: both wake.
+        fixture.canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        fixture.canvas.updateRendererViewportVisibility(full: true)
+        fixture.pump(0.2)
+        guard faceVisible() == true else { throw CheckError(description: "agent face was not woken on return") }
+        guard mirror.qaRendererVisible else { throw CheckError(description: "shared mirror was not woken on return") }
+
+        // A drag that ends far away sleeps the tile at drag end, with no settle pass.
+        let before = fixture.canvas.qaRendererViewportEdges
+        guard fixture.canvas.beginGeometryEdit(.moveTile, tileIds: [face.tile.id]) else {
+            throw CheckError(description: "could not begin a geometry edit")
+        }
+        let far = TileFrame(x: 30000, y: 40, width: 700, height: 520)
+        guard fixture.canvas.applySelectionFrames([face.tile.id: far]) else {
+            throw CheckError(description: "could not move the agent tile")
+        }
+        _ = fixture.canvas.commitGeometryEdit()
+        guard faceVisible() == false, fixture.canvas.qaRendererViewportEdges > before else {
+            throw CheckError(description: "a tile dragged far away kept rendering until the next settle")
+        }
+        return "agent face and mirror sleep off-screen, wake on return, drag end sleeps"
+    }
 }
