@@ -179,6 +179,25 @@ enum TerminalViewportVisibilityChecks {
         guard faceVisible() == true else { throw CheckError(description: "agent face was not woken on return") }
         guard mirror.qaRendererVisible else { throw CheckError(description: "shared mirror was not woken on return") }
 
+        // Array face, pan away and back, then Terminal face: the new surface
+        // must render at once, with no further camera step.
+        guard face.toggleFace(), fixture.pump(until: { face.face == .array }, timeout: 10) else {
+            throw CheckError(description: "agent tile never returned to its Array face")
+        }
+        fixture.canvas.setViewport(CanvasViewport(x: 20000, y: 0, zoom: 1))
+        fixture.canvas.updateRendererViewportVisibility(full: true)
+        fixture.pump(0.1)
+        fixture.canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+        fixture.canvas.updateRendererViewportVisibility(full: true)
+        fixture.pump(0.1)
+        guard face.toggleFace(), fixture.pump(until: { !face.ghosttyRuntimesForVisibility.isEmpty }, timeout: 5) else {
+            throw CheckError(description: "agent tile never reopened its terminal face")
+        }
+        fixture.pump(0.2)
+        guard faceVisible() == true, face.rendererVisible else {
+            throw CheckError(description: "terminal face reopened on screen after a pan stays occluded (blank)")
+        }
+
         // A drag that ends far away sleeps the tile at drag end, with no settle pass.
         let before = fixture.canvas.qaRendererViewportEdges
         guard fixture.canvas.beginGeometryEdit(.moveTile, tileIds: [face.tile.id]) else {

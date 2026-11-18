@@ -1656,6 +1656,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         terminalFaceSession = surface
         setContentView(surface.hostView)
         if start { surface.start() }
+        resyncViewportVisibilityWithCanvas()
         refreshRendererVisibility(force: true)
         refreshFaceSwitch()
         if window?.firstResponder === v2Composer?.textView || window?.firstResponder == nil {

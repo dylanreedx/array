@@ -2198,6 +2198,9 @@ run_app_check .build/debug/Array --managed-agent-page-zoom-check
 # and a relaunch reattaches.
 run_app_check .build/debug/Array --agent-face-switch-check
 run_app_check .build/debug/Array --agent-face-flip-check
+# Far terminals stop drawing and wake on return; an agent's Terminal face
+# opened after a pan in its Array face renders at once, not after a camera step.
+run_app_check .build/debug/Array --terminal-viewport-visibility-check
 # .plans/79 edge case 4: claude typed into a real shell tile (in this matrix's
 # isolated tmux, stand-in claude, fixture home), discovered and mapped to that
 # tile, offered in its band, and clicked: an agent tile beside it on the same
