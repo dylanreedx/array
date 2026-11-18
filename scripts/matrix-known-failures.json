@@ -52,7 +52,7 @@
     {
       "leg": "--tile-surface-residency-check",
       "kind": "known-red",
-      "reason": "Legacy list-renderer quiet camera cost already exceeds the unchanged 8.3 ms limit on pre-Wave1/2 base 7cc801d2. Fresh common-policy runs: base 21.57 ms, combined release 20.61 ms, all five arm populations correct. This documents the quiet-cost failure only; earlier behavioral failures remain release blockers.",
+      "reason": "The quiet camera arm now passes (3.9-6.9 ms against the 8.3 ms limit; it was 10.8-16.5 ms on 5beb8391's parent and 21.57 ms on base 7cc801d2 under common policy). The check still fails its next assertion: one live tile costs 8.6-10 ms per camera step on a quiet machine (11.7 before the whole-tile frame-post silencing) against 8.3 ms; what remains is AppKit scroll-view re-tiling plus composer and transcript layout. Earlier behavioral failures remain release blockers.",
       "evidence": "Lead memory clearance identifies residency as pre-existing. Fresh source/binary-stamped baseline: ~/array-scratch/release-features/release-0753-residency-legacy-base-7cc801d2/ (QA arm assertions only), paired common-policy logs: release-0753-residency-common-policy-AB/. Independent provenance audit in candidate-0753.md. Conductor full-gate postcheck requires the default-canvas opt-out success, all exact arm counts and this specific quiet-cost failure; other failures are not accepted.",
       "added": "2026-11-17",
       "expires": "2026-12-17"

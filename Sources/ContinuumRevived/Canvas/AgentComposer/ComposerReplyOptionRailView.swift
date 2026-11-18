@@ -31,6 +31,7 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
     var railHeight: CGFloat { Self.railHeight(zoom: pageZoom) }
 
     private let scrollView = NSScrollView(frame: .zero)
+    private var scrollConstraints: [NSLayoutConstraint] = []
     private let stack = NSStackView(frame: .zero)
     private var options: [AgentReplyOption] = []
 
@@ -104,6 +105,10 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
         )
     }
 
+    override var isHidden: Bool {
+        didSet { if oldValue != isHidden { mountScrollView(!isHidden) } }
+    }
+
     private func configureViews() {
         wantsLayer = true
         isHidden = true
@@ -127,9 +132,7 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
         scrollView.scrollerStyle = .overlay
         scrollView.documentView = stack
         scrollView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(scrollView)
-
-        NSLayoutConstraint.activate([
+        scrollConstraints = [
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
@@ -137,7 +140,22 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
             stack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
             stack.bottomAnchor.constraint(equalTo: scrollView.contentView.bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-        ])
+        ]
+        mountScrollView(!isHidden)
+    }
+
+    /// An empty rail is hidden, but a hidden view's constraints are still solved,
+    /// so its scroll view was re-framed and re-tiled on every camera step. It
+    /// joins the hierarchy only while the rail has content.
+    private func mountScrollView(_ mounted: Bool) {
+        if mounted {
+            guard scrollView.superview == nil else { return }
+            addSubview(scrollView)
+            NSLayoutConstraint.activate(scrollConstraints)
+        } else {
+            NSLayoutConstraint.deactivate(scrollConstraints)
+            scrollView.removeFromSuperview()
+        }
     }
 
     @objc private func chipPressed(_ sender: NSButton) {

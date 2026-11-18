@@ -1203,7 +1203,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     override func layout() {
         super.layout()
         awarenessBorder.frame = bounds.insetBy(dx: 2, dy: 2)
-
+        // Chrome nothing observes: its re-framing on every camera step would
+        // otherwise post a frame-change notification per view.
+        silenceFrameChangeNotifications()
     }
 
     func applyAwarenessSignal(_ signal: AgentSignal?) {
