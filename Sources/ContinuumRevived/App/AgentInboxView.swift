@@ -2276,6 +2276,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// frozen desktop order (P3.4) and applying it here is what makes "row N on
     /// screen" and "rows[N]" the same thing for every accessor below.
     func reload(rows newRows: [AgentInboxRow]) {
+        cancelOffMainApply()
         defer { syncElapsedTickTimer() }
         // P6.6: status transitions belong to this row-model boundary, not to
         // `viewFor`, so offscreen rows announce on the push that changed them.
@@ -2430,6 +2431,125 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// `Equatable` makes exact rather than a guess. (Found in cross-review; the
     /// change-set-only version showed a stale project name after a rename.)
     func apply(rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet, chatterPatchedAgentIDs: Set<UUID>? = nil) {
+        if newRows.count >= Self.offMainRowThreshold {
+            enqueueOffMainApply(rows: newRows, changed: changed, chatterPatchedAgentIDs: chatterPatchedAgentIDs)
+            return
+        }
+        cancelOffMainApply()
+        applyNow(rows: newRows, changed: changed, chatterPatchedAgentIDs: chatterPatchedAgentIDs, model: nil)
+    }
+
+    // MARK: - Off-main display (a long list's push)
+
+    /// From this many agents a push derives its display on a serial queue and
+    /// swaps the answer in on main. A shorter list is cheap enough that the
+    /// derivation stays inline, which keeps every short-list push synchronous.
+    static let offMainRowThreshold = 500
+    /// A held swap never waits longer than this for a camera gesture to end.
+    static let offMainHoldCap: TimeInterval = 3
+
+    /// True while the camera is moving; a ready swap waits for it to rest.
+    var holdsDisplaySwap: () -> Bool = { false }
+
+    private struct PendingOffMainApply {
+        var rows: [AgentInboxRow]
+        var changed: AgentsBoardChangeSet
+        var chatterPatchedAgentIDs: Set<UUID>?
+        var epoch: Int
+        var holdStartedAt: TimeInterval?
+    }
+    private var pendingOffMain: PendingOffMainApply?
+    private let offMainLatest = InboxDisplayLatest()
+    private static let displayQueue = DispatchQueue(label: "dev.arrayapp.sidebar-display", qos: .userInitiated)
+    /// Bumped by every synchronous derivation: view state (scope, search, folds,
+    /// sort, shelves) only ever changes through one, so a model built before the
+    /// bump was built from state that is gone.
+    private var displayEpoch = 0
+    /// Pushes handed to the queue, and swaps applied; for the witness.
+    /// A push is on the queue or waiting for the camera to rest.
+    var hasPendingOffMainApply: Bool { pendingOffMain != nil }
+    private(set) var qaOffMainRequestCount = 0
+    private(set) var qaOffMainSwapCount = 0
+    /// Main-thread time spent applying swapped-in models, for the witness: the
+    /// push itself only hands the snapshot to the queue.
+    private(set) var qaOffMainSwapNanos: UInt64 = 0
+
+    private func cancelOffMainApply() {
+        pendingOffMain = nil
+        _ = offMainLatest.next()
+    }
+
+    private func enqueueOffMainApply(
+        rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet, chatterPatchedAgentIDs: Set<UUID>?
+    ) {
+        qaOffMainRequestCount += 1
+        if var pending = pendingOffMain {
+            // Latest wins, but nothing the earlier push moved may be forgotten.
+            pending.rows = newRows
+            pending.changed = AgentsBoardChangeSet(
+                added: pending.changed.added.union(changed.added),
+                updated: pending.changed.updated.union(changed.updated),
+                removed: pending.changed.removed.union(changed.removed))
+            if let kept = pending.chatterPatchedAgentIDs, let incoming = chatterPatchedAgentIDs {
+                pending.chatterPatchedAgentIDs = kept.union(incoming)
+            } else {
+                pending.chatterPatchedAgentIDs = nil
+            }
+            pending.epoch = displayEpoch
+            pendingOffMain = pending
+        } else {
+            pendingOffMain = PendingOffMainApply(
+                rows: newRows, changed: changed, chatterPatchedAgentIDs: chatterPatchedAgentIDs,
+                epoch: displayEpoch, holdStartedAt: nil)
+        }
+        let pending = pendingOffMain!
+        historyReuseHint = pending.chatterPatchedAgentIDs
+        let inputs = displayInputs(for: pending.rows)
+        historyReuseHint = nil
+        let generation = offMainLatest.next()
+        let latest = offMainLatest
+        InboxDisplayHandoff.run(inputs, generation: generation, latest: latest, queue: Self.displayQueue) { [weak self] model in
+            self?.offMainModelReady(model, generation: generation)
+        }
+    }
+
+    private func offMainModelReady(_ model: InboxDisplayModel, generation: Int) {
+        guard generation == offMainLatest.current, var pending = pendingOffMain else { return }
+        if holdsDisplaySwap() {
+            let now = ProcessInfo.processInfo.systemUptime
+            let started = pending.holdStartedAt ?? now
+            if now - started < Self.offMainHoldCap {
+                pending.holdStartedAt = started
+                pendingOffMain = pending
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.offMainModelReady(model, generation: generation)
+                }
+                return
+            }
+        }
+        pendingOffMain = nil
+        qaOffMainSwapCount += 1
+        // View state moved since the snapshot: derive again from it, inline.
+        let usable = pending.epoch == displayEpoch ? model : nil
+        let started = DispatchTime.now().uptimeNanoseconds
+        applyNow(rows: pending.rows, changed: pending.changed,
+                 chatterPatchedAgentIDs: pending.chatterPatchedAgentIDs, model: usable)
+        qaOffMainSwapNanos += DispatchTime.now().uptimeNanoseconds - started
+    }
+
+    /// Settle a push that is still on the queue (a check, a teardown): derive and
+    /// apply it now.
+    func flushOffMainApplyForQA() {
+        guard let pending = pendingOffMain else { return }
+        cancelOffMainApply()
+        applyNow(rows: pending.rows, changed: pending.changed,
+                 chatterPatchedAgentIDs: pending.chatterPatchedAgentIDs, model: nil)
+    }
+
+    private func applyNow(
+        rows newRows: [AgentInboxRow], changed: AgentsBoardChangeSet, chatterPatchedAgentIDs: Set<UUID>?,
+        model: InboxDisplayModel?
+    ) {
         if foldMotion.isAnimating {
             let byId = newRows.reduce(into: [UUID: AgentInboxRow]()) { $0[$1.id] = $1 }
             let sameGeometry = rows.allSatisfy { previous in
@@ -2460,7 +2580,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // time here would hand `applyRows` its own answer as the previous one and
         // P2D.4's disclosure-moved rows would go unredrawn.
         let lifted = liftCrossfadeGhosts(from: rows, to: newRows)
-        applyRows(newRows, changed: changed, chatterPatchedAgentIDs: chatterPatchedAgentIDs)
+        applyRows(newRows, changed: changed, chatterPatchedAgentIDs: chatterPatchedAgentIDs, model: model)
         if foldMotion.isAnimating {
             let keys = Set(foldMotion.poses.keys)
             foldMotion.cover(items.indices.compactMap { index in
@@ -2472,7 +2592,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         completePendingAdvance(selectionOnEntry: selectionOnEntry)
     }
 
-    private func applyRows(_ newRows: [AgentInboxRow], changed: AgentsBoardChangeSet, chatterPatchedAgentIDs: Set<UUID>?) {
+    private func applyRows(
+        _ newRows: [AgentInboxRow], changed: AgentsBoardChangeSet, chatterPatchedAgentIDs: Set<UUID>?,
+        model: InboxDisplayModel? = nil
+    ) {
         // P3.8: the SCOPE decides what is on screen, so the diff is against the
         // filtered list — an agent that arrived in a project you are not scoped to
         // has not changed this list at all. `allRows` and the popup's menu are
@@ -2500,9 +2623,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // Only successful chatter patches leave the rest of the row values
         // intact. A full rebuild can change branches, scope, or family facts
         // independently of the activity change set used to redraw cells.
-        historyReuseHint = chatterPatchedAgentIDs
-        let next = display(from: newRows)
-        historyReuseHint = nil
+        let next: [InboxListItem]
+        if let model {
+            next = applyDisplayModel(model)
+        } else {
+            historyReuseHint = chatterPatchedAgentIDs
+            next = display(from: newRows)
+            historyReuseHint = nil
+        }
         // A History card draws its family's date and helper count, which live
         // beside the row model: a helper's later turn moves the date without
         // changing the root row, so those cards are stale too.
@@ -2667,6 +2795,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// already hidden under its parent, and the header would say it is holding a row
     /// that unfolding it does not produce.
     private func display(from incomingRows: [AgentInboxRow]) -> [InboxListItem] {
+        displayEpoch += 1
         let model = InboxDisplayBuilder.build(displayInputs(for: incomingRows))
         return applyDisplayModel(model)
     }

@@ -494,3 +494,33 @@ nonisolated enum InboxDisplayBuilder {
         return projection
     }
 }
+
+/// The newest request number, readable from the queue and from main.
+final class InboxDisplayLatest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var current: Int { lock.lock(); defer { lock.unlock() }; return value }
+    func next() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+}
+
+/// Runs one build on the serial queue, skipping it when a newer request has
+/// already been made, and hands the answer to main.
+nonisolated enum InboxDisplayHandoff {
+    static func run(
+        _ inputs: InboxDisplayInputs, generation: Int, latest: InboxDisplayLatest, queue: DispatchQueue,
+        deliver: @escaping @MainActor (InboxDisplayModel) -> Void
+    ) {
+        queue.async {
+            guard latest.current == generation else { return }
+            let model = InboxDisplayBuilder.build(inputs)
+            guard latest.current == generation else { return }
+            let box = UncheckedModel(model)
+            DispatchQueue.main.async { MainActor.assumeIsolated { deliver(box.model) } }
+        }
+    }
+}
+
+private struct UncheckedModel: @unchecked Sendable {
+    let model: InboxDisplayModel
+    init(_ model: InboxDisplayModel) { self.model = model }
+}

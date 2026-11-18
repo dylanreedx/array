@@ -16535,6 +16535,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         sidebar.agentInbox.onWakeRerender = { [weak self] in
             self?.reloadWorkspaceSidebar(rebuildAgentActivity: false)
         }
+        sidebar.agentInbox.holdsDisplaySwap = { [weak self] in
+            self?.canvasView?.isCameraInMotion ?? false
+        }
         sidebar.agentInbox.latestAssistantLineProvider = { [weak self] agentId in
             self?.agentSupervisor.latestAssistantLine(for: AgentID(rawValue: agentId))
         }
@@ -46642,6 +46645,12 @@ extension AppDelegate {
             app.applicationDidResignActive(
                 Notification(name: NSApplication.didResignActiveNotification, object: NSApplication.shared))
         }
+        // A long list applies a push off main, a moment after it; a witness that
+        // reads the rows next waits for that, outside any timed window.
+        func settle() {
+            let end = Date().addingTimeInterval(3)
+            while inbox.hasPendingOffMainApply, Date() < end { spin(0.01) }
+        }
         func activate() {
             app.applicationDidBecomeActive(
                 Notification(name: NSApplication.didBecomeActiveNotification, object: NSApplication.shared))
@@ -46654,6 +46663,7 @@ extension AppDelegate {
             let start = DispatchTime.now().uptimeNanoseconds
             body()
             let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+            settle()
             return Cost(rebuilds: WorkspaceSwitchCounters.activitySnapshotRebuilds - rebuilds,
                         reads: AtomicWriter.readCount - reads,
                         rowBuilds: app.qaInboxRowBuildCount - rowBuilds, ms: ms)
@@ -46991,6 +47001,8 @@ extension AppDelegate {
         let reloadsBefore = inbox.qaFullReloadCount
         let reordersBefore = inbox.qaIncrementalReorderCount
         let nanosBefore = app.qaAgentSurfacePushNanos
+        let swapNanosBefore = inbox.qaOffMainSwapNanos
+        let swapsBefore = inbox.qaOffMainSwapCount
         let steps = 80
         var turn = 1
         for step in 0..<steps {
@@ -47010,7 +47022,11 @@ extension AppDelegate {
         let reloads = inbox.qaFullReloadCount - reloadsBefore
         let reorders = inbox.qaIncrementalReorderCount - reordersBefore
         let pushes = app.qaAgentSurfacePushCount - pushesBefore
-        let pushMs = Double(app.qaAgentSurfacePushNanos - nanosBefore) / 1_000_000
+        // A long list derives its display off main and applies it later, outside
+        // the push, so the main-thread cost is the push plus the swaps.
+        let swapMs = Double(inbox.qaOffMainSwapNanos - swapNanosBefore) / 1_000_000
+        let swaps = inbox.qaOffMainSwapCount - swapsBefore
+        let pushMs = Double(app.qaAgentSurfacePushNanos - nanosBefore) / 1_000_000 + swapMs
 
         // Oracle: what is on screen is what a full build produces.
         let full = app.sidebarInboxRows()
@@ -47020,14 +47036,36 @@ extension AppDelegate {
             return !shown.matchesIgnoringLiveElapsed(fresh)
         }
         var failures: [String] = []
+        if swaps == 0 { failures.append("a \(restoredCount + streamingCount)-agent list never derived its display off main") }
+        // A camera gesture holds the swap: the push derives, but nothing is applied
+        // until the camera rests, then the held push lands.
+        do {
+            var cameraMoving = true
+            let previousHold = inbox.holdsDisplaySwap
+            inbox.holdsDisplaySwap = { cameraMoving }
+            let requestsBeforeHold = inbox.qaOffMainRequestCount
+            let swapsBeforeHold = inbox.qaOffMainSwapCount
+            let held = streaming[0]
+            supervisor.qaDeliver(.turnCompleted(threadId: thread(held), turnId: "t-hold", outcome: .completed, errorMessage: nil), to: held)
+            supervisor.qaDeliver(.turnStarted(threadId: thread(held), turnId: "t-hold2"), to: held)
+            spin(0.5)
+            if inbox.qaOffMainRequestCount == requestsBeforeHold { failures.append("hold: the push never reached the off-main queue") }
+            if inbox.qaOffMainSwapCount != swapsBeforeHold { failures.append("hold: a model was swapped in while the camera was moving") }
+            cameraMoving = false
+            spin(0.5)
+            if inbox.qaOffMainSwapCount == swapsBeforeHold || inbox.hasPendingOffMainApply {
+                failures.append("hold: the held push did not land once the camera rested")
+            }
+            inbox.holdsDisplaySwap = previousHold
+        }
         if builds > 6 { failures.append("\(steps) steps over \(restoredCount + streamingCount) agents built every sidebar row \(builds) times (limit 6)") }
         // The view's own apply (re-sort, re-render of a moved row) is still O(rows); this bound
         // guards the row-build half, which took the legacy push from ~24 s to ~12 s here.
         if pushMs > 16_000 { failures.append(String(format: "main-thread push time %.0f ms over %d pushes (limit 16000)", pushMs, pushes)) }
         if reloads > 2 { failures.append("the table was rendered whole \(reloads) times (limit 2)") }
         if !stale.isEmpty { failures.append("\(stale.count) rows differ from a full build") }
-        let line = String(format: "%d agents, %d streaming, 8 s: %d pushes, %d full row builds, %d per-agent patches, %d table reloads, %d in-place moves, %.0f ms main-thread push time",
-                          restoredCount + streamingCount, streamingCount, pushes, builds, patches, reloads, reorders, pushMs)
+        let line = String(format: "%d agents, %d streaming, 8 s: %d pushes, %d full row builds, %d per-agent patches, %d table reloads, %d in-place moves, %d off-main swaps (%.0f ms), %.0f ms main-thread push time",
+                          restoredCount + streamingCount, streamingCount, pushes, builds, patches, reloads, reorders, swaps, swapMs, pushMs)
         if !failures.isEmpty {
             throw Failure(description: "SidebarStreamCost RED (\(line)):\n  " + failures.joined(separator: "\n  "))
         }
