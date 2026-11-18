@@ -189,6 +189,21 @@ enum CharacterSoundsChecks {
                                           kind: .commandExecutionApproval), to: id)
         }
 
+        // A streamed text delta cannot signal, so it must not pay the per-tile lookup
+        // of the sound overrides (an O(tiles) scan of the canvas on every token).
+        delegate.qaEagerSoundOverrideLookup = ProcessInfo.processInfo.environment["WITNESS_EAGER_TILE_LOOKUP"] != nil
+        let lookupsBefore = delegate.qaSoundOverrideLookups
+        let leadThread = AgentSupervisor.threadId(for: lead)
+        for index in 0..<300 {
+            _ = deliver(.contentDelta(threadId: leadThread, turnId: "stream", streamKind: .assistant, delta: "t\(index) "),
+                        to: lead, after: 0)
+        }
+        try expect(delegate.qaSoundOverrideLookups == lookupsBefore,
+                   "300 streamed deltas must not look up tile sound overrides: \(delegate.qaSoundOverrideLookups - lookupsBefore) lookups")
+        _ = deliver(.turnStarted(threadId: leadThread, turnId: "stream-turn"), to: lead, after: 0)
+        try expect(delegate.qaSoundOverrideLookups == lookupsBefore + 1,
+                   "an event that can signal still looks up the overrides: \(delegate.qaSoundOverrideLookups - lookupsBefore) lookups")
+
         // Toggle off (the default): nothing, for every moment.
         try expect(!AgentCharacterSoundConfig.isEnabled(defaults), "character sounds are off by default")
         var silent = spawn(first) + finishTurn(first) + finishTurn(lead, lasting: 40) + finishTurn(second, .failed) + request(lead)
