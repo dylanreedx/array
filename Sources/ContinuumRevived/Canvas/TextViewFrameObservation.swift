@@ -31,9 +31,9 @@ extension NSView {
     /// labels, badges and buttons that nothing observes, and a zoom step re-frames
     /// them on every tile: on a quiet 12-tile canvas those posts were ~8 of the
     /// ~11 ms layout pass (`--tile-surface-residency-check`, 10.8 -> 2.6 ms per
-    /// step). Scroll and clip views are left alone, since their owners observe them.
+    /// step). Scroll, clip and text views are left alone: AppKit observes them itself.
     func silenceFrameChangeNotifications() {
-        if !(self is NSScrollView), !(self is NSClipView), postsFrameChangedNotifications {
+        if !(self is NSScrollView), !(self is NSClipView), !(self is NSTextView), postsFrameChangedNotifications {
             postsFrameChangedNotifications = false
         }
         for child in subviews { child.silenceFrameChangeNotifications() }
