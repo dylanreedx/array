@@ -105,7 +105,112 @@ private func checkCoalescedSurfacePatch() {
            "draining must clear the accumulated categories")
 }
 
+
+/// A long streamed reply (code fences, lists, a table, headings, quotes) is fed
+/// token by token through two projections: the original whole-reply parse and the
+/// incremental open-tail parse. Every intermediate document must be identical, and
+/// the bytes the incremental parse reads per delta must stay bounded by the open
+/// block, not grow with the reply.
+private func checkIncrementalOpenStreamParse() {
+    let thread = "incremental-parse-thread"
+    var sections: [String] = []
+    for i in 1...14 {
+        sections.append("## Step \(i)\n\nParagraph \(i) explains the change with `inline code`, **bold** text and a [link](https://example.com/\(i)).")
+        sections.append("- first item \(i)\n- second item with *emphasis*\n  - nested point\n- third item")
+        sections.append("```swift\nlet value\(i) = tiles.filter { $0.id == \(i) }\nprint(value\(i))\n```")
+        sections.append("| name | count |\n|------|-------|\n| alpha | \(i) |\n| beta | \(i * 2) |")
+        sections.append("> a quoted remark number \(i)")
+        sections.append("1. one\n2. two\n3. three")
+    }
+    let reply = sections.joined(separator: "\n\n")
+    // Tokens: runs of 1-9 characters, deterministic.
+    var tokens: [String] = []
+    var cursor = reply.startIndex
+    var step = 0
+    while cursor < reply.endIndex {
+        let length = 1 + (step * 7) % 9
+        let end = reply.index(cursor, offsetBy: length, limitedBy: reply.endIndex) ?? reply.endIndex
+        tokens.append(String(reply[cursor..<end]))
+        cursor = end
+        step += 1
+    }
+    expect(tokens.count >= 300, "incremental parse witness must stream at least 300 tokens; got \(tokens.count)")
+
+    let baseClock = DeterministicProjectionClock()
+    let fastClock = DeterministicProjectionClock()
+    var base = AgentTranscriptProjection(threadId: thread, monotonicNow: baseClock.now)
+    var fast = AgentTranscriptProjection(threadId: thread, monotonicNow: fastClock.now)
+    base.incrementalOpenStreamParse = false
+    fast.incrementalOpenStreamParse = ProcessInfo.processInfo.environment["WITNESS_FORCE_FULL_PARSE"] == nil
+    base.ingest(.turnStarted(threadId: thread, turnId: "turn-inc"))
+    fast.ingest(.turnStarted(threadId: thread, turnId: "turn-inc"))
+
+    var firstDivergence: Int?
+    var maxTailBytes = 0, lateBaseBytes = 0, lateFastBytes = 0
+    for (index, token) in tokens.enumerated() {
+        baseClock.advance(0.05); fastClock.advance(0.05)
+        base.ingest(.contentDelta(threadId: thread, turnId: "turn-inc", streamKind: .assistant, delta: token))
+        fast.ingest(.contentDelta(threadId: thread, turnId: "turn-inc", streamKind: .assistant, delta: token))
+        let a = base.document.entries.map { $0.blocks.map(resetRevisions) }
+        let b = fast.document.entries.map { $0.blocks.map(resetRevisions) }
+        if a != b, firstDivergence == nil { firstDivergence = index }
+        maxTailBytes = max(maxTailBytes, fast.streamingLastParsedBytes)
+        if index >= tokens.count - 20 {
+            lateBaseBytes = max(lateBaseBytes, base.streamingLastParsedBytes)
+            lateFastBytes = max(lateFastBytes, fast.streamingLastParsedBytes)
+        }
+    }
+    base.ingest(.turnCompleted(threadId: thread, turnId: "turn-inc", outcome: .completed, errorMessage: nil))
+    fast.ingest(.turnCompleted(threadId: thread, turnId: "turn-inc", outcome: .completed, errorMessage: nil))
+    expect(firstDivergence == nil,
+           "incremental open-stream parse diverged from the whole-reply parse at token \(firstDivergence ?? -1)")
+    expect(base.document.entries.map { $0.blocks.map(resetRevisions) } == fast.document.entries.map { $0.blocks.map(resetRevisions) },
+           "final streamed document must equal the whole-reply parse")
+    expect(lateBaseBytes > 4_000, "the whole-reply parse must read the entire reply at the end (\(lateBaseBytes) bytes)")
+    expect(lateFastBytes * 6 < lateBaseBytes && maxTailBytes < 1_500,
+           "incremental parse must read O(open block), not O(reply): late \(lateFastBytes) vs \(lateBaseBytes) bytes, max tail \(maxTailBytes)")
+}
+
+/// Tricky Markdown streamed one character at a time: the incremental parse must
+/// give exactly the whole-source parse at every prefix, chaining `previous` as the
+/// projection does. Syntax that can reach back (reference definitions, footnotes,
+/// CR line endings) falls back to the full parse and must still match.
+private func checkIncrementalParserCorpus() {
+    let docs: [String] = [
+        "See [the docs][d] and more.\n\nAnother paragraph.\n\n[d]: https://example.com/docs\n\nAfter the definition.",
+        "line one\r\nline two\r\n\r\n- item\r\n- item two\r\n\r\n```\r\ncode\r\n```\r\n",
+        "Title\n=====\n\nSubtitle\n---\n\nplain text after\n---\n\n* * *\n\nend",
+        "<div>\nhello\n\nworld\n</div>\n\nafter the html block\n\n<pre>\nkeep\n\nblank\n</pre>\n\nlast",
+        "- a\n\n  more of a\n\n- b\n\n   para of b\n\n1. one\n\n   two\n2. three\n\nafter",
+        "> quote line\n> - quoted item\n> more\n\ntext\n\n> second\n\n> third",
+        "```swift\nlet a = 1\n\n\nlet b = 2\n```\n\ntext\n\n~~~\nopen fence with a blank\n\nstill code",
+        "- [ ] todo\n- [x] done\n  - [ ] nested\n\nParagraph with ~~strike~~ and `code` and https://example.com autolink.",
+        "A claim[^1] with a note.\n\n[^1]: the footnote body\n\nTrailing.",
+        "| a | b |\n|---|---|\n| 1 | 2 |\ntext glued to the table\n| 3 | 4 |\n\nafter\n\n| c |\n|---|\n| x |",
+        "para\n| x | y |\n|---|---|\n| 1 | 2 |\n\ntail",
+        "    indented code\n\n    more code\n\nparagraph\n\n\n\n# heading\n#no space\n\n## two ##",
+    ]
+    let parser = MarkdownAgentMarkupParser()
+    let entry = AgentNodeID(rawValue: "entry:corpus")!
+    for (docIndex, doc) in docs.enumerated() {
+        var cache = AgentStreamingParseCache()
+        var prevFull: [AgentBlock] = [], prevFast: [AgentBlock] = []
+        var soFar = ""
+        var diverged: Int?
+        for (i, character) in doc.enumerated() {
+            soFar.append(character)
+            let full = parser.parse(soFar, entryID: entry, previous: prevFull)
+            let fast = parser.parseIncremental(soFar, entryID: entry, previous: prevFast, cache: &cache)
+            prevFull = full.blocks; prevFast = fast.blocks
+            if full != fast, diverged == nil { diverged = i }
+        }
+        expect(diverged == nil, "incremental parse diverged on corpus document \(docIndex) at character \(diverged ?? -1)")
+    }
+}
+
 func runAgentTranscriptProjectionChecks() {
+    checkIncrementalOpenStreamParse()
+    checkIncrementalParserCorpus()
     checkSteeringPreservesRequestTiming()
     checkAssistantDeltasSkipSeparatorSourceReads()
     checkCoalescedSurfacePatch()
