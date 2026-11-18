@@ -11777,13 +11777,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// (headless) simply have nothing to key on here; they still reach the dock
     /// count and the phone.
     private func agentStatusesByTileId() -> [UUID: AgentStatus] {
-        var statuses: [UUID: AgentStatus] = [:]
-        for row in AgentsBoardProjection.rows(from: agentActivity.snapshot)
-        where agentActivity.agentIdentities.contains(row.agentId) {
-            guard let tileId = row.tileId else { continue }
-            statuses[tileId] = row.status
+        AgentsBoardProjection.statusesByTile(from: agentActivity.snapshot) {
+            agentActivity.agentIdentities.contains($0)
         }
-        return statuses
     }
 
     /// Rebuild once, then push that one value to all four surfaces.

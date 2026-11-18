@@ -1881,7 +1881,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
 
     /// What a row in the ownership layout is asking the user, in a few words, or
     /// nil. The asking row's own words when it declared them; otherwise its kind.
-    static func ask(_ row: AgentInboxRow) -> String? {
+    nonisolated static func ask(_ row: AgentInboxRow) -> String? {
         if case .needsYou(let ask)? = row.selfReportLine { return ask }
         switch row.state {
         case .approval: return "approve a request"

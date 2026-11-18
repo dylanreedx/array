@@ -214,8 +214,35 @@ public enum AgentsBoardProjection {
         rows(from: snapshot).filter { $0.status == .needsAttention }
     }
 
+    /// The number of agents asking for attention. Counts the snapshot directly:
+    /// the answer does not depend on order, so it does not build and sort a row
+    /// per agent (a sidebar push at 2,000+ agents paid for that sort twice).
     public static func attentionCount(from snapshot: ActivityLogSnapshot) -> Int {
-        approvalsInboxRows(from: snapshot).count
+        snapshot.byAgent.values.reduce(into: 0) { count, activity in
+            if activity.status == .needsAttention { count += 1 }
+        }
+    }
+
+    /// Each tile's agent status, for the agents `including` admits. Two agents on
+    /// one tile resolve the way the sorted rows always did: the one that sorts
+    /// last wins. The sort itself is only paid for when that actually happens.
+    public static func statusesByTile(
+        from snapshot: ActivityLogSnapshot,
+        including: (UUID) -> Bool
+    ) -> [UUID: AgentStatus] {
+        var statuses: [UUID: AgentStatus] = [:]
+        var collided = false
+        for (agentId, activity) in snapshot.byAgent where including(agentId) {
+            guard let tileId = activity.tileId else { continue }
+            if statuses.updateValue(activity.status, forKey: tileId) != nil { collided = true }
+        }
+        guard collided else { return statuses }
+        statuses = [:]
+        for row in rows(from: snapshot) where including(row.agentId) {
+            guard let tileId = row.tileId else { continue }
+            statuses[tileId] = row.status
+        }
+        return statuses
     }
 
     public static func respondableRequest(in activity: AgentActivity) -> ApprovalResponseTarget? {

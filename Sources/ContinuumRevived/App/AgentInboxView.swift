@@ -820,13 +820,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         render(display(from: allRows))
     }
 
-    /// Saved choices win. Production starts open; legacy fixtures may opt into automatic folding.
-    private func isFolded(_ parentId: UUID) -> Bool {
-        if let open = foldChoices[parentId] { return !open }
-        guard foldsUntouchedGroups else { return false }
-        guard let rollup = rollupsByParent[parentId] else { return true }
-        return rollup.needsYou == 0 && rollup.unopenedFailed == 0
-    }
     // Ticket: docs/38-tickets/94-sidebar-native-ux/P6.5-child-fanout-attention-rollup.md
     /// Parents whose remainder affordance has been opened. This is view-local
     /// presentation state: it changes how many children are inline, never the
@@ -1874,47 +1867,6 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         "\(remainder.hiddenDescendantCount) folded"
     }
 
-    /// The Ledger's head: "For you" (blocking incidents, one line each) and
-    /// "Other updates" grouped by cause, with Clear N on the first heading. No
-    /// heading is drawn for nothing; the Quiet inbox draws its own head.
-    private func sidebarHeadItems() -> [InboxListItem] {
-        guard sidebarLayout == .ledger else { return quietInboxHeadItems() }
-        let blocking = sidebarIncidents.filter(\.isBlocking)
-        let updates = sidebarIncidents.filter { !$0.isBlocking }
-        var clear = sidebarClearIDs.count
-        var result: [InboxListItem] = []
-        if !blocking.isEmpty {
-            result.append(.sectionLabel(SidebarSectionLabel(
-                kind: .forYou, title: "For you", count: blocking.count, clearCount: clear)))
-            clear = 0
-            result.append(contentsOf: blocking.map(InboxListItem.incident))
-        }
-        if !updates.isEmpty || clear > 0 {
-            result.append(.sectionLabel(SidebarSectionLabel(
-                kind: .otherUpdates, title: updates.isEmpty ? "Updates" : "Other updates",
-                count: nil, clearCount: clear)))
-            result.append(contentsOf: updates.map(InboxListItem.incident))
-        }
-        return result
-    }
-
-    /// The Quiet inbox's head (SidebarQuietInboxViews.swift).
-    private func quietInboxHeadItems() -> [InboxListItem] { quietInboxHead(familyChips: sidebarFamilyChips) }
-
-    /// Recompute the shared core over the rows the list is drawing.
-    private func updateSidebarCore(liveRows: [AgentInboxRow], shownIDs: Set<UUID>) {
-        let standing = standingLeadIDs
-        sidebarClearIDs = SidebarClear.eligibleIDs(rows: liveRows, standing: standing)
-        sidebarIncidents = SidebarIncidentDismissals.visible(
-            SidebarIncidents.build(rows: liveRows), dismissed: dismissedIncidents, rows: liveRows)
-        var tallies: [UUID: SidebarLeadTally] = [:]
-        for lead in liveRows where lead.depth == 0 && parentsWithChildren.contains(lead.id) {
-            tallies[lead.id] = SidebarLeadTally.tally(leadId: lead.id, rows: liveRows, shownIDs: shownIDs)
-        }
-        sidebarTallies = tallies
-        sidebarFamilyChips = sidebarLayout == .quietInbox ? SidebarQuietInbox.familyChips(rows: liveRows) : []
-    }
-
     @objc private func headerBackgroundDidChange() {
         headerPattern.style = SidebarHeaderBackground.resolve(in: indicatorDefaults)
     }
@@ -2600,6 +2552,35 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             let slides = sortMode != .newest && next.count <= Self.rowMotionRowLimit
                 && window != nil && !prefersReducedMotion()
             let previousY = slides ? drawnRowMinYs() : [:]
+            // A short list whose agents only changed places (a streaming agent
+            // re-sorting) draws no row motion, so `render` would rebuild every
+            // card to move a few. Move them in place instead; the survivors keep
+            // their cells and glide exactly as they do after a whole render.
+            if next.count <= Self.rowMotionRowLimit, !rows.isEmpty,
+               Set(rows.map(\.id)) == Set(next.compactMap(\.agentRow).map(\.id)) {
+                let changedValues = Set(next.compactMap(\.agentRow).filter { row in
+                    previousByID[row.id].map { !row.matchesIgnoringLiveElapsed($0) } ?? true
+                }.map(\.id))
+                let keptSelection = selectedRows.map(\.id)
+                if applyScopeIncrementally(next, previousRollups: previousRollups,
+                    changedAgentIDs: changed.touched.union(changedValues).union(historyPresentationChanged),
+                    previousTallies: previousTallies,
+                    preservingAgentRows: true, allowingMoves: true, anchorsScroll: false) {
+                    // Rows that moved come back from the table without a view until
+                    // it is asked for one; the slide and any click need it now.
+                    let visibleRange = tableView.rows(in: tableView.visibleRect)
+                    for row in visibleRange.location..<NSMaxRange(visibleRange) {
+                        _ = tableView.view(atColumn: 0, row: row, makeIfNecessary: true)
+                    }
+                    if !keptSelection.isEmpty { restoreSelection(ids: keptSelection) }
+                    if slides {
+                        layoutSubtreeIfNeeded()
+                        tableView.layoutSubtreeIfNeeded()
+                        slideSurvivors(from: previousY)
+                    }
+                    return
+                }
+            }
             // .plans/113: a re-sort is not the person leaving their selection. The
             // frozen order never reorders on a push, so a multi-selection used to
             // survive every push; `render` empties the table's selection, so the
@@ -2686,328 +2667,62 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// already hidden under its parent, and the header would say it is holding a row
     /// that unfolding it does not produce.
     private func display(from incomingRows: [AgentInboxRow]) -> [InboxListItem] {
-        // Sidebar round: Clear's marks, then Standing, both sidebar preferences
-        // stamped on the rows. A mark new activity released is dropped.
-        let cleared = SidebarClearMarks.apply(clearMarks, to: incomingRows)
-        if !cleared.released.isEmpty {
-            for id in cleared.released { clearMarks[id] = nil }
+        let model = InboxDisplayBuilder.build(displayInputs(for: incomingRows))
+        return applyDisplayModel(model)
+    }
+
+    /// Every view-state value `display` derives from, by value, for the builder.
+    private func displayInputs(for incomingRows: [AgentInboxRow]) -> InboxDisplayInputs {
+        let holding = sortHeld && !rows.isEmpty
+        return InboxDisplayInputs(
+            rows: incomingRows, clearMarks: clearMarks, standingLeadIDs: standingLeadIDs,
+            hiddenKeys: externalSessionHiding?.hiddenKeys ?? [], searchQuery: searchQuery,
+            openAgentId: openAgentId, hiddenSources: hiddenSources, scope: effectiveScope,
+            currentWorkspaceName: currentWorkspaceName, currentWorkspaceId: currentWorkspaceId,
+            hiddenRevealed: hiddenRevealed, heldOrder: holding ? rows.map(\.id) : nil,
+            sortMode: sortMode, expandedFanoutParents: expandedFanoutParents, now: clock(),
+            foldChoices: foldChoices, foldsUntouchedGroups: foldsUntouchedGroups,
+            sidebarLayout: sidebarLayout, dismissedIncidents: dismissedIncidents,
+            shelfExpanded: shelfExpanded, foldsHistoryIntoShelf: foldsHistoryIntoShelf,
+            settledLimit: settledLimit, historyExpanded: historyExpanded,
+            quietHistoryCache: quietHistoryCache, historyReuseHint: historyReuseHint,
+            quietHistoryNote: Self.quietHistoryNote)
+    }
+
+    /// Write what a build derived into the view, and return the items it drew.
+    private func applyDisplayModel(_ model: InboxDisplayModel) -> [InboxListItem] {
+        if !model.releasedClearMarks.isEmpty {
+            for id in model.releasedClearMarks { clearMarks[id] = nil }
             SidebarClearMarks.save(clearMarks, to: indicatorDefaults)
         }
-        let unmarkedRows = cleared.rows
-        let newRows = SidebarStandingLeads.apply(standingLeadIDs, to: unmarkedRows)
-        let hiddenKeys = externalSessionHiding?.hiddenKeys ?? []
-        func isHidden(_ row: AgentInboxRow) -> Bool {
-            row.externalSession.map { hiddenKeys.contains($0.sessionKey) } ?? false
-        }
-        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
-        // Decide orphanhood against the full input, before scope/search can
-        // temporarily remove a real parent. Search remains the way to find a
-        // finished helper whose lead was deleted or cannot be restored.
-        let historyRows = InboxSort.promotingOrphansToRoots(InboxSort.excludingQuietOrphanedHelpers(
-            rows: newRows, openAgentId: openAgentId, searching: !query.isEmpty))
-        let sourced = historyRows.filter { $0.id == openAgentId || !hiddenSources.contains(InboxSource.key(for: $0)) }
-        let scopedWithHidden = InboxScope.filter(
-            rows: sourced, scope: effectiveScope, openAgentId: openAgentId,
-            currentWorkspace: currentWorkspaceName,
-            currentWorkspaceId: currentWorkspaceId)
-        // .plans/87: `Hidden (N)` counts what opening it would bring back here; open,
-        // those rows are drawn in place, dimmed, each with Show.
-        let hiddenHere = hiddenKeys.isEmpty ? [] : scopedWithHidden.filter(isHidden)
-        hiddenInScopeCount = hiddenHere.count
-        if hiddenHere.isEmpty { hiddenRevealed = false }
-        revealedHiddenIds = hiddenRevealed ? Set(hiddenHere.map(\.id)) : []
+        hiddenInScopeCount = model.hiddenInScopeCount
+        hiddenRevealed = model.hiddenRevealed
+        revealedHiddenIds = model.revealedHiddenIds
         updateHiddenFooter()
-        let scoped = hiddenRevealed || hiddenHere.isEmpty ? scopedWithHidden : scopedWithHidden.filter { !isHidden($0) }
-        let searched = query.isEmpty ? scoped : scoped.filter { row in
-            [row.title, row.projectName, row.workspaceName, row.model, row.branch, row.whereMarker?.text]
-                .compactMap { $0?.localizedLowercase }
-                .contains { $0.localizedCaseInsensitiveContains(query) }
-                || row.displayTitle.localizedCaseInsensitiveContains(query)
-        }
-        // .plans/113: under the pointer, rows already drawn keep their places.
-        let holding = sortHeld && !rows.isEmpty
-        if holding { sortHoldPending = true }
-        let sorted = InboxSort.sortForInbox(
-            rows: searched, mode: sortMode, heldOrder: holding ? rows.map(\.id) : nil)
-        marksWorkspaces = Set(sorted.compactMap(\.workspaceId)).count > 1
-        // P2D.4/P2D.5 must read the FULL sorted list. Capping or folding before
-        // these derivations would make a hidden child's disclosure, rollup and
-        // lifecycle blocker disappear together.
-        parentsWithChildren = InboxSort.parentIds(in: sorted)
-        ownershipAskByLead = Self.asksByLead(in: sorted)
-        var fullRollups = InboxSort.rollups(in: sorted)
-        let bounded = InboxSort.boundedForInbox(
-            rows: sorted, expandedParents: expandedFanoutParents, now: clock())
-        fanoutRemaindersByParent = bounded.remainderByParent
-        // The capped fields are a presentation-only overlay on the full rollup.
-        // `holdsParentOpen` and the lifecycle/action policy continue to read the
-        // uncapped descendant tallies above, so a remainder cannot change resource
-        // or settlement bookkeeping.
-        for remainder in bounded.remainders where !remainder.isExpanded {
-            guard var rollup = fullRollups[remainder.parentId] else { continue }
-            let hidden = remainder.hiddenDescendantCount
-            rollup = ChildRollup(
-                children: rollup.children,
-                working: rollup.working,
-                needsYou: rollup.needsYou,
-                failed: rollup.failed,
-                unopenedFailed: rollup.unopenedFailed,
-                cappedChildren: remainder.hiddenChildCount,
-                cappedDescendants: hidden,
-                cappedWorking: remainder.hiddenWorking,
-                cappedNeedsYou: remainder.hiddenNeedsYou,
-                cappedFailed: remainder.hiddenFailed)
-            fullRollups[remainder.parentId] = rollup
-        }
-        rollupsByParent = fullRollups
-        collapsedParents = Set(parentsWithChildren.filter(isFolded))
-        let visible = InboxSort.visibleRows(bounded.rows, collapsed: collapsedParents)
-        let visibleIDs = Set(visible.map(\.id))
-        updateSidebarCore(
-            liveRows: sorted.filter { $0.lifecycle == .active }, shownIDs: visibleIDs)
-        // A fold can remove the model's original after-row without removing the
-        // ancestor remainder it anchored. Re-anchor each still-visible parent's
-        // affordance to the last row that remains visible in that parent's bounded
-        // subtree. Iterating the model's ordered remainders preserves the nested
-        // child-before-parent order when two affordances share that fallback row.
-        var visibleRemaindersByAfterRow: [UUID: [FanoutRemainder]] = [:]
-        for remainder in bounded.remainders {
-            guard !collapsedParents.contains(remainder.parentId),
-                  visibleIDs.contains(remainder.parentId),
-                  let parentIndex = bounded.rows.firstIndex(where: {
-                      $0.id == remainder.parentId
-                  }) else { continue }
-            let parentDepth = bounded.rows[parentIndex].depth
-            let nextIndex = bounded.rows.index(after: parentIndex)
-            let subtreeEnd = bounded.rows[nextIndex...].firstIndex(where: {
-                $0.depth <= parentDepth
-            }) ?? bounded.rows.endIndex
-            guard let anchor = bounded.rows[parentIndex..<subtreeEnd].last(where: {
-                visibleIDs.contains($0.id)
-            }) else { continue }
-            visibleRemaindersByAfterRow[anchor.id, default: []].append(remainder)
-        }
-        fanoutRemaindersByAfterRow = visibleRemaindersByAfterRow
-        // P4.7. `clock()` and not `Date()`: the same injection point a parked row's
-        // "in 25m" is read from, so a card whose snooze expires between two renders
-        // cannot make a committed baseline flap.
-        let now = clock()
-        let parts = InboxSort.partition(rows: visible, now: now)
-        // Sidebar round: the layout's head (incidents), then Standing leads with
-        // their families, then everything else in the sort's order.
-        var standingRows: [AgentInboxRow] = []
-        var otherRows: [AgentInboxRow] = []
-        var inStanding = false
-        for row in parts.active {
-            if row.depth == 0 { inStanding = row.isStanding }
-            if inStanding { standingRows.append(row) } else { otherRows.append(row) }
-        }
-        historyEntryHelpers = [:]
-        historyEntryDates = [:]
-        var built = sidebarHeadItems()
-        if !standingRows.isEmpty {
-            built.append(.sectionLabel(SidebarSectionLabel(kind: .standing, title: "Standing", count: nil, clearCount: 0)))
-            built.append(contentsOf: agentItems(for: standingRows))
-        }
-        built.append(contentsOf: sortMode == .byProject ? projectGroupedItems(for: otherRows) : agentItems(for: otherRows))
-        built = withFamilyCauseLines(built)
-        // NO HEADER FOR AN EMPTY SHELF: "Snoozed (0)" is a line of chrome about
-        // nothing, and it would take a row's worth of a 320pt sidebar to say it.
-        if parts.shelfCount > 0 {
-            built.append(.shelfHeader(count: parts.shelfCount, isExpanded: shelfExpanded))
-            if shelfExpanded {
-                built.append(contentsOf: agentItems(for: parts.snoozed))
-            }
-        }
-        // P4.8: history is PAGED, and the page is taken last — on the rows that
-        // survived the scope, the folds and the section split, so the footer's count
-        // is of rows that pressing it really does produce.
-        // Decisions pass, "one history shelf": settled agents and agents closed to
-        // History are ONE section. In the app it is a collapsed, counted shelf at
-        // the BOTTOM — a spacer row takes whatever height the live list leaves —
-        // paged inside once it is open. The open agent is drawn even inside a
-        // shut shelf, the rule the paged tail already kept.
-        if !foldsHistoryIntoShelf {
-            let page = InboxSort.pageSettled(
-                parts.history, limit: settledLimit, openAgentId: openAgentId)
-            built.append(contentsOf: agentItems(for: page.shown))
-            if page.hasMore {
-                built.append(.settledMore(hidden: page.hidden))
-            }
-        } else if parts.historyCount > 0 {
-            // Quiet inbox: History counts families, the cards it draws, not
-            // helpers, and leaves out agents opened and never used.
-            let quiet = sidebarLayout == .quietInbox
-            let projection = quiet
-                ? quietHistoryProjection(parts.history, all: sorted, searching: !query.isEmpty, now: now)
-                : nil
-            let historyCount = projection?.families.count ?? parts.historyCount
-            if let projection {
-                historyEntryHelpers = projection.helpers
-                historyEntryDates = projection.dates
-            }
-            if historyCount > 0 {
-                built.append(.historyHeader(count: historyCount, isExpanded: historyExpanded))
-                if historyExpanded {
-                    // Quiet pages the family cards and force-includes the focused
-                    // agent's family using the same rule as an ordinary open row.
-                    let page = InboxSort.pageSettled(
-                        projection?.families ?? parts.history, limit: settledLimit,
-                        openAgentId: projection == nil ? openAgentId : projection?.openFamilyId)
-                    built.append(contentsOf: quiet ? page.shown.map(InboxListItem.agent) : agentItems(for: page.shown))
-                    if page.hasMore {
-                        built.append(.settledMore(hidden: page.hidden))
-                    }
-                } else if let open = parts.history.first(where: { $0.id == openAgentId }) {
-                    built.append(.agent(open))
-                }
-            }
-        }
-        if foldsHistoryIntoShelf, let firstShelf = built.firstIndex(where: \.isShelfHeading) {
-            built.insert(.shelfSpacer, at: firstShelf)
-        }
-        // Quiet inbox: the History footnote, under the shelf Clear fills.
-        if sidebarLayout == .quietInbox, parts.historyCount > 0 || !sidebarClearIDs.isEmpty {
-            built.append(.sectionLabel(SidebarSectionLabel(
-                kind: .historyNote, title: Self.quietHistoryNote, count: nil, clearCount: 0)))
-        }
-        return built
+        if model.sortHoldPending { sortHoldPending = true }
+        marksWorkspaces = model.marksWorkspaces
+        parentsWithChildren = model.parentsWithChildren
+        ownershipAskByLead = model.ownershipAskByLead
+        fanoutRemaindersByParent = model.fanoutRemaindersByParent
+        fanoutRemaindersByAfterRow = model.fanoutRemaindersByAfterRow
+        rollupsByParent = model.rollupsByParent
+        collapsedParents = model.collapsedParents
+        sidebarClearIDs = model.sidebarClearIDs
+        sidebarIncidents = model.sidebarIncidents
+        sidebarTallies = model.sidebarTallies
+        sidebarFamilyChips = model.sidebarFamilyChips
+        historyEntryHelpers = model.historyEntryHelpers
+        historyEntryDates = model.historyEntryDates
+        if let cache = model.quietHistoryCache { quietHistoryCache = cache }
+        historyProjectionBuildCountForQA += model.historyProjectionBuilds
+        return model.items
     }
 
-    // Plan: .plans/113-sidebar-sort
-    /// The live block in `By project`: a heading over each project's run of
-    /// top-level agents, which `InboxSort` already placed together. A subagent
-    /// stays with its lead, whatever project it is in. The count is the leads.
-    private func projectGroupedItems(for sectionRows: [AgentInboxRow]) -> [InboxListItem] {
-        var runs: [(title: String, rows: [AgentInboxRow])] = []
-        var currentKey: String?? = .none
-        for row in sectionRows {
-            if row.depth == 0 {
-                let key = InboxSort.projectGroupName(for: row)
-                if currentKey != .some(key) || runs.isEmpty {
-                    runs.append((key ?? InboxSort.noProjectTitle, []))
-                    currentKey = .some(key)
-                }
-            } else if runs.isEmpty {
-                runs.append((InboxSort.noProjectTitle, []))
-            }
-            runs[runs.count - 1].rows.append(row)
-        }
-        var result: [InboxListItem] = []
-        for run in runs {
-            result.append(.projectHeading(title: run.title, count: run.rows.filter { $0.depth == 0 }.count))
-            result.append(contentsOf: agentItems(for: run.rows))
-        }
-        return result
-    }
-
-    /// Turn a section's agent rows into table items, inserting each remainder
-    /// after the visible end of its live parent's subtree. `display(from:)`
-    /// already excludes a folded parent and re-anchors an ancestor's remainder
-    /// when a nested fold removes the model's original anchor.
-    /// Quiet inbox History: one card per family, its lead only, newest first by
-    /// the family's last real turn (the latest prompt or turn start across
-    /// the lead and its helpers).
-    /// Each card says how many helpers it holds and that same date
-    /// ("4 helpers · Nov 10"). Paging takes this order, so a page never
-    /// interleaves older families.
-    private func quietHistoryProjection(_ history: [AgentInboxRow], all: [AgentInboxRow],
-                                        searching: Bool, now: Date) -> QuietHistoryProjection {
-        // Chatter outside History can reuse the last projection when the same
-        // History rows still match. Check their IDs before walking the families.
-        if let cache = quietHistoryCache, let touched = historyReuseHint,
-           cache.searching == searching, cache.openAgentId == openAgentId,
-           cache.historyIDs.count == history.count,
-           touched.isDisjoint(with: cache.members),
-           history.allSatisfy({ cache.historyIDs.contains($0.id) }) {
-            return cache
-        }
-        historyProjectionBuildCountForQA += 1
-        let historyIDs = Set(history.map(\.id))
-        var childrenOf: [UUID: [AgentInboxRow]] = [:]
-        for row in all { if let parent = row.parentId, parent != row.id { childrenOf[parent, default: []].append(row) } }
-        let roots = history.filter { $0.parentId.map { !historyIDs.contains($0) } ?? true }
-        let openFamilyId: UUID? = {
-            guard let openAgentId else { return nil }
-            let byId = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-            guard var current = byId[openAgentId],
-                  InboxSort.section(for: current.lifecycle, now: now) == .history else { return nil }
-            let rootIDs = Set(roots.map(\.id))
-            var visited: Set<UUID> = []
-            // A folded or capped helper may be absent from History's visible rows.
-            // Walk the full ancestry to the closest root that actually draws a card.
-            while visited.insert(current.id).inserted {
-                if rootIDs.contains(current.id) { return current.id }
-                guard let parentId = current.parentId, let parent = byId[parentId] else { break }
-                current = parent
-            }
-            return nil
-        }()
-        var dated: [(row: AgentInboxRow, at: Date, index: Int)] = []
-        var members: Set<UUID> = historyIDs
-        var helpers: [UUID: Int] = [:]
-        var dates: [UUID: Date] = [:]
-        for (index, root) in roots.enumerated() {
-            var seen: Set<UUID> = [root.id]
-            // The last REAL turn (a prompt or a turn start) across the family.
-            // A relaunch restamps every helper's activity and run-completed time;
-            // interrupts, Clear, archive and read marks move other stamps; a helper
-            // opened and never used has only its creation. None of them is work, so
-            // the creation date is a fallback only when no member ever had a turn.
-            var latestTurn = root.lastTurnAt
-            // Opened and never used (no member ever had a turn or an outcome):
-            // nothing happened there, so it is not History. Search still finds
-            // it, and the open agent always draws.
-            var used = root.lastTurnAt != nil || root.terminalEvent != nil
-            var stack = childrenOf[root.id] ?? []
-            while let next = stack.popLast() {
-                guard seen.insert(next.id).inserted else { continue }
-                if let turn = next.lastTurnAt { latestTurn = max(latestTurn ?? turn, turn) }
-                if next.lastTurnAt != nil || next.terminalEvent != nil { used = true }
-                stack.append(contentsOf: childrenOf[next.id] ?? [])
-            }
-            members.formUnion(seen)
-            guard used || searching || root.id == openFamilyId else { continue }
-            let at = latestTurn ?? root.createdAt
-            helpers[root.id] = seen.count - 1
-            dates[root.id] = at
-            dated.append((root, at, index))
-        }
-        let families = dated.sorted { $0.at != $1.at ? $0.at > $1.at : $0.index < $1.index }.map(\.row)
-        let projection = QuietHistoryProjection(
-            historyIDs: historyIDs, members: members, searching: searching, openAgentId: openAgentId,
-            openFamilyId: openFamilyId, families: families, helpers: helpers, dates: dates)
-        quietHistoryCache = projection
-        return projection
-    }
-
-    /// The last Quiet History projection and what it was built from.
-    private struct QuietHistoryProjection {
-        let historyIDs: Set<UUID>
-        /// Every agent whose facts went into it: History's rows and each family's members.
-        let members: Set<UUID>
-        let searching: Bool
-        let openAgentId: UUID?
-        let openFamilyId: UUID?
-        let families: [AgentInboxRow]
-        let helpers: [UUID: Int]
-        let dates: [UUID: Date]
-    }
-    private var quietHistoryCache: QuietHistoryProjection?
+    private var quietHistoryCache: InboxQuietHistoryProjection?
     /// Set for one `display` when the host patched only these agents' chatter.
     private var historyReuseHint: Set<UUID>?
     /// How many times the History family projection was built, for the witness.
     private(set) var historyProjectionBuildCountForQA = 0
-
-    private func agentItems(for sectionRows: [AgentInboxRow]) -> [InboxListItem] {
-        var result: [InboxListItem] = []
-        for row in sectionRows {
-            result.append(.agent(row))
-            guard let remainders = fanoutRemaindersByAfterRow[row.id] else { continue }
-            result.append(contentsOf: remainders.map(InboxListItem.fanoutRemainder))
-        }
-        return result
-    }
 
     // MARK: - Source filtering
 
@@ -3159,7 +2874,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
 
     /// Each lead's ask: its own, or the first one asked anywhere under it. The
     /// asking subagent's row reads "waiting"; the lead is the one that asks you.
-    static func asksByLead(in rows: [AgentInboxRow]) -> [UUID: String] {
+    nonisolated static func asksByLead(in rows: [AgentInboxRow]) -> [UUID: String] {
         let byId = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var asks: [UUID: String] = [:]
         for row in rows {
@@ -3514,7 +3229,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     private func applyScopeIncrementally(
         _ next: [InboxListItem], previousRollups: [UUID: ChildRollup],
         changedAgentIDs: Set<UUID> = [], previousTallies: [UUID: SidebarLeadTally]? = nil,
-        preservingAgentRows: Bool = false, allowingMoves: Bool = false
+        preservingAgentRows: Bool = false, allowingMoves: Bool = false, anchorsScroll: Bool = true
     ) -> Bool {
         let old = items.map(\.identity), new = next.map(\.identity)
         let oldSet = Set(old), newSet = Set(new)
@@ -3558,7 +3273,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             body()
             NSAnimationContext.endGrouping()
         }
-        let anchor = preservingAgentRows ? visibleScrollAnchor(excluding: changedAgentIDs) : nil
+        let anchor = preservingAgentRows && anchorsScroll ? visibleScrollAnchor(excluding: changedAgentIDs) : nil
         if !preservingAgentRows { endRename(commit: true) }
         cancelCrossfades()
         let previousCells = Dictionary(cellsByRow.compactMap { index, cell in
