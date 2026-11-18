@@ -44,6 +44,8 @@ enum TranscriptArchiveFlushRejectionChecks {
                                          warn: { warnings.append($0) }, nameTitlerCommand: { _ in nil }, transcriptStore: store)
         _ = supervisor.restore()
         guard supervisor.records[id] != nil else { throw Failure(description: "fixture record did not restore") }
+        // A visible agent keeps the 200ms save debounce this fixture waits out.
+        supervisor.setEventsPresented(true, for: id)
         let oldDelay = AgentSupervisor.transcriptReleaseDelay
         AgentSupervisor.transcriptReleaseDelay = .seconds(60)
         defer { AgentSupervisor.transcriptReleaseDelay = oldDelay }
