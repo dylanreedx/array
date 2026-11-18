@@ -105,7 +105,180 @@ private func checkCoalescedSurfacePatch() {
            "draining must clear the accumulated categories")
 }
 
+
+/// A long streamed reply (code fences, lists, a table, headings, quotes) is fed
+/// token by token through two projections: the original whole-reply parse and the
+/// incremental open-tail parse. Every intermediate document must be identical, and
+/// the bytes the incremental parse reads per delta must stay bounded by the open
+/// block, not grow with the reply.
+private func checkIncrementalOpenStreamParse() {
+    let thread = "incremental-parse-thread"
+    var sections: [String] = []
+    for i in 1...14 {
+        sections.append("## Step \(i)\n\nParagraph \(i) explains the change with `inline code`, **bold** text and a [link](https://example.com/\(i)).")
+        sections.append("- first item \(i)\n- second item with *emphasis*\n  - nested point\n- third item")
+        sections.append("```swift\nlet value\(i) = tiles.filter { $0.id == \(i) }\nprint(value\(i))\n```")
+        sections.append("| name | count |\n|------|-------|\n| alpha | \(i) |\n| beta | \(i * 2) |")
+        sections.append("> a quoted remark number \(i)")
+        sections.append("1. one\n2. two\n3. three")
+    }
+    let reply = sections.joined(separator: "\n\n")
+    // Tokens: runs of 1-9 characters, deterministic.
+    var tokens: [String] = []
+    var cursor = reply.startIndex
+    var step = 0
+    while cursor < reply.endIndex {
+        let length = 1 + (step * 7) % 9
+        let end = reply.index(cursor, offsetBy: length, limitedBy: reply.endIndex) ?? reply.endIndex
+        tokens.append(String(reply[cursor..<end]))
+        cursor = end
+        step += 1
+    }
+    expect(tokens.count >= 300, "incremental parse witness must stream at least 300 tokens; got \(tokens.count)")
+
+    let baseClock = DeterministicProjectionClock()
+    let fastClock = DeterministicProjectionClock()
+    var base = AgentTranscriptProjection(threadId: thread, monotonicNow: baseClock.now)
+    var fast = AgentTranscriptProjection(threadId: thread, monotonicNow: fastClock.now)
+    base.incrementalOpenStreamParse = false
+    fast.incrementalOpenStreamParse = ProcessInfo.processInfo.environment["WITNESS_FORCE_FULL_PARSE"] == nil
+    base.ingest(.turnStarted(threadId: thread, turnId: "turn-inc"))
+    fast.ingest(.turnStarted(threadId: thread, turnId: "turn-inc"))
+
+    var firstDivergence: Int?
+    var maxTailBytes = 0, lateBaseBytes = 0, lateFastBytes = 0
+    for (index, token) in tokens.enumerated() {
+        baseClock.advance(0.05); fastClock.advance(0.05)
+        base.ingest(.contentDelta(threadId: thread, turnId: "turn-inc", streamKind: .assistant, delta: token))
+        fast.ingest(.contentDelta(threadId: thread, turnId: "turn-inc", streamKind: .assistant, delta: token))
+        let a = base.document.entries.map { $0.blocks.map(resetRevisions) }
+        let b = fast.document.entries.map { $0.blocks.map(resetRevisions) }
+        if a != b, firstDivergence == nil { firstDivergence = index }
+        maxTailBytes = max(maxTailBytes, fast.streamingLastParsedBytes)
+        if index >= tokens.count - 20 {
+            lateBaseBytes = max(lateBaseBytes, base.streamingLastParsedBytes)
+            lateFastBytes = max(lateFastBytes, fast.streamingLastParsedBytes)
+        }
+    }
+    base.ingest(.turnCompleted(threadId: thread, turnId: "turn-inc", outcome: .completed, errorMessage: nil))
+    fast.ingest(.turnCompleted(threadId: thread, turnId: "turn-inc", outcome: .completed, errorMessage: nil))
+    expect(firstDivergence == nil,
+           "incremental open-stream parse diverged from the whole-reply parse at token \(firstDivergence ?? -1)")
+    expect(base.document.entries.map { $0.blocks.map(resetRevisions) } == fast.document.entries.map { $0.blocks.map(resetRevisions) },
+           "final streamed document must equal the whole-reply parse")
+    expect(lateBaseBytes > 4_000, "the whole-reply parse must read the entire reply at the end (\(lateBaseBytes) bytes)")
+    expect(lateFastBytes * 6 < lateBaseBytes && maxTailBytes < 1_500,
+           "incremental parse must read O(open block), not O(reply): late \(lateFastBytes) vs \(lateBaseBytes) bytes, max tail \(maxTailBytes)")
+}
+
+/// Tricky Markdown streamed one character at a time: the incremental parse must
+/// give exactly the whole-source parse at every prefix, chaining `previous` as the
+/// projection does. Syntax that can reach back (reference definitions, footnotes,
+/// CR line endings) falls back to the full parse and must still match.
+private func checkIncrementalParserCorpus() {
+    let docs: [String] = [
+        "See [the docs][d] and more.\n\nAnother paragraph.\n\n[d]: https://example.com/docs\n\nAfter the definition.",
+        "line one\r\nline two\r\n\r\n- item\r\n- item two\r\n\r\n```\r\ncode\r\n```\r\n",
+        "Title\n=====\n\nSubtitle\n---\n\nplain text after\n---\n\n* * *\n\nend",
+        "<div>\nhello\n\nworld\n</div>\n\nafter the html block\n\n<pre>\nkeep\n\nblank\n</pre>\n\nlast",
+        "- a\n\n  more of a\n\n- b\n\n   para of b\n\n1. one\n\n   two\n2. three\n\nafter",
+        "> quote line\n> - quoted item\n> more\n\ntext\n\n> second\n\n> third",
+        "```swift\nlet a = 1\n\n\nlet b = 2\n```\n\ntext\n\n~~~\nopen fence with a blank\n\nstill code",
+        "- [ ] todo\n- [x] done\n  - [ ] nested\n\nParagraph with ~~strike~~ and `code` and https://example.com autolink.",
+        "A claim[^1] with a note.\n\n[^1]: the footnote body\n\nTrailing.",
+        "| a | b |\n|---|---|\n| 1 | 2 |\ntext glued to the table\n| 3 | 4 |\n\nafter\n\n| c |\n|---|\n| x |",
+        "para\n| x | y |\n|---|---|\n| 1 | 2 |\n\ntail",
+        "    indented code\n\n    more code\n\nparagraph\n\n\n\n# heading\n#no space\n\n## two ##",
+    ]
+    let parser = MarkdownAgentMarkupParser()
+    let entry = AgentNodeID(rawValue: "entry:corpus")!
+    for (docIndex, doc) in docs.enumerated() {
+        var cache = AgentStreamingParseCache()
+        var prevFull: [AgentBlock] = [], prevFast: [AgentBlock] = []
+        var soFar = ""
+        var diverged: Int?
+        for (i, character) in doc.enumerated() {
+            soFar.append(character)
+            let full = parser.parse(soFar, entryID: entry, previous: prevFull)
+            let fast = parser.parseIncremental(soFar, entryID: entry, previous: prevFast, cache: &cache)
+            prevFull = full.blocks; prevFast = fast.blocks
+            if full != fast, diverged == nil { diverged = i }
+        }
+        expect(diverged == nil, "incremental parse diverged on corpus document \(docIndex) at character \(diverged ?? -1)")
+    }
+}
+
+/// The display document and the durable mirror of one agent ingest the same events.
+/// With the shared parse memo the second one answers from the first's parse. Both
+/// must still equal projections that never share, at every step, even though the
+/// display one carries extra replayed history.
+private func checkSharedStreamParse() {
+    let shared = ProcessInfo.processInfo.environment["WITNESS_NO_SHARED_PARSE"] == nil
+    var sections: [String] = []
+    for i in 1...10 {
+        sections.append("## Part \(i)\n\nText \(i) with `code` and **bold**.")
+        sections.append("- a \(i)\n- b\n  - c")
+        sections.append("```swift\nlet x\(i) = \(i)\n```")
+        sections.append("| k | v |\n|---|---|\n| a | \(i) |")
+    }
+    let reply = sections.joined(separator: "\n\n")
+    var tokens: [String] = []
+    var cursor = reply.startIndex
+    var n = 0
+    while cursor < reply.endIndex {
+        let end = reply.index(cursor, offsetBy: 1 + (n * 5) % 8, limitedBy: reply.endIndex) ?? reply.endIndex
+        tokens.append(String(reply[cursor..<end])); cursor = end; n += 1
+    }
+
+    func make(thread: String, share: Bool, history: Bool) -> (AgentTranscriptProjection, DeterministicProjectionClock) {
+        let clock = DeterministicProjectionClock()
+        var projection = AgentTranscriptProjection(threadId: thread, monotonicNow: clock.now)
+        projection.sharesStreamParse = share
+        if history, let id = AgentNodeID(rawValue: "replayed-prompt") {
+            try? projection.appendUserPrompt(id: id, prompt: AgentPrompt("an earlier question from the replayed session"))
+        }
+        projection.ingest(.turnStarted(threadId: thread, turnId: "turn-share"))
+        return (projection, clock)
+    }
+    var (mirror, mirrorClock) = make(thread: "share-thread", share: shared, history: false)
+    var (display, displayClock) = make(thread: "share-thread", share: shared, history: true)
+    var (mirrorRef, mirrorRefClock) = make(thread: "share-ref-a", share: false, history: false)
+    var (displayRef, displayRefClock) = make(thread: "share-ref-b", share: false, history: true)
+
+    var firstDivergence: Int?
+    var displayParsedBytes = 0, refParsedBytes = 0
+    for (index, token) in tokens.enumerated() {
+        for clock in [mirrorClock, displayClock, mirrorRefClock, displayRefClock] { clock.advance(0.05) }
+        func event(_ thread: String) -> AgentRuntimeEvent {
+            .contentDelta(threadId: thread, turnId: "turn-share", streamKind: .assistant, delta: token)
+        }
+        mirror.ingest(event("share-thread")); display.ingest(event("share-thread"))
+        mirrorRef.ingest(event("share-ref-a")); displayRef.ingest(event("share-ref-b"))
+        displayParsedBytes += display.streamingLastParsedBytes
+        refParsedBytes += displayRef.streamingLastParsedBytes
+        func blocks(_ p: AgentTranscriptProjection) -> [[AgentBlock]] { p.document.entries.map { $0.blocks.map(resetRevisions) } }
+        if firstDivergence == nil, blocks(mirror) != blocks(mirrorRef) || blocks(display) != blocks(displayRef) {
+            firstDivergence = index
+        }
+    }
+    mirror.ingest(.turnCompleted(threadId: "share-thread", turnId: "turn-share", outcome: .completed, errorMessage: nil))
+    display.ingest(.turnCompleted(threadId: "share-thread", turnId: "turn-share", outcome: .completed, errorMessage: nil))
+    mirrorRef.ingest(.turnCompleted(threadId: "share-ref-a", turnId: "turn-share", outcome: .completed, errorMessage: nil))
+    displayRef.ingest(.turnCompleted(threadId: "share-ref-b", turnId: "turn-share", outcome: .completed, errorMessage: nil))
+    expect(firstDivergence == nil, "shared stream parse diverged from the unshared projections at token \(firstDivergence ?? -1)")
+    expect(display.document.entries.map { $0.blocks.map(resetRevisions) } == displayRef.document.entries.map { $0.blocks.map(resetRevisions) },
+           "final display document must equal the unshared one")
+    expect(display.streamingMarkupParseCount > 100, "witness must stream many parses; got \(display.streamingMarkupParseCount)")
+    expect(display.streamingParseMemoHits * 10 >= display.streamingMarkupParseCount * 9,
+           "the second projection of a thread must answer its parses from the shared memo: \(display.streamingParseMemoHits) hits of \(display.streamingMarkupParseCount)")
+    expect(refParsedBytes > 0 && displayParsedBytes * 10 < refParsedBytes,
+           "shared parse must cut the second projection's parsed bytes: \(displayParsedBytes) vs \(refParsedBytes)")
+}
+
 func runAgentTranscriptProjectionChecks() {
+    checkSharedStreamParse()
+    checkIncrementalOpenStreamParse()
+    checkIncrementalParserCorpus()
     checkSteeringPreservesRequestTiming()
     checkAssistantDeltasSkipSeparatorSourceReads()
     checkCoalescedSurfacePatch()

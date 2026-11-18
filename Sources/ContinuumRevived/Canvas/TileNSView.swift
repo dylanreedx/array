@@ -46,6 +46,10 @@ class TileNSView: NSView, TokenThemed {
     /// running, which is what a terminal or a web view should do.
     func prepareForParking() {}
 
+    /// A far-parked tile is one nobody can see. Subclasses that stream use this
+    /// to tell their source they no longer need live-rate events.
+    func farParkStateDidChange() {}
+
     // MARK: - Visibility index maintenance
     //
     // A tile's frame is a WORLD frame, and the world plane keeps a spatial index
@@ -746,6 +750,7 @@ class TileNSView: NSView, TokenThemed {
         parkedBody = body
         surfaceResidency = .surfaced
         isFarParked = true
+        farParkStateDidChange()
         // Plan 110: nobody can see a far-parked tile; its character holds still.
         titleBar?.setCharacterHeld(true)
         return true
@@ -759,6 +764,7 @@ class TileNSView: NSView, TokenThemed {
         let start = ProcessInfo.processInfo.systemUptime
         // Not parked from here on: the install below lays the real body out.
         isFarParked = false
+        farParkStateDidChange()
         body.removeFromSuperview()
         installContentView(body)
         Self.qaPromoteMs += (ProcessInfo.processInfo.systemUptime - start) * 1_000

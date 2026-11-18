@@ -44,8 +44,27 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         depth: Int,
         diagnostics: inout [AgentMarkupDiagnostic]
     ) -> [AgentBlock] {
+        let blocks = convertChildren(
+            parent, source: source, sourceMap: sourceMap, scopeID: scopeID,
+            occurrenceSeed: [:], depth: depth, diagnostics: &diagnostics
+        )
+        return reconcileIdentities(blocks, with: previous)
+    }
+
+    /// The conversion half of `convertBlocks`, before identity reconciliation.
+    /// `occurrenceSeed` carries the per-kind sibling counts of blocks converted
+    /// earlier (the streaming parse's closed prefix), so structural IDs continue.
+    private func convertChildren(
+        _ parent: Markup,
+        source: String,
+        sourceMap: SourceMap,
+        scopeID: AgentNodeID,
+        occurrenceSeed: [AgentBlockKind: Int],
+        depth: Int,
+        diagnostics: inout [AgentMarkupDiagnostic]
+    ) -> [AgentBlock] {
         var blocks: [AgentBlock] = []
-        var occurrences: [AgentBlockKind: Int] = [:]
+        var occurrences = occurrenceSeed
 
         for child in parent.children {
             let kind = blockKind(for: child)
@@ -71,10 +90,19 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                 diagnostics: &diagnostics
             ))
         }
-        return reconcileIdentities(blocks, with: previous)
+        return blocks
     }
 
-    private func reconcileIdentities(_ current: [AgentBlock], with previous: [AgentBlock]) -> [AgentBlock] {
+    /// `indexOffset` and `reservedSeed` let the streaming parse reconcile only the
+    /// open tail: `current`/`previous` then start after `indexOffset` closed
+    /// siblings, whose IDs are in `reservedSeed`. With the defaults this is the
+    /// original whole-list reconcile.
+    private func reconcileIdentities(
+        _ current: [AgentBlock],
+        with previous: [AgentBlock],
+        indexOffset: Int = 0,
+        reservedSeed: Set<AgentNodeID> = []
+    ) -> [AgentBlock] {
         var candidateVisits = 0
         defer { reconciliationWork?(candidateVisits) }
         var exactMatches: [Int: Int] = [:]
@@ -106,7 +134,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         // newly inserted positional node is considered. Structural generated
         // IDs can otherwise collide when a sibling is inserted before one of
         // those matches, making the newcomer appear to steal the old node.
-        var reservedIDs = Set(exactMatches.values.map { previous[$0].id })
+        var reservedIDs = reservedSeed.union(exactMatches.values.map { previous[$0].id })
         return current.indices.map { currentIndex in
             if let previousIndex = exactMatches[currentIndex] {
                 return adoptingIdentity(current[currentIndex], from: previous[previousIndex])
@@ -118,7 +146,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
                 reservedIDs.insert(previous[currentIndex].id)
                 return adoptingIdentity(current[currentIndex], from: previous[currentIndex])
             }
-            if currentIndex == current.startIndex,
+            if indexOffset == 0, currentIndex == current.startIndex,
                let previousIndex = previous.indices.first(where: {
                    !reservedPrevious.contains($0) && previous[$0].kind == current[currentIndex].kind
                }) {
@@ -130,7 +158,7 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
             if reservedIDs.contains(block.id) {
                 block = replacingIdentity(
                     block,
-                    with: blockID(entryID: block.id, stableKey: "inserted.\(currentIndex)")
+                    with: blockID(entryID: block.id, stableKey: "inserted.\(currentIndex + indexOffset)")
                 )
             }
             reservedIDs.insert(block.id)
@@ -560,5 +588,114 @@ public struct MarkdownAgentMarkupParser: AgentMarkupParsing {
         }
         let digest = String(format: "%016llx%016llx", first, second)
         return AgentNodeID(rawValue: "markdown-entry:\(digest)/\(stableKey)")!
+    }
+}
+
+
+// MARK: - Streaming (incremental) parse
+
+/// What a streamed reply's parse keeps between deltas: the top-level blocks that
+/// can no longer change (`closed`), and where the still-open last block starts.
+/// Each parse then re-reads only that open tail instead of the whole reply.
+public struct AgentStreamingParseCache: Equatable, Sendable {
+    fileprivate(set) var closed: [AgentBlock] = []
+    fileprivate(set) var closedCounts: [AgentBlockKind: Int] = [:]
+    /// UTF-8 offset into the source of the first line of the open tail.
+    fileprivate(set) var tailStartByte = 0
+    /// Set once the source holds syntax that can reach back into closed blocks
+    /// (reference definitions, footnotes) or anything the tail parse does not
+    /// model; every later parse of this stream is then the plain full parse.
+    fileprivate(set) var disabled = false
+    /// QA: UTF-8 bytes handed to the Markdown parser by the last parse.
+    public fileprivate(set) var lastParsedBytes = 0
+    public var closedBlockCount: Int { closed.count }
+    public init() {}
+}
+
+extension MarkdownAgentMarkupParser {
+    /// Same result as `parse(_:entryID:previous:)` for an append-only source, in
+    /// time proportional to the open tail rather than the whole reply.
+    public func parseIncremental(
+        _ source: String,
+        entryID: AgentNodeID,
+        previous: [AgentBlock],
+        cache: inout AgentStreamingParseCache
+    ) -> AgentMarkupParse {
+        func full() -> AgentMarkupParse {
+            cache.closed = []; cache.closedCounts = [:]; cache.tailStartByte = 0
+            cache.lastParsedBytes = source.utf8.count
+            return parse(source, entryID: entryID, previous: previous)
+        }
+        if cache.disabled { return full() }
+        guard !source.isEmpty else { cache.lastParsedBytes = 0; return AgentMarkupParse(blocks: []) }
+        let total = source.utf8.count
+        let closedCount = cache.closed.count
+        guard cache.tailStartByte <= total,
+              previous.count >= closedCount,
+              zip(cache.closed, previous).allSatisfy({ $0.id == $1.id })
+        else { return full() }
+
+        let tailText = String(decoding: source.utf8.dropFirst(cache.tailStartByte), as: UTF8.self)
+        if Self.tailReachesBack(tailText) { cache.disabled = true; return full() }
+
+        let sourceMap = SourceMap(source: tailText)
+        let document = Document(parsing: sourceMap.normalized, options: [.disableSmartOpts])
+        var diagnostics: [AgentMarkupDiagnostic] = []
+        let converted = convertChildren(
+            document, source: tailText, sourceMap: sourceMap, scopeID: entryID,
+            occurrenceSeed: cache.closedCounts, depth: 0, diagnostics: &diagnostics
+        )
+        if !diagnostics.isEmpty { cache.disabled = true; return full() }
+        let tail = reconcileIdentities(
+            converted,
+            with: Array(previous.dropFirst(closedCount)),
+            indexOffset: closedCount,
+            reservedSeed: Set(cache.closed.map(\.id))
+        )
+        cache.lastParsedBytes = tailText.utf8.count
+
+        // A block is final only once a BLANK line separates it from what follows:
+        // a line glued to a table or paragraph (a lone `| `, a setext underline)
+        // can still be absorbed back into it by the next delta. So the boundary
+        // is the latest top-level block that starts after a blank line.
+        let children = Array(document.children)
+        if children.count >= 2 {
+            var lineStarts: [Int] = [0]
+            var blank: [Bool] = []
+            var lineIsBlank = true
+            var offset = 0
+            for byte in tailText.utf8 {
+                offset += 1
+                if byte == 0x0A { blank.append(lineIsBlank); lineIsBlank = true; lineStarts.append(offset) }
+                else if byte != 0x20 && byte != 0x09 { lineIsBlank = false }
+            }
+            blank.append(lineIsBlank)
+            var boundary: Int?
+            for index in stride(from: children.count - 1, to: 0, by: -1) {
+                guard let line = children[index].range?.lowerBound.line, line >= 2, line - 1 <= blank.count,
+                      line - 1 < lineStarts.count, blank[line - 2] else { continue }
+                boundary = index
+                break
+            }
+            if let boundary, let line = children[boundary].range?.lowerBound.line {
+                for block in tail.prefix(boundary) { cache.closedCounts[block.kind, default: 0] += 1 }
+                cache.closed += tail.prefix(boundary)
+                cache.tailStartByte += lineStarts[line - 1]
+            }
+        }
+        return AgentMarkupParse(blocks: Array(cache.closed.prefix(closedCount)) + tail, diagnostics: [])
+    }
+
+    /// Syntax whose meaning can depend on text far from it, or that this parse
+    /// does not model: reference definitions and footnotes (resolved
+    /// document-wide), and CR line endings (the source map rewrites them).
+    private static func tailReachesBack(_ text: String) -> Bool {
+        if text.utf8.contains(0x0D) { return true }
+        if text.contains("[^") { return true }
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            let trimmed = line.drop(while: { $0 == " " })
+            if line.count - trimmed.count <= 3, trimmed.first == "[", trimmed.contains("]:") { return true }
+        }
+        return false
     }
 }

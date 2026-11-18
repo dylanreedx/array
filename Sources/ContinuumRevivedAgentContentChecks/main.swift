@@ -629,6 +629,7 @@ runMutationVocabularyChecks()
 // Ticket: docs/38-tickets/91-agent-tile-ux/P1.4-document-reducer.md —
 // pure indexed mutation application and reconstructible entry lifecycle.
 runDocumentReducerChecks()
+runReplaceMarkupPrefixChecks()
 
 // Ticket: docs/38-tickets/91-agent-tile-ux/P1.7-unknown-node-forward-compat.md —
 // lossless opaque JSON and payload-safe fallback behavior.

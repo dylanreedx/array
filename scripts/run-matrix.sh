@@ -2143,6 +2143,9 @@ run_app_check .build/debug/Array --bring-to-front-focus-check
 # the spawn window must carry a state, a word and a clock instead of presenting
 # "idle" while a CLI process starts. Asserted as ordering, never as elapsed time.
 run_app_check .build/debug/Array --agent-first-paint-check
+# Hidden agents cost main almost nothing: 20 fake streaming agents, 18 hidden, deliveries/s
+# and exact transcript equality against a never-hidden control (AgentEventCoalescer).
+run_app_check .build/debug/Array --hidden-agent-ingest-check
 # Confidence pass S3: one owner for turn presence (`AgentTurnPresence`). Drives
 # the production claude, codex and pi runners against their reactive fakes with
 # a real tile attached, and asserts every surface reads Starting from Return to

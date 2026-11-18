@@ -6331,6 +6331,22 @@ enum ContinuumApp {
         }
 
         #if ARRAY_CHECKS
+        if CommandLine.arguments.contains("--hidden-agent-ingest-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await HiddenAgentIngestChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApplication.shared.run()
+        }
+        #endif
+
+        #if ARRAY_CHECKS
         if CommandLine.arguments.contains("--agent-first-paint-check") {
             do {
                 _ = NSApplication.shared
@@ -22405,6 +22421,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Records a managed-agent runtime event onto the per-agent syncable
     /// timeline and nudges a companion publish so the phone updates (88.4c).
     /// `tileId` rides along as the optional view hint only (P2A.8).
+    /// QA: tile-override lookups `recordManagedActivity` made, and a switch that
+    /// restores the old lookup-for-every-event behaviour for a witness to compare.
+    private(set) var qaSoundOverrideLookups = 0
+    var qaEagerSoundOverrideLookup = false
+
     private func recordManagedActivity(agentId: AgentID, tileId: UUID?, event: AgentRuntimeEvent, status: @autoclosure () -> AgentStatus) {
         if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }),
            case .turnStarted = event, !onboardingProgressStore.load().startedAgentIDs.contains(agentId.rawValue) {
@@ -22414,7 +22435,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Sounds and banners stay what they were when this was fed by the tile:
         // an agent with a tile signals, a headless child does not.
         if let tileId {
-            let overrides = canvasView?.allWorkspaceTiles().first(where: { $0.id == tileId })?.metadata.agentSoundOverrides
+            // A streamed text delta never raises a signal or a character moment, so
+            // the tile's sound overrides (a scan of every tile on the canvas) are
+            // only read for the events that can use them.
+            let overrides: AgentSoundOverrides?
+            if case .contentDelta = event, !qaEagerSoundOverrideLookup {
+                overrides = nil
+            } else {
+                qaSoundOverrideLookups += 1
+                overrides = canvasView?.allWorkspaceTiles().first(where: { $0.id == tileId })?.metadata.agentSoundOverrides
+            }
             let signal = agentSignalCenter.ingest(
                 event: event,
                 agentID: agentId,
