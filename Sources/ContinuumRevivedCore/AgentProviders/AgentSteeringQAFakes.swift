@@ -121,6 +121,14 @@ public enum AgentSteeringQAFakes {
         return text?.split(separator: "\n").map(String.init) ?? []
     }
 
+    /// Each spawn's two Claude memory env vars, in order.
+    public static func memoryEnvironments(in directory: URL) -> [[String: String?]] {
+        let text = (try? String(contentsOf: directory.appendingPathComponent("cli-env.txt"), encoding: .utf8)) ?? ""
+        return text.split(separator: "\n").compactMap {
+            (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: String?]
+        }
+    }
+
     /// The pid of the most recently spawned fake process.
     public static func latestPid(in directory: URL) -> pid_t? {
         let text = try? String(contentsOf: directory.appendingPathComponent("pid.txt"), encoding: .utf8)
@@ -151,6 +159,8 @@ with open(os.path.join(HERE, "pid.txt"), "w") as f:
     f.write(str(os.getpid()))
 with open(os.path.join(HERE, "config-dirs.txt"), "a") as f:
     f.write(os.environ.get("CLAUDE_CONFIG_DIR", "<default>") + "\n")
+with open(os.path.join(HERE, "cli-env.txt"), "a") as f:
+    f.write(json.dumps({k: os.environ.get(k) for k in ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL")}) + "\n")
 with open(os.path.join(HERE, "codex-homes.txt"), "a") as f:
     f.write(os.environ.get("CODEX_HOME", "<default>") + "\n")
 

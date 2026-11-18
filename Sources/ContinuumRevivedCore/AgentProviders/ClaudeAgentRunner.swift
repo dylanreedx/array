@@ -1077,6 +1077,12 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         workspaceMCP: WorkspaceMCPConfiguration?, processOwner: String? = nil, configDirectory: String? = nil
     ) -> [String: String] {
         var environment = PiAgentRunner.childEnvironment(processOwner: processOwner)
+        // Memory and battery: no per-agent update check, telemetry or flag fetch
+        // (NONESSENTIAL_TRAFFIC), and no auto-registered official plugin
+        // marketplace. Neither touches login (OAuth/keychain) or already-installed
+        // plugins; see `.plans` perf-swarm report claude-cli-memory.
+        environment["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        environment["CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL"] = "1"
         if let configDirectory, !configDirectory.isEmpty {
             environment["CLAUDE_CONFIG_DIR"] = configDirectory
         } else {
