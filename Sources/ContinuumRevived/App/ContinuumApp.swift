@@ -863,6 +863,23 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // Headless gesture-deferral witness: an off-screen window, never the screen.
+        if CommandLine.arguments.contains("--gesture-defer-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                do {
+                    try await GestureDeferChecks.run()
+                    print("GestureDeferChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains(ChildCrashIsolationChecks.trapChildFlag) {
             ChildCrashIsolationChecks.trapChild()
         }
@@ -12017,6 +12034,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if let agent { pendingChatterAgents.insert(agent.rawValue) }
         else if let stateAgent { pendingStateAgents.insert(stateAgent.rawValue) }
         else { pendingPushBuildsRows = true }
+        // Tool chatter waits out a camera gesture (FrameGovernor); a state change
+        // (turn start/end, approval, failure) never does. The pending set above
+        // keeps what the one push at the drain must cover.
+        if agent != nil, FrameGovernor.shared.deferKeyed("agent-surface-push", { [weak self] in
+            self?.agentSurfacePush.request(within: 0.05)
+        }) { return }
         agentSurfacePush.request(within: debounce)
     }
 

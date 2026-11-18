@@ -437,6 +437,20 @@ final class CanvasMotionWorkload {
     /// Agents the source streams into (all of them unless the run picked a subset).
     var streamingAgentCount: Int { emitter.streamingCount ?? agentIDs.count + subagentIDs.count }
 
+    /// The supervisor's durable assistant text per streaming agent, in agent order:
+    /// the ordered-delivery witness of `--gesture-defer-check`.
+    func streamedAssistantTexts() -> [String] {
+        agentIDs.filter { emitter.streamingIDs?.contains($0) ?? true }.map { id in
+            guard let entry = supervisor.transcriptDocumentProjection(for: id)?.entries
+                .last(where: { $0.role == .assistant }) else { return "" }
+            return AgentTranscriptCopyController.plainText(for: entry.blocks)
+        }
+    }
+
+    var qaSupervisorIngestCount: Int { supervisor.qaTranscriptIngestCount }
+    var qaSourceTicks: Int { (emitter.snapshot()["ticks"] as? Int) ?? 0 }
+    var qaAgentCount: Int { agentIDs.count }
+
     /// Call only outside measured motion, after stopStreaming(). This reads the
     /// real semantic projections; it does not flush their pending event queues.
     var hasDeliveredStreamingSource: Bool {

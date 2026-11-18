@@ -241,7 +241,12 @@ final class AgentCharacterController {
         var context = FSEventStreamContext(version: 0, info: nil, retain: nil, release: nil, copyDescription: nil)
         let callback: FSEventStreamCallback = { _, _, _, _, _, _ in
             // Delivered on the main queue (below).
-            MainActor.assumeIsolated { AgentCharacterController.shared.userThemesChangedOnDisk() }
+            MainActor.assumeIsolated {
+                // A theme file changed on disk: the rescan waits out a camera gesture.
+                if !FrameGovernor.shared.deferKeyed("character-themes-on-disk", {
+                    AgentCharacterController.shared.userThemesChangedOnDisk()
+                }) { AgentCharacterController.shared.userThemesChangedOnDisk() }
+            }
         }
         guard let created = FSEventStreamCreate(
             nil, callback, &context, [importsDirectory.resolvingSymlinksInPath().path] as CFArray,

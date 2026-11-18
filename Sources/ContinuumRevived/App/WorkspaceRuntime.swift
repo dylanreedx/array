@@ -507,6 +507,7 @@ final class WorkspaceRuntime {
     /// than a second boot path. `install(into:)` stays a checks-only entry point.
     func adoptCanvas(_ canvasView: CanvasNSView) {
         self.canvasView = canvasView
+        FrameGovernor.shared.adopt(canvas: canvasView)
         if engagementMonitor == nil {
             engagementMonitor = NSEvent.addLocalMonitorForEvents(matching: [
                 .keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown,

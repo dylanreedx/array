@@ -761,7 +761,15 @@ final class ZoneRuntimeController {
         isCanvasDirty = true
         saveTimer?.invalidate()
         saveTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: false) { [weak self] _ in
-            Task { @MainActor in self?.flushCanvasSaveOffMain() }
+            Task { @MainActor in
+                guard let self else { return }
+                // The snapshot is O(tiles) on main: it waits out a camera gesture and
+                // runs once at the drain (isCanvasDirty stays set, so nothing is lost).
+                if FrameGovernor.shared.deferKeyed(ObjectIdentifier(self), { [weak self] in
+                    self?.flushCanvasSaveOffMain()
+                }) { return }
+                self.flushCanvasSaveOffMain()
+            }
         }
     }
 
