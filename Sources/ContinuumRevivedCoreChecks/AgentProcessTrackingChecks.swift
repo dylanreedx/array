@@ -12,6 +12,7 @@ import Foundation
 /// one that `setsid`s and is adopted by launchd (the owner tag is the only rung
 /// that reaches it). Each listens on a port the kernel picks.
 func runAgentProcessTrackingChecks() {
+    checkPollBackoff()
     checkAttributionShapes()
     checkCodexRuntimeHelper()
     checkLabels()
@@ -335,4 +336,15 @@ private func checkProcessStopSafetyAndEscalation() {
            "stop escalation: wait out the TERM grace, then finish promptly; took \(elapsed)s")
     expect(status & 0x7f == SIGKILL,
            "stop escalation: the resistant shell must end by SIGKILL, raw wait status \(status)")
+}
+
+/// An idle table is read less and less often; a change starts it again.
+private func checkPollBackoff() {
+    let base: TimeInterval = 2
+    let n = AgentProcessPollPolicy.quietScansBeforeBackoff
+    expect(AgentProcessPollPolicy.interval(base: base, quietScans: 0) == base, "poll: a fresh tracker scans at its base interval")
+    expect(AgentProcessPollPolicy.interval(base: base, quietScans: n - 1) == base, "poll: a few quiet scans do not slow it")
+    expect(AgentProcessPollPolicy.interval(base: base, quietScans: n) > base, "poll: a quiet table is read less often")
+    expect(AgentProcessPollPolicy.interval(base: base, quietScans: 1000) == base * AgentProcessPollPolicy.maximumStretch,
+           "poll: the wait is capped so a new job is still found")
 }

@@ -270,7 +270,64 @@ enum HelperEvidenceChecks {
         var activities: [AgentID: [String: AgentObservedActivity]]
     }
 
+    /// The classifier runs on every shell tool event. It must answer exactly as the
+    /// per-call regex version did (the timing is reported, not gated: debug builds
+    /// say little about the optimised cost).
+    private struct SplitMix: RandomNumberGenerator {
+        var state: UInt64
+        mutating func next() -> UInt64 {
+            state &+= 0x9E3779B97F4A7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+            z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+            return z ^ (z >> 31)
+        }
+    }
+
+    static func classifierWitness() throws {
+        func reference(compound command: String) -> Bool {
+            let text = command.replacingOccurrences(of: #"\d*>&\d+|\d*>>?\s*[^\s;|&<>]+|\d*<\s*[^\s;|&<>]+"#,
+                                                    with: " ", options: .regularExpression)
+            return text.range(of: #"[;|&\n`]|\$\(|<\("#, options: .regularExpression) != nil
+        }
+        func reference(background command: String) -> Bool {
+            let text = command.replacingOccurrences(of: #"\d*>&\d+|&>>?|>&"#, with: " ", options: .regularExpression)
+            if text.range(of: #"(^|[^&])&($|[^&])"#, options: .regularExpression) != nil { return true }
+            return HelperEvidence.words(text).contains { ["nohup", "disown", "setsid"].contains($0) }
+        }
+        let corpus = ["swift build", "swift run X --a-check 2>&1", "make > out.log", "a && b", "a | b", "a; b", "a\nb",
+                      "echo `x`", "echo $(x)", "cat <(x)", "x &", "x & y", "nohup x", "2>&1 y", "cmd &> log", "cmd >& log",
+                      "sleep 1 &", "a || b", "x < in.txt", "", "echo '&' done", "git status", "x 1>&2 &", "setsid x"]
+        for command in corpus {
+            try expect(HelperEvidence.isCompound(command) == reference(compound: command), "isCompound differs for \(command.debugDescription)")
+            try expect(HelperEvidence.startsBackgroundJob(command) == reference(background: command),
+                       "startsBackgroundJob differs for \(command.debugDescription)")
+        }
+        // Generated strings over the operator alphabet must agree with the patterns too.
+        var seed = SplitMix(state: 20_261_117)
+        let alphabet = Array("ab 1 2>&<|;$()`\n\t-/.x'\"")
+        for _ in 0..<20_000 {
+            var text = ""
+            for _ in 0..<Int.random(in: 0...14, using: &seed) { text.append(alphabet[Int.random(in: 0..<alphabet.count, using: &seed)]) }
+            try expect(HelperEvidence.isCompound(text) == reference(compound: text), "isCompound differs for \(text.debugDescription)")
+            try expect(HelperEvidence.startsBackgroundJob(text) == reference(background: text), "startsBackgroundJob differs for \(text.debugDescription)")
+        }
+        let big = "python3 - <<'EOF'\n" + String(repeating: "print(\"line of a long script\")\n", count: 400) + "EOF"
+        let mix = [big, "git status", "swift build --product Array", "ls -la Sources", "cat Package.swift", "grep -rn foo Sources", "swift run X --some-check 2>&1"]
+        let rounds = 5_000
+        func time(_ body: (String) -> Bool) -> Double {
+            let start = DispatchTime.now().uptimeNanoseconds
+            var sink = false
+            for i in 0..<rounds { sink = body(mix[i % mix.count]) != sink }
+            return Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6
+        }
+        let before = time { reference(compound: $0) || reference(background: $0) }
+        let after = time { HelperEvidence.isCompound($0) || HelperEvidence.startsBackgroundJob($0) }
+        print("helper-evidence classifier: \(rounds) commands, regex-per-call \(Int(before)) ms, cached \(Int(after)) ms")
+    }
+
     static func run() async throws {
+        try classifierWitness()
         let mode = ProcessInfo.processInfo.environment["CONTINUUM_HELPER_EVIDENCE_CASE"]
         if mode == "expected" {
             // Prints what the lead receives, for recording against the code before the change.
