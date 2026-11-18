@@ -2105,7 +2105,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// The status owner is the only announcement source. A changed elapsed value
     /// deliberately does not enter this snapshot, so re-rendering a ticking row
     /// can update its aggregate label without posting a second live-region event.
-    private func statusAccessibilitySummary(for row: AgentInboxRow) -> String {
+    nonisolated static func statusAccessibilitySummary(for row: AgentInboxRow) -> String {
         let pause = SidebarRecovery.cause(for: row) == .usageLimit
             ? SidebarFailureCause.usageLimit.label(harness: row.harness) : nil
         if row.isUnconfirmed {
@@ -2119,18 +2119,30 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// initial snapshot is silent; a removed id is pruned immediately, so a later
     /// reintroduction starts a fresh observation rather than announcing stale disk
     /// state. Elapsed is deliberately absent from this key.
-    private func updateStatusSnapshots(for newRows: [AgentInboxRow]) {
-        let ids = Set(newRows.map(\.id))
-        accessibilityStatusByAgent = accessibilityStatusByAgent.filter { ids.contains($0.key) }
-        accessibilityStatusAnnouncementOwners = accessibilityStatusAnnouncementOwners.filter {
-            ids.contains($0.key)
+    private func updateStatusSnapshots(for newRows: [AgentInboxRow], summaries: [UUID: String]? = nil) {
+        // `summaries` (from an off-main build of these same rows) is keyed by row id.
+        if let summaries {
+            if accessibilityStatusByAgent.keys.contains(where: { summaries[$0] == nil }) {
+                accessibilityStatusByAgent = accessibilityStatusByAgent.filter { summaries[$0.key] != nil }
+            }
+            if accessibilityStatusAnnouncementOwners.keys.contains(where: { summaries[$0] == nil }) {
+                accessibilityStatusAnnouncementOwners = accessibilityStatusAnnouncementOwners.filter {
+                    summaries[$0.key] != nil
+                }
+            }
+        } else {
+            let ids = Set(newRows.map(\.id))
+            accessibilityStatusByAgent = accessibilityStatusByAgent.filter { ids.contains($0.key) }
+            accessibilityStatusAnnouncementOwners = accessibilityStatusAnnouncementOwners.filter {
+                ids.contains($0.key)
+            }
         }
 
         for row in newRows {
             // Compare the spoken semantic status, not elapsed or other row facts.
             // This also catches a ready→woke attention transition without making
             // the status owner depend on the ticking duration.
-            let current = statusAccessibilitySummary(for: row)
+            let current = summaries?[row.id] ?? Self.statusAccessibilitySummary(for: row)
             guard let previous = accessibilityStatusByAgent[row.id] else {
                 accessibilityStatusByAgent[row.id] = current
                 continue
@@ -2143,11 +2155,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             } else {
                 let announcementOwner = accessibilityStatusAnnouncementOwners[row.id]
                     ?? AgentInboxStatusAnnouncementOwner(frame: .zero)
-                announcementOwner.apply(summary: statusAccessibilitySummary(for: row))
+                announcementOwner.apply(summary: Self.statusAccessibilitySummary(for: row))
                 accessibilityStatusAnnouncementOwners[row.id] = announcementOwner
                 owner = announcementOwner
             }
-            let summary = statusAccessibilitySummary(for: row)
+            let summary = Self.statusAccessibilitySummary(for: row)
             owner.setAccessibilityRole(owner.accessibilityRole() ?? .staticText)
             owner.setAccessibilityLabel("Status: \(summary)")
             owner.setAccessibilityValue(summary)
@@ -2295,15 +2307,24 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Keep one bounded re-render timer for the earliest derived wake. The view's
     /// `clock()` remains the rendering clock; scheduling uses the real wall clock so
     /// a shelf cannot linger for the rest of an injected minute in production.
+    /// The earliest wake an off-main build already found in `allRows`, for the
+    /// length of the apply that holds it.
+    private var wakeEarliestOverride: (date: Date?, Void)?
+
     private func scheduleWakeRerender() {
         cancelWakeRerender()
         let now = clock()
         // Plan 106: a finished subagent folds out of its lead's card 30 minutes
         // after it ended, on this same one timer.
-        let earliest = allRows.compactMap { row -> Date? in
-            if case .snoozed(let until) = row.lifecycle, until > now { return until }
-            return InboxSort.subagentFoldsAt(row).flatMap { $0 > now ? $0 : nil }
-        }.min()
+        let earliest: Date?
+        if let override = wakeEarliestOverride {
+            earliest = override.date.flatMap { $0 > now ? $0 : nil }
+        } else {
+            earliest = allRows.compactMap { row -> Date? in
+                if case .snoozed(let until) = row.lifecycle, until > now { return until }
+                return InboxSort.subagentFoldsAt(row).flatMap { $0 > now ? $0 : nil }
+            }.min()
+        }
         guard let earliest else { return }
         let delay = min(
             Self.wakeTimerMaximumDelay,
@@ -2468,6 +2489,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// Pushes handed to the queue, and swaps applied; for the witness.
     /// A push is on the queue or waiting for the camera to rest.
     var hasPendingOffMainApply: Bool { pendingOffMain != nil }
+    private(set) var skippedCellRefreshCountForQA = 0
     private(set) var qaOffMainRequestCount = 0
     private(set) var qaOffMainSwapCount = 0
     /// Main-thread time spent applying swapped-in models, for the witness: the
@@ -2566,7 +2588,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // P6.6: compare/prune before the incremental/full list branch. Cell
         // materialization is a rendering detail and must not decide whether a
         // semantic transition was announced.
-        updateStatusSnapshots(for: newRows)
+        updateStatusSnapshots(for: newRows, summaries: model?.statusSummaries)
         // P4.10: the same read `reload(rows:)` makes, and for the same reason — this
         // path keeps the selection when the list's identities did not move, and drops
         // it through `render` when they did, so only a value taken here survives both.
@@ -2581,7 +2603,9 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // time here would hand `applyRows` its own answer as the previous one and
         // P2D.4's disclosure-moved rows would go unredrawn.
         let lifted = liftCrossfadeGhosts(from: rows, to: newRows)
+        if let model { wakeEarliestOverride = (model.wakeEarliest, ()) }
         applyRows(newRows, changed: changed, chatterPatchedAgentIDs: chatterPatchedAgentIDs, model: model)
+        wakeEarliestOverride = nil
         if foldMotion.isAnimating {
             let keys = Set(foldMotion.poses.keys)
             foldMotion.cover(items.indices.compactMap { index in
@@ -3026,7 +3050,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         let lightsEveryWorkingGroup = SidebarActiveIndicatorScope.resolve(in: indicatorDefaults) == .working
         // The open agent's top lead, so a fold that hides the open helper leaves
         // its group's style alone. Style only: no row is drawn as selected for it.
-        var openLead = allRows.first { $0.id == openAgentId }
+        var openLead = openAgentId.flatMap { open in allRows.first { $0.id == open } }
         var visited: Set<UUID> = []
         while let row = openLead, let parentId = row.parentId, visited.insert(row.id).inserted,
               let parent = allRows.first(where: { $0.id == parentId }) { openLead = parent }
@@ -3105,8 +3129,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             }
             start = end + 1
         }
-        let liveLeads = Set(allRows.filter { $0.depth == 0 }.map(\.id))
-        groupFocusMemory = groupFocusMemory.filter { liveLeads.contains($0.key) }
+        if !groupFocusMemory.isEmpty {
+            let liveLeads = Set(allRows.filter { $0.depth == 0 }.map(\.id))
+            groupFocusMemory = groupFocusMemory.filter { liveLeads.contains($0.key) }
+        }
         return slices
     }
 
@@ -3145,6 +3171,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if !next.contains(where: { if case .historyHeader = $0 { return true }; return false }) { historyHeaderCell = nil }
         if !next.contains(where: { if case .shelfHeader = $0 { return true }; return false }) { shelfHeaderCell = nil }
         rows = next.compactMap(\.agentRow)
+        if drawnKeys.count > 256 { let live = Set(rows.map(\.id)); drawnKeys = drawnKeys.filter { live.contains($0.key) } }
         if !historyEntryCells.isEmpty { historyEntryCells = historyEntryCells.filter { historyEntryHelpers[$0.key] != nil } }
         if updatingFold { foldRenderNudge = settleNudgeTargetID(now: clock()) }
         nestingByTableRow = AgentInboxView.nestings(for: next)
@@ -4645,6 +4672,47 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // is an overlay and not part of the row's content — `apply` paints what the
         // agent IS, and a pill is a thing about the keyboard.
         cell.showJumpHint(jumpHintsVisible ? AgentInboxView.jumpHintText(forRowIndex: index) : nil)
+        drawnKeys[model.id] = drawnKey(for: model, tableRow: row)
+    }
+
+    /// What a drawn agent cell was last configured from. A cell whose key is
+    /// unchanged would repaint exactly what it already shows.
+    private struct DrawnKey {
+        var model: AgentInboxRow
+        var rollup: ChildRollup?
+        var tally: SidebarLeadTally?
+        var disclosure: RowDisclosure
+        var nesting: InboxNesting
+        var ownership: InboxOwnershipSlice
+        var selected: Bool
+        var interacting: Bool
+        var sortMode: InboxSortMode
+        var layout: SidebarLayout
+        var marksWorkspaces: Bool
+        var jumpHints: Bool
+        var parentsWithChildren: Bool
+
+        /// Equal, ignoring the live elapsed time (a timer redraws that).
+        func matches(_ other: DrawnKey) -> Bool {
+            model.matchesIgnoringLiveElapsed(other.model) && rollup == other.rollup && tally == other.tally
+                && disclosure == other.disclosure && nesting == other.nesting && ownership == other.ownership
+                && selected == other.selected && interacting == other.interacting
+                && sortMode == other.sortMode && layout == other.layout
+                && marksWorkspaces == other.marksWorkspaces && jumpHints == other.jumpHints
+                && parentsWithChildren == other.parentsWithChildren
+        }
+    }
+    private var drawnKeys: [UUID: DrawnKey] = [:]
+
+    private func drawnKey(for model: AgentInboxRow, tableRow row: Int) -> DrawnKey {
+        DrawnKey(
+            model: model, rollup: rollupsByParent[model.id],
+            tally: model.depth == 0 ? sidebarTallies[model.id] : nil,
+            disclosure: disclosure(for: model), nesting: nesting(atTableRow: row),
+            ownership: ownsSubagents ? ownership(atTableRow: row) : InboxOwnershipSlice(),
+            selected: tableView.selectedRowIndexes.contains(row), interacting: isInteracting(row: row),
+            sortMode: sortMode, layout: sidebarLayout, marksWorkspaces: marksWorkspaces,
+            jumpHints: jumpHintsVisible, parentsWithChildren: parentsWithChildren.contains(model.id))
     }
 
     /// Give an agent row that is already drawn its new facts without asking the
@@ -4663,6 +4731,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
               !updatingFold,
               abs(tableView.rect(ofRow: row).height - tableView.intercellSpacing.height - self.tableView(tableView, heightOfRow: row)) < 0.5
         else { return false }
+        // Nothing it draws from changed: leave it as it is.
+        if let last = drawnKeys[model.id], last.matches(drawnKey(for: model, tableRow: row)) {
+            skippedCellRefreshCountForQA += 1
+            return true
+        }
         cellBuildCountForQA += 1
         onCellBuildForQA?(model.id)
         configureAgentCell(

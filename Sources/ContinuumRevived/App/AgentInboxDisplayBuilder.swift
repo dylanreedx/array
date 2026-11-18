@@ -95,6 +95,11 @@ struct InboxDisplayModel: Sendable {
     var historyEntryDates: [UUID: Date] = [:]
     var quietHistoryCache: InboxQuietHistoryProjection?
     var historyProjectionBuilds = 0
+    /// The spoken status of every incoming row (`statusAccessibilitySummary`).
+    var statusSummaries: [UUID: String] = [:]
+    /// The earliest moment a row's state wants a re-render (snooze end, a finished
+    /// subagent folding away), measured at `input.now`.
+    var wakeEarliest: Date?
     /// The scope menu's entries for `rows` and these inputs.
     var scopeMenu: (inputs: InboxScopeMenuInputs, entries: [InboxScopeMenuEntry])?
 }
@@ -111,6 +116,18 @@ struct InboxDisplayModel: Sendable {
 nonisolated enum InboxDisplayBuilder {
     static func build(_ input: InboxDisplayInputs) -> InboxDisplayModel {
         var model = InboxDisplayModel()
+        // Scans of every incoming row that only read the row: the host applies the
+        // answers instead of walking 2,000+ rows on main.
+        model.statusSummaries.reserveCapacity(input.rows.count)
+        var wakeEarliest: Date?
+        for row in input.rows {
+            model.statusSummaries[row.id] = AgentInboxView.statusAccessibilitySummary(for: row)
+            let wake: Date?
+            if case .snoozed(let until) = row.lifecycle, until > input.now { wake = until }
+            else { wake = InboxSort.subagentFoldsAt(row).flatMap { $0 > input.now ? $0 : nil } }
+            if let wake, wakeEarliest.map({ wake < $0 }) ?? true { wakeEarliest = wake }
+        }
+        model.wakeEarliest = wakeEarliest
         if let menu = input.scopeMenu {
             model.scopeMenu = (menu, InboxScopeMenu.entries(
                 scope: menu.scope, workspaces: menu.workspaces, projects: menu.projects,
