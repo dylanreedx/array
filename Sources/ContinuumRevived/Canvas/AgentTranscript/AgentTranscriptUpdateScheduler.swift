@@ -19,9 +19,6 @@ final class AgentTranscriptUpdateScheduler {
     /// agents streaming (`.plans/84`, benchmark): visual applies were a quarter of
     /// the main thread, half of them for tiles nobody could see.
     var isPresentable: (() -> Bool)?
-    /// How soon an unseen transcript looks again; it bounds how stale a tile panned
-    /// into view can be.
-    static let unseenRecheckInterval: TimeInterval = 0.25
     /// QA: timed applies skipped because the transcript was not on screen.
     static private(set) var qaUnseenDeferrals = 0
 
@@ -38,15 +35,20 @@ final class AgentTranscriptUpdateScheduler {
         }
     }
 
-    /// A transcript off screen keeps its latest snapshot and looks again shortly,
-    /// applying once it can be seen: nobody can see the layout it would pay for.
+    /// A transcript off screen keeps its latest snapshot until new data or a
+    /// visibility change asks it to try again.
     private func flushUnlessHeld() {
         if pending != nil, let isPresentable, !isPresentable() {
             Self.qaUnseenDeferrals += 1
-            armTimer(after: Self.unseenRecheckInterval)
             return
         }
         flush()
+    }
+
+    /// Called by the canvas and view lifecycle when geometry or visibility changes.
+    func visibilityMayHaveChanged() {
+        guard pending != nil else { return }
+        armTimer()
     }
 
     func flush() {

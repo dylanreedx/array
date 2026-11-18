@@ -765,6 +765,8 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
     /// back to the ungated `apply` path.
     func flushPendingVisualUpdate() { updateScheduler.flush() }
 
+    func visibilityMayHaveChanged() { updateScheduler.visibilityMayHaveChanged() }
+
     /// On screen: in a window, not hidden or parked, and not clipped out of the
     /// canvas. A view with no window keeps the old behaviour (checks build them).
     var isOnScreenForVisualUpdates: Bool {
@@ -935,6 +937,16 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
             return view.subviews.contains(where: containsSelection)
         }
         return containsSelection(in: collectionView)
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        visibilityMayHaveChanged()
+    }
+
+    override func viewDidUnhide() {
+        super.viewDidUnhide()
+        visibilityMayHaveChanged()
     }
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {

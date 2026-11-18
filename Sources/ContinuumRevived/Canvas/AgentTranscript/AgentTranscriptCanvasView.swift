@@ -503,6 +503,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     /// Far parking moves the body into an off-screen park view in the same window.
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
+        visibilityMayHaveChanged()
         syncCharacters()
     }
 
@@ -525,6 +526,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     override func viewDidUnhide() {
         super.viewDidUnhide()
+        visibilityMayHaveChanged()
         reconcileGyro()
         syncCharacters()
     }
@@ -598,6 +600,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     }
 
     func flushPendingVisualUpdate() { updateScheduler.flush() }
+
+    func visibilityMayHaveChanged() { updateScheduler.visibilityMayHaveChanged() }
 
     func jumpToLatest() {
         scrollOffset = maximumScrollOffset

@@ -334,6 +334,7 @@ enum TileSurfaceResidencyChecks {
         try checkFlagOffChangesNothing()
         try checkFarOffscreenLiveTilesParkAndReturn()
         try runUnseenTranscriptsWaitUntilOnScreen()
+        try checkTranscriptWakesOnBodyPromotion()
         try checkFarParkingCoversMarkdownEditorsAndBodySwaps()
         try checkQuietSurfacesAndLiveStaysNative()
         try checkHysteresisIgnoresAPointerSweep()
@@ -772,19 +773,75 @@ enum TileSurfaceResidencyChecks {
         world.pump()
         let before = unseen.qaVisualApplyCount
         stream(unseenTile, 1, "off screen")
-        wait(0.4)
+        wait(0.15)
+        let idleStart = AgentTranscriptUpdateScheduler.qaUnseenDeferrals
+        wait(0.8)
+        let idleRetries = AgentTranscriptUpdateScheduler.qaUnseenDeferrals - idleStart
+        try expect(idleRetries == 0,
+                   "an idle hidden transcript retried \(idleRetries) times in 0.8 seconds")
+        // A new delta can try again, and the latest snapshot still wins.
+        unseenTile.ingest(.contentDelta(threadId: "surface-residency-1", turnId: "live-1",
+                                        streamKind: .assistant, delta: " newer"))
+        wait(0.15)
         try expect(unseen.qaVisualApplyCount == before,
                    "an off-screen transcript applied \(unseen.qaVisualApplyCount - before) times")
         try expect(unseen.qaAppliedVersion < unseen.qaEnqueuedVersion,
                    "the off-screen rows must still be the old version")
         canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
         world.pump()
-        wait(AgentTranscriptUpdateScheduler.unseenRecheckInterval + 0.15)
+        wait(0.4)
         try expect(unseen.qaVisualApplyCount == before + 1,
                    "back on screen it must apply once; applied \(unseen.qaVisualApplyCount - before) times")
         try expect(unseen.qaAppliedVersion == unseen.qaEnqueuedVersion,
                    "the applied rows must be the document streamed while it was off screen")
-        print("transcripts: an off-screen agent streamed without applying and caught up once on screen")
+        print("transcripts: idle hidden retries=\(idleRetries) in 0.8s; latest streamed snapshot caught up once on screen")
+    }
+
+    /// Promotion reparents an ancestor of the transcript, so the transcript's
+    /// own viewDidMoveToSuperview is not a visibility event. Both the surfaced
+    /// and far-parked paths must wake a held snapshot without another camera or
+    /// stream event.
+    private static func checkTranscriptWakesOnBodyPromotion() throws {
+        for farParked in [false, true] {
+            let world = World(tileCount: 1)
+            defer { world.teardown() }
+            world.canvas.farParkingEnabled = false
+            guard let tile = world.agentViews[world.tiles[0].id],
+                  let transcript = tile.qaTranscriptForChecks else {
+                throw Failure(message: "promotion fixture has no transcript")
+            }
+            if farParked {
+                world.canvas.surfaceResidencyEnabled = false
+                let park = NSView(frame: NSRect(x: 50_000, y: 50_000, width: 500, height: 500))
+                world.canvas.addSubview(park)
+                try expect(tile.parkBodyFarOffscreen(park: park), "fixture could not park the body")
+            } else {
+                world.canvas.surfaceResidencyEnabled = true
+                world.quiesceAndSurface()
+                try expect(tile.surfaceResidency == .surfaced, "fixture could not surface the body")
+                // No heartbeat may promote it before this witness explicitly does.
+                world.canvas.surfaceResidencyEnabled = false
+            }
+            world.pump()
+            try expect(!transcript.isOnScreenForVisualUpdates, "parked transcript must be off screen")
+            let before = transcript.qaVisualApplyCount
+            let thread = "surface-residency-0", turn = "promotion-held"
+            tile.ingest(.turnStarted(threadId: thread, turnId: turn))
+            tile.ingest(.contentDelta(threadId: thread, turnId: turn, streamKind: .assistant,
+                                      delta: "held until body promotion"))
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            try expect(tile.surfaceResidency == .surfaced && transcript.qaVisualApplyCount == before,
+                       "the snapshot must still be held in the park")
+            try expect(transcript.qaAppliedVersion < transcript.qaEnqueuedVersion,
+                       "the promotion fixture must have a pending snapshot")
+            tile.promoteBodyToNative()
+            world.pump()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            world.pump()
+            try expect(transcript.qaVisualApplyCount == before + 1
+                       && transcript.qaAppliedVersion == transcript.qaEnqueuedVersion,
+                       "\(farParked ? "far-parked" : "surfaced") body promotion must apply the held snapshot without another event")
+        }
     }
 
     /// `--gesture-telemetry-check`: the gesture log must name the frame a reparent

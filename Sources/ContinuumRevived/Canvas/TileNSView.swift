@@ -751,6 +751,9 @@ class TileNSView: NSView, TokenThemed {
         return true
     }
 
+    /// A subclass can wake work held while its body was in the off-screen park.
+    func bodyDidPromoteToNative() {}
+
     /// Put the real body back. Idempotent, and safe to call from anywhere —
     /// including `hitTest`, which is how a click during the settle window reaches
     /// the real body instead of being swallowed by a picture of it.
@@ -769,6 +772,7 @@ class TileNSView: NSView, TokenThemed {
         surfaceHost = nil
         surfaceResidency = .native
         titleBar?.restoreAccessory()
+        bodyDidPromoteToNative()
     }
 
     /// Drop the retained host and its texture. For teardown and for a tile whose
