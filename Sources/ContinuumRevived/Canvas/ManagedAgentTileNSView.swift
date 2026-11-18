@@ -1040,14 +1040,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 // The transcript model filters on THIS tile's thread id, so events
                 // carrying the agent's thread are rebound on the way in — the same
                 // rebinding the app did at this boundary before the tile owned it.
-                let bound = event.withThreadId(self.threadId)
-                // Capture the provider event before host-local transcript remapping;
-                // the original runtime thread is immutable tool identity, not a
-                // display-routing convenience.
-                self.ingest(bound, originalEvent: event)
-                self.onIngestedEvent?(bound)
-                self.tailEventsRead &+= 1
-                if !self.noticesAheadOfTail.isEmpty { self.appendNoticesReachedByTail() }
+                self.consumeTailEvent(event, generation: subscriptionGeneration)
             }
             // The tail ended (the agent was removed): nothing more precedes them.
             if let self, !Task.isCancelled { self.appendNoticesReachedByTail(all: true) }
@@ -2196,6 +2189,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
         eventSubscriptionGeneration = nil
+        deferredTailEvents.removeAll()
         eventSubscription?.cancel()
         eventSubscription = nil
         if let transcriptReloadObserverToken, let agentID = attachedAgentID {
@@ -2846,6 +2840,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             agentSource?.noteSubmissionReturn(for: agentID, at: returnedAt)
         }
         cancelStreamingMarkupParseTimer()
+        flushDeferredTailEvents()
         model.appendUserPrompt(id: id, prompt: prompt)
         hydrateManagedImages(prompt.imageAttachments.map(\.metadata))
         // final: true — the user's own words must not wait on the 30Hz streaming gate.
@@ -2916,12 +2911,58 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     func appendUserPrompt(_ prompt: AgentPrompt) {
         cancelStreamingMarkupParseTimer()
         guard let id = AgentNodeID(rawValue: "local-prompt-\(UUID().uuidString)") else { return }
+        flushDeferredTailEvents()
         model.appendUserPrompt(id: id, prompt: prompt)
         hydrateManagedImages(prompt.imageAttachments.map(\.metadata))
         // The user's own prompt is a direct response to their keystroke; echo it
         // without waiting on the streaming gate.
         synchronizeV2Transcript(final: true)
         scheduleStreamingMarkupParseTimerIfNeeded()
+    }
+
+    /// Streamed chunks this tile held because it is off screen while the camera
+    /// moves (`FrameGovernor`). FIFO; flushed before any newer event is applied.
+    private var deferredTailEvents: [(event: AgentRuntimeEvent, generation: UUID)] = []
+    private static let deferredTailEventCap = 4_096
+
+    private func consumeTailEvent(_ event: AgentRuntimeEvent, generation: UUID) {
+        if case .contentDelta = event, let agentID = attachedAgentID {
+            let governor = FrameGovernor.shared
+            if governor.shouldDefer(), !governor.agentIsVisible(agentID),
+               deferredTailEvents.count < Self.deferredTailEventCap {
+                deferredTailEvents.append((event, generation))
+                governor.noteDeferred(owner: self) { [weak self] in self?.flushDeferredTailEvents() }
+                return
+            }
+        }
+        flushDeferredTailEvents()
+        applyTailEvent(event)
+    }
+
+    /// QA: tail events a tile applied (the per-delta main-thread cost it paid).
+    nonisolated(unsafe) static var qaTailEventsApplied = 0
+
+    private func applyTailEvent(_ event: AgentRuntimeEvent) {
+        Self.qaTailEventsApplied &+= 1
+        let bound = event.withThreadId(threadId)
+        // Capture the provider event before host-local transcript remapping;
+        // the original runtime thread is immutable tool identity, not a
+        // display-routing convenience.
+        ingest(bound, originalEvent: event)
+        onIngestedEvent?(bound)
+        tailEventsRead &+= 1
+        if !noticesAheadOfTail.isEmpty { appendNoticesReachedByTail() }
+    }
+
+    /// Applies held chunks in arrival order. A chunk from a subscription that has
+    /// since been replaced is dropped: its replacement began from a snapshot that
+    /// already holds it.
+    func flushDeferredTailEvents() {
+        guard !deferredTailEvents.isEmpty else { return }
+        let held = deferredTailEvents
+        deferredTailEvents.removeAll()
+        FrameGovernor.shared.noteFlushed(owner: self, count: held.count)
+        for item in held where item.generation == eventSubscriptionGeneration { applyTailEvent(item.event) }
     }
 
     func ingest(_ event: AgentRuntimeEvent, originalEvent: AgentRuntimeEvent? = nil) {
@@ -4460,6 +4501,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         guard generation == streamingMarkupParseTimerGeneration else { return }
         streamingMarkupParseTimer = nil
         streamingMarkupParseTimerScheduledDelay = nil
+        // Off screen while the camera moves: the parse is a visual-only cost, and
+        // it runs once at the drain (a boundary flush parses it sooner).
+        if let agentID = attachedAgentID, !FrameGovernor.shared.agentIsVisible(agentID),
+           FrameGovernor.shared.deferKeyed(ObjectIdentifier(self), { [weak self] in
+               self?.scheduleStreamingMarkupParseTimerIfNeeded()
+           }) { return }
         if model.flushPendingStreamingMarkupIfDue() {
             synchronizeV2Transcript()
         }

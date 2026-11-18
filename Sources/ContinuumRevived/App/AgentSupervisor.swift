@@ -10697,6 +10697,7 @@ final class AgentSupervisor {
     }
 
     func transcriptDocumentProjection(for id: AgentID) -> AgentDocument? {
+        flushGestureDeferredIngest(for: id)
         if let released = releasedTranscripts[id] { return released.evidence }
         return transcriptProjections[id]?.document
     }
@@ -12017,6 +12018,7 @@ final class AgentSupervisor {
     /// what has streamed first. The publisher reads at most four times a second,
     /// the supervisor's own parse rate.
     func transcriptDocument(for id: AgentID) -> AgentDocument? {
+        flushGestureDeferredIngest(for: id)
         guard releasedTranscripts[id] == nil else { return nil }
         let rejected = transcriptProjections[id]?.rejectedMutationCount
         _ = transcriptProjections[id]?.flushPendingStreamingMarkup()
@@ -12151,6 +12153,8 @@ final class AgentSupervisor {
     /// `AgentSupervisor` is main-actor isolated, so no delivery can interleave the
     /// snapshot read and continuation registration.
     func transcriptAttachment(for id: AgentID, reboundTo threadId: String) -> TranscriptAttachment {
+        // A snapshot taken over held chunks would miss them, and the tail starts after.
+        flushGestureDeferredIngest(for: id)
         // A later explicit view can retry a failed read after storage returns.
         // This never retries a mutation or partial-save fault.
         if canonicalTranscriptPreflightFailures.contains(id) { startCanonicalTranscriptPreflight(for: id) }
@@ -12264,9 +12268,48 @@ final class AgentSupervisor {
     /// (`.plans/84`).
     static let transcriptStreamingParsesPerSecond: Double = 4
 
-    private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID, bypassReload: Bool = false) {
+    /// Streamed chunks of an agent nobody can see, held while the camera moves
+    /// (`FrameGovernor`). Strict FIFO per agent; flushed before anything newer is
+    /// applied, so nothing is lost or reordered.
+    private var gestureDeferredIngest: [AgentID: [AgentRuntimeEvent]] = [:]
+    private static let gestureDeferredIngestCap = 4_096
+    /// QA: events the canonical/projection ingest actually ran for (main-thread cost paid).
+    private(set) var qaTranscriptIngestCount = 0
+
+    /// Applies an agent's held chunks, in arrival order.
+    func flushGestureDeferredIngest(for id: AgentID) {
+        guard let held = gestureDeferredIngest.removeValue(forKey: id) else { return }
+        FrameGovernor.shared.noteFlushed(owner: self, count: held.count)
+        if !gestureDeferredIngest.isEmpty {
+            FrameGovernor.shared.noteDeferred(owner: self) { [weak self] in self?.drainGestureDeferredIngest() }
+        }
+        for event in held { ingestTranscriptEvent(event, for: id, gestureDrain: true) }
+    }
+
+    private func drainGestureDeferredIngest() {
+        let ids = Array(gestureDeferredIngest.keys)
+        for id in ids { flushGestureDeferredIngest(for: id) }
+    }
+
+    /// A pure content chunk for an agent with no tile on screen, during a gesture.
+    private func deferIngestForGesture(_ event: AgentRuntimeEvent, for id: AgentID) -> Bool {
+        let governor = FrameGovernor.shared
+        guard governor.shouldDefer(), !governor.agentIsVisible(id) else { return false }
+        if (gestureDeferredIngest[id]?.count ?? 0) >= Self.gestureDeferredIngestCap { return false }
+        gestureDeferredIngest[id, default: []].append(event)
+        governor.noteDeferred(owner: self) { [weak self] in self?.drainGestureDeferredIngest() }
+        return true
+    }
+
+    private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID, bypassReload: Bool = false,
+                                       gestureDrain: Bool = false) {
         guard transcriptStore != nil else { return }
+        if !bypassReload, !gestureDrain {
+            if case .contentDelta = event, deferIngestForGesture(event, for: id) { return }
+            flushGestureDeferredIngest(for: id)
+        }
         if !bypassReload, deferUntilTranscriptReloaded(id, { [weak self] in self?.ingestTranscriptEvent(event, for: id, bypassReload: true) }) { return }
+        qaTranscriptIngestCount &+= 1
         recordCanonicalTranscriptMutation(for: id) { $0.ingest(event); return true }
         if transcriptProjections[id] == nil { transcriptProjections[id] = transcriptProjection(for: id) }
         let capture = sharedTranscriptDetailCapture(for: id)
@@ -13058,6 +13101,7 @@ final class AgentSupervisor {
         // Inside a settlement, the turn's own captured reply (none when its
         // transcript was unavailable), never the previous turn's.
         if let scope = settlementScope, scope.id == id { return scope.reply }
+        flushGestureDeferredIngest(for: id)
         // The resumed model comes first: while a reload replays held events the
         // released summary still exists and names the previous turn's reply.
         if let projection = transcriptProjections[id] { return projection.finalAssistantText }
