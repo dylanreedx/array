@@ -11,46 +11,10 @@ import ContinuumRevivedCore
 // shared core (SidebarLedgerCore / SidebarQuietInbox); nothing is re-counted.
 
 extension AgentInboxView {
-    /// The Quiet inbox's head, from the core's per-render facts.
-    func quietInboxHead(familyChips: [SidebarQuietInbox.FamilyChip]) -> [InboxListItem] {
-        let blocking = SidebarQuietInbox.needsYou(sidebarIncidents)
-        let clear = sidebarClearIDs.count
-        guard clear > 0 || !blocking.isEmpty else { return [] }
-        var items: [InboxListItem] = [.sectionLabel(SidebarSectionLabel(
-            kind: .inbox, title: "Inbox", count: nil, clearCount: clear))]
-        // A family's cause is said inside its own card, never stacked here.
-        if !blocking.isEmpty { items.append(.quietNeedsYou(blocking)) }
-        return items
-    }
-
-    /// Quiet inbox: each family's one cause line, placed right after its lead's
-    /// own row so it draws inside that card. Any other layout, or a lead not in
-    /// the list, adds nothing.
-    func withFamilyCauseLines(_ items: [InboxListItem]) -> [InboxListItem] {
-        guard sidebarLayout == .quietInbox else { return items }
-        var byLead: [UUID: SidebarIncident] = [:]
-        for chip in sidebarFamilyChips where Self.causeLineText(chip.incident) != nil {
-            byLead[chip.familyId] = chip.incident
-        }
-        var result: [InboxListItem] = []
-        result.reserveCapacity(items.count + byLead.count + sidebarTallies.count)
-        for item in items {
-            result.append(item)
-            // A folded lead is a one-row card: its count stays on line 2.
-            guard case .agent(let row) = item, row.depth == 0, !collapsedParents.contains(row.id) else { continue }
-            // A's line 3: the lead's count, its own line under the lead.
-            if row.lifecycle == .active, let tally = sidebarTallies[row.id], tally.total > 0 {
-                result.append(.leadCount(tally))
-            }
-            if let incident = byLead[row.id] { result.append(.familyCause(incident, leadId: row.id)) }
-        }
-        return result
-    }
-
     /// The cause line's words. The lead's count line is where "N failed" is
     /// said, so a failure's line keeps only its reason ("Codex was busy"); a
     /// failure with no reason has no line. A pause keeps "7 paused · usage".
-    static func causeLineText(_ incident: SidebarIncident) -> String? {
+    nonisolated static func causeLineText(_ incident: SidebarIncident) -> String? {
         guard case .cause(let cause) = incident.kind else { return nil }
         switch cause {
         case .usageLimit:
