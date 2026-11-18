@@ -564,6 +564,18 @@ public final class CheckedOutBranchCache {
     /// Keyed by `WorktreeManager.resolved`, so the `/var` -> `/private/var` form
     /// of one directory is one entry rather than two.
     private var entries: [String: (readAt: Date, branch: String?)] = [:]
+    /// `WorktreeManager.resolved` costs file-system calls, and the sidebar asks per
+    /// record on every row build. A path that exists keeps its resolved form here
+    /// until `invalidate()`; a path that does not exist is never remembered.
+    private var resolvedKeys: [String: String] = [:]
+
+    private func key(for repo: URL) -> String {
+        let raw = repo.path
+        if let known = resolvedKeys[raw] { return known }
+        let resolved = WorktreeManager.resolved(repo)
+        if FileManager.default.fileExists(atPath: raw) { resolvedKeys[raw] = resolved }
+        return resolved
+    }
 
     /// Every `git rev-parse` this cache has actually run. The witness for "do not
     /// shell out per render" — without a counter that claim is unassertable.
@@ -582,8 +594,8 @@ public final class CheckedOutBranchCache {
     /// launch on every render. Nothing throws — a chip that cannot be resolved is
     /// simply not drawn, and a header is not the place to report a git error.
     public func branch(repo: URL, now: Date = Date()) -> String? {
-        let key = WorktreeManager.resolved(repo)
-        if let entry = entries[key],
+        let cacheKey = key(for: repo)
+        if let entry = entries[cacheKey],
            now >= entry.readAt,
            now.timeIntervalSince(entry.readAt) < ttl {
             return entry.branch
@@ -591,7 +603,7 @@ public final class CheckedOutBranchCache {
         gitReads += 1
         let branch = try? manager.currentBranch(repo: repo)
         let resolved = branch ?? nil
-        entries[key] = (now, resolved)
+        entries[cacheKey] = (now, resolved)
         return resolved
     }
 
@@ -602,13 +614,13 @@ public final class CheckedOutBranchCache {
     /// spawns per agent repo — ~0.4 s frozen per switch, sampled live
     /// (2026-08-19). `store` is how an off-main warmer fills what this serves.
     public func cachedOnly(repo: URL) -> String?? {
-        entries[WorktreeManager.resolved(repo)]?.branch
+        entries[key(for: repo)]?.branch
     }
 
     /// Record a value read elsewhere (the off-main warmer), so `cachedOnly`
     /// serves it and the TTL path does not immediately re-read it.
     public func store(branch: String?, repo: URL, now: Date = Date()) {
-        entries[WorktreeManager.resolved(repo)] = (now, branch)
+        entries[key(for: repo)] = (now, branch)
     }
 
     /// Forget everything, for a caller that knows a checkout moved (a `git
@@ -616,6 +628,7 @@ public final class CheckedOutBranchCache {
     /// there, but only after up to `ttl` of showing the old branch.
     public func invalidate() {
         entries.removeAll()
+        resolvedKeys.removeAll()
     }
 }
 
