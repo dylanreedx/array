@@ -5636,8 +5636,13 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Tell every Ghostty-hosting tile whether the viewport (plus margin) can
     /// see it. `full` also sweeps tiles that were never near (install, settle);
     /// the per-camera-step form is O(nearby) and only touches edges.
+    /// Off for 0.7.55: a hidden terminal's surface stopped ticking, so a terminal
+    /// created off-screen never ran its shell. Internal only; the visibility
+    /// checks turn it on in their own fixture.
+    nonisolated(unsafe) static var terminalViewportGatingEnabled = false
+
     func updateRendererViewportVisibility(full: Bool) {
-        guard window != nil else { return }
+        guard Self.terminalViewportGatingEnabled, window != nil else { return }
         let visible = worldPlane.bounds
         let lead = visible.insetBy(
             dx: -visible.width * Self.rendererViewportMargin,

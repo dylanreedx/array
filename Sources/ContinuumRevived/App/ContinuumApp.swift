@@ -7668,6 +7668,7 @@ enum ContinuumApp {
         }
 
         if CommandLine.arguments.contains("--terminal-viewport-visibility-check") {
+            CanvasNSView.terminalViewportGatingEnabled = true
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
             do {
