@@ -215,6 +215,19 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScala
         handleAttachmentIntake(from: pasteboard)
     }
 
+    /// Whether this Return chord is one of the composer's own sends right now
+    /// (a draft or attachment to send, queue or force). An empty composer's ⌥↩
+    /// would only insert a newline, so the open hold-⌥ leader takes it instead.
+    func composerOwnsReturn(_ event: NSEvent) -> Bool {
+        ComposerKeyPolicy.action(
+            for: event,
+            hasMarkedText: hasMarkedText(),
+            hasTrimmedContent: !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            suggestionsVisible: suggestionsAreVisible,
+            hasAttachments: composerObserver?.composerHasSendableAttachments(self) ?? false
+        ) != .nativeTextSystem
+    }
+
     override func keyDown(with event: NSEvent) {
         if composerObserver?.composerHandleDictationKey(self, event: event) == true { return }
         if handleCompletionKey(event) { return }

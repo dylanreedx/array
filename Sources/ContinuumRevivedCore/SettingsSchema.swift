@@ -208,6 +208,11 @@ public enum SettingsSchema {
                             help: "A jump keeps a readable zoom and lands on the composer. When the tile is taller than the screen, its header stays pinned at the top.",
                             keywords: ["jump", "reveal", "focus", "composer", "sticky header", "zoom"]),
             ]),
+            SettingsGroup(id: "canvas.focus", title: "Focusing tiles", rows: [
+                SettingsRow(.toggle(key: TileHeaderClickConfig.focusKey, label: "Click a header to focus its tile", default: TileHeaderClickConfig.defaultFocus),
+                            help: "Fits as much of the tile on screen as possible and puts the cursor in it, like ⌥↩. Dragging a header still moves the tile.",
+                            keywords: ["header", "title bar", "click", "focus", "centre", "center", "fit", "zoom"]),
+            ]),
             SettingsGroup(id: "canvas.toolbar", title: "Toolbar and hints", rows: [
                 SettingsRow(.toggle(key: FloatingToolbarConfig.visibleKey, label: "Show the canvas toolbar", default: FloatingToolbarConfig.defaultVisible),
                             keywords: ["floating toolbar", "create"]),

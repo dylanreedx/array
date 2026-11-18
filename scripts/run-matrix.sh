@@ -2002,6 +2002,12 @@ run_app_check .build/debug/Array --leader-zone-jump-check
 # NSApp.sendEvent with the production monitors — ⌥↩ queues in a working
 # composer, ⌥→ and ⌥3 (#) edit text, a quick ⌥-chord never opens the leader.
 run_app_check .build/debug/Array --composer-key-routing-check
+# Canvas navigation focus: hold-⌥ over a focused composer navigates (⌥→ docks,
+# ⌥-letters still type), ⌥↩ fits and focuses the current tile (a draft still
+# queues), and a header click focuses the same way unless Settings turns it off.
+run_app_check .build/debug/Array --leader-composer-hold-check
+run_app_check .build/debug/Array --leader-return-focus-check
+run_app_check .build/debug/Array --header-click-focus-check
 # DI-01: composer dictation through the real agent tile — a hypothesis never
 # reaches the draft store or sends, ↩ finishes, Esc removes only dictated words,
 # undo, focus loss, unbind, tile close, failure copy and the Settings toggle.
