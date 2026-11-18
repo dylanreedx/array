@@ -40,7 +40,7 @@ final class FileContentObservation {
             mode = found ? state.st_mode : nil
             exists = found
             var target = stat()
-            let targetFound = path.withCString { Darwin.stat($0, &target) } == 0
+            let targetFound = path.withCString { fstatat(AT_FDCWD, $0, &target, 0) } == 0
             targetDevice = targetFound ? target.st_dev : nil
             targetInode = targetFound ? target.st_ino : nil
             targetBytes = targetFound ? target.st_size : nil
@@ -170,7 +170,7 @@ final class FileContentObservation {
                 var target = stat()
                 let current = Stamp(path: path)
                 let same = fstat(fd, &descriptor) == 0 &&
-                    path.withCString { Darwin.stat($0, &target) } == 0 &&
+                    path.withCString { fstatat(AT_FDCWD, $0, &target, 0) } == 0 &&
                     descriptor.st_dev == target.st_dev && descriptor.st_ino == target.st_ino &&
                     current.device == stamp.device && current.inode == stamp.inode &&
                     current.targetDevice == stamp.targetDevice && current.targetInode == stamp.targetInode

@@ -26,11 +26,11 @@ final class ConductorQueueTileNSView: TileNSView {
         let device: UInt64
         let inode: UInt64
         let size: Int64
-        let modifiedSeconds: Int64
-        let modifiedNanoseconds: Int64
+        let modifiedSeconds: Int
+        let modifiedNanoseconds: Int
 
         init?(_ path: String) {
-            var info = stat()
+            var info = Darwin.stat()
             guard lstat(path, &info) == 0 else { return nil }
             device = UInt64(info.st_dev)
             inode = UInt64(info.st_ino)
@@ -50,7 +50,7 @@ final class ConductorQueueTileNSView: TileNSView {
         let group: UInt32
 
         init?(_ path: String) {
-            var info = stat()
+            var info = Darwin.stat()
             guard lstat(path, &info) == 0 else { return nil }
             mode = info.st_mode
             owner = info.st_uid
@@ -88,7 +88,7 @@ final class ConductorQueueTileNSView: TileNSView {
         }
         readInFlight = true
         Task.detached(priority: .utility) { [weak self] in
-            let onMainThread = Thread.isMainThread
+            let onMainThread = (pthread_main_np() != 0)
             let snapshot: ConductorQueueSnapshot
             let succeeded: Bool
             do {
@@ -133,10 +133,17 @@ final class ConductorQueueTileNSView: TileNSView {
         }
     }
 
+    // SQLite opens the database through any symlink and keeps its WAL beside the
+    // resolved file, so the database and its directory are watched at the target.
+    private func watchLocations(_ projectRoot: URL) -> (root: String, directory: String, database: String) {
+        let directory = projectRoot.appendingPathComponent(".conductor", isDirectory: true).path
+        let database = URL(fileURLWithPath: directory + "/conductor.db").resolvingSymlinksInPath().path
+        return (projectRoot.path, directory, database)
+    }
+
     private func updateWatches() {
         guard let projectRoot else { return }
-        let directory = projectRoot.appendingPathComponent(".conductor", isDirectory: true).path
-        let database = directory + "/conductor.db"
+        let (rootPath, directory, database) = watchLocations(projectRoot)
         let wal = database + "-wal"
         let filePaths = [database, wal]
         let identities = Dictionary(uniqueKeysWithValues: filePaths.compactMap { path in
@@ -144,7 +151,7 @@ final class ConductorQueueTileNSView: TileNSView {
         })
         // The root watch catches creation/replacement of .conductor, and the
         // directory watch catches db/WAL creation and atomic replacement.
-        let paths = [projectRoot.path, directory] + filePaths
+        let paths = Array(Set([rootPath, directory, (database as NSString).deletingLastPathComponent])) + filePaths
         for path in Array(watches.keys) where !paths.contains(path) || FileIdentity(path).map({ !watches[path]!.identity.sameFile(as: $0) }) != false {
             watches.removeValue(forKey: path)?.source.cancel()
         }
@@ -161,14 +168,14 @@ final class ConductorQueueTileNSView: TileNSView {
             source.resume()
         }
         lastDatabaseIdentity = identities
-        lastDirectoryAccess = Dictionary(uniqueKeysWithValues: [projectRoot.path, directory].compactMap { path in
+        lastDirectoryAccess = Dictionary(uniqueKeysWithValues: [rootPath, directory].compactMap { path in
             FileAccess(path).map { (path, $0) }
         })
     }
 
     private func filesystemChanged(path: String) {
         guard let projectRoot else { return }
-        let database = projectRoot.appendingPathComponent(".conductor/conductor.db").path
+        let database = watchLocations(projectRoot).database
         let old = lastDatabaseIdentity
         let oldAccess = lastDirectoryAccess
         updateWatches()
@@ -278,6 +285,32 @@ final class ConductorQueueTileNSView: TileNSView {
         let recoveredIdle = lockedView.refreshRequestCount
         _ = waitUntil({ false }, timeout: 1.5)
         try require(lockedView.refreshRequestCount == recoveredIdle, "successful recovery continued retrying at idle")
+        // A database reached through a symlink: writes land at the target.
+        let linkRoot = root.appendingPathComponent("link-project", isDirectory: true)
+        let linkDir = linkRoot.appendingPathComponent(".conductor", isDirectory: true)
+        let targetDir = root.appendingPathComponent("link-target", isDirectory: true)
+        try fm.createDirectory(at: linkDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        let targetDB = targetDir.appendingPathComponent("real.db")
+        try fm.createSymbolicLink(at: linkDir.appendingPathComponent("conductor.db"), withDestinationURL: targetDB)
+        let linker = Process()
+        linker.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        linker.arguments = [targetDB.path]
+        let linkInput = Pipe()
+        linker.standardInput = linkInput
+        linker.standardOutput = FileHandle.nullDevice
+        linker.standardError = FileHandle.nullDevice
+        try linker.run()
+        defer {
+            try? linkInput.fileHandleForWriting.close()
+            if linker.isRunning { linker.terminate() }
+        }
+        linkInput.fileHandleForWriting.write(Data((create + "\n").utf8))
+        try require(waitUntil({ fm.fileExists(atPath: targetDB.path) }), "symlink fixture db was not created")
+        let linkedView = ConductorQueueTileNSView(tile: tile, projectRoot: linkRoot, startTimer: true)
+        try require(waitUntil({ linkedView.observedText.contains("event-task · pending") }), "symlinked db was not read")
+        linkInput.fileHandleForWriting.write(Data("UPDATE tasks SET status='running' WHERE id='event-task';\n".utf8))
+        try require(waitUntil({ linkedView.observedText.contains("event-task · running") }), "update through a symlinked db did not reach the queue")
         print("Conductor idle refresh callbacks in 1.5 s: empty=\(idleWakeups), populated=\(databaseIdleWakeups)")
     }
 
