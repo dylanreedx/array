@@ -13179,14 +13179,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// ⌥⌫/⌥⌦ (word deletes), and ⌥↩ in a composer holding a draft — that ⌥↩ is
     /// a queue (or send) the user would otherwise lose. An EMPTY composer's ⌥↩
     /// only inserted a newline, which is why ⌥↩ "did nothing" over an agent.
+    ///
+    /// Only a composer hands its arrows and empty ⌥↩ to the leader (holding ⌥ over
+    /// an agent is how you navigate from one). Every other text input — notes,
+    /// the code editor, rename fields — keeps ⌥-arrows as word jumps and ⌥↩ as
+    /// its own, so a slow ⌥ never steals ordinary editing.
     private func leaderKeyBelongsToText(_ event: NSEvent) -> Bool {
         guard focusedResponderIsTextInput() else { return false }
         if event.keyCode == 51 || event.keyCode == 117 { return true }
-        if event.keyCode == 36 || event.keyCode == 76,
-           let composer = window?.firstResponder as? ComposerTextView {
-            return composer.composerOwnsReturn(event)
+        let returnKey = event.keyCode == 36 || event.keyCode == 76
+        guard let composer = window?.firstResponder as? ComposerTextView else {
+            return returnKey || (123...126).contains(event.keyCode)
         }
-        return false
+        return returnKey && composer.composerOwnsReturn(event)
     }
 
     /// Cancel a pending dwell and exit the leader if open (modifier released or a
@@ -47256,6 +47261,32 @@ extension AppDelegate {
             if inbox.qaOffMainSwapCount == swapsBeforeHold || inbox.hasPendingOffMainApply {
                 failures.append("hold: the held push did not land once the camera rested")
             }
+            inbox.holdsDisplaySwap = previousHold
+        }
+        // A focus change while a push is in flight must not drop it: the open
+        // agent changes membership (a scope that hides everything force-includes
+        // it), which re-renders, and that re-render must carry the pending rows.
+        do {
+            var cameraMoving = true
+            let previousHold = inbox.holdsDisplaySwap
+            let previousScope = inbox.scope
+            let previousOpen = inbox.openAgentId
+            inbox.holdsDisplaySwap = { cameraMoving }
+            inbox.setScope(.project("does-not-exist"))
+            let changed = streaming[1]
+            supervisor.qaDeliver(.turnCompleted(threadId: thread(changed), turnId: "t-focus", outcome: .completed, errorMessage: nil), to: changed)
+            spin(0.3)
+            if !inbox.hasPendingOffMainApply { failures.append("focus: the status push never reached the off-main queue") }
+            inbox.openAgentId = changed.rawValue
+            cameraMoving = false
+            spin(0.5)
+            let fresh = app.sidebarInboxRows().first { $0.id == changed.rawValue }
+            let shown = inbox.pushedRowForQA(id: changed.rawValue)
+            if shown?.state == .working || fresh.map({ shown?.matchesIgnoringLiveElapsed($0) != true }) ?? true {
+                failures.append("focus: a focus change mid-push dropped the push (row shows \(String(describing: shown?.state)), full build \(String(describing: fresh?.state)))")
+            }
+            inbox.openAgentId = previousOpen
+            inbox.setScope(previousScope)
             inbox.holdsDisplaySwap = previousHold
         }
         if builds > 6 { failures.append("\(steps) steps over \(restoredCount + streamingCount) agents built every sidebar row \(builds) times (limit 6)") }

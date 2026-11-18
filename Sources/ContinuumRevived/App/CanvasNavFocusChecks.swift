@@ -195,7 +195,46 @@ enum CanvasNavFocusChecks {
         try expect(composer.textView.string == "\u{153}#",
                    "a quick ⌥3 must type #, text is \(composer.textView.string.debugDescription)")
         try expect(f.window.firstResponder === composer.textView, "the composer must keep the keyboard")
-        return "⌥ held over a focused composer opens Quick Jump, ⌥→ docks the tile (caret untouched, Esc restores), a held ⌥q types œ and a quick ⌥3 types #"
+
+        // 5. A quick ⌥→ (before the dwell) moves the caret a word, and the
+        //    leader never opens under it, even once the dwell would have ended.
+        let arrow = String(UnicodeScalar(NSRightArrowFunctionKey)!)
+        f.setDraft(agentId, "alpha beta")
+        composer.textView.setSelectedRange(NSRange(location: 0, length: 0))
+        try f.flags(.option)
+        try f.key(arrow, keyCode: 124, mods: [.option, .function, .numericPad])
+        spin(pastDwell)
+        try expect(!f.leaderOpen && !f.canvas.navModeOverlayQASnapshot().isInstalled,
+                   "a quick ⌥→ in the composer must not open the leader")
+        try expect(composer.textView.selectedRange().location == 5,
+                   "a quick ⌥→ must move the caret a word, caret at \(composer.textView.selectedRange().location)")
+        try f.flags([])
+        spin(0.05)
+
+        // 6. Outside a composer (a note's text), ⌥ held past the dwell still
+        //    opens the leader, but ⌥→ stays a word jump and closes it.
+        let editableNoteId = UUID(uuidString: "00000000-0000-0000-0000-00000000CF0C")!
+        let editableTile = Tile(id: editableNoteId, kind: .note, title: "EDIT NOTE",
+                                frame: TileFrame(x: 620, y: 300, width: 240, height: 200),
+                                zPosition: .fromLegacyRank(3), runtimeRef: nil, metadata: TileMetadata())
+        let noteView = NoteTileNSView(tile: editableTile, noteId: UUID(), initialBody: "gamma delta")
+        f.canvas.install(tileView: noteView, for: editableTile)
+        noteView.layoutSubtreeIfNeeded()
+        let noteText = noteView.textView
+        _ = f.app.focusBroker.requestFocus(.tile(editableNoteId), reason: .userClick)
+        if f.window.firstResponder !== noteText { _ = f.window.makeFirstResponder(noteText) }
+        try expect(f.window.firstResponder === noteText && noteText.isEditable, "the note text must take the keyboard")
+        noteText.setSelectedRange(NSRange(location: 0, length: 0))
+        try f.flags(.option)
+        spin(pastDwell)
+        try expect(f.leaderOpen, "holding ⌥ over note text must still open the leader")
+        try f.key(arrow, keyCode: 124, mods: [.option, .function, .numericPad])
+        try expect(!f.leaderOpen, "⌥→ over note text must close the leader")
+        try expect(noteText.selectedRange().location == 5,
+                   "⌥→ over note text must move the caret a word, caret at \(noteText.selectedRange().location), responder \(String(describing: f.window.firstResponder))")
+        try f.flags([])
+        return "a quick ⌥→ in the composer jumps a word with no leader, ⌥→ over note text stays a word jump; "
+            + "⌥ held over a focused composer opens Quick Jump, ⌥→ docks the tile (caret untouched, Esc restores), a held ⌥q types œ and a quick ⌥3 types #"
     }
 
     // MARK: - (b) ⌥↩ focuses the current tile

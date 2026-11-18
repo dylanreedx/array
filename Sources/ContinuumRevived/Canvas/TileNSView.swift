@@ -659,6 +659,15 @@ class TileNSView: NSView, TokenThemed {
         for listener in rendererVisibilityListeners { listener.apply(visible) }
     }
 
+    /// A surface installed late (a face switch) cannot trust `viewportVisibleState`:
+    /// the canvas skips tiles that host no surface, so it may be from before the
+    /// camera last moved. Ask the canvas to recompute it from the frame now.
+    final func resyncViewportVisibilityWithCanvas() {
+        var ancestor = superview
+        while let view = ancestor, !(view is CanvasNSView) { ancestor = view.superview }
+        (ancestor as? CanvasNSView)?.updateRendererViewportVisibility(full: true)
+    }
+
     /// A view inside this tile that owns its own surface (the shared mirror).
     final func addRendererVisibilityListener(_ owner: AnyObject, apply: @escaping (Bool) -> Void) {
         let token = ObjectIdentifier(owner)

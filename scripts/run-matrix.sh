@@ -1978,6 +1978,9 @@ run_app_check .build/debug/Array --sidebar-liveness-check
 # rows and a focus move between read agents only moves the open row; neither
 # builds every sidebar row.
 run_app_check .build/debug/Array --sidebar-event-cost-check
+# 2,000+ agents streaming: a long list derives off main, a camera gesture holds
+# the swap, and a focus change mid-push carries the pending rows, never drops them.
+run_app_check .build/debug/Array --sidebar-stream-cost-check
 # Live-usage sample 2026-11-14: every app switch re-read every project's stores
 # and rebuilt every sidebar row (24.5% of main at ~2,400 agents). A switch now
 # reads nothing and builds rows only when the clock has moved one.
@@ -2198,6 +2201,9 @@ run_app_check .build/debug/Array --managed-agent-page-zoom-check
 # and a relaunch reattaches.
 run_app_check .build/debug/Array --agent-face-switch-check
 run_app_check .build/debug/Array --agent-face-flip-check
+# Far terminals stop drawing and wake on return; an agent's Terminal face
+# opened after a pan in its Array face renders at once, not after a camera step.
+run_app_check .build/debug/Array --terminal-viewport-visibility-check
 # .plans/79 edge case 4: claude typed into a real shell tile (in this matrix's
 # isolated tmux, stand-in claude, fixture home), discovered and mapped to that
 # tile, offered in its band, and clicked: an agent tile beside it on the same
