@@ -359,3 +359,19 @@ public enum AgentBackgroundJobText {
         return (["Running in the background:"] + lines).joined(separator: "\n")
     }
 }
+
+/// How long the tracker waits between scans. Every scan reads every process the
+/// user owns, so a table that has shown nothing for many scans is read less
+/// often; any change, an open panel or an explicit ask starts again at `base`.
+public enum AgentProcessPollPolicy {
+    /// Scans in a row that found no job, after which the interval doubles.
+    public static let quietScansBeforeBackoff = 3
+    /// Longest wait is this many times `base`.
+    public static let maximumStretch: Double = 4
+
+    public static func interval(base: TimeInterval, quietScans: Int) -> TimeInterval {
+        guard quietScans >= quietScansBeforeBackoff else { return base }
+        let doublings = Double(quietScans - quietScansBeforeBackoff + 1)
+        return base * min(maximumStretch, pow(2, doublings))
+    }
+}

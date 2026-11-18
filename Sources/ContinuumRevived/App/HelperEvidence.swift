@@ -145,19 +145,94 @@ struct HelperEvidence {
         }
     }
 
+    private static let redirections = try! NSRegularExpression(
+        pattern: #"\d*>&\d+|\d*>>?\s*[^\s;|&<>]+|\d*<\s*[^\s;|&<>]+"#)
+    private static let compoundMarks = try! NSRegularExpression(pattern: #"[;|&\n`]|\$\(|<\("#)
+    private static let backgroundRedirections = try! NSRegularExpression(pattern: #"\d*>&\d+|&>>?|>&"#)
+    private static let lonelyAmpersand = try! NSRegularExpression(pattern: #"(^|[^&])&($|[^&])"#)
+
+    private static func replacing(_ regex: NSRegularExpression, in text: String) -> String {
+        regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+    }
+
+    private static func contains(_ regex: NSRegularExpression, in text: String) -> Bool {
+        regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
     /// Anything a shell could run more than one way: lists, pipes, conditions,
     /// background jobs, substitutions, newlines. Plain redirections are fine.
+    ///
+    /// Runs once per shell tool event on the ledger's queue, so the patterns are
+    /// compiled once and a command with no operator character skips them (removing
+    /// redirections can only remove operators, never add one).
     static func isCompound(_ command: String) -> Bool {
-        let text = command.replacingOccurrences(of: #"\d*>&\d+|\d*>>?\s*[^\s;|&<>]+|\d*<\s*[^\s;|&<>]+"#,
-                                                with: " ", options: .regularExpression)
-        return text.range(of: #"[;|&\n`]|\$\(|<\("#, options: .regularExpression) != nil
+        var command = command
+        if let answer = command.withUTF8({ scanCompound($0) }) { return answer }
+        // Non-ASCII text: whitespace and digits mean more than ASCII's, so the patterns decide.
+        return contains(compoundMarks, in: replacing(redirections, in: command))
+    }
+
+    /// One pass over ASCII text, answering as the two patterns above do together:
+    /// redirections are skipped, then any operator character is compound.
+    /// `nil` when the text is not ASCII.
+    private static func scanCompound(_ b: UnsafeBufferPointer<UInt8>) -> Bool? {
+        let n = b.count
+        if b.contains(where: { $0 >= 0x80 }) { return nil }
+        func isSpace(_ c: UInt8) -> Bool { c == 0x20 || (c >= 0x09 && c <= 0x0D) }
+        func isDigit(_ c: UInt8) -> Bool { c >= 0x30 && c <= 0x39 }
+        func isTarget(_ c: UInt8) -> Bool { !isSpace(c) && c != 0x3B && c != 0x7C && c != 0x26 && c != 0x3C && c != 0x3E }
+        // The end of a redirection starting at `i`, or nil.
+        func redirection(at i: Int) -> Int? {
+            var k = i
+            while k < n, isDigit(b[k]) { k += 1 }
+            guard k < n else { return nil }
+            func target(from start: Int) -> Int? {
+                var t = start
+                while t < n, isSpace(b[t]) { t += 1 }
+                let first = t
+                while t < n, isTarget(b[t]) { t += 1 }
+                return t > first ? t : nil
+            }
+            if b[k] == 0x3E {
+                if k + 1 < n, b[k + 1] == 0x26 {
+                    var d = k + 2
+                    while d < n, isDigit(b[d]) { d += 1 }
+                    if d > k + 2 { return d }
+                }
+                return target(from: k + 1 < n && b[k + 1] == 0x3E ? k + 2 : k + 1)
+                    ?? (k + 1 < n && b[k + 1] == 0x3E ? target(from: k + 1) : nil)
+            }
+            if b[k] == 0x3C { return target(from: k + 1) }
+            return nil
+        }
+        var i = 0
+        while i < n {
+            let c = b[i]
+            if isDigit(c) || c == 0x3E || c == 0x3C, let end = redirection(at: i) { i = end; continue }
+            switch c {
+            case 0x3B, 0x7C, 0x26, 0x0A, 0x60: return true
+            case 0x24: if i + 1 < n, b[i + 1] == 0x28 { return true }
+            case 0x3C: if i + 1 < n, b[i + 1] == 0x28 { return true }
+            default: break
+            }
+            i += 1
+        }
+        return false
     }
 
     /// A lone `&` (not `&&`, `>&` or `&>`), or a word that detaches a job.
     static func startsBackgroundJob(_ command: String) -> Bool {
-        let text = command.replacingOccurrences(of: #"\d*>&\d+|&>>?|>&"#, with: " ", options: .regularExpression)
-        if text.range(of: #"(^|[^&])&($|[^&])"#, options: .regularExpression) != nil { return true }
-        return words(text).contains { ["nohup", "disown", "setsid"].contains($0) }
+        // Every pattern that rewrites the text contains `&`.
+        guard command.utf8.contains(0x26) else { return hasDetacher(command) }
+        let text = replacing(backgroundRedirections, in: command)
+        if contains(lonelyAmpersand, in: text) { return true }
+        return hasDetacher(text)
+    }
+
+    private static func hasDetacher(_ text: String) -> Bool {
+        let detachers = ["nohup", "disown", "setsid"]
+        guard detachers.contains(where: { text.contains($0) }) else { return false }
+        return words(text).contains { detachers.contains($0) }
     }
 
     /// A `swift build` the host saw: which product (nil = all) in which configuration.

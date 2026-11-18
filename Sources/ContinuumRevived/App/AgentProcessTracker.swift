@@ -44,6 +44,8 @@ final class AgentProcessTracker {
     private let internalPathPrefixes: [String]
     private var timer: Timer?
     private var tickInFlight = false
+    /// The scan about to start is the scheduled one, not a reaction to something.
+    private var timerFired = false
     /// Asked for while a scan was already running: that scan may predate what
     /// prompted the ask (an exit), so another runs straight after it.
     private var rescanQueued = false
@@ -51,6 +53,8 @@ final class AgentProcessTracker {
     private var exitSources: [Int32: (startedAt: Date, source: DispatchSourceProcess)] = [:]
     private var exitRescanPending = false
     private(set) var tickCount = 0
+    /// Scans in a row that found no job and no change; the interval stretches with it.
+    private var quietScans = 0
     /// Open panels. While any is open the scan runs every second, so what you
     /// are looking at is current.
     var liveDemand = 0 {
@@ -86,6 +90,7 @@ final class AgentProcessTracker {
     func refreshNow(completion: (@MainActor @Sendable () -> Void)? = nil) {
         timer?.invalidate()
         timer = nil
+        if timerFired { timerFired = false } else { quietScans = 0 }
         if let completion { completions.append(completion) }
         guard !tickInFlight else {
             rescanQueued = true
@@ -115,7 +120,9 @@ final class AgentProcessTracker {
                         }
                     }
                 }
+                let before = self.jobsByAgent
                 self.publish(ready)
+                self.quietScans = (self.jobsByAgent.isEmpty && before.isEmpty) ? self.quietScans + 1 : 0
                 self.watchExits()
                 if self.rescanQueued {
                     self.rescanQueued = false
@@ -132,10 +139,11 @@ final class AgentProcessTracker {
 
     private func scheduleNext(arrival: Date?, now: Date) {
         var interval = liveDemand > 0 ? Self.liveInterval
-            : NSApp?.isActive == true ? Self.activeInterval : Self.inactiveInterval
+            : AgentProcessPollPolicy.interval(
+                base: NSApp?.isActive == true ? Self.activeInterval : Self.inactiveInterval, quietScans: quietScans)
         if let arrival { interval = min(interval, max(0.05, arrival.timeIntervalSince(now) + 0.05)) }
         let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshNow() }
+            MainActor.assumeIsolated { self?.timerFired = true; self?.refreshNow() }
         }
         // Common modes: a scroll or a drag in progress must not hold a scan.
         RunLoop.main.add(timer, forMode: .common)
