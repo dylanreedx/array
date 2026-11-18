@@ -1,4 +1,5 @@
 import AppKit
+import ObjectiveC
 
 extension NSView {
     /// AppKit registers every `NSTextView` whose superview is not a clip view as
@@ -33,9 +34,22 @@ extension NSView {
     /// ~11 ms layout pass (`--tile-surface-residency-check`, 10.8 -> 2.6 ms per
     /// step). Scroll, clip and text views are left alone: AppKit observes them itself.
     func silenceFrameChangeNotifications() {
-        if !(self is NSScrollView), !(self is NSClipView), !(self is NSTextView), postsFrameChangedNotifications {
+        // A scroll view's document view is observed by its clip view, which is
+        // how the scroll view learns its content size changed.
+        let isDocumentView = superview is NSClipView
+        if !(self is NSScrollView), !(self is NSClipView), !isDocumentView,
+           !keepsPostingFrameChanges, postsFrameChangedNotifications {
             postsFrameChangedNotifications = false
         }
         for child in subviews { child.silenceFrameChangeNotifications() }
     }
+
+    /// Set while something observes this view's frame by notification (a popover
+    /// anchor), so a chrome silencing pass leaves it posting.
+    var keepsPostingFrameChanges: Bool {
+        get { objc_getAssociatedObject(self, &frameChangeOptOutKey) as? Bool ?? false }
+        set { objc_setAssociatedObject(self, &frameChangeOptOutKey, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
+    }
 }
+
+nonisolated(unsafe) private var frameChangeOptOutKey: UInt8 = 0

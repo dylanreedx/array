@@ -996,6 +996,7 @@ final class ChoicePopoverController {
             }
         })
         anchor.postsFrameChangedNotifications = true
+        anchor.keepsPostingFrameChanges = true
         anchorWindowObservation = anchor.observe(\.window, options: [.old, .new]) { [weak self] _, change in
             // `window` is optional, so KVO wraps both values in a second Optional.
             let oldWindow = change.oldValue ?? nil
@@ -1045,6 +1046,7 @@ final class ChoicePopoverController {
         anchorWindowObservation = nil
         if let anchorWasPostingFrameChanges {
             anchorView?.postsFrameChangedNotifications = anchorWasPostingFrameChanges
+            anchorView?.keepsPostingFrameChanges = false
         }
         anchorWasPostingFrameChanges = nil
     }

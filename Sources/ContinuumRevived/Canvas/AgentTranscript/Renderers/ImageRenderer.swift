@@ -340,6 +340,7 @@ private final class LazyImageGalleryContentView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         postsFrameChangedNotifications = true
+        keepsPostingFrameChanges = true
     }
 
     @available(*, unavailable)
