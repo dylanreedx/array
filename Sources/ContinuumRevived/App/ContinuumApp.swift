@@ -4599,7 +4599,7 @@ enum ContinuumApp {
             _ = NSApplication.shared
             Task { @MainActor in
                 do {
-                    let summary = try AgentStreamingChunkWorkChecks.run()
+                    let summary = try await AgentStreamingChunkWorkChecks.run()
                     print("AgentStreamingChunkWorkChecks passed: \(summary)")
                     Foundation.exit(0)
                 } catch {

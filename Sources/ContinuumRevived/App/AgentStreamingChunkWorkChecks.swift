@@ -23,7 +23,7 @@ enum AgentStreamingChunkWorkChecks {
         RunLoop.main.run(until: Date().addingTimeInterval(seconds))
     }
 
-    static func run() throws -> String {
+    static func run() async throws -> String {
         let tile = ManagedAgentTileNSView(tile: Tile(
             id: UUID(), kind: .managedAgent, title: "chunk-work",
             frame: TileFrame(x: 0, y: 0, width: 520, height: 640),
@@ -37,21 +37,20 @@ enum AgentStreamingChunkWorkChecks {
         tile.layoutSubtreeIfNeeded()
         let chrome = try chromeViews(in: tile)
         let summary = try checkChunksLeaveChromeClean(tile, chrome: chrome)
-        return summary + "; " + (try checkCachedToolRowsSkipValidation(tile))
+        return summary + "; " + (try await checkCachedToolRowsSkipValidation(tile))
     }
 
-    private static func chromeViews(in tile: NSView) throws -> [(name: String, view: NSView)] {
-        func first<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
-            if let match = view as? T { return match }
-            for child in view.subviews { if let match = first(type, in: child) { return match } }
-            return nil
+    /// The tile's own header, action button and provider footer. A tile with
+    /// chrome at rest keeps them out of the view tree, so wake it first: the
+    /// hovered or focused tile is the one that pays per chunk.
+    private static func chromeViews(in tile: ManagedAgentTileNSView) throws -> [(name: String, view: NSView)] {
+        tile.wakeChrome()
+        tile.layoutSubtreeIfNeeded()
+        guard let button = tile.qaPageZoomActionButton else {
+            throw Failure(description: "the tile has no composer action button")
         }
-        guard let header = first(AgentTileHeaderView.self, in: tile),
-              let button = first(ComposerActionButton.self, in: tile),
-              let footer = first(AgentComposerFooterView.self, in: tile) else {
-            throw Failure(description: "the tile has no header, composer action button or provider footer")
-        }
-        return [("header", header), ("action button", button), ("provider footer", footer)]
+        return [("header", tile.qaPageZoomHeaderView), ("action button", button),
+                ("provider footer", tile.qaProviderFooterView)]
     }
 
     private static func dirty(_ view: NSView) -> Bool {
@@ -100,34 +99,49 @@ enum AgentStreamingChunkWorkChecks {
         return "\(chunks) chunks dirtied chrome \(dirtied.values.reduce(0, +)) time(s), turn end updated \(changed.joined(separator: ", "))"
     }
 
-    private static func checkCachedToolRowsSkipValidation(_ tile: ManagedAgentTileNSView) throws -> String {
+    private static func checkCachedToolRowsSkipValidation(_ tile: ManagedAgentTileNSView) async throws -> String {
         guard let surface = tile.qaTranscriptSurface as? AgentTranscriptCanvasView else {
             throw Failure(description: "the tile did not install the canvas transcript")
         }
         surface.bindToolDetailAgent(AgentID(rawValue: UUID()))
         let thread = "chunks", turn = "t2"
-        tile.ingest(.turnStarted(threadId: thread, turnId: turn))
+        let started = AgentRuntimeEvent.turnStarted(threadId: thread, turnId: turn)
+        tile.ingest(started)
+        surface.captureRuntimeEvent(started)
         let rows = 60
+        var identities: [String: AgentToolDetailKey] = [:]
         for index in 0..<rows {
             let item = "call_\(index)_9fX2kQ7mZ"
-            tile.ingest(.itemStarted(threadId: thread, itemId: item, kind: .commandExecution, title: "swift build"))
+            let begin = AgentRuntimeEvent.itemStarted(threadId: thread, itemId: item, kind: .commandExecution, title: "swift build")
+            tile.ingest(begin)
+            identities[item] = surface.captureRuntimeEvent(begin)
             surface.captureRuntimeObservation(.toolDetail(itemId: item, detail: AgentToolDetailObservation(
                 phase: .ended, toolName: "Bash", fields: [(key: "command", value: "swift build --product Array")],
                 outputPreview: "Build complete \(index)", exitCode: 0, observedAt: Date())))
-            tile.ingest(.itemCompleted(threadId: thread, itemId: item, kind: .commandExecution, status: .completed))
+            let end = AgentRuntimeEvent.itemCompleted(threadId: thread, itemId: item, kind: .commandExecution, status: .completed)
+            tile.ingest(end)
+            surface.captureRuntimeEvent(end)
         }
-        tile.ingest(.turnCompleted(threadId: thread, turnId: turn, outcome: .completed, errorMessage: nil))
+        let finished = AgentRuntimeEvent.turnCompleted(threadId: thread, turnId: turn, outcome: .completed, errorMessage: nil)
+        tile.ingest(finished)
+        surface.captureRuntimeEvent(finished)
 
         let toolRows: [(AgentBlock, AgentEntry, String)] = tile.qaDocumentForChecks.entries.flatMap { entry in
             guard case let .providerItem(_, itemID?) = entry.provenance else { return [(AgentBlock, AgentEntry, String)]() }
             return entry.blocks.filter { $0.kind == .toolCall }.map { ($0, entry, itemID) }
         }
         try expect(toolRows.count == rows, "expected \(rows) tool rows, found \(toolRows.count)")
+        for (_, entry, itemID) in toolRows {
+            guard let identity = identities[itemID], surface.bindToolDetailIdentity(identity, to: entry.id) else {
+                throw Failure(description: "tool row \(itemID) has no capture identity to bind")
+            }
+        }
         // Present each once so the cache holds it, as a first rebuild does.
         let deadline = Date().addingTimeInterval(10)
         var cached = 0
         repeat {
-            pump(0.05)
+            // The capture writes through the main actor: yield to it, do not spin the run loop.
+            try await Task.sleep(for: .milliseconds(50))
             toolRows.forEach { _ = surface.toolDetail.presented($0.0, in: $0.1) }
             let presentation = surface.toolDetail.presentation
             cached = toolRows.filter {
