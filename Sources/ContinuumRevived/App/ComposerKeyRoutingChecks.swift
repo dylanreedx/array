@@ -13,8 +13,9 @@ import Foundation
 //
 // 0.7.27 answered that by never opening the leader over text input — and an
 // agent tile keeps its composer focused, so with an agent selected Quick Jump
-// was dead. Now it opens everywhere, and over text input hands back the keys
-// text owns (⌥↩, ⌥-arrows, ⌥⌫).
+// was dead. Now it opens everywhere. Over text input it hands back ⌥⌫/⌥⌦ and a
+// composer draft's ⌥↩ (queue); its arrows and an empty composer's ⌥↩ are its own
+// once the overlay is up (`CanvasNavFocusChecks`).
 //
 // Every key here goes through `NSApp.sendEvent` — the production order: the
 // app's local monitors (installed by the production `installHotkeyMonitor`),
@@ -140,10 +141,14 @@ extension AppDelegate {
         try flags(.option)
         spin(pastDwell)
         try expect(leaderOpen, "precondition: ⌥ held in the composer opens the leader")
+        // Once the overlay is up the user is navigating: ⌥→ docks the tile
+        // (`--leader-composer-hold-check`), the caret stays, Esc restores.
         try key(String(UnicodeScalar(NSRightArrowFunctionKey)!), keyCode: 124, mods: [.option, .function, .numericPad])
-        try expect(composer.textView.selectedRange().location == 5,
-                   "⌥→ with the leader open must still move the caret one word, caret at \(composer.textView.selectedRange().location)")
-        try expect(!leaderOpen, "⌥→ in the composer must close the leader")
+        try expect(composer.textView.selectedRange().location == 0,
+                   "⌥→ with the leader open belongs to the leader, caret at \(composer.textView.selectedRange().location)")
+        try expect(leaderOpen, "⌥→ with the leader open must keep it open")
+        try key("\u{1B}", keyCode: 53, mods: .option)
+        try expect(!leaderOpen, "Esc must close the leader")
         try flags([])
         spin(0.05)
 
@@ -219,6 +224,6 @@ extension AppDelegate {
         try expect(!leaderOpen, "a key the leader does not own must close it")
         try flags([])
 
-        return "a held ⌥ opens the leader over the composer; ⌥↩ still queues, ⌥→ still moves a word and ⌥⌫ still deletes one with it open; quick ⌥3 types # and quick ⌥a never jumps in the composer; off text a quick ⌥+label jumps, a quick non-label chord never opens the leader, and a held ⌥ passes through keys it does not own"
+        return "a held ⌥ opens the leader over the composer; with it open ⌥↩ still queues a draft and ⌥⌫ still deletes a word, while ⌥→ is the leader's; a quick ⌥→ moves a word; quick ⌥3 types # and quick ⌥a never jumps in the composer; off text a quick ⌥+label jumps, a quick non-label chord never opens the leader, and a held ⌥ passes through keys it does not own"
     }
 }

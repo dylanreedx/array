@@ -6844,6 +6844,12 @@ final class CanvasNSView: NSView, TokenThemed {
     /// going, else where the camera is. A jump made mid-flight records THIS as
     /// the view to go back to, not a point the camera was only passing through.
     var onUserTileReveal: ((UUID) -> Void)?
+    /// A plain single click on a tile's header, when `TileHeaderClickConfig`
+    /// allows it. The app frames and focuses the tile (`focusTileFitted`).
+    var onHeaderClickFocus: ((UUID) -> Void)?
+    /// Where `TileHeaderClickConfig` is read: Settings writes `.standard`; a
+    /// check points this at its own suite.
+    var headerClickDefaults: UserDefaults = .standard
     var spawnOverlayRects: (() -> [CGRect])?
     private var focusIsNewerThanCamera = false
     private(set) var userCameraMovedSinceArming = false
@@ -6886,6 +6892,23 @@ final class CanvasNSView: NSView, TokenThemed {
             if rect.intersects(visible) { return CGPoint(x: rect.midX, y: rect.midY) }
         }
         return CanvasEngine.screenToWorld(CGPoint(x: usable.midX, y: usable.midY), viewport: navigationViewport)
+    }
+
+    /// `CameraFraming.fitTileViewport` for a tile, inside the part of the canvas
+    /// no overlay covers. Hold-⌥ Return and a header click frame through this.
+    func framedFitViewportForTile(_ tileId: UUID) -> CanvasViewport? {
+        guard let snapshot = navigationTileSnapshot(for: tileId) else { return nil }
+        let frame = snapshot.worldFrame
+        let rect = CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+        let usable = usableVisibleScreenRect
+        var current = navigationViewport
+        current.x += Double(usable.minX) / current.zoom
+        current.y += Double(usable.minY) / current.zoom
+        var target = CameraFraming.fitTileViewport(
+            for: rect, kind: snapshot.kind, currentViewport: current, viewportSize: usable.size)
+        target.x -= Double(usable.minX) / target.zoom
+        target.y -= Double(usable.minY) / target.zoom
+        return target
     }
 
     func framedWorkViewport(for rect: CGRect, kind: TileKind, composerFirst: Bool = false) -> CanvasViewport {

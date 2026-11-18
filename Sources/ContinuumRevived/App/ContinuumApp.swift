@@ -5826,6 +5826,42 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--leader-composer-hold-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try CanvasNavFocusChecks.runLeaderComposerHold()
+                print("ContinuumRevivedLeaderComposerHoldChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --leader-composer-hold-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--leader-return-focus-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try CanvasNavFocusChecks.runLeaderReturnFocus()
+                print("ContinuumRevivedLeaderReturnFocusChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --leader-return-focus-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--header-click-focus-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try CanvasNavFocusChecks.runHeaderClickFocus()
+                print("ContinuumRevivedHeaderClickFocusChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --header-click-focus-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--composer-key-routing-check") {
             do {
                 _ = NSApplication.shared
@@ -13137,12 +13173,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return canvas.leaderZoneJumpTarget(forKey: key) != nil || canvas.leaderJumpTarget(forLabel: key) != nil
     }
 
-    /// Keys a focused text input owns even while the leader is open over it:
-    /// ⌥↩ (queue), ⌥←/→/↑/↓ (word and paragraph moves), ⌥⌫ and ⌥⌦ (word
-    /// deletes). Labels, zone keys and Esc keep their leader meaning.
+    /// Keys a focused text input keeps even while the leader is open over it.
+    ///
+    /// The rule is what the user can see. Before the dwell ends there is no
+    /// overlay and every ⌥-chord is the text's (handled in `handleHotkey`, never
+    /// here). Once the overlay is up, the user is navigating: ⌥↩ focuses the
+    /// current tile and ⌥-arrows dock it, as they do off text. Two exceptions
+    /// stay with the text because the leader has nothing better to do with them:
+    /// ⌥⌫/⌥⌦ (word deletes), and ⌥↩ in a composer holding a draft — that ⌥↩ is
+    /// a queue (or send) the user would otherwise lose. An EMPTY composer's ⌥↩
+    /// only inserted a newline, which is why ⌥↩ "did nothing" over an agent.
     private func leaderKeyBelongsToText(_ event: NSEvent) -> Bool {
         guard focusedResponderIsTextInput() else { return false }
-        return [36, 76, 123, 124, 125, 126, 51, 117].contains(event.keyCode)
+        if event.keyCode == 51 || event.keyCode == 117 { return true }
+        if event.keyCode == 36 || event.keyCode == 76,
+           let composer = window?.firstResponder as? ComposerTextView {
+            return composer.composerOwnsReturn(event)
+        }
+        return false
     }
 
     /// Cancel a pending dwell and exit the leader if open (modifier released or a
@@ -13183,7 +13231,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let tileId = canvasView?.canvasState.lastActiveTileId
             disarmLeader() // closes the leader modal (restores prior scope) + hides HUD
             guard let tileId, canvasView?.navigationTileSnapshot(for: tileId) != nil else { return true }
-            revealTileForWork(tileId, historyReason: .directTileActivation, scopeReason: .modalDismissed)
+            focusTileFitted(tileId, historyReason: .directTileActivation, scopeReason: .modalDismissed)
             demonstrateOnboarding(.quickJumpUsed)
             return true
         }
@@ -23118,6 +23166,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         return true
     }
 
+    /// Focus a tile with as much of it on screen as possible
+    /// (`CameraFraming.fitTileViewport`), then take its input scope — an agent's
+    /// composer. Hold-⌥ Return and a header click both come here; the camera,
+    /// history and scope go through `revealTileForWork`, the one owner.
+    @discardableResult
+    func focusTileFitted(
+        _ tileId: UUID, historyReason: FocusHistoryEventReason, scopeReason: FocusRequest
+    ) -> Bool {
+        guard let viewport = canvasView?.framedFitViewportForTile(tileId) else { return false }
+        return revealTileForWork(
+            tileId, historyReason: historyReason, scopeReason: scopeReason, viewportOverride: viewport)
+    }
+
     /// The zone's current/highlighted navigation tile: the one this zone was
     /// last on, else its first navigable tile. Empty zones return nil — a zone
     /// overview with no tile is a legitimate destination, not a place to
@@ -25676,6 +25737,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.persistLayoutTransaction(transaction) ?? false
         }
         canvasView.onUserTileReveal = { [weak self] id in self?.focusSpawnedTile(id) }
+        canvasView.onHeaderClickFocus = { [weak self] id in
+            self?.focusTileFitted(id, historyReason: .directTileActivation, scopeReason: .userClick)
+        }
         if let spawner { configureCreationAndRuntimeRoutes(on: spawner) }
         configureWorkspaceRuntimeHooks()
         installSettingsChangeObserver()

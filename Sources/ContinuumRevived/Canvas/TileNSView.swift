@@ -1450,6 +1450,35 @@ class TileNSView: NSView, TokenThemed {
 
     // MARK: - Mouse handling for drag and resize
 
+    private var pendingHeaderClickFocus: DispatchWorkItem?
+    /// The pinned head only shows while the camera already frames this tile's
+    /// composer end; a click there selects and never reframes
+    /// (`--agent-jump-composer-check`).
+    private var pressWasOnPinnedHead = false
+
+    /// A plain single click on the header (no drag) focuses the tile with as
+    /// much of it on screen as fits, when Settings allows. On the title it waits
+    /// out the double-click interval, because a second click there renames.
+    private func requestHeaderClickFocus(for event: NSEvent) {
+        guard event.clickCount == 1, !pressWasOnPinnedHead,
+              event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                .isDisjoint(with: [.shift, .command, .option, .control]),
+              let canvas, canvas.onHeaderClickFocus != nil,
+              TileHeaderClickConfig.clickFocuses(defaults: canvas.headerClickDefaults) else { return }
+        let id = tile.id
+        let local = convert(event.locationInWindow, from: nil)
+        guard titleContains(localPoint: local) else {
+            canvas.onHeaderClickFocus?(id)
+            return
+        }
+        let work = DispatchWorkItem { [weak self, weak canvas] in
+            self?.pendingHeaderClickFocus = nil
+            canvas?.onHeaderClickFocus?(id)
+        }
+        pendingHeaderClickFocus = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+    }
+
     override func mouseDown(with event: NSEvent) {
         tilePress(with: event)
     }
@@ -1458,6 +1487,12 @@ class TileNSView: NSView, TokenThemed {
     /// wherever it sits — never a resize, a bubble or a title rename — while the
     /// event keeps its real location for everything the drag reads from it.
     private func tilePress(with event: NSEvent, onPinnedHead: Bool = false) {
+        // Any new press supersedes a header-click focus still waiting out the
+        // double-click interval: the second click of a title double-click
+        // renames, and must not find the camera moved under it.
+        pendingHeaderClickFocus?.cancel()
+        pendingHeaderClickFocus = nil
+        pressWasOnPinnedHead = onPinnedHead
         agentReferenceDrag?.end()
         agentReferenceDrag = nil
         canvas?.tileSelection.preparePointerDown()
@@ -1680,6 +1715,7 @@ class TileNSView: NSView, TokenThemed {
         if case .move = completedDragKind, wasClick {
             _ = canvas?.commitGeometryEdit()
             canvas?.focusBroker?.enterScope(.tile(tile.id), reason: .userClick)
+            requestHeaderClickFocus(for: event)
             return
         }
 

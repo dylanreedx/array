@@ -187,6 +187,7 @@ check --focus-scope-dispatch-check
 check --found-character-themes-check
 check --fresh-install-check
 check --gesture-telemetry-check
+check --header-click-focus-check
 check --helper-command-evidence-check
 check --helper-completion-check
 check --helper-context-diet-check
@@ -219,10 +220,12 @@ check --layout-commit-truth-check
 check --lead-character-check
 check --lead-checkout-ledger-check
 check --leader-activation-check
+check --leader-composer-hold-check
 check --leader-jump-check
 check --leader-jump-framing-check
 check --leader-jump-visible-indicators-check
 check --leader-modal-recovery-check
+check --leader-return-focus-check
 check --leader-snap-check
 check --leader-zone-jump-check
 check --live-compaction-replay-check
@@ -724,6 +727,7 @@ leg run_app_check .build/debug/Array --focus-scope-dispatch-check
 leg run_app_check .build/debug/Array --found-character-themes-check
 leg run_app_check .build/debug/Array --fresh-install-check
 leg run_app_check .build/debug/Array --gesture-telemetry-check
+leg run_app_check .build/debug/Array --header-click-focus-check
 leg run_app_check .build/debug/Array --helper-command-evidence-check
 leg run_app_check .build/debug/Array --helper-completion-check
 leg run_app_check .build/debug/Array --helper-context-diet-check
@@ -755,10 +759,12 @@ leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --lead-character-check
 leg run_app_check .build/debug/Array --lead-checkout-ledger-check
 leg run_app_check .build/debug/Array --leader-activation-check
+leg run_app_check .build/debug/Array --leader-composer-hold-check
 leg run_app_check .build/debug/Array --leader-jump-check
 leg run_app_check .build/debug/Array --leader-jump-framing-check
 leg run_app_check .build/debug/Array --leader-jump-visible-indicators-check
 leg run_app_check .build/debug/Array --leader-modal-recovery-check
+leg run_app_check .build/debug/Array --leader-return-focus-check
 leg run_app_check .build/debug/Array --leader-snap-check
 leg run_app_check .build/debug/Array --leader-zone-jump-check
 leg run_app_check .build/debug/Array --live-compaction-replay-check

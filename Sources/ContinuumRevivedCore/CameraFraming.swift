@@ -119,6 +119,57 @@ public enum CameraFraming {
         return framed
     }
 
+    /// The camera for FOCUSING a tile with as much of it on screen as possible —
+    /// hold-⌥ Return and a header click. Unlike `revealWorkViewport` it may zoom
+    /// OUT: the whole tile is fitted inside `tilePaddingScreenPx`, no closer than
+    /// the current or working zoom (whichever is higher, capped at
+    /// `maxJumpZoom`) and no farther than the kind's readable zoom. A tile too
+    /// big to fit readably keeps that readable zoom and shows the part you work
+    /// in: an agent's BOTTOM (composer plus the latest transcript above it,
+    /// header pinned by the sticky head), every other kind's top-left.
+    ///
+    /// A tile already wholly on screen, at least as close as this framing would
+    /// put it, keeps the camera, so focusing it again never moves anything.
+    public static func fitTileViewport(
+        for worldRect: CGRect,
+        kind: TileKind,
+        currentViewport: CanvasViewport,
+        viewportSize: CGSize
+    ) -> CanvasViewport {
+        let readable = minimumReadableZoom(for: kind)
+        let width = Double(viewportSize.width), height = Double(viewportSize.height)
+        let fitZoom = min(
+            max(1, width - 2 * tilePaddingScreenPx) / max(1, Double(worldRect.width)),
+            max(1, height - 2 * tilePaddingScreenPx) / max(1, Double(worldRect.height)))
+        // Already whole on screen, at least as close as the fit would put it:
+        // keep the camera. An overview that merely shows the tile is not enough.
+        let screen = CGRect(origin: .zero, size: viewportSize)
+        let current = CanvasEngine.tileScreenFrame(
+            TileFrame(x: worldRect.minX, y: worldRect.minY, width: worldRect.width, height: worldRect.height),
+            viewport: currentViewport)
+        let fittedWorkingZoom = max(min(fitZoom, editableTargetZoom(for: kind)), readable)
+        if currentViewport.zoom >= fittedWorkingZoom - 0.0001,
+           screen.insetBy(dx: -0.5, dy: -0.5).contains(current) {
+            return currentViewport
+        }
+        let ceiling = min(max(editableTargetZoom(for: kind), currentViewport.zoom), maxJumpZoom)
+        let zoom = max(min(fitZoom, ceiling), readable)
+        let screenW = Double(worldRect.width) * zoom
+        let screenH = Double(worldRect.height) * zoom
+        let x = screenW <= width
+            ? Double(worldRect.midX) - width / 2 / zoom
+            : Double(worldRect.minX) - tilePaddingScreenPx / zoom
+        let y: Double
+        if screenH <= height {
+            y = Double(worldRect.midY) - height / 2 / zoom
+        } else if kind == .managedAgent {
+            y = Double(worldRect.maxY) + tilePaddingScreenPx / zoom - height / zoom
+        } else {
+            y = Double(worldRect.minY) - tilePaddingScreenPx / zoom
+        }
+        return CanvasViewport(x: x, y: y, zoom: zoom)
+    }
+
     /// True when the tile's screen frame sits entirely inside the viewport inset
     /// by `contextGutterScreenPx` — the composition reveal/work aims for. A tile
     /// that is merely "mostly visible" is NOT composed for work.

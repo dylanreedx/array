@@ -17,3 +17,19 @@ public enum AgentJumpConfig {
             : defaultComposerFirst
     }
 }
+
+/// Whether a single click on a tile's header focuses it (Settings > Canvas):
+/// the camera fits as much of the tile as it can and the tile takes the
+/// keyboard — an agent's composer — exactly as hold-⌥ Return does. Off: a
+/// header click only selects the tile, as before. A drag still moves it either
+/// way, and a double-click on the title still renames.
+public enum TileHeaderClickConfig {
+    public static let focusKey = "array.tileHeader.clickToFocus"
+    public static let defaultFocus = true
+
+    public static func clickFocuses(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: focusKey) != nil
+            ? defaults.bool(forKey: focusKey)
+            : defaultFocus
+    }
+}
