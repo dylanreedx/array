@@ -208,7 +208,75 @@ private func checkIncrementalParserCorpus() {
     }
 }
 
+/// The display document and the durable mirror of one agent ingest the same events.
+/// With the shared parse memo the second one answers from the first's parse. Both
+/// must still equal projections that never share, at every step, even though the
+/// display one carries extra replayed history.
+private func checkSharedStreamParse() {
+    let shared = ProcessInfo.processInfo.environment["WITNESS_NO_SHARED_PARSE"] == nil
+    var sections: [String] = []
+    for i in 1...10 {
+        sections.append("## Part \(i)\n\nText \(i) with `code` and **bold**.")
+        sections.append("- a \(i)\n- b\n  - c")
+        sections.append("```swift\nlet x\(i) = \(i)\n```")
+        sections.append("| k | v |\n|---|---|\n| a | \(i) |")
+    }
+    let reply = sections.joined(separator: "\n\n")
+    var tokens: [String] = []
+    var cursor = reply.startIndex
+    var n = 0
+    while cursor < reply.endIndex {
+        let end = reply.index(cursor, offsetBy: 1 + (n * 5) % 8, limitedBy: reply.endIndex) ?? reply.endIndex
+        tokens.append(String(reply[cursor..<end])); cursor = end; n += 1
+    }
+
+    func make(thread: String, share: Bool, history: Bool) -> (AgentTranscriptProjection, DeterministicProjectionClock) {
+        let clock = DeterministicProjectionClock()
+        var projection = AgentTranscriptProjection(threadId: thread, monotonicNow: clock.now)
+        projection.sharesStreamParse = share
+        if history, let id = AgentNodeID(rawValue: "replayed-prompt") {
+            try? projection.appendUserPrompt(id: id, prompt: AgentPrompt("an earlier question from the replayed session"))
+        }
+        projection.ingest(.turnStarted(threadId: thread, turnId: "turn-share"))
+        return (projection, clock)
+    }
+    var (mirror, mirrorClock) = make(thread: "share-thread", share: shared, history: false)
+    var (display, displayClock) = make(thread: "share-thread", share: shared, history: true)
+    var (mirrorRef, mirrorRefClock) = make(thread: "share-ref-a", share: false, history: false)
+    var (displayRef, displayRefClock) = make(thread: "share-ref-b", share: false, history: true)
+
+    var firstDivergence: Int?
+    var displayParsedBytes = 0, refParsedBytes = 0
+    for (index, token) in tokens.enumerated() {
+        for clock in [mirrorClock, displayClock, mirrorRefClock, displayRefClock] { clock.advance(0.05) }
+        func event(_ thread: String) -> AgentRuntimeEvent {
+            .contentDelta(threadId: thread, turnId: "turn-share", streamKind: .assistant, delta: token)
+        }
+        mirror.ingest(event("share-thread")); display.ingest(event("share-thread"))
+        mirrorRef.ingest(event("share-ref-a")); displayRef.ingest(event("share-ref-b"))
+        displayParsedBytes += display.streamingLastParsedBytes
+        refParsedBytes += displayRef.streamingLastParsedBytes
+        func blocks(_ p: AgentTranscriptProjection) -> [[AgentBlock]] { p.document.entries.map { $0.blocks.map(resetRevisions) } }
+        if firstDivergence == nil, blocks(mirror) != blocks(mirrorRef) || blocks(display) != blocks(displayRef) {
+            firstDivergence = index
+        }
+    }
+    mirror.ingest(.turnCompleted(threadId: "share-thread", turnId: "turn-share", outcome: .completed, errorMessage: nil))
+    display.ingest(.turnCompleted(threadId: "share-thread", turnId: "turn-share", outcome: .completed, errorMessage: nil))
+    mirrorRef.ingest(.turnCompleted(threadId: "share-ref-a", turnId: "turn-share", outcome: .completed, errorMessage: nil))
+    displayRef.ingest(.turnCompleted(threadId: "share-ref-b", turnId: "turn-share", outcome: .completed, errorMessage: nil))
+    expect(firstDivergence == nil, "shared stream parse diverged from the unshared projections at token \(firstDivergence ?? -1)")
+    expect(display.document.entries.map { $0.blocks.map(resetRevisions) } == displayRef.document.entries.map { $0.blocks.map(resetRevisions) },
+           "final display document must equal the unshared one")
+    expect(display.streamingMarkupParseCount > 100, "witness must stream many parses; got \(display.streamingMarkupParseCount)")
+    expect(display.streamingParseMemoHits * 10 >= display.streamingMarkupParseCount * 9,
+           "the second projection of a thread must answer its parses from the shared memo: \(display.streamingParseMemoHits) hits of \(display.streamingMarkupParseCount)")
+    expect(refParsedBytes > 0 && displayParsedBytes * 10 < refParsedBytes,
+           "shared parse must cut the second projection's parsed bytes: \(displayParsedBytes) vs \(refParsedBytes)")
+}
+
 func runAgentTranscriptProjectionChecks() {
+    checkSharedStreamParse()
     checkIncrementalOpenStreamParse()
     checkIncrementalParserCorpus()
     checkSteeringPreservesRequestTiming()

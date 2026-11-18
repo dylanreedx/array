@@ -24,6 +24,11 @@ public struct AgentTranscriptProjection: Sendable {
     public var incrementalOpenStreamParse = true
     /// QA: UTF-8 bytes the last open-stream parse handed to the Markdown parser.
     public private(set) var streamingLastParsedBytes = 0
+    /// Reuse the parse another projection of the same thread just did for identical
+    /// inputs (see `StreamingParseMemo`). Off parses every time, as before.
+    public var sharesStreamParse = true
+    /// QA: parses answered from the shared memo instead of the Markdown parser.
+    public private(set) var streamingParseMemoHits = 0
     /// Counts source materializations for reasoning-chunk separation, separately
     /// from parsing. Assistant deltas must keep this at zero even when a long
     /// answer is waiting for the next coalesced parse.
@@ -941,9 +946,23 @@ public struct AgentTranscriptProjection: Sendable {
         let source = stream.buffer.source
         let parse: AgentMarkupParse
         if incrementalOpenStreamParse {
-            parse = markupParser.parseIncremental(source, entryID: stream.entryID, previous: previous,
-                                                  cache: &openStream!.parseCache)
-            streamingLastParsedBytes = openStream!.parseCache.lastParsedBytes
+            if sharesStreamParse,
+               let hit = StreamingParseMemo.shared.lookup(thread: threadId, entryID: stream.entryID,
+                                                          source: source, previous: previous) {
+                openStream!.parseCache = hit.cache
+                parse = AgentMarkupParse(blocks: hit.blocks)
+                streamingParseMemoHits += 1
+                streamingLastParsedBytes = 0
+            } else {
+                parse = markupParser.parseIncremental(source, entryID: stream.entryID, previous: previous,
+                                                      cache: &openStream!.parseCache)
+                streamingLastParsedBytes = openStream!.parseCache.lastParsedBytes
+                if sharesStreamParse {
+                    StreamingParseMemo.shared.store(thread: threadId, entryID: stream.entryID, source: source,
+                                                    previous: previous, blocks: parse.blocks,
+                                                    cache: openStream!.parseCache)
+                }
+            }
         } else {
             parse = markupParser.parse(source, entryID: stream.entryID, previous: previous)
             streamingLastParsedBytes = source.utf8.count
@@ -967,6 +986,7 @@ public struct AgentTranscriptProjection: Sendable {
         }
         archiveRawMarkupSourceForOpenStream()
         let entryID = openStream!.entryID
+        StreamingParseMemo.shared.discard(thread: threadId)
         openStream = nil
         result.append(.finishEntry(id: entryID))
         if releasingHeld { result += releaseHeldInsertions() }
