@@ -34832,6 +34832,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     static func runConductorQueueTileSelfCheck() throws -> URL {
+        try ConductorQueueTileNSView.runEventDrivenSelfCheck()
         let tileId = UUID(uuidString: "A9300000-0000-4000-8000-000000000093")!
         let projectRoot = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("continuum-conductor-queue-check-\(UUID().uuidString)", isDirectory: true)
@@ -34856,6 +34857,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             throw NSError(domain: "ConductorQueueTileCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "conductor queue tile did not persist through ProjectStore"])
         }
         let rendered = ConductorQueueTileNSView(tile: tile, projectRoot: projectRoot, startTimer: false)
+        func waitForReads(_ count: Int) throws {
+            let deadline = Date().addingTimeInterval(5)
+            while rendered.completedReadCount < count && Date() < deadline {
+                _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            }
+            guard rendered.completedReadCount >= count else {
+                throw NSError(domain: "ConductorQueueTileCheck", code: 7, userInfo: [NSLocalizedDescriptionKey: "conductor queue read timed out"])
+            }
+        }
+        try waitForReads(1)
         let renderedTexts = Self.textFieldStrings(in: rendered)
         guard rendered.renderedTaskIds == ["task-alpha", "task-beta"],
               renderedTexts.contains(where: { $0.contains("task-alpha") && $0.contains("pending") && $0.contains("p9") && $0.contains("continuum-revived") }),
@@ -34864,6 +34875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         try runSQLiteSQL("UPDATE tasks SET status='running', priority=10 WHERE id='task-alpha';", databaseURL: db)
         rendered.refreshNow()
+        try waitForReads(2)
         let updatedText = Self.textFieldStrings(in: rendered).joined(separator: " | ")
         guard updatedText.contains("task-alpha · running · p10") else {
             throw NSError(domain: "ConductorQueueTileCheck", code: 3, userInfo: [NSLocalizedDescriptionKey: "conductor queue tile refresh did not render db update"])
