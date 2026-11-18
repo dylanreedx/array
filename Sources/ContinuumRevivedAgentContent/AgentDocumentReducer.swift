@@ -12,6 +12,10 @@ public struct AgentDocumentReducerMetrics: Equatable, Sendable {
 public struct AgentDocumentReducer: Sendable {
     public private(set) var document: AgentDocument
     public private(set) var metrics = AgentDocumentReducerMetrics()
+    /// `replaceMarkup` skips the leading blocks that are unchanged (same IDs,
+    /// payloads and children) and reconciles, validates and re-indexes only the
+    /// rest. Off gives the original whole-entry pass, which a witness compares to.
+    public var replaceMarkupSkipsUnchangedPrefix = true
 
     private var entryIndexes: [AgentNodeID: Int] = [:]
     private var blockOwners: [AgentNodeID: AgentNodeID] = [:]
@@ -108,17 +112,32 @@ public struct AgentDocumentReducer: Sendable {
             guard case .open = document.entries[entryIndex].lifecycle else {
                 throw AgentDocumentMutationError.entryFinished(entryID: entryID, operation: .replaceMarkup)
             }
-            try validateForest(incoming)
+            let allOldBlocks = document.entries[entryIndex].blocks
+            // Leading blocks the reply left exactly as they were. `reconcile` hands
+            // such a block back with its old revision and contributes nothing to
+            // inserted/removed/moved/updated, so they are skipped, not re-walked.
+            var prefix = 0
+            if replaceMarkupSkipsUnchangedPrefix {
+                while prefix < allOldBlocks.count, prefix < incoming.count,
+                      identicalIgnoringRevision(allOldBlocks[prefix], incoming[prefix]) { prefix += 1 }
+            }
+            let incomingTail = Array(incoming.dropFirst(prefix))
+            // Same duplicate-ID rule as validating the whole forest: a tail node may
+            // not reuse the ID of a kept prefix node.
+            try validateForest(incomingTail, alsoRejecting: { [self] id in
+                guard prefix > 0, let location = blockLocations[id] else { return false }
+                return location.entry == entryIndex && location.path[0] < prefix
+            })
 
-            let oldBlocks = document.entries[entryIndex].blocks
+            let oldBlocks = Array(allOldBlocks.dropFirst(prefix))
             let oldIDs = oldBlocks.flatMap(allIDs)
             let oldSet = Set(oldIDs)
-            for block in incoming { try validateFreshIDs(block, allowed: oldSet) }
+            for block in incomingTail { try validateFreshIDs(block, allowed: oldSet) }
 
             let oldNodes = oldBlocks.reduce(into: [AgentNodeID: AgentBlock]()) { result, block in
                 result.merge(indexed(block)) { current, _ in current }
             }
-            let replacements = try incoming.map { try reconcile($0, oldNodes: oldNodes) }
+            let replacements = try incomingTail.map { try reconcile($0, oldNodes: oldNodes) }
             let newIDs = replacements.flatMap(allIDs)
             let newSet = Set(newIDs)
             let changed = replacements.flatMap { changedIDs($0, oldNodes: oldNodes) }.filter(oldSet.contains)
@@ -135,10 +154,11 @@ public struct AgentDocumentReducer: Sendable {
 
             let entryRevision = try nextRevision(document.entries[entryIndex].revision, id: entryID)
             for block in oldBlocks { unindex(block) }
-            document.entries[entryIndex].blocks = replacements
+            document.entries[entryIndex].blocks = Array(allOldBlocks.prefix(prefix)) + replacements
             document.entries[entryIndex].lifecycle = newLifecycle
             document.entries[entryIndex].revision = entryRevision
-            for (blockIndex, block) in replacements.enumerated() {
+            for (offset, block) in replacements.enumerated() {
+                let blockIndex = prefix + offset
                 index(block, owner: entryID, root: block.id, entry: entryIndex, path: [blockIndex])
                 topBlockLocations[block.id] = (entryIndex, blockIndex)
             }
@@ -408,9 +428,10 @@ public struct AgentDocumentReducer: Sendable {
         try validateForest([block])
     }
 
-    private func validateForest(_ blocks: [AgentBlock]) throws {
+    private func validateForest(_ blocks: [AgentBlock], alsoRejecting rejected: ((AgentNodeID) -> Bool)? = nil) throws {
         var seen: Set<AgentNodeID> = []
         func visit(_ node: AgentBlock) throws {
+            guard rejected?(node.id) != true else { throw AgentDocumentMutationError.duplicateNodeID(id: node.id) }
             guard seen.insert(node.id).inserted else { throw AgentDocumentMutationError.duplicateNodeID(id: node.id) }
             guard payloadMatchesKind(node) else { throw AgentDocumentMutationError.duplicateNodeID(id: node.id) }
             for child in node.children { try visit(child) }
@@ -552,6 +573,12 @@ public struct AgentDocumentReducer: Sendable {
         func visit(_ node: AgentBlock) { result[node.id] = node; node.children.forEach(visit) }
         visit(block)
         return result
+    }
+
+    private func identicalIgnoringRevision(_ lhs: AgentBlock, _ rhs: AgentBlock) -> Bool {
+        lhs.id == rhs.id && lhs.kind == rhs.kind && lhs.sourceRange == rhs.sourceRange && lhs.payload == rhs.payload &&
+        lhs.children.count == rhs.children.count &&
+        zip(lhs.children, rhs.children).allSatisfy(identicalIgnoringRevision)
     }
 
     private func visibleEqual(_ lhs: AgentBlock, _ rhs: AgentBlock) -> Bool {
