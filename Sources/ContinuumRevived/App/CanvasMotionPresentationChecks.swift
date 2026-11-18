@@ -366,8 +366,9 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         let fidelity = env["CANVAS_MOTION_FIDELITY"] == "1"
         var fidelityWindowSize: NSSize?
         let selectedPhase = env["CANVAS_MOTION_PHASE"] ?? "zoom"
-        guard ["pan", "zoom", "mixed"].contains(selectedPhase) else {
-            throw Failure(description: "CANVAS_MOTION_PHASE must be pan, zoom or mixed")
+        // idle: the same timed phase with no camera input, for frames while agents stream.
+        guard ["pan", "zoom", "mixed", "idle"].contains(selectedPhase) else {
+            throw Failure(description: "CANVAS_MOTION_PHASE must be pan, zoom, mixed or idle")
         }
         // CANVAS_MOTION_STREAM=0 is the quiet control: agents attached, nothing streaming.
         let streams = env["CANVAS_MOTION_STREAM"] != "0"
@@ -561,8 +562,8 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
                                 "scheduledSeconds": begin + t, "producerSeconds": queued,
                                 "mainSeconds": MotionClock.now, "panDX": dx, "panDY": dy,
                                 "logZoom": logDelta])
-                            if phase != "zoom" { fixture.postPan(dx: dx, dy: dy) }
-                            if phase != "pan" { fixture.postMagnify(delta: exp(logDelta) - 1) }
+                            if phase == "pan" || phase == "mixed" { fixture.postPan(dx: dx, dy: dy) }
+                            if phase == "zoom" || phase == "mixed" { fixture.postMagnify(delta: exp(logDelta) - 1) }
                         }
                     }
                     let endDeadline = beginMach + MotionClock.ticks(duration)
@@ -704,6 +705,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             sourceErrors.append("source per-agent delta counts do not match the fixed offered workload")
         }
         let errors = summaries.compactMap { summary -> String? in
+            if summary["phase"] as? String == "idle" { return nil }
             if (summary["cameraCommitCount"] as? Int ?? 0) < 2 { return "\(summary["phase"]!): camera did not move" }
             if captureEnabled && (summary["distinctCapturedCameraStates"] as? Int ?? 0) < 2 { return "\(summary["phase"]!): no distinct captured camera changes" }
             if captureEnabled && summary["finalCameraCaptured"] as? Bool != true { return "\(summary["phase"]!): final camera not captured during settle" }

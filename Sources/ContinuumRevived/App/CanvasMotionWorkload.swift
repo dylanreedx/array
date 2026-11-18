@@ -48,6 +48,8 @@ final class CanvasMotionWorkload {
     private let supervisor: AgentSupervisor
     private let emitter: CanvasMotionEmitter
     private let agentIDs: [AgentID]
+    /// `CANVAS_MOTION_SUBAGENTS`: tile-less helpers folded under the agents above.
+    private let subagentIDs: [AgentID]
     private let agentTileIDs: [UUID]
     private let markdownTileIDs: [UUID]
     private let defaults: UserDefaults
@@ -250,6 +252,19 @@ final class CanvasMotionWorkload {
             agents.seedRehydratedTranscript(Self.history(index: index, turns: turns), for: id)
             ids.append(id)
         }
+        // CANVAS_MOTION_SUBAGENTS=k: k helpers with no tile, spread over the agents
+        // above as their parents. They stream through the same supervisor path and
+        // show only as folded sidebar rows, the way delegated helpers do.
+        var children: [AgentID] = []
+        for index in 0..<(ids.isEmpty ? 0 : max(0, Int(env["CANVAS_MOTION_SUBAGENTS"] ?? "") ?? 0)) {
+            let id = agents.spawn(role: nil, prompt: nil, cwd: root, harness: .codex,
+                                  model: "fixture/canvas-motion", thinking: "low",
+                                  projectId: projectID, projectRoot: root,
+                                  parentAgentID: ids[index % ids.count], tileId: nil,
+                                  displayName: "Motion helper \(index + 1)")
+            agents.seedRehydratedTranscript(Self.history(index: 1_000 + index, turns: 3), for: id)
+            children.append(id)
+        }
 
         let browser = BrowserEngineContext()
         let zoneRegistry = ZoneRuntimeRegistry(closeOnZero: true, makeController: { requested in
@@ -299,8 +314,10 @@ final class CanvasMotionWorkload {
         supervisor = agents
         emitter = events
         agentIDs = ids
+        subagentIDs = children
         events.deltaIntervalMs = max(5, Int(env["CANVAS_MOTION_DELTA_MS"] ?? "") ?? 50)
         events.turnDeltas = max(0, Int(env["CANVAS_MOTION_TURN_DELTAS"] ?? "") ?? 0)
+        events.toolEvery = max(0, Int(env["CANVAS_MOTION_TOOL_EVERY"] ?? "") ?? 0)
         // CANVAS_MOTION_STREAMING_AGENTS=k: the k agents nearest the camera stream.
         if let count = Int(env["CANVAS_MOTION_STREAMING_AGENTS"] ?? ""), count < ids.count {
             let center = CGPoint(x: viewport.x + windowSize.width / 2 / viewport.zoom,
@@ -310,7 +327,7 @@ final class CanvasMotionWorkload {
                 return hypot(frame.x + frame.width / 2 - center.x, frame.y + frame.height / 2 - center.y)
             }
             let nearest = zip(managedTileIDs, ids).sorted { distance($0.0) < distance($1.0) }.prefix(max(0, count))
-            events.streaming = Set(nearest.map(\.1))
+            events.streaming = Set(nearest.map(\.1)).union(children)
         }
         replayWindowSize = replay?.window
         replaySummary = replay.map { replay in
@@ -386,6 +403,9 @@ final class CanvasMotionWorkload {
         guard !closed else { return }
         if !sentPrompts {
             let streaming = emitter.streamingIDs
+            for id in subagentIDs where !supervisor.send("Check the next rendering detail.", to: id) {
+                rejectedInputCount += 1
+            }
             for (id, tileID) in zip(agentIDs, agentTileIDs) where streaming?.contains(id) ?? true {
                 if !supervisor.send("Continue reviewing the canvas rendering path and show the next implementation detail.", to: id) {
                     rejectedInputCount += 1
@@ -415,7 +435,7 @@ final class CanvasMotionWorkload {
     func stopStreaming() { emitter.stop() }
 
     /// Agents the source streams into (all of them unless the run picked a subset).
-    var streamingAgentCount: Int { emitter.streamingCount ?? agentIDs.count }
+    var streamingAgentCount: Int { emitter.streamingCount ?? agentIDs.count + subagentIDs.count }
 
     /// Call only outside measured motion, after stopStreaming(). This reads the
     /// real semantic projections; it does not flush their pending event queues.
@@ -742,6 +762,9 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
     private var firstTickUptime: TimeInterval?
     /// Agents that stream; nil streams all. The rest stay attached and idle.
     var streaming: Set<AgentID>?
+    /// Every n-th delta per agent is followed by one short tool step
+    /// (`CANVAS_MOTION_TOOL_EVERY`); 0 streams prose and code only.
+    var toolEvery = 0
     /// Milliseconds between deltas per streaming agent (`CANVAS_MOTION_DELTA_MS`).
     var deltaIntervalMs = 50
     /// Deltas per turn before the turn completes and a new one starts; 0 keeps one
@@ -835,6 +858,15 @@ private final class CanvasMotionEmitter: @unchecked Sendable {
                                                     streamKind: .assistant, delta: delta)) {
                     entry.deltas += 1
                     entry.bytes += delta.utf8.count
+                }
+                if toolEvery > 0, entry.deltas % toolEvery == 0 {
+                    let item = "\(entry.turn)-tool-\(entry.deltas)"
+                    _ = entry.runner.emit(.itemStarted(threadId: entry.thread, itemId: item,
+                                                       kind: .commandExecution, title: "Run render counters"))
+                    _ = entry.runner.emit(.contentDelta(threadId: entry.thread, turnId: entry.turn,
+                                                        streamKind: .commandOutput, delta: "counters ok \(entry.deltas)\n"))
+                    _ = entry.runner.emit(.itemCompleted(threadId: entry.thread, itemId: item,
+                                                         kind: .commandExecution, status: .completed))
                 }
                 if turnDeltas > 0, entry.deltas % turnDeltas == 0,
                    entry.runner.emit(.turnCompleted(threadId: entry.thread, turnId: entry.turn,

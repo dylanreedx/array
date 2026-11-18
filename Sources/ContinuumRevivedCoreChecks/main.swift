@@ -592,6 +592,11 @@ if CommandLine.arguments.contains("--agent-transcript-projection-check") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--agent-streaming-cost-check") {
+    runAgentStreamingCostChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-prompt-image-contract-check") {
     runAgentPromptImageContractChecks()
     Foundation.exit(0)
@@ -12708,6 +12713,10 @@ runAgentWhatProjectionChecks()
 // Queue 91 P3: the native UI receives one pure, host-local compact/disclosure
 // presentation with explicit external markers and independent AX facts.
 runAgentLocationPresentationChecks()
+
+// Per-event work in a streaming agent tile: the status timestamp and the Codex
+// transport override, each against the cost it used to repeat per call.
+runAgentStreamingCostChecks()
 
 // Ticket: docs/38-tickets/90-agent-ux/P2A.2-agent-store.md — agents listable
 // across every project, out of application support rather than a project root.

@@ -39,6 +39,7 @@ check --agent-restore-check
 check --agent-status-check
 check --agent-steering-recovery-check
 check --agent-stop-outcome-check
+check --agent-streaming-chunk-work-check
 check --agent-supervisor-check
 check --agent-tile-binding-check
 check --agent-tile-chrome-consolidation-check
@@ -587,6 +588,7 @@ leg run_app_check .build/debug/Array --agent-restore-check
 leg run_app_check .build/debug/Array --agent-status-check
 leg run_app_check .build/debug/Array --agent-steering-recovery-check
 leg run_app_check .build/debug/Array --agent-stop-outcome-check
+leg run_app_check .build/debug/Array --agent-streaming-chunk-work-check
 leg run_app_check .build/debug/Array --agent-supervisor-check
 leg run_app_check .build/debug/Array --agent-tile-binding-check
 leg run_app_check .build/debug/Array --agent-tile-chrome-consolidation-check

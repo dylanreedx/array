@@ -171,6 +171,13 @@ final class AgentTileHeaderView: NSView, TokenThemed, AgentPageZoomScalable, Til
     isolated deinit { elapsedTimer?.invalidate() }
 
     func apply(_ next: AgentTileStatePresenter.Presentation) {
+        // The tile re-applies the header on every streamed event; an unchanged
+        // presentation repainted the chip and the tokens each time. The elapsed
+        // label has its own timer, and appearance changes re-apply tokens.
+        guard next != presentation else {
+            updateVisibility()
+            return
+        }
         presentation = next
         branchChip.apply(next.branch)
         updateElapsed(now: AgentElapsedClock.now())

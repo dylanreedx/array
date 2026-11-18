@@ -1910,6 +1910,9 @@ run_app_check .build/debug/Array --agent-file-index-memory-check
 # every turn's runner leaked, all resting tiles shared one Auto Layout engine,
 # and every line a transcript ever drew stayed as CoreText.
 run_app_check .build/debug/Array --long-session-memory-check
+# Per streamed chunk, a real agent tile leaves unchanged chrome clean and serves
+# cached tool rows without re-running the secret redaction (120 Hz with 36 agents).
+run_app_check .build/debug/Array --agent-streaming-chunk-work-check
 run_app_check .build/debug/Array --agent-tile-reference-check
 # Resize, title-bar focus, Shift-select, live agent moves, header references
 # and swaps, through NSApp.sendEvent: the window hit-test and the focus monitor

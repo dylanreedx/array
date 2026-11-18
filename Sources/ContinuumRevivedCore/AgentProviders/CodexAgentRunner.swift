@@ -171,10 +171,15 @@ public enum CodexCLIBackend {
     /// structured provider-owned subagent identity. `exec` remains an explicit
     /// emergency escape hatch.
     public enum Transport: String, Sendable { case exec, appServer }
+    /// `environment` nil reads the one variable with `getenv`: copying the whole
+    /// process environment cost 2.5% of the main thread, because the compaction
+    /// availability the composer binds asks this on every streamed event.
     public static func transportOverride(
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String]? = nil
     ) -> Transport {
-        environment["CONTINUUM_CODEX_TRANSPORT"] == "exec" ? .exec : .appServer
+        let value = environment.map { $0["CONTINUUM_CODEX_TRANSPORT"] }
+            ?? getenv("CONTINUUM_CODEX_TRANSPORT").map { String(cString: $0) }
+        return value == "exec" ? .exec : .appServer
     }
 
     /// The distinguishing app-server JSON-RPC error for a `thread/resume` on a
