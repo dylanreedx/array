@@ -80,6 +80,7 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed, AgentPageZoomS
     var railHeight: CGFloat { Self.railHeight(zoom: pageZoom) }
 
     let scrollView = NSScrollView(frame: .zero)
+    private var scrollConstraints: [NSLayoutConstraint] = []
     let collectionView = ComposerImageAttachmentCollectionView(frame: .zero)
 
     var onRemoveAttachment: ((AgentPromptImageAttachment) -> Void)?
@@ -184,6 +185,7 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed, AgentPageZoomS
     override var isHidden: Bool {
         didSet {
             guard oldValue != isHidden else { return }
+            mountScrollView(!isHidden)
             if isHidden {
                 cancelAllThumbnailLeases(removeThumbnails: true)
             } else {
@@ -280,14 +282,27 @@ final class ComposerImageAttachmentRailView: NSView, TokenThemed, AgentPageZoomS
             object: scrollView.contentView
         )
         scrollView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(scrollView)
-
-        NSLayoutConstraint.activate([
+        scrollConstraints = [
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-        ])
+        ]
+        mountScrollView(!isHidden)
+    }
+
+    /// An empty rail is hidden, but a hidden view's constraints are still solved,
+    /// so its scroll view was re-framed and re-tiled on every camera step. It
+    /// joins the hierarchy only while the rail has content.
+    private func mountScrollView(_ mounted: Bool) {
+        if mounted {
+            guard scrollView.superview == nil else { return }
+            addSubview(scrollView)
+            NSLayoutConstraint.activate(scrollConstraints)
+        } else {
+            NSLayoutConstraint.deactivate(scrollConstraints)
+            scrollView.removeFromSuperview()
+        }
     }
 
     private func configureDataSource() {

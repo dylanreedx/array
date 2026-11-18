@@ -25,6 +25,7 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
     var railHeight: CGFloat { Self.railHeight(zoom: pageZoom) }
 
     private let scrollView = NSScrollView(frame: .zero)
+    private var scrollConstraints: [NSLayoutConstraint] = []
     private let stack = NSStackView(frame: .zero)
     private var references: [AgentPromptFileReference] = []
     private var agentReferences: [AgentPromptReference] = []
@@ -143,6 +144,10 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
         )
     }
 
+    override var isHidden: Bool {
+        didSet { if oldValue != isHidden { mountScrollView(!isHidden) } }
+    }
+
     private func configureViews() {
         wantsLayer = true
         isHidden = true
@@ -163,9 +168,7 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
         scrollView.scrollerStyle = .overlay
         scrollView.documentView = stack
         scrollView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(scrollView)
-
-        NSLayoutConstraint.activate([
+        scrollConstraints = [
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
@@ -173,7 +176,22 @@ final class ComposerFileReferenceRailView: NSView, TokenThemed, AgentPageZoomSca
             stack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
             stack.bottomAnchor.constraint(equalTo: scrollView.contentView.bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-        ])
+        ]
+        mountScrollView(!isHidden)
+    }
+
+    /// An empty rail is hidden, but a hidden view's constraints are still solved,
+    /// so its scroll view was re-framed and re-tiled on every camera step. It
+    /// joins the hierarchy only while the rail has content.
+    private func mountScrollView(_ mounted: Bool) {
+        if mounted {
+            guard scrollView.superview == nil else { return }
+            addSubview(scrollView)
+            NSLayoutConstraint.activate(scrollConstraints)
+        } else {
+            NSLayoutConstraint.deactivate(scrollConstraints)
+            scrollView.removeFromSuperview()
+        }
     }
 
     // MARK: - QA seams
