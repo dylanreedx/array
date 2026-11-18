@@ -25,6 +25,17 @@ struct InboxQuietHistoryProjection: Sendable {
     let dates: [UUID: Date]
 }
 
+/// What the scope menu's entries are derived from, besides the rows.
+struct InboxScopeMenuInputs: Equatable, Sendable {
+    var scope: InboxScope
+    var workspaces: [InboxScopeMenu.Workspace]
+    var projects: [String]
+    var legacyWorkspaces: [String]
+    var current: UUID?
+    var offersCurrent: Bool
+    var offersThisMac: Bool
+}
+
 /// Everything `InboxDisplayBuilder.build` reads, by value.
 struct InboxDisplayInputs: Sendable {
     var rows: [AgentInboxRow]
@@ -55,6 +66,8 @@ struct InboxDisplayInputs: Sendable {
     var quietHistoryCache: InboxQuietHistoryProjection?
     var historyReuseHint: Set<UUID>?
     var quietHistoryNote: String
+    /// Set when the scope menu's entries are wanted with this build.
+    var scopeMenu: InboxScopeMenuInputs?
 }
 
 /// Everything `display(from:)` used to write, by value.
@@ -82,6 +95,8 @@ struct InboxDisplayModel: Sendable {
     var historyEntryDates: [UUID: Date] = [:]
     var quietHistoryCache: InboxQuietHistoryProjection?
     var historyProjectionBuilds = 0
+    /// The scope menu's entries for `rows` and these inputs.
+    var scopeMenu: (inputs: InboxScopeMenuInputs, entries: [InboxScopeMenuEntry])?
 }
 
 /// What the table draws for a push: filtered, sorted, folded, then split into the
@@ -96,6 +111,12 @@ struct InboxDisplayModel: Sendable {
 nonisolated enum InboxDisplayBuilder {
     static func build(_ input: InboxDisplayInputs) -> InboxDisplayModel {
         var model = InboxDisplayModel()
+        if let menu = input.scopeMenu {
+            model.scopeMenu = (menu, InboxScopeMenu.entries(
+                scope: menu.scope, workspaces: menu.workspaces, projects: menu.projects,
+                legacyWorkspaces: menu.legacyWorkspaces, rows: input.rows, current: menu.current,
+                offersCurrent: menu.offersCurrent, offersThisMac: menu.offersThisMac))
+        }
         // Sidebar round: Clear's marks, then Standing, both sidebar preferences
         // stamped on the rows. A mark new activity released is dropped.
         let cleared = SidebarClearMarks.apply(input.clearMarks, to: input.rows)

@@ -2504,7 +2504,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         }
         let pending = pendingOffMain!
         historyReuseHint = pending.chatterPatchedAgentIDs
-        let inputs = displayInputs(for: pending.rows)
+        var inputs = displayInputs(for: pending.rows)
+        inputs.scopeMenu = scopeMenuInputs()
         historyReuseHint = nil
         let generation = offMainLatest.next()
         let latest = offMainLatest
@@ -2603,7 +2604,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // that first mentions it.
         allRows = newRows
         externalSessionHiding?.noteDiscovered(Set(newRows.compactMap(\.externalSession?.sessionKey)))
-        updateScopeMenu()
+        updateScopeMenu(derived: model?.scopeMenu)
         scheduleWakeRerender()
         // P2D.4: the disclosure is VIEW state, so it is not in `AgentInboxRow` and
         // the value comparison below cannot see it move. A first child arriving under
@@ -2768,8 +2769,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // different height. `reloadData(forRowIndexes:)` re-asks for the row's VIEW
         // and not for its height, so without this a row that just settled would
         // draw its one collapsed line into a card-sized slot — and keep the slot.
-        tableView.noteHeightOfRows(withIndexesChanged: indexes)
-        tableView.reloadData(forRowIndexes: indexes, columnIndexes: IndexSet(integer: 0))
+        refreshRows(indexes) { tableView.noteHeightOfRows(withIndexesChanged: $0) }
         updateShelfSpacerHeight()
         layoutSubtreeIfNeeded()
         restoreScrollAnchor(scrollAnchor)
@@ -2815,7 +2815,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             shelfExpanded: shelfExpanded, foldsHistoryIntoShelf: foldsHistoryIntoShelf,
             settledLimit: settledLimit, historyExpanded: historyExpanded,
             quietHistoryCache: quietHistoryCache, historyReuseHint: historyReuseHint,
-            quietHistoryNote: Self.quietHistoryNote)
+            quietHistoryNote: Self.quietHistoryNote, scopeMenu: nil)
     }
 
     /// Write what a build derived into the view, and return the items it drew.
@@ -3457,8 +3457,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 self.performRowAction(.settle)
             }
         }
-        immediately { tableView.noteHeightOfRows(withIndexesChanged: stale) }
-        tableView.reloadData(forRowIndexes: stale, columnIndexes: IndexSet(integer: 0))
+        if preservingAgentRows {
+            refreshRows(stale) { rows in immediately { tableView.noteHeightOfRows(withIndexesChanged: rows) } }
+        } else {
+            immediately { tableView.noteHeightOfRows(withIndexesChanged: stale) }
+            tableView.reloadData(forRowIndexes: stale, columnIndexes: IndexSet(integer: 0))
+        }
         applyWorkspaceMarksInPlace()
         updateShelfSpacerHeight()
         updateEmptyState()
@@ -3922,7 +3926,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// it — would collapse to a single entry and every index after it would point at
     /// the wrong scope. The tag carries the index instead of the position, so the
     /// separator between the two blocks costs nothing.
-    private func updateScopeMenu() {
+    /// What the menu's entries are derived from, besides the rows.
+    private func scopeMenuInputs() -> InboxScopeMenuInputs {
         var workspaces: [InboxScopeMenu.Workspace] = []
         var projects: [String] = []
         var legacyWorkspaces: [String] = []
@@ -3934,11 +3939,26 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             default: break
             }
         }
-        let entries = InboxScopeMenu.entries(
+        return InboxScopeMenuInputs(
             scope: scope, workspaces: workspaces, projects: projects, legacyWorkspaces: legacyWorkspaces,
-            rows: allRows, current: currentWorkspaceId,
+            current: currentWorkspaceId,
             offersCurrent: currentWorkspaceId != nil || currentWorkspaceName != nil,
             offersThisMac: offersThisMacScope)
+    }
+
+    /// `derived`: entries a build already made from these rows (off main), used
+    /// only when the menu's other inputs are still what it was given.
+    private func updateScopeMenu(derived: (inputs: InboxScopeMenuInputs, entries: [InboxScopeMenuEntry])? = nil) {
+        let menu = scopeMenuInputs()
+        let entries: [InboxScopeMenuEntry]
+        if let derived, derived.inputs == menu {
+            entries = derived.entries
+        } else {
+            entries = InboxScopeMenu.entries(
+                scope: menu.scope, workspaces: menu.workspaces, projects: menu.projects,
+                legacyWorkspaces: menu.legacyWorkspaces, rows: allRows, current: menu.current,
+                offersCurrent: menu.offersCurrent, offersThisMac: menu.offersThisMac)
+        }
         scopeMenuEntries = entries
         if let editing = colourEditingWorkspace,
            let workspace = entries.first(where: { $0.kind == .workspace(editing) }) {
@@ -4504,6 +4524,20 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // it anyway made the next layout pass reload and rebuild EVERY cell —
         // after each fold, mid-animation, and after every hover reload.
         if cardStyleOverride == nil || model.variant != .card { needsHeightRevalidation = true }
+        configureAgentCell(cell, model: model, row: row, index: index, reuseID: reuseID,
+                           reusesRecentCell: reusesRecentCell, interacting: interacting)
+        cellsByRow[row] = cell
+        updateAccessibilityHierarchy()
+        return cell
+    }
+
+    /// Everything a drawn agent row owes its cell, for a cell just made or lent
+    /// (`viewFor`) and for one already in the table that only has new facts
+    /// (`refreshCellInPlace`).
+    private func configureAgentCell(
+        _ cell: AgentInboxRowCell, model: AgentInboxRow, row: Int, index: Int,
+        reuseID: NSUserInterfaceItemIdentifier, reusesRecentCell: Bool, interacting: Bool
+    ) {
         // AppKit may ask for a cell before it has assigned the row frame. Give
         // the cell the live column width before `apply` measures its fit tier;
         // otherwise an empty initial frame leaves a hidden band visible while
@@ -4611,9 +4645,41 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // is an overlay and not part of the row's content — `apply` paints what the
         // agent IS, and a pill is a thing about the keyboard.
         cell.showJumpHint(jumpHintsVisible ? AgentInboxView.jumpHintText(forRowIndex: index) : nil)
-        cellsByRow[row] = cell
-        updateAccessibilityHierarchy()
-        return cell
+    }
+
+    /// Give an agent row that is already drawn its new facts without asking the
+    /// table for a new view: the cell is the one the reload would have lent back,
+    /// and the height is the one it holds. False when the row needs the table
+    /// (a different cell kind, a different height, a row not materialized).
+    private func refreshCellInPlace(tableRow row: Int) -> Bool {
+        guard cardStyleOverride != nil,
+              let model = item(at: row)?.agentRow, model.variant == .card,
+              historyEntryHelpers[model.id] == nil,
+              let index = rowIndex(forTableRow: row),
+              let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? AgentInbox96CellView,
+              cell.identifier?.rawValue == Self.accessibilityIdentifier(for: model),
+              recentCells[Self.accessibilityIdentifier(for: model) as NSString] === cell,
+              !crossfadingCells.values.contains(where: { $0 === cell }),
+              !updatingFold,
+              abs(tableView.rect(ofRow: row).height - tableView.intercellSpacing.height - self.tableView(tableView, heightOfRow: row)) < 0.5
+        else { return false }
+        cellBuildCountForQA += 1
+        onCellBuildForQA?(model.id)
+        configureAgentCell(
+            cell, model: model, row: row, index: index,
+            reuseID: NSUserInterfaceItemIdentifier(Self.accessibilityIdentifier(for: model)),
+            reusesRecentCell: true, interacting: isInteracting(row: row))
+        return true
+    }
+
+    /// Redraw these table rows: in place where the cell can take the new facts,
+    /// through the table where it cannot.
+    private func refreshRows(_ indexes: IndexSet, heightsNoted: (IndexSet) -> Void) {
+        var reload = IndexSet()
+        for row in indexes where !refreshCellInPlace(tableRow: row) { reload.insert(row) }
+        guard !reload.isEmpty else { return }
+        heightsNoted(reload)
+        tableView.reloadData(forRowIndexes: reload, columnIndexes: IndexSet(integer: 0))
     }
 
     /// T3 nightly's hover actions (confidence pass): a card offers [Snooze] [Settle],
