@@ -10,6 +10,8 @@ struct TerminalWheelQASample: Codable, Equatable {
     var normalizedDeltaX: Double
     var normalizedDeltaY: Double
     var deliveredViaProductionScrollWheel: Bool
+    /// The packed `ghostty_input_scroll_mods_t` handed to Ghostty (bit 0 precision, bits 1-3 momentum).
+    var scrollMods: Int32 = 0
 }
 
 struct TerminalSurfacePixelSize: Equatable, Sendable {
@@ -340,9 +342,12 @@ final class GhosttyTerminalView: NSView {
             precise: event.hasPreciseScrollingDeltas,
             deliveredViaProductionScrollWheel: true
         )
-        qaLastWheelSample = sample
+        let mods = TerminalWheelNormalizer.ghosttyScrollMods(precise: sample.precise, momentumPhase: event.momentumPhase.rawValue)
+        var recorded = sample
+        recorded.scrollMods = mods
+        qaLastWheelSample = recorded
         qaGhosttyScrollCallCount += 1
-        ghostty_surface_mouse_scroll(surface, sample.normalizedDeltaX, sample.normalizedDeltaY, 0)
+        ghostty_surface_mouse_scroll(surface, sample.normalizedDeltaX, sample.normalizedDeltaY, mods)
     }
 
     func normalizedWheelSample(deltaX: Double, deltaY: Double, precise: Bool, deliveredViaProductionScrollWheel: Bool) -> TerminalWheelQASample {

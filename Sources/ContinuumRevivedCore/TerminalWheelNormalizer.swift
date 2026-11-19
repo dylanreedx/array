@@ -54,6 +54,24 @@ public enum TerminalWheelNormalizer {
         )
     }
 
+    /// Packed `ghostty_input_scroll_mods_t`: bit 0 is precision, bits 1-3 the
+    /// momentum phase. Ghostty reads precise deltas as pixels and plain ones as
+    /// wheel ticks (x cell height), so dropping the bit makes a trackpad scroll
+    /// many times too far. `momentumPhase` is `NSEvent.Phase.rawValue`.
+    public static func ghosttyScrollMods(precise: Bool, momentumPhase: UInt) -> Int32 {
+        let momentum: Int32
+        switch momentumPhase {
+        case 0x1: momentum = 1 // began
+        case 0x4: momentum = 2 // stationary
+        case 0x2: momentum = 3 // changed
+        case 0x8: momentum = 4 // ended
+        case 0x10: momentum = 5 // cancelled
+        case 0x20: momentum = 6 // mayBegin
+        default: momentum = 0
+        }
+        return (precise ? 1 : 0) | (momentum << 1)
+    }
+
     private static func sanitized(_ value: Double) -> Double {
         value.isFinite ? value : 0
     }

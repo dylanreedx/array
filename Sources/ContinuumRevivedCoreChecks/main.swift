@@ -922,6 +922,10 @@ do {
     )
     expect(clamped.deltaX == 5 && clamped.deltaY == -5, "maxAbsDeltaPerEvent clamps symmetrically")
 
+    expect(TerminalWheelNormalizer.ghosttyScrollMods(precise: true, momentumPhase: 0) == 1, "precise (trackpad) wheel reaches Ghostty with the precision bit")
+    expect(TerminalWheelNormalizer.ghosttyScrollMods(precise: false, momentumPhase: 0) == 0, "line wheel reaches Ghostty without the precision bit")
+    expect(TerminalWheelNormalizer.ghosttyScrollMods(precise: true, momentumPhase: 0x2) == 0b111, "momentum changed packs into bits 1-3")
+
     let suiteName = "TerminalScrollConfigChecks-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suiteName)!
     defer { defaults.removePersistentDomain(forName: suiteName) }
