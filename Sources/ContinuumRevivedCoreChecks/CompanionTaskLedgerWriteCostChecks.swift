@@ -65,6 +65,45 @@ func runCompanionTaskLedgerWriteCostChecks() throws -> String {
                   changes, seededBytes / 1024, perChange)
 }
 
+/// Live sample, 2026-11-18: a quarter of Dylan's main thread was the phone
+/// publish's `reconcileQueued`, run for every agent with queued work on every
+/// publish. It re-wrote each queued run's state with the value it already held,
+/// which un-shares the run table: a copy and a full comparison of all 27,956
+/// runs per agent per publish. Unchanged queued work must cost nothing that
+/// grows with the ledger, and a real change must still commit.
+func runCompanionTaskLedgerReconcileCostChecks() throws -> String {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-task-ledger-reconcile-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let directory = root.appendingPathComponent("companion-tasks", isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    try seededLedger(tasks: 14_000, runsPerTask: 2).write(to: directory.appendingPathComponent("ledger.json"))
+    let ledger = try CompanionTaskLedger(applicationSupportDirectory: root)
+    let queued = try (0..<10).map { _ -> (UUID, [UUID]) in
+        let agent = UUID(), items = [UUID(), UUID()]
+        for item in items { _ = try ledger.reserveQueued(agentID: agent, itemID: item) }
+        return (agent, items)
+    }
+    let revision = ledger.revision
+    // One publish: every agent with queued work, as `companionTaskSnapshot` does.
+    var publishes: [Double] = []
+    for _ in 0..<5 {
+        let started = DispatchTime.now().uptimeNanoseconds
+        for (agent, items) in queued { try ledger.reconcileQueued(agentID: agent, itemIDs: items) }
+        publishes.append(Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+    }
+    let median = publishes.sorted()[publishes.count / 2]
+    try writeCostExpect(ledger.revision == revision, "reconciling unchanged queued work committed a change")
+    try writeCostExpect(median < 2,
+        String(format: "reconciling 10 agents' unchanged queued work took %.1f ms per publish on a 28,000-run ledger (limit 2 ms): each call copied and compared the whole run table", median))
+    // A real change still lands: an item the ledger has never seen.
+    let fresh = UUID()
+    try ledger.reconcileQueued(agentID: queued[0].0, itemIDs: queued[0].1 + [fresh])
+    try writeCostExpect(ledger.revision == revision + 1, "a newly queued item did not commit")
+    try writeCostExpect(try ledger.snapshot().tasks.contains { $0.members.contains { $0.runID == fresh && $0.state == .queued } },
+        "a newly queued item is missing from the published batch")
+    return String(format: "CompanionTaskLedgerReconcileCostChecks passed: 10 agents' unchanged queued work reconciled in %.2f ms per publish on a 28,000-run ledger with no commit; a new item still commits", median)
+}
+
 /// A settled history in the ledger's own on-disk shape (UUID-keyed dictionaries
 /// encode as alternating key/value arrays).
 private func seededLedger(tasks: Int, runsPerTask: Int) throws -> Data {

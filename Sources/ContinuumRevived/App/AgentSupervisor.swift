@@ -1511,6 +1511,42 @@ final class AgentSupervisor {
     func flushPendingTranscriptSaves() {
         for id in Array(transcriptPersistDeadline.keys) { scheduleTranscriptPersist(for: id, final: true) }
     }
+
+    /// Whether quitting now could lose transcript text: a save waiting out its
+    /// debounce, or one started and not yet on disk.
+    var hasTranscriptSavesPending: Bool {
+        !transcriptPersistDeadline.isEmpty || !transcriptPersistenceTasks.isEmpty || !canonicalTranscriptPreflights.isEmpty
+    }
+
+    /// App quit: starts every save still waiting out a debounce, then waits for
+    /// those and any already writing, at most `bound`, so quit cannot hang on a
+    /// stuck disk. The writes run in tasks; starting them and exiting at once,
+    /// as quit did, lost up to the last 2 s of a hidden agent's text. Returns
+    /// whether everything landed in time.
+    func finishTranscriptSavesForQuit(within bound: Duration = .seconds(2)) async -> Bool {
+        flushPendingTranscriptSaves()
+        if Self.qaLegacyQuitTranscriptFlush { return true }
+        let deadline = ContinuousClock.now + bound
+        var awaited: Set<Task<Void, Never>> = []
+        while true {
+            // A preflight that finishes starts the save it was holding, so look again.
+            let pending = Set(transcriptPersistenceTasks.values).union(canonicalTranscriptPreflights.values).subtracting(awaited)
+            if pending.isEmpty { return true }
+            awaited.formUnion(pending)
+            let finished = await withTaskGroup(of: Bool.self) { group in
+                group.addTask { for task in pending { await task.value }; return true }
+                group.addTask { try? await Task.sleep(until: deadline); return false }
+                let first = await group.next() ?? false
+                group.cancelAll()
+                return first
+            }
+            if !finished { return false }
+        }
+    }
+
+    /// QA seam: `CONTINUUM_QA_LEGACY_QUIT_TRANSCRIPT_FLUSH=1` starts the quit's
+    /// saves without waiting for them, as before, so one binary shows both.
+    static let qaLegacyQuitTranscriptFlush = ProcessInfo.processInfo.environment["CONTINUUM_QA_LEGACY_QUIT_TRANSCRIPT_FLUSH"] == "1"
     /// How many events each agent's tails have been sent. A local notice is
     /// stamped with it, so a tile still reading its tail can place the notice
     /// after exactly the events that preceded it (`AgentLocalNotice.afterEvent`).
