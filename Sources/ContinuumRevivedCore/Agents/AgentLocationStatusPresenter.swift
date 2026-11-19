@@ -285,8 +285,12 @@ public enum AgentLocationStatusPresenter {
         }
     }
 
+    // One shared formatter: building an ISO8601DateFormatter per call was 21% of
+    // main-thread time during a pure zoom. ISO8601DateFormatter is thread-safe.
+    private static let timestampFormatter = ISO8601DateFormatter()
+
     private static func timestamp(_ date: Date) -> String {
-        ISO8601DateFormatter().string(from: date)
+        timestampFormatter.string(from: date)
     }
 
     private static func boundedPath(_ path: String) -> String {

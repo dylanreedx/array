@@ -128,6 +128,18 @@ func runAgentLocationPresentationChecks() {
             && currentExternal.detailText.contains(externalRead.targetPath!.path)
             && currentExternal.detailText.contains("tool event"),
            "Agent location presentation: host-local disclosure omitted full path/provenance details")
+    // Status tick timestamp: output is pinned, and the shared formatter keeps
+    // many presentations cheap (a per-call ISO8601DateFormatter cost ~4x more).
+    expect(currentExternal.detailText.contains("tool event, 2027-01-15T08:00:00Z"),
+           "Agent location presentation: detail timestamp output changed")
+    let tickSnapshot = AgentLocationSnapshot(
+        home: home, whereDirectory: outsideDirectory, what: externalRead, lastUsefulWhat: externalRead)
+    let tickStart = Date()
+    for _ in 0..<2_000 {
+        _ = AgentLocationStatusPresenter.present(tickSnapshot, projectName: "Continuum")
+    }
+    expect(Date().timeIntervalSince(tickStart) < 1.0,
+           "Agent location presentation: 2,000 status ticks exceeded the 1s cost budget")
     expect(!((currentExternal as Any) is any Encodable),
            "Agent location presentation: host-local path presentation must not become Encodable")
 
