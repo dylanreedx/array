@@ -409,6 +409,12 @@ enum SidebarDogfoodChecks {
             throw Failure(description: "with the pauses over, the family is not offered to Clear — Clear \(inbox.sidebarClearIDs.count)")
         }
         let clearIDsBefore = inbox.sidebarClearIDs.count
+        // Ending the pauses removes the usage item above the Inbox heading, and the
+        // list's scroll anchor holds the agent rows in place by scrolling the heading
+        // (and its Clear button) 30pt off the top. A person scrolls back up to press
+        // it; so does the arm, rather than clicking a button that is not on screen.
+        inbox.scrollToTopForQA()
+        inbox.layoutForQA()
         try Q.click(clear)
         inbox.layoutForQA()
         let clickedMarks = inbox.clearMarks.keys.contains(lead.rawValue)
