@@ -1930,6 +1930,12 @@ run_app_check .build/debug/Array --compact-status-row-skip-check
 # Offline seed replay shares the live acceptance tile fixture, without CLI usage.
 run_app_check .build/debug/Array --live-compaction-replay-check
 run_app_check .build/debug/Array --agent-account-usage-check
+# Usage stops read as stops: Claude's limit line and rejected reading, Codex's
+# usage_limit_exceeded (usage-resume step 1).
+run_leg .build/debug/ContinuumRevivedCoreChecks --agent-usage-limit-check
+# A usage stop pauses the agent, tells its lead, and resumes the same session
+# on the same harness at the reset or the first proof of room, staggered.
+run_app_check .build/debug/Array --agent-usage-resume-check
 run_app_check .build/debug/Array --agent-account-manage-check
 # Real installed-provider warning/compaction/task-retention acceptance spends
 # subscription usage. Opt in explicitly; ordinary matrix runs stay offline.

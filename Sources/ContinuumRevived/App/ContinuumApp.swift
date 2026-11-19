@@ -3935,6 +3935,22 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Usage resume: a usage stop is a per-agent pause that Array resumes
+        // on the same session at the reset, staggered, and tells the lead so.
+        if CommandLine.arguments.contains("--agent-usage-resume-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentUsageResumeChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // .plans/101: account identity and live limits, read with no turn,
         // through a real supervisor into real attached tiles.
         if CommandLine.arguments.contains("--agent-account-usage-check") {
@@ -16641,21 +16657,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.onFailureDetailsLoaded = { [weak self] in
             self?.pushExternalSessionRows()
         }
-        // Sidebar round: "Switch & resume…" opens Settings > Agents, where the
-        // accounts live; the CLI keeps its own login. The other incident
-        // actions draw disabled this release.
+        // Sidebar round: a usage pause's "Open" reveals the paused agent; the
+        // other incident actions draw disabled this release.
         sidebar.agentInbox.onIncidentAction = { [weak self] incident in
             self?.performSidebarIncident(incident)
         }
-        // A usage reading changed (or arrived): the usage items follow it live.
-        NotificationCenter.default.addObserver(
-            forName: AgentSupervisor.accountUsageDidChangeNotification, object: agentSupervisor, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshSidebarUsageIfChanged() }
+        // A usage pause opened, resumed or cleared: its row follows.
+        agentSupervisor.onUsagePausesChanged = { [weak self] in
+            self?.reloadWorkspaceSidebar(rebuildAgentActivity: false)
         }
-        // A live runner's own quota reading writes the same account snapshot
-        // without posting that notification: it reaches the usage items here.
-        agentSupervisor.onAccountQuotaObserved = { [weak self] _ in self?.refreshSidebarUsageIfChanged() }
         // P3.15: the row menu and the bulk bar reach the supervisor. Until this call
         // existed the shipped app assigned neither callback, so every destructive item
         // was greyed and a stale agent could not be removed by any route.
@@ -16972,65 +16982,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             now: now
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
-        let usage = sidebarUsageStates(now: now)
-        lastStampedSidebarUsageStates = usage
+        // Usage-resume: "Paused · usage" is the agent's OWN pause, not the
+        // account in use's live reading.
+        let paused = Set(agentSupervisor.usagePauses.keys.map(\.rawValue))
         if only != nil {
             return SidebarUsageLive.stamp(
-                unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved), states: usage)
+                unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved), pausedAgents: paused)
         }
         return SidebarUsageLive.stamp(withExternalSessions(
             unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved),
-            registry: registry, now: now), states: usage)
-    }
-
-    /// A usage reading arrived (a probe, or a live runner's quota). The rows are
-    /// re-pushed only when a CLI's live state actually moved — exhausted,
-    /// recovered, or Switch appearing — so a runner reporting the same window
-    /// every turn costs one comparison, not a sidebar rebuild.
-    func refreshSidebarUsageIfChanged() {
-        guard sidebarUsageStates() != lastStampedSidebarUsageStates else { return }
-        reloadWorkspaceSidebar(rebuildAgentActivity: false)
-    }
-
-    /// Dogfood fix: each CLI's LIVE usage, from the account readings Array
-    /// already holds. Exhausted only while a window of the account in use is
-    /// spent and has not reset; Switch only when another signed-in account of
-    /// that CLI (a different login) exists. Re-pushed when a reading changes
-    /// and again at the earliest reset.
-    func sidebarUsageStates(now: Date = Date()) -> [String: SidebarUsageLive.State] {
-        var states: [String: SidebarUsageLive.State] = [:]
-        var earliestReset: Date?
-        for harness in [AgentHarness.claudeCode, .codex] {
-            let active = agentSupervisor.activeAccount(for: harness)
-            let spent = agentSupervisor.accountQuota(accountId: active.id)?.windows.filter { window in
-                guard let used = window.utilization, used >= 1, let reset = window.resetsAt else { return false }
-                return reset > now
-            } ?? []
-            if let reset = spent.compactMap(\.resetsAt).min() {
-                earliestReset = min(earliestReset ?? reset, reset)
-            }
-            let canSwitch = !spent.isEmpty && agentSupervisor.hasVerifiedAccountSwitch(from: active)
-            states[SidebarRecovery.providerName(harness.rawValue)] =
-                SidebarUsageLive.State(exhausted: !spent.isEmpty, canSwitch: canSwitch)
-        }
-        scheduleSidebarUsageReset(at: earliestReset)
-        return states
-    }
-
-    private func scheduleSidebarUsageReset(at reset: Date?) {
-        guard sidebarUsageResetAt != reset else { return }
-        sidebarUsageResetAt = reset
-        sidebarUsageResetTimer?.invalidate()
-        sidebarUsageResetTimer = nil
-        guard let reset else { return }
-        sidebarUsageResetTimer = Timer.scheduledTimer(
-            withTimeInterval: max(1, reset.timeIntervalSinceNow + 1), repeats: false
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.sidebarUsageResetAt = nil
-                self?.reloadWorkspaceSidebar(rebuildAgentActivity: false)
-            }
-        }
+            registry: registry, now: now), pausedAgents: paused)
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
@@ -17242,25 +17203,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         case none
     }
     private(set) var lastSidebarIncidentOutcomeForQA: SidebarIncidentOutcome = .none
-    private var sidebarUsageResetAt: Date?
-    /// The live usage the rows were last stamped with.
-    private var lastStampedSidebarUsageStates: [String: SidebarUsageLive.State] = [:]
-    private var sidebarUsageResetTimer: Timer?
 
     @discardableResult
     func performSidebarIncident(_ incident: SidebarIncident) -> SidebarIncidentOutcome {
         let outcome: SidebarIncidentOutcome
         switch incident.kind {
-        case .cause(.usageLimit) where incident.actionTitle == SidebarFailureCause.usageResumeTitle:
-            // One account for this CLI: Resume opens the paused agent to continue it.
-            if let owner = incident.ownerIDs.first ?? incident.agentIDs.first, revealAgentFromInbox(owner) {
-                outcome = .revealedAgent(owner)
+        case .cause(.usageLimit):
+            // Open the paused agent. Switching accounts lives in its tile only.
+            if let agent = incident.agentIDs.first ?? incident.ownerIDs.first, revealAgentFromInbox(agent) {
+                outcome = .revealedAgent(agent)
             } else {
                 outcome = .none
             }
-        case .cause(.usageLimit):
-            openSettings(paneID: "agents")
-            outcome = .openedSettings("agents")
         case .needsYou, .cause:
             outcome = .none
         }

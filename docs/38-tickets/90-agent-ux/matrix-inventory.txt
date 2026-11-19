@@ -50,6 +50,8 @@ check --agent-tile-reference-check
 check --agent-tile-rename-check
 check --agent-tool-detail-store-check
 check --agent-transcript-projection-check
+check --agent-usage-limit-check
+check --agent-usage-resume-check
 check --ambient-tile-frame-space-check
 check --app-support-channel-check
 check --app-switch-cost-check
@@ -605,6 +607,7 @@ leg run_app_check .build/debug/Array --agent-tile-file-mention-check
 leg run_app_check .build/debug/Array --agent-tile-fit-check
 leg run_app_check .build/debug/Array --agent-tile-reference-check
 leg run_app_check .build/debug/Array --agent-tile-rename-check
+leg run_app_check .build/debug/Array --agent-usage-resume-check
 leg run_app_check .build/debug/Array --ambient-tile-frame-space-check
 leg run_app_check .build/debug/Array --app-support-channel-check
 leg run_app_check .build/debug/Array --app-switch-cost-check
@@ -1069,6 +1072,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-prompt-image-contrac
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-report-contract-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-tool-detail-store-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-transcript-projection-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --agent-usage-limit-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --board-model-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --claude-hook-bridge-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
@@ -1174,7 +1178,7 @@ count ContinuumRevivedAgentContentChecks 25
 count ContinuumRevivedAgentUIChecks 24
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 213
+count ContinuumRevivedCoreChecks 215
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

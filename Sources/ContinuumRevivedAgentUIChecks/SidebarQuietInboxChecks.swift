@@ -15,7 +15,7 @@ func runSidebarQuietInboxChecks() {
     let chip = chips[0]
     expect(chip.familyId == F.id(1) && chip.cause == .usageLimit && chip.text == "12 paused · usage",
            "Quiet: the family chip is '12 paused · usage' — got '\(chip.text)'")
-    expect(chip.incident.actionTitle == "Switch & resume…", "Quiet: usage's one action — got \(chip.incident.actionTitle)")
+    expect(chip.incident.actionTitle == "Open", "Quiet: usage's one action opens the agent — got \(chip.incident.actionTitle)")
     expect(chip.incident.agentIDs.count == 12 && chip.incident.familyIDs == [F.id(1)],
            "Quiet: the chip acts on the family's 12 paused agents only")
     expect(chip.incident.ownerIDs.count == 12,
@@ -26,6 +26,7 @@ func runSidebarQuietInboxChecks() {
     let incidents = SidebarIncidents.build(rows: release)
     let box = SidebarQuietInbox.needsYou(incidents)
     expect(!box.isEmpty && box.allSatisfy(\.isBlocking), "Quiet: the box holds blocking incidents")
+    expect(!box.contains { $0.kind == .cause(.usageLimit) }, "Quiet: a usage pause is never in the Needs-you box")
     let calm = InboxSort.sortForInbox(rows: [
         F.row(300, "Done lead", outcome: .succeeded),
         F.row(301, "Done helper", parent: 300, outcome: .succeeded),
@@ -73,6 +74,6 @@ func runSidebarQuietInboxChecks() {
            && SidebarLeadTally.tally(leadId: F.id(600), rows: leadOnly, shownIDs: []).count(.failed) == 0,
            "a lead's own cause keeps its words and says no helper count — got '\(leadOnlyChip?.text ?? "none")'")
 
-    print("Sidebar quiet inbox passed: one chip per family (12 paused · usage, 12 owners), the box is blocking-only "
+    print("Sidebar quiet inbox passed: one chip per family (12 paused · usage, Open, 12 owners), the box is blocking-only (no usage) "
           + "and absent when nothing blocks, cleared helpers excluded")
 }

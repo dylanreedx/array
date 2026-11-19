@@ -4438,8 +4438,8 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
             case .incident(let incident):
                 let cell = incidentCells[incident.id] ?? SidebarIncidentCellView()
                 cell.onAction = { [weak self] in self?.pressIncident(incident) }
-                // This release: only "Switch & resume…" acts (it opens Settings >
-                // Agents > Accounts); the other actions draw disabled.
+                // This release: only a usage pause's "Open" acts (it reveals the
+                // paused agent); the other actions draw disabled.
                 cell.apply(incident, actionEnabled: onIncidentAction != nil && incident.kind == .cause(.usageLimit))
                 incidentCells[incident.id] = cell
                 return cell
@@ -4459,7 +4459,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 cell.identifier = NSUserInterfaceItemIdentifier("sidebar-family-cause-\(incident.id)")
                 cell.setNesting(nesting(atTableRow: row))
                 if ownsSubagents { cell.setOwnership(ownership(atTableRow: row)) }
-                // This release only "Switch & resume…" acts, as in the Needs you box.
+                // This release only a usage pause's "Open" acts.
                 cell.applyCause(incident, actionEnabled: onIncidentAction != nil && incident.kind == .cause(.usageLimit)) {
                     [weak self] in self?.pressIncident(incident)
                 }

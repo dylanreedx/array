@@ -1209,11 +1209,11 @@ final class AgentSupervisor {
     /// row of em dashes. See `AgentAccountQuotaStore` for why checking the reset
     /// is the right answer rather than discarding the reading.
     private var accountQuotas: [String: AgentAccountQuotaSnapshot] = [:]
-    private lazy var accountQuotaStore: AgentAccountQuotaStore? = {
-        guard let directory = AgentStore.resolveApplicationSupportDirectory(smokeTest: false)
-        else { return nil }
-        return AgentAccountQuotaStore(applicationSupportDirectory: directory)
-    }()
+    /// Beside the agent store, like `accountStore` and the run ledger. It used
+    /// to resolve only from `CONTINUUM_APP_SUPPORT`, which a real launch never
+    /// sets, so no reading ever reached disk and every relaunch started blank.
+    private lazy var accountQuotaStore: AgentAccountQuotaStore? =
+        AgentAccountQuotaStore(applicationSupportDirectory: store.layout.applicationSupportDirectory)
     /// Live views of an agent's identity. Names are record state rather than
     /// runtime events, so the transcript stream cannot carry first-prompt,
     /// manual, or generated renames to an already-attached tile.
@@ -2162,6 +2162,7 @@ final class AgentSupervisor {
     /// The latest turn's failure words: the live turn's when it has some,
     /// otherwise a correlated error from that turn, loaded lazily. nil until known.
     func sidebarFailureDetail(for id: AgentID) -> String? {
+        if let pause = usagePauses[id] { return pause.stop.message ?? AgentUsageLimitStop.claudeStructuredLine }
         if let live = turnFacts[id]?.failureMessage { return live }
         guard let record = records[id], let event = record.latestTerminalEvent else { return nil }
         switch event.outcome {
@@ -2770,10 +2771,11 @@ final class AgentSupervisor {
         if case let .accountQuota(snapshot) = observation {
             // The login this agent's live runner signed in as owns the reading.
             let accountId = account(forAgent: id)?.id ?? AgentAccount.defaultAccountId(for: snapshot.harness)
-            accountQuotas[accountId] = snapshot
+            restoreAccountQuotasIfNeeded()
+            accountQuotas[accountId] = snapshot.replacing(accountQuotas[accountId])
             accountQuotaStore?.save(accountQuotas)
             notifyQuotaObservers(observation, accountId: accountId, source: id)
-            onAccountQuotaObserved?(accountId)
+            usageReadingArrived(accountId: accountId, quota: accountQuotas[accountId] ?? snapshot)
             return
         }
         // S3: a provider retry is turn presence ("Retrying (2/5)"), then the
@@ -2848,10 +2850,6 @@ final class AgentSupervisor {
     private var accountUsageLastStarted: [String: Date] = [:]
     private var accountUsagePollTimer: Timer?
     static let accountUsageDidChangeNotification = Notification.Name("AgentSupervisor.accountUsageDidChange")
-    /// A live runner reported its account's quota (`.accountQuota`). Tiles hear
-    /// it through their observers; the sidebar's usage items hear it here, so an
-    /// exhausted or replenished window reaches Needs you without a probe.
-    var onAccountQuotaObserved: ((String) -> Void)?
 
     /// Saved logins and the account each CLI uses, beside the agent store (so
     /// channel-split, and a check's temp store gets its own).
@@ -3231,6 +3229,7 @@ final class AgentSupervisor {
         if let quota = reading.quota {
             accountQuotas[accountId] = quota
             accountQuotaStore?.save(accountQuotas)
+            usageReadingArrived(accountId: accountId, quota: quota)
         } else if let previous,
                   previous.organizationId != identity.organizationId || previous.email != identity.email {
             accountQuotas[accountId] = nil
@@ -5555,6 +5554,7 @@ final class AgentSupervisor {
             warn("AgentSupervisor.stop: no agent \(id.rawValue.uuidString)")
             return
         }
+        if usagePauses.removeValue(forKey: id) != nil { usagePausesChanged(id) }
         recoverForcedMessagesAfterStop(id)
         withdrawQueuedHelperAlert(id)
         killRunner(id)
@@ -9478,6 +9478,202 @@ final class AgentSupervisor {
         }
     }
 
+    // MARK: - Usage pauses (usage-resume, steps 2-5)
+
+    /// Agents whose last turn ended because their account ran out of usage.
+    /// In memory: a relaunch shows the turn as it ended.
+    private(set) var usagePauses: [AgentID: AgentUsagePause] = [:]
+    /// Checks drive the clock; production reads the wall clock.
+    var usagePauseNow: () -> Date = { Date() }
+    /// Resumes are spaced so a family does not stampede the new window.
+    var usageResumeStagger: TimeInterval = 20
+    /// With no stated reset, the CLIs are asked again this often.
+    var usageProbeInterval: TimeInterval = 600
+    /// The app-wide "Resume automatically" default a new pause starts with;
+    /// the tile's toggle (`setUsageAutoResume`) overrides it per agent.
+    var usageAutoResumeDefault = true
+    /// Told after any pause opens, clears or resumes (sidebar, tiles).
+    var onUsagePausesChanged: (() -> Void)?
+    private var usageResumeTask: Task<Void, Never>?
+    private var usageResumeNotBefore: Date?
+    /// Paused agents whose window is known open again (a later success on the
+    /// same account, or a reading under 100%): due now, still staggered.
+    private var usageFreed: Set<AgentID> = []
+    /// Checks only: every resume Array started, in order.
+    private(set) var usageResumeLogForQA: [AgentID] = []
+
+    static let usageContinuationPrompt = "Continue the task that the account usage limit paused. Resume from the current session state; do not repeat completed work."
+
+    func usagePause(for id: AgentID) -> AgentUsagePause? { usagePauses[id] }
+
+    /// QA seam: open a usage pause as a stop would (sidebar checks with no
+    /// live runner), or end one (`nil`).
+    func qaSetUsagePause(_ pause: AgentUsagePause?, for id: AgentID) {
+        usagePauses[id] = pause
+        usagePausesChanged(id)
+    }
+
+    /// The tile's "Resume automatically" toggle.
+    func setUsageAutoResume(_ on: Bool, for id: AgentID) {
+        guard usagePauses[id] != nil, usagePauses[id]?.resumesAutomatically != on else { return }
+        usagePauses[id]?.resumesAutomatically = on
+        usagePausesChanged(id)
+        scheduleUsageResume()
+    }
+
+    private func usagePausesChanged(_ id: AgentID) {
+        notifyTurnCapabilitiesChanged(id)
+        onUsagePausesChanged?()
+    }
+
+    private func openUsagePause(for id: AgentID, error: String?, now: Date) -> Bool {
+        guard let record = records[id], let harness = record.harness, harness != .pi,
+              record.capabilities.locallyManaged, !stopRequestedAgents.contains(id),
+              var stop = AgentUsageLimitStop.classify(errorMessage: error, now: now) else { return false }
+        stop.message = error
+        // The agent's OWN login: the runner that just stopped, never whichever
+        // account is active now.
+        let accountId = runnerAccounts[id]?.id ?? account(forAgent: id)?.id
+        if stop.resetsAt == nil, let accountId {
+            // The CLI's stated reset wins; else its rejected reading's.
+            stop.resetsAt = accountQuotas[accountId]?.windows
+                .filter { ($0.utilization ?? 0) >= AgentUsagePause.exhaustedFraction && !$0.isExpired(at: now) }
+                .compactMap(\.resetsAt).max()
+        }
+        // A reset already past (a just-passed minute, or a window that did not
+        // free as stated) says nothing about when room returns: probe instead,
+        // so a stop right after a resume never loops.
+        if let reset = stop.resetsAt, reset <= now.addingTimeInterval(30) { stop.resetsAt = nil }
+        let previous = usagePauses[id]
+        usagePauses[id] = AgentUsagePause(harness: harness, accountId: accountId, stop: stop, stoppedAt: now,
+                                          resumesAutomatically: previous?.resumesAutomatically ?? usageAutoResumeDefault)
+        usageFreed.remove(id)
+        appendAgentDiagnostics("harness=\(harness.rawValue) usage-paused account=\(accountId ?? "none") resets=\(stop.resetsAt.map { "\($0.timeIntervalSince1970)" } ?? "unknown")", agentID: id)
+        // After this delivery, never inside it.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.usagePauses[id] != nil else { return }
+            self.usagePausesChanged(id)
+            self.scheduleUsageResume()
+        }
+        return true
+    }
+
+    /// A turn on this agent's account succeeded: that window is open, so every
+    /// other agent paused on the same account is due now.
+    private func usageWindowProvedOpen(by id: AgentID, now: Date) {
+        guard !usagePauses.isEmpty, let accountId = runnerAccounts[id]?.id ?? account(forAgent: id)?.id else { return }
+        let freed = usagePauses.filter { $0.key != id && $0.value.accountId == accountId && $0.value.stoppedAt < now }.map(\.key)
+        guard !freed.isEmpty else { return }
+        usageFreed.formUnion(freed)
+        appendAgentDiagnostics("usage window open: a turn succeeded on account=\(accountId); \(freed.count) paused agent(s) due", agentID: id)
+        DispatchQueue.main.async { [weak self] in self?.runUsageResumeTick() }
+    }
+
+    /// A usage reading (the CLI's probe, or a live runner's) for one account.
+    /// Under 100% and taken after the stop frees that account's pauses.
+    private func usageReadingArrived(accountId: String, quota: AgentAccountQuotaSnapshot) {
+        let now = usagePauseNow()
+        let freed = usagePauses.filter { $0.value.accountId == accountId && $0.value.readingFreesUsage(quota, now: now) }.map(\.key)
+        guard !freed.isEmpty else { return }
+        usageFreed.formUnion(freed)
+        DispatchQueue.main.async { [weak self] in self?.runUsageResumeTick() }
+    }
+
+    private func usagePauseDue(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> Bool {
+        guard pause.resumesAutomatically else { return false }
+        if usageFreed.contains(id) { return true }
+        return pause.resetsAt.map { $0 <= now } ?? false
+    }
+
+    /// One pass: drops pauses of agents that are gone, resumes at most ONE due
+    /// agent (oldest stop first) when the stagger allows, probes accounts with
+    /// no stated reset, then sleeps until the next thing is due.
+    func runUsageResumeTick() {
+        let now = usagePauseNow()
+        for id in usagePauses.keys where records[id] == nil {
+            usagePauses[id] = nil
+            usageFreed.remove(id)
+        }
+        let due = usagePauses.filter { usagePauseDue($0.key, $0.value, now: now) }
+            .sorted { ($0.value.stoppedAt, $0.key.rawValue.uuidString) < ($1.value.stoppedAt, $1.key.rawValue.uuidString) }
+        if let first = due.first(where: { !isRunning($0.key) && runners[$0.key] == nil }),
+           usageResumeNotBefore.map({ $0 <= now }) ?? true {
+            if resumeUsagePaused(first.key) { usageResumeNotBefore = now.addingTimeInterval(usageResumeStagger) }
+        }
+        // No stated reset: ask the CLI (its own usage probe, no model turn).
+        for pause in usagePauses.values where pause.resetsAt == nil && pause.resumesAutomatically {
+            if let accountId = pause.accountId, let account = accounts.first(where: { $0.id == accountId }) {
+                refreshAccountUsage(account: account, minimumInterval: usageProbeInterval, now: now)
+            }
+        }
+        scheduleUsageResume()
+    }
+
+    /// Resumes one paused agent on its OWN session through its OWN harness: a
+    /// continuation turn, then its held queue. Never a fresh session, never
+    /// another CLI. False leaves it paused.
+    private func resumeUsagePaused(_ id: AgentID) -> Bool {
+        guard let pause = usagePauses[id], let record = records[id], record.harness == pause.harness else { return false }
+        // An existing session is required. Claude's id is derived from the
+        // agent and its stop proves the session ran; Codex stores its thread.
+        let hasSession: Bool
+        switch pause.harness {
+        case .claudeCode: hasSession = record.latestTurnAt != nil || record.providerSessionId != nil
+        case .codex: hasSession = record.codexThreadId?.isEmpty == false
+        case .pi: hasSession = false
+        }
+        guard hasSession, !isSharedAgent(id) else {
+            usagePauses[id]?.resumesAutomatically = false
+            appendAgentDiagnostics("usage resume refused: \(hasSession ? "shared agent" : "no existing session"); waits for a person", agentID: id)
+            usagePausesChanged(id)
+            return false
+        }
+        usagePauses[id] = nil
+        usageFreed.remove(id)
+        let accepted = send(Self.usageContinuationPrompt, to: id)
+        guard accepted else {
+            // Refused (busy, not ready): it waits for a person rather than
+            // retrying every tick.
+            var waiting = pause
+            waiting.resumesAutomatically = false
+            usagePauses[id] = waiting
+            appendAgentDiagnostics("usage resume refused: \(sendRefusal(for: id) ?? "send not accepted"); waits for a person", agentID: id)
+            usagePausesChanged(id)
+            return false
+        }
+        usageResumeLogForQA.append(id)
+        resumeQueue(for: id)
+        appendAgentDiagnostics("usage resumed on the same session", agentID: id)
+        for lead in helperParents(id) where records[lead] != nil {
+            upsertHelperNote(.progress, helper: id, lead: lead,
+                text: "resumed after the \(pause.providerName) usage reset, on the same session")
+        }
+        usagePausesChanged(id)
+        return true
+    }
+
+    /// Sleeps until the earliest of: a due pause (respecting the stagger), a
+    /// stated reset, or the next probe for a pause with no reset.
+    private func scheduleUsageResume() {
+        usageResumeTask?.cancel()
+        usageResumeTask = nil
+        let now = usagePauseNow()
+        let live = usagePauses.filter { records[$0.key] != nil && $0.value.resumesAutomatically }
+        guard !live.isEmpty else { return }
+        var wake = live.compactMap { usageFreed.contains($0.key) ? now : $0.value.resetsAt }.min()
+        if live.values.contains(where: { $0.resetsAt == nil }) {
+            wake = min(wake ?? .distantFuture, now.addingTimeInterval(usageProbeInterval))
+        }
+        guard var at = wake else { return }
+        if let notBefore = usageResumeNotBefore { at = max(at, notBefore) }
+        let delay = max(0.05, at.timeIntervalSince(Date()) + 1)
+        usageResumeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(min(delay, 86_400 * 8) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.runUsageResumeTick()
+        }
+    }
+
     private struct HelperMessageSubscription {
         var parent: AgentID
         var handle: String
@@ -9693,7 +9889,8 @@ final class AgentSupervisor {
                                   statusOverride: String? = nil) {
         noteHelperCompletion(id, turn: turn, outcome: outcome, error: error, statusOverride: statusOverride)
         settleHelperMessages(id, outcome: outcome, error: error)
-        writeTerminalSpawnResult(for: id, outcome: outcome, errorMessage: error)
+        writeTerminalSpawnResult(for: id, outcome: outcome,
+                                 errorMessage: usagePauses[id].map { $0.leadStatus(now: usagePauseNow()) } ?? error)
     }
 
     private func helperTurnCompleted(_ completion: HelperTurnCompletion) {
@@ -9994,6 +10191,12 @@ final class AgentSupervisor {
             }
         case .failed: status = (helperProviderRetryCounts[id] ?? 0) > 0 ? "failed after \(helperProviderRetryCounts[id]!) retries" : "failed"
         case .interrupted, .cancelled: status = "stopped"
+        }
+        // A usage pause is not a failure and not a stop: the lead is told it
+        // waits and when Array resumes it, so it does not redo the work.
+        if let pause = usagePauses[id] {
+            let reply = String((finalAssistantText(for: id) ?? Self.helperNoReplyText).prefix(2400))
+            return ("\(String(child.humanDisplayName.prefix(80))) finished: \(pause.leadStatus(now: usagePauseNow()))\n\(reply)", filedThisTurn)
         }
         let report: String
         if let filed = settlementReport(id), filed.filedAt > baseline {
@@ -14659,6 +14862,18 @@ final class AgentSupervisor {
         _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
     ) {
         var event = incomingEvent
+        // The account ran out: a pause, not a failure. Decided before the
+        // transient retry, the failure signal, the helper result and the queue
+        // see the turn, so none of them treats it as Failed; delivered as an
+        // interrupted turn that keeps the CLI's own line.
+        if case let .turnCompleted(threadId, turnId, .failed, error) = event,
+           openUsagePause(for: id, error: error, now: now) {
+            event = .turnCompleted(threadId: threadId, turnId: turnId, outcome: .interrupted, errorMessage: error)
+        }
+        if case .turnStarted = event, usagePauses.removeValue(forKey: id) != nil {
+            usagePausesChanged(id)
+        }
+        if case .turnCompleted(_, _, .completed, _) = event { usageWindowProvedOpen(by: id, now: now) }
         if case .turnCompleted(_, _, .failed, let error) = event,
            reserveHelperProviderRetry(id, error: error) { return }
         if Self.isRealActivity(event) { helperFoldEligibleSince[id] = nil }
