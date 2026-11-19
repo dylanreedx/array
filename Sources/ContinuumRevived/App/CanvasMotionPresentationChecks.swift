@@ -377,10 +377,16 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         // gesture starts, as they are in use; their ticks join the fixed budget.
         let lead = number("CANVAS_MOTION_STREAM_LEAD_SECONDS", 0, 0...30)
         let sourceTickLimit = streams ? Int((duration + lead) * 1_000 / Double(deltaMs)) : 0
+        // CANVAS_MOTION_OFFSCREEN=1: the window is parked off every display and the
+        // app never activates, so a run cannot take the screen. Main-thread work is
+        // the same; nothing is composited, so capture must be off.
+        let offscreen = env["CANVAS_MOTION_OFFSCREEN"] == "1"
+        if offscreen, captureEnabled { throw Failure(description: "CANVAS_MOTION_OFFSCREEN=1 needs CANVAS_MOTION_CAPTURE=0") }
         let fixture = try CanvasMotionWorkload(root: URL(fileURLWithPath: rootPath),
-            support: URL(fileURLWithPath: supportPath), markdownCount: markdownCount, agentCount: agentCount)
+            support: URL(fileURLWithPath: supportPath), markdownCount: markdownCount, agentCount: agentCount,
+            offscreen: offscreen)
         workload = fixture
-        if let screen = NSScreen.screens.first(where: {
+        if !offscreen, let screen = NSScreen.screens.first(where: {
             guard let id = $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
             return CGDisplayIsBuiltin(id.uint32Value) != 0
         }) ?? NSScreen.main {
@@ -392,8 +398,10 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             fixture.window.setFrame(NSRect(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2,
                                           width: size.width, height: size.height), display: true)
         }
-        fixture.window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if !offscreen {
+            fixture.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         let worldCenter = CanvasEngine.screenToWorld(CGPoint(x: fixture.canvas.bounds.midX,
             y: fixture.canvas.bounds.midY), viewport: fixture.canvas.viewport)
         let worldRect = CGRect(x: worldCenter.x - 80, y: worldCenter.y - 60, width: 160, height: 120)
@@ -512,7 +520,7 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         @MainActor func checkVisibility(_ snapshot: [String: Any], _ label: String) {
             let shown = snapshot["windowVisible"] as? Bool == true
             let unoccluded = snapshot["windowOcclusionVisible"] as? Bool == true
-            if !shown || !unoccluded {
+            if !offscreen, !shown || !unoccluded {
                 visibilityErrors.append("\(label): benchmark window was hidden or fully occluded")
             }
         }
@@ -527,8 +535,38 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
         try save(["pid": ProcessInfo.processInfo.processIdentifier, "stage": "motion",
             "output": output.path, "warmupSeconds": warmup],
             to: URL(fileURLWithPath: output.path + ".ready.json"))
+        // CANVAS_MOTION_STEP_HOOKS=1: count and time layer repaints and view layouts
+        // by class across the phase (`CanvasZoomStepCostChecks`' hooks). Diagnosis
+        // only: the hooks cost time, so a hooked run's frame numbers are not a result.
+        let stepHooks = env["CANVAS_MOTION_STEP_HOOKS"] == "1"
+        if stepHooks { CanvasZoomStepCostChecks.installHooks() }
+        // CANVAS_MOTION_ASYNC_DRAW=1 (experiment): every layer in the window
+        // rasterizes its drawing off the main thread (`drawsAsynchronously`).
+        if env["CANVAS_MOTION_ASYNC_DRAW"] == "1", let root = fixture.window.contentView?.superview?.layer {
+            var marked = 0
+            func mark(_ layer: CALayer) {
+                layer.drawsAsynchronously = true; marked += 1
+                layer.sublayers?.forEach(mark)
+            }
+            mark(root)
+            print("[canvas-motion] async draw on \(marked) layers")
+        }
+        // CANVAS_MOTION_RGBA8=1 (experiment): every layer's backing store is 8-bit
+        // RGBA instead of AppKit's default for the display.
+        if env["CANVAS_MOTION_RGBA8"] == "1", let root = fixture.window.contentView?.superview?.layer {
+            var formats: [String: Int] = [:]
+            func mark(_ layer: CALayer) {
+                formats[layer.contentsFormat.rawValue, default: 0] += 1
+                layer.contentsFormat = .RGBA8Uint
+                layer.sublayers?.forEach(mark)
+            }
+            mark(root)
+            print("[canvas-motion] RGBA8 on layers, formats before: \(formats)")
+        }
         for phase in [selectedPhase] {
             state.phase = phase
+            if stepHooks { CanvasZoomStepCostChecks.reset(); CanvasZoomStepCostChecks.counting = true }
+            SymbolRasterCache.qaResetCounters()
             receiver?.setKeeping(true)
             if fidelityWindowSize == nil { fidelityWindowSize = fixture.window.frame.size }
             let before = fixture.snapshot()
@@ -574,6 +612,17 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
                 }
             }
             let drained = MotionClock.now
+            CanvasZoomStepCostChecks.counting = false
+            let symbolDraws: [String: Any] = ["draws": SymbolRasterCache.qaDraws,
+                "ms": Double(SymbolRasterCache.qaDrawNanos) / 1e6, "hits": SymbolRasterCache.qaHits,
+                "misses": SymbolRasterCache.qaMisses, "enabled": SymbolRasterCache.isEnabled]
+            let stepCost: [String: Any] = !stepHooks ? [:] : [
+                "displays": CanvasZoomStepCostChecks.displays,
+                "displayMs": CanvasZoomStepCostChecks.displayNanos.mapValues { Double($0) / 1e6 },
+                "layouts": CanvasZoomStepCostChecks.layouts,
+                "scrollTiles": CanvasZoomStepCostChecks.tiles,
+                "clipOriginWrites": CanvasZoomStepCostChecks.clipOriginWrites,
+                "clipSizeWrites": CanvasZoomStepCostChecks.clipSizeWrites]
             let afterInput = fixture.snapshot()
             checkVisibility(afterInput, phase + "-afterInput")
             receiver?.setKeeping(false)
@@ -584,7 +633,8 @@ func runCanvasMotionPresentationCheck() async -> Int32 {
             state.phases.append(["name": phase, "startSeconds": begin, "endSeconds": begin + duration,
                 "mainQueueDrainedSeconds": drained, "settleEndSeconds": MotionClock.now,
                 "sourceTickLimit": sourceTickLimit, "sourceScheduledStartSeconds": begin,
-                "lastCameraSerial": state.serial, "before": before,
+                "lastCameraSerial": state.serial, "before": before, "stepCost": stepCost,
+                "symbolDraws": symbolDraws,
                 "afterInput": afterInput, "afterSettle": afterSettle])
         }
         // The provider stops itself at its finite budget, including the final

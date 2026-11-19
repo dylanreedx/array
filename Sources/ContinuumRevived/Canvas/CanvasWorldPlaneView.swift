@@ -184,6 +184,16 @@ final class CanvasWorldPlaneView: NSView {
         visibilityIndexIsDirty = true
     }
 
+    /// A tile entered, left or moved within the plane. The canvas re-asks that
+    /// tile's renderer visibility: a move, a zone install or a workspace return
+    /// changes what is near the viewport without any camera step.
+    var onTileWorldChanged: ((TileNSView) -> Void)?
+
+    func tileWorldChanged(_ tile: TileNSView) {
+        invalidateVisibilityIndex()
+        onTileWorldChanged?(tile)
+    }
+
     private(set) var fileTileViewCount = 0
     var onFileTileCountChanged: (() -> Void)?
 
@@ -194,6 +204,7 @@ final class CanvasWorldPlaneView: NSView {
             onFileTileCountChanged?()
         }
         invalidateVisibilityIndex()
+        if let tile = subview as? TileNSView { onTileWorldChanged?(tile) }
     }
 
     override func willRemoveSubview(_ subview: NSView) {
@@ -204,6 +215,7 @@ final class CanvasWorldPlaneView: NSView {
             onFileTileCountChanged?()
         }
         invalidateVisibilityIndex()
+        if let tile = subview as? TileNSView { onTileWorldChanged?(tile) }
     }
 
     override func sortSubviews(

@@ -843,6 +843,9 @@ enum ContinuumApp {
         // never a matrix leg.
         if CommandLine.arguments.contains("--canvas-motion-probe") {
             _ = NSApplication.shared
+            if ProcessInfo.processInfo.environment["CANVAS_MOTION_OFFSCREEN"] == "1" {
+                NSApp.setActivationPolicy(.prohibited)
+            }
             Task { @MainActor in
                 Foundation.exit(await runCanvasMotionPresentationCheck())
             }
@@ -4826,6 +4829,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--symbol-raster-cache-check") {
+            do {
+                _ = NSApplication.shared
+                try SymbolRasterCacheChecks.run()
+                print("SymbolRasterCacheChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--transcript-canvas-check") {
             do {
                 _ = NSApplication.shared
@@ -7674,7 +7689,8 @@ enum ContinuumApp {
             do {
                 let summary = try TerminalViewportVisibilityChecks.run()
                 let faces = try TerminalViewportVisibilityChecks.runFacesAndMirror()
-                print("ContinuumRevivedTerminalViewportVisibilityChecks passed: \(summary); \(faces)")
+                let returns = try TerminalRendererReturnChecks.run()
+                print("ContinuumRevivedTerminalViewportVisibilityChecks passed: \(summary); \(faces); \(returns)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -8767,11 +8783,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// since, and the uptime of that build. Every writer of the inbox goes through
     /// `sidebarInboxRows`, so this is what the sidebar holds.
     private var lastInboxRows: (rows: [AgentInboxRow], builtAt: TimeInterval)?
-    /// How long chatter may patch rows before a full build runs anyway. Bounds how
-    /// late a time-driven field (auto-settle, closing grace) can be while agents
-    /// stream; those move on a scale of minutes, and chatter used to refresh them
-    /// every 0.5 s only incidentally.
-    static let chatterPatchMaxAge: TimeInterval = 5
+    /// What the last external-session push read (`pushExternalSessionRowsIfTheyMoved`).
+    private var lastExternalRowInputs: ExternalRowInputs?
+    /// How long patches may stand in for a full build. A time-driven field
+    /// (auto-settle, a snooze ending) ends patching at its own deadline
+    /// (`inboxRowsTimeDerivedDeadline`), so this is only a safety net. At 5 s it
+    /// rebuilt every row every 5 s while anything streamed, a 100+ ms main-thread
+    /// stall each time with Dylan's 1,700 agents.
+    static var chatterPatchMaxAge: TimeInterval {
+        ProcessInfo.processInfo.environment["CONTINUUM_QA_SIDEBAR_LEGACY_PATCH_AGE"] == "1" ? 5 : 30
+    }
     /// `inboxTimeDerivedDeadline` for the last full row build, and the auto-settle
     /// setting that build read: a changed setting moves rows no deadline predicted.
     private var inboxRowsTimeDerivedDeadline: Date?
@@ -12020,26 +12041,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// (`AgentInboxRowBuilder.refreshingChatter`), or nil when a full build is
     /// owed: no cache, a cache older than `chatterPatchMaxAge`, or a row whose
     /// chatter could have moved more than those fields.
-    private func chatterPatchedInboxRows(for agents: Set<UUID>) -> [AgentInboxRow]? {
-        guard let cache = lastInboxRows,
-              ProcessInfo.processInfo.systemUptime - cache.builtAt < Self.chatterPatchMaxAge else { return nil }
+    /// Returns the rows and every agent whose row it rebuilt or refreshed: a state
+    /// change rebuilds a whole family, so the view's reuse hint must name them all.
+    private func chatterPatchedInboxRows(for agents: Set<UUID>) -> (rows: [AgentInboxRow], patched: Set<UUID>)? {
         let now = AgentElapsedClock.now()
+        guard let cache = lastInboxRows,
+              ProcessInfo.processInfo.systemUptime - cache.builtAt < Self.chatterPatchMaxAge,
+              inboxRowsTimeDerivedDeadline.map({ now < $0 }) ?? true else { return nil }
         var rows = cache.rows
-        for agent in agents {
+        var patched = agents
+        var rebuiltFamilies: Set<UUID> = []
+        for agent in agents where !rebuiltFamilies.contains(agent) {
             let id = AgentID(rawValue: agent)
             guard let index = rows.firstIndex(where: { $0.id == agent }) else { return nil }
             if statePatchAgents.contains(agent) {
-                let id = AgentID(rawValue: agent)
                 // Family moves other rows (children follow a parent's lifecycle, a
-                // child holds its parent open), so only a lone agent is patched.
-                guard rows[index].parentId == nil, rows[index].externalSession == nil,
-                      rows[index].sharedAgent == nil,
-                      agentSupervisor.records[id]?.parentAgentID == nil,
-                      !rows.contains(where: { $0.parentId == agent })
-                else { return nil }
-                let built = buildAgentInboxRows(now: now, only: [agent])
-                guard built.count == 1, built[0].id == agent else { return nil }
-                rows[index] = built[0]
+                // child holds its parent open), so the agent's whole family, root
+                // and every descendant, is rebuilt together. Only a lone agent used
+                // to be patched; in Dylan's app 90% of 1,700 agents are helpers, so
+                // nearly every turn start or end rebuilt every row (~25% of main).
+                guard Self.qaLegacySidebarFamilyPush == false || (rows[index].parentId == nil
+                        && agentSupervisor.records[id]?.parentAgentID == nil
+                        && !rows.contains(where: { $0.parentId == agent })),
+                      let family = inboxFamily(of: id) else { return nil }
+                let positions = rows.indices.filter { family.contains(rows[$0].id) }
+                guard positions.allSatisfy({ rows[$0].externalSession == nil && rows[$0].sharedAgent == nil }) else { return nil }
+                let built = markedForExternalSessions(buildAgentInboxRows(now: now, only: family))
+                guard built.count == positions.count else { return nil }
+                let byId = Dictionary(built.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                for position in positions {
+                    guard let row = byId[rows[position].id] else { return nil }
+                    rows[position] = row
+                }
+                rebuiltFamilies.formUnion(family)
+                patched.formUnion(family)
                 continue
             }
             guard let record = agentSupervisor.records[id],
@@ -12052,7 +12087,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             rows[index] = patched
         }
         lastInboxRows = (rows, cache.builtAt)
-        return rows
+        return (rows, patched)
+    }
+
+    /// QA seam: `CONTINUUM_QA_SIDEBAR_LEGACY_FAMILY_PUSH=1` patches lone agents
+    /// only, as before family patches, so one binary shows the before and after.
+    static let qaLegacySidebarFamilyPush = ProcessInfo.processInfo.environment["CONTINUUM_QA_SIDEBAR_LEGACY_FAMILY_PUSH"] == "1"
+
+    /// The agent's family: its root ancestor and every descendant of that root.
+    /// nil on a parent cycle, which only a full build resolves.
+    private func inboxFamily(of agent: AgentID) -> Set<UUID>? {
+        let records = agentSupervisor.records
+        var root = agent
+        var seen: Set<AgentID> = [agent]
+        while let parent = records[root]?.parentAgentID, records[parent] != nil {
+            guard seen.insert(parent).inserted else { return nil }
+            root = parent
+        }
+        var childrenOf: [AgentID: [AgentID]] = [:]
+        for (id, record) in records {
+            if let parent = record.parentAgentID { childrenOf[parent, default: []].append(id) }
+        }
+        var family: Set<UUID> = [root.rawValue]
+        var queue = [root]
+        while let next = queue.popLast() {
+            for child in childrenOf[next] ?? [] where family.insert(child.rawValue).inserted { queue.append(child) }
+        }
+        return family
     }
 
     /// P2B.7: an agent's own event folds straight into the snapshot the desktop is
@@ -16624,7 +16685,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         externalSessionMonitor.onChange = { [weak self] in
             self?.reconcileExternalSessions()
-            self?.pushExternalSessionRows()
+            self?.pushExternalSessionRowsIfTheyMoved()
             self?.refreshShellTileSessions()
             self?.refreshGettingStartedTasks()
         }
@@ -17112,8 +17173,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // and is populated only after readiness". `applyInbox([])` here would be the
         // "no agents" lie with a rendered empty state behind it.
         if agentActivity.isReconciled {
-            if let chatterOnly, let rows = chatterPatchedInboxRows(for: chatterOnly) {
-                sidebar.applyInbox(rows: rows, changed: agentActivity.lastChange, chatterPatchedAgentIDs: chatterOnly)
+            if let chatterOnly, let patch = chatterPatchedInboxRows(for: chatterOnly) {
+                sidebar.applyInbox(rows: patch.rows, changed: agentActivity.lastChange, chatterPatchedAgentIDs: patch.patched)
             } else {
                 sidebar.applyInbox(rows: sidebarInboxRows(inputs: inputs), changed: agentActivity.lastChange)
             }
@@ -18260,13 +18321,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The agent rows plus a row per session from another app, and the
     /// `Terminal` marker on agents whose tile shows the real CLI. A session an
     /// agent's record names is that agent's row, never a second one.
-    private func withExternalSessions(
-        _ rows: [AgentInboxRow], registry: Registry, now: Date
-    ) -> [AgentInboxRow] {
+    /// The managed rows as the sidebar shows them beside other apps' sessions: a
+    /// row whose agent stands in for a session still listed is that row, a paused
+    /// agent waits on you, a Terminal-face agent says so.
+    private func markedForExternalSessions(_ rows: [AgentInboxRow]) -> [AgentInboxRow] {
         let snapshot = externalSessionMonitor.snapshot
         let faceTiles = terminalFaceTiles()
         let listedKeys = Set(snapshot.sessions.filter { !$0.host.isArrayAgent }.map(\.id))
-        let marked = rows.compactMap { row -> AgentInboxRow? in
+        return rows.compactMap { row -> AgentInboxRow? in
             let agentId = AgentID(rawValue: row.id)
             guard let record = agentSupervisor.records[agentId] else { return row }
             // A watch or Move here tile stands in for a session that is still the
@@ -18282,6 +18344,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             return row
         }
+    }
+
+    private func withExternalSessions(
+        _ rows: [AgentInboxRow], registry: Registry, now: Date
+    ) -> [AgentInboxRow] {
+        let snapshot = externalSessionMonitor.snapshot
+        let marked = markedForExternalSessions(rows)
         guard !snapshot.sessions.isEmpty else { return marked }
         let owned = Set(sessionOwners().keys)
         var shellTitles: [UUID: String] = [:]
@@ -18464,8 +18533,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// The monitor's push: the inbox rows alone, not the sidebar tree.
     func pushExternalSessionRows() {
         guard let sidebar = workspaceSidebarView, agentActivity.isReconciled else { return }
+        lastExternalRowInputs = externalRowInputs()
         sidebar.applyInbox(rows: sidebarInboxRows(), changed: .empty)
     }
+
+    /// Everything `withExternalSessions` reads except the clock (age labels have
+    /// their own deadline). Array's own agents' sessions are in the snapshot and
+    /// move on every pass while they work, but they never make a row of their own.
+    struct ExternalRowInputs: Equatable {
+        var listed: [ExternalAgentSession]
+        var claudeUnreadable: Bool
+        var pauses: [AgentID: ExternalSessionPause]
+        var links: [AgentID: AgentExternalSessionLink]
+        var owned: Set<String>
+        var faceTiles: Set<UUID>
+        var shellTitles: [UUID: String]
+        var workspaceId: UUID?
+    }
+
+    private func externalRowInputs() -> ExternalRowInputs {
+        let snapshot = externalSessionMonitor.snapshot
+        var links: [AgentID: AgentExternalSessionLink] = [:]
+        for (id, record) in agentSupervisor.records {
+            if let link = record.externalSession { links[id] = link }
+        }
+        var shellTitles: [UUID: String] = [:]
+        for tile in canvasView?.allWorkspaceTiles() ?? [] where tile.kind == .terminal {
+            shellTitles[tile.id] = tile.title
+        }
+        return ExternalRowInputs(listed: snapshot.sessions.filter { !$0.host.isArrayAgent },
+                                 claudeUnreadable: snapshot.claudeUnreadable,
+                                 pauses: externalSessionPauses, links: links,
+                                 owned: Set(sessionOwners().keys), faceTiles: terminalFaceTiles(),
+                                 shellTitles: shellTitles, workspaceId: workspaceRuntime?.workspaceId)
+    }
+
+    /// The monitor's pass, every 3 s: a full row build (O(agents), ~100+ ms on
+    /// main with Dylan's 1,700 agents) only when something a row reads moved.
+    /// Age labels have their own deadline (`refreshExternalAgeLabels`).
+    func pushExternalSessionRowsIfTheyMoved() {
+        guard Self.qaLegacyExternalSessionPush || externalRowInputs() != lastExternalRowInputs else { return }
+        pushExternalSessionRows()
+    }
+
+    /// QA seam: `CONTINUUM_QA_SIDEBAR_LEGACY_EXTERNAL_PUSH=1` rebuilds every row on
+    /// every changed monitor pass, as before, so one binary shows both.
+    static let qaLegacyExternalSessionPush = ProcessInfo.processInfo.environment["CONTINUUM_QA_SIDEBAR_LEGACY_EXTERNAL_PUSH"] == "1"
 
     /// The one seam every external row's action goes through.
     @discardableResult
@@ -25374,7 +25487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// fresh runtime on the same directories. Returns the terminate reply.
     func qaQuitForRemount() -> NSApplication.TerminateReply {
         suppressTerminateOnWindowCloseForQA = true
-        let reply = applicationShouldTerminate(NSApplication.shared)
+        let reply = flushWorkspaceForQuit()
         if reply == .terminateNow {
             windowWillClose(Notification(name: NSWindow.willCloseNotification))
         }
@@ -26501,6 +26614,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let reply = flushWorkspaceForQuit()
+        guard reply == .terminateNow, agentSupervisor.hasTranscriptSavesPending else { return reply }
+        // Transcript saves run in tasks: exiting now would drop a hidden agent's
+        // last 2 s of text. They finish first, bounded so quit cannot hang.
+        Task { @MainActor in
+            _ = await agentSupervisor.finishTranscriptSavesForQuit()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    private func flushWorkspaceForQuit() -> NSApplication.TerminateReply {
         // ⌘Q is a menu key equivalent and takes no focus, so a zone name still
         // being typed would otherwise miss the flush below.
         canvasView?.commitZoneRename()
@@ -47290,14 +47415,101 @@ extension AppDelegate {
             inbox.setScope(previousScope)
             inbox.holdsDisplaySwap = previousHold
         }
+        // Chatter alone, longer than the old 5 s patch age: no clock-driven field
+        // is due, so nothing may rebuild every row.
+        _ = app.sidebarInboxRows()
+        let chatterBuildsBefore = app.qaInboxRowBuildCount
+        let chatterSteps = 70
+        for step in 0..<chatterSteps {
+            for agent in streaming {
+                supervisor.qaDeliver(.itemCompleted(threadId: thread(agent), itemId: "c\(step)", kind: .commandExecution, status: .completed), to: agent)
+                supervisor.qaDeliver(.itemStarted(threadId: thread(agent), itemId: "c\(step + 1)", kind: .commandExecution, title: "rg needle"), to: agent)
+            }
+            spin(0.1)
+        }
+        let chatterBuilds = app.qaInboxRowBuildCount - chatterBuildsBefore
+        if chatterBuilds > 0 { failures.append("\(chatterSteps / 10) s of tool chatter with no clock-driven change due built every sidebar row \(chatterBuilds) times (limit 0)") }
+
+        // Families (live sample, 2026-11-18): 90% of Dylan's 1,700 agents are
+        // helpers, and a helper's turn start or end used to rebuild every row,
+        // because only a lone agent could be patched. A lead and its helpers turn
+        // over here; the rows must stay a full build's without one.
+        let lead = spawn("Lead")
+        let helpers: [AgentID] = (0..<12).map { index in
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                projectId: projectId, parentAgentID: lead, tileId: nil)
+            _ = supervisor.rename(agentID: id, to: "Helper \(index)")
+            return id
+        }
+        for agent in [lead] + helpers {
+            supervisor.qaBindRunnerForCapabilities(ScriptedAgentRunner(script: []), for: agent)
+            supervisor.qaDeliver(.turnStarted(threadId: thread(agent), turnId: "f0"), to: agent)
+        }
+        spin(0.7)
+        _ = app.sidebarInboxRows()
+        let familyBuildsBefore = app.qaInboxRowBuildCount
+        let familyNanosBefore = app.qaAgentSurfacePushNanos + inbox.qaOffMainSwapNanos
+        let familySteps = 30
+        for step in 0..<familySteps {
+            let helper = helpers[step % helpers.count]
+            supervisor.qaDeliver(.turnCompleted(threadId: thread(helper), turnId: "f\(step)", outcome: .completed, errorMessage: nil), to: helper)
+            supervisor.qaDeliver(.turnStarted(threadId: thread(helper), turnId: "f\(step + 1)"), to: helper)
+            spin(0.1)
+        }
+        // The last helper ends its turn and stays done: the lead's row still holds it.
+        supervisor.qaDeliver(.turnCompleted(threadId: thread(helpers[0]), turnId: "f-end", outcome: .completed, errorMessage: nil), to: helpers[0])
+        spin(0.7)
+        let familyBuilds = app.qaInboxRowBuildCount - familyBuildsBefore
+        let familyMs = Double(app.qaAgentSurfacePushNanos + inbox.qaOffMainSwapNanos - familyNanosBefore) / 1_000_000
+        let familyFull = app.sidebarInboxRows()
+        let familyStale = ([lead] + helpers).filter { id in
+            guard let shown = inbox.pushedRowForQA(id: id.rawValue),
+                  let fresh = familyFull.first(where: { $0.id == id.rawValue }) else { return true }
+            return !shown.matchesIgnoringLiveElapsed(fresh)
+        }
+        if familyBuilds > 1 { failures.append("\(familySteps) helper turn changes in one family built every sidebar row \(familyBuilds) times (limit 1)") }
+        if !familyStale.isEmpty { failures.append("family: \(familyStale.count) lead/helper rows differ from a full build") }
+
+        // The session monitor's pass (every 3 s): Array's own agents' sessions
+        // move on every pass while they work, and never make a row of their own.
+        let monitor = app.externalSessionMonitor
+        func ownSession(_ seconds: TimeInterval) -> ExternalAgentSession {
+            ExternalAgentSession(provider: .claude, sessionId: "own", pid: 4242, cwd: projectRoot.path, title: "own",
+                                 status: .busy, startedAt: now, lastActivity: now.addingTimeInterval(seconds),
+                                 host: .arrayManaged(agentId: streaming[0].rawValue.uuidString), transcriptURL: nil)
+        }
+        monitor.publish(ExternalSessionSnapshot(sessions: [ownSession(0)]))
+        spin(0.1)
+        let passBuildsBefore = app.qaInboxRowBuildCount
+        let passes = 20
+        var passNanos: UInt64 = 0
+        for pass in 1...passes {
+            let started = DispatchTime.now().uptimeNanoseconds
+            monitor.publish(ExternalSessionSnapshot(sessions: [ownSession(Double(pass))]))
+            passNanos += DispatchTime.now().uptimeNanoseconds - started
+            spin(0.02)
+        }
+        let passBuilds = app.qaInboxRowBuildCount - passBuildsBefore
+        if passBuilds > 0 { failures.append("\(passes) monitor passes that moved only Array's own sessions built every sidebar row \(passBuilds) times (limit 0)") }
+        // Another app's session still lands at once.
+        let other = ExternalAgentSession(provider: .claude, sessionId: "elsewhere", pid: 4343, cwd: projectRoot.path,
+                                         title: "Elsewhere", status: .busy, startedAt: now, lastActivity: now,
+                                         host: .app("Ghostty"), transcriptURL: nil)
+        monitor.publish(ExternalSessionSnapshot(sessions: [ownSession(Double(passes + 1)), other]))
+        spin(0.7)
+        let otherRowId = ExternalSessionRows.rowId(forSessionKey: other.id)
+        if inbox.pushedRowForQA(id: otherRowId) == nil { failures.append("monitor: another app's new session never reached the sidebar") }
+
         if builds > 6 { failures.append("\(steps) steps over \(restoredCount + streamingCount) agents built every sidebar row \(builds) times (limit 6)") }
         // The view's own apply (re-sort, re-render of a moved row) is still O(rows); this bound
         // guards the row-build half, which took the legacy push from ~24 s to ~12 s here.
         if pushMs > 16_000 { failures.append(String(format: "main-thread push time %.0f ms over %d pushes (limit 16000)", pushMs, pushes)) }
         if reloads > 2 { failures.append("the table was rendered whole \(reloads) times (limit 2)") }
         if !stale.isEmpty { failures.append("\(stale.count) rows differ from a full build") }
-        let line = String(format: "%d agents, %d streaming, 8 s: %d pushes, %d full row builds, %d per-agent patches, %d table reloads, %d in-place moves, %d off-main swaps (%.0f ms), %.0f ms main-thread push time",
-                          restoredCount + streamingCount, streamingCount, pushes, builds, patches, reloads, reorders, swaps, swapMs, pushMs)
+        let line = String(format: "%d agents, %d streaming, 8 s: %d pushes, %d full row builds, %d per-agent patches, %d table reloads, %d in-place moves, %d off-main swaps (%.0f ms), %.0f ms main-thread push time; %d s chatter only: %d full row builds; family of 13, %d helper turn changes: %d full row builds, %.0f ms main-thread push time; %d own-session monitor passes: %d full row builds, %.0f ms on main",
+                          restoredCount + streamingCount, streamingCount, pushes, builds, patches, reloads, reorders, swaps, swapMs, pushMs,
+                          chatterSteps / 10, chatterBuilds, familySteps, familyBuilds, familyMs, passes, passBuilds, Double(passNanos) / 1_000_000)
         if !failures.isEmpty {
             throw Failure(description: "SidebarStreamCost RED (\(line)):\n  " + failures.joined(separator: "\n  "))
         }

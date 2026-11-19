@@ -52,6 +52,7 @@ enum HiddenAgentIngestChecks {
         }
         try await checkRevealFlushes()
         try await checkHiddenSaveDebounce()
+        try await checkQuitFinishesHiddenSave()
         print("hidden-agent-ingest: PASS")
     }
 
@@ -230,5 +231,58 @@ enum HiddenAgentIngestChecks {
         guard text.contains("tail"), text.contains("w\(tokens - 1) ") else {
             throw Failure(description: "save-debounce: final transcript is missing streamed text")
         }
+    }
+
+    /// The 2 s window means up to 2 s of a hidden agent's text is only in memory.
+    /// Quit used to start that save in a task and exit, so the text was lost.
+    /// Drives the quit's own entry (`finishTranscriptSavesForQuit`, which
+    /// `applicationShouldTerminate` awaits) and then reads the disk at once, as
+    /// an exiting process would: no run-loop turn may land the write afterwards.
+    /// `CONTINUUM_QA_LEGACY_QUIT_TRANSCRIPT_FLUSH=1` is the RED reproduction.
+    private static func checkQuitFinishesHiddenSave() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hidden-ingest-quit-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runners = Runners()
+        let supervisor = makeSupervisor(root: root, runners: runners)
+        defer { supervisor.stopAll() }
+        let saves = SaveCounter()
+        supervisor.qaBeforeTranscriptSave = { saves.bump() }
+        let config = AgentModelConfig.resolvedFromDefaults()
+        let id = supervisor.spawn(role: nil, prompt: nil, cwd: root, model: config.model, thinking: config.thinking)
+        guard supervisor.send("go", to: id) else { throw Failure(description: "quit-save: send refused") }
+        let runner = runners.make(for: id)
+        let started = Date().addingTimeInterval(5)
+        while Date() < started, runner.runCount == 0 { await pump(0.01) }
+        // Stream until one window's save has run, so the marker opens a fresh 2 s window.
+        let before = saves.value
+        var n = 0
+        let windowEnd = Date().addingTimeInterval(6)
+        while Date() < windowEnd, saves.value == before {
+            _ = runner.emit(.contentDelta(threadId: "t", turnId: "turn", streamKind: .assistant, delta: "q\(n) "))
+            n += 1
+            await pump(0.05)
+        }
+        guard saves.value > before else { throw Failure(description: "quit-save: the hidden agent never saved within 6 s") }
+        await pump(0.3)
+        let marker = "quitmarker\(UInt32.random(in: 1_000_000...9_999_999))"
+        _ = runner.emit(.contentDelta(threadId: "t", turnId: "turn", streamKind: .assistant, delta: "\(marker) "))
+        await pump(0.5)
+        let transcripts = root.appendingPathComponent("transcripts")
+        func onDisk() -> Bool {
+            let files = FileManager.default.enumerator(at: transcripts, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL }.filter { $0.pathExtension == "json" } ?? []
+            return files.contains { (try? String(contentsOf: $0, encoding: .utf8))?.contains(marker) == true }
+        }
+        guard !onDisk() else { throw Failure(description: "quit-save: the marker was already on disk; the fixture did not leave a save pending") }
+        let quitStart = DispatchTime.now().uptimeNanoseconds
+        let landed = await supervisor.finishTranscriptSavesForQuit()
+        let quitMs = Double(DispatchTime.now().uptimeNanoseconds - quitStart) / 1e6
+        let saved = onDisk()
+        print(String(format: "hidden-agent-ingest: quit with a pending hidden save waited %.0f ms; text on disk at exit: %@", quitMs, saved ? "yes" : "no"))
+        guard saved, landed else {
+            throw Failure(description: "quit-save: a hidden agent's last text was not on disk when quit returned (pending 2 s window lost)")
+        }
+        guard quitMs < 2_500 else { throw Failure(description: "quit-save: quit waited \(quitMs) ms (bound 2 s)") }
     }
 }
