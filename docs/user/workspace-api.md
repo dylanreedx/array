@@ -213,7 +213,7 @@ Recover the outcome of one of your earlier Array operations by operationId or id
 
 ### `array_message_agent`
 
-Send one text message (a new user turn) to another agent in your project. Who you can reach depends on the user's Agent permissions setting: under Free (the default), any agent in your project — your children, your parent, a sibling, or one the user started; under Ask first, only agents you created and the agent that created you, and the first message asks the user. Never an agent in another project. Requires an idempotencyKey: reuse the same key and payload to recover a remembered admission. Queued admissions survive restart; direct-send retry records retain their existing session scope. Returns delivery ('delivered', 'queued' or 'refused'), childAgentId (the agent you messaged), parentAgentId (you), childRunning and, when the send path exposes one, queuePosition — plus refusalReason when it declined. A busy or paused recipient queues the message durably without interrupting its current turn. The answer is not in this result: Array delivers it to you as a message. Errors are structured: permission_denied (out of reach, or the user declined), invalid_request (yourself, empty text, over 8 KB, or no key), idempotency_conflict (that key with different text), unsupported (the agent's harness or model is not ready, or a long chain of agent-to-agent turns with no prompt from the user). A queue persistence failure returns durability_failed, and the same key remains retryable. It never interrupts a turn and never moves the user's view unless you ask it to.
+Send one text message (a new user turn) to another agent in your project. Who you can reach depends on the user's Agent permissions setting: under Free (the default), any agent in your project — your children, your parent, a sibling, or one the user started; under Ask first, only agents you created and the agent that created you, and the first message asks the user. Never an agent in another project. Requires an idempotencyKey: reuse the same key and payload to recover a remembered admission. Queued admissions survive restart; direct-send retry records retain their existing session scope. Returns delivery ('delivered', 'queued', 'held' or 'refused'), childAgentId (the agent you messaged), parentAgentId (you), childRunning and, when the send path exposes one, queuePosition — plus refusalReason when it declined, or heldReason when it is held. A busy recipient queues the message durably without interrupting its current turn. A paused recipient holds it until the user resumes that agent; heldReason says why and how many of your messages it holds. Held messages run in order, each as sent; one held longer than 24 h expires unread instead, and its result tells you so. The answer is not in this result: Array delivers it to you as a message. Errors are structured: permission_denied (out of reach, or the user declined), invalid_request (yourself, empty text, over 8 KB, or no key), idempotency_conflict (that key with different text), unsupported (the agent's harness or model is not ready, or a long chain of agent-to-agent turns with no prompt from the user). A queue persistence failure returns durability_failed, and the same key remains retryable. It never interrupts a turn and never moves the user's view unless you ask it to.
 
 | Input | Meaning |
 | --- | --- |
@@ -221,6 +221,28 @@ Send one text message (a new user turn) to another agent in your project. Who yo
 | `text` | Required. The message, delivered verbatim as the child's next user turn. Max 8 KB of UTF-8. |
 | `idempotencyKey` | Required. Stable key for THIS message. Reuse it verbatim on any retry; a new message needs a new key. |
 | `presentation` | Optional. Absent means preserve everything: a message must not steal the user's view. Ask to reveal only when the user wants to watch the child. |
+
+#### Held and expired messages
+
+A recipient's follow-up queue is paused after the user presses Stop, after
+Array relaunches with work still queued, after a compaction that did not
+finish, or while an earlier input's delivery is unconfirmed. A paused queue
+runs only when the user resumes that agent.
+
+- A message to a paused agent returns `delivery: "held"` and `heldReason`:
+  how many of your messages it now holds, the pause reason, and what happens
+  next, for example `Held (2 pending from you): Builder is paused after a
+  Stop. …`. The reason is stored with the message, so retrying the same
+  `idempotencyKey` after a restart returns it again while the queue is still
+  paused.
+- Every held message is kept. When the user resumes the agent they run in the
+  order sent, each as written; a newer message never replaces an older one.
+- A message held longer than 24 h expires instead of running, at the next
+  restore or resume. It is never delivered, and you are told: its operation
+  settles as `interrupted` with a reason starting `Expired unread`, and that
+  result reaches you like any other.
+- Do not wait on a held message. Work around the paused agent or tell the
+  user.
 
 ### `array_update_agent`
 

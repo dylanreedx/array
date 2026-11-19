@@ -298,12 +298,14 @@ public struct AgentRevealResult: Codable, Equatable, Sendable {
 
 /// What the HOST OBSERVED of the delivery, and nothing more. `delivered` — the
 /// child's own send path took the text and started a turn with it; `queued` —
-/// the send path held it for a turn that has not finished (reserved: today's
-/// `AgentSupervisor.send` either delivers into the child's runner or declines);
-/// `refused` — the send path declined and the child was never prompted. It is
-/// never the child's ANSWER: that is collected the existing way.
+/// admitted behind a running turn or earlier queued work, and runs by itself
+/// when they finish; `held` — admitted to a PAUSED queue, which runs only when
+/// the user resumes it (`heldReason` says why), expires after 24 h, and is
+/// replaced by the sender's next message; `refused` — the send path declined
+/// and the child was never prompted. It is never the child's ANSWER: that is
+/// collected the existing way.
 public enum AgentMessageDelivery: String, Codable, Sendable {
-    case delivered, queued, refused
+    case delivered, queued, held, refused
 }
 
 public struct AgentMessageRequest: Codable, Equatable, Sendable {
@@ -395,6 +397,8 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
     public var queuePosition: Int?
     /// Why the send path declined, when `delivery == .refused`.
     public var refusalReason: String?
+    /// Why the message waits for the user, when `delivery == .held`.
+    public var heldReason: String?
     public var presentation: ArtifactOpenResult.Presentation
     public var presentationEffects: WorkspacePresentationEffects
 
@@ -407,6 +411,7 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
         childRunning: Bool?,
         queuePosition: Int? = nil,
         refusalReason: String? = nil,
+        heldReason: String? = nil,
         presentation: ArtifactOpenResult.Presentation = .deferred,
         presentationEffects: WorkspacePresentationEffects = .allPreserved
     ) {
@@ -418,6 +423,7 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
         self.childRunning = childRunning
         self.queuePosition = queuePosition
         self.refusalReason = refusalReason
+        self.heldReason = heldReason
         self.presentation = presentation
         self.presentationEffects = presentationEffects
     }
