@@ -172,8 +172,11 @@ enum CharacterSettingsChecks {
                 let pane = try FoundCharacterThemesChecks.pane(fixture)
                 let clip = pane.contentView
                 let overflow = max(0, frame.maxY - settings.viewportSize.height)
-                if overflow > 0 {
-                    clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + overflow + 8))
+                // A card above the viewport (an earlier card scrolled it away) needs the
+                // opposite scroll; ten cards no longer fit in one view.
+                let scroll = overflow > 0 ? overflow + 8 : (frame.minY < 0 ? frame.minY - 8 : 0)
+                if scroll != 0 {
+                    clip.scroll(to: NSPoint(x: clip.bounds.minX, y: max(0, clip.bounds.minY + scroll)))
                     pane.reflectScrolledClipView(clip)
                     fixture.settle(0.3)
                 }
