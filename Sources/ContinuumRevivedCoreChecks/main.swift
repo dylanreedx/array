@@ -12,6 +12,9 @@ if CommandLine.arguments.contains("--sidebar-history-scope-check") {
     try runSidebarHistoryScopeChecks()
     Foundation.exit(0)
 }
+if CommandLine.arguments.contains("--agent-location-presentation-check") {
+    runAgentLocationPresentationChecks(); exit(0)
+}
 if CommandLine.arguments.contains("--companion-agent-destination-check") {
     do { try runCompanionAgentDestinationChecks(); exit(0) }
     catch { print("FAIL companion agent destination: \(error)"); exit(1) }
