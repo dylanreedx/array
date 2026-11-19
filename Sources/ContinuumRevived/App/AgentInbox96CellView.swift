@@ -2335,7 +2335,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             button.frame = inCard(NSRect(x: actionRight - size.width, y: top, width: size.width, height: size.height))
             actionRight -= size.width + 6
         }
-        lineRight = min(lineRight, actionRight - 2)
+        // Hover never moves or narrows text: a label that runs under the actions
+        // fades out beneath them instead of re-truncating (and flickering).
+        let actionsLeft = actionRight + 6
+        defer { fadeTextUnderActions(leftEdge: actionsLeft) }
         // The project's text lands first; its icon lines up on where it landed,
         // so the two round to the backing grid once, not twice.
         var x2 = textX
@@ -2428,7 +2431,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         statusGlyph.isHidden = true
         let dots = InboxPulseDotsView.size
         pulseDots.frame = inCard(NSRect(x: x0 - 1, y: snapped(mid - dots.height / 2), width: dots.width, height: dots.height))
-        var used: CGFloat = 0
+        var actionsLeft = right
         if !hoverPopOut.isHidden || !hoverStop.isHidden {
             var cx = right
             for button in [hoverPopOut, hoverStop] where !button.isHidden {
@@ -2438,7 +2441,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 button.frame = inCard(NSRect(x: cx - size.width, y: top, width: size.width, height: size.height))
                 cx -= size.width + 4
             }
-            used = right - cx
+            actionsLeft = cx + 4
         }
         let showsResting = hoverPopOut.isHidden && hoverStop.isHidden
         var restingWidth: CGFloat = 0
@@ -2456,34 +2459,41 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         stateLabel.alphaValue = showsResting ? CGFloat(shown?.emphasis.accentOpacity ?? 1) : 0
         // Ledger: a fixed status column, the icon left of the age.
-        if ledger != nil, showsResting, reportPillText == nil, statusGlyph.symbol != nil {
+        // The resting widths are measured whether or not the actions cover them,
+        // so the title truncates identically while hovered.
+        if ledger != nil, reportPillText == nil, statusGlyph.symbol != nil {
             let side: CGFloat = 12
             let column: CGFloat = 52
             let clockLeft = right - max(restingWidth, column)
-            statusGlyph.isHidden = false
-            if statusGlyph.superview == nil { card.addSubview(statusGlyph) }
-            statusGlyph.frame = inCard(NSRect(x: clockLeft - 6 - side, y: snapped(mid - side / 2), width: side, height: side))
+            if showsResting {
+                statusGlyph.isHidden = false
+                if statusGlyph.superview == nil { card.addSubview(statusGlyph) }
+                statusGlyph.frame = inCard(NSRect(x: clockLeft - 6 - side, y: snapped(mid - side / 2), width: side, height: side))
+            }
             restingWidth = max(restingWidth, column) + 6 + side
         }
         let markSide: CGFloat = 11
-        if decorations.mark != nil, showsResting {
-            decorations.markSlot = NSRect(x: right - restingWidth - 7 - markSide, y: snapped(mid - markSide / 2),
-                                          width: markSide, height: markSide)
+        if decorations.mark != nil {
+            decorations.markSlot = showsResting
+                ? NSRect(x: right - restingWidth - 7 - markSide, y: snapped(mid - markSide / 2),
+                         width: markSide, height: markSide) : nil
             restingWidth += markSide + 7
         } else {
             decorations.markSlot = nil
         }
         // Plan 110: a helper's character, just left of its mark while it rests;
         // the hover controls take both places.
-        if showsResting, let size = characterSize {
-            let gap = decorations.markSlot == nil ? 7 : Self.characterGap
-            decorations.setCharacterSlot(NSRect(x: right - restingWidth - gap - size.width,
-                                                y: snapped(mid - size.height / 2), width: size.width, height: size.height))
+        if let size = characterSize {
+            let gap = decorations.mark == nil ? 7 : Self.characterGap
+            decorations.setCharacterSlot(showsResting
+                ? NSRect(x: right - restingWidth - gap - size.width,
+                         y: snapped(mid - size.height / 2), width: size.width, height: size.height) : nil)
             restingWidth += size.width + gap
         } else {
             decorations.setCharacterSlot(nil)
         }
-        used = max(used, restingWidth)
+        let used = restingWidth
+        defer { fadeTextUnderActions(leftEdge: actionsLeft) }
         let titleX = x0 + 14
         let titleMax = max(0, right - used - 12 - titleX)
         let titleNatural = Self.width(of: titleLabel)
@@ -2840,12 +2850,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 width: size.width, height: size.height))
             actionRight -= size.width + 6
         }
-        if actionRight < textRight - trailing - characterWidth - 6 {
-            var branchFrame = branchLabel.frame
-            branchFrame.size.width = max(0, min(branchFrame.width, actionRight - branchLeft))
-            branchLabel.frame = branchFrame
-        }
         selfReportLabel.frame = branchLabel.frame
+        fadeTextUnderActions(leftEdge: actionRight + 6)
         decorations.removeAllToolTips()
         markToolTipRect = nil
         if let slot = decorations.markSlot, let markToolTip {
@@ -2868,6 +2874,41 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             width: hintSize.width,
             height: hintSize.height)
 
+    }
+
+    /// Text that genuinely runs under the hover actions fades out beneath them.
+    /// The labels keep their resting frames, so hovering never re-truncates; a
+    /// mask (not a painted scrim) means the fade matches whatever fill the row
+    /// has. `leftEdge` is the leftmost visible action's x, or past the card's
+    /// width when none shows.
+    private func fadeTextUnderActions(leftEdge: CGFloat) {
+        let actions = [hoverSettle, hoverSnooze, hoverShare, hoverHide, hoverCopy, hoverMoveHere,
+                       hoverPopOut, hoverStop].filter { !$0.isHidden }
+        let band = actions.reduce(NSRect.null) { $0.union($1.frame) }
+        let fade: CGFloat = 14
+        for label in [titleLabel, branchLabel, tailLabel, workspaceLabel, placementLabel, whereLabel, selfReportLabel] {
+            let frame = label.frame
+            let under = !actions.isEmpty && !label.isHidden
+                && frame.minY < band.maxY && frame.maxY > band.minY
+                && frame.minX + min(frame.width, Self.width(of: label)) > leftEdge - fade
+            guard under, frame.width > 0 else {
+                label.layer?.mask = nil
+                continue
+            }
+            label.wantsLayer = true
+            let mask = (label.layer?.mask as? CAGradientLayer) ?? CAGradientLayer()
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            mask.frame = label.layer?.bounds ?? .zero
+            mask.startPoint = CGPoint(x: 0, y: 0.5)
+            mask.endPoint = CGPoint(x: 1, y: 0.5)
+            mask.colors = [NSColor.black.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+            let end = min(1, max(0, (leftEdge - 2 - frame.minX) / frame.width))
+            let start = min(end, max(0, (leftEdge - 2 - fade - frame.minX) / frame.width))
+            mask.locations = [0, NSNumber(value: Double(start)), NSNumber(value: Double(end))]
+            label.layer?.mask = mask
+            CATransaction.commit()
+        }
     }
 
     /// The states that are asking for a person, as opposed to reporting one. The
@@ -2915,6 +2956,27 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     @objc private func hoverSnoozeClicked() { onHoverSnooze?() }
     @objc private func hoverSettleClicked() { onHoverSettle?() }
     @objc private func hoverShareClicked() { onHoverShare?() }
+    /// Hover witness: every text label's frame in the card, and which of them
+    /// are faded under the actions. Hover must change neither the frames nor the
+    /// truncation they imply.
+    var qaTextFramesForQA: [String: NSRect] {
+        var frames: [String: NSRect] = [:]
+        for (name, label) in [("title", titleLabel), ("branch", branchLabel), ("tail", tailLabel),
+                              ("workspace", workspaceLabel), ("placement", placementLabel),
+                              ("where", whereLabel)] where !label.isHidden {
+            frames[name] = label.frame
+        }
+        return frames
+    }
+    var qaFadedLabelsForQA: [String] {
+        [("title", titleLabel), ("branch", branchLabel), ("tail", tailLabel),
+         ("workspace", workspaceLabel), ("placement", placementLabel), ("where", whereLabel)]
+            .filter { $0.1.layer?.mask != nil }.map { $0.0 }
+    }
+    var qaVisibleActionFramesForQA: [NSRect] {
+        [hoverSettle, hoverSnooze, hoverShare, hoverHide, hoverCopy, hoverMoveHere, hoverPopOut, hoverStop]
+            .filter { !$0.isHidden }.map { $0.frame }
+    }
     var hoverShareButtonForQA: NSView? { hoverShare.isHidden ? nil : hoverShare }
     var settleNudgeViewForQA: NSView? { settleNudge.isHidden ? nil : settleNudge }
     @objc private func hoverMoveHereClicked() { onHoverMoveHere?() }

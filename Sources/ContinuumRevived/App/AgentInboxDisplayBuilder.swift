@@ -249,8 +249,8 @@ nonisolated enum InboxDisplayBuilder {
         // renders cannot make a committed baseline flap.
         let now = input.now
         let parts = InboxSort.partition(rows: visible, now: now)
-        // Sidebar round: the layout's head (incidents), then Standing leads with
-        // their families, then everything else in the sort's order.
+        // Sidebar round: the layout's head (incidents), then standing leads (no heading: the list
+        // is a queue) with their families, then everything else in the sort's order.
         var standingRows: [AgentInboxRow] = []
         var otherRows: [AgentInboxRow] = []
         var inStanding = false
@@ -260,7 +260,6 @@ nonisolated enum InboxDisplayBuilder {
         }
         var built = sidebarHeadItems(model: model, input: input)
         if !standingRows.isEmpty {
-            built.append(.sectionLabel(SidebarSectionLabel(kind: .standing, title: "Standing", count: nil, clearCount: 0)))
             built.append(contentsOf: agentItems(for: standingRows, model: model))
         }
         built.append(contentsOf: input.sortMode == .byProject

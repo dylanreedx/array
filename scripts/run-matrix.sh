@@ -2241,6 +2241,8 @@ run_app_check .build/debug/Array --agent-inbox-check
 # Confidence pass S4: closing a tile (idle, busy, parent) and a lost tile, driven
 # through the mounted scene and read off the drawn inbox.
 run_app_check .build/debug/Array --sidebar-truth-check
+# Hover reveals the row's actions without re-laying-out or re-truncating its text.
+run_app_check .build/debug/Array --sidebar-hover-text-check
 # Queue 94 P0.2: offscreen sidebar probe — per-label drawable-vs-needed width at
 # 220/280/320 pt in both appearances, materialized before rows are applied.
 run_app_check .build/debug/Array --sidebar-ux-check

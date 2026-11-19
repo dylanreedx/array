@@ -9,7 +9,7 @@ import ContinuumRevivedCore
 // Neither is TokenThemed: colours are resolved on appearance change, the
 // pattern AgentInboxRemainderView uses.
 
-/// A heading inside the list: "For you", "Other updates", "Standing".
+/// A heading inside the list: "For you", "Other updates".
 struct SidebarSectionLabel: Equatable {
     enum Kind: String, Equatable { case forYou, otherUpdates, standing, inbox, historyNote }
     let kind: Kind

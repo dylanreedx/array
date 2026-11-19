@@ -681,8 +681,8 @@ extension SidebarLedgerChecks {
         inbox.reload(rows: input()); inbox.layoutForQA()
         guard let standing = inbox.itemsForQA.compactMap(\.agentRow).first(where: { $0.id == uuid(131) }),
               standing.isStanding, standing.lifecycle == .active,
-              inbox.itemsForQA.contains(where: { if case .sectionLabel(let label) = $0 { return label.title == "Standing" }; return false }) else {
-            throw Failure(description: "a pinned settled lead lost its Standing home on the next settlement push")
+              !inbox.itemsForQA.contains(where: { if case .sectionLabel(let label) = $0 { return label.title == "Standing" }; return false }) else {
+            throw Failure(description: "a pinned settled lead lost its standing state, or the Standing heading is back above the queue")
         }
     }
 
