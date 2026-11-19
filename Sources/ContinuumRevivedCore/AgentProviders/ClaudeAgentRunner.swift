@@ -195,7 +195,14 @@ public enum ClaudeCLIBackend {
 ///   it to the agent like any other turn.
 ///
 /// Measured live on claude 2.1.291 (captures in `.plans/69`'s probe directory).
-public final class ClaudeAgentRunner: @unchecked Sendable {
+/// A runner that can start its session process before the first prompt.
+public protocol AgentSessionPrewarming: AnyObject {
+    /// Starts the process the next turn will use; a no-op when one is running.
+    /// Blocks while the process boots; call it off the main thread.
+    func prewarm() throws
+}
+
+public final class ClaudeAgentRunner: @unchecked Sendable, AgentSessionPrewarming {
     public struct Config: Sendable {
         public var mode: AgentMode
         /// Claude-native model argument (already stripped of the `anthropic/`
@@ -560,6 +567,13 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     private var processSawInit = false
     private var turn: TurnWaiter?
     private var idleExitHandler: (@Sendable (Int32, String?, Bool) -> Void)?
+    /// Serializes process start between a pre-warm and the first turn, so the
+    /// two never spawn two claudes on one session. Recursive: a pre-warm that
+    /// resumes a Duckherd session drives a turn, which starts the process.
+    private let startupLock = NSRecursiveLock()
+    /// The live process was pre-warmed and has not run a turn: its boot stderr
+    /// still belongs to the first turn, which the resume self-heal reads.
+    private var prewarmedWithoutTurn = false
     private var unsolicited: UnsolicitedTurns?
     /// Steers written to stdin and not yet replayed, oldest first.
     private var pendingSteers: [(id: UUID, text: String)] = []
@@ -643,8 +657,34 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         } catch {
             throw RunError.launchFailed("could not prepare a local image attachment")
         }
-        try keepDuckherdOffOnResume()
+        startupLock.lock()
+        do { try keepDuckherdOffOnResume() } catch { startupLock.unlock(); throw error }
+        startupLock.unlock()
         try drive(line: line, onEvent: onEvent)
+    }
+
+    /// Boots the session process with no prompt, so a resumed agent's ~1 s of
+    /// CLI start overlaps the user's typing (measured 2026-11-18: first token
+    /// 1.67-1.87 s cold, 0.79-0.85 s on a process started 3 s earlier). The
+    /// next `run` writes its prompt to this process. A pre-warmed process that
+    /// dies before then is replaced by `run` with the usual resume self-heal.
+    public func prewarm() throws {
+        startupLock.lock(); defer { startupLock.unlock() }
+        guard queue.sync(execute: { child == nil && !stopRequested }) else { return }
+        try keepDuckherdOffOnResume()
+        guard let mode = sessionModes().first else { return }
+        let started = queue.sync { child == nil }
+        try ensureStarted(mode: mode)
+        if started { queue.sync { prewarmedWithoutTurn = child != nil } }
+    }
+
+    /// The session modes a turn tries, in order: the configured fork once,
+    /// otherwise resume-first (or new-first) with the other as the retry.
+    private func sessionModes() -> [SessionMode] {
+        if config.forkSession && !queue.sync(execute: { forkConsumed }) { return [.fork] }
+        let order = ClaudeCLIBackend.sessionModeOrder(
+            conversationMayExist: config.conversationMayExist || queue.sync { conversationEstablished })
+        return [order.first, order.retry]
     }
 
     static let duckherdDeclinedText =
@@ -737,16 +777,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
         onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void
     ) throws {
         if queue.sync(execute: { stopRequested }) { throw AgentRunStopped(detail: nil) }
-        let modes: [SessionMode]
-        if let requestedModes {
-            modes = requestedModes
-        } else if config.forkSession && !queue.sync(execute: { forkConsumed }) {
-            modes = [.fork]
-        } else {
-            let order = ClaudeCLIBackend.sessionModeOrder(
-                conversationMayExist: config.conversationMayExist || queue.sync { conversationEstablished })
-            modes = [order.first, order.retry]
-        }
+        let modes = requestedModes ?? sessionModes()
         for (index, mode) in modes.enumerated() {
             let wasWarm = queue.sync { child != nil }
             try ensureStarted(mode: mode)
@@ -756,7 +787,8 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
                 // used to reset per PROCESS, so turn N's error carried every
                 // earlier turn's diagnostics. A cold process keeps what its
                 // boot wrote: the resume self-heal reads it.
-                if wasWarm { stderrBuffer.removeAll() }
+                if wasWarm && !prewarmedWithoutTurn { stderrBuffer.removeAll() }
+                prewarmedWithoutTurn = false
                 // A turn claude began on its own that nobody adopted yet comes
                 // first: its events precede this prompt's, and this prompt's turn
                 // only starts after it.
@@ -915,6 +947,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable {
     // MARK: - Process
 
     private func ensureStarted(mode: SessionMode) throws {
+        startupLock.lock(); defer { startupLock.unlock() }
         if queue.sync(execute: { child != nil }) { return }
         // `--strict-mcp-config --mcp-config <path>` names a file Array writes;
         // (re)write it now and refuse the launch with the real reason if that

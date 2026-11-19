@@ -431,6 +431,38 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
         }
     }
 
+    // 5a. Pre-warm: writing to an agent whose session was closed starts the
+    //     claude process before Send, with --resume, and the message then runs
+    //     on that same process. `CONTINUUM_QA_PREWARM_OFF=1` makes this RED.
+    do {
+        let h = try Harness(.claude, idleTimeout: 4, hiddenTimeout: 0.5)
+        defer { h.tearDown() }
+        onPath(h)
+        h.supervisor.agentVisibleProvider = { _ in false }
+        try expect(h.supervisor.send("hello", to: h.id), "prewarm: seed refused")
+        try await eventually("prewarm: turn done") { !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed] }
+        try await eventually("prewarm: the hidden idle session is closed first", timeout: 5) {
+            !h.supervisor.qaHasIdleSession(h.id)
+        }
+        let before = h.spawns
+        h.supervisor.agentVisibleProvider = { _ in true }
+        try expect(h.supervisor.prewarmSession(for: h.id),
+                   "prewarm: writing to a closed claude session must start it before Send")
+        try await eventually("prewarm: the session process must start with no prompt written") { h.spawns == before + 1 }
+        try expect(h.promptTexts == ["hello"] && AgentSteeringQAFakes.argv(in: h.bin).contains("--resume"),
+                   "prewarm: the pre-warmed process must resume the conversation and receive nothing yet, prompts \(h.promptTexts)")
+        try expect(!h.supervisor.prewarmSession(for: h.id) && h.supervisor.qaPrewarmCount == 1,
+                   "prewarm: further keystrokes must not start another session")
+        let warmPid = AgentSteeringQAFakes.latestPid(in: h.bin)
+        try expect(h.supervisor.send("second", to: h.id), "prewarm: the message refused")
+        try await eventually("prewarm: the message completes") {
+            !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed, .completed]
+        }
+        try expect(h.spawns == before + 1 && AgentSteeringQAFakes.latestPid(in: h.bin) == warmPid
+                   && h.promptTexts == ["hello", "second"],
+                   "prewarm: the message must run on the pre-warmed process, spawns \(h.spawns - before), prompts \(h.promptTexts)")
+    }
+
     // 5b. One reap rule: the setting (here a fixed 4 s) governs a visible
     //     agent, a hidden idle one closes at min(setting, hidden cap = 1 s), and
     //     a message to a reaped agent is delivered once, in order, on a resumed

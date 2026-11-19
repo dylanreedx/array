@@ -14233,6 +14233,11 @@ final class AgentSupervisor {
     /// absent (headless, fixtures) means not visible.
     var agentVisibleProvider: ((AgentID) -> Bool)?
     private(set) var qaIdleReapCount = 0
+    /// Sessions `prewarmSession` started, for the witness.
+    private(set) var qaPrewarmCount = 0
+    /// QA only: `CONTINUUM_QA_PREWARM_OFF=1` turns pre-warming off, so one
+    /// binary shows the witness RED and GREEN.
+    nonisolated static let prewarmDisabled = ProcessInfo.processInfo.environment["CONTINUUM_QA_PREWARM_OFF"] == "1"
     private let idleSessionDefaults: UserDefaults
     private var idleReapTokens: [AgentID: UUID] = [:]
     /// QA: runs inside `accept(.queue)`/`accept(.steer)` after admission and
@@ -14835,6 +14840,29 @@ final class AgentSupervisor {
             self.releaseHeldHelperCompletion(id)
             self.notifyTurnCapabilitiesChanged(id)
         }
+    }
+
+    /// Starts a dormant Claude agent's session while the user writes to it, so
+    /// the message they are about to send does not wait for the CLI to boot:
+    /// about 1 s of a resumed agent's 1.7-1.9 s to first token (measured
+    /// 2026-11-18). This is what lets idle sessions close early without the
+    /// next message feeling slow. The session is pooled like any idle one: the
+    /// next send uses it, and the idle reaper closes it if nothing is sent.
+    /// Returns whether a session was started.
+    @discardableResult
+    func prewarmSession(for id: AgentID) -> Bool {
+        guard !Self.prewarmDisabled, let record = records[id], record.harness == .claudeCode,
+              runners[id] == nil, idleSessionRunners[id] == nil,
+              !pendingModeRestarts.contains(id), !contextRecoveryInFlight.contains(id),
+              helperProviderRetryErrors[id] == nil,
+              sharedAgentControlGates[id]?.isEmpty != false else { return false }
+        let runner = makeRunner(accountLaunch(runnerLaunch(for: id, record: record)))
+        guard let warming = runner as? AgentSessionPrewarming, runner.keepsSessionAliveBetweenTurns else { return false }
+        idleSessionRunners[id] = runner
+        qaPrewarmCount &+= 1
+        scheduleIdleReap(for: id, runner: runner)
+        DispatchQueue.global(qos: .userInitiated).async { try? warming.prewarm() }
+        return true
     }
 
     /// A queued message's prompt, its managed attachments re-validated. A

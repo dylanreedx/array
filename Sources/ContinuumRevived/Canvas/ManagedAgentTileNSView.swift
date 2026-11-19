@@ -562,9 +562,14 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             guard let self, let id = self.projectedAgentID else { return }
             self.agentSource?.refreshAccountUsage(for: id, minimumInterval: 30)
         }
-        v2Composer?.onDraftChange = { [weak self] _ in
+        v2Composer?.onDraftChange = { [weak self] draft in
             self?.updateV2ComposerPresentation()
             self?.onUserDraftEdited?()
+            // A message is being written: start a closed session now so it
+            // does not wait for the CLI to boot when it is sent.
+            if !draft.text.isEmpty, let self, let id = self.projectedAgentID {
+                self.agentSource?.prewarmSession(for: id)
+            }
         }
         v2Composer?.onDraftApplied = { [weak self] in self?.updateV2ComposerPresentation() }
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
