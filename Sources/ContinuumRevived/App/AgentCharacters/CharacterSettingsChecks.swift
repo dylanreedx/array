@@ -75,7 +75,8 @@ enum CharacterSettingsChecks {
         try expect(model.cards.map(\.id) == AgentCharacterBundled.builtInIDs + ["pond"],
                    "the picker offers the built-in sets, then the import: \(model.cards.map(\.id))")
         try expect(model.cards.map(\.detail) == ["8 icons", "12 icons", "12 icons", "14 icons",
-                                                 "12 icons", "2 icons · imported"],
+                                                 "12 icons", "12 icons", "12 icons", "12 icons", "12 icons",
+                                                 "2 icons · imported"],
                    "each card says how many characters, with no set parsed: \(model.cards.map(\.detail))")
 
         // A bad file: its problems, word for word, and nothing new on disk.
