@@ -144,6 +144,7 @@ enum CanvasCameraDriverChecks {
                    "final viewport must equal the composition of all 6 deltas: expected y \(expectedY), got \(canvas.viewport.y)")
 
         try runSlowApplyCoalesce()
+        try runFramePacedLeadingEdge()
 
         // Frame-recorder accounting: keep the whole active window, including a
         // long final delivery caused by a camera commit, but trim the smooth
@@ -250,6 +251,72 @@ enum CanvasCameraDriverChecks {
             try expect(driver.anchor == anchor,
                        "slow \(testCase.name): the queued gesture must retain its pointer anchor")
         }
+    }
+
+    /// A zoom's real cost lands AFTER `applyViewport` returns: the redraw of every
+    /// visible tile at the new scale runs in the Core Animation commit later in the
+    /// same run-loop turn. When frames are slower than the refresh interval, the
+    /// input that queued during a frame must fold into the display link's next
+    /// step, not each step the camera again on arrival: every step redraws every
+    /// visible tile, so per-input steps keep an over-budget main thread behind.
+    ///
+    /// Deterministic: 240 inputs at 120 Hz, a display link at 120 Hz, and a 12 ms
+    /// commit after every apply that ends in `noteFrameCommitted`, as the canvas's
+    /// frame-tail observer calls it. When the main thread frees up, queued input
+    /// is delivered first, then at most one (coalesced) link callback.
+    /// RED with `CONTINUUM_CAMERA_PACE_FROM_APPLY=1` (pacing from the apply's return):
+    /// one apply per input.
+    @MainActor
+    private static func runFramePacedLeadingEdge() throws {
+        let period = 1.0 / 120
+        let commitCost = 0.012
+        let inputCount = 240
+        let tuning = CanvasCameraDriver.Tuning()
+        let anchor = CGPoint(x: 260, y: 190)
+        let origin: TimeInterval = 3_000
+        var now = origin
+        var viewport = CanvasViewport(x: 40, y: 10, zoom: 0.9)
+        var expected = viewport
+        var applies = 0
+        let driver = CanvasCameraDriver(
+            tuning: tuning,
+            currentViewport: { viewport },
+            applyViewport: { next in viewport = next; applies += 1 },
+            makeDisplayLink: { _, _ in nil },
+            nativeRefreshInterval: { period }
+        )
+        driver.nowProvider = { now }
+        let inputs = (0..<inputCount).map { origin + Double($0) * period + 0.001 }
+        let ticks = (0..<(inputCount + 2)).map { origin + Double($0) * period + 0.004 }
+        var nextInput = 0, nextTick = 0
+        func frame(_ work: () -> Void) {
+            let before = applies
+            work()
+            if applies > before {
+                now += commitCost
+                driver.noteFrameCommitted()
+            }
+        }
+        while nextInput < inputCount || driver.qaHasPendingInput {
+            now = max(now, min(nextInput < inputCount ? inputs[nextInput] : .infinity, ticks[nextTick]))
+            while nextInput < inputCount, inputs[nextInput] <= now {
+                nextInput += 1
+                expected = CanvasEngine.zoom(expected, by: exp(-0.5 * tuning.scrollZoomGain), anchorScreen: anchor)
+                frame { driver.noteScrollZoom(deltaY: -0.5, location: anchor) }
+            }
+            if nextTick < ticks.count, ticks[nextTick] <= now {
+                while nextTick < ticks.count - 1, ticks[nextTick] <= now { nextTick += 1 }
+                frame { driver.qaFlushPending() }
+            } else if nextTick == ticks.count - 1, nextInput >= inputCount {
+                frame { driver.qaFlushPending() }
+            }
+        }
+        print("canvas camera frame pacing — \(applies) camera steps for \(inputCount) inputs with 12 ms frames "
+              + "(pacing from \(CanvasCameraDriver.pacesFromFrameCommit ? "frame commit" : "apply return"))")
+        try expect(applies <= inputCount * 3 / 4,
+                   "\(applies) camera steps for \(inputCount) inputs: input queued behind a slow frame stepped the camera on arrival instead of folding into the next display-link step")
+        try expect(abs(viewport.zoom - expected.zoom) < 1e-9 && !driver.qaHasPendingInput,
+                   "pacing must keep every input: expected zoom \(expected.zoom), got \(viewport.zoom)")
     }
 
     // MARK: - Leg 2: glide mechanics

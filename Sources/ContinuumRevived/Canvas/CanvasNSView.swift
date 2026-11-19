@@ -4910,6 +4910,7 @@ final class CanvasNSView: NSView, TokenThemed {
     private func completePendingFrame() {
         guard let start = pendingFrameStartedAt else { return }
         pendingFrameStartedAt = nil
+        cameraDriver.noteFrameCommitted()
         let now = ProcessInfo.processInfo.systemUptime
         gestureFrameTailsMs.append((now - start) * 1_000)
         let snapshot = gestureWorkSnapshot()

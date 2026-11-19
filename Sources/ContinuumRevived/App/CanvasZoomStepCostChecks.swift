@@ -52,6 +52,10 @@ enum CanvasZoomStepCostChecks {
     /// Per-class tallies, written by the hooked methods while `counting`.
     nonisolated(unsafe) static var counting = false
     nonisolated(unsafe) static var displays: [String: Int] = [:]
+    /// Nanoseconds inside `-[CALayer display]` per delegate class, outermost call
+    /// only (a backing layer's own `display` calls CALayer's).
+    nonisolated(unsafe) static var displayNanos: [String: UInt64] = [:]
+    nonisolated(unsafe) static var displayDepth = 0
     nonisolated(unsafe) static var layouts: [String: Int] = [:]
     nonisolated(unsafe) static var tileRequests: [String: Int] = [:]
     nonisolated(unsafe) static var tiles: [String: Int] = [:]
@@ -77,6 +81,7 @@ enum CanvasZoomStepCostChecks {
 
     static func reset() {
         displays = [:]; layouts = [:]; tileRequests = [:]; tiles = [:]; gridOnlyRetiles = 0; subPixelClipResnaps = 0; clipOriginRequests = 0
+        displayNanos = [:]; displayDepth = 0
         clipOriginWrites = 0; clipSizeWrites = 0
     }
 
@@ -119,8 +124,21 @@ enum CanvasZoomStepCostChecks {
         for cls in ownDisplay + [CALayer.self] {
             hook(cls, displaySel) { original in
                 let block: @convention(block) (CALayer) -> Void = { layer in
-                    if counting { displays[layer.delegate.map { name($0) } ?? "layer:" + name(layer), default: 0] += 1 }
+                    guard counting else { unsafeBitCast(original, to: VoidIMP.self)(layer, displaySel); return }
+                    // AppKit's private ContentLayer has no delegate: name it by the
+                    // view whose layer holds it, which is the view that draws it.
+                    let owner = (layer.delegate ?? layer.superlayer?.delegate) as? NSView
+                    let unseen = owner.map { $0.visibleRect.isEmpty } ?? false
+                    let key = (layer.delegate.map { name($0) }
+                        ?? "layer:" + name(layer) + "<" + name(layer.superlayer?.delegate) + ">")
+                        + (unseen ? " [unseen]" : "")
+                    displays[key, default: 0] += 1
+                    let outermost = displayDepth == 0
+                    displayDepth += 1
+                    let start = DispatchTime.now().uptimeNanoseconds
                     unsafeBitCast(original, to: VoidIMP.self)(layer, displaySel)
+                    displayDepth -= 1
+                    if outermost { displayNanos[key, default: 0] &+= DispatchTime.now().uptimeNanoseconds &- start }
                 }
                 return block
             }

@@ -140,16 +140,14 @@ enum NativeViewVectorRenderer {
         if let tint {
             context.saveGState()
             context.beginTransparencyLayer(in: rect, auxiliaryInfo: nil)
-            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1,
-                       respectFlipped: true, hints: nil)
+            SymbolRasterCache.draw(image, in: rect)
             context.setBlendMode(.sourceIn)
             context.setFillColor(tint.cgColor)
             context.fill(rect)
             context.endTransparencyLayer()
             context.restoreGState()
         } else {
-            image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1,
-                       respectFlipped: true, hints: nil)
+            SymbolRasterCache.draw(image, in: rect)
         }
     }
 

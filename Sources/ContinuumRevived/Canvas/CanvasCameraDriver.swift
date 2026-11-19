@@ -230,6 +230,27 @@ final class CanvasCameraDriver: NSObject {
 
     // MARK: - Commit pacing
 
+    /// QA: `CONTINUUM_CAMERA_PACE_FROM_APPLY=1` paces the leading edge from the
+    /// moment `applyViewport` returns, as before, so one binary shows both arms.
+    static var pacesFromFrameCommit = ProcessInfo.processInfo.environment["CONTINUUM_CAMERA_PACE_FROM_APPLY"] != "1"
+    private(set) var qaLeadingEdgeApplies = 0
+    private(set) var qaDisplayLinkApplies = 0
+
+    /// The canvas finished a frame this driver stepped: its layout, display and
+    /// Core Animation commit are done. The leading edge paces from HERE.
+    ///
+    /// `applyViewport` returns before any of that work: the redraw of every
+    /// visible tile at the new scale runs later in the same run-loop turn. Pacing
+    /// from the return let an input event that arrived just after a slow frame
+    /// (one over the refresh interval) apply a second camera step in the same
+    /// display interval as the display link's, and each such step redrew every
+    /// visible tile for a picture that never reached the screen: 10-26% of a
+    /// 24-agent zoom's camera steps.
+    func noteFrameCommitted() {
+        guard Self.pacesFromFrameCommit else { return }
+        lastCommitTime = max(lastCommitTime, nowProvider())
+    }
+
     private func submit() {
         let now = nowProvider()
         // Read the view's screen on each submission: the existing view-bound
@@ -244,6 +265,7 @@ final class CanvasCameraDriver: NSObject {
             interval = tuning.minCommitInterval
         }
         if now - lastCommitTime >= interval {
+            qaLeadingEdgeApplies += 1
             applyPending(at: now)
         } else {
             // A commit already landed this interval: the newest state waits for
@@ -385,6 +407,7 @@ final class CanvasCameraDriver: NSObject {
             stepGlide(dt: dt)
             lastActivityTime = now
         }
+        if pendingPanDX != 0 || pendingPanDY != 0 || pendingLogZoom != 0 { qaDisplayLinkApplies += 1 }
         applyPending(at: now)
         stepFlight(at: now)
         if !glideActive, flight == nil, now - lastActivityTime >= tuning.settleQuiet {

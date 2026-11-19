@@ -843,6 +843,9 @@ enum ContinuumApp {
         // never a matrix leg.
         if CommandLine.arguments.contains("--canvas-motion-probe") {
             _ = NSApplication.shared
+            if ProcessInfo.processInfo.environment["CANVAS_MOTION_OFFSCREEN"] == "1" {
+                NSApp.setActivationPolicy(.prohibited)
+            }
             Task { @MainActor in
                 Foundation.exit(await runCanvasMotionPresentationCheck())
             }
@@ -4819,6 +4822,18 @@ enum ContinuumApp {
                 _ = NSApplication.shared
                 try LongTranscriptPerformanceChecks.run()
                 print("LongTranscriptPerformanceChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--symbol-raster-cache-check") {
+            do {
+                _ = NSApplication.shared
+                try SymbolRasterCacheChecks.run()
+                print("SymbolRasterCacheChecks passed")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
