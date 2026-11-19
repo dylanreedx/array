@@ -44,16 +44,46 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
     /// never be the thing that raises a permission prompt.
     static var canWarm: Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
 
-    static func prewarm() {
-        guard canWarm, warming == nil else { return }
-        if let warmed, Date().timeIntervalSince(warmed.at) < warmLifetime { return }
-        warmed = nil
+    /// Starts (or keeps) a warm analyzer. `vocabulary` is called now, so the
+    /// file scan behind it begins at focus and its result is ready by the press.
+    static func prewarm(vocabulary: (@MainActor () -> [String])? = nil) {
+        _ = vocabulary?()
+        guard canWarm, warming == nil, warmed == nil else { return }
         warming = Task { @MainActor in
             defer { warming = nil }
             let engine = SpeechAnalyzerDictationEngine()
+            engine.vocabularyProvider = vocabulary
             guard (try? await engine.prepare()) != nil, let prepared = engine.prepared else { return }
             warmed = (prepared, Date())
+            warmExpiry = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(warmLifetime))
+                guard !Task.isCancelled else { return }
+                discardWarmed()
+            }
         }
+    }
+
+    private static var warmExpiry: Task<Void, Never>?
+
+    /// Releases the unused warm analyzer through `cancelAndFinishNow`, so the
+    /// lingering model is not held by an analyzer nobody will start.
+    private static func discardWarmed() {
+        warmExpiry?.cancel()
+        warmExpiry = nil
+        guard let old = warmed else { return }
+        warmed = nil
+        Task { await old.prepared.analyzer.cancelAndFinishNow() }
+    }
+
+    /// Takes the warm analyzer for a session; a press during an in-flight warm
+    /// waits for it rather than building a second one cold.
+    private static func takeWarmed() async -> Prepared? {
+        if let warming { await warming.value }
+        guard let taken = warmed else { return nil }
+        warmed = nil
+        warmExpiry?.cancel()
+        warmExpiry = nil
+        return taken.prepared
     }
 
     private var prepared: Prepared?
@@ -78,14 +108,10 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
 
     func prepare() async throws {
         try await Self.ensureMicrophoneAccess()
-        if let warmed = Self.warmed {
-            Self.warmed = nil
-            if Date().timeIntervalSince(warmed.at) < Self.warmLifetime {
-                try await applyContext(to: warmed.prepared.analyzer)
-                prepared = warmed.prepared
-                return
-            }
-            Task { await warmed.prepared.analyzer.cancelAndFinishNow() }
+        if let warm = await Self.takeWarmed() {
+            try await applyContext(to: warm.analyzer)
+            prepared = warm
+            return
         }
         guard let locale = await Self.resolveLocale() else {
             throw DictationFailure.unsupportedOnThisDevice

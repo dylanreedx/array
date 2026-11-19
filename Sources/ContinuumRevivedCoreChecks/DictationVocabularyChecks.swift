@@ -25,7 +25,7 @@ func runDictationVocabularyChecks() throws {
     try require(stems == ["DictationSession", "run-matrix", "README"], "identifier-like stems only: \(stems)")
 
     // Normalisation, using real recogniser output (see header).
-    let n = DictationNormalizer(terms: DictationVocabulary.assemble(dynamic: ["DictationSession", "AVAudioEngine", "ContinuumRevivedCore"]))
+    let n = DictationNormalizer(terms: DictationVocabulary.assemble(dynamic: ["DictationSession", "AVAudioEngine", "ContinuumRevivedCore", "MainView", "DataModel", "SessionManager", "README"]))
     let cases: [(String, String)] = [
         // "Edit DictationSession dot swift and check the AVAudioEngine tap"
         ("Add dictation session dot swift and check the AV audio engine tab",
@@ -37,6 +37,12 @@ func runDictationVocabularyChecks() throws {
         // Must NOT touch ordinary prose.
         ("connect the dots with swift", "connect the dots with swift"),
         ("a dot in the middle", "a dot in the middle"),
+        // Ordinary prose around identifier-like terms must stay prose.
+        ("open the main view and the data model", "open the main view and the data model"),
+        ("send the team dot md file", "send the team dot md file"),
+        ("see foo dot go for details", "see foo dot go for details"),
+        ("tell the session manager to stop", "tell the session manager to stop"),
+        ("README dot md has the notes", "README.md has the notes"),
         ("the audio engine is loud", "the audio engine is loud"),
     ]
     for (input, expected) in cases {

@@ -1673,6 +1673,7 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-tool-context-check
 run_leg .build/debug/ContinuumRevivedCoreChecks
 # CLI compatibility data must be checked by its focused witnesses too.
 run_leg .build/debug/ContinuumRevivedCoreChecks --cli-install-owner-check
+run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-vocabulary-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-history-scope-check

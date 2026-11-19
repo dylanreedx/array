@@ -57,9 +57,9 @@ final class ComposerDictationController {
 
     /// Warms the recogniser while the editor has focus, so pressing the mic does
     /// not wait on the model load. Quiet no-op wherever dictation is not offered.
-    static func prewarm() {
+    static func prewarm(vocabulary: (@MainActor () -> [String])? = nil) {
         guard qaEngineFactory == nil, isOffered else { return }
-        if #available(macOS 26, *) { SpeechAnalyzerDictationEngine.prewarm() }
+        if #available(macOS 26, *) { SpeechAnalyzerDictationEngine.prewarm(vocabulary: vocabulary) }
     }
 
     private static func makeEngine() -> (any DictationEngine)? {

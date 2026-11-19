@@ -74,6 +74,36 @@ public struct DictationNormalizer: Sendable {
         "plist", "sh", "html", "css", "txt", "toml",
     ]
 
+    private let knownStems: Set<String>
+    private let extensionRegex: NSRegularExpression?
+
+    /// Plain words an identifier is built from far too often to rewrite prose
+    /// for: `MainView` must not turn "main view" into an identifier.
+    private static let commonWords: Set<String> = [
+        "main", "view", "controller", "manager", "data", "model", "file", "files", "test", "tests",
+        "item", "items", "list", "table", "cell", "button", "label", "text", "image", "window",
+        "panel", "tile", "zone", "canvas", "agent", "agents", "session", "state", "store", "service",
+        "provider", "handler", "helper", "utils", "util", "config", "settings", "options", "context",
+        "type", "types", "base", "core", "app", "node", "tree", "page", "pages", "user", "users",
+        "name", "names", "value", "values", "key", "keys", "event", "events", "action", "actions",
+        "request", "response", "result", "results", "error", "errors", "log", "logs", "title",
+        "header", "footer", "content", "detail", "details", "default", "current", "active", "new",
+        "old", "first", "last", "next", "previous", "open", "close", "start", "stop", "run", "build",
+        "check", "checks", "query", "search", "filter", "sort", "group", "project", "projects",
+        "board", "task", "tasks", "card", "cards", "message", "messages", "queue", "stack", "input",
+        "output", "source", "target", "path", "paths", "root", "index", "id", "ids", "info", "status",
+    ]
+
+    /// Whether spoken words would be a safe, unambiguous rewrite to `term`:
+    /// three or more words, an acronym word, or at least one word that is not
+    /// plain English filler.
+    static func isDistinctiveIdentifier(_ words: [String]) -> Bool {
+        guard words.count >= 2 else { return false }
+        if words.count >= 3 { return true }
+        return words.contains { $0.count >= 2 && $0 == $0.uppercased() }
+            || words.contains { !commonWords.contains($0.lowercased()) }
+    }
+
     public init(terms: [String]) {
         var rules: [(NSRegularExpression, String)] = []
         func add(_ pattern: String, _ template: String) {
@@ -81,20 +111,23 @@ public struct DictationNormalizer: Sendable {
                 rules.append((regex, template))
             }
         }
-        // "foo dot swift" / "foo dot.swift" -> "foo.swift", only after a word
-        // and only for a known extension.
-        let exts = Self.extensions.joined(separator: "|")
-        add("(?<=\\w)\\s*\\bdot[ .](\(exts))\\b", ".$1")
         for (spoken, written) in Self.fixedAliases {
             add(Self.phrasePattern(spoken), NSRegularExpression.escapedTemplate(for: written))
         }
-        // A camel/Pascal identifier of two or more words, spoken as words:
-        // "dictation session" -> "DictationSession". Single words are left alone.
+        // A distinctive camel/Pascal identifier spoken as words:
+        // "dictation session" -> "DictationSession".
+        var stems = Set<String>()
         for term in terms where !term.contains(" ") {
+            stems.insert(term.lowercased())
             let words = Self.splitIdentifier(term)
-            guard words.count >= 2 else { continue }
+            guard Self.isDistinctiveIdentifier(words) else { continue }
             add(Self.phrasePattern(words.joined(separator: " ")), NSRegularExpression.escapedTemplate(for: term))
         }
+        self.knownStems = stems
+        // "<known stem> dot swift" / "dot.swift" -> ".swift", known extensions only.
+        let exts = Self.extensions.joined(separator: "|")
+        self.extensionRegex = try? NSRegularExpression(
+            pattern: "(?<![\\w])(\\w+)\\s*\\bdot[ .](\(exts))\\b", options: [.caseInsensitive])
         self.rules = rules
     }
 
@@ -103,6 +136,19 @@ public struct DictationNormalizer: Sendable {
         for (regex, template) in rules {
             let range = NSRange(result.startIndex..., in: result)
             result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: template)
+        }
+        if let extensionRegex {
+            let ns = result as NSString
+            var out = ""
+            var cursor = 0
+            for m in extensionRegex.matches(in: result, range: NSRange(location: 0, length: ns.length)) {
+                let stem = ns.substring(with: m.range(at: 1))
+                guard knownStems.contains(stem.lowercased()) else { continue }
+                out += ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor))
+                out += stem + "." + ns.substring(with: m.range(at: 2)).lowercased()
+                cursor = m.range.location + m.range.length
+            }
+            result = out + ns.substring(from: cursor)
         }
         return result
     }

@@ -958,7 +958,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool) {
         isEditorFocused = focused
-        if focused { ComposerDictationController.prewarm() }
+        if focused { ComposerDictationController.prewarm(vocabulary: { [weak self] in self?.dictationVocabulary() ?? [] }) }
         defer { onEditorFocusChange?(focused) }
         // Leaving the editor keeps what was said, the same as ↩.
         if !focused { dictation.finish() }
