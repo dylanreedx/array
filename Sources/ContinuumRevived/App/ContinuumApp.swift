@@ -843,6 +843,9 @@ enum ContinuumApp {
         // never a matrix leg.
         if CommandLine.arguments.contains("--canvas-motion-probe") {
             _ = NSApplication.shared
+            if ProcessInfo.processInfo.environment["CANVAS_MOTION_OFFSCREEN"] == "1" {
+                NSApp.setActivationPolicy(.prohibited)
+            }
             Task { @MainActor in
                 Foundation.exit(await runCanvasMotionPresentationCheck())
             }
