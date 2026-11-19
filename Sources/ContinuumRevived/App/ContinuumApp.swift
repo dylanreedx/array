@@ -5256,6 +5256,22 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--sidebar-hover-text-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    let args = CommandLine.arguments
+                    let shots = args.firstIndex(of: "--snapshots").flatMap { args.indices.contains($0 + 1) ? URL(fileURLWithPath: args[$0 + 1]) : nil }
+                    try await SidebarHoverTextChecks.run(snapshotDirectory: shots)
+                    print("ContinuumRevivedSidebarHoverTextChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--sidebar-truth-check") {
             _ = NSApplication.shared
             Task { @MainActor in
