@@ -391,6 +391,7 @@ check --streaming-ingest-check
 check --strict-agent-harness-check
 check --subagent-sidebar-open-check
 check --subagent-tile-zone-check
+check --symbol-raster-cache-check
 check --terminal-clipboard-check
 check --terminal-cmd-w-check
 check --terminal-fills-tile-check
@@ -923,6 +924,7 @@ leg run_app_check .build/debug/Array --streaming-ingest-check
 leg run_app_check .build/debug/Array --strict-agent-harness-check
 leg run_app_check .build/debug/Array --subagent-sidebar-open-check
 leg run_app_check .build/debug/Array --subagent-tile-zone-check
+leg run_app_check .build/debug/Array --symbol-raster-cache-check
 leg run_app_check .build/debug/Array --terminal-clipboard-check
 leg run_app_check .build/debug/Array --terminal-cmd-w-check
 leg run_app_check .build/debug/Array --terminal-fills-tile-check

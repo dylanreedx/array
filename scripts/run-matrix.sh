@@ -1972,6 +1972,8 @@ run_app_check .build/debug/Array --cross-project-agents-check
 # across two projects (one managed, one headless, one shell that is not an agent)
 # agree after a single `applyObserverStatuses`, and a flipped status moves all four.
 run_app_check .build/debug/Array --agent-inventory-wiring-check
+# Symbol raster cache: repeated symbol draws hit one cached raster instead of re-rasterising.
+run_app_check .build/debug/Array --symbol-raster-cache-check
 # P2B.6: the canvas sweep never erases a badge it has no entry for. A managed tile
 # with a live view and nothing on disk keeps the status its own ingest set across
 # two observer sweeps; an entry that says `idle` still clears a terminal's badge.
