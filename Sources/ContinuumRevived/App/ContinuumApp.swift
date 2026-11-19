@@ -4826,6 +4826,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--symbol-raster-cache-check") {
+            do {
+                _ = NSApplication.shared
+                try SymbolRasterCacheChecks.run()
+                print("SymbolRasterCacheChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--transcript-canvas-check") {
             do {
                 _ = NSApplication.shared

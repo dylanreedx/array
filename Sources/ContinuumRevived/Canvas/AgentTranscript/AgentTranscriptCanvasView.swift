@@ -1655,7 +1655,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                     CTLineDraw(line, context)
                 case let .symbol(image, rect):
                     guard rect.intersects(localVisible) else { continue }
-                    image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+                    SymbolRasterCache.draw(image, in: rect)
                 case let .character(mark, rect):
                     // A sprite layer shows the character; with none, today's icon.
                     guard rect.intersects(localVisible), let image = mark.fallback,
