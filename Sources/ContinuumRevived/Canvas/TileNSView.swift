@@ -1556,6 +1556,7 @@ class TileNSView: NSView, TokenThemed {
         }
         if let edge = edgeAtPress {
             dragKind = .resize(edge)
+            ResizeCursors.cursor(for: edge).set()
             canvas?.beginGeometryEdit(.resizeTile, tileIds: [tile.id], includeAllZones: true)
             canvas?.beginAutoLayoutGesture()
             return
@@ -1635,6 +1636,8 @@ class TileNSView: NSView, TokenThemed {
                 canvas.hideDragGhost()
             }
         case .resize(let edge):
+            // Hold the handle's cursor for the whole drag (the rects re-lay as the tile moves).
+            ResizeCursors.cursor(for: edge).set()
             // Live resize: the tile previews itself as it sizes. Accumulate the raw,
             // UN-snapped resize in `resizeFreeFrame` (seeded from the current frame on
             // the first event) and apply the snap as a preview on top — so dragging an
@@ -1817,10 +1820,7 @@ class TileNSView: NSView, TokenThemed {
         let h = bounds.height
         guard w > 2 * m, h > titleH + m else { return }
 
-        // Edge bands. Top/bottom span the full width (covering corners with
-        // a vertical-axis cursor — stock NSCursor has no diagonal corner
-        // cursor; the L-bracket hover indicator carries the corner-resize
-        // affordance visually).
+        // Edge bands. Top/bottom span the full width; corner squares follow below.
         addCursorRect(NSRect(x: 0, y: 0, width: w, height: m), cursor: .resizeUpDown)
         addCursorRect(NSRect(x: 0, y: h - m, width: w, height: m), cursor: .resizeUpDown)
         addCursorRect(NSRect(x: 0, y: m, width: m, height: h - 2 * m), cursor: .resizeLeftRight)
@@ -1831,6 +1831,18 @@ class TileNSView: NSView, TokenThemed {
         if titleDragHeight > 0 {
             addCursorRect(NSRect(x: m, y: m, width: w - 2 * m, height: titleDragHeight), cursor: .openHand)
         }
+        // Corners go last so they win over the title strip and the edge bands: the same squares `resizeEdge(at:)` hit-tests, so the diagonal
+        // cursor shows exactly where a drag resizes both axes.
+        let c = min(max(Self.cornerHoverSize, 2 * m), w / 2, h / 2)
+        for (edge, rect) in [
+            (ResizeEdge.topLeft, NSRect(x: 0, y: 0, width: c, height: c)),
+            (.topRight, NSRect(x: w - c, y: 0, width: c, height: c)),
+            (.bottomLeft, NSRect(x: 0, y: h - c, width: c, height: c)),
+            (.bottomRight, NSRect(x: w - c, y: h - c, width: c, height: c)),
+        ] {
+            addCursorRect(rect, cursor: ResizeCursors.cursor(for: edge))
+        }
+
         // The bubble's view classifies its circle on cursor entry and pointer
         // movement, rather than overriding resize with a square rect.
 

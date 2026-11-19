@@ -7792,6 +7792,7 @@ final class CanvasNSView: NSView, TokenThemed {
             pendingMovedPlacement = nil
             beginAutoLayoutGesture()
             zoneGesture = .resizingZone(target: target, edge: edge, lastWindowPoint: event.locationInWindow)
+            ResizeCursors.cursor(for: edge).set()
             beginGeometryEdit(.resizeZone, zoneIds: [target.zoneId])
             return
         }
@@ -7822,7 +7823,8 @@ final class CanvasNSView: NSView, TokenThemed {
                 addCursorRect(rect, cursor: .pointingHand)
             }
             // Resize cursors on the zone edges (added after the header so they win
-            // on the thin edge bands). No public diagonal cursor → corners reuse these.
+            // on the thin edge bands). The bottom corners follow, with the diagonal cursor
+            // (top corners belong to the header move strip, see zoneResizeEdge).
             let f = CanvasEngine.tileScreenFrame(CanvasEngine.zoneWorldFrame(placement), viewport: canvasState.viewport)
             guard f.width > 0, f.height > 0 else { continue }
             let m: CGFloat = 8
@@ -7830,6 +7832,9 @@ final class CanvasNSView: NSView, TokenThemed {
             addCursorRect(CGRect(x: f.maxX - m / 2, y: f.minY, width: m, height: f.height), cursor: .resizeLeftRight)
             addCursorRect(CGRect(x: f.minX, y: f.minY - m / 2, width: f.width, height: m), cursor: .resizeUpDown)
             addCursorRect(CGRect(x: f.minX, y: f.maxY - m / 2, width: f.width, height: m), cursor: .resizeUpDown)
+            let c = min(16, f.width / 2)
+            addCursorRect(CGRect(x: f.minX - c, y: f.maxY - c, width: 2 * c, height: 2 * c), cursor: ResizeCursors.cursor(for: .bottomLeft))
+            addCursorRect(CGRect(x: f.maxX - c, y: f.maxY - c, width: 2 * c, height: 2 * c), cursor: ResizeCursors.cursor(for: .bottomRight))
         }
     }
 
@@ -7926,6 +7931,7 @@ final class CanvasNSView: NSView, TokenThemed {
             return
         case .resizingZone(let target, let edge, let lastWindowPoint):
             let zoneId = target.zoneId
+            ResizeCursors.cursor(for: edge).set()
             guard target.layer == nil || mountedLayer(for: target) != nil else {
                 zoneGesture = .none; hideResizeDimensions(); abandonConcreteGestureTransaction(); return
             }

@@ -2226,6 +2226,7 @@ run_app_check .build/debug/Array --tile-action-check
 run_app_check .build/debug/Array --input-gate-check
 run_app_check .build/debug/Array --drag-magnetize-check
 run_app_check .build/debug/Array --resize-snap-check
+run_app_check .build/debug/Array --resize-corner-cursor-check
 run_app_check .build/debug/Array --browser-note-action-check
 run_app_check .build/debug/Array --focus-border-check
 run_app_check .build/debug/Array --browser-restore-state-check
