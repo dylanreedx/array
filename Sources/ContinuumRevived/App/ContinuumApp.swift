@@ -7674,7 +7674,8 @@ enum ContinuumApp {
             do {
                 let summary = try TerminalViewportVisibilityChecks.run()
                 let faces = try TerminalViewportVisibilityChecks.runFacesAndMirror()
-                print("ContinuumRevivedTerminalViewportVisibilityChecks passed: \(summary); \(faces)")
+                let returns = try TerminalRendererReturnChecks.run()
+                print("ContinuumRevivedTerminalViewportVisibilityChecks passed: \(summary); \(faces); \(returns)")
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

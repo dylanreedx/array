@@ -63,7 +63,7 @@ class TileNSView: NSView, TokenThemed {
     // the index against a brute-force subview walk each time.
 
     private func invalidateWorldPlaneVisibilityIndex() {
-        (superview as? CanvasWorldPlaneView)?.invalidateVisibilityIndex()
+        (superview as? CanvasWorldPlaneView)?.tileWorldChanged(self)
     }
 
     override func setFrameOrigin(_ newOrigin: NSPoint) {

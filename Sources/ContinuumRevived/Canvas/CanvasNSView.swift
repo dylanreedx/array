@@ -2147,6 +2147,7 @@ final class CanvasNSView: NSView, TokenThemed {
         // above all world content without any further ordering work.
         worldPlane.frame = bounds
         worldPlane.onAgentBubbleMoved = { [weak self] old, new in self?.agentBubbleMoved(from: old, to: new) }
+        worldPlane.onTileWorldChanged = { [weak self] tile in self?.noteRendererVisibilityChanged(tile) }
         worldPlane.onFileTileCountChanged = { [weak self] in
             guard let self else { return }
             if self.hasSurfaceResidency { self.startResidencyEvaluation() }
@@ -5636,17 +5637,18 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Tell every Ghostty-hosting tile whether the viewport (plus margin) can
     /// see it. `full` also sweeps tiles that were never near (install, settle);
     /// the per-camera-step form is O(nearby) and only touches edges.
-    /// Off for 0.7.55: a hidden terminal's surface stopped ticking, so a terminal
-    /// created off-screen never ran its shell. Internal only; the visibility
-    /// checks turn it on in their own fixture.
-    nonisolated(unsafe) static var terminalViewportGatingEnabled = false
+    /// Off by default since 0.7.55, whose release audit timed out waiting for a
+    /// new terminal's shell with gating on. An asleep surface keeps running its
+    /// shell (the return-path witness and an occluded-from-birth theme run both
+    /// show it), so that diagnosis does not hold; the default stays off until
+    /// the on-screen theme check is explained. `CONTINUUM_TERMINAL_VIEWPORT_GATING=1`
+    /// turns it on; the visibility check turns it on in its own fixture.
+    nonisolated(unsafe) static var terminalViewportGatingEnabled =
+        ProcessInfo.processInfo.environment["CONTINUUM_TERMINAL_VIEWPORT_GATING"] == "1"
 
     func updateRendererViewportVisibility(full: Bool) {
         guard Self.terminalViewportGatingEnabled, window != nil else { return }
-        let visible = worldPlane.bounds
-        let lead = visible.insetBy(
-            dx: -visible.width * Self.rendererViewportMargin,
-            dy: -visible.height * Self.rendererViewportMargin)
+        let lead = rendererLeadRect()
         var near = Set<ObjectIdentifier>()
         for view in worldPlane.tileViews(intersecting: lead) where view.hostsGhosttySurface {
             near.insert(ObjectIdentifier(view))
@@ -5666,6 +5668,47 @@ final class CanvasNSView: NSView, TokenThemed {
                 view.setViewportVisible(false)
             }
         }
+    }
+
+    private let rendererVisibilityPending = NSHashTable<TileNSView>.weakObjects()
+    private var rendererVisibilityPassScheduled = false
+
+    /// A tile entered, left or moved within the world plane. The camera pass
+    /// cannot see these: a programmatic move into view (the workspace API, a
+    /// tidy, a lend), a zone installed or a parked workspace returning, all
+    /// without a camera step. Collected and answered once, next runloop turn,
+    /// from each tile's own frame — O(changed), so a drag event never pays a
+    /// visibility-index rebuild.
+    private func noteRendererVisibilityChanged(_ view: TileNSView) {
+        guard Self.terminalViewportGatingEnabled else { return }
+        rendererVisibilityPending.add(view)
+        guard !rendererVisibilityPassScheduled else { return }
+        rendererVisibilityPassScheduled = true
+        DispatchQueue.main.async { [weak self] in self?.applyPendingRendererVisibility() }
+    }
+
+    private func applyPendingRendererVisibility() {
+        rendererVisibilityPassScheduled = false
+        // No window, no viewport to measure against: keep them for the next pass.
+        guard window != nil else { return }
+        let lead = rendererLeadRect()
+        let pending = rendererVisibilityPending.allObjects
+        rendererVisibilityPending.removeAllObjects()
+        for view in pending where view.hostsGhosttySurface {
+            // A tile out of the plane (a parked workspace, a closed zone) is in
+            // no window anyone can see: asleep, whatever its frame says.
+            let near = view.superview === worldPlane && view.frame.intersects(lead)
+            if near != view.viewportVisibleState { qaRendererViewportEdges += 1 }
+            view.setViewportVisible(near)
+            if near { rendererVisibleTiles.add(view) } else { rendererVisibleTiles.remove(view) }
+        }
+    }
+
+    private func rendererLeadRect() -> CGRect {
+        let visible = worldPlane.bounds
+        return visible.insetBy(
+            dx: -visible.width * Self.rendererViewportMargin,
+            dy: -visible.height * Self.rendererViewportMargin)
     }
 
     /// Bring parked bodies back before they reach the screen. Per camera step, so
