@@ -7682,6 +7682,19 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--terminal-wheel-scroll-check") {
+            let application = NSApplication.shared
+            application.setActivationPolicy(.accessory)
+            do {
+                let summary = try TerminalWheelScrollChecks.run()
+                print("ContinuumRevivedTerminalWheelScrollChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--terminal-fills-tile-check") {
             let application = NSApplication.shared
             application.setActivationPolicy(.accessory)
