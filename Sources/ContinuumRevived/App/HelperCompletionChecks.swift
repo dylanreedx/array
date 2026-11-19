@@ -256,6 +256,78 @@ enum HelperCompletionChecks {
             let file = SpawnResultFile.read(parentCwd: s.records[parent]!.cwd, handle: handle)
             try HelperGuardChecks.expect(file?.status.rawValue == expected, "later terminal overwrote a message handle")
         }
+        try await runHeldMessages(bench, child: child)
+    }
+
+    /// Orchestration review item 1, through the production API and the real
+    /// Stop: a message to a paused agent says it is held and why; the sender's
+    /// newer message replaces its older held one; a held message older than
+    /// 24 h expires with a record instead of running when the queue resumes;
+    /// a younger one runs then.
+    private static func runHeldMessages(_ bench: WorkspaceAgentReportChecks.Bench, child: AgentID) async throws {
+        let s = bench.supervisor, parent = bench.f.agentId
+        let childCwd = URL(fileURLWithPath: s.records[child]!.cwd), parentCwd = s.records[parent]!.cwd
+        var clock = Date()
+        s.agentMessageNow = { clock }
+        s.interruptGrace = 0.2
+        func prompts() -> String { (try? String(contentsOf: childCwd.appendingPathComponent("prompts.log"), encoding: .utf8)) ?? "" }
+        func send(_ key: String, _ text: String) throws -> [String: AnyHashableJSON] {
+            let reply = bench.f.api.dispatch(agentId: parent, requestId: key, op: "agent.message", payload: [
+                "agentId": child.rawValue.uuidString, "text": text, "idempotencyKey": key])
+            guard case let .result(result) = reply else { throw WorkspaceAgentReportChecks.Failure(description: "message failed: \(reply)") }
+            return result
+        }
+        // The user stops a running turn: the production Stop pauses the queue.
+        _ = try send("held-run", "HOLD-bisect-run")
+        let started = await waitUntil(timeout: 15, pollInterval: 0.02) { s.isRunning(child) }
+        try HelperGuardChecks.expect(started, "held-run did not start")
+        _ = await s.accept(.stop, for: child)
+        let paused = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) && s.isQueuePaused(for: child) }
+        try HelperGuardChecks.expect(paused, "Stop did not leave the queue paused")
+
+        let first = try send("held-1", "STALE-INSTRUCTION skip the blind bisect")
+        try HelperGuardChecks.expect(first["delivery"]?.string == "held"
+            && first["heldReason"]?.string?.contains("paused after a Stop") == true,
+            "a message to a paused agent must say held and why: \(first)")
+        let firstEntry = try s.queuedAgentMessage(caller: parent, key: "held-1")
+        let replay = try send("held-1", "STALE-INSTRUCTION skip the blind bisect")
+        try HelperGuardChecks.expect(replay["delivery"]?.string == "held", "a replayed held admission must still say held: \(replay)")
+
+        clock.addTimeInterval(60)
+        let second = try send("held-2", "OLD-BUT-LATEST stop your bisect")
+        let replaced = try s.queuedAgentMessage(caller: parent, key: "held-1")
+        try HelperGuardChecks.expect(second["delivery"]?.string == "held" && firstEntry?.phase == .queued
+            && replaced?.phase == .cancelled && replaced?.result?.reason?.contains("Replaced by a newer message") == true
+            && s.queuedMessages(for: child).filter { $0.agentMessageContext != nil }.count == 1,
+            "the sender's newer message replaces its older held one, with a record: \(String(describing: replaced?.result))")
+
+        // A day and more later the user resumes: the held message expires, unrun.
+        clock.addTimeInterval(AgentSupervisor.heldAgentMessageLifetime + 60)
+        s.resumeQueue(for: child)
+        let expired = await waitUntil(timeout: 15, pollInterval: 0.05) {
+            (try? s.queuedAgentMessage(caller: parent, key: "held-2"))??.phase == .cancelled
+        }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        let expiredEntry = try s.queuedAgentMessage(caller: parent, key: "held-2")
+        let expiredFile = SpawnResultFile.read(parentCwd: parentCwd, handle: "held-2")
+        try HelperGuardChecks.expect(expired && expiredEntry?.result?.reason?.hasPrefix("Expired unread") == true
+            && expiredFile?.status == .interrupted && !s.isRunning(child)
+            && !prompts().contains("OLD-BUT-LATEST") && !prompts().contains("STALE-INSTRUCTION"),
+            "a held message older than 24 h expires with a record and never runs: \(String(describing: expiredEntry?.result))")
+
+        // A younger held message runs when the user genuinely resumes.
+        _ = try send("held-fresh-run", "HOLD-second-run")
+        _ = await waitUntil(timeout: 15, pollInterval: 0.02) { s.isRunning(child) }
+        _ = await s.accept(.stop, for: child)
+        let pausedAgain = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) && s.isQueuePaused(for: child) }
+        try HelperGuardChecks.expect(pausedAgain, "second Stop did not pause the queue")
+        let fresh = try send("held-3", "FRESH-INSTRUCTION continue")
+        clock.addTimeInterval(3600)
+        s.resumeQueue(for: child)
+        let ran = await waitUntil(timeout: 15, pollInterval: 0.05) { prompts().contains("FRESH-INSTRUCTION") }
+        try HelperGuardChecks.expect(fresh["delivery"]?.string == "held" && ran, "a held message younger than 24 h runs on resume")
+        _ = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) }
+        print("helper-message-result-check: held messages say why, are replaced, expire after 24 h and run when fresh PASS")
     }
     static func runDeliveryLedger() async throws {
         let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-delivery-ledger")
@@ -826,6 +898,7 @@ enum HelperCompletionChecks {
         let blocked = try helper("Blocked"), server = try helper("Server"), messenger = try helper("Messenger", spawned: false)
         let alpha = try helper("Alpha"), beta = try helper("Beta"), gamma = try helper("Gamma"), delta = try helper("Delta")
         let restarter = try helper("Restarter")
+        let compiler = try helper("Compiler"), flaky = try helper("Flaky"), talker = try helper("Talker")
         // Round 3 cast.
         let coordinator = try helper("Coordinator", tools: true)
         let worker = try helper("Worker", parent: coordinator)
@@ -1039,6 +1112,46 @@ enum HelperCompletionChecks {
             && results(server)[0].hasPrefix("Server finished: \(AgentSupervisor.helperBackgroundRunningStatus)\n")
             && results(server)[0].contains("Dev server is up; waiting.") && status(server)?.status == .completed,
             "A a held final answer is delivered once at the cap, none before, saying background work still runs")
+
+        // Orchestration review item 2: one lead wake per finished TASK. A turn
+        // that ends with a build still running past ten minutes, or that fails
+        // while its job runs, is progress; the report that ends the task is
+        // the one wake.
+        try await start(compiler, "Run the release build.")
+        pool[compiler]!.background = true
+        try await end(compiler, "Release build started; waiting for it.")
+        await flushToLead()
+        now.addTimeInterval(11 * 60)
+        s.sweepHeldHelperCompletions()
+        await flushToLead()
+        let longBuildQuiet = results(compiler).isEmpty && s.isHelperCompletionHeld(compiler)
+        try await start(flaky, "Bisect the regression.")
+        pool[flaky]!.background = true
+        pool[flaky]!.fail("Claude Code reported an error without details.")
+        let flakyEnded = await waitUntil(timeout: 5, pollInterval: 0.02) { !s.isRunning(flaky) && pool[flaky]!.openTurns == 0 }
+        try await Task.sleep(nanoseconds: 80_000_000)
+        await flushToLead()
+        let failedQuiet = flakyEnded && results(flaky).isEmpty && s.isHelperCompletionHeld(flaky)
+        try await unsolicited(compiler, report: "COMPILE-REPORT", "Build passed.")
+        try await unsolicited(flaky, report: "BISECT-REPORT", "Culprit found.")
+        await flushToLead()
+        verdict(longBuildQuiet && failedQuiet
+            && results(compiler).count == 1 && results(compiler)[0].contains("Compiler finished: succeeded")
+            && results(compiler)[0].contains("COMPILE-REPORT")
+            && results(flaky).count == 1 && results(flaky)[0].contains("Flaky finished: succeeded")
+            && results(flaky)[0].contains("BISECT-REPORT"),
+            "W1 a turn ending with background work (past 10 min, or failed) wakes no lead; its report is exactly one wake (quiet \(longBuildQuiet)/\(failedQuiet), wakes \(results(compiler).count)/\(results(flaky).count))")
+
+        // Orchestration review item 3: no report, a long last message. The lead
+        // gets its END, where the conclusion is, marked as a tail.
+        try await start(talker, "Investigate the crash.")
+        let working = "HEAD-NOTES I am reading the files." + String(repeating: " Then I checked another file and kept going.", count: 80)
+        try await end(talker, working + " CONCLUSION: the crash is the outbox decode at restore.")
+        await flushToLead()
+        verdict(results(talker).count == 1 && results(talker)[0].contains("CONCLUSION: the crash is the outbox decode at restore.")
+            && results(talker)[0].contains(AgentSupervisor.helperReplyTailMarker) && !results(talker)[0].contains("HEAD-NOTES")
+            && results(talker)[0].count < AgentSupervisor.helperReplyLimit + 200,
+            "W3 a no-report finish relays the tail of its last message, marked")
 
         // P4/P7: results queued in separate batches behind a busy lead reach
         // it as ONE turn, in completion order (Beta finished first).

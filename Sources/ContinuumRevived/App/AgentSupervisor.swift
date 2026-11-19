@@ -2020,6 +2020,29 @@ final class AgentSupervisor {
     /// T5b — why each paused queue is held, for the rail's "Paused after …".
     private var queuePauseReasons: [AgentID: ComposerQueueRailState.Pause] = [:]
 
+    /// Wall clock for a queued agent message's age; checks inject one.
+    var agentMessageNow: () -> Date = { Date() }
+    /// A message held longer than this is stale: dropped with a record when
+    /// its queue next drains, never run (`.plans` orchestration review, item 1).
+    static let heldAgentMessageLifetime: TimeInterval = 24 * 3600
+
+    /// Why a message to `id` is held rather than queued to run, in words for
+    /// its sender; nil when the queue is not paused. A paused queue runs only
+    /// when the user resumes it, so "queued" alone told the sender a lie.
+    func agentMessageHoldReason(for id: AgentID) -> String? {
+        guard pausedQueues.contains(id) else { return nil }
+        let name = records[id]?.humanDisplayName ?? "The agent"
+        let why: String
+        switch queuePauseReasons[id] ?? .held {
+        case .afterStop: why = "is paused after a Stop"
+        case .afterRelaunch: why = "is paused after Array relaunched"
+        case .afterCompaction: why = "is paused because a compaction did not finish"
+        case .unconfirmed: why = "is paused because an earlier input's delivery is unconfirmed"
+        case .held: why = "is paused"
+        }
+        return "\(name) \(why). Its queue runs only when the user resumes it; a held message older than 24 h expires instead of running, and a newer message from you replaces this one."
+    }
+
     private func pauseQueue(_ id: AgentID, _ reason: ComposerQueueRailState.Pause) {
         // An ordinary terminal outcome cannot hide uncertain input custody.
         if pausedQueues.contains(id), queuePauseReasons[id] == .unconfirmed, reason != .unconfirmed { return }
@@ -5418,7 +5441,18 @@ final class AgentSupervisor {
         else { return (.refused, nil, nil) }
         if runners[id] != nil || pausedQueues.contains(id) || !(queuedWorkItemsCache[id] ?? []).isEmpty {
             guard let store = submissionRecoveryStore else { return (.refused, nil, nil) }
-            let item = AgentComposerQueuedMessage(text: prompt.text, queuedAt: Date(),
+            // A paused recipient replays its queue in order when resumed, so a
+            // sender's earlier held instruction would run before, and against,
+            // its latest one. The latest replaces them, with a record each.
+            let held = pausedQueues.contains(id)
+            if held {
+                for case .prompt(let earlier) in queuedWorkItemsCache[id] ?? []
+                where !earlier.isSteer && earlier.agentMessageContext != nil && earlier.agentMessageContext?.caller == senderID {
+                    cancelQueuedMessage(earlier.id, for: id,
+                        reason: "Replaced by a newer message from the same sender while the recipient was paused.")
+                }
+            }
+            let item = AgentComposerQueuedMessage(text: prompt.text, queuedAt: agentMessageNow(),
                 agentMessageHops: hops, agentMessageContext: context)
             var reservation: CompanionTaskRunHandle?
             updateCompanionTasks { reservation = try $0.reserveQueued(agentID: id.rawValue, itemID: item.id) }
@@ -5440,7 +5474,7 @@ final class AgentSupervisor {
                 catch { await MainActor.run { self?.warn("Agent message queue mirror failed; durable admission retained.") } }
             }
             if runners[id] == nil && !pausedQueues.contains(id) { drainQueue(for: id) }
-            return (.queued, position, nil)
+            return (held ? .held : .queued, position, nil)
         }
         let parent = companionParentRun(for: senderID)
         guard sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id, taskParent: parent) else {
@@ -5477,13 +5511,13 @@ final class AgentSupervisor {
         }
     }
 
-    private func cancelAgentMessage(_ message: AgentComposerQueuedMessage, for id: AgentID) -> Bool {
+    private func cancelAgentMessage(_ message: AgentComposerQueuedMessage, for id: AgentID, reason: String? = nil) -> Bool {
         guard let context = message.agentMessageContext else { return true }
         do {
             guard var entry = try agentMessageOutbox.lookup(caller: context.caller, key: context.idempotencyKey) else { return false }
             entry.phase = .cancelled
             entry.result = .init(toolCallId: context.operationId, status: .interrupted, agentId: id.rawValue,
-                reason: "Message cancelled before its queued turn started.", endedAt: Date(),
+                reason: reason ?? "Message cancelled before its queued turn started.", endedAt: Date(),
                 turnIdentity: "cancelled:\(message.id.uuidString)", recipientId: context.caller.rawValue)
             try agentMessageOutbox.save(entry)
             if let cwd = records[context.caller]?.cwd { SpawnResultFile.write(entry.result!, parentCwd: cwd, warn: warn) }
@@ -9522,7 +9556,10 @@ final class AgentSupervisor {
     }
     private var heldHelperCompletions: [AgentID: HeldHelperCompletion] = [:]
     private var heldSweepTask: Task<Void, Never>?
-    var heldHelperCompletionCap: TimeInterval = 600
+    /// Long enough for a release build or a full test run: a turn ended
+    /// with background work is progress, and waking the lead at 10 minutes
+    /// told it "finished" while the helper was still working.
+    var heldHelperCompletionCap: TimeInterval = 7200
     var heldBackgroundGrace: TimeInterval = 30
     static let helperNoReportStatus = "ended its turn without filing a report"
     static let helperBackgroundRunningStatus = "ended its turn with background work still running"
@@ -9530,6 +9567,10 @@ final class AgentSupervisor {
     private func helperHasBackgroundWork(_ id: AgentID) -> Bool {
         if let runner = (runners[id] ?? idleSessionRunners[id]) as? AgentSteeringRunning,
            runner.hasBackgroundWork || runner.hasRunningSubagents { return true }
+        // A turn the session began on its own (a finished job's notification)
+        // and Array has not yet adopted: the task is not over.
+        if let runner = (runners[id] ?? idleSessionRunners[id]) as? AgentUnsolicitedTurnReporting,
+           runner.hasUnsolicitedTurn { return true }
         return hasPendingArrayHelpers(id)
     }
 
@@ -9585,7 +9626,10 @@ final class AgentSupervisor {
     }
 
     private func holdsHelperCompletion(_ id: AgentID, outcome: TurnOutcome) -> Bool {
-        guard outcome == .completed, let child = records[id], child.capabilities.locallyManaged,
+        // A failed turn with work still running is not a terminal failure: the
+        // job's own result starts the next turn. Only a failure with nothing
+        // left running is the task's end.
+        guard outcome == .completed || outcome == .failed, let child = records[id], child.capabilities.locallyManaged,
               !helperParents(id).isEmpty, helperHasBackgroundWork(id), !helperFiledReportThisTurn(id),
               // A helper that says it is blocked is action, not progress.
               !helperIsBlocked(child) else { return false }
@@ -9636,6 +9680,21 @@ final class AgentSupervisor {
         transcriptProjections[id]?.document.entries.last(where: { $0.role == .assistant })?.id
     }
     static let helperNoReplyText = "(no reply this turn)"
+    static let helperReplyLimit = 2400
+    static let helperReplyTailMarker = "(no array_report: tail of last message) …"
+
+    /// A helper's last message without a report, as the lead gets it: whole
+    /// when it fits, otherwise its END. A conclusion comes last, so the head
+    /// cut that went before kept the working notes and lost the answer.
+    static func helperReplyTail(_ text: String) -> String {
+        guard text.count > helperReplyLimit else { return text }
+        var tail = Substring(text.suffix(helperReplyLimit - helperReplyTailMarker.count - 1))
+        // Start at a word, never mid-word.
+        if let space = tail.firstIndex(where: \.isWhitespace), tail.distance(from: tail.startIndex, to: space) < 80 {
+            tail = tail[space...].drop(while: \.isWhitespace)
+        }
+        return helperReplyTailMarker + " " + tail
+    }
     /// Each helper's latest settled completion. A wake refresh reads its reply
     /// only for the same identity; same-turn late output extends it.
     private var settledHelperCompletions: [AgentID: HelperTurnCompletion] = [:]
@@ -9999,7 +10058,7 @@ final class AgentSupervisor {
         if let filed = settlementReport(id), filed.filedAt > baseline {
             report = Self.helperCompletionReportText(filed.report)
         } else {
-            report = String((finalAssistantText(for: id) ?? Self.helperNoReplyText).prefix(2400))
+            report = Self.helperReplyTail(finalAssistantText(for: id) ?? Self.helperNoReplyText)
         }
         return ("\(String(child.humanDisplayName.prefix(80))) finished: \(status)\(error.map { ": \(String($0.prefix(600)))" } ?? "")\n\(report)", filedThisTurn)
     }
@@ -10170,7 +10229,7 @@ final class AgentSupervisor {
                                     settled.identity == state.turn {
                                 // This turn's own reply, never the transcript's latest: a
                                 // turn settled without its transcript stays textless.
-                                body = String((settled.reply ?? Self.helperNoReplyText).prefix(2400))
+                                body = Self.helperReplyTail(settled.reply ?? Self.helperNoReplyText)
                             } else {
                                 body = (state.text ?? update.1).components(separatedBy: "\n").dropFirst().joined(separator: "\n")
                             }
@@ -13579,6 +13638,7 @@ final class AgentSupervisor {
             if restoreOutboxFailed { self.warn("Agent message queue recovery could not complete.") }
             do { try await self.recoverAgentMessageQueue(for: id, restoredOutbox: restoredOutbox, snapshotRevision: revision) }
             catch { self.warn("Agent message queue recovery could not complete.") }
+            await self.expireStaleAgentMessages(for: id, store: store)
             let messages = await store.queuedWorkItems(for: id)
             self.queuedWorkItemsCache[id] = self.agentMessageQueueCache(messages, for: id, restoredOutbox: revision == self.agentMessageOutbox.writeRevision ? restoredOutbox : nil)
             if messages.contains(where: { if case .prompt(let m) = $0 { return m.steerUncertain }; return false }) {
@@ -13592,10 +13652,10 @@ final class AgentSupervisor {
     /// Deletes one visible chip. Direct manipulation of Array's own queue,
     /// never the turn in flight — the two-verb Stop stays two verbs: the
     /// primary control still means only "interrupt the current turn".
-    func cancelQueuedMessage(_ messageID: UUID, for id: AgentID) {
+    func cancelQueuedMessage(_ messageID: UUID, for id: AgentID, reason: String? = nil) {
         guard let store = submissionRecoveryStore else { return }
         if let item = queuedWorkItemsCache[id]?.first(where: { $0.id == messageID }),
-           case .prompt(let message) = item, !cancelAgentMessage(message, for: id) { return }
+           case .prompt(let message) = item, !cancelAgentMessage(message, for: id, reason: reason) { return }
         updateCompanionTasks { try $0.cancelQueued(messageID) }
         pendingQueueRemovals[id, default: []].insert(messageID)
         queuedWorkItemsCache[id]?.removeAll { $0.id == messageID }
@@ -13631,6 +13691,27 @@ final class AgentSupervisor {
         runQueueOp(for: id) { [weak self] in
             for itemID in followUps { _ = await store.removeQueuedMessage(id: itemID, for: id) }
             await self?.queueRemovalLanded(followUps, for: id)
+        }
+    }
+
+    /// Agent messages queued longer than `heldAgentMessageLifetime` are dropped,
+    /// never run: their sender has moved on, and replaying them is how a resumed
+    /// helper restarted work its lead had already called off. Each leaves a
+    /// cancelled outbox entry and an interrupted result for its sender.
+    private func expireStaleAgentMessages(for id: AgentID, store: AgentComposerDraftStore) async {
+        let now = agentMessageNow()
+        for item in await store.queuedWorkItems(for: id) {
+            guard case .prompt(let message) = item, message.agentMessageContext != nil, !message.isSteer else { continue }
+            let age = now.timeIntervalSince(message.queuedAt)
+            guard age > Self.heldAgentMessageLifetime else { continue }
+            let hours = Int(age / 3600)
+            guard cancelAgentMessage(message, for: id,
+                reason: "Expired unread: held \(hours) h, past the 24 h limit, so it was dropped instead of running.") else { continue }
+            updateCompanionTasks { try $0.cancelQueued(message.id) }
+            _ = await store.removeQueuedMessage(id: message.id, for: id)
+            queuedWorkItemsCache[id]?.removeAll { $0.id == message.id }
+            appendAgentDiagnostics("held agent message expired after \(hours) h; dropped without running", agentID: id)
+            notifyTurnCapabilitiesChanged(id)
         }
     }
 
@@ -13692,6 +13773,7 @@ final class AgentSupervisor {
             await self.qaBeforeQueueDrain?()
             do { try await self.recoverAgentMessageQueue(for: id) }
             catch { self.pauseQueue(id, .held); self.warn("Durable agent message awaits queue storage recovery."); return }
+            await self.expireStaleAgentMessages(for: id, store: store)
             guard self.canDrainQueue(for: id), var next = await store.nextWorkItem(for: id) else { return }
             // A helper note never starts a turn: it rides along with the next
             // result, or joins a running turn. Notes alone leave the lead idle.
