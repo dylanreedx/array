@@ -27,6 +27,9 @@ public final class AgentMessageOutbox {
         public var phase: Phase
         public var result: SpawnResultFile?
         public var queuePosition: Int?
+        /// Why the recipient's queue held this message at admission, so an
+        /// idempotent replay after a restart still says so.
+        public var heldReason: String?
 
         public init(context: AgentMessageQueueContext, message: AgentComposerQueuedMessage, queuePosition: Int? = nil) {
             self.context = context; self.message = message; self.phase = .queued

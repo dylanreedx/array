@@ -2029,8 +2029,14 @@ final class AgentSupervisor {
     /// Why a message to `id` is held rather than queued to run, in words for
     /// its sender; nil when the queue is not paused. A paused queue runs only
     /// when the user resumes it, so "queued" alone told the sender a lie.
-    func agentMessageHoldReason(for id: AgentID) -> String? {
+    /// `pending` counts the sender's held messages to `id`, with `adding`
+    /// for one not yet in the queue.
+    func agentMessageHoldReason(for id: AgentID, sender: AgentID, adding: Int = 0) -> String? {
         guard pausedQueues.contains(id) else { return nil }
+        let pending = adding + (queuedWorkItemsCache[id] ?? []).filter {
+            if case .prompt(let m) = $0 { return !m.isSteer && m.agentMessageContext?.caller == sender }
+            return false
+        }.count
         let name = records[id]?.humanDisplayName ?? "The agent"
         let why: String
         switch queuePauseReasons[id] ?? .held {
@@ -2040,7 +2046,7 @@ final class AgentSupervisor {
         case .unconfirmed: why = "is paused because an earlier input's delivery is unconfirmed"
         case .held: why = "is paused"
         }
-        return "\(name) \(why). Its queue runs only when the user resumes it; a held message older than 24 h expires instead of running, and a newer message from you replaces this one."
+        return "Held (\(pending) pending from you): \(name) \(why). Held messages run in order, each as sent, only when the user resumes it; one held longer than 24 h expires unread and you are told."
     }
 
     private func pauseQueue(_ id: AgentID, _ reason: ComposerQueueRailState.Pause) {
@@ -5441,23 +5447,21 @@ final class AgentSupervisor {
         else { return (.refused, nil, nil) }
         if runners[id] != nil || pausedQueues.contains(id) || !(queuedWorkItemsCache[id] ?? []).isEmpty {
             guard let store = submissionRecoveryStore else { return (.refused, nil, nil) }
-            // A paused recipient replays its queue in order when resumed, so a
-            // sender's earlier held instruction would run before, and against,
-            // its latest one. The latest replaces them, with a record each.
-            let held = pausedQueues.contains(id)
-            if held {
-                for case .prompt(let earlier) in queuedWorkItemsCache[id] ?? []
-                where !earlier.isSteer && earlier.agentMessageContext != nil && earlier.agentMessageContext?.caller == senderID {
-                    cancelQueuedMessage(earlier.id, for: id,
-                        reason: "Replaced by a newer message from the same sender while the recipient was paused.")
-                }
-            }
+            // A paused recipient keeps every held message, in order: "do A"
+            // then "also do B" are both instructions. Age, not recency, retires
+            // them (`expireStaleAgentMessages`).
+            let heldReason = agentMessageHoldReason(for: id, sender: senderID, adding: 1)
+            let held = heldReason != nil
             let item = AgentComposerQueuedMessage(text: prompt.text, queuedAt: agentMessageNow(),
                 agentMessageHops: hops, agentMessageContext: context)
             var reservation: CompanionTaskRunHandle?
             updateCompanionTasks { reservation = try $0.reserveQueued(agentID: id.rawValue, itemID: item.id) }
             do {
-                if let context { try agentMessageOutbox.save(.init(context: context, message: item, queuePosition: (queuedWorkItemsCache[id] ?? []).count + 1)) }
+                if let context {
+                    var entry = AgentMessageOutbox.Entry(context: context, message: item, queuePosition: (queuedWorkItemsCache[id] ?? []).count + 1)
+                    entry.heldReason = heldReason
+                    try agentMessageOutbox.save(entry)
+                }
             } catch {
                 let committed = context.flatMap { try? agentMessageOutbox.lookup(caller: $0.caller, key: $0.idempotencyKey) }
                 guard committed?.message.id == item.id else {
@@ -9556,10 +9560,10 @@ final class AgentSupervisor {
     }
     private var heldHelperCompletions: [AgentID: HeldHelperCompletion] = [:]
     private var heldSweepTask: Task<Void, Never>?
-    /// Long enough for a release build or a full test run: a turn ended
-    /// with background work is progress, and waking the lead at 10 minutes
-    /// told it "finished" while the helper was still working.
-    var heldHelperCompletionCap: TimeInterval = 7200
+    /// Long enough for most builds: a turn ended with background work is
+    /// progress, and waking the lead at 10 minutes told it "finished" while
+    /// the helper was still working. Short enough that a hung job surfaces.
+    var heldHelperCompletionCap: TimeInterval = 1800
     var heldBackgroundGrace: TimeInterval = 30
     static let helperNoReportStatus = "ended its turn without filing a report"
     static let helperBackgroundRunningStatus = "ended its turn with background work still running"
@@ -9626,10 +9630,9 @@ final class AgentSupervisor {
     }
 
     private func holdsHelperCompletion(_ id: AgentID, outcome: TurnOutcome) -> Bool {
-        // A failed turn with work still running is not a terminal failure: the
-        // job's own result starts the next turn. Only a failure with nothing
-        // left running is the task's end.
-        guard outcome == .completed || outcome == .failed, let child = records[id], child.capabilities.locallyManaged,
+        // Never a failed turn: a helper out of usage cannot start another turn,
+        // so its lead must hear at once even while a job it started still runs.
+        guard outcome == .completed, let child = records[id], child.capabilities.locallyManaged,
               !helperParents(id).isEmpty, helperHasBackgroundWork(id), !helperFiledReportThisTurn(id),
               // A helper that says it is blocked is action, not progress.
               !helperIsBlocked(child) else { return false }

@@ -688,7 +688,8 @@ extension WorkspaceAPIService {
                 guard entry.context.payloadHash == payloadHash else {
                     return .error(WorkspaceAPIError(code: .idempotencyConflict, message: "This key already admitted a different message."))
                 }
-                let heldReason = entry.phase == .queued ? supervisor.agentMessageHoldReason(for: entry.context.recipient) : nil
+                let heldReason = entry.phase == .queued && supervisor.isQueuePaused(for: entry.context.recipient)
+                    ? (entry.heldReason ?? supervisor.agentMessageHoldReason(for: entry.context.recipient, sender: agentId)) : nil
                 let replay = AgentMessageResult(operationId: entry.context.operationId, delivery: heldReason == nil ? .queued : .held,
                     childAgentId: entry.context.recipient, parentAgentId: agentId,
                     childName: target.humanDisplayName, childRunning: supervisor.isRunning(childId), queuePosition: entry.queuePosition,
@@ -844,7 +845,7 @@ extension WorkspaceAPIService {
         if delivery.delivery != .refused {
             result.delivery = delivery.delivery
             result.queuePosition = delivery.position
-            if delivery.delivery == .held { result.heldReason = supervisor.agentMessageHoldReason(for: childId) }
+            if delivery.delivery == .held { result.heldReason = supervisor.agentMessageHoldReason(for: childId, sender: agentId) }
             result.childRunning = supervisor.isRunning(childId)
             operations.update(operationId: requestId) { op in
                 op.status = .committed
