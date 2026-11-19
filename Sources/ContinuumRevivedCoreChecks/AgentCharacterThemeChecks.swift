@@ -47,6 +47,7 @@ func runAgentCharacterThemeChecks() {
     let packs: [(id: String, title: String, characters: Int)] = [
         ("street-sigils", "Street Sigils", 12), ("living-chords", "Living Chords", 12),
         ("ascii-morph", "ASCII morph", 14), ("signal-ghosts", "Signal Ghosts", 12),
+        ("burrow-buddies", "Burrow Buddies", 12), ("lunchbox-pals", "Lunchbox Pals", 12),
     ]
     expect(AgentCharacterBundled.builtInIDs == ["ducks-classic"] + packs.map(\.id),
            "the built-in ids, ducks first: \(AgentCharacterBundled.builtInIDs)")
@@ -126,6 +127,7 @@ func runAgentCharacterThemeChecks() {
         expect(card.lead?.levels.first == theme.lead?.levels.first && card.lead?.rest.first == theme.lead?.rest.first,
                "\(pack.id): the card's lead matches the pack")
     }
+    runAgentCharacterCutePackChecks()
     if let core = AgentCharacterBundled.folderURL() {
         expect(!FileManager.default.fileExists(atPath: core.appendingPathComponent("packs").path),
                "Core's resources hold no pack: the iOS app bundles them")
