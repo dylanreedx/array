@@ -15,7 +15,7 @@ import pathlib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PACKS = ROOT / "Sources/ContinuumRevivedCharacterPacks/Resources/packs"
 DUCKS = ROOT / "Sources/ContinuumRevivedCore/Resources/AgentCharacters/ducks.theme.json"
-PACK_IDS = ["street-sigils", "living-chords", "ascii-morph", "signal-ghosts", "burrow-buddies", "lunchbox-pals"]
+PACK_IDS = ["street-sigils", "living-chords", "ascii-morph", "signal-ghosts", "burrow-buddies", "lunchbox-pals", "kinetic-marks", "field-units"]
 # What a card draws. AgentCharacterCardArt.loops names the same loops.
 CARD_LOOPS = ["type", "read"]
 SINGLE_CLIPS = ["cheer", "droop", "asleep", "idle", "flinch", "wave", "noticed"]

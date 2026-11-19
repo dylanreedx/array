@@ -33,5 +33,15 @@
     "id": "lunchbox-pals",
     "title": "Lunchbox Pals",
     "characters": 12
+  },
+  {
+    "id": "kinetic-marks",
+    "title": "Kinetic Marks",
+    "characters": 12
+  },
+  {
+    "id": "field-units",
+    "title": "Field Units",
+    "characters": 12
   }
 ]

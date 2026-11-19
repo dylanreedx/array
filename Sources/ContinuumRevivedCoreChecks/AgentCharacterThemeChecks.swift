@@ -48,6 +48,7 @@ func runAgentCharacterThemeChecks() {
         ("street-sigils", "Street Sigils", 12), ("living-chords", "Living Chords", 12),
         ("ascii-morph", "ASCII morph", 14), ("signal-ghosts", "Signal Ghosts", 12),
         ("burrow-buddies", "Burrow Buddies", 12), ("lunchbox-pals", "Lunchbox Pals", 12),
+        ("kinetic-marks", "Kinetic Marks", 12), ("field-units", "Field Units", 12),
     ]
     expect(AgentCharacterBundled.builtInIDs == ["ducks-classic"] + packs.map(\.id),
            "the built-in ids, ducks first: \(AgentCharacterBundled.builtInIDs)")
