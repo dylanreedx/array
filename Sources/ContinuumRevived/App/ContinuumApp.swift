@@ -25374,7 +25374,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// fresh runtime on the same directories. Returns the terminate reply.
     func qaQuitForRemount() -> NSApplication.TerminateReply {
         suppressTerminateOnWindowCloseForQA = true
-        let reply = applicationShouldTerminate(NSApplication.shared)
+        let reply = flushWorkspaceForQuit()
         if reply == .terminateNow {
             windowWillClose(Notification(name: NSWindow.willCloseNotification))
         }
@@ -26501,6 +26501,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let reply = flushWorkspaceForQuit()
+        guard reply == .terminateNow, agentSupervisor.hasTranscriptSavesPending else { return reply }
+        // Transcript saves run in tasks: exiting now would drop a hidden agent's
+        // last 2 s of text. They finish first, bounded so quit cannot hang.
+        Task { @MainActor in
+            _ = await agentSupervisor.finishTranscriptSavesForQuit()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    private func flushWorkspaceForQuit() -> NSApplication.TerminateReply {
         // ⌘Q is a menu key equivalent and takes no focus, so a zone name still
         // being typed would otherwise miss the flush below.
         canvasView?.commitZoneRename()
