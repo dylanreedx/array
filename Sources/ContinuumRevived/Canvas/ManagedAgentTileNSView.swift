@@ -591,6 +591,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         v2Composer?.onDictationLevel = { [weak self] level in
             self?.v2DictationPill.waveform.record(level: level)
         }
+        v2Composer?.onDictationVocabulary = { [weak self] in self?.dictationVocabularyTerms() ?? [] }
         v2Composer?.onDictationPreparation = { [weak self] downloading in
             self?.v2DictationPill.setMode(.preparing(downloadingModel: downloading))
         }
@@ -1100,6 +1101,21 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// Offline check seam, using the same install path as a supervisor attach.
     func qaInstallTranscriptSnapshotForChecks(_ snapshot: ManagedAgentTranscriptModel) {
         installTranscriptSnapshot(snapshot)
+    }
+
+    /// This agent's own name and branch first, then its siblings' names.
+    func dictationVocabularyTerms() -> [String] {
+        guard let source = agentSource, let id = attachedAgentID else { return [] }
+        var terms: [String] = []
+        if let record = source.records[id] {
+            terms.append(record.humanDisplayName)
+            if let branch = record.worktreeBranch {
+                terms.append(branch)
+                if let last = branch.split(separator: "/").last { terms.append(String(last)) }
+            }
+        }
+        terms += source.records.filter { $0.key != id }.prefix(20).map { $0.value.humanDisplayName }
+        return terms
     }
 
     var agentReferenceForDragging: AgentPromptReference? {

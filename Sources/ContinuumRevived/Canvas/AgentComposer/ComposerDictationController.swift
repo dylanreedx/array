@@ -13,6 +13,9 @@ protocol ComposerDictationHost: AnyObject {
     func dictationStateDidChange(_ state: DictationState)
     func dictationLevelDidChange(_ level: Float)
     func dictationPreparationDidChange(downloadingModel: Bool)
+    /// Live names near this composer (agent, branch, files), most relevant first,
+    /// used to bias recognition toward what the user is likely to say.
+    func dictationVocabulary() -> [String]
     /// Once per session, after the text is final: the one place the draft is
     /// persisted (DI-01).
     func dictationSessionDidEnd(_ outcome: DictationOutcome)
@@ -50,6 +53,13 @@ final class ComposerDictationController {
         if qaEngineFactory != nil { return true }
         if #available(macOS 26, *) { return true }
         return false
+    }
+
+    /// Warms the recogniser while the editor has focus, so pressing the mic does
+    /// not wait on the model load. Quiet no-op wherever dictation is not offered.
+    static func prewarm() {
+        guard qaEngineFactory == nil, isOffered else { return }
+        if #available(macOS 26, *) { SpeechAnalyzerDictationEngine.prewarm() }
     }
 
     private static func makeEngine() -> (any DictationEngine)? {
@@ -112,6 +122,9 @@ final class ComposerDictationController {
             host.performDictationEdit { textView.setSelectedRange(NSRange(location: anchor, length: 0)) }
         }
 
+        if #available(macOS 26, *), let real = engine as? SpeechAnalyzerDictationEngine {
+            real.vocabularyProvider = { [weak host] in host?.dictationVocabulary() ?? [] }
+        }
         let session = DictationSession(engine: engine)
         session.onStateChange = { [weak self] state in self?.sessionStateDidChange(state) }
         session.onProvisionalChange = { [weak self] text in self?.showProvisional(text) }

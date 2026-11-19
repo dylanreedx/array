@@ -27,7 +27,37 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
     /// assets; nil otherwise. Hosts may poll it to show progress in `.preparing`.
     private(set) var installProgress: Progress?
 
+    /// Live terms (agent, branch, files) the host wants recognised, most
+    /// relevant first. Read at prepare and start, so a session sees the state
+    /// at the moment the user pressed the mic.
+    var vocabularyProvider: (@MainActor () -> [String])?
+
+    /// A transcriber and analyzer prepared before the user pressed the mic. The
+    /// model load is the slow part of a press, so the composer warms one while
+    /// the editor has focus; the next session adopts it. Single use, and stale
+    /// after `warmLifetime` so a forgotten one does not hold the model forever.
+    private static var warmed: (prepared: Prepared, at: Date)?
+    private static var warming: Task<Void, Never>?
+    private static let warmLifetime: TimeInterval = 120
+
+    /// True once the user has already granted the microphone: warming must
+    /// never be the thing that raises a permission prompt.
+    static var canWarm: Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+
+    static func prewarm() {
+        guard canWarm, warming == nil else { return }
+        if let warmed, Date().timeIntervalSince(warmed.at) < warmLifetime { return }
+        warmed = nil
+        warming = Task { @MainActor in
+            defer { warming = nil }
+            let engine = SpeechAnalyzerDictationEngine()
+            guard (try? await engine.prepare()) != nil, let prepared = engine.prepared else { return }
+            warmed = (prepared, Date())
+        }
+    }
+
     private var prepared: Prepared?
+    private var normalizer = DictationNormalizer(terms: [])
     private var sink: (@MainActor (DictationEngineEvent) -> Void)?
     private var graph: CaptureGraph?
     private var analyzerTask: Task<Void, Never>?
@@ -48,6 +78,15 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
 
     func prepare() async throws {
         try await Self.ensureMicrophoneAccess()
+        if let warmed = Self.warmed {
+            Self.warmed = nil
+            if Date().timeIntervalSince(warmed.at) < Self.warmLifetime {
+                try await applyContext(to: warmed.prepared.analyzer)
+                prepared = warmed.prepared
+                return
+            }
+            Task { await warmed.prepared.analyzer.cancelAndFinishNow() }
+        }
         guard let locale = await Self.resolveLocale() else {
             throw DictationFailure.unsupportedOnThisDevice
         }
@@ -73,6 +112,7 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
             modules: [transcriber],
             options: SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .lingering)
         )
+        try await applyContext(to: analyzer)
         do {
             // Loads the model now so the first word after `.ready` is not lost
             // to first-run latency.
@@ -84,6 +124,16 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
         }
         try Task.checkCancellation()
         prepared = Prepared(transcriber: transcriber, analyzer: analyzer, format: format)
+    }
+
+    /// Biases recognition toward the project's own vocabulary and builds the
+    /// matching normaliser. Bounded by `DictationVocabulary.termLimit`.
+    private func applyContext(to analyzer: SpeechAnalyzer) async throws {
+        let terms = DictationVocabulary.assemble(dynamic: vocabularyProvider?() ?? [])
+        normalizer = DictationNormalizer(terms: terms)
+        let context = AnalysisContext()
+        context.contextualStrings[.general] = terms
+        try? await analyzer.setContext(context)
     }
 
     func start(emitting sink: @escaping @MainActor (DictationEngineEvent) -> Void) throws {
@@ -171,8 +221,9 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
 
     // MARK: - Events (main actor, generation-guarded)
 
-    private func handle(text: String, isFinal: Bool, generation: UInt64) {
+    private func handle(text rawText: String, isFinal: Bool, generation: UInt64) {
         guard generation == self.generation, sink != nil else { return }
+        let text = normalizer.normalize(rawText)
         if isFinal {
             guard !text.isEmpty else { return }
             let needsSpace = !lastFinal.isEmpty

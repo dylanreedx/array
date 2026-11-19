@@ -107,6 +107,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     var onDictationStateChange: ((DictationState) -> Void)?
     var onDictationLevel: ((Float) -> Void)?
     var onDictationPreparation: ((_ downloadingModel: Bool) -> Void)?
+    /// Names near this agent (its own name, branch, sibling agents), most
+    /// relevant first; the composer adds file names from its checkout.
+    var onDictationVocabulary: (() -> [String])?
     static let dictationKeyHint = "↩ done · esc discard"
     /// Callbacks the tile wires to `AgentSupervisor`. Direct manipulation of
     /// Array's queue; only send-now on a follow-up touches the turn in flight
@@ -955,6 +958,7 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     func composerFocusDidChange(_ textView: ComposerTextView, focused: Bool) {
         isEditorFocused = focused
+        if focused { ComposerDictationController.prewarm() }
         defer { onEditorFocusChange?(focused) }
         // Leaving the editor keeps what was said, the same as ↩.
         if !focused { dictation.finish() }
@@ -2182,6 +2186,15 @@ extension AgentComposerView: ComposerDictationHost {
 
     func dictationLevelDidChange(_ level: Float) {
         onDictationLevel?(level)
+    }
+
+    func dictationVocabulary() -> [String] {
+        var terms = onDictationVocabulary?() ?? []
+        if let root = completionContext?.checkoutRoot {
+            terms.append(root.lastPathComponent)
+            terms += DictationFileTermCache.shared.terms(forRoot: root)
+        }
+        return terms
     }
 
     func dictationPreparationDidChange(downloadingModel: Bool) {
