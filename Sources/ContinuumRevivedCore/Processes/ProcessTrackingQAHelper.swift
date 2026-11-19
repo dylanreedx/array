@@ -37,6 +37,18 @@ public enum ProcessTrackingQAHelper {
                 usleep(20_000)
             }
             Foundation.exit(0)
+        case "churn-agent":
+            // A job shaped like a build: one long-lived shell whose members
+            // start and end ~40 times a second, until `<dir>/stop-churn` exists.
+            usleep(2_500_000)
+            let shell = Process()
+            shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+            shell.arguments = ["-c",
+                               "printf '%s' \"$$\" > \"$1/churn.pid\"; while [ ! -e \"$1/stop-churn\" ]; do /bin/sleep 0.3 & /bin/sleep 0.05; done",
+                               "array-churn-script", output]
+            do { try shell.run() } catch { Foundation.exit(70) }
+            shell.waitUntilExit()
+            Foundation.exit(0)
         case "list-fds":
             let open = (0..<1024).filter { fcntl(Int32($0), F_GETFD) != -1 }
             try? open.map(String.init).joined(separator: " ").write(toFile: output, atomically: true, encoding: .utf8)

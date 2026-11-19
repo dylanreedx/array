@@ -11,8 +11,12 @@ extension Notification.Name {
 ///
 /// One scan for the whole app, off the main thread. Scans are driven three
 /// ways, so the list follows a process's whole life rather than a clock:
-/// - **Exit** is an event. Every listed process is watched with a kqueue exit
+/// - **Exit** is an event. Every job's root is watched with a kqueue exit
 ///   source; the moment one ends, the table is read again (`watchExits`).
+///   Only roots: a build under an agent starts and ends dozens of compilers a
+///   second inside one job, and a rescan per member kept this queue busy for
+///   more than half a core in 0.7.55. A member's exit changes the job's pids
+///   and ports, which the next poll picks up; a root's exit changes the list.
 /// - **Arrival** is scheduled. A new job is listed once it is
 ///   `minimumJobAge` old, so the next scan is booked for exactly then.
 /// - **Everything else** (a port opening, a job no source saw start) is
@@ -27,6 +31,10 @@ final class AgentProcessTracker {
     /// Exits arrive in bursts (Stop All, a dev server and its workers); one
     /// rescan covers the burst.
     static let exitCoalescing: TimeInterval = 0.08
+    /// QA only: `CONTINUUM_QA_PROCESS_TRACKER_LEGACY_PACING=1` restores the
+    /// 0.7.55 exit watch on every member, so one binary shows the churn
+    /// witness RED and GREEN.
+    static let legacyPacing = ProcessInfo.processInfo.environment["CONTINUUM_QA_PROCESS_TRACKER_LEGACY_PACING"] == "1"
 
     private(set) var jobsByAgent: [AgentID: [AgentBackgroundJob]] = [:]
 
@@ -53,6 +61,8 @@ final class AgentProcessTracker {
     private var exitSources: [Int32: (startedAt: Date, source: DispatchSourceProcess)] = [:]
     private var exitRescanPending = false
     private(set) var tickCount = 0
+    /// Wall time the worker has spent reading the table, for the churn witness.
+    private(set) var scanSeconds: TimeInterval = 0
     /// Scans in a row that found no job and no change; the interval stretches with it.
     private var quietScans = 0
     /// Open panels. While any is open the scan runs every second, so what you
@@ -102,11 +112,14 @@ final class AgentProcessTracker {
         worker.queue.async {
             // Every job, however young; `minimumJobAge` is applied here so the
             // tracker knows when the youngest will be old enough to list.
+            let began = Date()
             let raw = worker.reader.agentJobs(internalPathPrefixes: prefixes, minimumAge: 0)
+            let took = Date().timeIntervalSince(began)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.tickInFlight = false
                 self.tickCount += 1
+                self.scanSeconds += took
                 let now = Date()
                 var ready: [String: [AgentBackgroundJob]] = [:]
                 var nextArrival: Date?
@@ -150,12 +163,16 @@ final class AgentProcessTracker {
         self.timer = timer
     }
 
-    /// One exit source per listed process, matched by start time so a pid the
-    /// OS reuses is never mistaken for the one we were watching.
+    /// One exit source per job root, matched by start time so a pid the OS
+    /// reuses is never mistaken for the one we were watching.
     private func watchExits() {
         var wanted: [Int32: Date] = [:]
         for job in jobsByAgent.values.flatMap({ $0 }) {
-            for pid in job.pids { wanted[pid] = job.startTimes[pid] ?? job.startedAt }
+            if Self.legacyPacing {
+                for pid in job.pids { wanted[pid] = job.startTimes[pid] ?? job.startedAt }
+            } else {
+                wanted[job.rootPid] = job.startTimes[job.rootPid] ?? job.startedAt
+            }
         }
         for (pid, watch) in exitSources where wanted[pid] != watch.startedAt {
             watch.source.cancel()
