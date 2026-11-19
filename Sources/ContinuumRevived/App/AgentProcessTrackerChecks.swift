@@ -311,7 +311,54 @@ enum AgentProcessTrackerChecks {
                    "stopping the last portless script must clear the tile and top-bar indicators")
         tracker.panel.dismiss(animated: false)
 
+        // 9. Churn: a job shaped like a build, whose members start and end ~40
+        // times a second. The tracker must keep listing it while reading the
+        // table at most twice a second, and still drop it the moment its root
+        // exits. 0.7.55 rescanned on every member's exit and spent more than
+        // half a core here (`CONTINUUM_QA_PROCESS_TRACKER_LEGACY_PACING=1`
+        // restores that exit watch: this section then fails).
+        let churnDirectory = fixture.tempRoot.appendingPathComponent("churn", isDirectory: true)
+        try FileManager.default.createDirectory(at: churnDirectory, withIntermediateDirectories: true)
+        let churnCLI = try ProcessGroupChild.spawn(
+            executable: me,
+            arguments: [ProcessTrackingQAHelper.flag, "churn-agent", churnDirectory.path],
+            environment: PiAgentRunner.childEnvironment(processOwner: tag),
+            currentDirectory: nil, standardInput: .nullDevice)
+        defer {
+            try? Data().write(to: churnDirectory.appendingPathComponent("stop-churn"))
+            churnCLI.terminateGroup(graceSeconds: 0.2)
+        }
+        let churnPidFile = churnDirectory.appendingPathComponent("churn.pid")
+        func churnRoot() -> Int32? {
+            (try? String(contentsOf: churnPidFile, encoding: .utf8)).flatMap { Int32($0) }
+        }
+        // Listing is asked for (as above): after Stop All the quiet poll may be
+        // stretched past this wait. The churn window below asks for nothing.
+        let churnListed = { churnRoot().map { root in tracker.jobs(for: fixture.agentId).contains { $0.rootPid == root } } ?? false }
+        pump(until: churnListed, seconds: 15)
+        guard churnListed(), let churnRootPid = churnRoot() else {
+            throw Failure(message: "a churning build-like job must be listed; got \(tracker.jobs(for: fixture.agentId).map(\.label))")
+        }
+        let window9 = 6.0
+        let ticksBefore = tracker.tickCount
+        let busyBefore = tracker.scanSeconds
+        RunLoop.main.run(until: Date().addingTimeInterval(window9))
+        let scansPerSecond = Double(tracker.tickCount - ticksBefore) / window9
+        let scanBusy = (tracker.scanSeconds - busyBefore) / window9
+        try expect(tracker.jobs(for: fixture.agentId).contains { $0.rootPid == churnRootPid },
+                   "the churning job must stay listed while its members come and go")
+        try expect(scansPerSecond <= 2,
+                   "member churn must not drive the table scan: \(String(format: "%.1f", scansPerSecond)) scans/s, worker busy \(String(format: "%.0f", scanBusy * 100))% (limit 2)")
+        let churnKilledAt = Date()
+        try Data().write(to: churnDirectory.appendingPathComponent("stop-churn"))
+        kill(churnRootPid, SIGTERM)
+        guard let churnGoneAt = wait(until: { !tracker.jobs(for: fixture.agentId).contains { $0.rootPid == churnRootPid } }, seconds: 8) else {
+            throw Failure(message: "the churning job must leave when its root exits")
+        }
+        let churnExitLag = churnGoneAt.timeIntervalSince(churnKilledAt)
+        try expect(churnExitLag < 1.0, "under churn a job must still leave at once when its root exits; took \(String(format: "%.2f", churnExitLag))s")
+
         tile.detach()
-        return "agent process tracker check passed: listed \(String(format: "%.2f", arrivalLag))s after eligible, dropped a killed job in \(String(format: "%.2f", exitLag))s, 3 jobs on ports \(ports), panel live, opened :\(port) beside the agent, Stop and Stop All ended \(pids.count) processes; portless shell survived reply and CLI completion, retained its clock, exposed command/PID/advancing uptime, and Stop ended shell and child"
+        return "agent process tracker check passed: churn \(String(format: "%.1f", scansPerSecond)) scans/s, worker busy \(String(format: "%.1f", scanBusy * 100))%, root exit dropped in \(String(format: "%.2f", churnExitLag))s; listed \(String(format: "%.2f", arrivalLag))s after eligible, dropped a killed job in \(String(format: "%.2f", exitLag))s, 3 jobs on ports \(ports), panel live, opened :\(port) beside the agent, Stop and Stop All ended \(pids.count) processes; portless shell survived reply and CLI completion, retained its clock, exposed command/PID/advancing uptime, and Stop ended shell and child"
     }
 }
