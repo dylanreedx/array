@@ -1803,6 +1803,17 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--resize-corner-cursor-check") {
+            do {
+                _ = NSApplication.shared
+                try ResizeCornerCursorChecks.run()
+                print("ResizeCornerCursorChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL --resize-corner-cursor-check: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--tile-multiselect-check") {
             do {
                 _ = NSApplication.shared
