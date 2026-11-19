@@ -47,6 +47,7 @@ func runAgentCharacterThemeChecks() {
     let packs: [(id: String, title: String, characters: Int)] = [
         ("street-sigils", "Street Sigils", 12), ("living-chords", "Living Chords", 12),
         ("ascii-morph", "ASCII morph", 14), ("signal-ghosts", "Signal Ghosts", 12),
+        ("kinetic-marks", "Kinetic Marks", 12), ("field-units", "Field Units", 12),
     ]
     expect(AgentCharacterBundled.builtInIDs == ["ducks-classic"] + packs.map(\.id),
            "the built-in ids, ducks first: \(AgentCharacterBundled.builtInIDs)")
@@ -126,6 +127,66 @@ func runAgentCharacterThemeChecks() {
         expect(card.lead?.levels.first == theme.lead?.levels.first && card.lead?.rest.first == theme.lead?.rest.first,
                "\(pack.id): the card's lead matches the pack")
     }
+    // 1c. Kinetic Marks and Field Units at the smallest size Array draws: the
+    // 20 x 12 point slot on a 1x display, one device pixel per 4 x 4 art pixels.
+    // Every frame of every member, in both appearances, through the atlas the
+    // sprite layer draws from, still shows a figure there; and every member's
+    // still pose differs from every other's at that size, by shape or colour.
+    for id in ["kinetic-marks", "field-units"] {
+        guard let theme = AgentCharacterBundled.theme(id: id) else {
+            expect(false, "\(id): does not load")
+            return
+        }
+        expect(theme.characters.count >= 12 && theme.frameWidth == 80 && theme.frameHeight == 48,
+               "\(id): 12 members of 80 x 48 art, got \(theme.characters.count) of \(theme.frameWidth) x \(theme.frameHeight)")
+        // One small cell's figure colour, or nil where the figure covers under half of it.
+        func cells(_ atlas: AgentCharacterAtlas, _ frame: Int) -> [(Int, Int, Int)?] {
+            let rect = atlas.frames[frame]
+            var out: [(Int, Int, Int)?] = []
+            for cy in 0..<(rect.height / 4) {
+                for cx in 0..<(rect.width / 4) {
+                    var sum = (0, 0, 0), count = 0
+                    for y in 0..<4 {
+                        for x in 0..<4 {
+                            let p = atlas.pixel(x: rect.x + cx * 4 + x, y: rect.y + cy * 4 + y)
+                            if p.a == 255 { sum = (sum.0 + Int(p.r), sum.1 + Int(p.g), sum.2 + Int(p.b)); count += 1 }
+                        }
+                    }
+                    out.append(count >= 8 ? (sum.0 / count, sum.1 / count, sum.2 / count) : nil)
+                }
+            }
+            return out
+        }
+        var stills: [(name: String, cells: [(Int, Int, Int)?])] = []
+        for index in theme.characters.indices {
+            let name = theme.characters[index].name
+            for appearance in AgentCharacterAtlas.Appearance.allCases {
+                let atlas = AgentCharacterAtlas(theme: theme, character: index, appearance: appearance)
+                expect(atlas.frames.count >= 20, "\(id): \(name) has its animation, \(atlas.frames.count) distinct frames")
+                for loop in AgentCharacterLoop.allCases {
+                    expect(atlas.frameIndices(of: loop).count >= 6, "\(id): \(name) \(loop.rawValue) loop has 6 or more frames")
+                }
+                for frame in atlas.frames.indices {
+                    let inked = cells(atlas, frame).compactMap { $0 }.count
+                    expect(inked >= 10, "\(id): \(name) frame \(frame) (\(appearance.rawValue)) is \(inked) cells at the smallest size")
+                }
+                if appearance == .dark { stills.append((name, cells(atlas, atlas.frameIndex(of: .clip(.idle))))) }
+            }
+        }
+        for a in stills.indices {
+            for b in stills.indices where b > a {
+                let differ = zip(stills[a].cells, stills[b].cells).filter { lhs, rhs in
+                    switch (lhs, rhs) {
+                    case (nil, nil): return false
+                    case let (l?, r?): return abs(l.0 - r.0) + abs(l.1 - r.1) + abs(l.2 - r.2) > 90
+                    default: return true
+                    }
+                }.count
+                expect(differ >= 12, "\(id): \(stills[a].name) and \(stills[b].name) differ in only \(differ) cells at the smallest size")
+            }
+        }
+    }
+
     if let core = AgentCharacterBundled.folderURL() {
         expect(!FileManager.default.fileExists(atPath: core.appendingPathComponent("packs").path),
                "Core's resources hold no pack: the iOS app bundles them")

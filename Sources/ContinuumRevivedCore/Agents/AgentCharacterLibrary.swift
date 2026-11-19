@@ -35,7 +35,7 @@ public enum AgentCharacterBundled {
     /// The other built-in sets, in the picker's order. Each ships as
     /// `<packs>/<id>/theme.json` with its sounds beside it: the layout of an
     /// imported user set, read by the same parser and the same sound resolver.
-    public static let packIDs = ["street-sigils", "living-chords", "ascii-morph", "signal-ghosts"]
+    public static let packIDs = ["street-sigils", "living-chords", "ascii-morph", "signal-ghosts", "kinetic-marks", "field-units"]
     /// Mac only: the iOS app links Core but not this bundle, so there every pack
     /// lookup is nil and only the ducks exist.
     static let packsBundleName = "continuum-revived_ContinuumRevivedCharacterPacks.bundle"
