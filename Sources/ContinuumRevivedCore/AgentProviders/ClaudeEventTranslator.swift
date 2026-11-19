@@ -59,6 +59,11 @@ public struct ClaudeEventTranslator {
     /// The bare model id `system/init` reported — the key of this run's entry in
     /// `result.modelUsage`, where claude states the model's context window.
     private var model: String?
+    /// This turn's usage stop, from the CLI's error-tagged assistant frame
+    /// ("You've hit your 5-hour limit · resets 6:20pm (America/Toronto)") or
+    /// a `rate_limit_event` whose status is `rejected`.
+    private var pendingUsageLimitLine: String?
+    private var sawRejectedRateLimit = false
     /// The last process-cumulative `modelUsage` a numbered result reported, so
     /// a later numbered result without `model_usage_since_last_result` still
     /// yields only its own share.
@@ -136,6 +141,9 @@ public struct ClaudeEventTranslator {
         switch type {
         case "system":
             let subtype = object["subtype"] as? String
+            // A new run: a stop from a run that never reached its result must
+            // not name this one.
+            if subtype == "init" { pendingUsageLimitLine = nil; sawRejectedRateLimit = false }
             if subtype == "compact_boundary" {
                 return translateCompactBoundary(object)
             }
@@ -261,6 +269,10 @@ public struct ClaudeEventTranslator {
         // allowance. Emitting nothing here is deliberate, not an oversight.
         case "rate_limit_event":
             if let info = object["rate_limit_info"] as? [String: Any],
+               (info["status"] as? String) == "rejected" {
+                sawRejectedRateLimit = true
+            }
+            if let info = object["rate_limit_info"] as? [String: Any],
                let snapshot = AgentAccountQuota.claudeSnapshot(
                     rateLimitInfo: info, observedAt: now()) {
                 onRuntimeObservation?(.accountQuota(snapshot))
@@ -367,6 +379,16 @@ public struct ClaudeEventTranslator {
         guard let message = object["message"] as? [String: Any],
               let content = message["content"] as? [[String: Any]]
         else { return [] }
+        // The CLI's own usage stop arrives as a synthetic assistant message
+        // tagged `error: "rate_limit"` whose only text is "You've hit your
+        // 5-hour limit · resets …". Keep that line for this run's `is_error`
+        // result, whose own body may be empty.
+        if !isSubagent, object["error"] as? String == "rate_limit" {
+            let line = (content.first(where: { $0["type"] as? String == "text" })?["text"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            pendingUsageLimitLine = line.flatMap { AgentUsageLimitStop.isClaudeLimitText($0) ? $0 : nil }
+                ?? pendingUsageLimitLine ?? AgentUsageLimitStop.claudeStructuredLine
+        }
         var events: [AgentRuntimeEvent] = []
         // OCCUPANCY. One assistant frame is one API response, so its `usage`
         // describes exactly one request: `input_tokens` plus the two cache
@@ -782,12 +804,20 @@ public struct ClaudeEventTranslator {
                 provider: "claude",
                 candidates: [subtype, result]) {
                 errorMessage = AgentContextFullRecovery.canonicalErrorMessage
+            } else if let line = AgentUsageLimitStop.isClaudeLimitText(result)
+                        ? result?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        : (pendingUsageLimitLine ?? (sawRejectedRateLimit ? AgentUsageLimitStop.claudeStructuredLine : nil)) {
+                // The account ran out. The CLI's own line, whole, so the
+                // supervisor can pause the agent on usage instead of failing it.
+                errorMessage = line
             } else {
                 errorMessage = AgentFailureText.providerMessage(result)
                     ?? (subtype == "success" || subtype == nil
                         ? "Claude Code reported an error without details." : subtype)
             }
         }
+        pendingUsageLimitLine = nil
+        sawRejectedRateLimit = false
         events.append(.turnCompleted(
             threadId: threadId,
             turnId: currentTurnId,
