@@ -42,8 +42,10 @@ public enum SidebarFailureCause: String, CaseIterable, Equatable, Sendable {
     /// cannot continue until you act.
     public var isBlocking: Bool {
         switch self {
-        case .usageLimit, .signInExpired, .couldNotStart: return true
-        case .providerBusy, .interruptedByRestart, .taskError: return false
+        // A usage pause needs nobody: Array resumes it at the reset. It is
+        // never a Needs-you item (usage-resume, step 8).
+        case .signInExpired, .couldNotStart: return true
+        case .usageLimit, .providerBusy, .interruptedByRestart, .taskError: return false
         }
     }
 
@@ -72,7 +74,8 @@ public enum SidebarFailureCause: String, CaseIterable, Equatable, Sendable {
     /// The one action. Sign-in runs the CLI's own login; never an API key.
     public var actionTitle: String {
         switch self {
-        case .usageLimit: return "Switch & resume…"
+        // Switching accounts lives in the agent's tile only: the sidebar opens it.
+        case .usageLimit: return "Open"
         case .providerBusy: return "Retry"
         case .signInExpired: return "Sign in…"
         case .couldNotStart: return "Repair setup…"
@@ -184,8 +187,12 @@ public enum SidebarRecovery {
             if cause == .usageLimit, !row.usageExhaustedNow { return .taskError }
             return cause
         }
-        if outcome == .interrupted, classify(row.failureDetail) == .interruptedByRestart {
-            return .interruptedByRestart
+        if outcome == .interrupted {
+            let words = classify(row.failureDetail)
+            if words == .interruptedByRestart { return .interruptedByRestart }
+            // Array delivers a usage stop as an interrupted turn carrying the
+            // CLI's line; it is a pause only while the agent's own pause lasts.
+            if words == .usageLimit, row.usageExhaustedNow { return .usageLimit }
         }
         return nil
     }
@@ -431,9 +438,8 @@ public enum SidebarIncidents {
                 : "\(first.displayTitle) · \(firstFamily.displayTitle)"
             switch group.cause {
             case .usageLimit:
-                title = "\(provider) usage ran out"
-                let resumable = owners.count == 1 ? "1 can resume" : "\(owners.count) can resume"
-                detail = "\(agents) paused in \(familyWord) · \(resumable)"
+                title = "Waiting for \(provider) usage"
+                detail = "\(agents) in \(familyWord) · Array resumes \(count == 1 ? "it" : "them") at the reset"
             case .signInExpired:
                 title = "\(provider) sign-in expired"
                 detail = count == 1 ? where1 : "\(agents) in \(familyWord)"
@@ -455,10 +461,6 @@ public enum SidebarIncidents {
             let action: String = {
                 if group.cause == .interruptedByRestart || group.cause == .providerBusy,
                    group.rows.allSatisfy(\.resumesThroughLead) { return "Resume with lead" }
-                // Switch only when a second signed-in account of this CLI exists.
-                if group.cause == .usageLimit, !group.rows.contains(where: \.usageCanSwitchAccount) {
-                    return SidebarFailureCause.usageResumeTitle
-                }
                 return group.cause.actionTitle
             }()
             result.append(SidebarIncident(
@@ -706,9 +708,9 @@ public enum SidebarClearMarks {
 // MARK: - Dogfood fixes (0.7.53): live usage and dismissible Needs-you items
 
 extension SidebarFailureCause {
-    /// A usage pause's action when no second signed-in account of that CLI
-    /// exists: open the paused agent to continue it, never "Switch".
-    public static let usageResumeTitle = "Resume"
+    /// A usage pause's one sidebar action: open the paused agent. Switching
+    /// accounts is offered in its tile only, never here.
+    public static let usageResumeTitle = "Open"
 }
 
 /// What the host knows LIVE about one CLI's usage: whether its account in use
@@ -720,6 +722,19 @@ public enum SidebarUsageLive {
         public init(exhausted: Bool, canSwitch: Bool) {
             self.exhausted = exhausted
             self.canSwitch = canSwitch
+        }
+    }
+
+    /// Usage-resume: a row is paused on usage only while ITS OWN agent holds a
+    /// usage pause (set at the stop, cleared at the reset, by a later success
+    /// on the same account, or by a reading under 100%). Neither another
+    /// account's reading nor an old failure's words make it one.
+    public static func stamp(_ rows: [AgentInboxRow], pausedAgents: Set<UUID>) -> [AgentInboxRow] {
+        rows.map { row in
+            var stamped = row
+            stamped.usageExhaustedNow = pausedAgents.contains(row.id)
+            stamped.usageCanSwitchAccount = false
+            return stamped
         }
     }
 

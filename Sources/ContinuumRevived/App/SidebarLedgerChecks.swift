@@ -12,8 +12,9 @@ import ContinuumRevivedCore
 //   1. the lead's chip says "18 helpers · 12 paused · 1 failed", its AX help
 //      carries the full partition, and shown helper rows + the drawn fold
 //      numbers = 18; "failed" is drawn once on the card;
-//   2. each failure class draws its label and one action; "Switch & resume…"
-//      reaches the host when pressed, the others draw disabled this release;
+//   2. each failure class draws its label and one action; a usage pause's
+//      "Open" reaches the host when pressed (never "Switch & resume…": account
+//      switching lives in the tile), the others draw disabled this release;
 //   3. Clear N acts on exactly the clearable rows without telling the host: the
 //      rows leave, blocked rows stay, Undo brings them back;
 //   4. switching Settings > Sidebar > Layout re-renders the list live;
@@ -285,8 +286,8 @@ enum SidebarLedgerChecks {
         // 2. Each failure class: its label and its one action, pressed.
         let expected: [(String, String, SidebarIncident.Kind)] = [
             ("Redesign tile agent bubble", "Respond", .needsYou),
-            ("Claude usage ran out", "Switch & resume…", .cause(.usageLimit)),
-            ("Codex usage ran out", "Switch & resume…", .cause(.usageLimit)),
+            ("Waiting for Claude usage", "Open", .cause(.usageLimit)),
+            ("Waiting for Codex usage", "Open", .cause(.usageLimit)),
             ("Claude sign-in expired", "Sign in…", .cause(.signInExpired)),
             ("Codex couldn't start", "Repair setup…", .cause(.couldNotStart)),
             ("Codex was busy", "Retry", .cause(.providerBusy)),
@@ -321,10 +322,14 @@ enum SidebarLedgerChecks {
                 }
             }
         }
-        // The usage incident counts owners: 11 Claude agents, 11 can resume.
-        if let claude = inbox.sidebarIncidents.first(where: { $0.title == "Claude usage ran out" }),
-           claude.detail != "11 agents paused in 1 family · 11 can resume" {
-            throw fail("usage detail reads '\(claude.detail)'")
+        // The usage incident counts its agents and says Array resumes them;
+        // it is never blocking, so never a Needs you item.
+        if let claude = inbox.sidebarIncidents.first(where: { $0.title == "Waiting for Claude usage" }),
+           claude.detail != "11 agents in 1 family · Array resumes them at the reset" || claude.isBlocking {
+            throw fail("usage detail reads '\(claude.detail)', blocking \(claude.isBlocking)")
+        }
+        guard !inbox.sidebarIncidents.contains(where: { $0.actionTitle == "Switch & resume…" }) else {
+            throw fail("the sidebar must never offer Switch & resume…")
         }
 
         // 3. Clear N, through its button.
@@ -430,7 +435,7 @@ enum SidebarLedgerChecks {
             throw fail("failed is repeated on the lead card: '\(said)'")
         }
         return "  \(label): chip '18 helpers · 12 paused · 1 failed', \(familyRows) drawn + folds \(foldNumbers) = 18 (\(foldTitles.joined(separator: " / "))); "
-            + "\(expected.count) incidents drawn with their actions, Switch & resume pressed to the host and the rest disabled; Clear \(expectedClear.count) left blockers, Undo restored; layout switch re-rendered twice; tile-less helper drawn like its sibling"
+            + "\(expected.count) incidents drawn with their actions, usage Open pressed to the host and the rest disabled, no Switch & resume; Clear \(expectedClear.count) left blockers, Undo restored; layout switch re-rendered twice; tile-less helper drawn like its sibling"
     }
 
     static func still(window: NSWindow, inbox: AgentInboxView, to url: URL) throws {
@@ -540,44 +545,50 @@ extension SidebarLedgerChecks {
         guard live().contains(leadID.rawValue), f.canvas.tileView(for: tileID) != nil else {
             throw Failure(description: "Undo did not bring the lead back")
         }
-        // "Switch & resume…": a live usage stop on the helper, its incident's
-        // button pressed through the window, Settings opens on Agents.
+        // A usage stop on the helper opens its own pause; its incident's
+        // "Open" pressed through the window reveals that agent (never Settings).
         f.delegate.qaAttachWindowForOfflineCheck(window)
         let supervisor = f.delegate.qaAgentSupervisor
         guard let helperID = supervisor.records.values.first(where: { $0.parentAgentID == leadID })?.id else {
             throw Failure(description: "the fixture helper is missing")
         }
-        try SidebarDogfoodChecks.makeUsageLive(supervisor, harness: .codex, root: f.tempRoot, secondLogin: true)
+        supervisor.usageAutoResumeDefault = false
         let thread = AgentSupervisor.threadId(for: helperID)
         supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "usage"), to: helperID)
         supervisor.qaDeliver(.turnCompleted(threadId: thread, turnId: "usage", outcome: .failed,
                                             errorMessage: "You've hit your 5-hour limit · resets 4:00 AM"), to: helperID)
         f.delegate.qaRefreshAgentSurfaces()
         inbox.layoutForQA()
+        supervisor.setUsageAutoResume(false, for: helperID)
+        f.delegate.qaRefreshAgentSurfaces()
+        inbox.layoutForQA()
         // The Ledger draws the usage stop as an incident row; the Quiet inbox,
-        // as a line of its Needs you box. Either way its drawn action is pressed.
+        // as the cause line in its family's card (never a Needs you line).
         var usageAction: InboxSettleNudgeButton?
         if let usageAt = inbox.itemsForQA.firstIndex(where: {
             if case .incident(let i) = $0 { return i.kind == .cause(.usageLimit) } else { return false }
         }), let usageCell = inbox.cellForQA(atItem: usageAt) as? SidebarIncidentCellView {
             usageAction = usageCell.actionButton
-        } else if let box = QuickHideChecks.views(in: inbox, where: { $0 is SidebarQuietNeedsYouView && !$0.isHiddenOrHasHiddenAncestor })
-            .first as? SidebarQuietNeedsYouView {
-            usageAction = box.lines.first { $0.incident?.kind == .cause(.usageLimit) }?.actionButton
+        } else if let line = inbox.familyCauseCells.values.first(where: { $0.causeIncidentForQA?.kind == .cause(.usageLimit) }) {
+            usageAction = line.causeActionForQA
+        }
+        guard QuickHideChecks.views(in: inbox, where: { $0 is SidebarQuietNeedsYouView && !$0.isHiddenOrHasHiddenAncestor }).isEmpty else {
+            throw Failure(description: "a usage pause must never draw a Needs you box")
         }
         guard let usageAction else {
             let helperRow = inbox.allRowsForQA.first { $0.id == helperID.rawValue }
             throw Failure(description: "no usage incident drawn (helper state \(String(describing: helperRow?.state)), detail \(helperRow?.failureDetail ?? "nil"))")
         }
         window.contentView?.layoutSubtreeIfNeeded()
-        guard usageAction.title == "Switch & resume…", usageAction.isEnabled else {
+        guard usageAction.title == "Open", usageAction.isEnabled else {
             throw Failure(description: "usage action reads '\(usageAction.title)', enabled \(usageAction.isEnabled)")
         }
-        try press(usageAction, in: window, "Switch & resume…")
-        guard let modal = f.delegate.qaSettingsModal, modal.isVisible, modal.model.selectedPaneID == "agents" else {
-            throw Failure(description: "Switch & resume did not open Settings > Agents (modal \(f.delegate.qaSettingsModal?.isVisible == true), pane \(f.delegate.qaSettingsModal?.model.selectedPaneID ?? "nil"))")
+        try press(usageAction, in: window, "Open")
+        guard f.delegate.lastSidebarIncidentOutcomeForQA == .revealedAgent(helperID.rawValue),
+              f.delegate.qaSettingsModal?.isVisible != true else {
+            throw Failure(description: "usage Open must reveal the paused helper, not Settings — got \(f.delegate.lastSidebarIncidentOutcomeForQA)")
         }
-        return "SidebarClearTilesChecks passed (\(layout.title)): Switch & resume… pressed through the window opened Settings > Agents (accounts); Clear through the real button left all \(tilesBefore.count) tiles on the canvas, settled no record, moved the lead out of the live list, and Undo brought it back"
+        return "SidebarClearTilesChecks passed (\(layout.title)): the usage pause's Open pressed through the window revealed the paused helper (no Settings, no Needs you box); Clear through the real button left all \(tilesBefore.count) tiles on the canvas, settled no record, moved the lead out of the live list, and Undo brought it back"
     }
 }
 

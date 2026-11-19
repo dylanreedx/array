@@ -276,6 +276,16 @@ public struct AgentAccountQuotaSnapshot: Equatable, Sendable, Codable {
         windows.first { $0.kind == kind }
     }
 
+    /// This reading as it should replace `previous`: one that states no
+    /// window keeps the windows `previous` stated (a credits-only update says
+    /// nothing about the allowance) and takes only its credit facts.
+    public func replacing(_ previous: AgentAccountQuotaSnapshot?) -> AgentAccountQuotaSnapshot {
+        guard windows.isEmpty, let previous, !previous.windows.isEmpty, previous.harness == harness else { return self }
+        var merged = previous
+        merged.credits = credits ?? previous.credits
+        return merged
+    }
+
     /// Nothing worth showing: no window carries a reading and there are no
     /// credit facts either. Emitting this would replace a real prior reading
     /// with a blank one, so producers drop it instead.
@@ -317,9 +327,13 @@ public enum AgentAccountQuota {
         }
 
         if windows.isEmpty, let type = rateLimitInfo["rateLimitType"] as? String, !type.isEmpty {
+            // The flat shape states no percentage. `status: "rejected"` IS
+            // the statement that the window is used up: the CLI refused the
+            // request. Reading it as "unknown" kept every Claude stop off 100%.
+            let rejected = (rateLimitInfo["status"] as? String) == "rejected"
             windows.append(AgentQuotaWindow(
                 kind: AgentQuotaWindowKind(providerName: type),
-                utilization: nil,
+                utilization: rejected ? 1.0 : nil,
                 resetsAt: epochSeconds(rateLimitInfo["resetsAt"])))
         }
 
@@ -344,6 +358,12 @@ public enum AgentAccountQuota {
         observedAt: Date,
         source: AgentQuotaTelemetrySource = .codexAccountRateLimits
     ) -> AgentAccountQuotaSnapshot? {
+        // Codex reports more than one bucket. Only `codex` is the account's
+        // allowance; `premium` arrives with no windows and a "0" credit
+        // balance right before a usage stop (every one of 36 stops in
+        // `~/.codex/sessions`, 2026-10-19…11-18). Taken as the account's
+        // reading, it blanked the spent window at the moment it hit 100%.
+        if let limit = rateLimits["limitId"] as? String, !limit.isEmpty, limit != "codex" { return nil }
         var windows: [AgentQuotaWindow] = []
         for key in ["primary", "secondary"] {
             guard let body = rateLimits[key] as? [String: Any] else { continue }

@@ -640,6 +640,13 @@ if CommandLine.arguments.contains("--agent-account-quota-check") {
     Foundation.exit(0)
 }
 
+// Usage resume step 1: Claude's limit wording and rejected rate-limit reading,
+// Codex's usage_limit_exceeded, never "reported an error without details".
+if CommandLine.arguments.contains("--agent-usage-limit-check") {
+    runAgentUsageLimitChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--agent-account-usage-check") {
     runAgentAccountUsageChecks()
     Foundation.exit(0)
@@ -11753,6 +11760,7 @@ runAgentContextOccupancyChecks()
 runAgentAccountQuotaChecks()
 // .plans/101 — live limits and identity, read with no model turn.
 runAgentAccountUsageChecks()
+runAgentUsageLimitChecks()
 
 // Plan: .plans/01-provider-cli-backends.md (claude CLI backend)
 runClaudeAgentBackendChecks()

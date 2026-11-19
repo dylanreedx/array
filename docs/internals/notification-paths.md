@@ -1,6 +1,6 @@
 # Notification paths
 
-Maintained contract and source inventory. Last audited: 2026-11-05 (character sounds MAC-10…13: built-in packs).
+Maintained contract and source inventory. Last audited: 2026-11-18 (usage pauses: MAC-15, helper delivery; earlier: character sounds MAC-10…13).
 
 Every Array-owned agent notification needs a stable path ID and an explicit
 trigger → policy → recipient → delivery surface → tap/action → outcome chain.
@@ -293,6 +293,23 @@ priority only for steers it would actually take, so an uncertain one no longer
 spins the take-and-return loop. Witnesses: `--helper-completion-check` (R3
 cases, including one driven by the production flush timer on a frozen clock)
 and `--helper-wake-setting-check` (queued-message lookup).
+
+Usage pauses (usage-resume, 2026-11-18). A helper turn that ends on its CLI's
+usage stop is not a failure: the supervisor records a per-agent usage pause
+(`AgentSupervisor.openUsagePause`, the agent's own account and the stated
+reset) before the transient retry, failure signal, helper result or queue see
+the turn, and delivers it as an interrupted turn carrying the CLI's line. Its
+lead receives ONE delivery headed `finished: paused for Claude usage; Array
+resumes it at 10:20 PM` (or `…when usage frees up` with no stated reset, or
+`…when someone resumes it` with Resume automatically off), never `failed`; the
+spawn-result file carries the same words. Array then resumes the SAME session
+on the SAME harness with one continuation turn — at the reset, at a later
+success on the same account, or at a reading under 99% — oldest stop first,
+one agent per `usageResumeStagger` (20 s), never a fresh session or another
+CLI; an agent with no existing session, or a shared agent, waits for a person.
+The resume leaves the lead a progress NOTE (`resumed after the Claude usage
+reset, on the same session`), which never starts a lead turn. Witness:
+`--agent-usage-resume-check`.
 
 Progress text and output emitted after a result was delivered (the +16 s case,
 or a report filed after the turn) become durable queue NOTES (`helperNote`), one
@@ -673,7 +690,7 @@ These do not pass through Fly or the phone classifier.
 | MAC-12 | A turn fails or a runtime error arrives; an approval or user-input request opens | Character sound: the set's `sounds.honk` / `sounds.chirp`, else bundled honk / chirp | Exempt from the 1.5 s gap. Replay ignored |
 | MAC-13 | Every MAC-10…12 event that does not sound | Quiet, recorded with its reason in `AgentCharacterSoundCenter.outcomes` | Toggle off (default) `off`; agent sound master off `masterOff`; characters hidden `charactersHidden`; tile override mutes the matching event `muted`; Array's alert sound played for the same signal `alertPlayed`; gap `tooSoon`; no clip and no bundled file `noSound`. A headless agent (no tile) and a shared agent's guest are never fed. Player failure: logged to stderr, nothing retried; a playing alert of higher priority keeps playing and the character sound is dropped |
 | MAC-14 | Workspace API result tile fully outside the canvas | Local canvas edge indicator, silent; click or Return visits via `revealTileForWork` | Visible tiles stay quiet; indicator clears on visibility or visit. Missing/unmounted tile has no indicator. No push, retry, sound or startup presentation. Behavioral leg: `--workspace-api-agent-camera-check` |
-| MAC-15 | A sidebar row's semantic status changes during a row push, including a lazily loaded usage cause and a LIVE usage transition | `AgentInboxView.updateStatusSnapshots` → the row's single status owner → `NSAccessibility.announcementRequested`, recipient is local assistive technology. Message is agent title + status. A row whose recorded failure words are a usage stop reads “Paused · usage” in both layouts only while its CLI's live usage is exhausted (`SidebarRecovery.cause` reads `usageExhaustedNow`, stamped by `AppDelegate.sidebarUsageStates`: a window of the account in use at 100% whose reset is still ahead). Live usage reaches the rows from both writers of the account snapshot — the usage probe (`accountUsageDidChangeNotification`) and a live runner's `.accountQuota` observation (`AgentSupervisor.onAccountQuotaObserved`) — through `AppDelegate.refreshSidebarUsageIfChanged`. The timer for the earliest spent window's reset calls `reloadWorkspaceSidebar(rebuildAgentActivity: false)` directly. Entry (exhausted) announces “Paused · usage”; recovery (reading below 100%, or the reset passing) announces the row's ordinary failed status. An unconfirmed row retains “Unconfirmed…last known status” | Initial snapshot/new identity is quiet; elapsed-only and repeated semantic status are quiet; removed identities are pruned. A quota reading that leaves every CLI's live state unchanged pushes no rows and is quiet. With no live reading an old usage stop is never “Paused · usage”. No phone push, app banner, sound, tap action or retry. Framework delivery has no acknowledgement. `--sidebar-quiet-inbox-check` witnesses the real supervisor row-update path and captured announcement, including the confidence qualifier; `--sidebar-dogfood-check` witnesses the announcement on entry and recovery through a runner-delivered quota on the mounted sidebar, a repeated reading staying quiet, and time-only expiry; `--sidebar-ux-check` covers status-owner/quiet behavior. Actual VoiceOver audio is not witnessed |
+| MAC-15 | A sidebar row's semantic status changes during a row push, including a lazily loaded usage cause and a usage pause opening or ending | `AgentInboxView.updateStatusSnapshots` → the row's single status owner → `NSAccessibility.announcementRequested`, recipient is local assistive technology. Message is agent title + status. Usage-resume (2026-11-18): a row reads “Paused · usage” in both layouts only while ITS OWN agent holds a usage pause (`AgentSupervisor.usagePauses`, stamped by `SidebarUsageLive.stamp(_:pausedAgents:)` in `AppDelegate`), never from the account in use's live reading or an old failure's words. The pause opens when a turn ends on the CLI's usage stop (Claude's “You've hit your 5-hour/weekly/session limit · resets …”, a rejected `rate_limit_event`, Codex's `usage_limit_exceeded`) and ends at the stated reset, at a later success on the same account, at a reading of that account under 99%, or on Stop; every change calls `AgentSupervisor.onUsagePausesChanged` → `reloadWorkspaceSidebar`. Entry announces “Paused · usage”; the resume announces the working status. A usage pause is NOT blocking: it is never a Needs-you line, and its only sidebar action is “Open” (reveals the agent); the sidebar has no “Switch & resume…” (account switching lives in the agent tile). An unconfirmed row retains “Unconfirmed…last known status” | Initial snapshot/new identity is quiet; elapsed-only and repeated semantic status are quiet; removed identities are pruned. A quota reading changes no row by itself. No phone push, app banner, sound, tap action or retry for a usage pause (the stop is delivered as an interrupted turn, so MAC-03, MAC-11 and MAC-12 stay quiet). Framework delivery has no acknowledgement. `--agent-usage-resume-check` witnesses the pause opening per agent, delivered interrupted with no failed terminal, and ending by success/reset/reading/Stop through the production supervisor; `--sidebar-quiet-inbox-check` witnesses the real supervisor row-update path and captured announcement; `--sidebar-dogfood-check` witnesses entry and recovery on the mounted sidebar; `--sidebar-ux-check` covers status-owner/quiet behavior. Actual VoiceOver audio is not witnessed |
 
 Character sounds (MAC-10…13) are Settings › Notifications & Sounds › Character
 sounds, off by default, under the same master switch and volume, through the same

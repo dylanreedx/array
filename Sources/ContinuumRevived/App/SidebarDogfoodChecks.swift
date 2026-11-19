@@ -108,6 +108,8 @@ enum SidebarDogfoodChecks {
         // The fixture's own source agent has never run: settle it so the list
         // is only about the agents each section makes.
         _ = delegate.qaAgentSupervisor.settle(agentID: fixture.agentId)
+        // Usage pauses here are sidebar fixtures: nothing resumes mid-check.
+        delegate.qaAgentSupervisor.usageAutoResumeDefault = false
         return Harness(fixture: fixture, suite: suite, window: window, sidebar: sidebar,
                        inheritedAppSupport: inherited, appSupport: agentStoreRoot)
     }
@@ -323,6 +325,11 @@ enum SidebarDogfoodChecks {
                              parentAgentID: parent, displayName: name)
         }
         let codexWords = "You've hit your usage limit. Upgrade to Pro or try again at 3:05 PM."
+        // This fixture has no CLI to run the lead: a wake with the helpers'
+        // "paused for usage" report fails and retries, flipping the lead to
+        // working mid-check, which takes it out of Clear. The lead's delivery
+        // is witnessed by --agent-usage-resume-check; here it stays off.
+        supervisor.helperCompletionEnabled = { _ in false }
         let lead = codex("Release lead")
         let paused = (0..<2).map { codex("Overnight helper \($0 + 1)", parent: lead) }
         h.finish(lead)
@@ -355,86 +362,68 @@ enum SidebarDogfoodChecks {
             inbox.layoutForQA()
         }
 
-        // (a) Old failure words alone, no live reading: nothing needs you.
-        try expect(usageIncidents().isEmpty && usageLine() == nil,
-                   "(a) a usage item shows with no live reading — incidents \(inbox.sidebarIncidents.map(\.title))")
-        // Live usage NOT exhausted: still nothing, and the stops are clearable.
-        reading(active.id, org: "org-personal", used: 0.4)
-        try expect(usageIncidents().isEmpty && usageLine() == nil,
-                   "(a) a usage item shows while live usage is 40% — incidents \(inbox.sidebarIncidents.map(\.title))")
-        try expect(inbox.sidebarClearIDs.contains(lead.rawValue),
-                   "(a) with usage available, the family with old usage stops is clearable (its lead takes them) — Clear \(inbox.sidebarClearIDs.count)")
-        // Live usage exhausted: the item appears, through the reading's own notification.
-        reading(active.id, org: "org-personal", used: 1.0)
-        guard let line = usageLine() else {
-            throw Failure(description: "(a) live usage is exhausted but Needs you has no usage item — incidents \(inbox.sidebarIncidents.map(\.title))")
+        // Usage-resume: each stop opened a real usage pause on its own agent.
+        // Resume automatically is off here so nothing resumes mid-check.
+        for id in paused { supervisor.setUsageAutoResume(false, for: id) }
+        h.refresh()
+        inbox.layoutForQA()
+        // (a) The stop is a pause on the agent, never a Needs you item.
+        guard let incident = usageIncidents().first else {
+            throw Failure(description: "(a) the agents' own usage pauses draw no usage item — incidents \(inbox.sidebarIncidents.map(\.title))")
         }
-        try expect(line.titleLabel.stringValue == "Codex usage ran out", "(a) the item reads '\(line.titleLabel.stringValue)'")
-        // (c, e) One Codex account: Resume, never Switch.
-        try expect(line.actionButton.title == SidebarFailureCause.usageResumeTitle,
-                   "(c) with one Codex account the action reads '\(line.actionButton.title)', wanted Resume")
-        try Q.click(line.actionButton)
+        try expect(incident.title == "Waiting for Codex usage" && !incident.isBlocking && box() == nil && usageLine() == nil,
+                   "(a) the pause reads '\(incident.title)', blocking \(incident.isBlocking), box \(box() != nil)")
+        try expect(paused.allSatisfy { id in inbox.allRowsForQuietCheck.first { $0.id == id.rawValue }.map { SidebarRecovery.state(for: $0) == .paused } == true },
+                   "(a) each stopped helper reads paused")
+        // (b) A live reading changes nothing by itself: 40%, 100%, and a second
+        // signed-in login all leave one item whose action is Open, never Switch.
+        for (org, used) in [("org-personal", 0.4), ("org-personal", 1.0)] {
+            reading(active.id, org: org, used: used)
+            try expect(usageIncidents().count == 1 && box() == nil, "(b) a \(Int(used * 100))% reading moved the usage item")
+        }
+        let work = try supervisor.addAccount(harness: .codex, label: "Work")
+        reading(work.id, org: "org-work", used: 0.1)
+        try expect(usageIncidents().first?.actionTitle == "Open"
+                   && !inbox.sidebarIncidents.contains { $0.actionTitle == "Switch & resume…" },
+                   "(b) with a second login the sidebar still offers '\(usageIncidents().first?.actionTitle ?? "nil")', never Switch & resume…")
+        // (c) Open reveals a paused agent through the host.
+        _ = h.delegate.performSidebarIncident(usageIncidents()[0])
         try expect(h.delegate.lastSidebarIncidentOutcomeForQA == .revealedAgent(lead.rawValue)
                        || paused.contains { h.delegate.lastSidebarIncidentOutcomeForQA == .revealedAgent($0.rawValue) },
-                   "(c) Resume opens the paused agent — got \(h.delegate.lastSidebarIncidentOutcomeForQA)")
-        // (c) A second folder holding the SAME login is not a second account.
-        let work = try supervisor.addAccount(harness: .codex, label: "Work")
-        reading(work.id, org: "org-personal", used: 0.1)
-        try expect(usageLine()?.actionButton.title == SidebarFailureCause.usageResumeTitle,
-                   "(c) a second folder on the same login offers '\(usageLine()?.actionButton.title ?? "nil")', wanted Resume")
-        // (c) A second signed-in account with a different login: Switch.
-        reading(work.id, org: "org-work", used: 0.1)
-        guard let switchLine = usageLine(), switchLine.actionButton.title == "Switch & resume…" else {
-            throw Failure(description: "(c) a second signed-in Codex account offers '\(usageLine()?.actionButton.title ?? "nil")', wanted Switch & resume…")
-        }
+                   "(c) Open reveals the paused agent — got \(h.delegate.lastSidebarIncidentOutcomeForQA)")
         inbox.scrollToTopForQA()
-        Q.photograph(h.sidebar, "dogfood-needsyou-live")
-        try Q.click(switchLine.actionButton)
-        try expect(h.delegate.lastSidebarIncidentOutcomeForQA == .openedSettings("agents"),
-                   "(c) Switch & resume… opens Settings > Agents — got \(h.delegate.lastSidebarIncidentOutcomeForQA)")
-
-        // (d) Dismiss through the drawn ×; it persists and stays away on a push.
-        guard let dismissed = switchLine.incident else { throw Failure(description: "no usage incident to dismiss") }
-        try Q.click(switchLine.dismissButton)
+        Q.photograph(h.sidebar, "dogfood-usage-pause")
+        // (d) The pauses end (reset, success or probe): the item clears itself.
+        for id in paused { supervisor.qaSetUsagePause(nil, for: id) }
+        // No wait: the push that ending a pause schedules may land after the
+        // click below. A Clear must win over any push carrying older state.
         inbox.layoutForQA()
-        try expect(usageLine() == nil, "(d) the dismissed usage item is still drawn")
-        try expect(SidebarIncidentDismissals.isDismissed(
-            dismissed, dismissed: SidebarIncidentDismissals.load(from: h.suite), rows: inbox.allRowsForQuietCheck),
-                   "(d) the dismissal is not persisted — \(SidebarIncidentDismissals.load(from: h.suite))")
-        h.refresh()
-        let reread = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 380, height: 600), indicatorDefaults: h.suite)
-        reread.reload(rows: inbox.allRowsForQuietCheck)
-        try expect(!reread.sidebarIncidents.contains { $0.kind == .cause(.usageLimit) },
-                   "(d) a sidebar built from the saved settings shows the dismissed item again")
-        try expect(usageLine() == nil, "(d) a push brought the dismissed item back with nothing new")
-        // (d) A new incident brings it back: another helper stops on usage.
-        let third = codex("Overnight helper 3", parent: lead)
-        h.finish(third, failed: codexWords)
-        h.refresh()
-        try expect(usageLine() != nil, "(d) a new usage stop did not bring the dismissed item back")
-
-        // (b) Usage returns: the item clears itself, through the reading alone.
-        reading(active.id, org: "org-personal", used: 0.3)
-        try expect(usageLine() == nil && usageIncidents().isEmpty,
-                   "(b) usage returned but the item stays — incidents \(inbox.sidebarIncidents.map(\.title))")
-        // Cleared stays cleared when usage later runs out: nothing happened to
-        // those agents, so the old stop must not bring the family back.
+        try expect(usageIncidents().isEmpty && box() == nil,
+                   "(d) the pauses ended but the item stays — incidents \(inbox.sidebarIncidents.map(\.title))")
+        // Cleared stays cleared when usage later reads 100%: old words without a
+        // pause are never one, so the old stop must not bring the family back.
         guard let clear = (Q.views(in: inbox) {
             ($0 as? SidebarSectionLabelView)?.titleForQA.hasPrefix("Inbox") == true && !$0.isHiddenOrHasHiddenAncestor
         }.first as? SidebarSectionLabelView)?.clearButton, !clear.isHidden,
               inbox.sidebarClearIDs.contains(lead.rawValue) else {
-            throw Failure(description: "with usage back, the family is not offered to Clear — Clear \(inbox.sidebarClearIDs.count)")
+            throw Failure(description: "with the pauses over, the family is not offered to Clear — Clear \(inbox.sidebarClearIDs.count)")
         }
+        let clearIDsBefore = inbox.sidebarClearIDs.count
         try Q.click(clear)
+        inbox.layoutForQA()
+        let clickedMarks = inbox.clearMarks.keys.contains(lead.rawValue)
+        // The pause-end push, and another, land after the Clear.
+        pump(0.3)
+        h.refresh()
         inbox.layoutForQA()
         func drawnLive() -> Bool {
             inbox.itemsForQuietCheck.contains { $0.agentRow?.id == lead.rawValue && $0.agentRow?.isCleared == false }
         }
-        try expect(!drawnLive(), "Clear left the family in the live list")
+        try expect(!drawnLive(), "Clear left the family in the live list (click marked lead \(clickedMarks), marks now \(inbox.clearMarks.keys.contains(lead.rawValue)), toast '\(inbox.undoToastTextForQA)', clear ids before \(clearIDsBefore)) — rows \(inbox.allRowsForQuietCheck.filter { $0.id == lead.rawValue || $0.parentId == lead.rawValue }.map { "\($0.displayTitle):\($0.state):\(SidebarRecovery.state(for: $0)):cause=\(String(describing: SidebarRecovery.cause(for: $0))):blocked=\($0.settlementBlocked):cleared=\($0.isCleared):active=\($0.lastActiveAt.map { "\($0.timeIntervalSinceNow)" } ?? "-"):ended=\($0.terminalEvent.map { "\($0.outcome)@\($0.endedAt.timeIntervalSinceNow)" } ?? "-")" }), pauses \(supervisor.usagePauses.count)")
         reading(active.id, org: "org-personal", used: 1.0)
-        try expect(!drawnLive() && usageLine() == nil,
-                   "usage running out again brought a cleared family back (live \(drawnLive()), item \(usageLine() != nil))")
-        return "Live usage: no item from old words or at 40%; at 100% 'Codex usage ran out' with Resume (one account, or a second folder on the same login) and Switch & resume… only with a second login; × dismisses, persists, and a new stop brings it back; usage back clears it; a family cleared while usage was back stays cleared when it runs out again"
+        try expect(!drawnLive() && usageIncidents().isEmpty,
+                   "usage reading 100% again brought a cleared family back (live \(drawnLive()), item \(!usageIncidents().isEmpty))")
+        return "Usage pauses: a stop pauses its own agent ('Waiting for Codex usage', never Needs you); 40%/100% readings and a second login change nothing and never offer Switch & resume…; Open reveals the agent; the pauses ending clears the item; Clear clicked with no wait stayed cleared through the pushes that landed after it, and at 100%"
     }
 
     // MARK: - 4. An orphan whose lead is gone is its own root card
@@ -886,7 +875,7 @@ enum SidebarDogfoodChecks {
         return "Cleared card: 5 unrelated pushes lifted no ghost and left the cleared History card in its row at full strength; 3 rapid reversals started real fades, reused the live cell, and left both History cards in their rows, opaque, with no ghosts held"
     }
 
-    // MARK: - 7. A live runner's quota reaches Needs you, both ways
+    // MARK: - 7. A usage pause's entry and exit announce; runner readings alone are quiet
 
     static func checkRunnerQuota() throws -> String {
         let h = try makeHarness("runner-quota")
@@ -914,7 +903,10 @@ enum SidebarDogfoodChecks {
                     observedAt: Date(), source: .codexRateLimitsRead, accountId: active.id)),
             accountId: active.id)
         inbox.layoutForQA()
-        try expect(usageLine(inbox) == nil, "fixture: a usage item shows at 40%")
+        // Each stop opened the helper's own pause (Resume automatically off here).
+        for id in paused { supervisor.setUsageAutoResume(false, for: id) }
+        inbox.layoutForQA()
+        try expect(usageLine(inbox) == nil, "fixture: a usage pause drew a Needs you line")
 
         let pausedLabel = SidebarFailureCause.usageLimit.label(harness: "codex")
         func announced(since start: Int) -> [String] { Array(announcements.dropFirst(start)) }
@@ -927,40 +919,40 @@ enum SidebarDogfoodChecks {
             inbox.layoutForQA()
         }
 
-        // Entry: the runner reports the window spent.
-        var mark = announcements.count
-        runner(1.0)
-        guard let line = usageLine(inbox) else {
-            throw Failure(description: "entry: a runner-delivered exhausted quota did not reach Needs you — incidents \(inbox.sidebarIncidents.map(\.title))")
+        func rowState(_ id: AgentID) -> SidebarTallyState? {
+            inbox.allRowsForQuietCheck.first { $0.id == id.rawValue }.map(SidebarRecovery.state(for:))
         }
-        try expect(line.titleLabel.stringValue == "Codex usage ran out", "entry: the item reads '\(line.titleLabel.stringValue)'")
-        let entered = announced(since: mark)
-        try expect(paused.allSatisfy { id in entered.contains { $0.hasPrefix("Quota helper \(paused.firstIndex(of: id)! + 1): ") && $0.hasSuffix(pausedLabel) } },
-                   "entry: MAC-15 did not announce '\(pausedLabel)' for each paused helper — \(entered)")
-        // Quiet: the runner reports the same spent window again.
+        try expect(paused.allSatisfy { rowState($0) == .paused }, "fixture: the stopped helpers read paused")
+        // Exit: the pauses end (a reset, a later success, a reading under 99%).
+        var mark = announcements.count
+        for id in paused { supervisor.qaSetUsagePause(nil, for: id) }
+        inbox.layoutForQA()
+        let recovered = announced(since: mark)
+        try expect(paused.allSatisfy { rowState($0) != .paused }
+                   && recovered.contains { $0.hasPrefix("Quota helper 1: ") && !$0.hasSuffix(pausedLabel) },
+                   "exit: MAC-15 did not announce the helper leaving '\(pausedLabel)' — \(recovered)")
+        // Quiet: the runner reports the window spent, again and again. A reading
+        // never makes a pause on its own, and never rebuilds the rows.
         mark = announcements.count
         let buildsBefore = h.delegate.qaInboxRowBuildCount
         runner(1.0)
-        try expect(announced(since: mark).isEmpty, "quiet: a repeated reading announced \(announced(since: mark))")
-        try expect(h.delegate.qaInboxRowBuildCount == buildsBefore,
-                   "quiet: a repeated reading rebuilt the sidebar rows \(h.delegate.qaInboxRowBuildCount - buildsBefore) times")
-        // Recovery: the runner reports the window replenished.
-        mark = announcements.count
+        runner(1.0)
         runner(0.2)
-        try expect(usageLine(inbox) == nil, "recovery: a runner-delivered replenished quota left the usage item drawn")
-        let recovered = announced(since: mark)
-        try expect(recovered.contains { $0.hasPrefix("Quota helper 1: ") && !$0.hasSuffix(pausedLabel) },
-                   "recovery: MAC-15 did not announce the helper leaving '\(pausedLabel)' — \(recovered)")
-        // Time-only expiry: spent until a reset 1.5 s ahead, then no reading at all.
-        runner(1.0, resetsIn: 1.5)
-        try expect(usageLine(inbox) != nil, "expiry: the spent window did not draw the usage item")
+        try expect(announced(since: mark).isEmpty && paused.allSatisfy { rowState($0) != .paused },
+                   "quiet: a runner reading moved a row — \(announced(since: mark))")
+        try expect(h.delegate.qaInboxRowBuildCount == buildsBefore,
+                   "quiet: runner readings rebuilt the sidebar rows \(h.delegate.qaInboxRowBuildCount - buildsBefore) times")
+        // Entry: a helper's own turn stops on usage again.
         mark = announcements.count
-        let deadline = Date().addingTimeInterval(6)
-        while usageLine(inbox) != nil, Date() < deadline { pump(0.1); inbox.layoutForQA() }
-        try expect(usageLine(inbox) == nil, "expiry: the window's reset passed but the usage item stayed")
-        try expect(announced(since: mark).contains { $0.hasPrefix("Quota helper 1: ") },
-                   "expiry: MAC-15 did not announce the reset — \(announced(since: mark))")
-        return "Runner quota: a runner's exhausted reading drew 'Codex usage ran out' and announced '\(pausedLabel)'; a repeat was quiet with 0 row builds; a replenished reading removed it and announced recovery; a reset 1.5 s ahead expired it with no reading"
+        h.finish(paused[0], failed: codexUsageWords)
+        supervisor.setUsageAutoResume(false, for: paused[0])
+        h.refresh()
+        inbox.layoutForQA()
+        let entered = announced(since: mark)
+        try expect(rowState(paused[0]) == .paused && usageLine(inbox) == nil
+                   && entered.contains { $0.hasPrefix("Quota helper 1: ") && $0.hasSuffix(pausedLabel) },
+                   "entry: MAC-15 did not announce '\(pausedLabel)' for the stopped helper — \(entered)")
+        return "Usage pause announcements: the pauses ending announced recovery; three runner readings (100%, 100%, 20%) moved no row, announced nothing and rebuilt 0 rows; a new stop paused its own helper, announced '\(pausedLabel)', and drew no Needs you line"
     }
 
     // MARK: - 8. Switch needs evidence of a different login
@@ -986,24 +978,22 @@ enum SidebarDogfoodChecks {
                 accountId: accountId)
             inbox.layoutForQA()
         }
-        func action() -> String { usageLine(inbox)?.actionButton.title ?? "no item" }
+        func action() -> String {
+            inbox.sidebarIncidents.first { $0.kind == .cause(.usageLimit) }?.actionTitle ?? "no item"
+        }
+        supervisor.setUsageAutoResume(false, for: helper)
         let active = supervisor.activeAccount(for: .codex)
-        // codex's `account/read` can omit the workspace id: no organisation known.
         reading(active.id, email: "me@example.test", org: nil, used: 1.0)
-        try expect(action() == SidebarFailureCause.usageResumeTitle, "one account: '\(action())', wanted Resume")
+        try expect(action() == "Open", "one account: '\(action())', wanted Open")
         let work = try supervisor.addAccount(harness: .codex, label: "Work")
-        reading(work.id, email: "me@example.test", org: nil, used: 0.1)
-        try expect(action() == SidebarFailureCause.usageResumeTitle,
-                   "the same login in a second folder, no organisation id on either, offers '\(action())', wanted Resume")
-        reading(work.id, email: nil, org: nil, used: 0.1)
-        try expect(action() == SidebarFailureCause.usageResumeTitle,
-                   "a second folder whose login names nothing offers '\(action())', wanted Resume")
-        reading(work.id, email: "me@example.test", org: "org-team", used: 0.1)
-        try expect(action() == SidebarFailureCause.usageResumeTitle,
-                   "an organisation known on one side only offers '\(action())', wanted Resume")
-        reading(work.id, email: "work@example.test", org: nil, used: 0.1)
-        try expect(action() == "Switch & resume…", "a different email offers '\(action())', wanted Switch & resume…")
-        return "Switch: one login in two folders with no organisation id, a login naming nothing, and an organisation on one side only all offer Resume; a different email offers Switch & resume…"
+        // Whatever the second login is, the sidebar never offers a switch:
+        // switching accounts lives in the agent's tile only.
+        for (email, org) in [("me@example.test", nil), (nil, nil), ("me@example.test", "org-team"), ("work@example.test", nil)] as [(String?, String?)] {
+            reading(work.id, email: email, org: org, used: 0.1)
+            try expect(action() == "Open" && usageLine(inbox) == nil,
+                       "a second login (\(email ?? "nil"), \(org ?? "nil")) drew '\(action())' / a Needs you line, wanted Open only")
+        }
+        return "Switch: one account, the same login twice, a login naming nothing, an organisation on one side and a different email all leave the sidebar's one usage action as Open — never Switch & resume…, never Needs you"
     }
 
     static func checkSwitchSharedOrganization() throws -> String {
@@ -1031,7 +1021,10 @@ enum SidebarDogfoodChecks {
                 accountId: account.id)
             h.inbox.layoutForQA()
         }
-        func action() -> String { usageLine(h.inbox)?.actionButton.title ?? "no usage item" }
+        func action() -> String {
+            h.inbox.sidebarIncidents.first { $0.kind == .cause(.usageLimit) }?.actionTitle ?? "no usage item"
+        }
+        supervisor.setUsageAutoResume(false, for: helper)
         reading(active, email: "personal@example.test", org: "team", used: 1.0)
         reading(alternate, email: "work@example.test", org: "team", used: 0.1)
         let settings = supervisor.settingsAccountRows().first { $0.id == alternate.id }
@@ -1040,14 +1033,14 @@ enum SidebarDogfoodChecks {
         guard case .refused = supervisor.switchAccount(to: alternate.id) else {
             throw Failure(description: "the supervisor accepted a switch within the same organization")
         }
-        try expect(action() == SidebarFailureCause.usageResumeTitle,
-                   "the only alternate shares the active organization and Settings offers Sign In, but the sidebar draws '\(action())'; wanted Resume")
+        try expect(action() == "Open",
+                   "the only alternate shares the active organization and Settings offers Sign In; the sidebar draws '\(action())', wanted Open")
 
         reading(alternate, email: "personal@example.test", org: "other-team", used: 0.1)
         let eligible = supervisor.settingsAccountRows().first { $0.id == alternate.id }
-        try expect(eligible?.canSignIn == false && action() == "Switch & resume…",
-                   "the same email in a different organization should offer Switch, got '\(action())'")
-        return "The mounted Claude usage item offers Resume when Settings requires Sign In for the shared organization. A different organization offers Switch even with the same email."
+        try expect(eligible?.canSignIn == false && action() == "Open",
+                   "a switchable login in another organization still leaves the sidebar on Open (switching is the tile's), got '\(action())'")
+        return "Settings requires Sign In for an alternate in the shared organization and the supervisor refuses that switch; with a switchable login in another organization the mounted sidebar's Claude usage item still offers Open, never Switch & resume…"
     }
 
     // MARK: - 9. History dates come from real turns and redraw when they move
@@ -1252,8 +1245,8 @@ enum SidebarDogfoodChecks {
     }
 
     static func checkUsageScopeActions() throws -> String {
-        func switchedScope(layout: SidebarLayout, dismiss: Bool = false) throws -> String? {
-            let h = try makeHarness("scope-\(layout.rawValue)-\(dismiss ? "dismiss" : "resume")")
+        func switchedScope(layout: SidebarLayout) throws -> String? {
+            let h = try makeHarness("scope-\(layout.rawValue)-open")
             defer { h.close() }
             let inbox = h.inbox
             inbox.setSidebarLayoutForQA(layout)
@@ -1267,12 +1260,14 @@ enum SidebarDogfoodChecks {
             for id in [first, second] { h.finish(id, failed: "You've hit your usage limit. Upgrade to Pro or try again at 3:05 PM.") }
             h.refresh()
 
-            func quietLine() -> SidebarQuietNeedsYouView.Line? {
-                Q.views(in: inbox) { $0 is SidebarQuietNeedsYouView && !$0.isHiddenOrHasHiddenAncestor }
-                    .compactMap { $0 as? SidebarQuietNeedsYouView }.first?.lines.first
-            }
+            // Quiet draws a usage pause as its family's cause line (never a
+            // Needs you line); the Ledger, as an incident row.
             func resumeButton() -> NSButton? {
-                if layout == .quietInbox { return quietLine()?.actionButton }
+                if layout == .quietInbox {
+                    return Q.views(in: inbox.tableForQA) { ($0 as? AgentInboxRemainderView)?.causeIncidentForQA?.kind == .cause(.usageLimit)
+                        && !$0.isHiddenOrHasHiddenAncestor }
+                        .compactMap { ($0 as? AgentInboxRemainderView)?.causeActionForQA }.first
+                }
                 return Q.views(in: inbox) { $0 is SidebarIncidentCellView && !$0.isHiddenOrHasHiddenAncestor }
                     .compactMap { $0 as? SidebarIncidentCellView }.first?.actionButton
             }
@@ -1288,26 +1283,15 @@ enum SidebarDogfoodChecks {
                 throw Failure(description: "fixture: Pb usage line was not mounted")
             }
             try expect(current.agentIDs == [second.rawValue], "fixture: usage model did not switch to Pb")
-            if dismiss {
-                guard let button = quietLine()?.dismissButton else { throw Failure(description: "no mounted Dismiss button") }
-                let fingerprint = SidebarIncidentDismissals.fingerprint(current, rows: inbox.allRowsForQuietCheck)
-                try Q.click(button)
-                inbox.layoutForQA()
-                let key = SidebarIncidentDismissals.storageKey(current, rows: inbox.allRowsForQuietCheck)
-                let saved = SidebarIncidentDismissals.load(from: h.suite)[key]
-                if saved != fingerprint || quietLine() != nil { return "Dismiss did not save Pb's fingerprint and remove its mounted usage line" }
-            } else {
-                try Q.click(resume)
-                if h.delegate.lastSidebarIncidentOutcomeForQA != .revealedAgent(second.rawValue) {
-                    return "\(layout.rawValue) Resume expected Pb's agent \(second.rawValue), got \(h.delegate.lastSidebarIncidentOutcomeForQA) (Pa's agent \(first.rawValue))"
-                }
+            try Q.click(resume)
+            if h.delegate.lastSidebarIncidentOutcomeForQA != .revealedAgent(second.rawValue) {
+                return "\(layout.rawValue) Open expected Pb's agent \(second.rawValue), got \(h.delegate.lastSidebarIncidentOutcomeForQA) (Pa's agent \(first.rawValue))"
             }
             return nil
         }
-        let failures = try [switchedScope(layout: .quietInbox), switchedScope(layout: .quietInbox, dismiss: true),
-                            switchedScope(layout: .ledger)].compactMap { $0 }
+        let failures = try [switchedScope(layout: .quietInbox), switchedScope(layout: .ledger)].compactMap { $0 }
         try expect(failures.isEmpty, failures.joined(separator: "\n"))
-        return "After a same-count Pa → Pb scope change, Quiet and Ledger Resume revealed Pb's agent. Quiet Dismiss saved Pb's fingerprint and hid its line."
+        return "After a same-count Pa → Pb scope change, Quiet's cause line and the Ledger's incident Open revealed Pb's agent. (A usage pause is not a Needs you item, so it has no Dismiss.)"
     }
 
     static func checkFamilyCauseAction() throws -> String {
@@ -1336,7 +1320,7 @@ enum SidebarDogfoodChecks {
         h.finish(second, failed: words)
         h.refresh()
         guard let action = causeLine()?.causeActionForQA, action.title == SidebarFailureCause.usageResumeTitle else {
-            throw Failure(description: "fixture: family Resume did not stay mounted")
+            throw Failure(description: "fixture: the family usage Open did not stay mounted")
         }
         try expect(inbox.sidebarFamilyChips.first?.incident.agentIDs == [second.rawValue],
                    "fixture: the family cause model did not switch to the second helper")
@@ -1494,26 +1478,16 @@ enum SidebarDogfoodChecks {
                 .compactMap { $0 as? SidebarQuietNeedsYouView }
                 .first?.lines.first { $0.incident?.kind == .cause(.usageLimit) }
         }
+        // Each project shows its own agent's pause, and never as a Needs you
+        // line: there is nothing to dismiss, and nothing to act on but Open.
         for (project, id) in [("Pa", first), ("Pb", second)] {
             try selectProject(project)
-            guard let line = mountedUsageLine(), line.incident?.agentIDs == [id.rawValue] else {
-                throw Failure(description: "fixture: could not find the usage line for \(project)")
-            }
-            try Q.click(line.dismissButton)
-            inbox.layoutForQA()
-            try expect(mountedUsageLine() == nil, "\(project)'s usage line did not dismiss")
+            let usage = inbox.sidebarIncidents.filter { $0.kind == .cause(.usageLimit) }
+            try expect(usage.count == 1 && usage[0].agentIDs == [id.rawValue] && !usage[0].isBlocking
+                       && usage[0].actionTitle == "Open" && mountedUsageLine() == nil,
+                       "\(project): wanted one non-blocking usage item for its own agent and no Needs you line — got \(usage.map { "\($0.title):\($0.agentIDs.count):\($0.isBlocking)" })")
         }
-        for project in ["Pa", "Pb"] {
-            try selectProject(project)
-            try expect(mountedUsageLine() == nil, "\(project)'s dismissed usage line reappeared after switching projects")
-        }
-        let restored = AgentInboxView(frame: inbox.frame, indicatorDefaults: h.suite)
-        restored.reload(rows: inbox.allRowsForQuietCheck)
-        for project in ["Pa", "Pb"] {
-            restored.setScope(.project(project))
-            try expect(restored.sidebarIncidents.isEmpty, "a fresh inbox reloaded \(project)'s dismissed usage incident")
-        }
-        return "Dismissed Pa and Pb independently using both mounted buttons. Both stayed dismissed when revisited and from saved preferences."
+        return "Pa and Pb each showed only their own agent's usage pause, non-blocking with Open, and neither drew a Needs you line to dismiss."
     }
 
     static func checkHistoryKeyboardPaint() throws -> String {

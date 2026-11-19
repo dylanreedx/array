@@ -727,7 +727,9 @@ public struct CodexAppServerEventTranslator {
         var code: String?
         if failed, let error = turn["error"] as? [String: Any] {
             let message = error["message"] as? String
+            // A bare code, or an object keyed by the code (`{"usageLimitExceeded": …}`).
             let codexErrorInfo = error["codexErrorInfo"] as? String
+                ?? (error["codexErrorInfo"] as? [String: Any]).flatMap { $0.count == 1 ? $0.keys.first : nil }
             let errorCode = error["code"] as? String
             let errorType = error["type"] as? String
             let contextFull = AgentContextFullRecovery.isContextFull(
@@ -741,6 +743,13 @@ public struct CodexAppServerEventTranslator {
             if !contextFull {
                 code = AgentFailureText.providerMessage(message)
                     ?? errorCode ?? errorType ?? codexErrorInfo
+                // `usage_limit_exceeded` is the structured usage stop. Keep
+                // Codex's own sentence when it has one; else the code, which
+                // `AgentUsageLimitStop` reads as a stop.
+                if let info = codexErrorInfo, AgentUsageLimitStop.classify(errorMessage: info, now: Date()) != nil,
+                   AgentUsageLimitStop.classify(errorMessage: code, now: Date()) == nil {
+                    code = info
+                }
             }
         }
         // T5 — `turn/interrupt` ends the turn `interrupted`; reporting that as

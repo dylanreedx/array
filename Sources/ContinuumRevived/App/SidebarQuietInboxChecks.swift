@@ -155,6 +155,8 @@ enum SidebarQuietInboxChecks {
                                                 outcome: words == nil ? .completed : .failed,
                                                 errorMessage: words), to: id)
         }
+        // Usage pauses here are sidebar fixtures: nothing resumes mid-check.
+        supervisor.usageAutoResumeDefault = false
         let lead = spawn("Release lead")
         // The paused helpers run on Codex, whose usage is out LIVE with a second
         // login to switch to (old failure words alone are no longer a pause).
@@ -169,6 +171,10 @@ enum SidebarQuietInboxChecks {
         for id in [lead, doneHelper, family, solo] { finish(id) }
         finish(paused1, failed: usageWords)
         finish(paused2, failed: usageWords)
+        // Each stop opened a real usage pause on the agent. Resume automatically
+        // is off here (the tile's toggle), so a later success on the same
+        // account does not resume the other helper mid-check.
+        for id in [paused1, paused2] { supervisor.setUsageAutoResume(false, for: id) }
         finish(failedHelper, failed: taskWords)
         finish(familyHelper, failed: taskWords)
         // The fixture's own source agent has never run: settle it so the head
@@ -278,15 +284,12 @@ enum SidebarQuietInboxChecks {
         try expect(inbox.sidebarLayout == .quietInbox && inbox.sidebarLayoutRenderCountForQA == rendersBefore + 1,
                    "the Layout setting re-renders the list live")
 
-        // 2. The head.
-        guard let box = needsYouBox() else {
-            throw Failure(description: "Quiet draws the Needs you box while usage blocks — items \(inbox.itemsForQuietCheck.count), rows \(inbox.allRowsForQuietCheck.map { "\($0.displayTitle):\($0.state):\($0.lifecycle):\($0.failureDetail ?? "-")" }), incidents \(inbox.sidebarIncidents.map(\.title))")
-        }
-        try expect(box.accessibilityLabel() == "Needs you, 1" && box.lines.count == 1,
-                   "one blocking incident, one line — got \(box.accessibilityLabel() ?? "nil"), \(box.lines.count) lines")
-        let usageLine = box.lines[0]
-        try expect(usageLine.incident?.kind == .cause(.usageLimit) && usageLine.actionButton.title == "Switch & resume…",
-                   "the box's line is the usage pause with its one action — got \(usageLine.accessibilityLabel() ?? "")")
+        // 2. The head. A usage pause needs nobody (Array resumes it), so it is
+        // never a Needs you line, and nothing else blocks here: no box at all.
+        try expect(needsYouBox() == nil && boxItems() == 0,
+                   "a usage pause is never a Needs you line — incidents \(inbox.sidebarIncidents.map(\.title))")
+        try expect(!inbox.sidebarIncidents.contains { $0.kind == .cause(.usageLimit) && $0.isBlocking },
+                   "a usage pause is not blocking")
         guard let inboxLabel = sectionCell("Inbox") else { throw Failure(description: "no Inbox heading") }
         let clearIDs = inbox.sidebarClearIDs
         try expect(!inboxLabel.clearButton.isHidden && inboxLabel.clearButton.title == "Clear \(clearIDs.count)",
@@ -302,7 +305,7 @@ enum SidebarQuietInboxChecks {
         let familyCause = causes.first { $0.causeIncidentForQA?.familyIDs == [family.rawValue] }
         try expect(causes.count == 2, "one cause line per family with a cause — got \(causes.map(\.titleForQA))")
         try expect(leadCause?.titleForQA.hasSuffix("2 paused · usage") == true
-                   && leadCause?.causeActionForQA?.title == "Switch & resume…",
+                   && leadCause?.causeActionForQA?.title == "Open",
                    "the release family's ONE cause line is its usage pause — got \(leadCause?.titleForQA ?? "nil")")
         try expect(familyCause?.titleForQA.hasSuffix(taskWords) == true && familyCause?.causeActionForQA?.title == "Open",
                    "the failed family's cause line names its reason and one action — got \(familyCause?.titleForQA ?? "nil")")
@@ -332,6 +335,7 @@ enum SidebarQuietInboxChecks {
         delegate.qaRefreshAgentSurfaces()
         inbox.layoutForQA()
         finish(paused1, failed: usageWords)
+        supervisor.setUsageAutoResume(false, for: paused1)
         delegate.qaRefreshAgentSurfaces()
         inbox.layoutForQA()
         try expect(spoken.contains { $0.hasPrefix("Overnight helper:") && $0.hasSuffix("Paused · usage") },
@@ -395,31 +399,28 @@ enum SidebarQuietInboxChecks {
                            "a cause line's count is its lead's tally — '\(line.titleForQA)' vs \(leadTally.fullLine)")
             }
         }
-        try expect(usageLine.accessibilityLabel()?.contains("2 agents paused") == true,
-                   "the box's AX says the same 2 paused — got \(usageLine.accessibilityLabel() ?? "")")
+        try expect(Set(leadCause?.causeIncidentForQA?.agentIDs ?? []) == [paused1.rawValue, paused2.rawValue],
+                   "the usage cause line carries the same 2 paused agents")
 
         // 4. Actions reach the host with that family's agents only.
         var pressed: [SidebarIncident] = []
         inbox.onIncidentAction = { pressed.append($0) }
         inbox.reload(rows: inbox.allRowsForQuietCheck)
         inbox.layoutForQA()
-        guard let liveBox = needsYouBox(), liveBox.lines.first?.actionButton.isEnabled == true,
+        guard needsYouBox() == nil,
               let liveFamilyAction = causeLines().first(where: { $0.causeIncidentForQA?.familyIDs == [family.rawValue] })?.causeActionForQA,
               let liveLeadAction = causeLines().first(where: { $0.causeIncidentForQA?.familyIDs == [lead.rawValue] })?.causeActionForQA,
               liveLeadAction.isEnabled else {
             throw Failure(description: "with a host, the usage actions are enabled")
         }
-        try Q.click(liveBox.lines[0].actionButton)
         try Q.click(liveFamilyAction)
-        try expect(pressed.count == 1 && !liveFamilyAction.isEnabled,
-                   "only usage acts; Open stays disabled — got \(pressed.count) calls")
-        try expect(Set(pressed[0].agentIDs) == [paused1.rawValue, paused2.rawValue] && pressed[0].kind == .cause(.usageLimit),
-                   "the box's usage action carries the paused agents")
-        // The in-card usage action, pressed through the window, reaches the same entry point.
+        try expect(pressed.isEmpty && !liveFamilyAction.isEnabled,
+                   "only usage acts; a failure's Open stays disabled — got \(pressed.count) calls")
+        // The in-card usage action ("Open", never Switch), pressed through the window.
         try Q.click(liveLeadAction)
-        try expect(pressed.count == 2 && pressed[1].kind == .cause(.usageLimit)
-                   && Set(pressed[1].agentIDs) == [paused1.rawValue, paused2.rawValue],
-                   "the card's Switch & resume… carries that family's paused agents — got \(pressed.count) calls")
+        try expect(pressed.count == 1 && pressed[0].kind == .cause(.usageLimit) && pressed[0].actionTitle == "Open"
+                   && Set(pressed[0].agentIDs) == [paused1.rawValue, paused2.rawValue],
+                   "the card's Open carries that family's paused agents — got \(pressed.count) calls")
 
         // 5. Clear through the drawn control, refusing the paused; ⌘Z returns them.
         guard let clearButton = sectionCell("Inbox")?.clearButton else { throw Failure(description: "no Clear") }
@@ -501,7 +502,7 @@ enum SidebarQuietInboxChecks {
         try expect(inbox.familyCauseCells.isEmpty, "switching to Ledger releases every Quiet count and cause view")
 
         return "Quiet inbox: the Layout setting re-renders live both ways; the head is Inbox · Clear \(clearIDs.count), "
-            + "a Needs you box with one usage line, and one cause line inside each family's card (2 paused · usage / its reason); "
+            + "no Needs you box for a usage pause, and one cause line inside each family's card (2 paused · usage with Open / its reason); "
             + "head and family actions are plain words, Clear's glyph is the checkmark, no hand or emoji, a card says failed once; "
             + "the cause line's count is the lead's tally and drawn helpers + folded = \(tally.total); actions carry their family; "
             + "Clear takes 4 off the list and refuses the paused, ⌘Z restores; with nothing blocking there is no box"

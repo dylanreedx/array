@@ -53,6 +53,12 @@ import Foundation
 //               and unprompted, the rest — the way claude carries on by itself
 //               when a background child it launched reports back
 //   anything else: a short text reply
+// `exhausted.txt` beside the claude fake lists account folders (one
+// `CLAUDE_CONFIG_DIR` per line, `<default>` for none) whose every turn ends
+// the way claude 2.1.32x ends a turn on a used-up window: a rejected
+// `rate_limit_event`, the synthetic error-tagged assistant line, an is_error
+// result (`limit-line.txt` / `limit-reset.txt` replace the line and its epoch).
+// `argv-log.jsonl` records every spawn's arguments and account folder.
 // `reject-resume` beside the fake makes claude fail `--resume` the way the real
 // CLI does for a conversation that does not exist yet. `clear-queue-delay`
 // (seconds) beside the pi fake delays its `clear_queue` answer, and with it
@@ -109,6 +115,17 @@ public enum AgentSteeringQAFakes {
         return argv
     }
 
+    /// Every spawn's arguments and `CLAUDE_CONFIG_DIR`, in order.
+    public static func argvLog(in directory: URL) -> [(argv: [String], configDir: String)] {
+        guard let text = try? String(contentsOf: directory.appendingPathComponent("argv-log.jsonl"), encoding: .utf8)
+        else { return [] }
+        return text.split(separator: "\n").compactMap { line in
+            guard let object = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+                  let argv = object["argv"] as? [String], let dir = object["configDir"] as? String else { return nil }
+            return (argv, dir)
+        }
+    }
+
     /// Each spawn's `CODEX_HOME`, in order; `<default>` when unset.
     public static func codexHomes(in directory: URL) -> [String] {
         let text = try? String(contentsOf: directory.appendingPathComponent("codex-homes.txt"), encoding: .utf8)
@@ -139,6 +156,8 @@ import json, os, sys, threading, time, subprocess, queue
 HERE = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(HERE, "argv.json"), "w") as f:
     json.dump(sys.argv[1:], f)
+with open(os.path.join(HERE, "argv-log.jsonl"), "a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "configDir": os.environ.get("CLAUDE_CONFIG_DIR", "<default>")}) + "\n")
 _count_path = os.path.join(HERE, "spawn.count")
 try:
     with open(_count_path) as f:
@@ -268,6 +287,21 @@ def result(is_error=False, subtype="success"):
 def say(text):
     out({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}, "parent_tool_use_id": None, "session_id": SID})
 
+def account_exhausted():
+    try:
+        with open(os.path.join(HERE, "exhausted.txt")) as f:
+            listed = [l.strip() for l in f if l.strip()]
+    except FileNotFoundError:
+        return False
+    return os.environ.get("CLAUDE_CONFIG_DIR", "<default>") in listed
+
+def read_beside(name, default):
+    path = os.path.join(HERE, name)
+    if not os.path.exists(path):
+        return default
+    with open(path) as f:
+        return f.read().strip()
+
 def run_turn(msg):
     text = text_of(msg)
     if text.startswith("CRON "):
@@ -294,6 +328,18 @@ def run_turn(msg):
     out({"type": "system", "subtype": "init", "session_id": SID, "cwd": os.getcwd(), "model": "fake-claude", "slash_commands": ["compact"]})
     replay(msg)
     kind = shape(text)
+    if account_exhausted():
+        line = read_beside("limit-line.txt", "You've hit your 5-hour limit \u00b7 resets 1:40am (America/Toronto)")
+        reset = int(read_beside("limit-reset.txt", "0") or "0")
+        info = {"status": "rejected", "rateLimitType": "five_hour", "overageStatus": "rejected", "isUsingOverage": False}
+        if reset:
+            info["resetsAt"] = reset
+        out({"type": "rate_limit_event", "rate_limit_info": info, "session_id": SID})
+        out({"type": "assistant", "message": {"id": "msg_synthetic", "model": "<synthetic>", "role": "assistant",
+             "content": [{"type": "text", "text": line}]}, "parent_tool_use_id": None, "session_id": SID, "error": "rate_limit"})
+        out({"type": "result", "subtype": "success", "is_error": True, "session_id": SID, "result": line,
+             "usage": {"input_tokens": 0, "output_tokens": 0}})
+        return
     if kind == "CRASH":
         crash()
     if kind == "VANISH":

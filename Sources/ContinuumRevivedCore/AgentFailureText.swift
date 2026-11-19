@@ -51,6 +51,11 @@ public enum AgentFailureText {
             "api error", "unauthorized", "forbidden", "authentication", "oauth", "/login",
             "invalid api key", "access token", "token expired", "token has expired",
             "rate limit", "rate_limit", "usage limit", "quota", "credit balance", "overloaded",
+            // Claude's own usage stop: "You've hit your 5-hour limit · resets
+            // 6:20pm (America/Toronto)", "…weekly limit…", "…session limit…".
+            // Missing these read every Claude usage stop as "reported an error
+            // without details" (design round, Box 3).
+            "5-hour limit", "weekly limit", "session limit", "hit your",
             "timed out", "timeout", "connection", "network", "econnreset", "unavailable",
             "status 4", "status 5", " 401", " 403", " 429", " 500", " 502", " 503", " 529",
             // The account cannot use the chosen model. pi (openai-codex) says

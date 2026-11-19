@@ -102,8 +102,9 @@ func runSidebarLedgerCoreChecks() {
            "a usage stop reads as a pause, never Failed")
     expect(SidebarFailureCause.providerBusy.label(harness: "codex") == "Codex was busy", "busy label names the CLI")
     let actions = SidebarFailureCause.allCases.map(\.actionTitle)
-    expect(actions == ["Switch & resume…", "Retry", "Sign in…", "Repair setup…", "Resume", "Open"],
+    expect(actions == ["Open", "Retry", "Sign in…", "Repair setup…", "Resume", "Open"],
            "one action per class, got \(actions)")
+    expect(!SidebarFailureCause.usageLimit.isBlocking, "a usage pause needs nobody: Array resumes it at the reset")
     // An unexplained failure is a real task error; an interruption with no words is Stopped.
     let generic = F.row(90, "x", outcome: .failed, detail: "Claude Code reported an error without details.")
     expect(SidebarRecovery.cause(for: generic) == .taskError && SidebarRecovery.state(for: generic) == .failed,
@@ -173,8 +174,10 @@ func runSidebarLedgerCoreChecks() {
     expect(claudeUsage?.ownerIDs.count == 11 && claudeUsage?.ownerIDs.contains(F.id(2)) == true
            && claudeUsage?.ownerIDs.contains(F.id(6)) == false,
            "resumable owners counted once, mirrored helper through its lead: \(claudeUsage?.ownerIDs.count ?? -1)")
-    expect(claudeUsage?.detail == "11 agents paused in 1 family · 11 can resume", "usage detail: \(claudeUsage?.detail ?? "nil")")
-    expect(claudeUsage?.actionTitle == "Switch & resume…", "usage action")
+    expect(claudeUsage?.title == "Waiting for Claude usage", "usage title: \(claudeUsage?.title ?? "nil")")
+    expect(claudeUsage?.detail == "11 agents in 1 family · Array resumes them at the reset", "usage detail: \(claudeUsage?.detail ?? "nil")")
+    expect(claudeUsage?.actionTitle == "Open" && claudeUsage?.isBlocking == false,
+           "usage action is Open (switching lives in the tile) and never blocks, even with a second account")
     let codexUsage = incidents.first { $0.kind == .cause(.usageLimit) && $0.harness == "codex" }
     expect(codexUsage?.agentIDs == [F.id(16)], "the Codex pause has its own reachable incident")
     let setup = incidents.first { $0.kind == .cause(.couldNotStart) }
@@ -247,7 +250,7 @@ func runSidebarLedgerCoreChecks() {
         expect(applied.released.contains(unknown.id) && !applied.rows[0].isCleared,
                "a late blocking cause releases an existing Clear mark")
     }
-    // Dogfood: a usage stop blocks only while usage is out live, so it never
+    // Usage-resume: a usage stop never blocks, so it never
     // releases a mark on its own — with or without live usage.
     for live in [false, true] {
         var revealed = unknown
@@ -280,19 +283,23 @@ func runSidebarLedgerCoreChecks() {
         expect(SidebarRecovery.cause(for: live) == .usageLimit && SidebarRecovery.state(for: live) == .paused,
                "a usage stop while usage is out live is a pause")
         let one = SidebarIncidents.build(rows: [live]).first { $0.kind == .cause(.usageLimit) }
-        expect(one?.actionTitle == SidebarFailureCause.usageResumeTitle,
-               "one account: the usage action is Resume — got \(one?.actionTitle ?? "nil")")
+        expect(one?.actionTitle == SidebarFailureCause.usageResumeTitle && one?.actionTitle == "Open"
+               && one?.title == "Waiting for Claude usage" && one?.detail == "1 agent in 1 family · Array resumes it at the reset",
+               "one account: the usage action is Open — got \(one?.actionTitle ?? "nil") / \(one?.detail ?? "nil")")
         live.usageCanSwitchAccount = true
         let two = SidebarIncidents.build(rows: [live]).first { $0.kind == .cause(.usageLimit) }
-        expect(two?.actionTitle == "Switch & resume…", "a second signed-in account: Switch & resume…")
-        let dismissed = [two!.id: SidebarIncidentDismissals.fingerprint(two!, rows: [live])]
-        expect(SidebarIncidentDismissals.visible([two!], dismissed: dismissed, rows: [live]).isEmpty,
+        expect(two?.actionTitle == "Open", "a second signed-in account: still Open, never Switch in the sidebar")
+        expect(SidebarQuietInbox.needsYou(SidebarIncidents.build(rows: [live])).isEmpty,
+               "a usage pause is never a Needs-you item")
+        // Dismissal, on a blocking cause (a usage pause is never in Needs you).
+        let signedOut = F.row(402, "Signed-out stop", outcome: .failed, detail: "OAuth session expired")
+        let blocker = SidebarIncidents.build(rows: [signedOut]).first { $0.kind == .cause(.signInExpired) }!
+        let dismissed = [blocker.id: SidebarIncidentDismissals.fingerprint(blocker, rows: [signedOut])]
+        expect(SidebarIncidentDismissals.visible([blocker], dismissed: dismissed, rows: [signedOut]).isEmpty,
                "a dismissed incident is hidden")
-        let newer = F.row(401, "New usage stop", outcome: .failed, detail: F.usage)
-        var newerLive = newer
-        newerLive.usageExhaustedNow = true
-        let grown = SidebarIncidents.build(rows: [live, newerLive]).first { $0.kind == .cause(.usageLimit) }!
-        expect(SidebarIncidentDismissals.visible([grown], dismissed: dismissed, rows: [live, newerLive]).count == 1,
+        let newer = F.row(401, "New sign-in stop", outcome: .failed, detail: "OAuth session expired")
+        let grown = SidebarIncidents.build(rows: [signedOut, newer]).first { $0.kind == .cause(.signInExpired) }!
+        expect(SidebarIncidentDismissals.visible([grown], dismissed: dismissed, rows: [signedOut, newer]).count == 1,
                "a new agent in the incident brings a dismissed item back")
     }
     let queued = AgentInboxRow(id: unknown.id, title: unknown.title, state: .ready,
