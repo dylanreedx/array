@@ -99,7 +99,7 @@ enum CharacterSettingsChecks {
                                                 appearance: NSAppearance(named: appearance))
             defer { fixture.tearDown() }
             fixture.show(paneID: "agentCharacters")
-            var arts = try awaitCards(count: 6, in: fixture)
+            var arts = try awaitCards(count: AgentCharacterBundled.builtInIDs.count + 1, in: fixture)
             // Renamed in the UI, the page answers to its new word and its old one.
             for word in ["icon", "character"] {
                 settings.searchQuery = word
@@ -143,7 +143,7 @@ enum CharacterSettingsChecks {
             fixture.settle(0.3)
             try expect(grid.sprites.allSatisfy { !$0.isAnimating }, "\(label): the grid out of view holds still")
             // Reacquire actual visible views without rescuing the return scroll.
-            arts = try awaitCards(count: 6, in: fixture, revealPicker: false)
+            arts = try awaitCards(count: AgentCharacterBundled.builtInIDs.count + 1, in: fixture, revealPicker: false)
             try expect(arts.values.flatMap(\.sprites).allSatisfy(\.isAnimating), "\(label): cards moved back into view move again")
             moving += 1
 
@@ -165,7 +165,7 @@ enum CharacterSettingsChecks {
                                             appearance: NSAppearance(named: .darkAqua))
         defer { fixture.tearDown() }
         fixture.show(paneID: "agentCharacters")
-        _ = try awaitCards(count: 6, in: fixture)
+        _ = try awaitCards(count: AgentCharacterBundled.builtInIDs.count + 1, in: fixture)
         let page = settings.agentCharacters
         for id in AgentCharacterBundled.packIDs {
             if let frame = settings.anchorFrames["ArrayAgentCharacterSet.\(id)"] {
@@ -205,7 +205,7 @@ enum CharacterSettingsChecks {
         // Back to the built-in set, which is parsed, so it takes effect at once.
         page.select(id: AgentCharacterBundled.themeID)
         try expect(controller.theme?.id == AgentCharacterBundled.themeID, "choosing the built-in set switches back")
-        return "Character settings checks passed: discovery through a fixture home (2 files, nothing read), folder import copies one file and selects it, a bad file shows its problems and imports nothing, the page opened in \(stills) appearances with 6 cards drawn and no whole pack parsed, cards and grid move only in view and still under Reduce Motion in \(moving) appearances, \(AgentCharacterBundled.packIDs.count) pack cards clicked: drawn, saved, speaking from their folders, each parsed once off the main thread"
+        return "Character settings checks passed: discovery through a fixture home (2 files, nothing read), folder import copies one file and selects it, a bad file shows its problems and imports nothing, the page opened in \(stills) appearances with \(AgentCharacterBundled.builtInIDs.count + 1) cards drawn and no whole pack parsed, cards and grid move only in view and still under Reduce Motion in \(moving) appearances, \(AgentCharacterBundled.packIDs.count) pack cards clicked: drawn, saved, speaking from their folders, each parsed once off the main thread"
     }
 
     /// Draw every real card with the picker in view. Navigation is setup only;
