@@ -327,11 +327,15 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         }
     }
 
+    /// Runs on every phone publish for every agent with queued work. A write of
+    /// the value a run already holds still un-shares `runs`, which costs a copy
+    /// and a full comparison of the whole ledger (28k runs in Dylan's app, a
+    /// quarter of the main thread), so only a real change writes.
     public func reconcileQueued(agentID: UUID, itemIDs: [UUID]) throws {
         try change { next in
             for id in itemIDs {
-                if next.runs[id] != nil {
-                    if next.runs[id]!.queued { next.runs[id]!.member.state = .queued }
+                if let run = next.runs[id] {
+                    if run.queued, run.member.state != .queued { next.runs[id]!.member.state = .queued }
                 } else {
                     let task = UUID()
                     next.tasks[task] = .init(root: id, complete: false, createdRevision: next.revision)
