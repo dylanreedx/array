@@ -68,6 +68,8 @@ final class GhosttyTerminalView: NSView {
     private var keyTextAccumulator: [String]?
     private(set) var qaGhosttyScrollCallCount = 0
     private(set) var qaLastWheelSample: TerminalWheelQASample?
+    /// Deltas and packed mods exactly as passed to `ghostty_surface_mouse_scroll`.
+    private(set) var qaLastGhosttyScroll: (deltaX: Double, deltaY: Double, mods: Int32)?
     private var lastAppliedSurfacePixelSize: TerminalSurfacePixelSize?
     private(set) var qaSurfaceResizeRequestedCount = 0
     private(set) var qaSurfaceResizeAppliedCount = 0
@@ -340,9 +342,16 @@ final class GhosttyTerminalView: NSView {
             precise: event.hasPreciseScrollingDeltas,
             deliveredViaProductionScrollWheel: true
         )
+        let mods = TerminalWheelNormalizer.ghosttyScrollMods(precise: sample.precise, momentumPhase: event.momentumPhase.rawValue)
         qaLastWheelSample = sample
+        sendScrollToGhostty(surface, deltaX: sample.normalizedDeltaX, deltaY: sample.normalizedDeltaY, mods: mods)
+    }
+
+    /// The one call into Ghostty for wheel input; records exactly what it was given.
+    private func sendScrollToGhostty(_ surface: ghostty_surface_t, deltaX: Double, deltaY: Double, mods: Int32) {
         qaGhosttyScrollCallCount += 1
-        ghostty_surface_mouse_scroll(surface, sample.normalizedDeltaX, sample.normalizedDeltaY, 0)
+        qaLastGhosttyScroll = (deltaX, deltaY, mods)
+        ghostty_surface_mouse_scroll(surface, deltaX, deltaY, mods)
     }
 
     func normalizedWheelSample(deltaX: Double, deltaY: Double, precise: Bool, deliveredViaProductionScrollWheel: Bool) -> TerminalWheelQASample {
