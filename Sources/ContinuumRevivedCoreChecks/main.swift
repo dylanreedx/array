@@ -555,6 +555,11 @@ if CommandLine.arguments.contains("--dictation-session-negative-witness") {
     Foundation.exit(0)
 }
 
+if CommandLine.arguments.contains("--dictation-vocabulary-check") {
+    try runDictationVocabularyChecks()
+    Foundation.exit(0)
+}
+
 if CommandLine.arguments.contains("--dictation-check") {
     try runMainActorCheck {
         try await runDictationSessionChecks()

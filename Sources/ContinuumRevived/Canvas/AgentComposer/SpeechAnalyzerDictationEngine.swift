@@ -27,7 +27,67 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
     /// assets; nil otherwise. Hosts may poll it to show progress in `.preparing`.
     private(set) var installProgress: Progress?
 
+    /// Live terms (agent, branch, files) the host wants recognised, most
+    /// relevant first. Read at prepare and start, so a session sees the state
+    /// at the moment the user pressed the mic.
+    var vocabularyProvider: (@MainActor () -> [String])?
+
+    /// A transcriber and analyzer prepared before the user pressed the mic. The
+    /// model load is the slow part of a press, so the composer warms one while
+    /// the editor has focus; the next session adopts it. Single use, and stale
+    /// after `warmLifetime` so a forgotten one does not hold the model forever.
+    private static var warmed: (prepared: Prepared, at: Date)?
+    private static var warming: Task<Void, Never>?
+    private static let warmLifetime: TimeInterval = 120
+
+    /// True once the user has already granted the microphone: warming must
+    /// never be the thing that raises a permission prompt.
+    static var canWarm: Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+
+    /// Starts (or keeps) a warm analyzer. `vocabulary` is called now, so the
+    /// file scan behind it begins at focus and its result is ready by the press.
+    static func prewarm(vocabulary: (@MainActor () -> [String])? = nil) {
+        _ = vocabulary?()
+        guard canWarm, warming == nil, warmed == nil else { return }
+        warming = Task { @MainActor in
+            defer { warming = nil }
+            let engine = SpeechAnalyzerDictationEngine()
+            engine.vocabularyProvider = vocabulary
+            guard (try? await engine.prepare()) != nil, let prepared = engine.prepared else { return }
+            warmed = (prepared, Date())
+            warmExpiry = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(warmLifetime))
+                guard !Task.isCancelled else { return }
+                discardWarmed()
+            }
+        }
+    }
+
+    private static var warmExpiry: Task<Void, Never>?
+
+    /// Releases the unused warm analyzer through `cancelAndFinishNow`, so the
+    /// lingering model is not held by an analyzer nobody will start.
+    private static func discardWarmed() {
+        warmExpiry?.cancel()
+        warmExpiry = nil
+        guard let old = warmed else { return }
+        warmed = nil
+        Task { await old.prepared.analyzer.cancelAndFinishNow() }
+    }
+
+    /// Takes the warm analyzer for a session; a press during an in-flight warm
+    /// waits for it rather than building a second one cold.
+    private static func takeWarmed() async -> Prepared? {
+        if let warming { await warming.value }
+        guard let taken = warmed else { return nil }
+        warmed = nil
+        warmExpiry?.cancel()
+        warmExpiry = nil
+        return taken.prepared
+    }
+
     private var prepared: Prepared?
+    private var normalizer = DictationNormalizer(terms: [])
     private var sink: (@MainActor (DictationEngineEvent) -> Void)?
     private var graph: CaptureGraph?
     private var analyzerTask: Task<Void, Never>?
@@ -48,6 +108,11 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
 
     func prepare() async throws {
         try await Self.ensureMicrophoneAccess()
+        if let warm = await Self.takeWarmed() {
+            try await applyContext(to: warm.analyzer)
+            prepared = warm
+            return
+        }
         guard let locale = await Self.resolveLocale() else {
             throw DictationFailure.unsupportedOnThisDevice
         }
@@ -73,6 +138,7 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
             modules: [transcriber],
             options: SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .lingering)
         )
+        try await applyContext(to: analyzer)
         do {
             // Loads the model now so the first word after `.ready` is not lost
             // to first-run latency.
@@ -84,6 +150,16 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
         }
         try Task.checkCancellation()
         prepared = Prepared(transcriber: transcriber, analyzer: analyzer, format: format)
+    }
+
+    /// Biases recognition toward the project's own vocabulary and builds the
+    /// matching normaliser. Bounded by `DictationVocabulary.termLimit`.
+    private func applyContext(to analyzer: SpeechAnalyzer) async throws {
+        let terms = DictationVocabulary.assemble(dynamic: vocabularyProvider?() ?? [])
+        normalizer = DictationNormalizer(terms: terms)
+        let context = AnalysisContext()
+        context.contextualStrings[.general] = terms
+        try? await analyzer.setContext(context)
     }
 
     func start(emitting sink: @escaping @MainActor (DictationEngineEvent) -> Void) throws {
@@ -171,8 +247,9 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
 
     // MARK: - Events (main actor, generation-guarded)
 
-    private func handle(text: String, isFinal: Bool, generation: UInt64) {
+    private func handle(text rawText: String, isFinal: Bool, generation: UInt64) {
         guard generation == self.generation, sink != nil else { return }
+        let text = normalizer.normalize(rawText)
         if isFinal {
             guard !text.isEmpty else { return }
             let needsSpace = !lastFinal.isEmpty
