@@ -45,6 +45,9 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     /// (`docs/internals/managed-lead-tool-loading.md`).
     public private(set) var chooser = false
     public private(set) var alwaysLoadedTools: [String] = []
+    /// A helper's lean start: only `HelperLeanStart.tools` are served, with one
+    /// short instruction text (`HelperUsagePolicy.swift`).
+    public private(set) var leanHelper = false
     public static let alwaysLoadedToolsEnvironmentKey = "ARRAY_WORKSPACE_ALWAYS_LOADED_TOOLS"
 
     /// How long a client waits for one workspace tool call. An approval alert
@@ -90,6 +93,11 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
     /// write here only added file I/O to the launch path.
     public func choosingTasks() -> WorkspaceMCPConfiguration {
         var copy = self; copy.chooser = true
+        return copy
+    }
+
+    public func leaningForHelper() -> WorkspaceMCPConfiguration {
+        var copy = self; copy.leanHelper = true
         return copy
     }
 
@@ -139,6 +147,7 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
             environment[Self.alwaysLoadedToolsEnvironmentKey] = alwaysLoadedTools.joined(separator: ",")
         }
         if chooser { environment[ManagedChooser.serverEnvironmentKey] = "1" }
+        if leanHelper { environment[HelperLeanStart.environmentKey] = HelperLeanStart.tools.joined(separator: ",") }
         return environment
     }
 
@@ -160,6 +169,7 @@ public struct WorkspaceMCPConfiguration: Equatable, Sendable {
          // and approval UI gate its operations, as `--allowedTools` leaves them
          // the only gate for Claude.
          "mcp_servers.array_workspace.default_tools_approval_mode=\"approve\""]
+            + (leanHelper ? ["mcp_servers.array_workspace.enabled_tools=[" + HelperLeanStart.tools.map(Self.tomlString).joined(separator: ",") + "]"] : [])
             + environment.keys.sorted().map { key in
                 "mcp_servers.array_workspace.env.\(key)=\(Self.tomlString(environment[key] ?? ""))"
             }

@@ -185,7 +185,7 @@ enum ReplyRulesChecks {
                 for (label, id) in [("failed helper", failed), ("retry", retry)] {
                     let launches = h.launches(cli: shape.cli, owner: id)
                     try expect(!launches.isEmpty, "\(label) never launched")
-                    for argv in launches { try verify(argv, shape, label) }
+                    for argv in launches { try verify(argv, shape, label, helper: true) }
                 }
             }
         }
@@ -309,12 +309,13 @@ enum ReplyRulesChecks {
     // MARK: - Helpers
 
     /// The block is intact, in the one option its harness reads, exactly once.
-    static func verify(_ argv: [String], _ shape: Shape, _ what: String, personal: Bool = false) throws {
+    static func verify(_ argv: [String], _ shape: Shape, _ what: String, personal: Bool = false, helper: Bool = false) throws {
         let label = "\(shape) \(what)"
         try expect(!argv.isEmpty, "\(label): no launch")
         switch shape {
         case .claudeTools:
-            try expect(PersonalRulesChecks.appended(argv) == [WorkspaceMCPConfiguration.agentGuidance + "\n\n" + ReplyStandard.block],
+            // A helper's Array text is its MCP server's lean instructions, so only the block rides here.
+            try expect(PersonalRulesChecks.appended(argv) == [(helper ? "" : WorkspaceMCPConfiguration.agentGuidance + "\n\n") + ReplyStandard.block],
                        "\(label): one --append-system-prompt with the guidance then the block, got \(PersonalRulesChecks.appended(argv))")
         case .claudeBare:
             try expect(PersonalRulesChecks.appended(argv) == [ReplyStandard.block],

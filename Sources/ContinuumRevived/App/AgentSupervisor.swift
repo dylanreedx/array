@@ -1420,6 +1420,8 @@ final class AgentSupervisor {
                 workspaceMCP = workspaceMCP?.alwaysLoading(ManagedLeadHookState.alwaysLoadedTools)
             }
         }
+        // A helper needs array_report and little else (`HelperLeanStart`).
+        if record.parentAgentID != nil { workspaceMCP = workspaceMCP?.leaningForHelper() }
         return AgentRunnerLaunch(record: record, spawnDepth: depth(of: id),
                                  workspaceMCP: workspaceMCP,
                                  projectStandards: standards)

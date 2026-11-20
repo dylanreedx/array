@@ -55,8 +55,13 @@ extension ManagedModeChecks {
         try expect(b.supervisor.records[helper]?.parentAgentID == lead, "the helper must name the lead as parent")
         let helperTools = try listedTools(claudeServer(b, helper))
         try expectAllDeferred(helperTools, "a helper's launch")
-        try expectOriginalDelegationIntent(helperTools, "a Free helper's launch")
-        try expect(names(helperTools) == names(leadTools), "a lead and its helper must be offered the same tools")
+        // A helper gets the lean start: the four tools it needs and nothing else.
+        let leanTools: Set<String> = ["array_report", "array_status", "array_workspace_context", "array_message_agent"]
+        try expect(names(helperTools) == leanTools,
+                   "a helper must be offered exactly \(leanTools.sorted()); it was offered \(names(helperTools).count) tools: \(names(helperTools).sorted())")
+        try expect(names(leadTools).count > 30, "the lead must keep the full tool list")
+        try expect(!(try argv(b, helper)).contains(WorkspaceMCPConfiguration.agentGuidance),
+                   "a helper's system prompt must not repeat the instructions its MCP server already gives")
 
         let solo = try await delegate(b, mode: nil, label: "solo")
         try await settled(b, solo)

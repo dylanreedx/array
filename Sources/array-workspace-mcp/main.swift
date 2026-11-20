@@ -75,6 +75,8 @@ struct ArrayWorkspaceMCP {
         /// Listed with `_meta["anthropic/alwaysLoad"]`: a Claude Managed lead's
         /// first tools, loaded up front rather than through tool search.
         let alwaysLoadedTools: Set<String>
+        /// A helper's lean start: only these tools, one short instruction text.
+        let toolAllowlist: Set<String>?
         /// Opt-in protocol accounting only; no compact text or token estimate.
         let toolContextFacts: WorkspaceMCPJSON?
         let session: URLSession
@@ -99,6 +101,8 @@ struct ArrayWorkspaceMCP {
             self.chooser = environment[ManagedChooser.serverEnvironmentKey] == "1"
             self.alwaysLoadedTools = Set((environment[WorkspaceMCPConfiguration.alwaysLoadedToolsEnvironmentKey] ?? "")
                 .split(separator: ",").map(String.init))
+            let allowed = (environment[HelperLeanStart.environmentKey] ?? "").split(separator: ",").map(String.init)
+            self.toolAllowlist = allowed.isEmpty ? nil : Set(allowed)
             // URLSession's default request timeout is 60 s. The host answers a
             // delegation only after the user answers its approval alert, so a
             // slow answer used to read "bridge unavailable" here while the
@@ -110,14 +114,16 @@ struct ArrayWorkspaceMCP {
             if environment["ARRAY_WORKSPACE_TOOL_CONTEXT_FACTS"] == "1" {
                 toolContextFacts = Self.measureToolContext(
                     tools: Self.listedTools(projectStandards: projectStandards, chooser: chooser,
-                        delivery: delivery, alwaysLoadedTools: alwaysLoadedTools),
-                    instructions: WorkspaceMCPToolCatalog.serverInstructions(for: delivery))
+                        delivery: delivery, alwaysLoadedTools: alwaysLoadedTools, allowlist: toolAllowlist),
+                    instructions: toolAllowlist == nil ? WorkspaceMCPToolCatalog.serverInstructions(for: delivery) : HelperLeanStart.instructions)
             } else { toolContextFacts = nil }
         }
 
         private static func listedTools(projectStandards: Bool, chooser: Bool,
-                                        delivery: WorkspaceResultDelivery, alwaysLoadedTools: Set<String>) -> [WorkspaceMCPJSON] {
-            var tools = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards, chooser: chooser).map { tool in
+                                        delivery: WorkspaceResultDelivery, alwaysLoadedTools: Set<String>,
+                                        allowlist: Set<String>? = nil) -> [WorkspaceMCPJSON] {
+            var tools = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards, chooser: chooser)
+                .filter { allowlist?.contains($0.name) ?? true }.map { tool in
                 var listed: [String: WorkspaceMCPJSON] = [
                     "name": .string(tool.name),
                     "description": .string(WorkspaceMCPToolCatalog.mcpDescription(tool, for: delivery)),
@@ -127,7 +133,7 @@ struct ArrayWorkspaceMCP {
                 }
                 return WorkspaceMCPJSON.object(listed)
             }
-            if delivery == .collect {
+            if delivery == .collect, allowlist == nil {
                 tools.append(.object(["name": .string(WorkspaceMCPToolCatalog.waitAgentsName),
                                       "description": .string(WorkspaceMCPToolCatalog.waitAgentsDescription),
                                       "inputSchema": .object(WorkspaceMCPToolCatalog.waitAgentsInputSchema)]))
@@ -209,13 +215,13 @@ struct ArrayWorkspaceMCP {
                     "protocolVersion": .string("2024-11-05"),
                     "capabilities": .object(["tools": .object([:])]),
                     "serverInfo": .object(["name": .string("array-workspace"), "version": .string("0.1")]),
-                    "instructions": .string(WorkspaceMCPToolCatalog.serverInstructions(for: delivery))
+                    "instructions": .string(toolAllowlist == nil ? WorkspaceMCPToolCatalog.serverInstructions(for: delivery) : HelperLeanStart.instructions)
                 ]
                 if let toolContextFacts { result["_meta"] = .object(["array/toolContext": toolContextFacts]) }
                 return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null, "result": .object(result)]))
             case "tools/list":
                 let tools = Self.listedTools(projectStandards: projectStandards, chooser: chooser,
-                                             delivery: delivery, alwaysLoadedTools: alwaysLoadedTools)
+                                             delivery: delivery, alwaysLoadedTools: alwaysLoadedTools, allowlist: toolAllowlist)
                 return encode(.object(["jsonrpc": .string("2.0"), "id": request.id ?? .null,
                                        "result": .object(["tools": .array(tools)])]))
             case "tools/call":
@@ -239,7 +245,7 @@ struct ArrayWorkspaceMCP {
             let reply: WorkspaceMCPJSON
             if name == WorkspaceMCPToolCatalog.waitAgentsName, delivery == .collect {
                 reply = await waitAgents(arguments)
-            } else if let tool = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards, chooser: chooser).first(where: { $0.name == name }) {
+            } else if let tool = WorkspaceMCPToolCatalog.tools(projectStandards: projectStandards, chooser: chooser).first(where: { $0.name == name && (toolAllowlist?.contains($0.name) ?? true) }) {
                 do {
                     let lookupID = Self.providerCallID(params) ?? UUID().uuidString
                     let raw = tool.operation == .operationGet
