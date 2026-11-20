@@ -1873,6 +1873,8 @@ final class TileSpawner {
         size: CGSize? = nil
     ) -> ManagedAgentOutcome {
         guard let canvasView else { return .failure(SpawnError.canvasUnavailable) }
+        let hitchTag = MainThreadActivity.begin("agent-spawn")
+        defer { hitchTag.end() }
         // CX-01 Phase 2b: the workspace API targets the PARENT's zone, not the
         // armed one — an explicit scope outranks the provider (§16: targeting a
         // zone for placement is separate from arming it).

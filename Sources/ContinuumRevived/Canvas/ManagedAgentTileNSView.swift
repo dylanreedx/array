@@ -3178,6 +3178,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// `now` defaults to `AgentElapsedClock` (`Date()` outside the film build), the
     /// clock the header's own elapsed readout uses, so the two never disagree.
     private func refreshCompactStatus(at now: Date = AgentElapsedClock.now(), location: AgentLocationSnapshot? = nil) {
+        let hitchTag = MainThreadActivity.begin("status-tick")
+        defer { hitchTag.end() }
         defer { chromeDidChange() }
         // Turn cards: the newest turn's work strip reads the same presence the
         // row does, on the same tick.

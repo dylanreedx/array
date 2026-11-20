@@ -1399,6 +1399,8 @@ class TileNSView: NSView, TokenThemed {
         if surfaceResidency == .surfaced, bounds.contains(local) {
             qaHitTestPromotionCount &+= 1
             Self.hitTestPromotionTotal &+= 1
+            let hitchTag = MainThreadActivity.begin("hit-test-promotion")
+            defer { hitchTag.end() }
             promoteBodyToNative()
         }
         // The pinned head is opaque and drawn over everything on the tile, the

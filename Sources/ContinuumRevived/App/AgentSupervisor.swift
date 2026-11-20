@@ -12661,6 +12661,8 @@ final class AgentSupervisor {
 
     private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID, bypassReload: Bool = false,
                                        gestureDrain: Bool = false) {
+        let hitchTag = MainThreadActivity.begin("transcript-ingest")
+        defer { hitchTag.end() }
         guard transcriptStore != nil else { return }
         if !bypassReload, !gestureDrain {
             if case .contentDelta = event, deferIngestForGesture(event, for: id) { return }

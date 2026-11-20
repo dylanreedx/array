@@ -871,6 +871,24 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // Headless witness that a main-thread stall is logged with its label and
+        // the gesture it landed in, and that an idle app logs nothing.
+        if CommandLine.arguments.contains("--hitch-log-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                do {
+                    try await HitchLogChecks.run()
+                    print("HitchLogChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         // Headless gesture-deferral witness: an off-screen window, never the screen.
         if CommandLine.arguments.contains("--gesture-defer-check") {
             _ = NSApplication.shared
@@ -9060,6 +9078,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     """
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Names whatever blocks the main run loop for 50 ms or more (one log line,
+        // `continuum.canvas` / `stall`). Idle, it never runs.
+        MainThreadStallWatchdog.install()
         // Continuum's canvas is a dark surface: every tile/card fill is a dark
         // literal. The text, however, used dynamic system colors, which resolve
         // to BLACK under light appearance — that is the "black text on dark
@@ -15991,6 +16012,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             },
             canvasSnapshot: { [weak self] in
                 try await MainActor.run {
+                    let hitchTag = MainThreadActivity.begin("companion-canvas-snapshot")
+                    defer { hitchTag.end() }
                     guard let self, let canvasView = self.canvasView else {
                         throw CompanionSyncAppError.missingCanvas
                     }
@@ -16018,6 +16041,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // its own (see `companionActivitySnapshot`).
             activitySnapshot: { [weak self] in
                 try await MainActor.run {
+                    let hitchTag = MainThreadActivity.begin("companion-activity-snapshot")
+                    defer { hitchTag.end() }
                     guard let self else { return ActivityLogSnapshot.empty }
                     return try self.companionActivitySnapshot()
                 }
@@ -18402,6 +18427,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// rows: the palette, the companion and the lifecycle verbs read
     /// `buildAgentInboxRows`, which never holds someone else's agent.
     func sidebarInboxRows(now: Date = AgentElapsedClock.now(), inputs: SidebarModelInputs? = nil) -> [AgentInboxRow] {
+        let hitchTag = MainThreadActivity.begin("sidebar-inbox-build")
+        defer { hitchTag.end() }
         let inputs = inputs ?? currentSidebarModelInputs()
         let settle = autoSettle
         let rows = buildAgentInboxRows(now: now, inputs: inputs) + sharedAgentSidebarRows(inputs: inputs, now: now)
@@ -26198,6 +26225,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         _ layers: [CanvasNSView.ZoneLayer],
         phase: WorkspaceRuntime.TileHydrationPhase
     ) {
+        let hitchTag = MainThreadActivity.begin("zone-hydration")
+        defer { hitchTag.end() }
         for layer in layers {
             // Ambient (project-less) zones keep their placeholders for now: their
             // tiles live in the workspace document's own register rather than in a
@@ -26344,6 +26373,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvas: CanvasNSView,
         wiresAgents: Bool = true
     ) {
+        let hitchTag = MainThreadActivity.begin("agent-restore")
+        defer { hitchTag.end() }
         // Managed agents are BUILT in Phase A but WIRED here: `wireManagedAgentTile`
         // resolves the view through `canvasView.tileView(for:)`, so the layer has to
         // be installed before it can find anything.
