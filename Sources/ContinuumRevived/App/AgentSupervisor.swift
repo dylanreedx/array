@@ -1255,6 +1255,25 @@ final class AgentSupervisor {
         didSet { if recordStorage.count != characterPackRecordCount { scheduleCharacterPacks() } }
     }
     var records: [AgentID: AgentRecord] { recordStorage }
+
+    /// Every record in `AgentStore.isOrderedBefore` order. A whole-sidebar build
+    /// asked for this sort each time (~23% of a build at ~1,700 records); the
+    /// order moves only when a record arrives, leaves or changes `createdAt`.
+    private var orderedRecordIDsCache: [AgentID]?
+    /// Sorts performed, for the cache witness.
+    private(set) var qaRecordSortCount = 0
+    /// QA seam: `CONTINUUM_QA_RECORD_SORT_CACHE_OFF=1` sorts on every call.
+    nonisolated(unsafe) static var qaRecordSortCacheOff =
+        ProcessInfo.processInfo.environment["CONTINUUM_QA_RECORD_SORT_CACHE_OFF"] == "1"
+    func recordsInDisplayOrder() -> [AgentRecord] {
+        if !Self.qaRecordSortCacheOff, let ids = orderedRecordIDsCache, ids.count == recordStorage.count {
+            return ids.compactMap { recordStorage[$0] }
+        }
+        qaRecordSortCount += 1
+        let sorted = recordStorage.values.sorted(by: AgentStore.isOrderedBefore)
+        orderedRecordIDsCache = sorted.map(\.id)
+        return sorted
+    }
     private var characterPackRecordCount = 0
     private var characterPacksScheduled = false
 
@@ -1262,6 +1281,13 @@ final class AgentSupervisor {
     /// message card reads avoids capturing/copying the complete dictionary on
     /// every agent event while still covering restore, removal and retargeting.
     private func setRecord(_ record: AgentRecord?, for id: AgentID) {
+        // The display order depends on membership and `createdAt` only.
+        if orderedRecordIDsCache != nil {
+            let before = recordStorage[id]
+            if (before == nil) != (record == nil) || before?.createdAt != record?.createdAt {
+                orderedRecordIDsCache = nil
+            }
+        }
         if runtimeObservationObservers[id] != nil,
            (records[id] == nil) != (record == nil) || records[id]?.harness != record?.harness {
             quotaObservationIndexDirty = true

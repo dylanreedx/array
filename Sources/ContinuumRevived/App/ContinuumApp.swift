@@ -17040,7 +17040,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // prompt line, never the "New agent" placeholder.
         let orderedRecords = only.map { subset in
             subset.compactMap { agentSupervisor.records[AgentID(rawValue: $0)] }.sorted(by: AgentStore.isOrderedBefore)
-        } ?? agentSupervisor.records.values.sorted(by: AgentStore.isOrderedBefore)
+        } ?? agentSupervisor.recordsInDisplayOrder()
         let records = orderedRecords.map { record in
             guard let name = agentSupervisor.sidebarUntitledName(for: record.id) else { return record }
             var named = record
@@ -46834,6 +46834,42 @@ extension AppDelegate {
         let turnReasons = app.qaFullPushReasons.filter { $0.value != reasonsBefore[$0.key, default: 0] }
         witness(turnBuilds == 0, "7: turns of 6 tile-less agents built every sidebar row \(turnBuilds) times, reasons \(turnReasons)")
         report.append("tile-less turns: \(turnBuilds) full row builds over 18 turn pairs")
+
+        // 8 · The record order is sorted once, not once per whole-sidebar build.
+        // A store shaped like the real one: three families of 100 helpers.
+        let parents = (0..<3).map { spawn("Lead \($0)") }
+        for lead in parents {
+            for index in 0..<100 {
+                let helper = supervisor.spawn(
+                    role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                    projectId: projectId, parentAgentID: lead, tileId: nil)
+                _ = supervisor.rename(agentID: helper, to: "Helper \(index)")
+            }
+        }
+        app.refreshAgentSurfaces(notify: false)
+        settle()
+        func fullBuilds(_ count: Int) -> (sorts: Int, msPerBuild: Double) {
+            let sortsBefore = supervisor.qaRecordSortCount
+            let started = DispatchTime.now().uptimeNanoseconds
+            for _ in 0..<count { _ = app.sidebarInboxRows() }
+            let nanos = DispatchTime.now().uptimeNanoseconds - started
+            return (supervisor.qaRecordSortCount - sortsBefore, Double(nanos) / 1e6 / Double(count))
+        }
+        let wasCacheOff = AgentSupervisor.qaRecordSortCacheOff
+        defer { AgentSupervisor.qaRecordSortCacheOff = wasCacheOff }
+        AgentSupervisor.qaRecordSortCacheOff = true
+        let legacySort = fullBuilds(10)
+        AgentSupervisor.qaRecordSortCacheOff = false
+        _ = app.sidebarInboxRows()
+        let cachedSort = fullBuilds(10)
+        witness(legacySort.sorts == 10, "8: control: with the cache off ten builds sorted \(legacySort.sorts) times")
+        witness(cachedSort.sorts == 0, "8: ten whole-sidebar builds sorted the records \(cachedSort.sorts) times")
+        let beforeSpawn = supervisor.qaRecordSortCount
+        _ = spawn("Late")
+        _ = app.sidebarInboxRows()
+        witness(supervisor.qaRecordSortCount - beforeSpawn == 1, "8: a new record did not re-sort once")
+        report.append(String(format: "sort cache: %d sorts per 10 builds (was %d); %.1f ms per build (was %.1f), debug, %d records",
+                             cachedSort.sorts, legacySort.sorts, cachedSort.msPerBuild, legacySort.msPerBuild, supervisor.records.count))
 
         if !failures.isEmpty {
             throw Failure(description: "SidebarEventCost RED:\n  " + failures.joined(separator: "\n  "))
