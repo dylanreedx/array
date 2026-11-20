@@ -124,6 +124,9 @@ final class WorkspaceAPIService {
 
     // Shared with `WorkspaceAPIService+Canvas.swift` (same pipeline, other file).
     var grants: [AgentID: [WorkspaceToolGrant]] = [:]
+    /// `agent.inspect` on another agent, once per helper per five minutes.
+    var pollLimiter = AgentPollLimiter()
+    var pollNow: () -> Date = { Date() }
     private var revocationGenerations: [AgentID: UInt64] = [:]
     /// Explicit user approvals belong to the app session and project/action
     /// scope. Per-agent grants still carry revocation and enabled-state checks.

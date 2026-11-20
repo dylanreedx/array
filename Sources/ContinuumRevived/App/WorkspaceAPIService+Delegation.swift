@@ -113,9 +113,12 @@ extension WorkspaceAPIService {
             return completion(fail(.unsupported, reason))
         }
         let catalog = AgentModelCatalog.shared.snapshot(for: childHarness)
-        guard let childModel = request.model ?? (childHarness == parentHarness ? record.model : catalog.seedModel),
+        // A lead that names no model gets the harness's cheap class from the live
+        // catalogue (never a written-down id); a retry keeps its helper's model.
+        let defaultTierModel = request.model == nil && request.retryOf == nil ? HelperDefaultTier.model(in: catalog) : nil
+        guard let childModel = request.model ?? defaultTierModel ?? (childHarness == parentHarness ? record.model : catalog.seedModel),
               catalog.models.contains(childModel),
-              (request.model == nil && childHarness == parentHarness || childModel.contains("/")) else {
+              (request.model == nil && (childHarness == parentHarness || defaultTierModel != nil) || childModel.contains("/")) else {
             // Name the offered ids verbatim: the caller cannot see the catalogue
             // otherwise, and a guessed bare id ("claude-haiku-5-5") never matches.
             let offered = catalog.models.prefix(24).joined(separator: ", ")
@@ -429,7 +432,7 @@ extension WorkspaceAPIService {
                 return completion(created(retryOf, continued: true))
             }
         }
-        supervisor.handleSpawnRequestAsync(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? retryEffort ?? (childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)), mode: .free, retryOf: request.retryOf, originalBrief: request.task, contract: contract, checkoutOffMain: checkoutOffMain, gate: gate) { [weak self] outcome in
+        supervisor.handleSpawnRequestAsync(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? retryEffort ?? HelperDefaultTier.effort), mode: .free, retryOf: request.retryOf, originalBrief: request.task, contract: contract, checkoutOffMain: checkoutOffMain, gate: gate) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
             case let .spawned(childId):

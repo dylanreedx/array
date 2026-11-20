@@ -96,7 +96,7 @@ func runManagedModeLiveChecks() async throws {
     mounted.helperWatchdogThreshold = 20
 
     let lead = mounted.spawn(role: nil, prompt: nil, cwd: root, harness: harness, model: leadModel,
-        thinking: "low", projectId: WorkspaceInvariantsFixture.projectA1, projectRoot: root, displayName: "Managed live lead")
+        thinking: environment["ARRAY_USAGE_MODE"] == nil ? "low" : "medium", projectId: WorkspaceInvariantsFixture.projectA1, projectRoot: root, displayName: "Managed live lead")
     record("leadIsManaged", mounted.effectiveMode(for: lead) == .managed, mounted.effectiveMode(for: lead).rawValue)
     guard results["leadIsManaged"] == true else { throw Failure(description: "Lead is not Managed; no model turn was sent.") }
     _ = mounted.setWorkspaceToolsEnabled(agentID: lead, true)
@@ -143,6 +143,62 @@ func runManagedModeLiveChecks() async throws {
         }
         evidence["failures"] = failures
         save()
+    }
+
+    // Usage scenarios (`scripts/helper-usage-live.sh`), no model-driven choreography
+    // beyond the task itself. `helpers3`: three tiny helpers through the real
+    // `agent.delegate` path with no model, effort or tools chosen by the caller.
+    // `single`: the task run by one Free agent. `lead`: the task handed to the
+    // Managed lead to delegate to one helper. Evidence records every session id.
+    if let usageMode = environment["ARRAY_USAGE_MODE"] {
+        let started = Date()
+        var task = "Reply with the word OK."
+        if let path = environment["ARRAY_USAGE_TASKS_FILE"], let data = FileManager.default.contents(atPath: path),
+           let all = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]],
+           let index = environment["ARRAY_USAGE_TASK"].flatMap(Int.init), all.indices.contains(index) {
+            task = all[index]["prompt"] as? String ?? task
+            for (name, text) in (all[index]["files"] as? [String: String]) ?? [:] {
+                try text.write(to: root.appendingPathComponent(name), atomically: true, encoding: .utf8)
+            }
+        }
+        app.workspaceAPI.approvalHandler = { _ in .allowForSession }
+        func settled() -> Bool {
+            !mounted.isRunning(lead) && mounted.children(of: lead).allSatisfy { !mounted.isRunning($0) && mounted.records[$0]?.latestTerminalEvent != nil }
+        }
+        switch usageMode {
+        case "helpers3":
+            for n in 1...3 {
+                let reply = app.workspaceAPI.dispatch(agentId: lead, requestId: "usage-\(n)", op: "agent.delegate", payload: [
+                    "task": "Tiny usage-benchmark task \(n): run `echo hello-\(n)` in the shell, then call array_report with the summary \"hello-\(n)\".",
+                    "idempotencyKey": "usage-key-\(n)", "presentation": ["camera": "preserve"]])
+                if case let .error(error) = reply { throw Failure(description: "delegation \(n) refused: \(error.message)") }
+            }
+        case "single":
+            _ = mounted.setMode(.free, for: lead)
+            guard mounted.send(task, to: lead) else { throw Failure(description: "single send refused") }
+        case "lead":
+            guard mounted.send("Delegate this task to ONE helper with array_delegate, passing the task text verbatim. End your turn; when its report arrives, answer with its result in one line.\n\nTASK: \(task)", to: lead) else { throw Failure(description: "lead send refused") }
+        default: throw Failure(description: "unknown ARRAY_USAGE_MODE \(usageMode)")
+        }
+        _ = await waitUntil(timeout: 5, pollInterval: 0.2) { mounted.isRunning(lead) || !mounted.children(of: lead).isEmpty }
+        let done = await waitUntil(timeout: 600, pollInterval: 0.5) { settled() && (usageMode != "lead" || !mounted.children(of: lead).isEmpty) }
+        _ = await waitUntil(timeout: 120, pollInterval: 0.5) { settled() }
+        // The helper's result wakes the lead after the helper ends; count that turn.
+        if usageMode == "lead" {
+            _ = await waitUntil(timeout: 90, pollInterval: 0.5) { (answers[lead] ?? []).count >= 2 && settled() }
+        }
+        snapshotAgents()
+        evidence["usageMode"] = usageMode
+        evidence["wallSeconds"] = Date().timeIntervalSince(started)
+        evidence["sessions"] = ([lead] + mounted.children(of: lead)).map { id -> [String: Any] in
+            let r = mounted.records[id]
+            return ["role": id == lead ? "lead" : "helper", "id": id.rawValue.uuidString, "sessionId": r?.providerSessionId ?? "",
+                    "model": r?.model ?? "", "thinking": r?.thinking ?? ""]
+        }
+        record("usageFinished", done, mounted.children(of: lead).map { "\(mounted.records[$0]?.model ?? "?") \(mounted.records[$0]?.thinking ?? "?")" })
+        evidence["status"] = done ? "usage-complete" : "usage-timeout"
+        save()
+        return
     }
 
     // Turn 1: two independent jobs at once; job B stalls on purpose.

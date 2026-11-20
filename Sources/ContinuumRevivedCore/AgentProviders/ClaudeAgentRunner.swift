@@ -359,8 +359,12 @@ public final class ClaudeAgentRunner: @unchecked Sendable, AgentSessionPrewarmin
             // so the config path stays last.
             // Host text joins the guidance in this ONE value: a second
             // `--append-system-prompt` replaces the first (claude 2.1.321).
-            args += ["--append-system-prompt", ([WorkspaceMCPConfiguration.agentGuidance] + (hostInstructions.map { [$0] } ?? [])).joined(separator: "\n\n"),
-                     "--allowedTools", "mcp__array_workspace"]
+            // A lean helper's one text rides the MCP instructions, which Claude
+            // shows even while it defers the tools: no second copy here.
+            let guidance = workspaceMCP.leanHelper ? [] : [WorkspaceMCPConfiguration.agentGuidance]
+            let appended = (guidance + (hostInstructions.map { [$0] } ?? [])).joined(separator: "\n\n")
+            args += (appended.isEmpty ? [] : ["--append-system-prompt", appended])
+                + ["--allowedTools", "mcp__array_workspace"]
                 + (mode == .free ? ["--disallowedTools", "ListAgents"] : [])
             if hookSurfaceAvailable {
                 args += ["--settings", WorkspaceAgentHook.claudeSettingsJSON(

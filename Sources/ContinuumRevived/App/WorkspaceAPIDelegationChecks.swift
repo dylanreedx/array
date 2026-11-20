@@ -341,7 +341,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                 let handle = "cross-\(source.rawValue)-\(target.rawValue)".replacingOccurrences(of: " ", with: "-")
                 var payload: [String: Any] = ["task": "cross harness task", "idempotencyKey": handle, "presentation": ["camera": "preserve"]]
                 if target != source { payload["harness"] = target.rawValue }
-                let expectedModel = source == .codex ? AgentCatalogQAFixture.claude.models.last! : (target == source ? model : AgentModelCatalog.shared.snapshot(for: target).seedModel!)
+                let expectedModel = source == .codex ? AgentCatalogQAFixture.claude.models.last! : (target == .claudeCode ? "anthropic/claude-sonnet-5-5" : target == .codex ? "openai-codex/gpt-5.4-mini" : AgentModelCatalog.shared.snapshot(for: target).seedModel!)
                 if source == .codex { payload["model"] = expectedModel }
                 let tilesBefore = agentTileCount()
                 let created = try result(api.dispatch(agentId: parent, requestId: handle, op: "agent.delegate", payload: payload), "cross harness delegation")
@@ -349,7 +349,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                 try expect(replay["childAgentId"] == created["childAgentId"], "cross retry creates no duplicate")
                 let childId = AgentID(rawValue: UUID(uuidString: created["childAgentId"]!.string!)!)
                 var child = supervisor.records[childId]!
-                try expect(child.harness == target && child.model == expectedModel, "child owns selected harness and catalogue model")
+                try expect(child.harness == target && child.model == expectedModel, "child owns selected harness and catalogue model: \(source.rawValue)->\(target.rawValue) wanted \(expectedModel), got \(child.harness?.rawValue ?? "nil") \(child.model)")
                 try expect(child.mode == .free, "cross helper must remain able to edit in both lead modes")
                 if managed {
                     try expect(child.tileId == nil && created["tileId"] == nil && agentTileCount() == tilesBefore,
@@ -519,7 +519,7 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
             let lead = effortLeadIds[source]!
             let pair = "\(source.rawValue) → \(target.rawValue)"
             let harness: [String: Any] = source == target ? [:] : ["harness": target.rawValue]
-            func with(_ extra: [String: Any]) -> [String: Any] { harness.merging(extra) { $1 } }
+            func with(_ extra: [String: Any]) -> [String: Any] { harness.merging(extra) { $1 }.merging(["model": model]) { old, _ in old } }
             let model = source == target ? supervisor.records[lead]!.model : AgentModelCatalog.shared.snapshot(for: target).seedModel!
             let accepted = AgentModelCatalog.shared.efforts(for: model, harness: target) ?? []
             check(accepted.contains("high"), "\(pair): the fixture catalogue must list high for \(model)")
@@ -576,12 +576,16 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                 }
             }
 
-            // Omitted: the thinking and argv a helper got before the field existed.
+            // Omitted: the default tier. Independent expectation, written here as
+            // outcomes: Claude's Sonnet-class entry and Codex's mini, at medium,
+            // never the lead's own model or effort.
             if let child = childId(delegateEffort(lead, harness), "\(pair) omitted effort") {
-                let expected = source == target ? supervisor.records[lead]!.thinking : AgentModelConfig.defaultThinking
-                check(supervisor.records[child]?.thinking == expected, "\(pair): omitted effort must keep \(expected), got \(String(describing: supervisor.records[child]?.thinking))")
+                let expected = "medium"
+                let tierModel = target == .claudeCode ? "anthropic/claude-sonnet-5-5" : "openai-codex/gpt-5.4-mini"
+                check(supervisor.records[child]?.model == tierModel, "\(pair): omitted model must be the harness's cheap class \(tierModel), got \(String(describing: supervisor.records[child]?.model))")
+                check(supervisor.records[child]?.thinking == expected, "\(pair): omitted effort must be \(expected), got \(String(describing: supervisor.records[child]?.thinking))")
                 if let launch = await settle(child, launch: 1, "\(pair) omitted effort") {
-                    let legacy = target == .codex ? CodexCLIBackend.effortArgument(forThinking: expected, model: model) : ClaudeCLIBackend.effortArgument(forThinking: expected, model: model)
+                    let legacy = target == .codex ? CodexCLIBackend.effortArgument(forThinking: expected, model: tierModel) : ClaudeCLIBackend.effortArgument(forThinking: expected, model: tierModel)
                     let today = launch.argv(effort: legacy), now = launch.argv(effort: launch.effort)
                     check(launch.effort == legacy && today.count == now.count && zip(today, now).allSatisfy { $0 == $1 },
                           "\(pair): omitted effort argv must equal today's element by element; differing \(zip(today, now).filter { $0 != $1 }), lengths \(today.count)/\(now.count)")
@@ -610,9 +614,9 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
             let lead = effortLeadIds[target]!
             let model = supervisor.records[lead]!.model
             let fixture = target == .codex ? AgentCatalogQAFixture.codex : AgentCatalogQAFixture.claude
-            guard let child = childId(delegateEffort(lead, ["effort": "xhigh"]), "\(target.rawValue) stale setup") else { continue }
+            guard let child = childId(delegateEffort(lead, ["effort": "xhigh", "model": model]), "\(target.rawValue) stale setup") else { continue }
             _ = await settle(child, launch: 1, "\(target.rawValue) stale setup")
-            let staleFailed = childId(delegateEffort(lead, ["effort": "xhigh", "task": "EFFORT-FAIL"]), "\(target.rawValue) stale retry setup")
+            let staleFailed = childId(delegateEffort(lead, ["effort": "xhigh", "task": "EFFORT-FAIL", "model": model]), "\(target.rawValue) stale retry setup")
             if let staleFailed { _ = await settle(staleFailed, launch: 1, "\(target.rawValue) stale retry setup") }
             var levels = fixture.effortLevels
             levels[model] = levels[model]?.filter { $0 != "xhigh" }
