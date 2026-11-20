@@ -96,7 +96,8 @@ enum SidebarTruthChecks {
               + "record naming a tile no canvas holds was never drawn live; with another "
               + "project's agent listing unreadable, a close still reached the list; an agent-"
               + "event push opened no file; the default scope was the workspace on screen, "
-              + "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
+              + "across a switch; ")
+        print("sidebar-truth (cont.): a switch restoring \(switchLoadTileCount) runtime-backed tiles "
               + "reloaded the sidebar once; settled and closed agents shared ONE folded History "
               + "heading, most recent first, at the bottom of the list; the header has two compact rows whose New "
               + "agent button made an agent; hovering it offered Snooze and Settle, and "

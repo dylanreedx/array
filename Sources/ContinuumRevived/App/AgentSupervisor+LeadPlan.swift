@@ -7,9 +7,16 @@ struct LeadPlanPresentation: Equatable {
         let title: String
         let owner: String
         let state: State
+        /// Prototype (plan-drawer): extra live facts a direction can draw.
+        var note: String? = nil
+        var liveDot: Bool = false
+        var isSection: Bool = false
     }
     let steps: [Step]
     let collapsed: Bool
+    var banner: String? = nil
+    var chips: [String] = []
+    var dimmed: Bool = false
     var summary: String { "Plan · \(steps.filter { $0.state == .done }.count) of \(steps.count) done" }
     var urgent: Step? {
         for state in [State.needsYou, .failed, .running] {
