@@ -193,9 +193,12 @@ enum ManagedModeChecks {
         let start: [String: Any] = ["hook_event_name": "SessionStart", "source": "startup", "session_id": "s"]
         if ProcessInfo.processInfo.environment["CONTINUUM_MANAGED_CHECK_SECTION"] != "budget" {
             let first = try await hook(b, managed, start)
-            try expect(first["additionalContext"] as? String == ManagedLeadHookState.brief && AgentReport.wordCount(ManagedLeadHookState.brief) <= 140 && ManagedLeadHookState.brief.contains("array_status"), "managed startup brief absent or too long")
+            try expect(first["additionalContext"] as? String == ManagedLeadHookState.brief && AgentReport.wordCount(ManagedLeadHookState.brief) <= 190 && ManagedLeadHookState.brief.contains("array_status"), "managed startup brief absent or too long")
             // The delivered brief tells the lead to use each tool it starts with loaded.
             let delivered = first["additionalContext"] as? String ?? ""
+            // A lead ends its turn only when nothing is independent of its helpers, and says what it waits on.
+            try expect(delivered.contains("only when nothing left is independent of your helpers") && delivered.contains("which helpers you are waiting on")
+                       && !delivered.contains("After delegating, end your turn;"), "delivered lead brief does not tell the lead to keep independent work going")
             try expect(delivered.contains("Include optional contract fields") && delivered.contains("owns") && delivered.contains("checks"), "delivered lead brief omits optional delegation contract guidance")
             let unnamed = ManagedLeadHookState.alwaysLoadedTools.filter { !delivered.contains($0) }
             try expect(unnamed.isEmpty, "the delivered brief never names the always-loaded \(unnamed)")
