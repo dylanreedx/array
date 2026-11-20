@@ -88,6 +88,115 @@ enum ManagedLeadPlanChecks {
         try await call(config, "array_status", ["now": "Still reviewing"])
         try expect(view.presentation?.steps.count == 5, "ordinary status erased plan")
 
+        // ---- plan-drawer: roster (B), plan age (A), decision chips (C) ----
+        // Everything below goes through the production MCP -> supervisor -> tile path;
+        // the offscreen stills are of the same mounted drawer.
+        let stillsDir = ProcessInfo.processInfo.environment["CONTINUUM_PLAN_DRAWER_DIR"].map { URL(fileURLWithPath: $0) }
+        func still(_ name: String) throws {
+            guard let stillsDir else { return }
+            try FileManager.default.createDirectory(at: stillsDir, withIntermediateDirectories: true)
+            let previous = NSApp.appearance
+            defer { NSApp.appearance = previous; tile.appearance = nil }
+            for (label, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                let theme = NSAppearance(named: appearance)!
+                NSApp.appearance = theme; tile.appearance = theme
+                tile.window?.appearance = theme
+                tile.layoutSubtreeIfNeeded(); view.layoutSubtreeIfNeeded()
+                var result: Result<NSBitmapImageRep, Error>!
+                theme.performAsCurrentDrawingAppearance { result = Result { try UIProbe.bitmap(of: view, id: "plan-drawer-\(name)") } }
+                try result.get().representation(using: .png, properties: [:])!
+                    .write(to: stillsDir.appendingPathComponent("\(name)-\(label).png"))
+            }
+        }
+        _ = view.accessibilityPerformPress()
+        try expect(view.presentation?.collapsed == false, "drawer did not expand for roster checks")
+        try expect(view.presentation?.steps.contains { $0.isSection } == false,
+                   "a plan that names every helper must not repeat them as a roster")
+        try still("1-plan-up-to-date")
+
+        // B. The plan names nobody: helpers appear from the delegations, grouped, with live state.
+        try await call(config, "array_status", ["now": "Replanned", "plan": [
+            ["title": "Merge the sign-in rework", "owner": "lead"], ["title": "Choose error copy", "owner": "you"]]])
+        func sections() -> [String] { view.presentation?.steps.filter(\.isSection).map(\.title) ?? [] }
+        try expect(sections() == ["Needs you", "Working", "Plan"], "roster groups wrong: \(sections())")
+        try expect(view.presentation?.title == "Helpers · 1 working · 1 need you", "roster header wrong: \(String(describing: view.presentation?.title))")
+        let rosterRows = view.presentation?.steps.filter { $0.ownerAgent != nil } ?? []
+        try expect(rosterRows.first { $0.ownerAgent == failed }?.state == .failed
+                   && rosterRows.first { $0.ownerAgent == helper }?.state == .running, "roster rows did not carry the helpers' real state")
+        // A helper's real status change moves its row: a new helper appears, then settles to Done.
+        let quick = try await delegateHelper(b, label: "Quick check")
+        try await AgentPresenceChecks.eventually("new helper did not reach the roster") {
+            view.presentation?.steps.contains { $0.ownerAgent == quick } == true
+        }
+        try await ManagedModeChecks.settled(b, quick)
+        try await AgentPresenceChecks.eventually("settled helper did not move to Done") {
+            view.presentation?.steps.first { $0.ownerAgent == quick }?.state == .done
+                && view.presentation?.steps.contains { $0.isSection && $0.title == "Done" } == true
+        }
+        try still("2-roster-live")
+
+        // B. Clicking an owner reveals that helper, through the real event path.
+        let helperIndex = view.presentation!.steps.firstIndex { $0.ownerAgent == helper }!
+        guard let hostWindow = view.window else { throw WorkspaceAgentReportChecks.Failure(description: "lead-plan: drawer has no window") }
+        let ownerRect = view.ownerRect(helperIndex)
+        let owner = view.convert(NSPoint(x: ownerRect.midX, y: ownerRect.midY), to: nil)
+        var revealed: [AgentID] = []
+        let originalReveal = tile.onRevealAgent
+        tile.onRevealAgent = { id, parent in revealed.append(id); originalReveal?(id, parent) }
+        func click(at point: NSPoint) {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                                  timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: hostWindow.windowNumber,
+                                                  context: nil, eventNumber: 1, clickCount: 1, pressure: 1) { NSApp.sendEvent(event) }
+            }
+        }
+        hostWindow.orderFrontOffscreenForChecks()
+        click(at: owner)
+        try expect(revealed == [helper], "clicking the owner did not ask to reveal that helper: \(revealed); hit=\(String(describing: hostWindow.contentView?.hitTest(hostWindow.contentView!.convert(owner, from: nil))).prefix(120)) visible=\(hostWindow.isVisible) viewFrame=\(view.frame) inWin=\(owner) ownerRect=\(ownerRect) tile.onReveal=\(originalReveal != nil)")
+        let titleCell = view.convert(NSPoint(x: 40, y: view.rowRect(helperIndex).midY), to: nil)
+        click(at: titleCell)
+        try expect(revealed == [helper], "clicking a title must not reveal a helper")
+        try expect(b.f.delegate.revealAgentFromInbox(helper.rawValue), "the app could not reveal that helper's tile")
+        tile.onRevealAgent = originalReveal
+
+        // A. A plan nobody has touched for three days says so, and an ordinary status does not reset it.
+        let threeDaysAgo = Date().addingTimeInterval(-3 * 86400)
+        try expect(supervisor.declareStatus(AgentDeclaredStatus(now: "Old news", plan: [
+            AgentPlanStep(title: "Dylan picks the option", owner: "you"), AgentPlanStep(title: "Ship", owner: "lead")],
+            declaredAt: threeDaysAgo, planDeclaredAt: threeDaysAgo), for: lead), "could not write the old plan")
+        try await call(config, "array_status", ["now": "Busy with helpers"])
+        let aged = view.presentation?.steps ?? []
+        try expect(aged.contains { $0.isSection && $0.stale && $0.title == "Plan · written 3d ago" }, "stale plan did not show its age: \(aged.map(\.title))")
+        try expect(aged.first { $0.title == "Dylan picks the option" }?.note == "asked 3d ago"
+                   && aged.first { $0.title == "Ship" }?.stale == true, "stale rows not marked")
+        try expect(supervisor.records[lead]?.declaredStatus?.planDeclaredAt.map { abs($0.timeIntervalSince(threeDaysAgo)) < 1 } == true,
+                   "an ordinary status reset the plan's age")
+        try still("3-plan-stale")
+        try await call(config, "array_status", ["now": "Replanned again", "plan": [["title": "Fresh step", "owner": "lead"]]])
+        try expect(view.presentation?.steps.contains { $0.stale } == false, "a rewritten plan stayed stale")
+
+        // C. A decision with options: chips in the composer's chip style; a chip answers into the composer.
+        try await call(config, "array_status", ["now": "Waiting on you", "needsYou": "Which error copy ships?",
+                                                "options": ["Short and blunt", "Long and kind"]])
+        try expect(view.presentation?.decision == "Which error copy ships?" && view.presentation?.options == ["Short and blunt", "Long and kind"],
+                   "decision did not reach the drawer")
+        try expect(view.optionRail.qaOptions == ["Short and blunt", "Long and kind"] && !view.optionRail.isHidden, "chips not shown")
+        try still("4-decision-chips")
+        try expect(view.optionRail.qaPressChip(titled: "Long and kind"), "chip could not be pressed")
+        try expect(tile.qaComposerDraftText == "Long and kind", "chip did not answer into the composer: \(tile.qaComposerDraftText)")
+        for bad: [String: Any] in [["now": "x", "options": ["a", "b"]], ["now": "x", "needsYou": "q", "options": ["only one"]],
+                                   ["now": "x", "needsYou": "q", "options": ["a", "a"]], ["now": "x", "needsYou": "q", "options": ["a", String(repeating: "z", count: 41)]]] {
+            let reply = try await WorkspaceAgentReportChecks.call(config, "array_status", bad)
+            try expect(reply.isError, "bad options accepted: \(bad)")
+        }
+        try await call(config, "array_status", ["now": "Waiting on you", "needsYou": "Which error copy ships?"])
+        try expect(view.presentation?.options.isEmpty == true && view.optionRail.isHidden, "options outlived the status that offered them")
+        try await call(config, "array_status", ["now": "Resolved"])
+        try expect(view.presentation?.decision == nil, "decision stayed after needsYou cleared")
+        // Put the drawer back as the rest of this check found it.
+        try await call(config, "array_status", ["now": "Reviewing helper results", "plan": plan])
+        _ = view.accessibilityPerformPress()
+
         // Bounds and forgery: every refusal leaves the full declaration intact.
         let before = supervisor.records[lead]?.declaredStatus
         let badPlans: [Any] = [[], Array(repeating: plan[0], count: 7),
@@ -131,23 +240,23 @@ enum ManagedLeadPlanChecks {
 
         // One scripted helper: running -> needs you -> failed checks -> done.
         try await call(helperConfig, "array_status", ["now": "Waiting on decision", "needsYou": "Approve login"])
-        try expect(view.presentation?.steps[1].state == .needsYou, "helper needs-you did not repaint lead")
+        try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .needsYou, "helper needs-you did not repaint lead")
         try expect(view.presentation?.header.contains("Needs you: Check login flow") == true, "first urgent helper missing from header")
         try await call(helperConfig, "array_status", ["now": "Testing login"])
-        try expect(view.presentation?.steps[1].state == .running, "cleared needs-you did not return to running")
+        try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .running, "cleared needs-you did not return to running")
         try await call(helperConfig, "array_report", ["summary": "Login check failed", "checks": [["what": "Login", "result": "fail"]]])
         try Data().write(to: URL(fileURLWithPath: supervisor.records[helper]!.cwd).appendingPathComponent("managed-release"))
         try await ManagedModeChecks.settled(b, helper)
-        try expect(view.presentation?.steps[1].state == .failed, "completed failed checks did not repaint failed")
+        try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .failed, "completed failed checks did not repaint failed")
         try await call(helperConfig, "array_report", ["summary": "Login now passes", "checks": [["what": "Login", "result": "pass"]]])
-        try expect(view.presentation?.steps[1].state == .done, "successful helper did not repaint done")
+        try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .done, "successful helper did not repaint done")
         // A claimed pass cannot hide a failed command Array observed.
         for exitCode in [1, 0] {
             _ = try await ManagedModeChecks.hook(b, helper, ["hook_event_name": "PostToolUse", "tool_name": "Bash",
                 "tool_input": ["command": "swift test"], "tool_response": ["exit_code": exitCode]])
             try await call(helperConfig, "array_report", ["summary": "Checks finished",
                 "checks": [["what": "swift test", "result": "pass"]]])
-            try expect(view.presentation?.steps[1].state == (exitCode == 0 ? .done : .failed),
+            try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == (exitCode == 0 ? .done : .failed),
                        "observed command failure lost behind helper's pass claim")
         }
         plan[3]["state"] = "done"
@@ -164,22 +273,24 @@ enum ManagedLeadPlanChecks {
         try await Task.sleep(for: .milliseconds(200))
         now.addTimeInterval(601)
         await supervisor.sweepHelperWatchdog()
-        try expect(view.presentation?.steps[1].state == .needsYou, "watchdog did not repaint plan")
+        try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .needsYou, "watchdog did not repaint plan")
         _ = try await ManagedModeChecks.hook(b, helper, ["hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": [:]])
-        try expect(view.presentation?.steps[1].state == .running, "hook progress did not clear watchdog plan state")
+        try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .running, "hook progress did not clear watchdog plan state")
         try Data().write(to: URL(fileURLWithPath: supervisor.records[helper]!.cwd).appendingPathComponent("managed-release"))
         try await ManagedModeChecks.settled(b, helper)
 
         try expect(supervisor.send("FAIL-TURN", to: helper), "error turn did not start")
         try await AgentPresenceChecks.eventually("helper error did not repaint failed", timeout: 15) {
-            !supervisor.isRunning(helper) && view.presentation?.steps[1].state == .failed
+            !supervisor.isRunning(helper) && view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .failed
         }
         let waiting = supervisor.spawn(role: nil, prompt: nil, cwd: b.f.pbRoot, harness: .claudeCode,
             model: ManagedModeChecks.model, thinking: "high", projectId: b.f.projectPb,
             projectRoot: b.f.pbRoot, parentAgentID: lead, displayName: "Not started")
         plan.append(["title": String(repeating: "x", count: 80), "owner": waiting.rawValue.uuidString])
         try await call(config, "array_status", ["now": "Review", "plan": plan])
-        try expect(view.presentation?.steps.count == 6 && view.presentation?.steps.last?.state == .waiting,
+        let steps6 = view.presentation?.steps ?? []
+        let planRows = steps6.reversed().prefix(while: { !$0.isSection })
+        try expect(planRows.count == 6 && steps6.last?.state == .waiting,
                    "six-step/80-character boundary or unstarted helper failed")
 
         // Real disk restore and a newly attached tile, not a Codable round trip.
