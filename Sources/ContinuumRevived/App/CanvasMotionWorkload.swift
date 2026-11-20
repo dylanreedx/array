@@ -50,7 +50,7 @@ final class CanvasMotionWorkload {
     private let agentIDs: [AgentID]
     /// `CANVAS_MOTION_SUBAGENTS`: tile-less helpers folded under the agents above.
     private let subagentIDs: [AgentID]
-    private let agentTileIDs: [UUID]
+    let agentTileIDs: [UUID]
     private let markdownTileIDs: [UUID]
     private let defaults: UserDefaults
     private let defaultsName: String

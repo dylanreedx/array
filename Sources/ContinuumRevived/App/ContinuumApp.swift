@@ -889,6 +889,23 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // Headless idle-frame attribution: an off-screen window, never the screen.
+        if CommandLine.arguments.contains("--idle-frames-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                do {
+                    try await IdleFramesChecks.run()
+                    print("IdleFramesChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         // Headless gesture-deferral witness: an off-screen window, never the screen.
         if CommandLine.arguments.contains("--gesture-defer-check") {
             _ = NSApplication.shared
