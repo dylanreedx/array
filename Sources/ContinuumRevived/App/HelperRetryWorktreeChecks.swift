@@ -43,9 +43,10 @@ enum HelperRetryWorktreeChecks {
         try git(root, ["commit", "-qm", "test: seed disposable helper repository"])
     }
 
-    static func request(_ b: Bench, parent: AgentID? = nil, task: String, title: String = "fix ledger", retry: AgentID? = nil, key: String = UUID().uuidString) async throws -> WorkspaceAgentReportChecks.ToolReply {
+    static func request(_ b: Bench, parent: AgentID? = nil, task: String, title: String = "fix ledger", retry: AgentID? = nil, effort: String? = nil, key: String = UUID().uuidString) async throws -> WorkspaceAgentReportChecks.ToolReply {
         var payload: [String: Any] = ["task": task, "title": title, "harness": "Claude Code", "model": ManagedModeChecks.model, "idempotencyKey": key]
         if let retry { payload["retryOf"] = retry.rawValue.uuidString }
+        if let effort { payload["effort"] = effort }
         return try await WorkspaceAgentReportChecks.call(b.configuration(for: parent ?? b.f.agentId), "array_delegate", payload)
     }
 
@@ -181,7 +182,7 @@ enum HelperRetryWorktreeChecks {
     }
 
     static func retry() async throws {
-        let b = try bench("helper-retry"); defer { b.tearDown() }
+        let b = try bench("helper-retry", efforts: [AgentModelConfig.defaultThinking, "high"]); defer { b.tearDown() }
         let root = URL(fileURLWithPath: b.supervisor.records[b.f.agentId]!.checkoutRoot)
         try repository(root)
         let brief = "HOLD PRIOR-BRIEF repair the ledger " + Array(repeating: "earlier", count: 600).joined(separator: " ")
@@ -211,8 +212,8 @@ enum HelperRetryWorktreeChecks {
         let successfulReply = try await request(b, task: "retry success", retry: foreign)
         try expect(WorkspaceAgentReportChecks.errorCode(successfulReply) == "invalid_request", "successful retry was accepted")
         let key = UUID().uuidString
-        let retried = try child(await request(b, task: "Continue repair", retry: old, key: key))
-        let replayed = try child(await request(b, task: "Continue repair", retry: old, key: key))
+        let retried = try child(await request(b, task: "Continue repair", retry: old, effort: "high", key: key))
+        let replayed = try child(await request(b, task: "Continue repair", retry: old, effort: "high", key: key))
         try expect(retried == replayed, "transport replay created another retry")
         let seen = try await capture(b, retried)
         let prompt = String(decoding: try JSONSerialization.data(withJSONObject: seen["prompt"]!), as: UTF8.self)
@@ -240,7 +241,7 @@ enum HelperRetryWorktreeChecks {
             _ = b.supervisor.send("HOLD resume the old helper", to: resumed)
         }
         let countBeforeGap = b.supervisor.records.count
-        let gapRetry = try await request(b, task: "retry across the gap", retry: resumed)
+        let gapRetry = try await request(b, task: "retry across the gap", retry: resumed, effort: "high")
         try expect(b.supervisor._spawnCheckoutResolvedHookForQA == nil, "the retry never reached the gap after its git step")
         try expect(!b.supervisor.mayRetry(resumed, from: b.f.agentId), "the old helper did not resume in the gap")
         try expect(WorkspaceAgentReportChecks.errorCode(gapRetry) == "invalid_request" && b.supervisor.records.count == countBeforeGap,
@@ -250,7 +251,7 @@ enum HelperRetryWorktreeChecks {
         _ = try await capture(b, held)
         b.supervisor.stop(held)
         try expect(b.supervisor.mayRetry(held, from: b.f.agentId), "stopped helper not eligible")
-        let stoppedRetry = try child(await request(b, task: "Continue stopped work", retry: held))
+        let stoppedRetry = try child(await request(b, task: "Continue stopped work", retry: held, effort: "high"))
         _ = try await capture(b, stoppedRetry)
         print("Helper retry checks passed: real first prompt, git names/report/caps, running and foreign refusals, stopped retry, idempotency and persistence")
     }
@@ -356,14 +357,24 @@ enum HelperRetryWorktreeChecks {
         }
         let refused = try await message("PLAIN pick the work up again")
         try await Task.sleep(nanoseconds: 300_000_000)
-        try expect(refused.isError && !r.supervisor.isRunning(earlier) && r.supervisor.isRunning(later),
-                   "a re-messaged helper started writing the checkout another helper is writing: \(refused.reply)")
-        try expect(String(describing: refused.reply).contains("is writing this checkout"), "the refusal did not say why: \(refused.reply)")
+        // Never refused: queued, and not run while another helper writes the checkout.
+        try expect(!refused.isError && !r.supervisor.isRunning(earlier) && r.supervisor.isRunning(later),
+                   "a re-messaged helper was refused, or started writing the checkout another helper is writing: \(refused.reply)")
+        try expect(String(describing: refused.reply).contains("queued"), "the message was not reported queued: \(refused.reply)")
         try await finish(r, later)
-        let accepted = try await message("PLAIN pick the work up again")
-        try expect(!accepted.isError, "a re-message after the other helper finished was refused: \(accepted.reply)")
+        let earlierCwd = URL(fileURLWithPath: r.supervisor.records[earlier]!.cwd)
+        let ran = await waitUntil(timeout: 20, pollInterval: 0.05) {
+            ((try? String(contentsOf: earlierCwd.appendingPathComponent("prompts.log"), encoding: .utf8)) ?? "").contains("PLAIN pick the work up again")
+        }
+        try expect(ran, "the queued message did not run once the other helper finished")
+        // The rule itself: sharing a checkout handle is not writing the same directory.
+        var apart = r.supervisor.records[earlier]!
+        apart.cwd = rRoot.appendingPathComponent(".worktrees/elsewhere").path
+        try expect(!AgentSupervisor.sharesWritableCheckout(apart, r.supervisor.records[later]!)
+                   && AgentSupervisor.sharesWritableCheckout(r.supervisor.records[earlier]!, r.supervisor.records[later]!),
+                   "helpers with their own worktree directory were treated as sharing one")
         r.supervisor.stopAll()
-        print("Helper checkout writers passed: the first helper shares with no worktree made; two delegations in one moment get one checkout each; a finished helper re-messaged while another writes the checkout is refused, then accepted once it finishes")
+        print("Helper checkout writers passed: the first helper shares with no worktree made; two delegations in one moment get one checkout each; a finished helper re-messaged while another writes the checkout is queued, never refused, and runs once it finishes")
 
         // A native spawn that lands while a delegation's git step runs off main
         // takes the shared checkout first. The delegation must then get its own

@@ -321,10 +321,18 @@ enum HelperCompletionChecks {
         try await Task.sleep(nanoseconds: 500_000_000)
         let expiredEntry = try s.queuedAgentMessage(caller: parent, key: "held-2")
         let expiredFiles = ["held-1", "held-2"].map { SpawnResultFile.read(parentCwd: parentCwd, handle: $0)?.status }
-        try HelperGuardChecks.expect(expired && expiredEntry?.result?.reason?.hasPrefix("Expired unread") == true
+        try HelperGuardChecks.expect(expired && expiredEntry?.result?.reason?.hasPrefix("Bundled, not run") == true
             && expiredFiles == [.interrupted, .interrupted] && !s.isRunning(child)
             && !prompts().contains("STALE-A") && !prompts().contains("STALE-B"),
             "held messages older than 24 h expire with a record each and never run: \(String(describing: expiredEntry?.result))")
+
+        // The stale messages were bundled into one note, none dropped.
+        let bundles = s.queuedMessages(for: child).filter { $0.helperNote && $0.text.contains("While you were away") }
+        try HelperGuardChecks.expect(bundles.count == 1 && bundles[0].text.contains("STALE-A") && bundles[0].text.contains("STALE-B"),
+            "the two stale messages share one 'while you were away' note: \(bundles.count)")
+        // This fixture's runner never confirms a steer, so dismiss the note
+        // before the part below, which is about younger messages.
+        for note in bundles { s.cancelQueuedMessage(note.id, for: child) }
 
         // Younger held messages run when the user resumes: both, in order.
         try await stopRunning("held-fresh-run", "HOLD-second-run")

@@ -201,6 +201,7 @@ check --helper-message-result-check
 check --helper-protected-paths-check
 check --helper-provider-retry-check
 check --helper-retry-check
+check --helper-retry-session-check
 check --helper-tile-auto-fold-check
 check --helper-tile-cap-check
 check --helper-tile-lifecycle-check
@@ -459,6 +460,9 @@ check --ui-tour-check
 check --undo-toast-placement-check
 check --unified-model-boot-check
 check --update-channel-check
+check --usage-account-fallback-check
+check --usage-pause-account-switch-check
+check --usage-stop-queue-check
 check --uuid-string-order-check
 check --viewport-sanitize-check
 check --web-link-open-check
@@ -753,6 +757,7 @@ leg run_app_check .build/debug/Array --helper-message-result-check
 leg run_app_check .build/debug/Array --helper-protected-paths-check
 leg run_app_check .build/debug/Array --helper-provider-retry-check
 leg run_app_check .build/debug/Array --helper-retry-check
+leg run_app_check .build/debug/Array --helper-retry-session-check
 leg run_app_check .build/debug/Array --helper-tile-auto-fold-check
 leg run_app_check .build/debug/Array --helper-tile-cap-check
 leg run_app_check .build/debug/Array --helper-tile-lifecycle-check
@@ -998,6 +1003,9 @@ leg run_app_check .build/debug/Array --ui-tour-check || ui_tour_status=$?
 leg run_app_check .build/debug/Array --undo-toast-placement-check
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --update-channel-check
+leg run_app_check .build/debug/Array --usage-account-fallback-check
+leg run_app_check .build/debug/Array --usage-pause-account-switch-check
+leg run_app_check .build/debug/Array --usage-stop-queue-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
 leg run_app_check .build/debug/Array --web-link-open-check
 leg run_app_check .build/debug/Array --window-chrome-check

@@ -570,6 +570,15 @@ private struct SettingsAccountRows: View {
                             .settingsRenderedText("account.\(row.id)", "\(row.title): \(status(row)) · \(row.switchingDetail ?? row.detail)", model: model)
                             manageLine(row)
                         }
+                        if mine.count >= 2, let isOn = model.accountFallbackEnabled, let set = model.onSetAccountFallback {
+                            Toggle(isOn: Binding(get: { isOn() }, set: { set($0) })) {
+                                SettingsRowLabel(
+                                    title: "Move to another account when one runs out",
+                                    help: "A tile moves to the account with the most room and continues its session there. All \(harness == .claudeCode ? "Claude" : "Codex") accounts spent: it waits for the reset.")
+                            }
+                            .toggleStyle(.switch)
+                            .settingsRenderedText("account.fallback.\(harness.rawValue)", isOn() ? "fallback on" : "fallback off", model: model)
+                        }
                         if let add = model.onAddAccount {
                             Button(harness == .claudeCode ? "Add Claude account…" : "Add Codex account…") { add(harness) }
                                 .settingsRenderedText("account.add.\(harness.rawValue)", "add", model: model)

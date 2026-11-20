@@ -346,6 +346,11 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     public var projectId: UUID?
     /// Set by the orchestrator when this agent was spawned by another (P2D).
     public var parentAgentID: AgentID?
+    /// Set when a lead retried this helper with a fresh agent (`retryOf` that
+    /// could not continue this one's session): the replacement's id. This
+    /// agent's queue was cancelled and its usage pause dropped; surfaces fold
+    /// it into the replacement.
+    public var supersededBy: AgentID?
     public var capabilities: AgentCapabilities
     /// The durable slot this child owns in its parent's name space. It is
     /// assigned at spawn, including for children whose final name uses a higher
@@ -1033,7 +1038,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey, CaseIterable {
         case schemaVersion, id, displayName, displayNameSource, namingRequest, role, harness, mode, model, thinking, cwd
         case projectRoot, checkoutRoot, homeRelativePath, lastObservedWhere, worktreeId
-        case worktreeBranch, projectId, parentAgentID, capabilities, sourceItemId
+        case worktreeBranch, projectId, parentAgentID, supersededBy, capabilities, sourceItemId
         case delegationContext, spawnResultHandle, workspaceToolsEnabled, identityColor, characterName, automaticCharacterIndex
         case parentRelativeOrdinal, nextChildOrdinal
         case createdAtReferenceInterval, lastActivityAtReferenceInterval
@@ -1116,6 +1121,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         if let index = automaticCharacterIndex, index < 0 { automaticCharacterIndex = nil }
         characterName = (try? container.decodeIfPresent(String.self, forKey: .characterName)) ?? nil
         parentRelativeOrdinal = try container.decodeIfPresent(Int.self, forKey: .parentRelativeOrdinal)
+        supersededBy = try container.decodeIfPresent(AgentID.self, forKey: .supersededBy)
         nextChildOrdinal = max(1, try container.decodeIfPresent(Int.self, forKey: .nextChildOrdinal) ?? 1)
         createdAt = Date(timeIntervalSinceReferenceDate:
             try container.decode(Double.self, forKey: .createdAtReferenceInterval))
@@ -1230,6 +1236,7 @@ public struct AgentRecord: Codable, Equatable, Sendable {
         try container.encodeIfPresent(automaticCharacterIndex, forKey: .automaticCharacterIndex)
         try container.encodeIfPresent(characterName, forKey: .characterName)
         try container.encodeIfPresent(parentRelativeOrdinal, forKey: .parentRelativeOrdinal)
+        try container.encodeIfPresent(supersededBy, forKey: .supersededBy)
         if nextChildOrdinal != 1 {
             try container.encode(nextChildOrdinal, forKey: .nextChildOrdinal)
         }

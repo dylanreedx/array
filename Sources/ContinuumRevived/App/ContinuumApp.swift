@@ -3975,6 +3975,22 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Stale leads: a paused queue must say why, and nothing but a person's
+        // own typing may leave an agent message stranded in it.
+        if CommandLine.arguments.contains("--agent-queue-drain-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentQueueDrainChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // Usage resume: a usage stop is a per-agent pause that Array resumes
         // on the same session at the reset, staggered, and tells the lead so.
         if CommandLine.arguments.contains("--agent-usage-resume-check") {
@@ -4182,6 +4198,66 @@ enum ContinuumApp {
             Task { @MainActor in
                 do {
                     try await FakeCLILifecycleChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // retryOf continues the SAME session; a spawned replacement supersedes.
+        if CommandLine.arguments.contains("--helper-retry-session-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runHelperRetrySessionChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // Automatic account fallback and the lead's truthful usage notice.
+        if CommandLine.arguments.contains("--usage-account-fallback-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runUsageAccountFallbackChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // A usage stop holds a queue for usage and releases it at the reset.
+        if CommandLine.arguments.contains("--usage-stop-queue-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runUsageStopQueueChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // A usage pause ends when the account in use changes to one with room.
+        if CommandLine.arguments.contains("--usage-pause-account-switch-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runUsagePauseAccountSwitchChecks()
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)
@@ -16339,6 +16415,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self, case let .refused(reason) = self.agentSupervisor.switchAccount(to: accountId) else { return }
             self.setWorkspaceManagementMessage(reason, kind: .error)
         }
+        model.accountFallbackEnabled = { [weak self] in self?.agentSupervisor.accountFallbackOn ?? true }
+        model.onSetAccountFallback = { [weak self] on in self?.agentSupervisor.setAccountFallback(on) }
         model.onAddAccount = { [weak self] harness in self?.addAccountAndSignIn(harness) }
         model.onSignInAccount = { [weak self] accountId in self?.signInToAccount(accountId) }
         model.onRenameAccount = { [weak self] accountId, label in
@@ -17840,7 +17918,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             setWorkspaceManagementMessage("Nothing to stop — no selected agent has a prompt in flight.")
             return false
         }
-        for record in running { agentSupervisor.stop(record.id) }
+        for record in running { agentSupervisor.stop(record.id, byUser: true) }
         setWorkspaceManagementMessage("Stopped \(countedAgents(running.count)): \(agentNameList(running)).", kind: .success)
         refreshAgentSurfaces(notify: false)
         return true
@@ -25823,6 +25901,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.workspaceToolsPermission = { [weak self] in
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
+        agentSupervisor.accountFallbackDefaults = settingsDefaults
         agentSupervisor.configureManagedMode(defaults: settingsDefaults)
         // Performance at scale, item 4: on unless `agents.recordArchive.enabled` is false.
         agentSupervisor.recordArchiveDefaults = settingsDefaults

@@ -2052,7 +2052,15 @@ final class AgentSupervisor {
     /// Set on `.interrupted`. A user who interrupted wants to look first, so
     /// the held queue is not auto-drained into a turn they did not ask for.
     /// Cleared by the next explicit `.send`/`.sendPrompt` or `resumeQueue`.
-    private var pausedQueues: Set<AgentID> = []
+    private var pausedQueues: Set<AgentID> = [] {
+        didSet {
+            // Every release of a held queue leaves a line, whoever released it:
+            // a stranded queue used to be provable only by its absence.
+            for id in oldValue.subtracting(pausedQueues) {
+                appendAgentDiagnostics("queue resumed reason=\(queuePauseReasons[id].map(Self.pauseLogName) ?? "unknown") depth=\(queuedWorkItemsCache[id]?.count ?? 0)", agentID: id)
+            }
+        }
+    }
     /// T5b — why each paused queue is held, for the rail's "Paused after …".
     private var queuePauseReasons: [AgentID: ComposerQueueRailState.Pause] = [:]
 
@@ -2081,15 +2089,31 @@ final class AgentSupervisor {
         case .afterCompaction: why = "is paused because a compaction did not finish"
         case .unconfirmed: why = "is paused because an earlier input's delivery is unconfirmed"
         case .held: why = "is paused"
+        case .usage: why = "is paused because its account hit its usage limit"
         }
-        return "Held (\(pending) pending from you): \(name) \(why). Held messages run in order, each as sent, only when the user resumes it; one held longer than 24 h expires unread and you are told."
+        if queuePauseReasons[id] == .usage {
+            return "Held (\(pending) pending from you): \(name) \(why). Array resumes it when usage returns and then runs held messages in order; nobody needs to press Resume. A held message older than 24 h is bundled into a 'while you were away' note on its next turn, never dropped."
+        }
+        return "Held (\(pending) pending from you): \(name) \(why). Held messages run in order, each as sent, only when the user resumes it; one held longer than 24 h is bundled into a 'while you were away' note on its next turn, never dropped, and you are told."
     }
 
     private func pauseQueue(_ id: AgentID, _ reason: ComposerQueueRailState.Pause) {
         // An ordinary terminal outcome cannot hide uncertain input custody.
         if pausedQueues.contains(id), queuePauseReasons[id] == .unconfirmed, reason != .unconfirmed { return }
-        pausedQueues.insert(id)
         queuePauseReasons[id] = reason
+        if pausedQueues.insert(id).inserted {
+            appendAgentDiagnostics("queue paused reason=\(Self.pauseLogName(reason)) depth=\(queuedWorkItemsCache[id]?.count ?? 0)", agentID: id)
+        }
+    }
+    private static func pauseLogName(_ reason: ComposerQueueRailState.Pause) -> String {
+        switch reason {
+        case .afterStop: return "afterStop"
+        case .afterRelaunch: return "afterRelaunch"
+        case .afterCompaction: return "afterCompaction"
+        case .unconfirmed: return "unconfirmed"
+        case .held: return "held"
+        case .usage: return "usage"
+        }
     }
     /// The outcome of the turn that just freed a runner slot, read by
     /// `clearRunner` — the one moment the slot is actually free to accept the
@@ -2911,6 +2935,22 @@ final class AgentSupervisor {
     private var accountIdentities: [String: AgentAccountIdentity] = [:]
     /// Accounts whose CLI answered "not signed in" on the last read.
     private var signedOutAccounts: Set<String> = []
+    /// Agents automatic fallback moved off a spent account: id -> account id.
+    /// In memory; cleared per CLI by a person's switch.
+    private(set) var accountOverrides: [AgentID: String] = [:]
+    /// Settings > Agents > Accounts "Move to another account when one runs
+    /// out". nil = the default, on; it only ever acts with 2+ accounts.
+    var accountFallbackPreference: Bool?
+    /// Where the app keeps that choice (`agents.accountFallback`); checks leave it nil.
+    var accountFallbackDefaults: UserDefaults?
+    static let accountFallbackKey = "agents.accountFallback"
+    var accountFallbackOn: Bool {
+        accountFallbackPreference ?? (accountFallbackDefaults?.object(forKey: Self.accountFallbackKey) as? Bool) ?? true
+    }
+    func setAccountFallback(_ on: Bool) {
+        accountFallbackPreference = on
+        accountFallbackDefaults?.set(on, forKey: Self.accountFallbackKey)
+    }
     private var accountUsageInFlight: Set<String> = []
     private var accountUsageLastStarted: [String: Date] = [:]
     private var accountUsagePollTimer: Timer?
@@ -3011,6 +3051,16 @@ final class AgentSupervisor {
     func account(forAgent id: AgentID) -> AgentAccount? {
         guard let harness = records[id]?.harness, harness != .pi else { return nil }
         if hasLiveRunner(id), let live = runnerAccounts[id] { return live }
+        return effectiveAccount(for: id, harness: harness)
+    }
+
+    /// The account an agent's NEXT launch signs in as: where automatic
+    /// fallback moved it, else the CLI's account in use. A person's switch
+    /// (`switchAccount`) clears every move for that CLI.
+    func effectiveAccount(for id: AgentID, harness: AgentHarness) -> AgentAccount {
+        if let moved = accountOverrides[id], let account = accounts.first(where: { $0.id == moved && $0.harness == harness }) {
+            return account
+        }
         return activeAccount(for: harness)
     }
 
@@ -3065,6 +3115,8 @@ final class AgentSupervisor {
         state.active[harness.rawValue] = account.isDefault ? nil : account.id
         do { try accountStore.save(state) } catch { return .refused("Couldn't save the account choice.") }
         accountState = state
+        // A person's choice outranks every automatic move for this CLI.
+        accountOverrides = accountOverrides.filter { records[$0.key]?.harness != harness }
         var finishing = 0
         for (id, record) in records where record.harness == harness {
             if runners[id] != nil {
@@ -3077,6 +3129,8 @@ final class AgentSupervisor {
         }
         NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
         refreshAccountUsage(account: account, minimumInterval: 30)
+        // Pauses held on the account just left are due on this one.
+        if !usagePauses.isEmpty { DispatchQueue.main.async { [weak self] in self?.runUsageResumeTick() } }
         return .switched(finishingTurns: finishing)
     }
 
@@ -3086,7 +3140,7 @@ final class AgentSupervisor {
     private func accountLaunch(_ launch: AgentRunnerLaunch) -> AgentRunnerLaunch {
         let id = launch.record.id
         guard let harness = launch.record.harness, harness != .pi else { return launch }
-        let active = activeAccount(for: harness)
+        let active = effectiveAccount(for: id, harness: harness)
         if harness == .claudeCode, let previous = runnerAccounts[id], previous.id != active.id {
             let location = Self.claudeSessionLocation(for: launch.record)
             _ = try? AgentAccountSetup.ensureSessionVisible(
@@ -3463,6 +3517,8 @@ final class AgentSupervisor {
     @discardableResult
     func restore(fileManager: FileManager = .default) -> RestoreReport {
         var report = RestoreReport()
+        startQueueSweep()
+        defer { repairOrphanedQueues(fileManager: fileManager) }
         if !AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
             unarchiveAllBeforeRestore()
         }
@@ -5226,7 +5282,7 @@ final class AgentSupervisor {
     /// inferred, a CLI that is not logged in, and the seconds after launch while
     /// the catalogue probe is still out, during which readiness is `.checking` for
     /// every harness. Silence there reads as a broken app.
-    func sendRefusal(for id: AgentID) -> String? {
+    func sendRefusal(for id: AgentID, ignoringWriter: Bool = false) -> String? {
         guard let record = records[id] else { return nil }
         if terminalFaceAgents.contains(id) {
             return "This agent is open in its Terminal face. Switch the tile back to Array to send from here."
@@ -5245,7 +5301,7 @@ final class AgentSupervisor {
         if waitsForSessionDiscovery(record) {
             return "Checking whether another app has this session open first."
         }
-        if let writer = otherHelperWriting(checkoutOf: record) {
+        if !ignoringWriter, let writer = otherHelperWriting(checkoutOf: record) {
             return "\(writer) is writing this checkout now. Send again once it finishes, or delegate a new helper, which gets its own worktree."
         }
         return Self.sendRefusal(record: record)
@@ -5260,8 +5316,27 @@ final class AgentSupervisor {
               record.latestTerminalEvent != nil, record.delegationContext?.checkoutNotice == nil else { return nil }
         return records.values.first {
             $0.id != record.id && $0.parentAgentID == parent && $0.capabilities != .observedReadOnly
-                && $0.checkoutRoot == record.checkoutRoot && $0.delegationContext?.checkoutNotice == nil && isRunning($0.id)
+                && Self.sharesWritableCheckout($0, record) && $0.delegationContext?.checkoutNotice == nil && isRunning($0.id)
         }?.humanDisplayName
+    }
+
+    /// Two helpers conflict only when they write the SAME directory. Sharing
+    /// a checkout handle is not that: each helper delegated into its own
+    /// worktree works in a directory of its own, and a refusal for it made
+    /// the sender remember to retry, which nobody did.
+    static func sharesWritableCheckout(_ a: AgentRecord, _ b: AgentRecord) -> Bool {
+        a.checkoutRoot == b.checkoutRoot
+            && WorktreeManager.resolved(URL(fileURLWithPath: a.cwd)) == WorktreeManager.resolved(URL(fileURLWithPath: b.cwd))
+    }
+
+    /// A helper finishing frees the checkout a sibling's queued message was
+    /// waiting on: drain those queues now, not at the next sweep.
+    private func wakeQueuesWaiting(onWriter id: AgentID) {
+        guard let parent = records[id]?.parentAgentID else { return }
+        for (sibling, items) in queuedWorkItemsCache where sibling != id && !items.isEmpty
+            && records[sibling]?.parentAgentID == parent && runners[sibling] == nil && !pausedQueues.contains(sibling) {
+            drainQueue(for: sibling)
+        }
     }
 
     /// The rule itself, over a record and a catalogue — pure enough to pin every
@@ -5477,14 +5552,24 @@ final class AgentSupervisor {
                              hops: Int, context: AgentMessageQueueContext? = nil)
         -> (delivery: AgentMessageDelivery, position: Int?, error: String?) {
         let prompt = AgentPrompt(agentMessageText(text, from: senderID))
-        guard records[id] != nil, sendRefusal(for: id) == nil,
+        guard records[id] != nil, sendRefusal(for: id, ignoringWriter: true) == nil,
               !contextRecoveryInFlight.contains(id), sharedAgentControlGates[id]?.isEmpty != false
         else { return (.refused, nil, nil) }
-        if runners[id] != nil || pausedQueues.contains(id) || !(queuedWorkItemsCache[id] ?? []).isEmpty {
+        // A helper note never starts a turn and never blocks one: an agent whose
+        // queue holds only notes is idle, and a message to it starts a turn now.
+        let queuedBehind = (queuedWorkItemsCache[id] ?? []).contains { item in
+            if case .prompt(let m) = item { return !m.helperNote }
+            return true
+        }
+        // Another helper writing this very directory is a reason to wait, never
+        // to refuse: the message is queued and runs when that helper finishes.
+        let writerBusy = records[id].map { otherHelperWriting(checkoutOf: $0) != nil } ?? false
+        if runners[id] != nil || pausedQueues.contains(id) || queuedBehind || writerBusy {
             guard let store = submissionRecoveryStore else { return (.refused, nil, nil) }
             // A paused recipient keeps every held message, in order: "do A"
             // then "also do B" are both instructions. Age, not recency, retires
-            // them (`expireStaleAgentMessages`).
+            // them (`bundleStaleAgentMessages`).
+            reevaluateUsagePause(for: id)
             let heldReason = agentMessageHoldReason(for: id, sender: senderID, adding: 1)
             let held = heldReason != nil
             let item = AgentComposerQueuedMessage(text: prompt.text, queuedAt: agentMessageNow(),
@@ -5623,21 +5708,28 @@ final class AgentSupervisor {
     /// This is the TEARDOWN stop — quit, archive, a closed tile, every
     /// programmatic caller — and it kills. The composer's Stop goes through
     /// `accept(.stop)`, which interrupts first (T5).
-    func stop(_ id: AgentID) {
+    func stop(_ id: AgentID, byUser: Bool = false) {
         guard records[id] != nil else {
             warn("AgentSupervisor.stop: no agent \(id.rawValue.uuidString)")
             return
         }
-        if usagePauses.removeValue(forKey: id) != nil { usagePausesChanged(id) }
+        if usagePauses.removeValue(forKey: id) != nil { releaseUsageQueueHold(id); usagePausesChanged(id) }
         recoverForcedMessagesAfterStop(id)
         withdrawQueuedHelperAlert(id)
-        killRunner(id)
+        // Quit and archive stop an agent without anyone to resume its queue;
+        // only a person's own Stop (the inbox action) holds it.
+        if byUser, runners[id] != nil { userStoppedAgents.insert(id) }
+        killRunner(id, pauseAfterStop: byUser)
     }
 
     /// T5 — the user's Stop is an INTERRUPT first: the turn ends, the process
     /// and its background work live on. A kill is the fallback, when the
     /// interrupt fails or never lands, and a second Stop while one is pending.
     private func stopFromComposer(_ id: AgentID) {
+        // The ONE thing that holds a queue: a person pressed Stop. A kill or
+        // interrupt from anything else (closing a helper, a restart, a retry)
+        // leaves the queue to run, or its messages strand with nobody to resume.
+        userStoppedAgents.insert(id)
         recoverForcedMessagesAfterStop(id)
         if !activeCompactionOperations.contains(id),
            !interruptingAgents.contains(id),
@@ -5647,11 +5739,14 @@ final class AgentSupervisor {
             interruptTurn(steering, for: id)
             return
         }
-        killRunner(id)
+        killRunner(id, pauseAfterStop: true)
     }
+    /// Agents whose running turn a person stopped, read once by
+    /// `handleQueueOnTurnCompleted` to decide whether the queue is held.
+    private var userStoppedAgents: Set<AgentID> = []
 
     /// Kills the bound runner's process group and closes the turn synchronously.
-    private func killRunner(_ id: AgentID, pauseAfterStop: Bool = true) {
+    private func killRunner(_ id: AgentID, pauseAfterStop: Bool = false) {
         let retrying = helperProviderRetryErrors.removeValue(forKey: id) != nil
         helperProviderRetryTasks.removeValue(forKey: id)?.cancel()
         let hadRunner = runners[id] != nil || retrying
@@ -5713,6 +5808,7 @@ final class AgentSupervisor {
     /// without this its Pi process outlives the session that started it. Iterates a
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
+        queueSweepTask?.cancel(); queueSweepTask = nil
         flushPendingTranscriptSaves()
         wakeupScheduler?.stop()
         for id in Array(helperProviderRetryErrors.keys) { stop(id) }
@@ -7369,6 +7465,7 @@ final class AgentSupervisor {
                 contextDietRequested: spawned.delegationContext?.contextDietRequested)
             setRecord(spawned, for: childID)
             persist(spawned)
+            if let retryOf { supersede(retryOf, by: childID) }
             // The child record remembers the tool call that asked for it, so its
             // terminal `.turnCompleted` in `deliver` can rewrite the result file
             // even across a relaunch. Distinct from `sourceItemId` (fan-out and
@@ -9622,12 +9719,13 @@ final class AgentSupervisor {
         usagePauses[id] = AgentUsagePause(harness: harness, accountId: accountId, stop: stop, stoppedAt: now,
                                           resumesAutomatically: previous?.resumesAutomatically ?? usageAutoResumeDefault)
         usageFreed.remove(id)
+        if let accountId { applyAccountFallback(harness: harness, held: accountId, now: now) }
         appendAgentDiagnostics("harness=\(harness.rawValue) usage-paused account=\(accountId ?? "none") resets=\(stop.resetsAt.map { "\($0.timeIntervalSince1970)" } ?? "unknown")", agentID: id)
         // After this delivery, never inside it.
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.usagePauses[id] != nil else { return }
+            guard let self, let pause = self.usagePauses[id] else { return }
             self.usagePausesChanged(id)
-            self.scheduleUsageResume()
+            if self.usagePauseLeftBehind(id, pause, now: self.usagePauseNow()) { self.runUsageResumeTick() } else { self.scheduleUsageResume() }
         }
         return true
     }
@@ -9655,8 +9753,91 @@ final class AgentSupervisor {
 
     private func usagePauseDue(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> Bool {
         guard pause.resumesAutomatically else { return false }
-        if usageFreed.contains(id) { return true }
+        if usagePauseFreedNow(id, pause) { return true }
         return pause.resetsAt.map { $0 <= now } ?? false
+    }
+
+    /// A pause belongs to the account that ran out. Once the CLI's account in
+    /// use is another one with room, the pause no longer describes where the
+    /// agent's next turn runs: its launch signs in as the active account and
+    /// makes the same session visible there (`accountLaunch`). The 2026-11-20
+    /// incident: three helpers held Work at 100% while Array had already moved
+    /// to Personal at 21%, and nothing noticed for 3 hours.
+    private func usagePauseLeftBehind(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> Bool {
+        guard pause.harness != .pi, let held = pause.accountId else { return false }
+        let active = effectiveAccount(for: id, harness: pause.harness)
+        guard active.id != held else { return false }
+        let open = accountQuotas[active.id]?.windows.filter { !$0.isExpired(at: now) } ?? []
+        return !open.contains { ($0.utilization ?? 0) >= Self.accountFallbackCeiling }
+    }
+
+    private func usagePauseFreedNow(_ id: AgentID, _ pause: AgentUsagePause) -> Bool {
+        usageFreed.contains(id) || usagePauseLeftBehind(id, pause, now: usagePauseNow())
+    }
+
+    /// Automatic fallback never picks an account this full.
+    static let accountFallbackCeiling = 0.95
+
+    /// Another signed-in account of the CLI with room, most headroom first: by
+    /// its live reading, skipping any window at the ceiling. An account never
+    /// read counts as half free, behind every account that was read lower.
+    private func fallbackAccount(for harness: AgentHarness, excluding held: String, now: Date) -> AgentAccount? {
+        func headroom(_ account: AgentAccount) -> Double? {
+            let used = (accountQuotas[account.id]?.windows ?? []).filter { !$0.isExpired(at: now) }.compactMap(\.utilization)
+            guard let top = used.max() else { return 0.5 }
+            return top >= Self.accountFallbackCeiling ? nil : 1 - top
+        }
+        return accounts
+            .filter { $0.harness == harness && $0.id != held && !signedOutAccounts.contains($0.id) }
+            .compactMap { account in headroom(account).map { (account, $0) } }
+            .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0.id < $1.0.id }
+            .first?.0
+    }
+
+    /// A stop on `held`: every agent paused on it moves to the account with
+    /// the most room and resumes there on the same session. Quiet: one line in
+    /// each tile. All accounts spent: nothing moves, the pause waits for the
+    /// earliest reset as before.
+    private func applyAccountFallback(harness: AgentHarness, held: String, now: Date) {
+        guard accountFallbackOn, harness != .pi,
+              let target = fallbackAccount(for: harness, excluding: held, now: now) else { return }
+        let from = accounts.first { $0.id == held }?.label ?? "That account"
+        for (id, pause) in usagePauses where pause.harness == harness && pause.accountId == held
+            && pause.resumesAutomatically && accountOverrides[id] == nil {
+            accountOverrides[id] = target.id
+            // A pooled session keeps the login it started with: retire it, as a
+            // person's switch does, so the resume launches on the new account.
+            if runners[id] != nil {
+                retireSessionAfterTurn.insert(id)
+            } else if let idle = idleSessionRunners.removeValue(forKey: id) {
+                idleReapTokens[id] = nil
+                idle.stop()
+            }
+            let until = pause.resetsAt.map { " until \(AgentUsagePause.clock($0, now: now))" } ?? ""
+            appendLocalNotice(id: id, key: "account-moved", title: "Moved to \(target.label)",
+                              body: "\(from) is at its limit\(until).")
+            appendAgentDiagnostics("usage fallback: account \(held) -> \(target.id)", agentID: id)
+        }
+    }
+
+    /// What a lead is told about a helper's usage stop: whose limit it is, and
+    /// whether Array already moved the helper, so one account's limit is never
+    /// read as the CLI's.
+    func usageLeadStatus(for id: AgentID, _ pause: AgentUsagePause) -> String {
+        let now = usagePauseNow()
+        let held = accounts.first { $0.id == pause.accountId }
+        let name = held?.label ?? "its account"
+        if let moved = accountOverrides[id], moved != pause.accountId, let target = accounts.first(where: { $0.id == moved }) {
+            let until = pause.resetsAt.map { " (limit until \(AgentUsagePause.clock($0, now: now)))" } ?? ""
+            return "paused for \(pause.providerName) usage on account \(name)\(until), then Array moved it to \(target.label) and is resuming it there on the same session. That is one account's limit, not all of \(pause.providerName): do not restart or re-brief it."
+        }
+        let base = pause.leadStatus(now: now)
+        guard pause.harness != .pi, held != nil else { return base }
+        if let room = fallbackAccount(for: pause.harness, excluding: pause.accountId ?? "", now: now) {
+            return base + ". That is account \(name)'s limit only: \(room.label) has room (Settings > Agents > Accounts, or leave it to resume). It resumes on the same session; do not restart it."
+        }
+        let others = accounts.filter { $0.harness == pause.harness && $0.id != pause.accountId }
+        return base + (others.isEmpty ? ". That is account \(name)'s limit." : ". That is account \(name)'s limit, and no other \(pause.providerName) account has room.")
     }
 
     /// One pass: drops pauses of agents that are gone, resumes at most ONE due
@@ -9720,10 +9901,82 @@ final class AgentSupervisor {
         appendAgentDiagnostics("usage resumed on the same session", agentID: id)
         for lead in helperParents(id) where records[lead] != nil {
             upsertHelperNote(.progress, helper: id, lead: lead,
-                text: "resumed after the \(pause.providerName) usage reset, on the same session")
+                text: accountOverrides[id].flatMap { moved in accounts.first { $0.id == moved }?.label }.map { "resumed on account \($0) after the \(pause.providerName) usage stop, on the same session" } ?? "resumed after the \(pause.providerName) usage reset, on the same session")
         }
         usagePausesChanged(id)
         return true
+    }
+
+    /// A usage pause that ended without `resumeUsagePaused` (a new turn, Stop,
+    /// supersession) must not leave its queue held: only the pause held it.
+    private func releaseUsageQueueHold(_ id: AgentID) {
+        if pausedQueues.contains(id), queuePauseReasons[id] == .usage { resumeQueue(for: id) }
+    }
+
+    /// A message for a usage-paused agent asks again whether usage is back:
+    /// the account its next launch signs in as may have room now, or its own
+    /// account may have been refilled, with nothing yet to wake the pause.
+    private func reevaluateUsagePause(for id: AgentID) {
+        guard let pause = usagePauses[id], pause.resumesAutomatically else { return }
+        let now = usagePauseNow()
+        if usagePauseLeftBehind(id, pause, now: now) {
+            DispatchQueue.main.async { [weak self] in self?.runUsageResumeTick() }
+        } else if let held = pause.accountId, let account = accounts.first(where: { $0.id == held }) {
+            // The CLI's own usage probe (no model turn); a reading with room
+            // frees the pause through `usageReadingArrived`.
+            _ = refreshAccountUsage(account: account, minimumInterval: 60, now: now)
+        }
+    }
+
+    // MARK: - Retrying a helper on its own session
+
+    /// A lead's `retryOf` can continue `id` itself when its Claude session
+    /// exists and nothing asked for a different model, effort or CLI: the same
+    /// agent, session and checkout, signed in as the account in use. Anything
+    /// else spawns a fresh helper, which supersedes this one.
+    func canContinueSessionForRetry(_ id: AgentID, harness: AgentHarness, model: String?, effort: String?) -> Bool {
+        guard let record = records[id], record.harness == .claudeCode, harness == .claudeCode,
+              record.capabilities.locallyManaged, !isSharedAgent(id), !isRunning(id), runners[id] == nil,
+              record.latestTurnAt != nil || record.providerSessionId != nil,
+              model == nil || model == record.model,
+              effort == nil || effort == record.thinking,
+              FileManager.default.fileExists(atPath: record.cwd) else { return false }
+        return true
+    }
+
+    /// Continues `id` on its own session with `prompt`, then its held queue.
+    /// False leaves it exactly as it was (the caller spawns instead).
+    func continueSessionForRetry(_ id: AgentID, prompt: String) -> Bool {
+        let pause = usagePauses[id]
+        usagePauses[id] = nil
+        usageFreed.remove(id)
+        guard send(prompt, to: id) else {
+            if let pause { usagePauses[id] = pause }
+            return false
+        }
+        resumeQueue(for: id)
+        appendAgentDiagnostics("retry continued the same session", agentID: id)
+        usagePausesChanged(id)
+        return true
+    }
+
+    /// `old` was replaced by `new`: it will not run again. Its usage pause is
+    /// dropped, every queued message is cancelled with a note to its sender,
+    /// and the record names its replacement so surfaces can fold it.
+    func supersede(_ old: AgentID, by new: AgentID) {
+        guard old != new, var record = records[old], record.supersededBy == nil else { return }
+        record.supersededBy = new
+        setRecord(record, for: old)
+        persist(record)
+        if usagePauses.removeValue(forKey: old) != nil { usagePausesChanged(old) }
+        usageFreed.remove(old)
+        releaseUsageQueueHold(old)
+        let name = records[new]?.humanDisplayName ?? "its replacement"
+        let note = "Superseded: this helper was replaced by \(name) (\(new.rawValue.uuidString)), so the message was cancelled instead of running. Message the replacement."
+        for item in queuedWorkItemsCache[old] ?? [] {
+            if case .prompt(let message) = item { cancelQueuedMessage(message.id, for: old, reason: note) }
+        }
+        appendAgentDiagnostics("superseded by \(new.rawValue.uuidString); queue cancelled", agentID: old)
     }
 
     /// Sleeps until the earliest of: a due pause (respecting the stagger), a
@@ -9734,7 +9987,7 @@ final class AgentSupervisor {
         let now = usagePauseNow()
         let live = usagePauses.filter { records[$0.key] != nil && $0.value.resumesAutomatically }
         guard !live.isEmpty else { return }
-        var wake = live.compactMap { usageFreed.contains($0.key) ? now : $0.value.resetsAt }.min()
+        var wake = live.compactMap { usagePauseFreedNow($0.key, $0.value) ? now : $0.value.resetsAt }.min()
         if live.values.contains(where: { $0.resetsAt == nil }) {
             wake = min(wake ?? .distantFuture, now.addingTimeInterval(usageProbeInterval))
         }
@@ -9988,7 +10241,7 @@ final class AgentSupervisor {
         noteHelperCompletion(id, turn: turn, outcome: outcome, error: error, statusOverride: statusOverride)
         settleHelperMessages(id, outcome: outcome, error: error)
         writeTerminalSpawnResult(for: id, outcome: outcome,
-                                 errorMessage: usagePauses[id].map { $0.leadStatus(now: usagePauseNow()) } ?? error)
+                                 errorMessage: usagePauses[id].map { usageLeadStatus(for: id, $0) } ?? error)
     }
 
     private func helperTurnCompleted(_ completion: HelperTurnCompletion) {
@@ -10294,7 +10547,7 @@ final class AgentSupervisor {
         // waits and when Array resumes it, so it does not redo the work.
         if let pause = usagePauses[id] {
             let reply = String((finalAssistantText(for: id) ?? Self.helperNoReplyText).prefix(2400))
-            return ("\(String(child.humanDisplayName.prefix(80))) finished: \(pause.leadStatus(now: usagePauseNow()))\n\(reply)", filedThisTurn)
+            return ("\(String(child.humanDisplayName.prefix(80))) finished: \(usageLeadStatus(for: id, pause))\n\(reply)", filedThisTurn)
         }
         let report: String
         if let filed = settlementReport(id), filed.filedAt > baseline {
@@ -13880,11 +14133,27 @@ final class AgentSupervisor {
             if restoreOutboxFailed { self.warn("Agent message queue recovery could not complete.") }
             do { try await self.recoverAgentMessageQueue(for: id, restoredOutbox: restoredOutbox, snapshotRevision: revision) }
             catch { self.warn("Agent message queue recovery could not complete.") }
-            await self.expireStaleAgentMessages(for: id, store: store)
+            await self.bundleStaleAgentMessages(for: id, store: store)
             let messages = await store.queuedWorkItems(for: id)
             self.queuedWorkItemsCache[id] = self.agentMessageQueueCache(messages, for: id, restoredOutbox: revision == self.agentMessageOutbox.writeRevision ? restoredOutbox : nil)
             if messages.contains(where: { if case .prompt(let m) = $0 { return m.steerUncertain }; return false }) {
                 self.pauseQueue(id, .unconfirmed)
+            }
+            // A relaunch holds a queue so a person's typed follow-up never runs
+            // into a turn nobody is watching. Nobody typed an agent's message or
+            // a helper's result: it runs once hydrated, as it would have had the
+            // app stayed open. One typed item keeps the whole queue held, so
+            // order is never rearranged around a person's input.
+            if self.pausedQueues.contains(id), self.queuePauseReasons[id] == .afterRelaunch,
+               !messages.isEmpty,
+               messages.allSatisfy({ item in
+                   guard case .prompt(let m) = item, !m.steerUncertain else { return false }
+                   return m.agentMessageContext != nil || m.helperCompletion || m.helperNote
+               }) {
+                self.pausedQueues.remove(id)
+                self.queuePauseReasons[id] = nil
+                self.notifyTurnCapabilitiesChanged(id)
+                if self.runners[id] == nil { self.drainQueue(for: id) }
             }
             self.companionQueueHydrationPending.remove(id)
             if !messages.isEmpty { self.notifyTurnCapabilitiesChanged(id) }
@@ -13936,25 +14205,50 @@ final class AgentSupervisor {
         }
     }
 
-    /// Agent messages queued longer than `heldAgentMessageLifetime` are dropped,
-    /// never run: their sender has moved on, and replaying them is how a resumed
-    /// helper restarted work its lead had already called off. Each leaves a
-    /// cancelled outbox entry and an interrupted result for its sender.
-    private func expireStaleAgentMessages(for id: AgentID, store: AgentComposerDraftStore) async {
+    /// Agent messages queued longer than `heldAgentMessageLifetime` are never
+    /// dropped and never replayed one by one: their sender has moved on, and
+    /// running each is how a resumed helper restarted work its lead had already
+    /// called off. They fold into ONE compact "while you were away" note that
+    /// the recipient reads on its next turn, so the context survives and the
+    /// judgement of what still matters is the recipient's. Each leaves a
+    /// cancelled outbox entry and an interrupted result saying so for its sender.
+    private func bundleStaleAgentMessages(for id: AgentID, store: AgentComposerDraftStore) async {
         let now = agentMessageNow()
+        var stale: [(message: AgentComposerQueuedMessage, hours: Int)] = []
         for item in await store.queuedWorkItems(for: id) {
-            guard case .prompt(let message) = item, message.agentMessageContext != nil, !message.isSteer else { continue }
-            let age = now.timeIntervalSince(message.queuedAt)
-            guard age > Self.heldAgentMessageLifetime else { continue }
-            let hours = Int(age / 3600)
-            guard cancelAgentMessage(message, for: id,
-                reason: "Expired unread: held \(hours) h, past the 24 h limit, so it was dropped instead of running.") else { continue }
+            guard case .prompt(let message) = item, message.agentMessageContext != nil, !message.isSteer,
+                  now.timeIntervalSince(message.queuedAt) > Self.heldAgentMessageLifetime else { continue }
+            stale.append((message, Int(now.timeIntervalSince(message.queuedAt) / 3600)))
+        }
+        guard !stale.isEmpty else { return }
+        var members: [(text: String, senderID: UUID, senderName: String)] = []
+        var settled: [AgentComposerQueuedMessage] = []
+        for entry in stale {
+            let message = entry.message
+            guard let context = message.agentMessageContext else { continue }
+            // A message whose outbox entry is gone still bundles: only the
+            // sender's result record is missing, and the content must survive.
+            let hasEntry = ((try? agentMessageOutbox.lookup(caller: context.caller, key: context.idempotencyKey)) ?? nil) != nil
+            guard !hasEntry || cancelAgentMessage(message, for: id, reason: "Bundled, not run: held \(entry.hours) h, past the 24 h limit, so it reached \(records[id]?.humanDisplayName ?? "the recipient") inside one \"while you were away\" note on its next turn.")
+            else { continue }
+            var inner = message.text, name = records[context.caller]?.humanDisplayName ?? "Agent"
+            if case .agentMessage(let payload) = AgentMessageEnvelope.classify(message.text) {
+                inner = payload.text; name = payload.senderName
+            }
+            members.append(("While you were away, held \(entry.hours) h: " + AgentMessageEnvelope.excerpt(inner, limit: 500),
+                            context.caller.rawValue, name))
+            settled.append(message)
+        }
+        guard !members.isEmpty, let body = Optional(AgentMessageEnvelope.wrapBatch(members)) else { return }
+        _ = try? await store.upsertHelperNote(id: UUID(), text: body, for: id)
+        for message in settled {
             updateCompanionTasks { try $0.cancelQueued(message.id) }
             _ = await store.removeQueuedMessage(id: message.id, for: id)
             queuedWorkItemsCache[id]?.removeAll { $0.id == message.id }
-            appendAgentDiagnostics("held agent message expired after \(hours) h; dropped without running", agentID: id)
-            notifyTurnCapabilitiesChanged(id)
         }
+        queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+        appendAgentDiagnostics("held agent messages bundled: count=\(settled.count) oldest=\(stale.map(\.hours).max() ?? 0) h; delivered as one note, none dropped", agentID: id)
+        notifyTurnCapabilitiesChanged(id)
     }
 
     /// Explicit resume after an interrupt, distinct from the next Send: this
@@ -13995,19 +14289,112 @@ final class AgentSupervisor {
     /// `pausedQueues`); every other outcome (`.completed`, `.failed`,
     /// `.cancelled`) writes the next queued item as an ordinary send.
     private func handleQueueOnTurnCompleted(outcome: TurnOutcome, for id: AgentID) {
+        defer { wakeQueuesWaiting(onWriter: id) }
         guard submissionRecoveryStore != nil else { return }
-        if outcome == .interrupted {
+        let userStopped = userStoppedAgents.remove(id) != nil
+        if outcome == .interrupted, userStopped {
             pauseQueue(id, .afterStop)
             notifyTurnCapabilitiesChanged(id)
             return
+        }
+        // A usage stop is not a Stop: the agent resumes by itself when usage
+        // returns, and that resume releases this hold (`resumeUsagePaused`,
+        // or `releaseUsageQueueHold` when the pause ends another way). Draining
+        // now would run every held message into the spent account.
+        if outcome == .interrupted, usagePauses[id] != nil {
+            pauseQueue(id, .usage)
+            notifyTurnCapabilitiesChanged(id)
+            return
+        }
+        if outcome == .interrupted {
+            appendAgentDiagnostics("turn interrupted without a user Stop; queue not paused depth=\(queuedWorkItemsCache[id]?.count ?? 0)", agentID: id)
         }
         guard !pausedQueues.contains(id) else { return }
         if !(deliveringSteers[id]?.isEmpty ?? true) { deferredQueueOutcomes[id] = outcome; return }
         drainQueue(for: id)
     }
 
+    /// One-time repair, run at every restore (cheap and idempotent): a queue
+    /// file whose agent has no record anywhere can never be hydrated or
+    /// drained, so its messages sat for days. The file moves, whole, to
+    /// `orphaned-queues/` (never deleted), and each agent message in it gets
+    /// a result for its sender saying where it went.
+    func repairOrphanedQueues(fileManager: FileManager = .default) {
+        guard let queue = submissionRecoveryStore,
+              let files = try? fileManager.contentsOfDirectory(at: queue.layout.queuedMessagesDirectory, includingPropertiesForKeys: nil)
+        else { return }
+        let archive = store.layout.applicationSupportDirectory.appendingPathComponent("orphaned-queues", isDirectory: true)
+        for file in files where file.pathExtension == "json" {
+            guard let uuid = UUID(uuidString: file.deletingPathExtension().lastPathComponent) else { continue }
+            let id = AgentID(rawValue: uuid)
+            let recordFile = store.layout.agentsDirectory.appendingPathComponent("\(uuid.uuidString).json")
+            guard records[id] == nil, !fileManager.fileExists(atPath: recordFile.path),
+                  (try? Data(contentsOf: file))?.count ?? 0 > 2 else { continue }
+            do {
+                try fileManager.createDirectory(at: archive, withIntermediateDirectories: true)
+                var target = archive.appendingPathComponent("\(uuid.uuidString).json")
+                var n = 2
+                while fileManager.fileExists(atPath: target.path) {
+                    target = archive.appendingPathComponent("\(uuid.uuidString)-\(n).json"); n += 1
+                }
+                try fileManager.moveItem(at: file, to: target)
+                var settled = 0
+                for entry in (try? agentMessageOutbox.entries()) ?? []
+                where entry.context.recipient == id && (entry.phase == .queued || entry.phase == .started) {
+                    var done = entry
+                    done.phase = .cancelled
+                    done.result = .init(toolCallId: entry.context.operationId, status: .interrupted, agentId: id.rawValue,
+                        reason: "The recipient no longer exists; its queued messages were archived to orphaned-queues/, not run.",
+                        endedAt: Date(), turnIdentity: "orphaned:\(entry.message.id.uuidString)", recipientId: entry.context.caller.rawValue)
+                    if (try? agentMessageOutbox.save(done)) != nil {
+                        settled += 1
+                        if let cwd = records[entry.context.caller]?.cwd { SpawnResultFile.write(done.result!, parentCwd: cwd, warn: warn) }
+                    }
+                }
+                appendAgentDiagnostics("queue repair: no agent record; queue archived to orphaned-queues/\(target.lastPathComponent), \(settled) sender result(s) written", agentID: id)
+            } catch { warn("Orphaned agent queue could not be archived.") }
+        }
+    }
+
+    // MARK: Queue sweep
+    //
+    // A drain is triggered by events: a turn ends, a message arrives, a person
+    // presses Send. A drain that returned early (a session hold, a steer in
+    // delivery, a context recovery) was never retried, so its messages waited
+    // for the next event, which for an idle lead may never come. The sweep is
+    // the net under all of them: at most once an interval per agent, only for
+    // an agent with queued work, no runner and no hold.
+    var queueSweepInterval: TimeInterval = 60
+    private var queueSweepTask: Task<Void, Never>?
+    private var lastQueueSweep: [AgentID: Date] = [:]
+    /// Witness seam: the next drain returns at once, as an early exit does.
+    var qaDropNextDrain = false
+
+    func startQueueSweep() {
+        guard queueSweepTask == nil else { return }
+        queueSweepTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                let interval = self?.queueSweepInterval ?? 60
+                try? await Task.sleep(for: .seconds(interval))
+                guard !Task.isCancelled, let self else { return }
+                self.sweepQueues()
+            }
+        }
+    }
+
+    func sweepQueues(now: Date = Date()) {
+        for (id, items) in queuedWorkItemsCache where !items.isEmpty {
+            guard runners[id] == nil, !pausedQueues.contains(id), canDrainQueue(for: id),
+                  now.timeIntervalSince(lastQueueSweep[id] ?? .distantPast) >= queueSweepInterval * 0.9 else { continue }
+            lastQueueSweep[id] = now
+            appendAgentDiagnostics("queue sweep: retrying drain depth=\(items.count) reason=idle runner, queued work, no hold", agentID: id)
+            drainQueue(for: id)
+        }
+    }
+
     private func drainQueue(for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
+        if qaDropNextDrain { qaDropNextDrain = false; return }
         let previous = queueOpTasks[id]
         queueOpTasks[id] = Task { @MainActor [weak self] in
             if let previous { await previous.value }
@@ -14015,7 +14402,7 @@ final class AgentSupervisor {
             await self.qaBeforeQueueDrain?()
             do { try await self.recoverAgentMessageQueue(for: id) }
             catch { self.pauseQueue(id, .held); self.warn("Durable agent message awaits queue storage recovery."); return }
-            await self.expireStaleAgentMessages(for: id, store: store)
+            await self.bundleStaleAgentMessages(for: id, store: store)
             guard self.canDrainQueue(for: id), var next = await store.nextWorkItem(for: id) else { return }
             // A helper note never starts a turn: it rides along with the next
             // result, or joins a running turn. Notes alone leave the lead idle.
@@ -14162,6 +14549,7 @@ final class AgentSupervisor {
     /// can change it while the durable queue/attachment store is awaited.
     private func canDrainQueue(for id: AgentID) -> Bool {
         runners[id] == nil && !pausedQueues.contains(id) && !isSessionHeld(id)
+            && !(records[id].map { otherHelperWriting(checkoutOf: $0) != nil } ?? false)
             && (deliveringSteers[id]?.isEmpty ?? true)
             && pendingForceSends[id] == nil && deferredForceSends[id] == nil
             && !contextRecoveryInFlight.contains(id)
@@ -14546,7 +14934,7 @@ final class AgentSupervisor {
 
     private func escalateToKill(_ id: AgentID) {
         let forced = takePendingForceSend(for: id)
-        killRunner(id, pauseAfterStop: forced == nil)
+        killRunner(id, pauseAfterStop: forced == nil && userStoppedAgents.contains(id))
         if let forced { sendOrRecoverForcedPrompt(forced, to: id) }
     }
 
@@ -15020,6 +15408,7 @@ final class AgentSupervisor {
             event = .turnCompleted(threadId: threadId, turnId: turnId, outcome: .interrupted, errorMessage: error)
         }
         if case .turnStarted = event, usagePauses.removeValue(forKey: id) != nil {
+            releaseUsageQueueHold(id)
             usagePausesChanged(id)
         }
         if case .turnCompleted(_, _, .completed, _) = event { usageWindowProvedOpen(by: id, now: now) }
