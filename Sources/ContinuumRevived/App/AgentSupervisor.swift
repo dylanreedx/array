@@ -13564,22 +13564,73 @@ final class AgentSupervisor {
 
     /// Nothing is reading or about to write this agent's transcript.
     private func transcriptIsDormant(_ id: AgentID) -> Bool {
-        transcriptStore != nil && records[id] != nil && !isRunning(id)
-            && records[id]?.externalSession == nil && (providerHistoryReadPins[id]?.isEmpty ?? true)
-            && (subscribers[id]?.isEmpty ?? true)
-            && sharedTranscriptDetailObservers[id] == nil
-            && outsideHistoryObservers[id] == nil
-            && (localNoticeObservers[id]?.isEmpty ?? true)
-            && !adoptingSessionHistory.contains(id) && !terminalFaceAgents.contains(id)
-            && !compactingAgents.contains(id) && !activeCompactionOperations.contains(id)
-            && !contextRecoveryInFlight.contains(id)
-            && transcriptPersistenceTasks[id] == nil && transcriptPersistDebounce[id] == nil
-            && transcriptReloads[id] == nil
-            && canonicalTranscriptPreflights[id] == nil
-            && (transcriptProjections[id].map { $0.activeToolCount == 0 } ?? true)
+        transcriptDormancyBlocker(id) == nil
+    }
+
+    /// The first condition that keeps `id`'s transcript resident, nil when it is
+    /// dormant. One list serves the release gate and the retention report, so
+    /// the report names exactly what the gate checked.
+    private func transcriptDormancyBlocker(_ id: AgentID) -> String? {
+        if transcriptStore == nil { return "no-store" }
+        if records[id] == nil { return "no-record" }
+        if isRunning(id) { return "running" }
+        if records[id]?.externalSession != nil { return "external-session" }
+        if !(providerHistoryReadPins[id]?.isEmpty ?? true) { return "provider-read-pin" }
+        if !(subscribers[id]?.isEmpty ?? true) { return "tile-subscriber" }
+        if sharedTranscriptDetailObservers[id] != nil { return "detail-observer" }
+        if outsideHistoryObservers[id] != nil { return "outside-history-observer" }
+        if !(localNoticeObservers[id]?.isEmpty ?? true) { return "notice-observer" }
+        if adoptingSessionHistory.contains(id) { return "adopting-history" }
+        if terminalFaceAgents.contains(id) { return "terminal-face" }
+        if compactingAgents.contains(id) || activeCompactionOperations.contains(id) { return "compacting" }
+        if contextRecoveryInFlight.contains(id) { return "context-recovery" }
+        if transcriptPersistenceTasks[id] != nil || transcriptPersistDebounce[id] != nil { return "save-pending" }
+        if transcriptReloads[id] != nil { return "reloading" }
+        if canonicalTranscriptPreflights[id] != nil { return "preflight" }
+        if let projection = transcriptProjections[id], projection.activeToolCount != 0 { return "active-tool" }
+        return nil
+    }
+
+    /// Why each agent holding a decoded transcript still holds it: blocker name
+    /// to agent count. Agents the release gate would not even schedule for
+    /// (persistence blocked, local-only history, not yet canonical) are named
+    /// by that reason.
+    func transcriptRetentionBlockers() -> [String: Int] {
+        var counts: [String: Int] = [:]
+        let resident = Set(transcriptProjections.keys).union(sharedTranscriptDetails.keys)
+            .union(canonicalTranscriptProjections.keys)
+        for id in resident {
+            let reason: String
+            if transcriptPersistenceBlocked.contains(id) { reason = "persistence-blocked" }
+            else if transcriptHasLocalOnlyHistory.contains(id) { reason = "local-only-history" }
+            else if !canonicalTranscriptReady.contains(id) { reason = "not-canonical-yet" }
+            else { reason = transcriptDormancyBlocker(id) ?? "releasable" }
+            counts[reason, default: 0] += 1
+        }
+        return counts
+    }
+
+    private static let retentionLogger = Logger(subsystem: "continuum.canvas", category: "stall")
+    private var retentionReportTask: Task<Void, Never>?
+
+    /// One line in the hitch-log category, so a prod build can say what keeps
+    /// its transcripts decoded: `retention: 255 resident; tile-subscriber 240, ...`.
+    private func startRetentionReport() {
+        guard retentionReportTask == nil, transcriptStore != nil else { return }
+        retentionReportTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(300))
+                guard let self else { return }
+                let counts = self.transcriptRetentionBlockers()
+                guard !counts.isEmpty else { continue }
+                let parts = counts.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }
+                Self.retentionLogger.notice("retention: \(counts.values.reduce(0, +)) resident; \(parts.joined(separator: ", "))")
+            }
+        }
     }
 
     private func scheduleTranscriptRelease(for id: AgentID) {
+        startRetentionReport()
         guard !transcriptPersistenceBlocked.contains(id), !transcriptHasLocalOnlyHistory.contains(id),
               transcriptProjections[id] != nil || sharedTranscriptDetails[id] != nil,
               transcriptIsDormant(id) else { return }
@@ -13868,6 +13919,10 @@ final class AgentSupervisor {
             for observer in Array((transcriptReloadObservers[id] ?? [:]).values) { observer() }
         }
     }
+
+    /// QA: whether this launch counts `id`'s history as loaded (a restore, a
+    /// transcript of its own, or a live event), as the first reveal asks.
+    func qaHasLoadedHistory(_ id: AgentID) -> Bool { hasLoadedHistory(id) }
 
     /// QA: what this supervisor holds decoded across every agent.
     var qaHeldTranscripts: (projections: Int, rehydrated: Int, toolDetails: Int, events: Int, released: Int) {

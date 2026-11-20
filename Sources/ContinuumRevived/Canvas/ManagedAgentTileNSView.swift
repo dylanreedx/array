@@ -806,6 +806,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         supervisor: AgentSupervisor,
         projectName: String? = nil
     ) {
+        farParkedFollow = nil
         if attachedAgentID == agentID, eventSubscription != nil {
             // Assign unconditionally (including nil), matching the full-attach
             // path below: re-attaching after a Change Home to a custom FOLDER
@@ -2205,7 +2206,22 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     var isAttachedToAgent: Bool { attachedAgentID != nil }
 
+    /// Far parking used to keep the tile's event tail and observers, which kept
+    /// its agent from ever going dormant: a canvas of far-parked tiles held every
+    /// agent's decoded transcript for as long as it stayed there. The tile lets go
+    /// of its follow now, as a workspace park does, keeping the transcript it
+    /// shows, and follows again when it comes back. `CONTINUUM_QA_LEGACY_FAR_PARK_KEEPS_TAIL=1`
+    /// restores the old behaviour for the witness's RED arm.
+    static let qaLegacyFarParkKeepsTail = ProcessInfo.processInfo.environment["CONTINUUM_QA_LEGACY_FAR_PARK_KEEPS_TAIL"] == "1"
+    private var farParkedFollow: (agentID: AgentID, supervisor: AgentSupervisor, projectName: String?)?
+
     override func farParkStateDidChange() {
+        if !isFarParked, let follow = farParkedFollow {
+            farParkedFollow = nil
+            statusHeldWhileParked = false
+            attach(agentID: follow.agentID, supervisor: follow.supervisor, projectName: follow.projectName)
+            return
+        }
         if !isFarParked, statusHeldWhileParked {
             // Back in view: one refresh brings the row, the tail text, the turn
             // cards and the stale-What timer up to the agent's current state.
@@ -2213,6 +2229,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             refreshLocationStatus()
         }
         guard let agentID = attachedAgentID, eventSubscription != nil else { return }
+        if isFarParked, !Self.qaLegacyFarParkKeepsTail, let supervisor = agentSource {
+            farParkedFollow = (agentID, supervisor, locationProjectName)
+            detach()
+            return
+        }
         agentSource?.setEventsPresented(!isFarParked, for: agentID)
     }
 

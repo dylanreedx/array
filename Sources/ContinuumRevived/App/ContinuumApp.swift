@@ -2123,6 +2123,20 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--transcript-dormancy-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(240))
+                fputs("FAIL: transcript dormancy check exceeded its 240-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await TranscriptDormancyChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // What saving managed agents' transcripts costs the main thread during
         // and after a burst of finished turns, and that the saved file is the
         // supervisor's document.

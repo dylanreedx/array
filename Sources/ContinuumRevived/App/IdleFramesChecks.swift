@@ -68,7 +68,10 @@ enum IdleFramesChecks {
         // promote and must refresh its held row at once.
         var returnWitness: [String: Any] = ["checked": false]
         if let tile = fixture.agentTileIDs.compactMap({ fixture.canvas.tileView(for: $0) as? ManagedAgentTileNSView })
-            .first(where: { $0.isFarParked && $0.qaStatusHeldWhileParked }) {
+            .first(where: { $0.isFarParked && ($0.qaStatusHeldWhileParked || !$0.isAttachedToAgent) }) {
+            // A far-parked tile either holds its status row, or (as the dormancy
+            // change has it) has let go of its agent entirely; both must refresh
+            // on return.
             let before = tile.qaLocationRefreshCount
             tile.promoteBodyToNative()
             returnWitness = ["checked": true, "refreshedOnReturn": tile.qaLocationRefreshCount > before,
