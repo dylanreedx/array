@@ -175,5 +175,36 @@ func runAgentQueueDrainChecks() async throws {
         try await Task.sleep(for: .milliseconds(500))
         try require(user.1.runs == 1, "the user's Stop keeps the queued message from running")
     }
+
+    // MARK: 3. A drain that returned early is retried by the sweep.
+    // The queue is idle, un-paused and holds a message, and no event is coming
+    // to drain it: the shape a lead stayed in until a person typed.
+    do {
+        let dir = root.appendingPathComponent("s3", isDirectory: true)
+        let store = AgentStore(applicationSupportDirectory: dir.appendingPathComponent("agents"))
+        let id = AgentID(rawValue: UUID())
+        try store.upsert(.init(id: id, displayName: "Lead", harness: .pi, model: model, thinking: "medium",
+            cwd: root.path, createdAt: Date(), lastActivityAt: Date()))
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: dir.appendingPathComponent("drafts"), debounceInterval: 0)
+        let provider = Provider(); provider.threadId = AgentSupervisor.threadId(for: id)
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in provider }, warn: { _ in },
+            nameTitlerCommand: { _ in nil }, submissionRecoveryStore: drafts)
+        _ = supervisor.restore()
+        supervisor.queueSweepInterval = 0.3
+        try require(await supervisor.accept(.sendPrompt(.init("first turn")), for: id) == .accepted, "first turn starts")
+        try await waitFor("first turn running") { provider.runs == 1 }
+        var queued = await supervisor.accept(.queue(.init("second")), for: id)
+        for _ in 0..<150 where queued != .accepted {
+            try await Task.sleep(for: .milliseconds(20))
+            queued = await supervisor.accept(.queue(.init("second")), for: id)
+        }
+        try require(queued == .accepted, "second prompt queues, got \(queued)")
+        supervisor.qaDropNextDrain = true
+        provider.release()
+        try await Task.sleep(for: .milliseconds(150))
+        try await waitFor("the queued message runs without any new event") { provider.runs == 2 }
+        try require(diagnostics(dir.appendingPathComponent("agents")).contains("queue sweep: retrying drain"),
+            "the sweep says why it retried")
+    }
     print("AgentQueueDrainChecks passed")
 }

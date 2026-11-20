@@ -3482,6 +3482,7 @@ final class AgentSupervisor {
     @discardableResult
     func restore(fileManager: FileManager = .default) -> RestoreReport {
         var report = RestoreReport()
+        startQueueSweep()
         if !AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
             unarchiveAllBeforeRestore()
         }
@@ -5742,6 +5743,7 @@ final class AgentSupervisor {
     /// without this its Pi process outlives the session that started it. Iterates a
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
+        queueSweepTask?.cancel(); queueSweepTask = nil
         flushPendingTranscriptSaves()
         wakeupScheduler?.stop()
         for id in Array(helperProviderRetryErrors.keys) { stop(id) }
@@ -14055,8 +14057,45 @@ final class AgentSupervisor {
         drainQueue(for: id)
     }
 
+    // MARK: Queue sweep
+    //
+    // A drain is triggered by events: a turn ends, a message arrives, a person
+    // presses Send. A drain that returned early (a session hold, a steer in
+    // delivery, a context recovery) was never retried, so its messages waited
+    // for the next event, which for an idle lead may never come. The sweep is
+    // the net under all of them: at most once an interval per agent, only for
+    // an agent with queued work, no runner and no hold.
+    var queueSweepInterval: TimeInterval = 60
+    private var queueSweepTask: Task<Void, Never>?
+    private var lastQueueSweep: [AgentID: Date] = [:]
+    /// Witness seam: the next drain returns at once, as an early exit does.
+    var qaDropNextDrain = false
+
+    func startQueueSweep() {
+        guard queueSweepTask == nil else { return }
+        queueSweepTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                let interval = self?.queueSweepInterval ?? 60
+                try? await Task.sleep(for: .seconds(interval))
+                guard !Task.isCancelled, let self else { return }
+                self.sweepQueues()
+            }
+        }
+    }
+
+    func sweepQueues(now: Date = Date()) {
+        for (id, items) in queuedWorkItemsCache where !items.isEmpty {
+            guard runners[id] == nil, !pausedQueues.contains(id), canDrainQueue(for: id),
+                  now.timeIntervalSince(lastQueueSweep[id] ?? .distantPast) >= queueSweepInterval * 0.9 else { continue }
+            lastQueueSweep[id] = now
+            appendAgentDiagnostics("queue sweep: retrying drain depth=\(items.count) reason=idle runner, queued work, no hold", agentID: id)
+            drainQueue(for: id)
+        }
+    }
+
     private func drainQueue(for id: AgentID) {
         guard let store = submissionRecoveryStore else { return }
+        if qaDropNextDrain { qaDropNextDrain = false; return }
         let previous = queueOpTasks[id]
         queueOpTasks[id] = Task { @MainActor [weak self] in
             if let previous { await previous.value }
