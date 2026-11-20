@@ -39,6 +39,7 @@ enum HelperLivenessChecks {
         bench.f.api.approvalHandler = { _ in .allowForSession }
         var now = Date()
         supervisor.helperWatchdogNow = { now }
+        supervisor.helperWatchdogThreshold = 600; supervisor.helperStallAlertAfter = 180
         let settings = bench.settings
         func setSwitch(_ on: Bool) { settings.set(on, forKey: AgentManagedModeConfig.stallAlertsKey) }
 
@@ -147,7 +148,7 @@ enum HelperLivenessChecks {
         func section(_ name: String, _ body: () async throws -> Void) async {
             do { try await body() } catch { failures.append("\(name): \(error)") }
         }
-        let todayAlertSuffix = "has shown no progress for 10 min (last: transcript grew). Check it, message it, or stop it."
+        let todayAlertSuffix = "has shown no progress for 10 min (last: transcript grew). \(AgentSupervisor.helperAlertAdvice)"
 
         // 0. The evidence for `HelperLiveness.reasoningStreams`: the recorded
         // provider streams through their real translators.
@@ -316,7 +317,7 @@ enum HelperLivenessChecks {
         }
 
         // 3. A long live build: switch on, no alert at ten minutes or twenty;
-        // off, today's alert.
+        // off, no alert either: a running command is not a stall.
         await section("long build") {
             setSwitch(true)
             progress(claude)
@@ -332,7 +333,7 @@ enum HelperLivenessChecks {
             now = t.addingTimeInterval(1201)
             try await sweep()
             let offAlerts = Array(alerts(about: claude).dropFirst(before))
-            check(offAlerts.count == 1 && offAlerts[0].contains(todayAlertSuffix), "long build, switch off: today's alert did not arrive: \(offAlerts)")
+            check(offAlerts.isEmpty, "long build, switch off: a live build must not alert before its wait ceiling either: \(offAlerts)")
             setSwitch(true)
             try await endBuilds(claude, [build], "long build")
             progress(claude)

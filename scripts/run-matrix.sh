@@ -1455,6 +1455,7 @@ if [[ "$MANAGED_MODE_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --first-helper-isolation-check
   run_app_check .build/debug/Array --helper-retry-check
 run_app_check .build/debug/Array --helper-context-diet-check
+run_app_check .build/debug/Array --helper-usage-check
   run_app_check .build/debug/Array --orchestration-plan-check
   run_app_check .build/debug/Array --orchestration-request-lifecycle-check
   run_app_check .build/debug/Array --orchestration-request-policy-check
@@ -1784,6 +1785,7 @@ run_leg python3 scripts/check-fake-cli-leaks-test.py --real-bench .build/debug/A
 run_app_check .build/debug/Array --fake-cli-lifecycle-check
 run_app_check .build/debug/Array --helper-retry-check
 run_app_check .build/debug/Array --helper-context-diet-check
+run_app_check .build/debug/Array --helper-usage-check
 run_app_check .build/debug/Array --orchestration-plan-check
 run_app_check .build/debug/Array --orchestration-request-lifecycle-check
 run_app_check .build/debug/Array --orchestration-request-policy-check

@@ -7474,7 +7474,7 @@ final class AgentSupervisor {
 
     // Ten minutes tolerates long builds/tool calls, but catches an abandoned
     // approval or silent helper before it consumes a work session. No setting.
-    static let defaultHelperWatchdogThreshold: TimeInterval = 10 * 60
+    static let defaultHelperWatchdogThreshold: TimeInterval = 20 * 60
     var helperWatchdogThreshold = AgentSupervisor.defaultHelperWatchdogThreshold
     var helperWatchdogNow: () -> Date = { Date() }
     private var helperWatchdogTimer: Timer?
@@ -7499,7 +7499,7 @@ final class AgentSupervisor {
     var helperLivenessQuietAfter = HelperLiveness.defaultQuietAfter
     /// With `AgentManagedModeConfig.stallAlertsKey` on, a lead hears once its
     /// stalled helper has gone this long without progress. Informs only.
-    static let defaultHelperStallAlertAfter: TimeInterval = 3 * 60
+    static let defaultHelperStallAlertAfter: TimeInterval = 20 * 60
     var helperStallAlertAfter = AgentSupervisor.defaultHelperStallAlertAfter
     /// With the switch on, waiting on a process or tool call is not a stall,
     /// but waiting this long without progress is worth one message. Informs only.
@@ -7596,6 +7596,8 @@ final class AgentSupervisor {
         }
     }
 
+    /// A stall alert informs; the helper's result arrives by itself.
+    static let helperAlertAdvice = "No action needed unless you know it is stuck or no longer wanted."
     private enum HelperAlertKind { case noProgress, stalled, stillWaiting }
 
     /// Runs on the same actor as hook and transcript ingestion. The clock is
@@ -7692,7 +7694,11 @@ final class AgentSupervisor {
             let quiet = now.timeIntervalSince(progress.at)
             // Switch off: ten minutes without progress, whatever the helper is
             // doing. On: by what it is doing.
-            let fact = stallAlerts ? helperLiveness[id] : nil
+            // A running command or open tool call is never a stall, with the
+            // switch on or off: it waits for the ceiling.
+            let observed = helperLiveness[id]
+            let running = observed?.state == .waitingOnChild || observed?.state == .waitingOnToolCall
+            let fact = stallAlerts || running ? observed : nil
             let kind: HelperAlertKind?
             switch fact?.state {
             case .waitingOnHelper?, .working?, .finished?: kind = nil
@@ -7737,11 +7743,11 @@ final class AgentSupervisor {
             }
             switch kind {
             case .noProgress:
-                pendingHelperAlerts[id] = (target, "\(label) has shown no progress for \(minutes) min (last: \(progress.last)). Check it, message it, or stop it.")
+                pendingHelperAlerts[id] = (target, "\(label) has shown no progress for \(minutes) min (last: \(progress.last)). \(Self.helperAlertAdvice)")
             case .stalled:
-                pendingHelperAlerts[id] = (target, "\(label) is stalled: no progress since \(since) (\(quietMinutes) min), nothing it started is running and no tool call is open (last: \(progress.last)). Check it, message it, or stop it.")
+                pendingHelperAlerts[id] = (target, "\(label) is stalled: no progress since \(since) (\(quietMinutes) min), nothing it started is running and no tool call is open (last: \(progress.last)). \(Self.helperAlertAdvice)")
             case .stillWaiting:
-                pendingHelperAlerts[id] = (target, "\(label) is still waiting on \(waitedOn) for \(quietMinutes) min, with no progress since \(since) (last: \(progress.last)). Check it, message it, or stop it.")
+                pendingHelperAlerts[id] = (target, "\(label) is still waiting on \(waitedOn) for \(quietMinutes) min, with no progress since \(since) (last: \(progress.last)). \(Self.helperAlertAdvice)")
             }
         }
         for (child, alert) in pendingHelperAlerts {

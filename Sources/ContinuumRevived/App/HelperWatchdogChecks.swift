@@ -19,6 +19,7 @@ enum HelperWatchdogChecks {
             registry: bench.f.delegate.registryStore!.loadOrEmpty(), reason: .continuumRestarted, now: Date())
         var now = Date()
         supervisor.helperWatchdogNow = { now }
+        supervisor.helperWatchdogThreshold = 600
         let child = try bench.delegate("HOLD-watchdog")
         let idle = try bench.delegate("idle-control")
         try HelperGuardChecks.expect(supervisor.send("HOLD-parent", to: parent), "parent did not start")
@@ -79,7 +80,7 @@ enum HelperWatchdogChecks {
         try HelperGuardChecks.expect(alerts().count == 1, "expected exactly one queued parent message, got \(alerts().count)")
         let text = AgentMessageEnvelope.unwrappedText(alerts()[0].text)
         try HelperGuardChecks.expect(text.split(whereSeparator: \.isWhitespace).count <= 40
-            && text.contains("Check it, message it, or stop it."), "alert wording is wrong: \(text)")
+            && text.contains(AgentSupervisor.helperAlertAdvice), "alert wording is wrong: \(text)")
         // Reuse the shipped needs-you style in both appearances.
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             window.appearance = NSAppearance(named: appearance)
@@ -177,6 +178,7 @@ enum HelperWatchdogChecks {
         let orphan = AgentSupervisor(store: orphanStore)
         defer { orphan.stopAll() }
         orphan.helperWatchdogNow = { now }
+        orphan.helperWatchdogThreshold = 600
         _ = orphan.restore()
         try HelperGuardChecks.expect(orphan.records[parent] == nil, "orphan setup retained its parent")
         try? FileManager.default.removeItem(at: cwd.appendingPathComponent("release.flag"))

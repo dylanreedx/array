@@ -114,6 +114,11 @@ extension WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: .notFound, message: "No agent with that id is known to this host. Re-resolve it through array_find_agent."))
         }
 
+        // Polling costs the lead's whole context and the result arrives by itself.
+        if let refusal = pollLimiter.check(caller: "\(agentId)", target: "\(target.id)", now: pollNow()) {
+            return .error(WorkspaceAPIError(code: .unsupported, message: refusal))
+        }
+
         // Grant on the TARGET agent. "Allow once" is spent the moment it authorizes.
         var approvalRequestId: String?
         switch WorkspaceToolGrantEvaluator.evaluateAgentInspect(
