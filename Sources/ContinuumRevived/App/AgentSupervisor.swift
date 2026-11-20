@@ -3642,7 +3642,20 @@ final class AgentSupervisor {
         // child tile does not sit apparently mid-turn forever. Runs at the END,
         // because it needs every restored record in `records` to resolve a child's
         // parent.
-        reconcileObservedRunsAfterRestore()
+        if let ledger = companionTaskLedger, companionTaskTrackingHealthy {
+            // One ledger commit for the whole replay, not one per event.
+            let before = ledger.revision
+            do {
+                try ledger.batch { reconcileObservedRunsAfterRestore() }
+                if before != ledger.revision { onCompanionTasksChanged?() }
+            } catch {
+                companionTaskTrackingHealthy = false
+                warn("Companion task tracking failed; task notifications remain withheld.")
+                onCompanionTasksChanged?()
+            }
+        } else {
+            reconcileObservedRunsAfterRestore()
+        }
         reconcileManagedMode()
         restoreHelperMessageSubscriptions()
         settleHelpersCutOffByRestart()
