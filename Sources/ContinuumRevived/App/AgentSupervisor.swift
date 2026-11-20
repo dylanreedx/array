@@ -14266,6 +14266,12 @@ final class AgentSupervisor {
     private(set) var qaIdleReapCount = 0
     /// Sessions `prewarmSession` started, for the witness.
     private(set) var qaPrewarmCount = 0
+    /// How often an idle session on a visible tile re-reads its visibility once
+    /// the hidden cap has passed.
+    var idleVisibilityPollInterval: TimeInterval = 30
+    /// QA: `CONTINUUM_QA_REAP_VISIBILITY_ONCE=1` restores reading visibility only
+    /// when the timer is scheduled.
+    nonisolated static let reapVisibilityOnce = ProcessInfo.processInfo.environment["CONTINUUM_QA_REAP_VISIBILITY_ONCE"] == "1"
     /// QA only: `CONTINUUM_QA_PREWARM_OFF=1` turns pre-warming off, so one
     /// binary shows the witness RED and GREEN.
     nonisolated static let prewarmDisabled = ProcessInfo.processInfo.environment["CONTINUUM_QA_PREWARM_OFF"] == "1"
@@ -14846,7 +14852,13 @@ final class AgentSupervisor {
         let hiddenTimeout = min(visibleTimeout, idleHiddenRunnerTimeout)
         let waited = Date().timeIntervalSince(since)
         let isVisible = agentVisibleProvider?(id) == true
-        let delay = max(0, (isVisible ? visibleTimeout : hiddenTimeout) - waited)
+        var delay = max(0, (isVisible ? visibleTimeout : hiddenTimeout) - waited)
+        // A tile that scrolls off screen while its session idles falls under the
+        // hidden cap: look again at the cap (then every poll) instead of
+        // sleeping out the whole visible timeout.
+        if isVisible, hiddenTimeout < visibleTimeout, !Self.reapVisibilityOnce {
+            delay = min(delay, max(hiddenTimeout - waited, idleVisibilityPollInterval))
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.idleReapTokens[id] == token, self.idleSessionRunners[id] === runner else { return }
             // A running shell job (a dev server) or child keeps the session;
@@ -14862,15 +14874,19 @@ final class AgentSupervisor {
                 self.scheduleIdleReap(for: id, runner: runner, since: since, visibleTimeout: visibleTimeout)
                 return
             }
-            self.idleReapTokens[id] = nil
-            self.idleSessionRunners[id] = nil
             self.qaIdleReapCount &+= 1
-            runner.stop()
-            self.interruptWorkingClaudeMirroredChildren(of: id)
-            self.returnDeliveringSteers(for: id)
-            self.releaseHeldHelperCompletion(id)
-            self.notifyTurnCapabilitiesChanged(id)
+            self.closeIdleSession(id, runner)
         }
+    }
+
+    private func closeIdleSession(_ id: AgentID, _ runner: AgentRunning) {
+        idleReapTokens[id] = nil
+        idleSessionRunners[id] = nil
+        runner.stop()
+        interruptWorkingClaudeMirroredChildren(of: id)
+        returnDeliveringSteers(for: id)
+        releaseHeldHelperCompletion(id)
+        notifyTurnCapabilitiesChanged(id)
     }
 
     /// Starts a dormant Claude agent's session while the user writes to it, so

@@ -162,6 +162,35 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
                    "prewarm-caret: typing into the draft must still start the session")
     }
 
+    // 5a4. An idle session on a visible tile falls under the hidden cap when the
+    //      tile leaves the screen, instead of sleeping out the visible timeout.
+    //      CONTINUUM_QA_REAP_VISIBILITY_ONCE=1 is RED.
+    do {
+        let h = try Harness(.claude, idleTimeout: 8, hiddenTimeout: 1)
+        defer { h.tearDown() }
+        onPath(h)
+        h.supervisor.idleVisibilityPollInterval = 0.2
+        var visible = true
+        h.supervisor.agentVisibleProvider = { _ in visible }
+        try expect(h.supervisor.send("hello", to: h.id), "reap-visibility: seed refused")
+        try await eventually("reap-visibility: turn done") { !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed] }
+        try expect(h.supervisor.qaHasIdleSession(h.id), "reap-visibility: a visible idle session is kept")
+        try await Task.sleep(for: .milliseconds(1500))
+        try expect(h.supervisor.qaHasIdleSession(h.id), "reap-visibility: still visible, so kept past the hidden cap")
+        visible = false
+        try await eventually("reap-visibility: hidden now, so reaped at the hidden cap, not the visible timeout", timeout: 3) {
+            !h.supervisor.qaHasIdleSession(h.id)
+        }
+        // And back: a hidden session that becomes visible again is kept to the visible timeout.
+        try expect(h.supervisor.send("again", to: h.id), "reap-visibility: second send refused")
+        try await eventually("reap-visibility: second turn done") { !h.supervisor.isRunning(h.id) && h.completedTurns.count == 2 }
+        visible = false
+        try await Task.sleep(for: .milliseconds(600))
+        visible = true
+        try await Task.sleep(for: .milliseconds(2000))
+        try expect(h.supervisor.qaHasIdleSession(h.id), "reap-visibility: a tile that came back on screen keeps its session")
+    }
+
     }
 
     if prewarmOnly {
