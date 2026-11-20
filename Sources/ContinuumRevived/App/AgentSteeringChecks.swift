@@ -9,7 +9,7 @@ import Foundation
 // stands in for each CLI on PATH and records exactly what reached it. Runs as
 // part of `--agent-compaction-ui-check`.
 @MainActor
-func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: Bool = false) async throws {
+func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: Bool = false, prewarmOnly: Bool = false) async throws {
     struct Failure: Error, CustomStringConvertible { let description: String }
     func expect(_ condition: Bool, _ message: String) throws {
         if !condition { throw Failure(description: "steering: " + message) }
@@ -96,6 +96,78 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
         else { unsetenv("CONTINUUM_CODEX_TRANSPORT") }
     }
     func onPath(_ harness: Harness) { setenv("PATH", "\(harness.bin.path):\(originalPath)", 1) }
+
+    @MainActor
+    func prewarmWitnesses() async throws {
+    // 5a. Pre-warm: writing to an agent whose session was closed starts the
+    //     claude process before Send, with --resume, and the message then runs
+    //     on that same process. `CONTINUUM_QA_PREWARM_OFF=1` makes this RED.
+    do {
+        let h = try Harness(.claude, idleTimeout: 4, hiddenTimeout: 0.5)
+        defer { h.tearDown() }
+        onPath(h)
+        h.supervisor.agentVisibleProvider = { _ in false }
+        try expect(h.supervisor.send("hello", to: h.id), "prewarm: seed refused")
+        try await eventually("prewarm: turn done") { !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed] }
+        try await eventually("prewarm: the hidden idle session is closed first", timeout: 5) {
+            !h.supervisor.qaHasIdleSession(h.id)
+        }
+        let before = h.spawns
+        h.supervisor.agentVisibleProvider = { _ in true }
+        try expect(h.supervisor.prewarmSession(for: h.id),
+                   "prewarm: writing to a closed claude session must start it before Send")
+        try await eventually("prewarm: the session process must start with no prompt written") { h.spawns == before + 1 }
+        try expect(h.promptTexts == ["hello"] && AgentSteeringQAFakes.argv(in: h.bin).contains("--resume"),
+                   "prewarm: the pre-warmed process must resume the conversation and receive nothing yet, prompts \(h.promptTexts)")
+        try expect(!h.supervisor.prewarmSession(for: h.id) && h.supervisor.qaPrewarmCount == 1,
+                   "prewarm: further keystrokes must not start another session")
+        let warmPid = AgentSteeringQAFakes.latestPid(in: h.bin)
+        try expect(h.supervisor.send("second", to: h.id), "prewarm: the message refused")
+        try await eventually("prewarm: the message completes") {
+            !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed, .completed]
+        }
+        try expect(h.spawns == before + 1 && AgentSteeringQAFakes.latestPid(in: h.bin) == warmPid
+                   && h.promptTexts == ["hello", "second"],
+                   "prewarm: the message must run on the pre-warmed process, spawns \(h.spawns - before), prompts \(h.promptTexts)")
+    }
+
+    // 5a2. Pre-warm is for WRITING, not for looking: a caret move or a click
+    //      into a restored, unsent draft changes no words and must not start a
+    //      CLI that nothing then uses; typing must. RED before the fix.
+    do {
+        let h = try Harness(.claude, idleTimeout: 4, hiddenTimeout: 0.5)
+        defer { h.tearDown() }
+        onPath(h)
+        h.supervisor.agentVisibleProvider = { _ in false }
+        try expect(h.supervisor.send("hello", to: h.id), "prewarm-caret: seed refused")
+        try await eventually("prewarm-caret: turn done") { !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed] }
+        try await eventually("prewarm-caret: the hidden idle session is closed first", timeout: 5) {
+            !h.supervisor.qaHasIdleSession(h.id)
+        }
+        let tile = ManagedAgentTileNSView(tile: Tile(
+            id: UUID(), kind: .managedAgent, title: "prewarm-caret",
+            frame: TileFrame(x: 0, y: 0, width: 520, height: 420),
+            zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed")))
+        tile.attach(agentID: h.id, supervisor: h.supervisor)
+        guard let composer = tile.qaComposerForChecks else { throw Failure(description: "steering: prewarm-caret: no composer") }
+        let before = h.supervisor.qaPrewarmCount
+        tile.qaSetComposerDraftForChecks("an unsent draft restored from disk")
+        composer.qaMoveCaretForChecks(to: 3)
+        composer.qaMoveCaretForChecks(to: 0)
+        try expect(h.supervisor.qaPrewarmCount == before && !h.supervisor.qaHasIdleSession(h.id),
+                   "prewarm-caret: moving the caret in a restored draft started a CLI nobody will use")
+        composer.qaTypeForChecks("x")
+        try expect(h.supervisor.qaPrewarmCount == before + 1 && h.supervisor.qaHasIdleSession(h.id),
+                   "prewarm-caret: typing into the draft must still start the session")
+    }
+
+    }
+
+    if prewarmOnly {
+        try await prewarmWitnesses()
+        return
+    }
 
     // Card7: use production runners, offline CLIs and the production helper
     // journal/flush. A boundary must consume the attributed result in this turn.
@@ -431,37 +503,7 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
         }
     }
 
-    // 5a. Pre-warm: writing to an agent whose session was closed starts the
-    //     claude process before Send, with --resume, and the message then runs
-    //     on that same process. `CONTINUUM_QA_PREWARM_OFF=1` makes this RED.
-    do {
-        let h = try Harness(.claude, idleTimeout: 4, hiddenTimeout: 0.5)
-        defer { h.tearDown() }
-        onPath(h)
-        h.supervisor.agentVisibleProvider = { _ in false }
-        try expect(h.supervisor.send("hello", to: h.id), "prewarm: seed refused")
-        try await eventually("prewarm: turn done") { !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed] }
-        try await eventually("prewarm: the hidden idle session is closed first", timeout: 5) {
-            !h.supervisor.qaHasIdleSession(h.id)
-        }
-        let before = h.spawns
-        h.supervisor.agentVisibleProvider = { _ in true }
-        try expect(h.supervisor.prewarmSession(for: h.id),
-                   "prewarm: writing to a closed claude session must start it before Send")
-        try await eventually("prewarm: the session process must start with no prompt written") { h.spawns == before + 1 }
-        try expect(h.promptTexts == ["hello"] && AgentSteeringQAFakes.argv(in: h.bin).contains("--resume"),
-                   "prewarm: the pre-warmed process must resume the conversation and receive nothing yet, prompts \(h.promptTexts)")
-        try expect(!h.supervisor.prewarmSession(for: h.id) && h.supervisor.qaPrewarmCount == 1,
-                   "prewarm: further keystrokes must not start another session")
-        let warmPid = AgentSteeringQAFakes.latestPid(in: h.bin)
-        try expect(h.supervisor.send("second", to: h.id), "prewarm: the message refused")
-        try await eventually("prewarm: the message completes") {
-            !h.supervisor.isRunning(h.id) && h.completedTurns == [.completed, .completed]
-        }
-        try expect(h.spawns == before + 1 && AgentSteeringQAFakes.latestPid(in: h.bin) == warmPid
-                   && h.promptTexts == ["hello", "second"],
-                   "prewarm: the message must run on the pre-warmed process, spawns \(h.spawns - before), prompts \(h.promptTexts)")
-    }
+    try await prewarmWitnesses()
 
     // 5b. One reap rule: the setting (here a fixed 4 s) governs a visible
     //     agent, a hidden idle one closes at min(setting, hidden cap = 1 s), and

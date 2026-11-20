@@ -356,6 +356,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// new ones (P6.1). WEAK — the tile is a view of an agent the supervisor owns,
     /// and a view must never keep it alive.
     private weak var agentSource: AgentSupervisor?
+    /// The composer text the pre-warm last saw, so only a real edit starts a session.
+    private var lastDraftTextSeenForPrewarm = ""
     private let leadPlanView = AgentLeadPlanView(frame: .zero)
     private var leadPlanObserverToken: UUID?
     var qaLeadPlanView: AgentLeadPlanView { leadPlanView }
@@ -567,11 +569,20 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self?.onUserDraftEdited?()
             // A message is being written: start a closed session now so it
             // does not wait for the CLI to boot when it is sent.
-            if !draft.text.isEmpty, let self, let id = self.projectedAgentID {
+            // Only a change of the words counts: a caret move or a click into a
+            // restored, unsent draft is not someone writing, and used to start
+            // a CLI that nothing then used.
+            guard let self else { return }
+            let wordsChanged = draft.text != self.lastDraftTextSeenForPrewarm
+            self.lastDraftTextSeenForPrewarm = draft.text
+            if wordsChanged, !draft.text.isEmpty, let id = self.projectedAgentID {
                 self.agentSource?.prewarmSession(for: id)
             }
         }
-        v2Composer?.onDraftApplied = { [weak self] in self?.updateV2ComposerPresentation() }
+        v2Composer?.onDraftApplied = { [weak self] in
+            self?.lastDraftTextSeenForPrewarm = self?.v2Composer?.draft.text ?? ""
+            self?.updateV2ComposerPresentation()
+        }
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
         v2Composer?.onSubmissionStarted = { [weak self] prompt in
             self?.beginOptimisticSubmission(prompt)
