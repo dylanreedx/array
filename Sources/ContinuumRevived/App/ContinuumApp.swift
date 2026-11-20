@@ -1174,6 +1174,20 @@ enum ContinuumApp {
                 }
             }
         }
+        if CommandLine.arguments.contains("--idle-waker-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await AgentIdleWakerChecks.run()
+                    print("AgentIdleWakerChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--agent-process-tracker-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {

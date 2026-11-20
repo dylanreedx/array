@@ -2518,6 +2518,9 @@ run_app_check .build/debug/Array --workspace-api-session-permissions-check
 # menu through the boot mount's tracker, a port opens in a browser beside the
 # agent in its own zone, and Stop All ends every process.
 run_app_check .build/debug/Array --agent-process-tracker-check
+# An idle agent is woken once when a process it started exits (not for CLI-tracked
+# background work), and nudged once for an idle promise with nothing running.
+run_app_check .build/debug/Array --idle-waker-check
 # .plans/79: sessions from other apps are rows of the production sidebar, keyed
 # by session, marked where they live, scoped by "This Mac", never doubled; Copy
 # forks one into a managed Claude agent in its project.

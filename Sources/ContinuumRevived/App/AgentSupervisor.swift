@@ -1052,7 +1052,62 @@ private final class CompactionTerminalLatch: @unchecked Sendable {
 final class AgentSupervisor {
     /// 0.7.30 — what each agent left running. Owned by the app delegate; tiles
     /// read it through the supervisor they attach to.
-    weak var processTracker: AgentProcessTracker?
+    weak var processTracker: AgentProcessTracker? {
+        didSet {
+            processTracker?.onJobsEnded = { [weak self] agent, jobs in self?.idleWaker.jobsEnded(agent, jobs) }
+        }
+    }
+
+    /// Wakes an idle agent when a process it started exits, and nudges an idle
+    /// promise (`AgentIdleWaker`). Delivery is `deliverSystemWake`.
+    lazy var idleWaker: AgentIdleWaker = {
+        let waker = AgentIdleWaker()
+        waker.isIdle = { [weak self] id in self?.canStartSystemTurn(id) == true }
+        waker.cliTracksBackgroundWork = { [weak self] id in
+            guard let self else { return false }
+            let runner = self.runners[id] ?? self.idleSessionRunners[id]
+            return (runner as? AgentSteeringRunning)?.hasBackgroundWork == true
+                || (runner as? AgentUnsolicitedTurnReporting)?.hasUnsolicitedTurn == true
+        }
+        waker.liveJobs = { [weak self] id in self?.processTracker?.jobs(for: id).count ?? 0 }
+        waker.lastReply = { [weak self] id in self?.finalAssistantText(for: id) }
+        waker.filedReport = { [weak self] id in
+            guard let self, let filed = self.settlementReport(id) else { return false }
+            return filed.filedAt > (self.lastSettledAt[id] ?? self.reportTurnBaseline)
+        }
+        waker.deliver = { [weak self] id, text in self?.deliverSystemWake(text, to: id) == true }
+        return waker
+    }()
+
+    /// An idle agent with something of its own still running is waiting, not
+    /// stale: the lead reads "waiting on process swift (pid 41, 4m)".
+    func idleWaitingFact(for id: AgentID, now: Date) -> HelperLivenessFact? {
+        guard runners[id] == nil, let jobs = processTracker?.jobs(for: id), let first = jobs.min(by: { $0.startedAt < $1.startedAt })
+        else { return nil }
+        let age = Int(now.timeIntervalSince(first.startedAt))
+        let name = Self.firstWord(first.label) ?? "process"
+        return HelperLivenessFact(state: .waitingOnChild, since: first.startedAt,
+            lastProgressAt: records[id]?.lastActivityAt ?? first.startedAt, liveChildren: jobs.count,
+            openToolCalls: 0, subHelpers: 0,
+            detail: "waiting on process \(name) (pid \(first.rootPid), \(age >= 120 ? "\(age / 60)m" : "\(age)s"))")
+    }
+
+    private func canStartSystemTurn(_ id: AgentID) -> Bool {
+        guard let record = records[id], record.capabilities.locallyManaged, sendRefusal(for: id) == nil else { return false }
+        return runners[id] == nil && !pausedQueues.contains(id) && (queuedWorkItemsCache[id] ?? []).isEmpty
+            && !contextRecoveryInFlight.contains(id) && sharedAgentControlGates[id]?.isEmpty != false
+    }
+
+    /// One short Array-originated turn for an idle agent, through the same
+    /// send path as a message. Anything in the way (a pause, a queue) means no
+    /// wake: the queue's own next turn is the agent's wake then.
+    private func deliverSystemWake(_ text: String, to id: AgentID) -> Bool {
+        guard canStartSystemTurn(id) else { return false }
+        let prompt = AgentPrompt("[Array] " + text)
+        guard sendPrepared(PreparedAgentPrompt(prompt: prompt, expectedAgentID: id), to: id) else { return false }
+        echoPrompt(prompt, for: id)
+        return true
+    }
     private struct RunnerGenerationToken: Equatable, Sendable {
         let rawValue = UUID()
     }
@@ -15650,6 +15705,7 @@ final class AgentSupervisor {
                 returnDeliveringSteers(for: id)
             }
             notifyTurnCapabilitiesChanged(id)
+            idleWaker.turnEnded(id)
             // B4: this is the actual moment the runner slot frees, not the
             // `.turnCompleted` event itself — that event still fires while
             // `runners[id]` holds this very runner, so draining there would
