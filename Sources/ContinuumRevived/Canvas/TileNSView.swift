@@ -573,6 +573,8 @@ class TileNSView: NSView, TokenThemed {
     /// surface. Everything that promotes a surfaced tile on contact (hitTest,
     /// focus, accessibility, a resize) treats this one the same way.
     private(set) var isFarParked = false
+    /// Views whose backing stores were dropped when the body was far-parked.
+    private var parkReleasedBacking: [ParkedBackingStore.Weak] = []
     private var surfaceHost: TileSurfaceHostView?
 
     /// The host is RETAINED across gestures, not rebuilt on every demotion.
@@ -810,6 +812,17 @@ class TileNSView: NSView, TokenThemed {
         surfaceResidency = .surfaced
         isFarParked = true
         farParkStateDidChange()
+        if ParkedBackingStore.releaseEnabled {
+            // One turn later: the reparent above leaves each layer with a
+            // display pending that the next commit would answer by redrawing
+            // what was just dropped (measured: 0 KB before the flush, the full
+            // tile after it).
+            DispatchQueue.main.async { [weak self, weak body] in
+                guard let self, let body, self.isFarParked, self.parkedBody === body,
+                      self.parkReleasedBacking.isEmpty else { return }
+                self.parkReleasedBacking = ParkedBackingStore.release(in: body)
+            }
+        }
         // Plan 110: nobody can see a far-parked tile; its character holds still.
         titleBar?.setCharacterHeld(true)
         return true
@@ -832,6 +845,10 @@ class TileNSView: NSView, TokenThemed {
         Self.qaPromoteMs += (ProcessInfo.processInfo.systemUptime - start) * 1_000
         parkedBody = nil
         titleBar?.setCharacterHeld(false)
+        if !parkReleasedBacking.isEmpty {
+            ParkedBackingStore.restore(parkReleasedBacking)
+            parkReleasedBacking = []
+        }
         // `surfaceHost` tracks what is INSTALLED; `retainedSurfaceHost` keeps the
         // view and its uploaded texture alive for the next gesture.
         surfaceHost = nil

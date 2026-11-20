@@ -312,6 +312,67 @@ enum TileSurfaceResidencyChecks {
         return (ProcessInfo.processInfo.systemUptime - start) * 1_000
     }
 
+    // MARK: - Far-parked backing stores
+
+    /// Bytes of AppKit backing store a far-parked tile keeps, on the DEFAULT renderer.
+    /// RED with `CONTINUUM_LEGACY_PARKED_BACKING=1` (every store kept), GREEN without.
+    /// Returning tiles must have their pixels back after one display pass, so the
+    /// frame that shows them is not blank.
+    static func runFarParkBackingCheck() throws {
+        let world = World(tileCount: 8)
+        defer { world.teardown() }
+        world.canvas.farParkingEnabled = false
+        world.canvas.surfaceResidencyEnabled = false
+        let views = world.tiles.compactMap { world.agentViews[$0.id] }
+        func total(_ pick: (ManagedAgentTileNSView) -> NSView?) -> ParkedBackingStore.Census {
+            var sum = ParkedBackingStore.Census()
+            for view in views {
+                guard let body = pick(view) else { continue }
+                let c = ParkedBackingStore.census(in: body)
+                sum.layers += c.layers
+                sum.bytes += c.bytes
+                for (k, v) in c.byClass { sum.byClass[k, default: 0] += v }
+            }
+            return sum
+        }
+        for _ in 0..<3 { world.pump() }
+        let native = total { $0.farParkableBody }
+        print("native: \(native.layers) layers, \(native.bytes / 1024) KB, by class \(native.byClass)")
+        try expect(native.bytes > 0, "fixture drew no backing stores, so the witness would prove nothing")
+        for view in views {
+            try expect(view.parkBodyFarOffscreen(park: world.canvas.surfaceParkView), "fixture could not far-park a tile")
+        }
+        print("parked, before any pass: \(total { $0.parkedBody }.bytes / 1024) KB")
+        func kb() -> Int { total { $0.parkedBody }.bytes / 1024 }
+        world.canvas.layoutSubtreeIfNeeded(); print("after layout: \(kb()) KB")
+        world.window.displayIfNeeded(); print("after displayIfNeeded: \(kb()) KB")
+        CATransaction.flush(); print("after flush: \(kb()) KB")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1)); print("after runloop: \(kb()) KB")
+        let dirty = views.filter { $0.parkedBody?.needsDisplay == true }.count
+        print("parked bodies still marked needsDisplay: \(dirty), park hidden: \(world.canvas.surfaceParkView.isHidden)")
+        for _ in 0..<3 { world.pump(); RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let parked = total { $0.parkedBody }
+        let perTile = parked.bytes / max(views.count, 1)
+        print("parked: \(parked.layers) layers, \(parked.bytes / 1024) KB (\(perTile / 1024) KB per tile), by class \(parked.byClass)")
+        var returnMs: [Double] = []
+        for view in views {
+            let ms = milliseconds {
+                view.promoteBodyToNative()
+                world.canvas.layoutSubtreeIfNeeded()
+                world.window.displayIfNeeded()
+                CATransaction.flush()
+            }
+            returnMs.append(ms)
+        }
+        let back = total { $0.farParkableBody }
+        let sorted = returnMs.sorted()
+        print("returned: \(back.bytes / 1024) KB; tile return incl. display: median \(String(format: "%.2f", sorted[sorted.count / 2])) ms, max \(String(format: "%.2f", sorted.last ?? 0)) ms (debug build)")
+        try expect(parked.bytes * 20 <= native.bytes,
+                   "far-parked tiles keep \(parked.bytes / 1024) KB of backing store against \(native.bytes / 1024) KB native")
+        try expect(back.bytes * 10 >= native.bytes * 9,
+                   "returned tiles drew \(back.bytes / 1024) KB of \(native.bytes / 1024) KB in the first display pass")
+    }
+
     // MARK: - Run
 
     static func run() throws {
