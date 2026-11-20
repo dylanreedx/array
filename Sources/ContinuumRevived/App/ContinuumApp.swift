@@ -46871,6 +46871,33 @@ extension AppDelegate {
         report.append(String(format: "sort cache: %d sorts per 10 builds (was %d); %.1f ms per build (was %.1f), debug, %d records",
                              cachedSort.sorts, legacySort.sorts, cachedSort.msPerBuild, legacySort.msPerBuild, supervisor.records.count))
 
+        // 9 · Rows outside any family are not built for the child rollup.
+        let wasEvery = AgentInboxRowBuilder.qaBuildEveryProvisionalRow
+        defer { AgentInboxRowBuilder.qaBuildEveryProvisionalRow = wasEvery }
+        func provisional() -> (rows: Int, ms: Double, built: [AgentInboxRow]) {
+            AgentInboxRowBuilder.qaProvisionalRowCount = 0
+            let started = DispatchTime.now().uptimeNanoseconds
+            var built: [AgentInboxRow] = []
+            for _ in 0..<10 { built = app.sidebarInboxRows() }
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6 / 10
+            return (AgentInboxRowBuilder.qaProvisionalRowCount / 10, ms, built)
+        }
+        let rowsNow = Date()
+        AgentInboxRowBuilder.qaBuildEveryProvisionalRow = true
+        let everyRow = provisional()
+        AgentInboxRowBuilder.qaBuildEveryProvisionalRow = false
+        let familyRows = provisional()
+        _ = rowsNow
+        let boardCount = everyRow.rows
+        witness(familyRows.rows < boardCount, "9: family-only built \(familyRows.rows) provisional rows, every-row built \(boardCount)")
+        witness(familyRows.rows >= 300, "9: fixture: the 300 helpers were not in a family (\(familyRows.rows))")
+        witness(familyRows.built.map(\.id) == everyRow.built.map(\.id)
+                && familyRows.built.map(\.lifecycle) == everyRow.built.map(\.lifecycle)
+                && familyRows.built.map(\.state) == everyRow.built.map(\.state),
+                "9: family-only provisional rows changed the built rows")
+        report.append(String(format: "provisional rows per build: %d (was %d); %.1f ms per build (was %.1f), debug",
+                             familyRows.rows, everyRow.rows, familyRows.ms, everyRow.ms))
+
         if !failures.isEmpty {
             throw Failure(description: "SidebarEventCost RED:\n  " + failures.joined(separator: "\n  "))
         }
