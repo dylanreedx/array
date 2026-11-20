@@ -1084,6 +1084,7 @@ if [[ "$FOCUS_SAFE_INPUT_ONLY" -eq 1 ]]; then
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-agents-contract-check
+  run_leg .build/debug/ContinuumRevivedCoreChecks --resource-bundle-layout-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-mcp-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
   run git diff --check

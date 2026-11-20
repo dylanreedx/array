@@ -196,10 +196,19 @@ ghostty_resources_embedded=true
 # landed exactly where PiExtensionInstaller looks for it in production,
 # byte-identical to the committed source (a truncated or stale copy is as dead
 # as a missing one).
-CORE_RESOURCE_BUNDLE_PATH="$RESOURCES/continuum-revived_ContinuumRevivedCore.bundle"
+# SwiftPM resource bundles are flat before Swift 6.4 and `Contents/Resources`
+# nested after; the app's lookups accept both, so the check does too.
+resource_bundle_root() {
+  local dir="$1" probe="$2"
+  if [[ -e "$dir/$probe" ]]; then echo "$dir"
+  elif [[ -e "$dir/Contents/Resources/$probe" ]]; then echo "$dir/Contents/Resources"
+  else echo "$dir"; fi
+}
+CORE_RESOURCE_BUNDLE_DIR="$RESOURCES/continuum-revived_ContinuumRevivedCore.bundle"
+CORE_RESOURCE_BUNDLE_PATH="$(resource_bundle_root "$CORE_RESOURCE_BUNDLE_DIR" PiExtensions/continuum-spawn-agent.ts)"
 SPAWN_AGENT_EXTENSION_SOURCE="$ROOT_DIR/Sources/ContinuumRevivedCore/Resources/PiExtensions/continuum-spawn-agent.ts"
 SPAWN_AGENT_EXTENSION_BUNDLED="$CORE_RESOURCE_BUNDLE_PATH/PiExtensions/continuum-spawn-agent.ts"
-[[ -d "$CORE_RESOURCE_BUNDLE_PATH" ]] || { echo "FAIL: missing Core resource bundle at $CORE_RESOURCE_BUNDLE_PATH" >&2; exit 1; }
+[[ -d "$CORE_RESOURCE_BUNDLE_DIR" ]] || { echo "FAIL: missing Core resource bundle at $CORE_RESOURCE_BUNDLE_PATH" >&2; exit 1; }
 [[ -f "$SPAWN_AGENT_EXTENSION_BUNDLED" ]] || { echo "FAIL: missing bundled spawn_agent extension at $SPAWN_AGENT_EXTENSION_BUNDLED" >&2; exit 1; }
 if ! cmp -s "$SPAWN_AGENT_EXTENSION_SOURCE" "$SPAWN_AGENT_EXTENSION_BUNDLED"; then
   echo "FAIL: bundled spawn_agent extension differs from the committed source" >&2
@@ -209,7 +218,8 @@ fi
 # The built-in character packs ship in their own bundle, so the iOS app can leave
 # them out. Each pack's theme and card must reach the app, byte-identical.
 CHARACTER_PACKS_SOURCE="$ROOT_DIR/Sources/ContinuumRevivedCharacterPacks/Resources/packs"
-CHARACTER_PACKS_BUNDLED="$RESOURCES/continuum-revived_ContinuumRevivedCharacterPacks.bundle/packs"
+CHARACTER_PACKS_DIR="$RESOURCES/continuum-revived_ContinuumRevivedCharacterPacks.bundle"
+CHARACTER_PACKS_BUNDLED="$(resource_bundle_root "$CHARACTER_PACKS_DIR" packs)/packs"
 if ! diff -rq "$CHARACTER_PACKS_SOURCE" "$CHARACTER_PACKS_BUNDLED" >/dev/null; then
   echo "FAIL: bundled character packs differ from the committed source" >&2
   exit 1
@@ -218,7 +228,8 @@ fi
 # The app target's SwiftPM resource bundle owns the fully local CodeMirror
 # surface. Verify the executable page and generated assets all reached the
 # signed app; loading any of these from the network is intentionally forbidden.
-APP_RESOURCE_BUNDLE_PATH="$RESOURCES/continuum-revived_ContinuumRevived.bundle"
+APP_RESOURCE_BUNDLE_DIR="$RESOURCES/continuum-revived_ContinuumRevived.bundle"
+APP_RESOURCE_BUNDLE_PATH="$(resource_bundle_root "$APP_RESOURCE_BUNDLE_DIR" CodeEditor)"
 CODE_EDITOR_SOURCE="$ROOT_DIR/Sources/ContinuumRevived/Resources/CodeEditor"
 CODE_EDITOR_BUNDLED="$APP_RESOURCE_BUNDLE_PATH/CodeEditor"
 for editor_resource in index.html editor.js editor.css ASSET_VERSION LICENSE.txt VIM-LICENSE.txt; do
