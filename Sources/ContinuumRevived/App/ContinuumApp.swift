@@ -17818,7 +17818,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             setWorkspaceManagementMessage("Nothing to stop — no selected agent has a prompt in flight.")
             return false
         }
-        for record in running { agentSupervisor.stop(record.id) }
+        for record in running { agentSupervisor.stop(record.id, byUser: true) }
         setWorkspaceManagementMessage("Stopped \(countedAgents(running.count)): \(agentNameList(running)).", kind: .success)
         refreshAgentSurfaces(notify: false)
         return true

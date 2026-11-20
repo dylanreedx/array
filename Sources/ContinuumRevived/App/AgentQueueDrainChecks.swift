@@ -38,12 +38,14 @@ func runAgentQueueDrainChecks() async throws {
             let n = lock.withLock { started += 1; return started }
             onEvent(.turnStarted(threadId: threadId, turnId: "turn-\(n)"))
             if blocks { gate.wait() }
-            if !lock.withLock({ stopped }) {
-                onEvent(.turnCompleted(threadId: threadId, turnId: "turn-\(n)", outcome: .completed, errorMessage: nil))
-            }
+            let wasStopped = lock.withLock { stopped }
+            onEvent(.turnCompleted(threadId: threadId, turnId: "turn-\(n)",
+                outcome: wasStopped ? .interrupted : .completed, errorMessage: nil))
         }
         func steer(_ prompt: AgentPrompt, id: UUID) throws {}
-        func interrupt() throws {}
+        func interrupt() throws { lock.withLock { stopped = true }; gate.signal() }
+        /// The provider ends its own turn as interrupted: nobody pressed Stop.
+        func endInterrupted() { lock.withLock { stopped = true }; gate.signal() }
         func stop() { lock.withLock { stopped = true }; gate.signal() }
         func observeSpawnRequests(_ handler: @escaping @Sendable (SpawnRequest) -> Void) {}
         func observeRuntimeObservations(_ handler: @escaping @Sendable (AgentRuntimeObservation) -> Void) {}
@@ -85,10 +87,11 @@ func runAgentQueueDrainChecks() async throws {
             queued = await supervisor.accept(.queue(.init("queued behind the running turn")), for: id)
         }
         try require(queued == .accepted, "second prompt queues, got \(queued)")
-        supervisor.stop(id)
-        let log = diagnostics(dir.appendingPathComponent("agents"))
-        try require(log.contains("agent=\(id.rawValue.uuidString) queue paused reason=afterStop depth="),
-            "Stop leaves a 'queue paused reason=afterStop depth=' line, got: \(log)")
+        try require(await supervisor.accept(.stop, for: id) == .accepted, "the user Stop is accepted")
+        let agentsDir = dir.appendingPathComponent("agents")
+        try await waitFor("Stop leaves a 'queue paused reason=afterStop depth=' line") {
+            diagnostics(agentsDir).contains("agent=\(id.rawValue.uuidString) queue paused reason=afterStop depth=")
+        }
         supervisor.resumeQueue(for: id)
         try require(diagnostics(dir.appendingPathComponent("agents")).contains("queue resumed reason=afterStop"),
             "resuming leaves a 'queue resumed reason=afterStop' line")
@@ -133,6 +136,44 @@ func runAgentQueueDrainChecks() async throws {
         try await Task.sleep(for: .milliseconds(800))
         try require(typed.provider.runs == 0 && typed.supervisor.isQueuePaused(for: typed.id),
             "a follow-up the person typed still waits for them after a relaunch")
+    }
+
+    // MARK: 2. Only a person's Stop holds a queue.
+    // A kill from anything else (closing a helper, a restart, a retry) used to
+    // pause the queue too, and nothing ever resumed it: ED88C2A4 exited 143
+    // with the perf lead's message still queued.
+    do {
+        func world(_ name: String) async throws -> (AgentSupervisor, Provider, AgentID) {
+            let dir = root.appendingPathComponent(name, isDirectory: true)
+            let store = AgentStore(applicationSupportDirectory: dir.appendingPathComponent("agents"))
+            let id = AgentID(rawValue: UUID())
+            try store.upsert(.init(id: id, displayName: "Lead", harness: .pi, model: model, thinking: "medium",
+                cwd: root.path, createdAt: Date(), lastActivityAt: Date()))
+            let drafts = AgentComposerDraftStore(applicationSupportDirectory: dir.appendingPathComponent("drafts"), debounceInterval: 0)
+            let provider = Provider(); provider.threadId = AgentSupervisor.threadId(for: id)
+            let supervisor = AgentSupervisor(store: store, makeRunner: { _ in provider }, warn: { _ in },
+                nameTitlerCommand: { _ in nil }, submissionRecoveryStore: drafts)
+            _ = supervisor.restore()
+            try require(await supervisor.accept(.sendPrompt(.init("first turn")), for: id) == .accepted, "first turn starts")
+            try await waitFor("first turn running") { provider.runs == 1 }
+            var queued = await supervisor.accept(.queue(.init("second")), for: id)
+            for _ in 0..<150 where queued != .accepted {
+                try await Task.sleep(for: .milliseconds(20))
+                queued = await supervisor.accept(.queue(.init("second")), for: id)
+            }
+            try require(queued == .accepted, "second prompt queues, got \(queued)")
+            return (supervisor, provider, id)
+        }
+        let programmatic = try await world("s2-kill")
+        programmatic.1.endInterrupted()
+        try await waitFor("an interrupted turn nobody asked for lets the queue run") { programmatic.1.runs == 2 }
+        try require(!programmatic.0.isQueuePaused(for: programmatic.2), "an unrequested interrupt does not hold the queue")
+
+        let user = try await world("s2-user")
+        try require(await user.0.accept(.stop, for: user.2) == .accepted, "user Stop accepted")
+        try await waitFor("the user's Stop holds the queue") { user.0.isQueuePaused(for: user.2) }
+        try await Task.sleep(for: .milliseconds(500))
+        try require(user.1.runs == 1, "the user's Stop keeps the queued message from running")
     }
     print("AgentQueueDrainChecks passed")
 }

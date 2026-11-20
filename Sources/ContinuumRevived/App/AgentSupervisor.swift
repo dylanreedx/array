@@ -5642,7 +5642,7 @@ final class AgentSupervisor {
     /// This is the TEARDOWN stop — quit, archive, a closed tile, every
     /// programmatic caller — and it kills. The composer's Stop goes through
     /// `accept(.stop)`, which interrupts first (T5).
-    func stop(_ id: AgentID) {
+    func stop(_ id: AgentID, byUser: Bool = false) {
         guard records[id] != nil else {
             warn("AgentSupervisor.stop: no agent \(id.rawValue.uuidString)")
             return
@@ -5650,13 +5650,20 @@ final class AgentSupervisor {
         if usagePauses.removeValue(forKey: id) != nil { usagePausesChanged(id) }
         recoverForcedMessagesAfterStop(id)
         withdrawQueuedHelperAlert(id)
-        killRunner(id)
+        // Quit and archive stop an agent without anyone to resume its queue;
+        // only a person's own Stop (the inbox action) holds it.
+        if byUser, runners[id] != nil { userStoppedAgents.insert(id) }
+        killRunner(id, pauseAfterStop: byUser)
     }
 
     /// T5 — the user's Stop is an INTERRUPT first: the turn ends, the process
     /// and its background work live on. A kill is the fallback, when the
     /// interrupt fails or never lands, and a second Stop while one is pending.
     private func stopFromComposer(_ id: AgentID) {
+        // The ONE thing that holds a queue: a person pressed Stop. A kill or
+        // interrupt from anything else (closing a helper, a restart, a retry)
+        // leaves the queue to run, or its messages strand with nobody to resume.
+        userStoppedAgents.insert(id)
         recoverForcedMessagesAfterStop(id)
         if !activeCompactionOperations.contains(id),
            !interruptingAgents.contains(id),
@@ -5666,11 +5673,14 @@ final class AgentSupervisor {
             interruptTurn(steering, for: id)
             return
         }
-        killRunner(id)
+        killRunner(id, pauseAfterStop: true)
     }
+    /// Agents whose running turn a person stopped, read once by
+    /// `handleQueueOnTurnCompleted` to decide whether the queue is held.
+    private var userStoppedAgents: Set<AgentID> = []
 
     /// Kills the bound runner's process group and closes the turn synchronously.
-    private func killRunner(_ id: AgentID, pauseAfterStop: Bool = true) {
+    private func killRunner(_ id: AgentID, pauseAfterStop: Bool = false) {
         let retrying = helperProviderRetryErrors.removeValue(forKey: id) != nil
         helperProviderRetryTasks.removeValue(forKey: id)?.cancel()
         let hadRunner = runners[id] != nil || retrying
@@ -14031,10 +14041,14 @@ final class AgentSupervisor {
     /// `.cancelled`) writes the next queued item as an ordinary send.
     private func handleQueueOnTurnCompleted(outcome: TurnOutcome, for id: AgentID) {
         guard submissionRecoveryStore != nil else { return }
-        if outcome == .interrupted {
+        let userStopped = userStoppedAgents.remove(id) != nil
+        if outcome == .interrupted, userStopped {
             pauseQueue(id, .afterStop)
             notifyTurnCapabilitiesChanged(id)
             return
+        }
+        if outcome == .interrupted {
+            appendAgentDiagnostics("turn interrupted without a user Stop; queue not paused depth=\(queuedWorkItemsCache[id]?.count ?? 0)", agentID: id)
         }
         guard !pausedQueues.contains(id) else { return }
         if !(deliveringSteers[id]?.isEmpty ?? true) { deferredQueueOutcomes[id] = outcome; return }
@@ -14581,7 +14595,7 @@ final class AgentSupervisor {
 
     private func escalateToKill(_ id: AgentID) {
         let forced = takePendingForceSend(for: id)
-        killRunner(id, pauseAfterStop: forced == nil)
+        killRunner(id, pauseAfterStop: forced == nil && userStoppedAgents.contains(id))
         if let forced { sendOrRecoverForcedPrompt(forced, to: id) }
     }
 
