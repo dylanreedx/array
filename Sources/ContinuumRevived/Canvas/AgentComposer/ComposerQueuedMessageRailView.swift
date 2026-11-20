@@ -38,7 +38,7 @@ struct ComposerQueueRailState: Equatable {
         var title: String {
             switch self {
             case .afterStop: return "Paused after Stop"
-            case .afterRelaunch: return "Paused after relaunch"
+            case .afterRelaunch: return "Held while you were away"
             case .afterCompaction: return "Paused, compaction did not finish"
             case .unconfirmed: return "Unconfirmed; retry may repeat"
             case .held: return "Paused"

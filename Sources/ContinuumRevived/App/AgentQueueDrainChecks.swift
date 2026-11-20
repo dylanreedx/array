@@ -107,13 +107,18 @@ func runAgentQueueDrainChecks() async throws {
     // the person typed something into it. Messages and results from other
     // agents were never typed by anyone: they run once the recipient is
     // hydrated, as they would have had the app stayed open.
-    func relaunch(_ name: String, seed: (AgentComposerDraftStore, AgentID) async throws -> Void) async throws
+    func relaunch(_ name: String, liveSenders: [AgentID] = [], seed: (AgentComposerDraftStore, AgentID) async throws -> Void) async throws
         -> (supervisor: AgentSupervisor, provider: Provider, id: AgentID) {
         let dir = root.appendingPathComponent(name, isDirectory: true)
         let store = AgentStore(applicationSupportDirectory: dir.appendingPathComponent("agents"))
         let id = AgentID(rawValue: UUID())
-        try store.upsert(.init(id: id, displayName: "Lead", harness: .pi, model: model, thinking: "medium",
-            cwd: root.path, createdAt: Date(), lastActivityAt: Date()))
+        // A recipient that was mid-turn when Array quit, and senders that still are.
+        for (agent, label) in [(id, "Lead")] + liveSenders.map({ ($0, "Sender") }) {
+            var record = AgentRecord(id: agent, displayName: label, harness: .pi, model: model, thinking: "medium",
+                cwd: root.path, createdAt: Date(), lastActivityAt: Date())
+            record.latestTurnAt = Date().addingTimeInterval(-60)
+            try store.upsert(record)
+        }
         let drafts = AgentComposerDraftStore(applicationSupportDirectory: dir.appendingPathComponent("drafts"), debounceInterval: 0)
         try await seed(drafts, id)
         let provider = Provider()
@@ -126,7 +131,7 @@ func runAgentQueueDrainChecks() async throws {
     }
     do {
         let sender = AgentID(rawValue: UUID())
-        let agentOnly = try await relaunch("s1-agent") { drafts, id in
+        let agentOnly = try await relaunch("s1-agent", liveSenders: [sender]) { drafts, id in
             let context = AgentMessageQueueContext(caller: sender, recipient: id, operationId: "op-1",
                 idempotencyKey: "key-1", payloadHash: "h")
             try await drafts.enqueueAgentMessage(.init(text: "<array-agent-message>do the thing</array-agent-message>",
@@ -321,6 +326,81 @@ func runAgentQueueDrainChecks() async throws {
         try require(!AgentSupervisor.sharesWritableCheckout(apart, supervisor.records[b]!)
             && AgentSupervisor.sharesWritableCheckout(supervisor.records[a]!, supervisor.records[b]!),
             "sharing a checkout handle is not writing the same directory")
+    }
+
+    // MARK: 7. A relaunch never starts a burst of agents (0.7.57 regression).
+    // 20 agents hold messages of mixed age and state. Only the entitled ones
+    // wake: recent, recipient mid-turn at the quit, sender live, usage free.
+    // They wake staggered, live leads first. The rest stay held, show the
+    // note, and start nothing.
+    do {
+        let dir = root.appendingPathComponent("s7", isDirectory: true)
+        let store = AgentStore(applicationSupportDirectory: dir.appendingPathComponent("agents"))
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: dir.appendingPathComponent("drafts"), debounceInterval: 0)
+        let live = AgentID(rawValue: UUID())
+        let dead = AgentID(rawValue: UUID())
+        func record(_ id: AgentID, _ name: String, working: Bool = true, settled: Bool = false) -> AgentRecord {
+            var r = AgentRecord(id: id, displayName: name, harness: .pi, model: model, thinking: "medium",
+                cwd: root.path, createdAt: Date(), lastActivityAt: Date())
+            r.latestTurnAt = Date().addingTimeInterval(-120)
+            if !working { r.runCompletedAt = Date().addingTimeInterval(-60) }
+            if settled { r.settledOverride = .settled }
+            return r
+        }
+        try store.upsert(record(live, "Live sender"))
+        var entitled: [AgentID] = [], leads: [AgentID] = [], withheld: [AgentID] = [], usageOut: [AgentID] = []
+        var providers: [AgentID: Provider] = [:]
+        func add(_ name: String, age: TimeInterval = 60, working: Bool = true, settled: Bool = false,
+                 sender: AgentID? = nil, typed: Bool = false, lead: Bool = false) async throws -> AgentID {
+            let id = AgentID(rawValue: UUID())
+            try store.upsert(record(id, name, working: working, settled: settled))
+            if lead {
+                var child = record(AgentID(rawValue: UUID()), "\(name) helper"); child.parentAgentID = id
+                try store.upsert(child)
+            }
+            if typed { _ = await drafts.enqueueMessage(text: "typed by a person", for: id) }
+            else {
+                let from = sender ?? live
+                let context = AgentMessageQueueContext(caller: from, recipient: id, operationId: "op-\(name)",
+                    idempotencyKey: "key-\(name)", payloadHash: "h")
+                try await drafts.enqueueAgentMessage(.init(text: "<array-agent-message>work</array-agent-message>",
+                    queuedAt: Date().addingTimeInterval(-age), agentMessageHops: 1, agentMessageContext: context), for: id)
+            }
+            let provider = Provider(); provider.blocks = false; provider.threadId = AgentSupervisor.threadId(for: id)
+            providers[id] = provider
+            return id
+        }
+        for n in 0..<4 { entitled.append(try await add("fresh\(n)")) }
+        for n in 0..<2 { let id = try await add("lead\(n)", lead: true); entitled.append(id); leads.append(id) }
+        for n in 0..<3 { withheld.append(try await add("old\(n)", age: 3 * 3600)) }
+        for n in 0..<3 { withheld.append(try await add("idle\(n)", working: false)) }
+        for n in 0..<2 { withheld.append(try await add("settled\(n)", settled: true)) }
+        for n in 0..<2 { withheld.append(try await add("deadsender\(n)", sender: dead)) }
+        withheld.append(try await add("typed", typed: true))
+        for n in 0..<3 { usageOut.append(try await add("usage\(n)")) }
+        try require(entitled.count + withheld.count + usageOut.count == 20, "the fixture holds 20 agents")
+
+        let supervisor = AgentSupervisor(store: store, makeRunner: { providers[$0.record.id] ?? Provider() }, warn: { _ in },
+            nameTitlerCommand: { _ in nil }, submissionRecoveryStore: drafts)
+        supervisor.relaunchWakeStagger = 1.0
+        _ = supervisor.restore()
+        let stop = try require2(AgentUsageLimitStop.classify(errorMessage: "You've hit your usage limit", now: Date()), "usage stop classifies")
+        for id in usageOut {
+            supervisor.qaSetUsagePause(AgentUsagePause(harness: .pi, accountId: nil, stop: stop, stoppedAt: Date(), resumesAutomatically: false), for: id)
+        }
+        func total(_ ids: [AgentID]) -> Int { ids.reduce(0) { $0 + (providers[$1]?.runs ?? 0) } }
+        try await waitFor("the first three entitled agents wake") { total(entitled) >= 3 }
+        try require(total(entitled) == 3, "no more than 3 wake in the first burst, got \(total(entitled))")
+        try require(Set(supervisor.relaunchWakeLogForQA.prefix(2)) == Set(leads), "live leads wake first: \(supervisor.relaunchWakeLogForQA)")
+        try await waitFor("the rest of the entitled agents wake, one per stagger", timeout: 12) { total(entitled) == entitled.count }
+        try await Task.sleep(for: .milliseconds(700))
+        try require(total(withheld) == 0, "a held, unentitled agent woke: \(total(withheld))")
+        try require(total(usageOut) == 0, "an agent whose account is out of usage woke")
+        for id in withheld + usageOut {
+            try require(supervisor.isQueuePaused(for: id), "an unentitled queue stays held")
+        }
+        let notes = withheld.filter { supervisor.awayMessageCount(for: $0) > 0 }
+        try require(notes.count >= withheld.count - 1, "held agent messages show as 'while you were away': \(notes.count)")
     }
     print("AgentQueueDrainChecks passed")
 }

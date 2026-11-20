@@ -2090,7 +2090,8 @@ final class AgentSupervisor {
                return false
            }),
            !(await queue.hasUncertainSteers(for: id)) {
-            pausedQueues.remove(id); queuePauseReasons[id] = nil
+            // Our own wakeups still obey the launch rules: usage first, then the stagger.
+            if recipientHasUsage(id) { relaunchScheduledWakes.insert(id); enqueueRelaunchWake(id) }
         }
         notifyTurnCapabilitiesChanged(id)
         if !pausedQueues.contains(id) {
@@ -3601,6 +3602,7 @@ final class AgentSupervisor {
     func restore(fileManager: FileManager = .default) -> RestoreReport {
         var report = RestoreReport()
         startQueueSweep()
+        namingQuietUntil = agentMessageNow().addingTimeInterval(launchNamingQuiet)
         defer { repairOrphanedQueues(fileManager: fileManager) }
         if !AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
             unarchiveAllBeforeRestore()
@@ -5906,6 +5908,7 @@ final class AgentSupervisor {
     /// snapshot because `stop` mutates `runners`.
     func stopAll() {
         queueSweepTask?.cancel(); queueSweepTask = nil
+        relaunchWakePump?.cancel(); relaunchWakePump = nil
         flushPendingTranscriptSaves()
         wakeupScheduler?.stop()
         for id in Array(helperProviderRetryErrors.keys) { stop(id) }
@@ -9440,6 +9443,9 @@ final class AgentSupervisor {
         guard Self.automaticGeneratedNamingEnabled else { return }
         guard record.acceptsAutomaticName(from: .generated),
               record.displayNameSource != .generated else { return }
+        // A relaunch is not the moment to spend a provider process renaming agents
+        // that already have a name (the launch burst of exit-code-1 titlers).
+        if record.displayNameSource != .sentinel, restoredIDs.contains(id), agentMessageNow() < namingQuietUntil { return }
         // A BOUNDED number of attempts, not one.
         //
         // `requestGeneratedName` refuses for two very different reasons and
@@ -14286,6 +14292,117 @@ final class AgentSupervisor {
         pausedQueues.contains(id)
     }
 
+    // MARK: Relaunch wakes
+    //
+    // A relaunch used to release every queue of agent messages, so 21 agents
+    // started turns at once, some on 48 h old messages and some into a usage
+    // limit. The rule now: only a queue that is entitled wakes, and the entitled
+    // ones wake through one staggered pump, live leads first.
+    static let relaunchWakeFreshness: TimeInterval = 2 * 3600
+    /// At most this many wakes in the first minute, then one per stagger.
+    var relaunchWakeBurst = 3
+    var relaunchWakeStagger: TimeInterval = 20
+    var relaunchWakeCoalesce: TimeInterval = 0.25
+    private var relaunchWakeQueue: [AgentID] = []
+    private var relaunchWakePump: Task<Void, Never>?
+    /// Queues of our own durable wakeups: entitled by usage alone, still staggered.
+    private var relaunchScheduledWakes: Set<AgentID> = []
+    /// Checks only: every agent the relaunch pump woke, in order.
+    private(set) var relaunchWakeLogForQA: [AgentID] = []
+    /// No automatic naming for an agent that already has a name until this passes.
+    private var namingQuietUntil: Date = .distantPast
+    var launchNamingQuiet: TimeInterval = 180
+
+    /// Held agent messages waiting for a person or a live lead ("N messages while
+    /// you were away"); zero when the queue is not held by a relaunch.
+    func awayMessageCount(for id: AgentID) -> Int {
+        guard pausedQueues.contains(id), queuePauseReasons[id] == .afterRelaunch else { return 0 }
+        return (queuedWorkItemsCache[id] ?? []).filter {
+            if case .prompt(let m) = $0 { return !m.helperNote && (m.agentMessageContext != nil || m.helperCompletion) }
+            return false
+        }.count
+    }
+
+    private func wasWorkingBeforeQuit(_ record: AgentRecord, now: Date) -> Bool {
+        guard record.archivedAt == nil, record.settledOverride != .settled,
+              let started = record.latestTurnAt,
+              now.timeIntervalSince(record.lastActivityAt) < Self.relaunchWakeFreshness else { return false }
+        let ended = [record.runCompletedAt, record.failedAt].compactMap { $0 }.max()
+        return ended.map { started > $0 } ?? true
+    }
+
+    private func recipientHasUsage(_ id: AgentID) -> Bool {
+        guard let record = records[id], let harness = record.harness else { return false }
+        if usagePauses[id] != nil { return false }
+        let now = usagePauseNow()
+        let account = effectiveAccount(for: id, harness: harness)
+        let open = accountQuotas[account.id]?.windows.filter { !$0.isExpired(at: now) } ?? []
+        return !open.contains { ($0.utilization ?? 0) >= AgentUsagePause.exhaustedFraction }
+    }
+
+    private func relaunchWakeEntitled(_ id: AgentID, items: [AgentComposerQueuedWorkItem]) -> Bool {
+        let now = agentMessageNow()
+        guard let record = records[id] else { return false }
+        let working = wasWorkingBeforeQuit(record, now: now)
+            || records.values.contains { $0.parentAgentID == id && wasWorkingBeforeQuit($0, now: now) }
+        guard working, record.archivedAt == nil, record.settledOverride != .settled else { return false }
+        var wakes = false
+        for item in items {
+            guard case .prompt(let m) = item, !m.steerUncertain else { return false }
+            if m.helperNote { continue }
+            guard now.timeIntervalSince(m.queuedAt) < Self.relaunchWakeFreshness else { return false }
+            if let context = m.agentMessageContext {
+                guard let sender = records[context.caller], sender.archivedAt == nil,
+                      sender.settledOverride != .settled,
+                      runners[context.caller] != nil || wasWorkingBeforeQuit(sender, now: now) else { return false }
+                wakes = true
+            } else if m.helperCompletion {
+                wakes = true
+            } else { return false }
+        }
+        return wakes && recipientHasUsage(id)
+    }
+
+    /// Live leads (agents with children) first, then the rest in arrival order.
+    private func enqueueRelaunchWake(_ id: AgentID) {
+        guard !relaunchWakeQueue.contains(id) else { return }
+        let isLead = records.values.contains { $0.parentAgentID == id }
+        if isLead {
+            let firstOther = relaunchWakeQueue.firstIndex { lead in !records.values.contains { $0.parentAgentID == lead } }
+            relaunchWakeQueue.insert(id, at: firstOther ?? relaunchWakeQueue.endIndex)
+        } else { relaunchWakeQueue.append(id) }
+        guard relaunchWakePump == nil else { return }
+        relaunchWakePump = Task { @MainActor [weak self] in
+            var started = 0
+            if let wait = self?.relaunchWakeCoalesce, wait > 0 { try? await Task.sleep(for: .seconds(wait)) }
+            while !Task.isCancelled, let self, !self.relaunchWakeQueue.isEmpty {
+                let next = self.relaunchWakeQueue.removeFirst()
+                if self.releaseRelaunchWake(next) {
+                    started += 1
+                    if started >= self.relaunchWakeBurst, !self.relaunchWakeQueue.isEmpty {
+                        try? await Task.sleep(for: .seconds(self.relaunchWakeStagger))
+                    }
+                }
+            }
+            self?.relaunchWakePump = nil
+        }
+    }
+
+    /// Re-checks entitlement at the moment of waking: the account may have run
+    /// out of usage during the stagger.
+    private func releaseRelaunchWake(_ id: AgentID) -> Bool {
+        guard pausedQueues.contains(id), queuePauseReasons[id] == .afterRelaunch,
+              let items = queuedWorkItemsCache[id],
+              relaunchScheduledWakes.contains(id) ? recipientHasUsage(id) : relaunchWakeEntitled(id, items: items) else { return false }
+        relaunchScheduledWakes.remove(id)
+        pausedQueues.remove(id)
+        queuePauseReasons[id] = nil
+        relaunchWakeLogForQA.append(id)
+        notifyTurnCapabilitiesChanged(id)
+        if runners[id] == nil { drainQueue(for: id) }
+        return true
+    }
+
     private func hydrateQueueCache(for id: AgentID, restoredOutbox: [AgentMessageOutbox.Entry]? = nil, restoreOutboxFailed: Bool = false) {
         guard let store = submissionRecoveryStore else { return }
         queuedWorkItemsCache[id] = []
@@ -14304,21 +14421,18 @@ final class AgentSupervisor {
             if messages.contains(where: { if case .prompt(let m) = $0 { return m.steerUncertain }; return false }) {
                 self.pauseQueue(id, .unconfirmed)
             }
-            // A relaunch holds a queue so a person's typed follow-up never runs
-            // into a turn nobody is watching. Nobody typed an agent's message or
-            // a helper's result: it runs once hydrated, as it would have had the
-            // app stayed open. One typed item keeps the whole queue held, so
-            // order is never rearranged around a person's input.
-            if self.pausedQueues.contains(id), self.queuePauseReasons[id] == .afterRelaunch,
-               !messages.isEmpty,
-               messages.allSatisfy({ item in
-                   guard case .prompt(let m) = item, !m.steerUncertain else { return false }
-                   return m.agentMessageContext != nil || m.helperCompletion || m.helperNote
-               }) {
-                self.pausedQueues.remove(id)
-                self.queuePauseReasons[id] = nil
-                self.notifyTurnCapabilitiesChanged(id)
-                if self.runners[id] == nil { self.drainQueue(for: id) }
+            // A relaunch never starts a burst of agents. A queue holding only agent
+            // messages and helper results is released only if its recipient was
+            // working when Array quit, the messages are fresh, the sender is live
+            // and the recipient's account has usage. Even then it wakes through the
+            // staggered launch pump. Everything else stays held, quietly, and is
+            // delivered with the next turn a person or a live lead starts.
+            if self.pausedQueues.contains(id), self.queuePauseReasons[id] == .afterRelaunch, !messages.isEmpty {
+                if self.relaunchWakeEntitled(id, items: messages) {
+                    self.enqueueRelaunchWake(id)
+                } else {
+                    self.appendAgentDiagnostics("relaunch wake withheld: \(messages.count) held, not entitled to start a turn", agentID: id)
+                }
             }
             self.companionQueueHydrationPending.remove(id)
             if !messages.isEmpty { self.notifyTurnCapabilitiesChanged(id) }
