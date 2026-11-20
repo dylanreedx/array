@@ -70,6 +70,7 @@ public enum WorkspaceAPIExposure {
         "agent.automaticCharacterIndex": .internal,
         "agent.characterName": .exposed(.agentUpdate),
         "agent.parentRelativeOrdinal": .internal,
+        "agent.supersededBy": .internal,
         "agent.nextChildOrdinal": .internal,
         "agent.createdAtReferenceInterval": .internal,
         "agent.lastActivityAtReferenceInterval": .internal,

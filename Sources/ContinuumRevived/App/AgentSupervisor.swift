@@ -2930,6 +2930,22 @@ final class AgentSupervisor {
     private var accountIdentities: [String: AgentAccountIdentity] = [:]
     /// Accounts whose CLI answered "not signed in" on the last read.
     private var signedOutAccounts: Set<String> = []
+    /// Agents automatic fallback moved off a spent account: id -> account id.
+    /// In memory; cleared per CLI by a person's switch.
+    private(set) var accountOverrides: [AgentID: String] = [:]
+    /// Settings > Agents > Accounts "Move to another account when one runs
+    /// out". nil = the default, on; it only ever acts with 2+ accounts.
+    var accountFallbackPreference: Bool?
+    /// Where the app keeps that choice (`agents.accountFallback`); checks leave it nil.
+    var accountFallbackDefaults: UserDefaults?
+    static let accountFallbackKey = "agents.accountFallback"
+    var accountFallbackOn: Bool {
+        accountFallbackPreference ?? (accountFallbackDefaults?.object(forKey: Self.accountFallbackKey) as? Bool) ?? true
+    }
+    func setAccountFallback(_ on: Bool) {
+        accountFallbackPreference = on
+        accountFallbackDefaults?.set(on, forKey: Self.accountFallbackKey)
+    }
     private var accountUsageInFlight: Set<String> = []
     private var accountUsageLastStarted: [String: Date] = [:]
     private var accountUsagePollTimer: Timer?
@@ -3030,6 +3046,16 @@ final class AgentSupervisor {
     func account(forAgent id: AgentID) -> AgentAccount? {
         guard let harness = records[id]?.harness, harness != .pi else { return nil }
         if hasLiveRunner(id), let live = runnerAccounts[id] { return live }
+        return effectiveAccount(for: id, harness: harness)
+    }
+
+    /// The account an agent's NEXT launch signs in as: where automatic
+    /// fallback moved it, else the CLI's account in use. A person's switch
+    /// (`switchAccount`) clears every move for that CLI.
+    func effectiveAccount(for id: AgentID, harness: AgentHarness) -> AgentAccount {
+        if let moved = accountOverrides[id], let account = accounts.first(where: { $0.id == moved && $0.harness == harness }) {
+            return account
+        }
         return activeAccount(for: harness)
     }
 
@@ -3084,6 +3110,8 @@ final class AgentSupervisor {
         state.active[harness.rawValue] = account.isDefault ? nil : account.id
         do { try accountStore.save(state) } catch { return .refused("Couldn't save the account choice.") }
         accountState = state
+        // A person's choice outranks every automatic move for this CLI.
+        accountOverrides = accountOverrides.filter { records[$0.key]?.harness != harness }
         var finishing = 0
         for (id, record) in records where record.harness == harness {
             if runners[id] != nil {
@@ -3096,6 +3124,8 @@ final class AgentSupervisor {
         }
         NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
         refreshAccountUsage(account: account, minimumInterval: 30)
+        // Pauses held on the account just left are due on this one.
+        if !usagePauses.isEmpty { DispatchQueue.main.async { [weak self] in self?.runUsageResumeTick() } }
         return .switched(finishingTurns: finishing)
     }
 
@@ -3105,7 +3135,7 @@ final class AgentSupervisor {
     private func accountLaunch(_ launch: AgentRunnerLaunch) -> AgentRunnerLaunch {
         let id = launch.record.id
         guard let harness = launch.record.harness, harness != .pi else { return launch }
-        let active = activeAccount(for: harness)
+        let active = effectiveAccount(for: id, harness: harness)
         if harness == .claudeCode, let previous = runnerAccounts[id], previous.id != active.id {
             let location = Self.claudeSessionLocation(for: launch.record)
             _ = try? AgentAccountSetup.ensureSessionVisible(
@@ -7429,6 +7459,7 @@ final class AgentSupervisor {
                 contextDietRequested: spawned.delegationContext?.contextDietRequested)
             setRecord(spawned, for: childID)
             persist(spawned)
+            if let retryOf { supersede(retryOf, by: childID) }
             // The child record remembers the tool call that asked for it, so its
             // terminal `.turnCompleted` in `deliver` can rewrite the result file
             // even across a relaunch. Distinct from `sourceItemId` (fan-out and
@@ -9682,12 +9713,13 @@ final class AgentSupervisor {
         usagePauses[id] = AgentUsagePause(harness: harness, accountId: accountId, stop: stop, stoppedAt: now,
                                           resumesAutomatically: previous?.resumesAutomatically ?? usageAutoResumeDefault)
         usageFreed.remove(id)
+        if let accountId { applyAccountFallback(harness: harness, held: accountId, now: now) }
         appendAgentDiagnostics("harness=\(harness.rawValue) usage-paused account=\(accountId ?? "none") resets=\(stop.resetsAt.map { "\($0.timeIntervalSince1970)" } ?? "unknown")", agentID: id)
         // After this delivery, never inside it.
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.usagePauses[id] != nil else { return }
+            guard let self, let pause = self.usagePauses[id] else { return }
             self.usagePausesChanged(id)
-            self.scheduleUsageResume()
+            if self.usagePauseLeftBehind(id, pause, now: self.usagePauseNow()) { self.runUsageResumeTick() } else { self.scheduleUsageResume() }
         }
         return true
     }
@@ -9715,8 +9747,91 @@ final class AgentSupervisor {
 
     private func usagePauseDue(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> Bool {
         guard pause.resumesAutomatically else { return false }
-        if usageFreed.contains(id) { return true }
+        if usagePauseFreedNow(id, pause) { return true }
         return pause.resetsAt.map { $0 <= now } ?? false
+    }
+
+    /// A pause belongs to the account that ran out. Once the CLI's account in
+    /// use is another one with room, the pause no longer describes where the
+    /// agent's next turn runs: its launch signs in as the active account and
+    /// makes the same session visible there (`accountLaunch`). The 2026-11-20
+    /// incident: three helpers held Work at 100% while Array had already moved
+    /// to Personal at 21%, and nothing noticed for 3 hours.
+    private func usagePauseLeftBehind(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> Bool {
+        guard pause.harness != .pi, let held = pause.accountId else { return false }
+        let active = effectiveAccount(for: id, harness: pause.harness)
+        guard active.id != held else { return false }
+        let open = accountQuotas[active.id]?.windows.filter { !$0.isExpired(at: now) } ?? []
+        return !open.contains { ($0.utilization ?? 0) >= Self.accountFallbackCeiling }
+    }
+
+    private func usagePauseFreedNow(_ id: AgentID, _ pause: AgentUsagePause) -> Bool {
+        usageFreed.contains(id) || usagePauseLeftBehind(id, pause, now: usagePauseNow())
+    }
+
+    /// Automatic fallback never picks an account this full.
+    static let accountFallbackCeiling = 0.95
+
+    /// Another signed-in account of the CLI with room, most headroom first: by
+    /// its live reading, skipping any window at the ceiling. An account never
+    /// read counts as half free, behind every account that was read lower.
+    private func fallbackAccount(for harness: AgentHarness, excluding held: String, now: Date) -> AgentAccount? {
+        func headroom(_ account: AgentAccount) -> Double? {
+            let used = (accountQuotas[account.id]?.windows ?? []).filter { !$0.isExpired(at: now) }.compactMap(\.utilization)
+            guard let top = used.max() else { return 0.5 }
+            return top >= Self.accountFallbackCeiling ? nil : 1 - top
+        }
+        return accounts
+            .filter { $0.harness == harness && $0.id != held && !signedOutAccounts.contains($0.id) }
+            .compactMap { account in headroom(account).map { (account, $0) } }
+            .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0.id < $1.0.id }
+            .first?.0
+    }
+
+    /// A stop on `held`: every agent paused on it moves to the account with
+    /// the most room and resumes there on the same session. Quiet: one line in
+    /// each tile. All accounts spent: nothing moves, the pause waits for the
+    /// earliest reset as before.
+    private func applyAccountFallback(harness: AgentHarness, held: String, now: Date) {
+        guard accountFallbackOn, harness != .pi,
+              let target = fallbackAccount(for: harness, excluding: held, now: now) else { return }
+        let from = accounts.first { $0.id == held }?.label ?? "That account"
+        for (id, pause) in usagePauses where pause.harness == harness && pause.accountId == held
+            && pause.resumesAutomatically && accountOverrides[id] == nil {
+            accountOverrides[id] = target.id
+            // A pooled session keeps the login it started with: retire it, as a
+            // person's switch does, so the resume launches on the new account.
+            if runners[id] != nil {
+                retireSessionAfterTurn.insert(id)
+            } else if let idle = idleSessionRunners.removeValue(forKey: id) {
+                idleReapTokens[id] = nil
+                idle.stop()
+            }
+            let until = pause.resetsAt.map { " until \(AgentUsagePause.clock($0, now: now))" } ?? ""
+            appendLocalNotice(id: id, key: "account-moved", title: "Moved to \(target.label)",
+                              body: "\(from) is at its limit\(until).")
+            appendAgentDiagnostics("usage fallback: account \(held) -> \(target.id)", agentID: id)
+        }
+    }
+
+    /// What a lead is told about a helper's usage stop: whose limit it is, and
+    /// whether Array already moved the helper, so one account's limit is never
+    /// read as the CLI's.
+    func usageLeadStatus(for id: AgentID, _ pause: AgentUsagePause) -> String {
+        let now = usagePauseNow()
+        let held = accounts.first { $0.id == pause.accountId }
+        let name = held?.label ?? "its account"
+        if let moved = accountOverrides[id], moved != pause.accountId, let target = accounts.first(where: { $0.id == moved }) {
+            let until = pause.resetsAt.map { " (limit until \(AgentUsagePause.clock($0, now: now)))" } ?? ""
+            return "paused for \(pause.providerName) usage on account \(name)\(until), then Array moved it to \(target.label) and is resuming it there on the same session. That is one account's limit, not all of \(pause.providerName): do not restart or re-brief it."
+        }
+        let base = pause.leadStatus(now: now)
+        guard pause.harness != .pi, held != nil else { return base }
+        if let room = fallbackAccount(for: pause.harness, excluding: pause.accountId ?? "", now: now) {
+            return base + ". That is account \(name)'s limit only: \(room.label) has room (Settings > Agents > Accounts, or leave it to resume). It resumes on the same session; do not restart it."
+        }
+        let others = accounts.filter { $0.harness == pause.harness && $0.id != pause.accountId }
+        return base + (others.isEmpty ? ". That is account \(name)'s limit." : ". That is account \(name)'s limit, and no other \(pause.providerName) account has room.")
     }
 
     /// One pass: drops pauses of agents that are gone, resumes at most ONE due
@@ -9780,10 +9895,60 @@ final class AgentSupervisor {
         appendAgentDiagnostics("usage resumed on the same session", agentID: id)
         for lead in helperParents(id) where records[lead] != nil {
             upsertHelperNote(.progress, helper: id, lead: lead,
-                text: "resumed after the \(pause.providerName) usage reset, on the same session")
+                text: accountOverrides[id].flatMap { moved in accounts.first { $0.id == moved }?.label }.map { "resumed on account \($0) after the \(pause.providerName) usage stop, on the same session" } ?? "resumed after the \(pause.providerName) usage reset, on the same session")
         }
         usagePausesChanged(id)
         return true
+    }
+
+    // MARK: - Retrying a helper on its own session
+
+    /// A lead's `retryOf` can continue `id` itself when its Claude session
+    /// exists and nothing asked for a different model, effort or CLI: the same
+    /// agent, session and checkout, signed in as the account in use. Anything
+    /// else spawns a fresh helper, which supersedes this one.
+    func canContinueSessionForRetry(_ id: AgentID, harness: AgentHarness, model: String?, effort: String?) -> Bool {
+        guard let record = records[id], record.harness == .claudeCode, harness == .claudeCode,
+              record.capabilities.locallyManaged, !isSharedAgent(id), !isRunning(id), runners[id] == nil,
+              record.latestTurnAt != nil || record.providerSessionId != nil,
+              model == nil || model == record.model,
+              effort == nil || effort == record.thinking,
+              FileManager.default.fileExists(atPath: record.cwd) else { return false }
+        return true
+    }
+
+    /// Continues `id` on its own session with `prompt`, then its held queue.
+    /// False leaves it exactly as it was (the caller spawns instead).
+    func continueSessionForRetry(_ id: AgentID, prompt: String) -> Bool {
+        let pause = usagePauses[id]
+        usagePauses[id] = nil
+        usageFreed.remove(id)
+        guard send(prompt, to: id) else {
+            if let pause { usagePauses[id] = pause }
+            return false
+        }
+        resumeQueue(for: id)
+        appendAgentDiagnostics("retry continued the same session", agentID: id)
+        usagePausesChanged(id)
+        return true
+    }
+
+    /// `old` was replaced by `new`: it will not run again. Its usage pause is
+    /// dropped, every queued message is cancelled with a note to its sender,
+    /// and the record names its replacement so surfaces can fold it.
+    func supersede(_ old: AgentID, by new: AgentID) {
+        guard old != new, var record = records[old], record.supersededBy == nil else { return }
+        record.supersededBy = new
+        setRecord(record, for: old)
+        persist(record)
+        if usagePauses.removeValue(forKey: old) != nil { usagePausesChanged(old) }
+        usageFreed.remove(old)
+        let name = records[new]?.humanDisplayName ?? "its replacement"
+        let note = "Superseded: this helper was replaced by \(name) (\(new.rawValue.uuidString)), so the message was cancelled instead of running. Message the replacement."
+        for item in queuedWorkItemsCache[old] ?? [] {
+            if case .prompt(let message) = item { cancelQueuedMessage(message.id, for: old, reason: note) }
+        }
+        appendAgentDiagnostics("superseded by \(new.rawValue.uuidString); queue cancelled", agentID: old)
     }
 
     /// Sleeps until the earliest of: a due pause (respecting the stagger), a
@@ -9794,7 +9959,7 @@ final class AgentSupervisor {
         let now = usagePauseNow()
         let live = usagePauses.filter { records[$0.key] != nil && $0.value.resumesAutomatically }
         guard !live.isEmpty else { return }
-        var wake = live.compactMap { usageFreed.contains($0.key) ? now : $0.value.resetsAt }.min()
+        var wake = live.compactMap { usagePauseFreedNow($0.key, $0.value) ? now : $0.value.resetsAt }.min()
         if live.values.contains(where: { $0.resetsAt == nil }) {
             wake = min(wake ?? .distantFuture, now.addingTimeInterval(usageProbeInterval))
         }
@@ -10048,7 +10213,7 @@ final class AgentSupervisor {
         noteHelperCompletion(id, turn: turn, outcome: outcome, error: error, statusOverride: statusOverride)
         settleHelperMessages(id, outcome: outcome, error: error)
         writeTerminalSpawnResult(for: id, outcome: outcome,
-                                 errorMessage: usagePauses[id].map { $0.leadStatus(now: usagePauseNow()) } ?? error)
+                                 errorMessage: usagePauses[id].map { usageLeadStatus(for: id, $0) } ?? error)
     }
 
     private func helperTurnCompleted(_ completion: HelperTurnCompletion) {
@@ -10354,7 +10519,7 @@ final class AgentSupervisor {
         // waits and when Array resumes it, so it does not redo the work.
         if let pause = usagePauses[id] {
             let reply = String((finalAssistantText(for: id) ?? Self.helperNoReplyText).prefix(2400))
-            return ("\(String(child.humanDisplayName.prefix(80))) finished: \(pause.leadStatus(now: usagePauseNow()))\n\(reply)", filedThisTurn)
+            return ("\(String(child.humanDisplayName.prefix(80))) finished: \(usageLeadStatus(for: id, pause))\n\(reply)", filedThisTurn)
         }
         let report: String
         if let filed = settlementReport(id), filed.filedAt > baseline {

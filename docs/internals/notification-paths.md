@@ -311,6 +311,22 @@ The resume leaves the lead a progress NOTE (`resumed after the Claude usage
 reset, on the same session`), which never starts a lead turn. Witness:
 `--agent-usage-resume-check`.
 
+The notice names WHOSE limit it was, so a lead never reads one account's limit
+as global: it appends `That is account Work's limit only: <other> has room …`,
+or `…and no other Claude account has room`, and when Array already moved the
+helper (automatic account fallback: every agent paused on the spent account
+moves to the other account of the same CLI with the most headroom under 95%,
+resumes its SAME session there, and shows one quiet line in its tile;
+Settings > Agents > Accounts toggle, on by default with 2+ accounts) it reads
+`paused for Claude usage on account Work (limit until 1:40 AM), then Array
+moved it to Default and is resuming it there on the same session … do not
+restart or re-brief it`. An account switch in Settings, or a stop whose account
+is no longer the one in use, ends the pause the same way. A lead's `retryOf` on a
+helper with a Claude session continues THAT agent; a spawned replacement marks
+the old one `supersededBy`, cancelling its queue with a note to each sender.
+Witnesses: `--usage-pause-account-switch-check`,
+`--usage-account-fallback-check`, `--helper-retry-session-check`.
+
 Progress text and output emitted after a result was delivered (the +16 s case,
 or a report filed after the turn) become durable queue NOTES (`helperNote`), one
 per helper, lead and kind, replaced while they wait. A note never starts a turn:

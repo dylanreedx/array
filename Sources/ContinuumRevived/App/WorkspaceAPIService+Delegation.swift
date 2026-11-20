@@ -247,7 +247,7 @@ extension WorkspaceAPIService {
         let spawnRequest = SpawnRequest(
             role: nil, prompt: prompt, isolated: false, sourceItemID: requestId,
             displayLabel: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty)
-        func created(_ childId: AgentID) -> Reply {
+        func created(_ childId: AgentID, continued: Bool = false) -> Reply {
             let chooserAdvice = supervisor.chooserDelegated(agentId, source: requestId, pending: chooserPending, child: childId)
             if supervisor.qaRunLedgerRecording, let child = supervisor.records[childId] {
                 // `.plans/116` part 8: shadow evidence of the child's own tool calls,
@@ -297,6 +297,7 @@ extension WorkspaceAPIService {
             // where comparing could cost the main actor about a millisecond, the
             // result says so instead of comparing.
             var notes = prepared?.notes ?? []
+            if continued { notes.append("retryOf continued the same agent and session on the account in use; no new helper or checkout was created") }
             if let chooserAdvice { notes.append(chooserAdvice) }
             if let contract, !(contract.owns.isEmpty && contract.shared.isEmpty) {
                 let siblings = supervisor.children(of: agentId).compactMap { sibling -> (AgentID, AgentRecord, AgentDelegationContract)? in
@@ -320,7 +321,13 @@ extension WorkspaceAPIService {
 
             // 7. Attachment: a tile in the PARENT's zone, framed against that zone
             //    (hazard 9), through the existing managed-agent tile route.
-            if record.mode == .managed {
+            if continued {
+                // The tile already exists: nothing to attach or present.
+                result.tileId = child?.tileId
+                result.steps.attachment = .skipped
+                result.steps.durability = .succeeded
+                result.steps.presentation = .skipped
+            } else if record.mode == .managed {
                 // A full Array runner and courier, with presentation deliberately absent.
                 result.steps.attachment = .skipped
                 result.steps.durability = .succeeded
@@ -411,6 +418,16 @@ extension WorkspaceAPIService {
             if self.supervisor.chooserRequiresPlan(for: agentId) { return "planRequired" }
             if let retryOf = request.retryOf, !self.supervisor.mayRetry(retryOf, from: agentId) { return "retryIneligible" }
             return nil
+        }
+        // A retry of a helper whose session still exists continues THAT agent:
+        // same session, same checkout, the account in use. Only when it cannot
+        // (no session, another CLI, model or effort asked) does it spawn.
+        if let retryOf = request.retryOf, request.contract == nil,
+           supervisor.canContinueSessionForRetry(retryOf, harness: childHarness, model: request.model, effort: request.effort) {
+            var resumePrompt = request.task
+            if supervisor.continueSessionForRetry(retryOf, prompt: resumePrompt) {
+                return completion(created(retryOf, continued: true))
+            }
         }
         supervisor.handleSpawnRequestAsync(spawnRequest, from: agentId, childSelection: AgentLaunchSelection(harness: childHarness, model: childModel, thinking: request.effort ?? retryEffort ?? (childHarness == parentHarness ? record.thinking : AgentModelConfig.defaultThinking)), mode: .free, retryOf: request.retryOf, originalBrief: request.task, contract: contract, checkoutOffMain: checkoutOffMain, gate: gate) { [weak self] outcome in
             guard let self else { return }

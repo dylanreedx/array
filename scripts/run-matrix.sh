@@ -1939,6 +1939,11 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-usage-limit-check
 run_app_check .build/debug/Array --agent-usage-resume-check
 # A paused queue logs why, and agent messages cannot be stranded in one.
 run_app_check .build/debug/Array --agent-queue-drain-check
+# A usage pause ends when the account in use becomes one with room; retryOf
+# continues the same session and a spawned replacement supersedes its helper.
+run_app_check .build/debug/Array --usage-pause-account-switch-check
+run_app_check .build/debug/Array --usage-account-fallback-check
+run_app_check .build/debug/Array --helper-retry-session-check
 run_app_check .build/debug/Array --agent-account-manage-check
 # Real installed-provider warning/compaction/task-retention acceptance spends
 # subscription usage. Opt in explicitly; ordinary matrix runs stay offline.

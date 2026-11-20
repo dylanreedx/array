@@ -4181,6 +4181,51 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // retryOf continues the SAME session; a spawned replacement supersedes.
+        if CommandLine.arguments.contains("--helper-retry-session-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runHelperRetrySessionChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // Automatic account fallback and the lead's truthful usage notice.
+        if CommandLine.arguments.contains("--usage-account-fallback-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runUsageAccountFallbackChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
+        // A usage pause ends when the account in use changes to one with room.
+        if CommandLine.arguments.contains("--usage-pause-account-switch-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runUsagePauseAccountSwitchChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--helper-retry-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -16317,6 +16362,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             guard let self, case let .refused(reason) = self.agentSupervisor.switchAccount(to: accountId) else { return }
             self.setWorkspaceManagementMessage(reason, kind: .error)
         }
+        model.accountFallbackEnabled = { [weak self] in self?.agentSupervisor.accountFallbackOn ?? true }
+        model.onSetAccountFallback = { [weak self] on in self?.agentSupervisor.setAccountFallback(on) }
         model.onAddAccount = { [weak self] harness in self?.addAccountAndSignIn(harness) }
         model.onSignInAccount = { [weak self] accountId in self?.signInToAccount(accountId) }
         model.onRenameAccount = { [weak self] accountId, label in
@@ -25801,6 +25848,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.workspaceToolsPermission = { [weak self] in
             WorkspaceToolsConfig.permission(defaults: self?.settingsDefaults ?? .standard)
         }
+        agentSupervisor.accountFallbackDefaults = settingsDefaults
         agentSupervisor.configureManagedMode(defaults: settingsDefaults)
         // Performance at scale, item 4: on unless `agents.recordArchive.enabled` is false.
         agentSupervisor.recordArchiveDefaults = settingsDefaults

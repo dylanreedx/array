@@ -31,6 +31,14 @@ final class SettingsModel {
     /// do: switch the whole CLI to one, and add one through the CLI's own login.
     @ObservationIgnored var accountRows: (() -> [SettingsAccountRow])?
     @ObservationIgnored var onSwitchAccount: ((String) -> Void)?
+    /// "Move to another account when one runs out": read, and set.
+    @ObservationIgnored var accountFallbackEnabled: (() -> Bool)?
+    @ObservationIgnored private var onSetAccountFallbackRaw: ((Bool) -> Void)?
+    /// Sets the choice, then redraws the rows that show it.
+    var onSetAccountFallback: ((Bool) -> Void)? {
+        get { onSetAccountFallbackRaw.map { raw in { [weak self] on in raw(on); self?.revision += 1 } } }
+        set { onSetAccountFallbackRaw = newValue }
+    }
     @ObservationIgnored var onAddAccount: ((AgentHarness) -> Void)?
     @ObservationIgnored var onSignInAccount: ((String) -> Void)?
     /// Relabels a saved login (account id, new name). The folder and the login
