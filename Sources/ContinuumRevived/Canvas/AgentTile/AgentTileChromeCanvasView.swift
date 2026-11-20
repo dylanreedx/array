@@ -420,14 +420,20 @@ final class AgentTileChromeCanvasView: NSView {
         isResting = true
         qaRestCount += 1
         // The host window's appearance is the app's; the body takes the tile's.
+        let t0 = ProcessInfo.processInfo.systemUptime
         body.appearance = effectiveAppearance
         body.removeFromSuperview()
         restingHost.view(matching: window).addSubview(body)
         body.frame = bounds
+        let t1 = ProcessInfo.processInfo.systemUptime
         layOutRestingBody()
+        qaLastRestPartsMs = (reparent: (t1 - t0) * 1_000, layout: (ProcessInfo.processInfo.systemUptime - t1) * 1_000)
         drawnFingerprint = nil
         needsDisplay = true
     }
+
+    /// Checks only: where the last `rest()` spent its time.
+    private(set) var qaLastRestPartsMs = (reparent: 0.0, layout: 0.0)
 
     func wake() {
         guard isResting else { return }

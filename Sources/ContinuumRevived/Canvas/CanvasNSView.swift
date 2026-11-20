@@ -7548,14 +7548,32 @@ final class CanvasNSView: NSView, TokenThemed {
     /// ContinuumApp routes here so pinches over a tile body still zoom the
     /// canvas (the tile content has no zoom of its own to compete with).
     func handlePinch(_ event: NSEvent) {
+        handlePinch(magnification: Double(event.magnification), phase: event.phase,
+                    location: convert(event.locationInWindow, from: nil), timestamp: event.timestamp)
+    }
+
+    func handlePinch(magnification: Double, phase: NSEvent.Phase, location: CGPoint, timestamp: TimeInterval) {
         guard !isZoneScopePickerActive else { return }
-        let cursor = convert(event.locationInWindow, from: nil)
-        cameraDriver.notePinch(
-            magnification: Double(event.magnification),
-            phase: event.phase,
-            location: cursor,
-            timestamp: event.timestamp
-        )
+        // The pinch's own `.began` carries no camera step: the one moment before a
+        // zoom's first frame where the hovered live tile can rest without that
+        // frame paying for it.
+        if phase == .began, Self.preRestsChromeAtPinchBegan { restAgentChromeBeforeCameraStep() }
+        cameraDriver.notePinch(magnification: magnification, phase: phase, location: location, timestamp: timestamp)
+    }
+
+    /// QA legacy arm: leave the rest to the zoom's first camera step, as 0.7.56 did.
+    nonisolated(unsafe) static var preRestsChromeAtPinchBegan = true
+
+    /// The rest `setViewport` does at a gesture's first step, done ahead of it. The
+    /// settle wakes the tile under the pointer exactly as it does after an in-step rest.
+    private func restAgentChromeBeforeCameraStep() {
+        guard !agentChromeRestedForMotion else { return }
+        agentChromeRestedForMotion = true
+        restAgentChromeForCameraMotion()
+        // Draw the resting picture now, in this turn, not in the first frame's display.
+        for case let agent as ManagedAgentTileNSView in Array(tileViews.values) + tileLayers.flatMap({ Array($0.tileViews.values) }) {
+            agent.qaChromeCanvas?.displayIfNeeded()
+        }
     }
 
     /// Whether this press should enter the shared camera-pan lifecycle. Tile
