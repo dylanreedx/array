@@ -8,12 +8,8 @@ public enum BrowserSiteScope {
     /// `AgentContextWindowResolver.bundledWindows`: Contents/Resources in the
     /// app, beside a bare binary.
     private static let rules: Set<String> = {
-        let name = "continuum-revived_ContinuumRevivedCore.bundle"
-        let roots = [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()].compactMap { $0 }
-        guard let text = roots.lazy.compactMap({ root in
-            try? String(contentsOf: root.appendingPathComponent(name).appendingPathComponent("PublicSuffixList.dat"),
-                        encoding: .utf8)
-        }).first else { return [] }
+        guard let url = ResourceBundleLocator.coreURL("PublicSuffixList.dat"),
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
         return Set(text.split(separator: "\n").compactMap { line in
             let rule = line.trimmingCharacters(in: .whitespaces)
             guard !rule.isEmpty, !rule.hasPrefix("//") else { return nil }

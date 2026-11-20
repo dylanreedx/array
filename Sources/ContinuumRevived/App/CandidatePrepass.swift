@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import ContinuumRevivedCore
 
 /// Minted only at the host's explicit candidate-ready seam. No HEAD inference.
 struct PrepassCandidate: Codable, Equatable, Sendable {
@@ -53,11 +54,8 @@ final class CandidatePrepass: @unchecked Sendable {
     }
 
     static func bundledResource(_ name: String) -> URL? {
-        for root in [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()].compactMap({ $0 }) {
-            let path = root.appendingPathComponent("continuum-revived_ContinuumRevived.bundle/GatePrepass/" + name)
-            if FileManager.default.fileExists(atPath: path.path) { return path }
-        }
-        return nil
+        ResourceBundleLocator.url(bundleName: "continuum-revived_ContinuumRevived.bundle",
+                                  relativePath: "GatePrepass/" + name)
     }
     static func bundledEvaluator() -> URL? { bundledResource("evaluator.py") }
 

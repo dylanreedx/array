@@ -227,6 +227,10 @@ if CommandLine.arguments.contains("--workspace-api-board-contract-check") {
     runWorkspaceAPIBoardContractChecks()
     Foundation.exit(0)
 }
+if CommandLine.arguments.contains("--resource-bundle-layout-check") {
+    runResourceBundleLayoutChecks()
+    Foundation.exit(0)
+}
 if CommandLine.arguments.contains("--pi-host-tool-bridge-check") {
     runPiHostToolBridgeChecks()
     Foundation.exit(0)

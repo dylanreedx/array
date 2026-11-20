@@ -94,15 +94,8 @@ public enum AgentCLITestedVersions {
     /// Same lookup as `AgentContextWindowResolver.bundledWindows`: the app copies
     /// the Core bundle into Contents/Resources, a bare binary has it alongside.
     public static func bundled() -> [AgentHarness: String] {
-        let name = "continuum-revived_ContinuumRevivedCore.bundle"
-        let roots = [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()].compactMap { $0 }
-        for root in roots {
-            let url = root.appendingPathComponent(name).appendingPathComponent(resourceName)
-            if let data = try? Data(contentsOf: url) {
-                let values = decode(data)
-                if !values.isEmpty { return values }
-            }
-        }
-        return [:]
+        guard let url = ResourceBundleLocator.coreURL(resourceName),
+              let data = try? Data(contentsOf: url) else { return [:] }
+        return decode(data)
     }
 }

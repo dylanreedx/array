@@ -15,12 +15,8 @@ public enum AgentCharacterBundled {
     /// The built-in set's folder: inside the app at Contents/Resources, or beside
     /// a bare binary (checks), as `make-app-bundle.sh` lays Core's resources out.
     public static func folderURL() -> URL? {
-        let roots = [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()].compactMap { $0 }
-        for root in roots {
-            let url = root.appendingPathComponent(resourceBundleName).appendingPathComponent(folder)
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent(themeFileName).path) { return url }
-        }
-        return nil
+        ResourceBundleLocator.url(bundleName: resourceBundleName, relativePath: "\(folder)/\(themeFileName)")?
+            .deletingLastPathComponent()
     }
 
     public static var themeURL: URL? { folderURL()?.appendingPathComponent(themeFileName) }
@@ -52,12 +48,8 @@ public enum AgentCharacterBundled {
 
     /// The packs' folder, found the way `folderURL()` finds Core's.
     public static func packsFolderURL() -> URL? {
-        let roots = [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()].compactMap { $0 }
-        for root in roots {
-            let url = root.appendingPathComponent(packsBundleName).appendingPathComponent(packsFolder, isDirectory: true)
-            if FileManager.default.fileExists(atPath: url.appendingPathComponent(manifestFileName).path) { return url }
-        }
-        return nil
+        ResourceBundleLocator.url(bundleName: packsBundleName, relativePath: "\(packsFolder)/\(manifestFileName)")?
+            .deletingLastPathComponent()
     }
 
     /// A built-in pack's folder (holding its `theme.json` and sounds); nil for the

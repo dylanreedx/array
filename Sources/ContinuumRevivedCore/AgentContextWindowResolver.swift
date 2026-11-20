@@ -123,13 +123,6 @@ public final class AgentContextWindowResolver: @unchecked Sendable {
     }
 
     public static func bundledWindows() -> [String: Int] {
-        let name = "continuum-revived_ContinuumRevivedCore.bundle"
-        let roots = [Bundle.main.resourceURL,
-                     Bundle.main.executableURL?.deletingLastPathComponent()].compactMap { $0 }
-        for root in roots {
-            let values = load(root.appendingPathComponent(name).appendingPathComponent("ContextWindows.json"))
-            if !values.isEmpty { return values }
-        }
-        return [:]
+        load(ResourceBundleLocator.coreURL("ContextWindows.json"))
     }
 }

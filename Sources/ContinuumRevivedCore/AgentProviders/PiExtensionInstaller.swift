@@ -129,18 +129,12 @@ public enum PiExtensionInstaller {
     }
 
     public static func bundledExtensionURL(fileName: String, fileManager: FileManager = .default) -> URL? {
-        let resourceBundleName = "continuum-revived_ContinuumRevivedCore.bundle"
-        let relativePath = "PiExtensions/\(fileName)"
-        var candidates: [URL] = []
-        if let resourcesURL = Bundle.main.resourceURL {
-            candidates.append(
-                resourcesURL.appendingPathComponent(resourceBundleName).appendingPathComponent(relativePath))
-        }
-        if let executableURL = Bundle.main.executableURL {
-            candidates.append(
-                executableURL.deletingLastPathComponent()
-                    .appendingPathComponent(resourceBundleName).appendingPathComponent(relativePath))
-        }
-        return candidates.first { fileManager.fileExists(atPath: $0.path) }
+        bundledExtensionURL(fileName: fileName, roots: nil, fileManager: fileManager)
+    }
+
+    /// `roots` overrides where the Core bundle is searched (checks only).
+    public static func bundledExtensionURL(fileName: String, roots: [URL]?, fileManager: FileManager = .default) -> URL? {
+        ResourceBundleLocator.url(bundleName: ResourceBundleLocator.coreBundleName,
+                                  relativePath: "PiExtensions/\(fileName)", roots: roots, fileManager: fileManager)
     }
 }
