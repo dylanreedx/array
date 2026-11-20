@@ -480,14 +480,39 @@ enum TileChromeCanvasChecks {
         // gesture (one live hovered tile cost a zoom a third of its frames) and
         // the settle wakes it again.
         let hovered = underPointer[0]
-        let motionRests = hovered.qaChromeMotionRestCount
         clock.now += gap
-        canvas.cameraDriver.noteScrollPan(dx: -1, dy: 0, location: pointer)
-        canvas.layoutSubtreeIfNeeded()
-        window.displayIfNeeded()
-        try expect(canvas.isCameraInMotion, "the second pan never moved the camera; the assertion is vacuous")
-        try expect(hovered.isChromeResting && hovered.qaChromeMotionRestCount == motionRests + 1,
-                   "the live tile under the pointer stayed live through a camera gesture")
+        func frameMs(_ dx: Double) -> Double {
+            let t0 = ProcessInfo.processInfo.systemUptime
+            canvas.cameraDriver.noteScrollPan(dx: dx, dy: 0, location: pointer)
+            canvas.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            CATransaction.flush()
+            return (ProcessInfo.processInfo.systemUptime - t0) * 1_000
+        }
+        // Frame 1 of a PAN over the live tile must not rest it (a 13-33 ms reparent in
+        // debug); the legacy arm shows the witness goes RED when it does.
+        func firstPanFrame(legacy: Bool) -> (rests: Int, ms: Double) {
+            CanvasNSView.qaRestsChromeOnPan = legacy
+            defer { CanvasNSView.qaRestsChromeOnPan = false }
+            let before = hovered.qaChromeMotionRestCount
+            clock.now += gap
+            let ms = frameMs(-1)
+            let rests = hovered.qaChromeMotionRestCount - before
+            canvas.cameraDriver.qaMarkSettledNow()
+            canvas.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            return (rests, ms)
+        }
+        let legacyFrame = firstPanFrame(legacy: true)
+        try expect(!hovered.isChromeResting, "the settle did not wake the tile under the pointer again")
+        let pan = firstPanFrame(legacy: false)
+        print("FIRSTFRAME pan frame 1: legacy \(legacyFrame.rests) rest \(legacyFrame.ms) ms; fixed \(pan.rests) rests \(pan.ms) ms")
+        try expect(legacyFrame.rests == 1, "legacy arm must rest the hovered tile in a pan's first frame (witness vacuous)")
+        try expect(pan.rests == 0 && !hovered.isChromeResting, "a pan's first frame rested the live tile under the pointer")
+        // A zoom over it still rests it (one live hovered tile cost a zoom a third of its frames).
+        clock.now += gap
+        canvas.cameraDriver.noteScrollZoom(deltaY: 1, location: pointer)
+        canvas.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        try expect(hovered.isChromeResting, "a zoom must still rest the live tile under the pointer")
         canvas.cameraDriver.qaMarkSettledNow()
         canvas.layoutSubtreeIfNeeded()
         window.displayIfNeeded()

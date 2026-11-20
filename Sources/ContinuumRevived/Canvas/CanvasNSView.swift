@@ -4609,7 +4609,12 @@ final class CanvasNSView: NSView, TokenThemed {
         // A navigation flight's steps are the driver's, but programmatic: the jump
         // that started it already noted the user's interaction once.
         if (cameraDriver.isApplying && !cameraDriver.isFlying) || pointerPanActive { focusIsNewerThanCamera = false; userCameraMovedSinceArming = true; onUserCameraChange?() }
-        if !agentChromeRestedForMotion, cameraDriver.isApplying || pointerPanActive {
+        // A pan does not redraw a live tile (its views just ride the world plane), so
+        // resting one costs frame 1 a 13-33 ms reparent + layout (debug) for nothing.
+        // Only a zoom session rests it; a zoom that follows a pan still does, because
+        // the flag stays clear. `qaRestsChromeOnPan` is the legacy arm for the witness.
+        let chromeRestPays = Self.qaRestsChromeOnPan || cameraDriver.isCameraSessionActive
+        if !agentChromeRestedForMotion, chromeRestPays, cameraDriver.isApplying || pointerPanActive {
             agentChromeRestedForMotion = true
             restAgentChromeForCameraMotion()
         }
@@ -4694,6 +4699,8 @@ final class CanvasNSView: NSView, TokenThemed {
 
     /// Set at a camera gesture's first step, cleared when it settles.
     private var agentChromeRestedForMotion = false
+    /// QA legacy arm: rest the hovered live tile at a PAN's first step, as 0.7.56 did.
+    nonisolated(unsafe) static var qaRestsChromeOnPan = false
 
     /// Once per gesture, never per step: the live agent chrome the pointer was
     /// holding awake rests for the gesture (`restChromeForCameraMotion`).
