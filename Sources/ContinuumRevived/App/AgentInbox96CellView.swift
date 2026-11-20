@@ -1424,23 +1424,51 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         var size = controller.spriteSize(of: atlas, backingScale: metadataRasterScale,
                                          size: isSubagentRow ? .small : nil)
         if haloHelperIcon, size.height > 0 {
-            let k = Self.haloHelperIconHeight / size.height
-            size = NSSize(width: (size.width * k).rounded(), height: Self.haloHelperIconHeight)
+            let k = min(Self.haloHelperIconHeight / size.height, Self.haloHelperColumn / max(size.width, 1))
+            size = NSSize(width: (size.width * k).rounded(), height: (size.height * k).rounded())
         }
         if characterSize != size {
             characterSize = size
             needsLayout = true
         }
         reconcileCharacterVisibility()
+        applyHaloHelperMotion()
     }
 
     /// Halo: a resting helper (no helpers of its own) shows its plain character
     /// where its dots would be, a little bigger; working rows keep dots + right icon.
     private var haloHelperIcon: Bool {
-        guard Self.leadPlateOn, isSubagentRow, let row = shown?.row else { return false }
-        return (shown?.disclosure ?? RowDisclosure.none) == RowDisclosure.none && row.state != .working && Self.ask(row) == nil
+        guard Self.leadPlateOn, isSubagentRow else { return false }
+        return (shown?.disclosure ?? RowDisclosure.none) == RowDisclosure.none
     }
-    private static let haloHelperIconHeight: CGFloat = 18
+    private static let haloHelperIconHeight: CGFloat = 14
+    /// Fixed leading column for a helper's icon, so every helper title starts at one x.
+    private static let haloHelperColumn: CGFloat = 24
+
+    /// Working = a soft bob and breath on the icon itself (no dots); failed = muted.
+    /// Static under Reduce Motion, and still while the cell is paused or hidden.
+    private func applyHaloHelperMotion() {
+        let layer = decorations.characterLayer
+        let key = "haloWorking"
+        let state = shown?.row.state
+        let on = haloHelperIcon && characterSize != nil
+        layer.opacity = on && state == .failed ? 0.5 : 1
+        let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
+        let moving = on && state == .working && !prefersReducedMotion() && visible && !isHiddenOrHasHiddenAncestor
+        guard moving else { layer.removeAnimation(forKey: key); return }
+        guard layer.animation(forKey: key) == nil else { return }
+        let bob = CABasicAnimation(keyPath: "transform.translation.y")
+        bob.fromValue = -1; bob.toValue = 1
+        let breath = CABasicAnimation(keyPath: "opacity")
+        breath.fromValue = 1; breath.toValue = 0.7
+        let group = CAAnimationGroup()
+        group.animations = [bob, breath]
+        group.duration = 0.9
+        group.autoreverses = true
+        group.repeatCount = .infinity
+        group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(group, forKey: key)
+    }
 
     private func releaseLeadPlate() {
         guard showsLeadPlate || !leadPlate.isHidden || disclosureButton.alphaValue != 1 else { return }
@@ -1457,6 +1485,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
         decorations.characterLayer.setPaused(!visible || isHiddenOrHasHiddenAncestor)
         leadPlate.setPaused(!visible || isHiddenOrHasHiddenAncestor)
+        applyHaloHelperMotion()
     }
 
     override func viewDidHide() {
@@ -2567,11 +2596,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         // Plan 110: a helper's character, just left of its mark while it rests;
         // the hover controls take both places.
-        var leftIconWidth: CGFloat = 0
         if leftIcon, let size = characterSize {
-            decorations.setCharacterSlot(showsResting
-                ? NSRect(x: x0 - 1, y: snapped(mid - size.height / 2), width: size.width, height: size.height) : nil)
-            leftIconWidth = max(0, size.width - 14)
+            decorations.setCharacterSlot(
+                NSRect(x: x0 + 2 + ((Self.haloHelperColumn - size.width) / 2).rounded(),
+                       y: snapped(mid - size.height / 2), width: size.width, height: size.height))
         } else if let size = characterSize {
             let gap = decorations.mark == nil ? 7 : Self.characterGap
             decorations.setCharacterSlot(showsResting
@@ -2583,7 +2611,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         let used = restingWidth
         defer { fadeTextUnderActions(leftEdge: actionsLeft) }
-        let titleX = x0 + 14 + leftIconWidth
+        let titleX = x0 + 14 + (Self.leadPlateOn ? Self.haloHelperColumn - 8 : 0)
         let titleMax = max(0, right - used - 12 - titleX)
         let titleNatural = Self.width(of: titleLabel)
         place(titleLabel, x: titleX, centre: mid, width: min(titleNatural, titleMax))

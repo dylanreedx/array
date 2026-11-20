@@ -34,7 +34,7 @@ enum SidebarLeadIconRoundChecks {
             row(1, "Rework the sign-in screen", .working, model: "claude-opus-5-5", colour: "teal", branch: "agent/sign-in", action: .type, pinned: true),
             row(11, "Audit the token usage", .working, model: "claude-sonnet-5-5", parent: 1, action: .read),
             row(12, "Write the sign-in tests", .ready, model: "gpt-5.5", parent: 1, outcome: .succeeded, unread: true),
-            row(13, "Migrate the keychain wrapper", .failed, model: "claude-sonnet-5-5", parent: 1, outcome: .failed),
+            row(13, "Migrate the keychain wrapper", .failed, model: "claude-sonnet-5-5", parent: 1, outcome: .failed, unread: true),
             row(2, "Run the release matrix", .ready, model: "claude-opus-5-5", colour: "purple", outcome: .succeeded, unread: true),
             row(21, "Build the iOS legs", .ready, model: "claude-sonnet-5-5", parent: 2, outcome: .succeeded),
             row(22, "Bundle probe", .ready, model: "claude-sonnet-5-5", parent: 2, outcome: .succeeded),
@@ -71,9 +71,10 @@ enum SidebarLeadIconRoundChecks {
             let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 300, height: 620))
             inbox.clock = { now }
             inbox.onRowAction = { _, _ in }
-            inbox.wiredRowActions = [.settle, .snooze]
+            inbox.wiredRowActions = [.settle, .snooze, .popOut, .stopAgent]
             inbox.hoverCardEnabled = false
             let window = NSWindow(contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.acceptsMouseMovedEvents = true
             window.appearance = NSAppearance(named: appearance)
             window.contentView = inbox
             window.orderFrontOffscreenForChecks()
@@ -127,6 +128,60 @@ enum SidebarLeadIconRoundChecks {
                     let name = variant == .off ? "today" : variant.rawValue
                     try snap(windows.last!, to: stills.appendingPathComponent("\(name)-\(style.rawValue)-\(tone).png"), settle: 0.6)
                     count += 1
+                }
+            }
+        }
+        // Hover witness (halo): a helper's left icon must stay visible while the
+        // pointer is over its row, for a working, a resting and a failed helper.
+        if only == nil || only == .halo {
+            for (appearance, tone) in tones {
+                configure(enabled: true, style: .orb)
+                InboxLeadIconVariant.current = .halo
+                let inbox = makeInbox(appearance)
+                let window = windows.last!
+                window.makeKey()
+                if let cell = inbox.cellForQA(id: id(2)) { _ = cell.clickDisclosureForQA() }
+                inbox.layoutForQA()
+                inbox.updateTrackingAreas()
+                for (n, label) in [(11, "working"), (12, "resting"), (13, "failed")] {
+                    let point = try SidebarHelperHoverChecks.windowPoint(inbox, id: id(n))
+                    try SidebarHelperHoverChecks.crossing(.mouseEntered, at: point, inbox: inbox, window: window)
+                    try SidebarHelperHoverChecks.move(to: point, in: window)
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+                    CATransaction.flush()
+                    guard inbox.hoveredAgentIdForQA == id(n) else {
+                        throw Failure(description: "hover \(label) \(tone): the pointer never reached the row")
+                    }
+                    guard let cell = inbox.cellForQA(id: id(n)) else { throw Failure(description: "no cell \(label)") }
+                    let layer = cell.characterLayerForQA
+                    let alpha = layer.presentation()?.opacity ?? layer.opacity
+                    guard !layer.isHidden, alpha > 0.3, layer.frame.width > 4, layer.frame.height > 4 else {
+                        throw Failure(description: "hover \(label) \(tone): helper icon gone (hidden=\(layer.isHidden) alpha=\(alpha) frame=\(layer.frame))")
+                    }
+                    if n == 11 { try snap(window, to: stills.appendingPathComponent("halo-helpers-hover-\(tone).png"), settle: 0.2) }
+                    fputs("HOVER-OK \(label) \(tone) alpha=\(alpha) frame=\(layer.frame)\n", stderr)
+                    try SidebarHelperHoverChecks.crossing(.mouseExited, at: NSPoint(x: -20, y: point.y), inbox: inbox, window: window)
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+                    inbox.layoutForQA()
+                }
+            }
+        }
+        // Working-loop frames (halo helper bob), light and dark, ~40 ms apart.
+        if only == nil || only == .halo {
+            for (appearance, tone) in tones {
+                configure(enabled: true, style: .orb)
+                InboxLeadIconVariant.current = .halo
+                let inbox = makeInbox(appearance)
+                let window = windows.last!
+                if let cell = inbox.cellForQA(id: id(2)) { _ = cell.clickDisclosureForQA() }
+                inbox.layoutForQA()
+                let dir = out.appendingPathComponent("frames/helper-working-\(tone)", isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+                let start = Date()
+                for n in 0..<46 {
+                    RunLoop.current.run(until: start.addingTimeInterval(Double(n) * 0.04))
+                    try write(window, to: dir.appendingPathComponent(String(format: "f%02d.png", n)))
                 }
             }
         }
