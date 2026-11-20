@@ -1946,6 +1946,8 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-usage-limit-check
 # A usage stop pauses the agent, tells its lead, and resumes the same session
 # on the same harness at the reset or the first proof of room, staggered.
 run_app_check .build/debug/Array --agent-usage-resume-check
+# A window opening resumes at most 2 leads, never helpers (2026-11-20 herd).
+run_app_check .build/debug/Array --usage-resume-herd-check
 # A paused queue logs why, and agent messages cannot be stranded in one.
 run_app_check .build/debug/Array --agent-queue-drain-check
 # A usage pause ends when the account in use becomes one with room; retryOf

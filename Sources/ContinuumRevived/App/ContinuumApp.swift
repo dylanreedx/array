@@ -4070,6 +4070,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Usage hotfix: a window opening resumes at most 2 leads, never helpers.
+        if CommandLine.arguments.contains("--usage-resume-herd-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runUsageResumeHerdChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // .plans/101: account identity and live limits, read with no turn,
         // through a real supervisor into real attached tiles.
         if CommandLine.arguments.contains("--agent-account-usage-check") {

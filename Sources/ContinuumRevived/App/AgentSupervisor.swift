@@ -9845,6 +9845,14 @@ final class AgentSupervisor {
     var onUsagePausesChanged: (() -> Void)?
     private var usageResumeTask: Task<Void, Never>?
     private var usageResumeNotBefore: Date?
+    /// 2026-11-20: one success freed ~16 paused agents at once, each a cold-cache
+    /// rewrite of 100-580k tokens. A window opening resumes at most this many
+    /// agents per account; the next only after a fresh reading under the ceiling.
+    static let usageResumesPerOpening = 2
+    static let usageResumeReadingCeiling = 0.6
+    private var usageResumeAllowance: [String: Int] = [:]
+    private var usageLastResumeAt: [String: Date] = [:]
+    private var usageHoldNoted: Set<AgentID> = []
     /// Paused agents whose window is known open again (a later success on the
     /// same account, or a reading under 100%): due now, still staggered.
     private var usageFreed: Set<AgentID> = []
@@ -9857,6 +9865,14 @@ final class AgentSupervisor {
 
     /// QA seam: open a usage pause as a stop would (sidebar checks with no
     /// live runner), or end one (`nil`).
+    /// A helper whose lead is gone resumes like any agent (a helper with a live
+    /// lead never does); checks use this to exercise the orphan path.
+    func qaDetachFromParent(_ id: AgentID) {
+        guard var record = records[id] else { return }
+        record.parentAgentID = nil
+        setRecord(record, for: id)
+    }
+
     func qaSetUsagePause(_ pause: AgentUsagePause?, for id: AgentID) {
         usagePauses[id] = pause
         usagePausesChanged(id)
@@ -9897,6 +9913,7 @@ final class AgentSupervisor {
         usagePauses[id] = AgentUsagePause(harness: harness, accountId: accountId, stop: stop, stoppedAt: now,
                                           resumesAutomatically: previous?.resumesAutomatically ?? usageAutoResumeDefault)
         usageFreed.remove(id)
+        if let accountId { usageResumeAllowance[accountId] = nil }
         if let accountId { applyAccountFallback(harness: harness, held: accountId, now: now) }
         appendAgentDiagnostics("harness=\(harness.rawValue) usage-paused account=\(accountId ?? "none") resets=\(stop.resetsAt.map { "\($0.timeIntervalSince1970)" } ?? "unknown")", agentID: id)
         // After this delivery, never inside it.
@@ -10027,11 +10044,33 @@ final class AgentSupervisor {
             usagePauses[id] = nil
             usageFreed.remove(id)
         }
-        let due = usagePauses.filter { usagePauseDue($0.key, $0.value, now: now) }
-            .sorted { ($0.value.stoppedAt, $0.key.rawValue.uuidString) < ($1.value.stoppedAt, $1.key.rawValue.uuidString) }
-        if let first = due.first(where: { !isRunning($0.key) && runners[$0.key] == nil }),
+        let allDue = usagePauses.filter { usagePauseDue($0.key, $0.value, now: now) }
+        // A helper whose lead exists never resumes by itself: its lead decides.
+        var heldByLead: [AgentID: [AgentID]] = [:]
+        var due: [(key: AgentID, value: AgentUsagePause)] = []
+        for entry in allDue {
+            if let lead = usageHoldingLead(of: entry.key) { heldByLead[lead, default: []].append(entry.key) } else { due.append(entry) }
+        }
+        // Leads (and plain agents) before orphaned helpers, then oldest stop.
+        due.sort {
+            let a = (records[$0.key]?.parentAgentID != nil ? 1 : 0, $0.value.stoppedAt, $0.key.rawValue.uuidString)
+            let b = (records[$1.key]?.parentAgentID != nil ? 1 : 0, $1.value.stoppedAt, $1.key.rawValue.uuidString)
+            return a < b
+        }
+        noteHeldHelpers(heldByLead)
+        if let first = due.first(where: { !isRunning($0.key) && runners[$0.key] == nil && usageResumeAllowed($0.key, now: now) }),
            usageResumeNotBefore.map({ $0 <= now }) ?? true {
-            if resumeUsagePaused(first.key) { usageResumeNotBefore = now.addingTimeInterval(usageResumeStagger) }
+            let account = effectiveAccount(for: first.key, harness: first.value.harness).id
+            if resumeUsagePaused(first.key) {
+                usageResumeNotBefore = now.addingTimeInterval(usageResumeStagger)
+                usageResumeAllowance[account] = (usageResumeAllowance[account] ?? Self.usageResumesPerOpening) - 1
+                usageLastResumeAt[account] = now
+            }
+        }
+        // Agents left waiting on the budget need a fresh reading to go on.
+        for entry in due where !usageResumeAllowed(entry.key, now: now) {
+            let id = effectiveAccount(for: entry.key, harness: entry.value.harness)
+            refreshAccountUsage(account: id, minimumInterval: usageProbeInterval, now: now)
         }
         // No stated reset: ask the CLI (its own usage probe, no model turn).
         for pause in usagePauses.values where pause.resetsAt == nil && pause.resumesAutomatically {
@@ -10040,6 +10079,39 @@ final class AgentSupervisor {
             }
         }
         scheduleUsageResume()
+    }
+
+    /// The live lead whose decision a paused helper waits on, if any.
+    private func usageHoldingLead(of id: AgentID) -> AgentID? {
+        guard let lead = records[id]?.parentAgentID, records[lead] != nil else { return nil }
+        return lead
+    }
+
+    /// Whether this agent's account still has resume budget in this opening: the
+    /// first `usageResumesPerOpening` are free; each further one needs a reading
+    /// taken after the last resume that shows the 5-hour window under the ceiling.
+    private func usageResumeAllowed(_ id: AgentID, now: Date) -> Bool {
+        guard let harness = usagePauses[id]?.harness else { return false }
+        let account = effectiveAccount(for: id, harness: harness).id
+        if (usageResumeAllowance[account] ?? Self.usageResumesPerOpening) > 0 { return true }
+        guard let quota = accountQuotas[account], quota.observedAt > (usageLastResumeAt[account] ?? .distantPast),
+              let used = quota.windows.first(where: { $0.kind == .fiveHour && !$0.isExpired(at: now) })?.utilization,
+              used < Self.usageResumeReadingCeiling else { return false }
+        usageResumeAllowance[account] = 1
+        return true
+    }
+
+    /// One short note per lead listing helpers Array did not resume.
+    private func noteHeldHelpers(_ held: [AgentID: [AgentID]]) {
+        usageHoldNoted.formIntersection(usagePauses.keys)
+        for (lead, ids) in held {
+            let fresh = ids.filter { !usageHoldNoted.contains($0) }.sorted { $0.rawValue.uuidString < $1.rawValue.uuidString }
+            guard let first = fresh.first else { continue }
+            usageHoldNoted.formUnion(fresh)
+            let names = fresh.compactMap { records[$0]?.humanDisplayName }.joined(separator: ", ")
+            upsertHelperNote(.usageHold, helper: first, lead: lead,
+                text: "Usage is back, but Array left these helpers paused so one reset does not resume everything at once: \(names). Each resumes on its own session when you message it, or from its Resume button.")
+        }
     }
 
     /// Resumes one paused agent on its OWN session through its OWN harness: a
@@ -10163,9 +10235,13 @@ final class AgentSupervisor {
         usageResumeTask?.cancel()
         usageResumeTask = nil
         let now = usagePauseNow()
-        let live = usagePauses.filter { records[$0.key] != nil && $0.value.resumesAutomatically }
+        let live = usagePauses.filter { records[$0.key] != nil && $0.value.resumesAutomatically && usageHoldingLead(of: $0.key) == nil }
         guard !live.isEmpty else { return }
-        var wake = live.compactMap { usagePauseFreedNow($0.key, $0.value) ? now : $0.value.resetsAt }.min()
+        var wake = live.compactMap { entry -> Date? in
+            guard usagePauseFreedNow(entry.key, entry.value) || (entry.value.resetsAt.map { $0 <= now } ?? false) else { return entry.value.resetsAt }
+            // Due but out of budget: wait for the next reading, never spin.
+            return usageResumeAllowed(entry.key, now: now) ? now : now.addingTimeInterval(usageProbeInterval)
+        }.min()
         if live.values.contains(where: { $0.resetsAt == nil }) {
             wake = min(wake ?? .distantFuture, now.addingTimeInterval(usageProbeInterval))
         }
@@ -10519,7 +10595,7 @@ final class AgentSupervisor {
 
     // MARK: Helper notes
 
-    enum HelperNoteKind: String { case progress, followUp }
+    enum HelperNoteKind: String { case progress, followUp, usageHold }
     private var helperNoteIDs: [String: UUID] = [:]
     /// Leads that received this helper's latest delivered turn, so output it
     /// emits afterwards still finds them once its subscription is settled.
@@ -10541,9 +10617,12 @@ final class AgentSupervisor {
         guard let store = submissionRecoveryStore, wakesForHelperCompletion(lead), records[lead] != nil,
               let child = records[helper] else { return }
         let name = String(child.humanDisplayName.prefix(80))
-        let line = kind == .progress
-            ? "\(name) progress note (no action needed; its result follows): "
-            : "\(name) added after its result was delivered: "
+        let line: String
+        switch kind {
+        case .progress: line = "\(name) progress note (no action needed; its result follows): "
+        case .followUp: line = "\(name) added after its result was delivered: "
+        case .usageHold: line = "Array usage note: "
+        }
         let body = AgentMessageEnvelope.wrap(line + AgentMessageEnvelope.excerpt(text, limit: 600), senderID: helper.rawValue, senderName: child.humanDisplayName)
         let key = "\(kind.rawValue)|\(lead.rawValue.uuidString)|\(helper.rawValue.uuidString)"
         let previous = queueOpTasks[lead]

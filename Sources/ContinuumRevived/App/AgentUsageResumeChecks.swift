@@ -131,6 +131,10 @@ func runAgentUsageResumeChecks() async throws {
     // The lead's own turn on the spent account pauses too (drained in 3).
     try await waitFor("the lead's own turn settles") { !supervisor.isRunning(lead) }
 
+    // The mechanics below are for agents Array resumes by itself: a helper with a
+    // live lead never is (`--usage-resume-herd-check`), so orphan these.
+    for helper in helpers { supervisor.qaDetachFromParent(helper) }
+
     // 3. The Nov 16 shape: a later success on the SAME account ends the pauses.
     try exhaust(false)
     let before = supervisor.usageResumeLogForQA.count
@@ -154,9 +158,6 @@ func runAgentUsageResumeChecks() async throws {
                     "a resumed helper finishes its continuation, got \(String(describing: supervisor.records[helper]?.latestTerminalEvent?.outcome))")
     }
     try require(continuations() >= 2, "each resume is a continuation turn, got \(continuations())")
-    try require(received("resumed after the Claude usage reset")
-                    || supervisor.queuedMessages(for: lead).contains { $0.text.contains("resumed after the Claude usage reset") },
-                "the lead must hear that its helper resumed")
     // The lead's own turn stopped on the same account: the success freed it too.
     // Drain it, then stop waking it so later helper turns cannot move the counts.
     if supervisor.usagePause(for: lead) != nil {
