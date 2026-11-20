@@ -598,6 +598,8 @@ final class WorkspaceAPIService {
             return fileReport(agentId: agentId, ownHandle: ownHandle, payload: payload)
         case .standardsRead:
             return .error(WorkspaceAPIError(code: .unsupported, message: "standards.read requires the asynchronous workspace entry."))
+        case .agentStop:
+            return stopHelpers(agentId: agentId, payload: payload, isCancelled: isCancelled)
         case .agentSchedule:
             guard payload["agentId"] == nil else {
                 return .error(.init(code: .permissionDenied, message: "Schedules are self-only; omit agentId."))

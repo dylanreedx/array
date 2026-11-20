@@ -2128,6 +2128,30 @@
       }
     },
     {
+      "name": "array_stop_agent",
+      "label": "Array Stop Agent",
+      "op": "agent.stop",
+      "description": "Stop helpers you created, right now. Takes effect within seconds and does not queue behind the helper's turn: the helper's process is stopped. Pass agentId for one helper, or all=true for every helper you created that is still running (\"pause all agents\"). Works only on your own descendants, never an agent you did not create. A stopped helper keeps its session; message it with array_message_agent to start it again.",
+      "promptSnippet": "Stop one or all of the helpers you created",
+      "promptGuidelines": [
+        "Use this when the user says stop, pause or hold. Do not tell the user to press Stop in the inbox yourself: you can do it.",
+        "all=true stops every running helper you created; agentId stops one."
+      ],
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string",
+            "description": "The childAgentId of one helper you created."
+          },
+          "all": {
+            "type": "boolean",
+            "description": "Stop every running helper you created."
+          }
+        }
+      }
+    },
+    {
       "name": "array_standards",
       "label": "Array Standards",
       "op": "standards.read",

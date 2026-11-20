@@ -310,7 +310,7 @@ public enum AgentInboxRowBuilder {
             closingSince: closingSince,
             hasLiveRunner: observedFacts.hasLiveRunner,
             identityColor: record?.identityColor,
-            selfReport: record.flatMap(selfReport(for:)),
+            selfReport: record.flatMap { selfReport(for: $0) },
             // A row with no record is a terminal session, which is its tile.
             hasTile: record.map { $0.tileId != nil } ?? true,
             isPinned: record?.pinned ?? false,
@@ -375,7 +375,7 @@ public enum AgentInboxRowBuilder {
     /// from an earlier turn is history, not news, and never reaches the row: a
     /// new turn's `latestTurnAt` is stamped at its start, after anything the
     /// last one said. The row decides by its state which of the two it draws.
-    static func selfReport(for record: AgentRecord) -> InboxSelfReport? {
+    public static func selfReport(for record: AgentRecord, now: Date = Date()) -> InboxSelfReport? {
         let turnStart = record.latestTurnAt ?? .distantPast
         let status = record.declaredStatus.flatMap { $0.declaredAt >= turnStart ? $0 : nil }
         let report = record.lastReport.flatMap { $0.filedAt >= turnStart ? $0.report : nil }
@@ -383,9 +383,20 @@ public enum AgentInboxRowBuilder {
         guard status != nil || report != nil || watchdog != nil else { return nil }
         let checks = report?.checks ?? []
         return InboxSelfReport(
-            now: status?.now, needsYou: watchdog ?? status?.needsYou,
+            now: status.map { declaredNowLine($0, endedAt: record.latestTerminalEvent?.endedAt, at: now) },
+            needsYou: watchdog ?? status?.needsYou,
             checksPassed: checks.filter { $0.result == .pass }.count,
             checksFailed: checks.filter { $0.result == .fail }.count)
+    }
+
+    /// A declared "now" is only true while its turn runs. Once a turn has ended
+    /// after the declaration (stopped, interrupted, finished) the line is shown
+    /// as past, "was: Applying…, 2h ago", never as present tense.
+    static func declaredNowLine(_ status: AgentDeclaredStatus, endedAt: Date?, at now: Date) -> String {
+        guard let endedAt, endedAt >= status.declaredAt else { return status.now }
+        let seconds = max(0, Int(now.timeIntervalSince(status.declaredAt)))
+        let ago = seconds < 60 ? "just now" : seconds < 3600 ? "\(seconds / 60)m ago" : seconds < 86_400 ? "\(seconds / 3600)h ago" : "\(seconds / 86_400)d ago"
+        return "was: \(status.now), \(ago)"
     }
 
     /// Translate the existing child rollup's two hold-open states into the same

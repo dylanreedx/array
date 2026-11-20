@@ -443,9 +443,21 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                 // three times and could not find the exact ones. The refusal must
                 // name every id the selected catalogue offers, verbatim.
                 let offered = AgentModelCatalog.shared.snapshot(for: source).models
-                let bare = String(offered.last!.split(separator: "/").last!)
-                let refusedBare = try failure(api.dispatch(agentId: parent, requestId: handle + "-bare", op: "agent.delegate", payload: ["task": "bare", "idempotencyKey": handle + "-bare", "model": bare]), .unsupported, "bare model id")
-                try expect(offered.allSatisfy { refusedBare.message.contains($0) }, "model refusal must list the exact catalogue ids \(offered): \(refusedBare.message)")
+                let exact = offered.last!
+                let bare = String(exact.split(separator: "/").last!)
+                let uniqueBare = offered.filter { $0.split(separator: "/", maxSplits: 1).last.map(String.init) == bare }.count == 1
+                try expect(uniqueBare, "fixture catalogue keeps \(bare) unique")
+                // 2026-11-20: a bare id naming exactly one live id resolves to it and the
+                // exact id is what the helper records. Partial ids stay refused.
+                let accepted = try result(api.dispatch(agentId: parent, requestId: handle + "-bare", op: "agent.delegate", payload: ["task": "bare", "idempotencyKey": handle + "-bare", "model": bare]), "unique bare model id")
+                if let raw = accepted["childAgentId"]?.string, let uuid = UUID(uuidString: raw) {
+                    try expect(supervisor.records[AgentID(rawValue: uuid)]?.model == exact, "bare id \(bare) is recorded as \(exact)")
+                } else { throw Failure(message: "bare id delegate returned no child") }
+                let partial = String(bare.dropLast(2))
+                let refusedPartial = try failure(api.dispatch(agentId: parent, requestId: handle + "-partial", op: "agent.delegate", payload: ["task": "partial", "idempotencyKey": handle + "-partial", "model": partial]), .unsupported, "partial model id")
+                try expect(offered.allSatisfy { refusedPartial.message.contains($0) }, "model refusal must list the exact catalogue ids \(offered): \(refusedPartial.message)")
+                let refusedOther = try failure(api.dispatch(agentId: parent, requestId: handle + "-bare2", op: "agent.delegate", payload: ["task": "x", "idempotencyKey": handle + "-bare2", "model": "nonexistent-model"]), .unsupported, "unknown bare id")
+                try expect(!refusedOther.message.contains("Use `"), "no hint for an unmatched id")
             }
         }
         // MARK: Delegate effort (.plans/116 part 6)
@@ -869,7 +881,19 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                "operation.get by idempotencyKey recovers the partial outcome and names the failed step: \(partialOp)")
     try expect(partialOp["childRunning"]?.bool == supervisor.isRunning(secondChild),
                "operation.get reports liveness truthfully: \(partialOp["childRunning"] as Any)")
-    supervisor.stop(secondChild)
+    // agent.stop (2026-11-20, "pause all agents rn"): a lead stops a helper it
+    // created, now. Evidence is the helper's live runner, not the reply. An agent
+    // the caller did not create is refused and left untouched.
+    let strangerBefore = supervisor.isRunning(strangerId)
+    _ = try failure(dispatch("agent.stop", ["agentId": strangerId.rawValue.uuidString]), .permissionDenied, "stop a stranger")
+    _ = try failure(dispatch("agent.stop", ["agentId": parentId.rawValue.uuidString]), .permissionDenied, "stop self")
+    _ = try failure(dispatch("agent.stop", [:]), .invalidRequest, "stop with no target")
+    try expect(supervisor.isRunning(strangerId) == strangerBefore, "a refused stop must not touch the stranger")
+    let stopReply = try result(dispatch("agent.stop", ["all": true]), "stop all own helpers")
+    let stoppedIds = (stopReply["stopped"]?.array ?? []).compactMap { $0.object?["agentId"]?.string }
+    try expect(stoppedIds.contains(secondChildString), "agent.stop all reports the running helper it stopped: \(stopReply)")
+    try expect(!supervisor.isRunning(secondChild), "the helper's runner is gone as soon as agent.stop returns")
+    try expect(!stoppedIds.contains(strangerId.rawValue.uuidString), "all never reaches an agent the caller did not create")
     let stoppedOp = try result(dispatch("operation.get", ["idempotencyKey": "k2"]), "operation.get after stop")
     try expect(stoppedOp["childRunning"]?.bool == false,
                "a stopped child is reported as not running: \(stoppedOp["childRunning"] as Any)")
