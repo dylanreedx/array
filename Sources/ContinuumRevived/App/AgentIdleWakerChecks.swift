@@ -2,8 +2,8 @@ import AppKit
 import ContinuumRevivedCore
 
 /// `--idle-waker-check`: an idle agent is woken once when a process it started
-/// exits, is not woken for work its CLI tracks, and gets one nudge for an idle
-/// promise with nothing running. Through the production supervisor (send,
+/// exits, and is not woken for work its CLI tracks. A reply that promises later
+/// action is never nudged. Through the production supervisor (send,
 /// turn-end, runner retention) and the production tracker's job-list diff; only
 /// the CLI is a scripted runner.
 @MainActor
@@ -35,7 +35,6 @@ enum AgentIdleWakerChecks {
         tracker.knownAgents = { [agent] }
         supervisor.processTracker = tracker
         supervisor.idleWaker.batchWindow = 0.3
-        supervisor.idleWaker.nudgeDelay = 0.4
 
         var failures: [String] = []
         func verdict(_ ok: Bool, _ label: String) {
@@ -53,8 +52,7 @@ enum AgentIdleWakerChecks {
         func settle(_ seconds: TimeInterval) async { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) }
         func idle() async -> Bool { await until { !supervisor.isRunning(agent) && runner.openTurns == 0 } }
         func wakes() -> [String] { runner.prompts.filter { $0.contains("background command") } }
-        func nudges() -> [String] { runner.prompts.filter { $0.contains("nothing will wake you") } }
-        func job(_ pid: Int32, _ label: String, detached: Bool = true) -> AgentBackgroundJob {
+                func job(_ pid: Int32, _ label: String, detached: Bool = true) -> AgentBackgroundJob {
             AgentBackgroundJob(id: "job-\(pid)", owner: agent.rawValue.uuidString, rootPid: pid, pids: [pid],
                 startTimes: [:], label: label, commandLine: label, ports: [],
                 startedAt: Date().addingTimeInterval(-90), detached: detached)
@@ -104,22 +102,19 @@ enum AgentIdleWakerChecks {
         verdict(wakes().count == 2, "b. CLI-tracked background work is not double-woken")
         runner.background = false
 
-        // (c) An idle promise with nothing running is nudged once.
+        // (c) A reply that promises later action is never nudged: phrases match
+        // quoted and descriptive text, and the nudge was visible to the person.
         runner.end(saying: "The build is going. I'll check again in 4 minutes.")
         guard supervisor.send("go", to: agent) else { throw Failure(description: "the promise turn did not start") }
-        verdict(await until { nudges().count == 1 }, "c. one nudge after the delay")
         _ = await idle()
-        await settle(1.0)
-        verdict(nudges().count == 1, "c. nudged once, and the nudge turn earns no nudge")
-
-        // …and not while something of the agent's is still running.
-        publish([job(9006, "swift build")])
-        runner.end(saying: "Waiting on the build.")
-        guard supervisor.send("go again", to: agent) else { throw Failure(description: "the second promise turn did not start") }
+        await settle(1.2)
+        verdict(supervisor.idleWaker.wakeCount == 2 && !runner.prompts.contains { $0.contains("nothing will wake you") },
+                "c. a promise with nothing running earns no nudge")
+        runner.end(saying: "A proposed label is \"waiting on 1 helper\".")
+        guard supervisor.send("go again", to: agent) else { throw Failure(description: "the quoted-phrase turn did not start") }
         _ = await idle()
-        await settle(1.0)
-        verdict(nudges().count == 1, "c. no nudge while a process is running")
-        publish([])
+        await settle(1.2)
+        verdict(!runner.prompts.contains { $0.contains("nothing will wake you") }, "c. quoted 'waiting on' earns no nudge")
 
         if !failures.isEmpty { throw Failure(description: "FAILED: " + failures.joined(separator: "; ")) }
     }

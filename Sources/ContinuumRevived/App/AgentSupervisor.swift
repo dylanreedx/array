@@ -1058,8 +1058,8 @@ final class AgentSupervisor {
         }
     }
 
-    /// Wakes an idle agent when a process it started exits, and nudges an idle
-    /// promise (`AgentIdleWaker`). Delivery is `deliverSystemWake`.
+    /// Wakes an idle agent when a process it started exits (`AgentIdleWaker`).
+    /// Delivery is `deliverSystemWake`.
     lazy var idleWaker: AgentIdleWaker = {
         let waker = AgentIdleWaker()
         waker.isIdle = { [weak self] id in self?.canStartSystemTurn(id) == true }
@@ -1068,12 +1068,6 @@ final class AgentSupervisor {
             let runner = self.runners[id] ?? self.idleSessionRunners[id]
             return (runner as? AgentSteeringRunning)?.hasBackgroundWork == true
                 || (runner as? AgentUnsolicitedTurnReporting)?.hasUnsolicitedTurn == true
-        }
-        waker.liveJobs = { [weak self] id in self?.processTracker?.jobs(for: id).count ?? 0 }
-        waker.lastReply = { [weak self] id in self?.finalAssistantText(for: id) }
-        waker.filedReport = { [weak self] id in
-            guard let self, let filed = self.settlementReport(id) else { return false }
-            return filed.filedAt > (self.lastSettledAt[id] ?? self.reportTurnBaseline)
         }
         waker.deliver = { [weak self] id, text in self?.deliverSystemWake(text, to: id) == true }
         return waker
@@ -16568,7 +16562,6 @@ final class AgentSupervisor {
                 returnDeliveringSteers(for: id)
             }
             notifyTurnCapabilitiesChanged(id)
-            idleWaker.turnEnded(id)
             // B4: this is the actual moment the runner slot frees, not the
             // `.turnCompleted` event itself — that event still fires while
             // `runners[id]` holds this very runner, so draining there would
