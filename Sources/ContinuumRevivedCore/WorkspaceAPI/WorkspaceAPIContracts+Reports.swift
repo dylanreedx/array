@@ -173,17 +173,30 @@ public struct AgentDeclaredStatus: Codable, Equatable, Sendable {
     public var plan: [AgentPlanStep]?
     public var declaredAt: Date
     public var provenance: String
+    /// When the PLAN was last written. `declaredAt` moves on every status, so
+    /// it cannot say how old the plan is; this moves only when `plan` is sent.
+    /// Nil on records written before it existed (readers fall back to `declaredAt`).
+    public var planDeclaredAt: Date?
+    /// Short answers to `needsYou`, shown as chips on the lead's drawer. Valid
+    /// only beside a `needsYou`; replaced (not carried) by every status.
+    public var options: [String]?
 
-    public init(now: String, next: String? = nil, needsYou: String? = nil, plan: [AgentPlanStep]? = nil, declaredAt: Date) {
+    public static let optionsMaxCount = 4
+    public static let optionMaxCharacters = 40
+
+    public init(now: String, next: String? = nil, needsYou: String? = nil, plan: [AgentPlanStep]? = nil, declaredAt: Date,
+                planDeclaredAt: Date? = nil, options: [String]? = nil) {
         self.now = now
         self.next = next
         self.needsYou = needsYou
         self.plan = plan
         self.declaredAt = declaredAt
+        self.planDeclaredAt = planDeclaredAt
+        self.options = options
         self.provenance = Self.provenance
     }
 
-    private struct Wire: Decodable { var now: String?; var next: String?; var needsYou: String?; var plan: [AgentPlanStep]? }
+    private struct Wire: Decodable { var now: String?; var next: String?; var needsYou: String?; var plan: [AgentPlanStep]?; var options: [String]? }
 
     public static func validated(payload: [String: Any], at date: Date) -> Result<AgentDeclaredStatus, WorkspaceAPIError> {
         func refuse(_ message: String) -> Result<AgentDeclaredStatus, WorkspaceAPIError> {
@@ -223,7 +236,19 @@ public struct AgentDeclaredStatus: Codable, Equatable, Sendable {
                 }
             }
         }
-        return .success(AgentDeclaredStatus(now: now, next: next, needsYou: needsYou, plan: plan, declaredAt: date))
+        var options: [String]?
+        if let raw = wire.options {
+            guard needsYou != nil else { return refuse("options answer needsYou; send needsYou with them.") }
+            let folded = raw.map(AgentReport.oneLine)
+            guard (2...optionsMaxCount).contains(folded.count),
+                  folded.allSatisfy({ (1...optionMaxCharacters).contains($0.count) }),
+                  Set(folded).count == folded.count else {
+                return refuse("options takes 2–\(optionsMaxCount) distinct short answers of 1–\(optionMaxCharacters) characters.")
+            }
+            options = folded
+        }
+        return .success(AgentDeclaredStatus(now: now, next: next, needsYou: needsYou, plan: plan, declaredAt: date,
+                                            planDeclaredAt: plan == nil ? nil : date, options: options))
     }
 }
 

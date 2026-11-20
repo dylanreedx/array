@@ -2039,6 +2039,17 @@
             "type": "string",
             "maxLength": 140
           },
+          "options": {
+            "type": "array",
+            "description": "2-4 short answers to needsYou, shown as one-click chips. Needs needsYou.",
+            "minItems": 2,
+            "maxItems": 4,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40
+            }
+          },
           "plan": {
             "type": "array",
             "description": "Lead plan; omission keeps it. Helper state is observed.",
