@@ -89,18 +89,19 @@ enum SidebarTruthChecks {
         try eventPushOpensNoFile(world)
         try unreadableRootIsolation(world)
         try oneRowHeaderMakesAnAgent(world)
-        print("sidebar-truth: an idle agent's closed tile left the live list at once; a WORKING "
-              + "agent's closed tile kept its normal row and turn clock, kept running, offered Bring back "
-              + "to canvas and Stop, restored through the live reveal path, and left for History "
-              + "by itself when its turn ended; a closed parent took its subagents with it; a "
-              + "record naming a tile no canvas holds was never drawn live; with another "
-              + "project's agent listing unreadable, a close still reached the list; an agent-"
-              + "event push opened no file; the default scope was the workspace on screen, "
-              + "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
-              + "reloaded the sidebar once; settled and closed agents shared ONE folded History "
-              + "heading, most recent first, at the bottom of the list; the header has two compact rows whose New "
-              + "agent button made an agent; hovering it offered Snooze and Settle, and "
-              + "Settle settled it")
+        let truthSummary: [String] = ["sidebar-truth: an idle agent's closed tile left the live list at once; a WORKING "
+              , "agent's closed tile kept its normal row and turn clock, kept running, offered Bring back "
+              , "to canvas and Stop, restored through the live reveal path, and left for History "
+              , "by itself when its turn ended; a closed parent took its subagents with it; a "
+              , "record naming a tile no canvas holds was never drawn live; with another "
+              , "project's agent listing unreadable, a close still reached the list; an agent-"
+              , "event push opened no file; the default scope was the workspace on screen, "
+              , "across a switch; a switch restoring \(switchLoadTileCount) runtime-backed tiles "
+              , "reloaded the sidebar once; settled and closed agents shared ONE folded History "
+              , "heading, most recent first, at the bottom of the list; the header has two compact rows whose New "
+              , "agent button made an agent; hovering it offered Snooze and Settle, and "
+              , "Settle settled it"]
+        print(truthSummary.joined())
     }
 
     /// Keep this in the matrix's existing sidebar-truth leg. Mount the production
