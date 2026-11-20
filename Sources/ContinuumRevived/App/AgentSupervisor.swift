@@ -10577,8 +10577,10 @@ final class AgentSupervisor {
 
     /// The durable half of `trackHelperMessage`, read back at restore.
     private func restoreHelperMessageSubscriptions() {
-        for lead in records.values where lead.capabilities.locallyManaged {
-            for row in SpawnResultFile.subscriptions(parentCwd: lead.cwd, recipient: lead.id.rawValue) {
+        let leads = records.values.filter { $0.capabilities.locallyManaged }
+        let rowsByLead = SpawnResultFile.subscriptions(leads: leads.map { ($0.cwd, $0.id.rawValue) })
+        for lead in leads {
+            for row in rowsByLead[lead.id.rawValue] ?? [] {
                 let helper = AgentID(rawValue: row.helper)
                 guard records[helper] != nil,
                       !(helperMessageSubscriptions[helper] ?? []).contains(where: { $0.parent == lead.id && $0.handle == row.handle })
