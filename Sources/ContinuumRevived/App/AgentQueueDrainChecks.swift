@@ -206,5 +206,38 @@ func runAgentQueueDrainChecks() async throws {
         try require(diagnostics(dir.appendingPathComponent("agents")).contains("queue sweep: retrying drain"),
             "the sweep says why it retried")
     }
+
+    // MARK: 4. Expiry never silently drops an agent message.
+    // A message held past 24 h folds into one "while you were away" note for
+    // the recipient's next turn. It is not run, and not dropped.
+    do {
+        let sender = AgentID(rawValue: UUID())
+        let agentsDir = root.appendingPathComponent("s4/agents", isDirectory: true)
+        let outbox = AgentMessageOutbox(applicationSupportDirectory: agentsDir)
+        let old = Date().addingTimeInterval(-72 * 3600)
+        var recipient: AgentID?
+        let world = try await relaunch("s4") { drafts, id in
+            recipient = id
+            let context = AgentMessageQueueContext(caller: sender, recipient: id, operationId: "op-old",
+                idempotencyKey: "key-old", payloadHash: "h")
+            let message = AgentComposerQueuedMessage(text: "<array-agent-message from=\"\(sender.rawValue.uuidString.lowercased())\" name=\"Perf lead\">\nskip the blind bisect\n</array-agent-message>",
+                queuedAt: old, agentMessageHops: 1, agentMessageContext: context)
+            try outbox.save(.init(context: context, message: message, queuePosition: 1))
+            try await drafts.enqueueAgentMessage(message, for: id)
+        }
+        let id = recipient!
+        try await waitFor("the stale message is settled with a record") {
+            (try? outbox.lookup(caller: sender, key: "key-old"))??.phase == .cancelled
+        }
+        let entry = try outbox.lookup(caller: sender, key: "key-old")
+        try require(entry?.result?.reason?.hasPrefix("Bundled, not run") == true,
+            "the sender is told it was bundled, not dropped: \(String(describing: entry?.result?.reason))")
+        let remaining = world.supervisor.queuedMessages(for: id)
+        let bundle = remaining.map(\.text).first { $0.contains("While you were away") }
+        try require(bundle?.contains("skip the blind bisect") == true && bundle?.contains("held 72 h") == true,
+            "the content survives in one note: \(remaining)")
+        try require(world.provider.runs == 0, "a bundled message does not start a turn")
+        try require(diagnostics(agentsDir).contains("held agent messages bundled: count=1"), "the bundling is logged")
+    }
     print("AgentQueueDrainChecks passed")
 }

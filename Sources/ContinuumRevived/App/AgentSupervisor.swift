@@ -2090,7 +2090,7 @@ final class AgentSupervisor {
         case .unconfirmed: why = "is paused because an earlier input's delivery is unconfirmed"
         case .held: why = "is paused"
         }
-        return "Held (\(pending) pending from you): \(name) \(why). Held messages run in order, each as sent, only when the user resumes it; one held longer than 24 h expires unread and you are told."
+        return "Held (\(pending) pending from you): \(name) \(why). Held messages run in order, each as sent, only when the user resumes it; one held longer than 24 h is bundled into a 'while you were away' note on its next turn, never dropped, and you are told."
     }
 
     private func pauseQueue(_ id: AgentID, _ reason: ComposerQueueRailState.Pause) {
@@ -5500,11 +5500,17 @@ final class AgentSupervisor {
         guard records[id] != nil, sendRefusal(for: id) == nil,
               !contextRecoveryInFlight.contains(id), sharedAgentControlGates[id]?.isEmpty != false
         else { return (.refused, nil, nil) }
-        if runners[id] != nil || pausedQueues.contains(id) || !(queuedWorkItemsCache[id] ?? []).isEmpty {
+        // A helper note never starts a turn and never blocks one: an agent whose
+        // queue holds only notes is idle, and a message to it starts a turn now.
+        let queuedBehind = (queuedWorkItemsCache[id] ?? []).contains { item in
+            if case .prompt(let m) = item { return !m.helperNote }
+            return true
+        }
+        if runners[id] != nil || pausedQueues.contains(id) || queuedBehind {
             guard let store = submissionRecoveryStore else { return (.refused, nil, nil) }
             // A paused recipient keeps every held message, in order: "do A"
             // then "also do B" are both instructions. Age, not recency, retires
-            // them (`expireStaleAgentMessages`).
+            // them (`bundleStaleAgentMessages`).
             let heldReason = agentMessageHoldReason(for: id, sender: senderID, adding: 1)
             let held = heldReason != nil
             let item = AgentComposerQueuedMessage(text: prompt.text, queuedAt: agentMessageNow(),
@@ -13911,7 +13917,7 @@ final class AgentSupervisor {
             if restoreOutboxFailed { self.warn("Agent message queue recovery could not complete.") }
             do { try await self.recoverAgentMessageQueue(for: id, restoredOutbox: restoredOutbox, snapshotRevision: revision) }
             catch { self.warn("Agent message queue recovery could not complete.") }
-            await self.expireStaleAgentMessages(for: id, store: store)
+            await self.bundleStaleAgentMessages(for: id, store: store)
             let messages = await store.queuedWorkItems(for: id)
             self.queuedWorkItemsCache[id] = self.agentMessageQueueCache(messages, for: id, restoredOutbox: revision == self.agentMessageOutbox.writeRevision ? restoredOutbox : nil)
             if messages.contains(where: { if case .prompt(let m) = $0 { return m.steerUncertain }; return false }) {
@@ -13983,25 +13989,47 @@ final class AgentSupervisor {
         }
     }
 
-    /// Agent messages queued longer than `heldAgentMessageLifetime` are dropped,
-    /// never run: their sender has moved on, and replaying them is how a resumed
-    /// helper restarted work its lead had already called off. Each leaves a
-    /// cancelled outbox entry and an interrupted result for its sender.
-    private func expireStaleAgentMessages(for id: AgentID, store: AgentComposerDraftStore) async {
+    /// Agent messages queued longer than `heldAgentMessageLifetime` are never
+    /// dropped and never replayed one by one: their sender has moved on, and
+    /// running each is how a resumed helper restarted work its lead had already
+    /// called off. They fold into ONE compact "while you were away" note that
+    /// the recipient reads on its next turn, so the context survives and the
+    /// judgement of what still matters is the recipient's. Each leaves a
+    /// cancelled outbox entry and an interrupted result saying so for its sender.
+    private func bundleStaleAgentMessages(for id: AgentID, store: AgentComposerDraftStore) async {
         let now = agentMessageNow()
+        var stale: [(message: AgentComposerQueuedMessage, hours: Int)] = []
         for item in await store.queuedWorkItems(for: id) {
-            guard case .prompt(let message) = item, message.agentMessageContext != nil, !message.isSteer else { continue }
-            let age = now.timeIntervalSince(message.queuedAt)
-            guard age > Self.heldAgentMessageLifetime else { continue }
-            let hours = Int(age / 3600)
-            guard cancelAgentMessage(message, for: id,
-                reason: "Expired unread: held \(hours) h, past the 24 h limit, so it was dropped instead of running.") else { continue }
+            guard case .prompt(let message) = item, message.agentMessageContext != nil, !message.isSteer,
+                  now.timeIntervalSince(message.queuedAt) > Self.heldAgentMessageLifetime else { continue }
+            stale.append((message, Int(now.timeIntervalSince(message.queuedAt) / 3600)))
+        }
+        guard !stale.isEmpty else { return }
+        var members: [(text: String, senderID: UUID, senderName: String)] = []
+        var settled: [AgentComposerQueuedMessage] = []
+        for entry in stale {
+            let message = entry.message
+            guard let context = message.agentMessageContext,
+                  cancelAgentMessage(message, for: id, reason: "Bundled, not run: held \(entry.hours) h, past the 24 h limit, so it reached \(records[id]?.humanDisplayName ?? "the recipient") inside one \"while you were away\" note on its next turn.")
+            else { continue }
+            var inner = message.text, name = records[context.caller]?.humanDisplayName ?? "Agent"
+            if case .agentMessage(let payload) = AgentMessageEnvelope.classify(message.text) {
+                inner = payload.text; name = payload.senderName
+            }
+            members.append(("While you were away, held \(entry.hours) h: " + AgentMessageEnvelope.excerpt(inner, limit: 500),
+                            context.caller.rawValue, name))
+            settled.append(message)
+        }
+        guard !members.isEmpty, let body = Optional(AgentMessageEnvelope.wrapBatch(members)) else { return }
+        _ = try? await store.upsertHelperNote(id: UUID(), text: body, for: id)
+        for message in settled {
             updateCompanionTasks { try $0.cancelQueued(message.id) }
             _ = await store.removeQueuedMessage(id: message.id, for: id)
             queuedWorkItemsCache[id]?.removeAll { $0.id == message.id }
-            appendAgentDiagnostics("held agent message expired after \(hours) h; dropped without running", agentID: id)
-            notifyTurnCapabilitiesChanged(id)
         }
+        queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+        appendAgentDiagnostics("held agent messages bundled: count=\(settled.count) oldest=\(stale.map(\.hours).max() ?? 0) h; delivered as one note, none dropped", agentID: id)
+        notifyTurnCapabilitiesChanged(id)
     }
 
     /// Explicit resume after an interrupt, distinct from the next Send: this
@@ -14103,7 +14131,7 @@ final class AgentSupervisor {
             await self.qaBeforeQueueDrain?()
             do { try await self.recoverAgentMessageQueue(for: id) }
             catch { self.pauseQueue(id, .held); self.warn("Durable agent message awaits queue storage recovery."); return }
-            await self.expireStaleAgentMessages(for: id, store: store)
+            await self.bundleStaleAgentMessages(for: id, store: store)
             guard self.canDrainQueue(for: id), var next = await store.nextWorkItem(for: id) else { return }
             // A helper note never starts a turn: it rides along with the next
             // result, or joins a running turn. Notes alone leave the lead idle.
