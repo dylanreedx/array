@@ -52,6 +52,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     case plan = "array_plan"
     case status = "array_status"
     case schedule = "array_schedule_agent"
+    case stopAgent = "array_stop_agent"
     case standards = "array_standards"
 
     public var isBrowser: Bool { rawValue.hasPrefix("array_browser_") }
@@ -70,7 +71,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
     public var kind: AgentToolKind {
         switch self {
         case .workspaceContext, .openDocument, .canvasQuery, .inspectAgent, .getOperation, .boardQuery, .deviceList, .deviceObserve, .standards: return .read
-        case .canvasApply, .boardApply, .boardManage, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun, .report, .status, .plan, .schedule: return .edit
+        case .canvasApply, .boardApply, .boardManage, .updateAgent, .deviceOpen, .deviceAct, .deviceClose, .deviceBuildRun, .report, .status, .plan, .schedule, .stopAgent: return .edit
         case .findAgent: return .search
         case .delegate: return .delegate
         case .revealAgent, .messageAgent, .browserOpen, .browserNavigate, .browserSnapshot,
@@ -100,6 +101,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .plan: return "point.3.connected.trianglepath.dotted"
         case .status: return "text.bubble"
         case .schedule: return "clock"
+        case .stopAgent: return "stop.circle"
         case .standards: return "book"
         }
     }
@@ -149,6 +151,7 @@ public enum ArrayWorkspaceTool: String, CaseIterable, Sendable {
         case .notify: return "Notified you"
         case .report: return "Filed a report"
         case .schedule: return "Updated its schedule"
+        case .stopAgent: return "Stopped helpers"
         case .plan: return "Chose how to do the task"
         case .status: return "Posted its status"
         case .standards: return "Read the project standards"

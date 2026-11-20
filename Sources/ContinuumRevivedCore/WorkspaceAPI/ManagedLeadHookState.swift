@@ -5,14 +5,14 @@ import Foundation
 public struct ManagedLeadHookState {
     // Permanent context: paid again on every later message. Keep this brief tight.
     public static let brief = """
-    You are an Array Managed lead. Plan first: 1–6 steps, each with an owner (helper, lead, or you); post it with array_status and update it as steps change. Delegate implementation and bulk investigation with array_delegate. Give each helper a self-contained brief: goal, where to look, constraints, and what done means. Include optional contract fields owns, shared, mustNotTouch, checks, decisions, costLimit and report where applicable. \(HelperDefaultTier.briefLine) Send a follow-up to an existing helper with array_message_agent instead of delegating again. Helpers can edit files; you cannot. Orient with reads. After delegating, end your turn; results arrive by themselves. Never wait, poll or message a helper to check on it. Trust a helper's report unless it names a failure or a gap. One review per change; don't re-run a helper's passing checks.
+    You are an Array Managed lead. Plan first: 1–6 steps, each with an owner (helper, lead, or you); post it with array_status and update it as steps change. Delegate implementation and bulk investigation with array_delegate. Give each helper a self-contained brief: goal, where to look, constraints, and what done means. Include optional contract fields owns, shared, mustNotTouch, checks, decisions, costLimit and report where applicable. \(HelperDefaultTier.briefLine) Send a follow-up to an existing helper with array_message_agent instead of delegating again. When the user says stop or pause, stop your helpers yourself with array_stop_agent (one agentId, or all=true) and never tell the user to press Stop. Helpers can edit files; you cannot. Orient with reads. After delegating, end your turn; results arrive by themselves. Never wait, poll or message a helper to check on it. Trust a helper's report unless it names a failure or a gap. One review per change; don't re-run a helper's passing checks.
     """
     /// The tools a Claude Managed lead starts with loaded: the two the brief
     /// names first, and the one it follows up on a helper with. Claude defers
     /// every other MCP tool behind tool search; a lead that had to search for
     /// these did its work through the shell, or sent `array_delegate` before
     /// its schema loaded (`docs/internals/managed-lead-tool-loading.md`).
-    public static let alwaysLoadedTools = ["array_status", "array_delegate", "array_message_agent"]
+    public static let alwaysLoadedTools = ["array_status", "array_delegate", "array_message_agent", "array_stop_agent"]
     /// Appended to a Managed lead's helper's first prompt only. Permanent
     /// context for that helper: keep it one short line.
     public static let helperReportLine = "When done, call array_report with a summary and any check that failed or that you could not run."

@@ -881,7 +881,19 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                "operation.get by idempotencyKey recovers the partial outcome and names the failed step: \(partialOp)")
     try expect(partialOp["childRunning"]?.bool == supervisor.isRunning(secondChild),
                "operation.get reports liveness truthfully: \(partialOp["childRunning"] as Any)")
-    supervisor.stop(secondChild)
+    // agent.stop (2026-11-20, "pause all agents rn"): a lead stops a helper it
+    // created, now. Evidence is the helper's live runner, not the reply. An agent
+    // the caller did not create is refused and left untouched.
+    let strangerBefore = supervisor.isRunning(strangerId)
+    _ = try failure(dispatch("agent.stop", ["agentId": strangerId.rawValue.uuidString]), .permissionDenied, "stop a stranger")
+    _ = try failure(dispatch("agent.stop", ["agentId": parentId.rawValue.uuidString]), .permissionDenied, "stop self")
+    _ = try failure(dispatch("agent.stop", [:]), .invalidRequest, "stop with no target")
+    try expect(supervisor.isRunning(strangerId) == strangerBefore, "a refused stop must not touch the stranger")
+    let stopReply = try result(dispatch("agent.stop", ["all": true]), "stop all own helpers")
+    let stoppedIds = (stopReply["stopped"]?.array ?? []).compactMap { $0.object?["agentId"]?.string }
+    try expect(stoppedIds.contains(secondChildString), "agent.stop all reports the running helper it stopped: \(stopReply)")
+    try expect(!supervisor.isRunning(secondChild), "the helper's runner is gone as soon as agent.stop returns")
+    try expect(!stoppedIds.contains(strangerId.rawValue.uuidString), "all never reaches an agent the caller did not create")
     let stoppedOp = try result(dispatch("operation.get", ["idempotencyKey": "k2"]), "operation.get after stop")
     try expect(stoppedOp["childRunning"]?.bool == false,
                "a stopped child is reported as not running: \(stoppedOp["childRunning"] as Any)")

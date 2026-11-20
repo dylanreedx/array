@@ -78,6 +78,8 @@ public enum WorkspaceAPIOp: String, Codable, Sendable, CaseIterable {
     case standardsRead = "standards.read"
     // Experimental Claude Managed task choice; opt-in tool surface. Appended last.
     case agentPlan = "agent.plan"
+    // A lead stops its own helpers (descendants only). Appended last.
+    case agentStop = "agent.stop"
 }
 
 // MARK: - Identity
