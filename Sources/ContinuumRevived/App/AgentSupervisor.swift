@@ -2135,6 +2135,25 @@ final class AgentSupervisor {
     /// The user's message the running turn is answering, kept until the turn settles.
     private var inFlightUserMessages: [AgentID: AgentComposerQueuedMessage] = [:]
     private var restoredUnansweredMessages: Set<UUID> = []
+    /// Queues this supervisor holds for an unanswered user message, each with the
+    /// timer that ends the hold. A queue never sits held with an agent message in
+    /// it: the first one to arrive, or ten minutes with no user action, releases
+    /// the hold and the unanswered message runs once.
+    private var unansweredHolds: [AgentID: Task<Void, Never>] = [:]
+    var unansweredHoldLimit: TimeInterval = 600
+    private func holdUnansweredMessage(for id: AgentID) {
+        unansweredHolds[id]?.cancel()
+        let limit = unansweredHoldLimit
+        unansweredHolds[id] = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(limit))
+            guard !Task.isCancelled else { return }
+            self?.releaseUnansweredHold(id)
+        }
+    }
+    private func releaseUnansweredHold(_ id: AgentID) {
+        guard unansweredHolds.removeValue(forKey: id) != nil else { return }
+        if pausedQueues.contains(id), queuePauseReasons[id] == .held { resumeQueue(for: id) }
+    }
     /// Live 2026-11-20: a turn interrupted by something other than the user's own
     /// Stop left their message answered by nothing, and it fell into history. It
     /// goes back to the top of the queue, held, with a notice; sending the queue
@@ -2144,10 +2163,14 @@ final class AgentSupervisor {
     /// strands agent messages nobody resumes (the lead-stuck failure), so then the
     /// message runs again at once. Restored at most once per message, so a turn
     /// that keeps being interrupted cannot loop.
-    func restoreUnansweredMessage(_ message: AgentComposerQueuedMessage, for id: AgentID) {
-        guard let store = submissionRecoveryStore, restoredUnansweredMessages.insert(message.id).inserted else { return }
-        let agentTrafficWaits = queuedMessages(for: id).contains { $0.agentMessageContext != nil }
-        if !agentTrafficWaits { pauseQueue(id, .held) }
+    @discardableResult
+    func restoreUnansweredMessage(_ message: AgentComposerQueuedMessage, for id: AgentID) -> Bool {
+        guard let store = submissionRecoveryStore, restoredUnansweredMessages.insert(message.id).inserted else { return false }
+        let agentTrafficWaits = queuedMessages(for: id).contains { $0.agentMessageContext != nil || AgentMessageEnvelope.classify($0.text).isAgentMessage }
+        if !agentTrafficWaits {
+            pauseQueue(id, .held)
+            holdUnansweredMessage(for: id)
+        }
         appendLocalNotice(id: id, key: "unanswered-\(message.id.uuidString)", title: "Not answered",
             body: agentTrafficWaits
                 ? "This turn was interrupted before it answered your message. It is running again."
@@ -2155,6 +2178,7 @@ final class AgentSupervisor {
         runQueueOp(for: id) { await store.requeueWorkItemAtFront(.prompt(message), for: id) }
         if agentTrafficWaits { drainQueue(for: id) }
         notifyTurnCapabilitiesChanged(id)
+        return true
     }
     /// Set on `.interrupted`. A user who interrupted wants to look first, so
     /// the held queue is not auto-drained into a turn they did not ask for.
@@ -2164,6 +2188,7 @@ final class AgentSupervisor {
             // Every release of a held queue leaves a line, whoever released it:
             // a stranded queue used to be provable only by its absence.
             for id in oldValue.subtracting(pausedQueues) {
+                unansweredHolds.removeValue(forKey: id)?.cancel()
                 appendAgentDiagnostics("queue resumed reason=\(queuePauseReasons[id].map(Self.pauseLogName) ?? "unknown") depth=\(queuedWorkItemsCache[id]?.count ?? 0)", agentID: id)
             }
         }
@@ -5722,6 +5747,7 @@ final class AgentSupervisor {
             }
             queuedWorkItemsCache[id, default: []].append(.prompt(item))
             let position = queuedWorkItemsCache[id]!.count
+            releaseUnansweredHold(id)
             notifyTurnCapabilitiesChanged(id)
             if let reservation { updateCompanionTasks { try $0.resolveQueuedReservation(reservation, accepted: true) } }
             runQueueOp(for: id) { [weak self] in
@@ -14507,8 +14533,8 @@ final class AgentSupervisor {
             notifyTurnCapabilitiesChanged(id)
             return
         }
-        if outcome == .interrupted, let message = inFlightMessage, lastAssistantEntryID(id) == turnReplyFloors[id]?.entryID {
-            restoreUnansweredMessage(message, for: id)
+        if outcome == .interrupted, let message = inFlightMessage, lastAssistantEntryID(id) == turnReplyFloors[id]?.entryID,
+           restoreUnansweredMessage(message, for: id) {
             return
         }
         if outcome == .interrupted {

@@ -148,7 +148,7 @@ func runAgentQueueDrainChecks() async throws {
     // pause the queue too, and nothing ever resumed it: ED88C2A4 exited 143
     // with the perf lead's message still queued.
     do {
-        func world(_ name: String, agentTraffic: Bool = false) async throws -> (AgentSupervisor, Provider, AgentID) {
+        func world(_ name: String, agentTraffic: Bool = false) async throws -> (AgentSupervisor, Provider, AgentID, AgentID) {
             let dir = root.appendingPathComponent(name, isDirectory: true)
             let store = AgentStore(applicationSupportDirectory: dir.appendingPathComponent("agents"))
             let id = AgentID(rawValue: UUID())
@@ -175,7 +175,7 @@ func runAgentQueueDrainChecks() async throws {
             }
             try require(queued == .accepted, "second prompt queues, got \(queued)")
             }
-            return (supervisor, provider, id)
+            return (supervisor, provider, id, sender)
         }
         let programmatic = try await world("s2-kill")
         programmatic.1.endInterrupted()
@@ -191,8 +191,29 @@ func runAgentQueueDrainChecks() async throws {
         // (the stuck-lead failure): the unanswered message runs again at once.
         let agentWorld = try await world("s2-agent", agentTraffic: true)
         agentWorld.1.endInterrupted()
-        try await waitFor("an unrequested interrupt with agent traffic queued lets the queue run") { agentWorld.1.runs == 2 }
+        try await waitFor("an unrequested interrupt with agent traffic queued lets the queue run (runs \(agentWorld.1.runs), paused \(agentWorld.0.isQueuePaused(for: agentWorld.2)), queue \(agentWorld.0.queuedMessages(for: agentWorld.2).map(\.text)))") { agentWorld.1.runs == 2 }
         try require(!agentWorld.0.isQueuePaused(for: agentWorld.2), "agent traffic is never stranded behind a held queue")
+
+        // A queue never sits held with an agent message in it: the first one to
+        // ARRIVE while "Not answered" is held releases it. The unanswered message
+        // runs once, then the newcomer follows.
+        let late = try await world("s2-late")
+        late.1.endInterrupted()
+        try await waitFor("the unanswered message is held") { late.0.isQueuePaused(for: late.2) }
+        let arrived = late.0.deliverAgentMessage("a helper finished", from: late.3, to: late.2, hops: 1)
+        try require(arrived.delivery != .refused, "the late agent message is accepted: \(arrived)")
+        try await waitFor("an arriving agent message releases the hold and the unanswered message runs") { late.1.runs == 2 }
+        try require(!late.0.isQueuePaused(for: late.2), "no queue sits held with an agent message in it")
+        late.1.release()
+        try await waitFor("the newcomer runs after the unanswered message") { late.1.runs == 3 }
+
+        // The hold itself is capped: with no user action the unanswered message
+        // re-runs once on its own.
+        let capped = try await world("s2-cap")
+        capped.0.unansweredHoldLimit = 0.3
+        capped.1.endInterrupted()
+        try await waitFor("the unanswered message is held") { capped.0.isQueuePaused(for: capped.2) }
+        try await waitFor("the hold ends by itself and the unanswered message runs once") { capped.1.runs == 2 && !capped.0.isQueuePaused(for: capped.2) }
 
         let user = try await world("s2-user")
         try require(await user.0.accept(.stop, for: user.2) == .accepted, "user Stop accepted")
