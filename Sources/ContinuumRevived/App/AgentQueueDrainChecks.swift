@@ -34,13 +34,15 @@ func runAgentQueueDrainChecks() async throws {
         var threadId = ""
         private let gate = DispatchSemaphore(value: 0)
         var runs: Int { lock.withLock { started } }
+        private var seen: [String] = []
+        var prompts: [String] { lock.withLock { seen } }
         /// A turn that stays open until released or stopped.
         var blocks = true
         func release() { gate.signal() }
         var acceptsSteerNow: Bool { true }
         var hasBackgroundWork: Bool { false }
         func run(prompt: AgentPrompt, onEvent: @escaping @Sendable (AgentRuntimeEvent) -> Void) throws {
-            let n = lock.withLock { started += 1; return started }
+            let n = lock.withLock { started += 1; seen.append(prompt.text); return started }
             onEvent(.turnStarted(threadId: threadId, turnId: "turn-\(n)"))
             if blocks { gate.wait() }
             let wasStopped = lock.withLock { stopped }
@@ -401,6 +403,61 @@ func runAgentQueueDrainChecks() async throws {
         }
         let notes = withheld.filter { supervisor.awayMessageCount(for: $0) > 0 }
         try require(notes.count >= withheld.count - 1, "held agent messages show as 'while you were away': \(notes.count)")
+    }
+
+    // MARK: 8. New traffic is never held by a relaunch.
+    // A held backlog stays quiet. A NEW message from a live agent starts one
+    // turn that carries the backlog in front of it, unless the recipient's
+    // account is out of usage.
+    do {
+        let dir = root.appendingPathComponent("s8", isDirectory: true)
+        let store = AgentStore(applicationSupportDirectory: dir.appendingPathComponent("agents"))
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: dir.appendingPathComponent("drafts"), debounceInterval: 0)
+        let live = AgentID(rawValue: UUID())
+        func agent(_ id: AgentID, _ name: String, working: Bool) throws {
+            var r = AgentRecord(id: id, displayName: name, harness: .pi, model: model, thinking: "medium",
+                cwd: root.path, createdAt: Date(), lastActivityAt: Date())
+            r.latestTurnAt = Date().addingTimeInterval(-120)
+            if !working { r.runCompletedAt = Date().addingTimeInterval(-60) }
+            try store.upsert(r)
+        }
+        try agent(live, "Live lead", working: true)
+        var providers: [AgentID: Provider] = [:]
+        var ids: [AgentID] = []
+        for name in ["free", "out"] {
+            let id = AgentID(rawValue: UUID())
+            try agent(id, name, working: false)
+            for n in 1...2 {
+                let context = AgentMessageQueueContext(caller: live, recipient: id, operationId: "op-\(name)\(n)",
+                    idempotencyKey: "key-\(name)\(n)", payloadHash: "h")
+                try await drafts.enqueueAgentMessage(.init(text: "<array-agent-message>backlog \(n) for \(name)</array-agent-message>",
+                    queuedAt: Date().addingTimeInterval(-300), agentMessageHops: 1, agentMessageContext: context), for: id)
+            }
+            let provider = Provider(); provider.blocks = false; provider.threadId = AgentSupervisor.threadId(for: id)
+            providers[id] = provider
+            ids.append(id)
+        }
+        let supervisor = AgentSupervisor(store: store, makeRunner: { providers[$0.record.id] ?? Provider() }, warn: { _ in },
+            nameTitlerCommand: { _ in nil }, submissionRecoveryStore: drafts)
+        _ = supervisor.restore()
+        let stop = try require2(AgentUsageLimitStop.classify(errorMessage: "You've hit your usage limit", now: Date()), "usage stop classifies")
+        supervisor.qaSetUsagePause(AgentUsagePause(harness: .pi, accountId: nil, stop: stop, stoppedAt: Date(), resumesAutomatically: false), for: ids[1])
+        try await Task.sleep(for: .milliseconds(700))
+        try require(providers[ids[0]]!.runs == 0 && providers[ids[1]]!.runs == 0, "the backlog alone starts nothing")
+        for id in ids {
+            let context = AgentMessageQueueContext(caller: live, recipient: id, operationId: "op-new", idempotencyKey: "key-new-\(id.rawValue)", payloadHash: "h2")
+            _ = supervisor.deliverAgentMessage("fresh news", from: live, to: id, hops: 1, context: context)
+        }
+        try await waitFor("a live lead's new message starts the turn") { providers[ids[0]]!.runs >= 1 }
+        try await Task.sleep(for: .milliseconds(800))
+        let free = providers[ids[0]]!
+        try require(free.runs == 1, "exactly one turn, got \(free.runs)")
+        let text = free.prompts.first ?? ""
+        try require(text.contains("backlog 1 for free") && text.contains("backlog 2 for free") && text.contains("fresh news"),
+            "the turn carries the backlog and the new message: \(text)")
+        try require((text.range(of: "backlog 2")?.lowerBound ?? text.endIndex) < (text.range(of: "fresh news")?.lowerBound ?? text.startIndex),
+            "the backlog comes in front of the new message")
+        try require(providers[ids[1]]!.runs == 0, "no wake into an exhausted account")
     }
     print("AgentQueueDrainChecks passed")
 }

@@ -5669,9 +5669,17 @@ final class AgentSupervisor {
             // then "also do B" are both instructions. Age, not recency, retires
             // them (`bundleStaleAgentMessages`).
             reevaluateUsagePause(for: id)
+            // New traffic is never held by a relaunch: a message from a live agent
+            // releases the queue and carries the held backlog in front of it as one
+            // bundle. Only the backlog stays quiet. No wake into an exhausted account.
+            var promptText = prompt.text
+            if pausedQueues.contains(id), queuePauseReasons[id] == .afterRelaunch,
+               let bundled = bundleHeldBacklogForLiveMessage(prompt.text, from: senderID, to: id, store: store) {
+                promptText = bundled
+            }
             let heldReason = agentMessageHoldReason(for: id, sender: senderID, adding: 1)
             let held = heldReason != nil
-            let item = AgentComposerQueuedMessage(text: prompt.text, queuedAt: agentMessageNow(),
+            let item = AgentComposerQueuedMessage(text: promptText, queuedAt: agentMessageNow(),
                 agentMessageHops: hops, agentMessageContext: context)
             var reservation: CompanionTaskRunHandle?
             updateCompanionTasks { reservation = try $0.reserveQueued(agentID: id.rawValue, itemID: item.id) }
@@ -14401,6 +14409,47 @@ final class AgentSupervisor {
         notifyTurnCapabilitiesChanged(id)
         if runners[id] == nil { drainQueue(for: id) }
         return true
+    }
+
+    /// A live sender's NEW message to a queue held after a relaunch. Folds the held
+    /// agent messages into one batch in front of it, releases the hold and returns
+    /// the combined text; nil leaves the queue held (typed input in it, a sender
+    /// that is not live, or a recipient out of usage).
+    private func bundleHeldBacklogForLiveMessage(_ text: String, from senderID: AgentID, to id: AgentID,
+                                                 store: AgentComposerDraftStore) -> String? {
+        let now = agentMessageNow()
+        guard let sender = records[senderID],
+              runners[senderID] != nil || wasWorkingBeforeQuit(sender, now: now),
+              recipientHasUsage(id) else { return nil }
+        var backlog: [AgentComposerQueuedMessage] = []
+        for item in queuedWorkItemsCache[id] ?? [] {
+            guard case .prompt(let m) = item, !m.steerUncertain else { return nil }
+            if m.helperNote || m.helperCompletion { continue }
+            guard m.agentMessageContext != nil, !m.isSteer else { return nil }
+            backlog.append(m)
+        }
+        func member(_ raw: String, _ caller: AgentID) -> (text: String, senderID: UUID, senderName: String) {
+            if case .agentMessage(let payload) = AgentMessageEnvelope.classify(raw) {
+                return (payload.text, caller.rawValue, payload.senderName)
+            }
+            return (raw, caller.rawValue, records[caller]?.humanDisplayName ?? "Agent")
+        }
+        var members: [(text: String, senderID: UUID, senderName: String)] = []
+        for m in backlog {
+            guard let context = m.agentMessageContext else { continue }
+            let hasEntry = ((try? agentMessageOutbox.lookup(caller: context.caller, key: context.idempotencyKey)) ?? nil) != nil
+            guard !hasEntry || cancelAgentMessage(m, for: id, reason: "Delivered with the next message to \(records[id]?.humanDisplayName ?? "the recipient"), after Array relaunched.") else { continue }
+            let inner = member(m.text, context.caller)
+            members.append(("While you were away: " + AgentMessageEnvelope.excerpt(inner.text, limit: 500), inner.senderID, inner.senderName))
+            updateCompanionTasks { try $0.cancelQueued(m.id) }
+            queuedWorkItemsCache[id]?.removeAll { $0.id == m.id }
+            runQueueOp(for: id) { _ = await store.removeQueuedMessage(id: m.id, for: id) }
+        }
+        pausedQueues.remove(id); queuePauseReasons[id] = nil
+        guard !members.isEmpty else { return nil }
+        members.append(member(text, senderID))
+        appendAgentDiagnostics("held backlog carried by a live message: count=\(members.count - 1)", agentID: id)
+        return AgentMessageEnvelope.wrapBatch(members)
     }
 
     private func hydrateQueueCache(for id: AgentID, restoredOutbox: [AgentMessageOutbox.Entry]? = nil, restoreOutboxFailed: Bool = false) {
