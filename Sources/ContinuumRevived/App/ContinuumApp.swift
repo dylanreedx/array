@@ -12215,13 +12215,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let now = AgentElapsedClock.now()
         guard let cache = lastInboxRows,
               ProcessInfo.processInfo.systemUptime - cache.builtAt < Self.chatterPatchMaxAge,
-              inboxRowsTimeDerivedDeadline.map({ now < $0 }) ?? true else { return nil }
+              inboxRowsTimeDerivedDeadline.map({ now < $0 }) ?? true else { qaPatchMisses[lastInboxRows == nil ? "no-cache" : (inboxRowsTimeDerivedDeadline.map({ now >= $0 }) == true ? "time-deadline" : "cache-age"), default: 0] += 1; return nil }
         var rows = cache.rows
         var patched = agents
         var rebuiltFamilies: Set<UUID> = []
         for agent in agents where !rebuiltFamilies.contains(agent) {
             let id = AgentID(rawValue: agent)
-            guard let index = rows.firstIndex(where: { $0.id == agent }) else { return nil }
+            guard let index = rows.firstIndex(where: { $0.id == agent }) else { qaPatchMisses["agent-not-in-rows", default: 0] += 1; return nil }
             if statePatchAgents.contains(agent) {
                 // Family moves other rows (children follow a parent's lifecycle, a
                 // child holds its parent open), so the agent's whole family, root
@@ -12231,16 +12231,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 guard Self.qaLegacySidebarFamilyPush == false || (rows[index].parentId == nil
                         && agentSupervisor.records[id]?.parentAgentID == nil
                         && !rows.contains(where: { $0.parentId == agent })),
-                      let family = inboxFamily(of: id) else { return nil }
+                      let family = inboxFamily(of: id) else { qaPatchMisses["family-cycle", default: 0] += 1; return nil }
                 let positions = rows.indices.filter { family.contains(rows[$0].id) }
-                guard positions.allSatisfy({ rows[$0].externalSession == nil && rows[$0].sharedAgent == nil }) else { return nil }
+                guard positions.allSatisfy({ rows[$0].externalSession == nil && rows[$0].sharedAgent == nil }) else { qaPatchMisses["family-external-or-shared", default: 0] += 1; return nil }
                 let built = markedForExternalSessions(buildAgentInboxRows(now: now, only: family))
-                guard built.count == positions.count else { return nil }
+                guard built.count == positions.count else { qaPatchMisses["family-count-mismatch", default: 0] += 1; return nil }
                 let byId = Dictionary(built.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 for position in positions {
-                    guard let row = byId[rows[position].id] else { return nil }
+                    guard let row = byId[rows[position].id] else { qaPatchMisses["family-row-missing", default: 0] += 1; return nil }
                     rows[position] = row
                 }
+                qaFamilyPatchRows += family.count
                 rebuiltFamilies.formUnion(family)
                 patched.formUnion(family)
                 continue
@@ -12251,7 +12252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                   let patched = AgentInboxRowBuilder.refreshingChatter(
                     rows[index], turnSnapshot: snapshot, record: record, boardUpdatedAt: updatedAt,
                     lastActivity: agentSupervisor.lastActivity(for: id), now: now)
-            else { return nil }
+            else { qaPatchMisses["chatter-row-not-patchable", default: 0] += 1; return nil }
             rows[index] = patched
         }
         lastInboxRows = (rows, cache.builtAt)
@@ -16779,6 +16780,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         ProcessInfo.processInfo.environment["CONTINUUM_QA_SIDEBAR_LEGACY_TURN_OBSERVER"] == "1"
     /// Why nameless (whole-sidebar) pushes were requested, by call site.
     private(set) var qaFullPushReasons: [String: Int] = [:]
+    /// Why a chatter/state patch gave up and a full build ran, and rows rebuilt by family patches.
+    private(set) var qaPatchMisses: [String: Int] = [:]
+    private(set) var qaFamilyPatchRows = 0
 
     /// .plans/113: the sidebar's real host wiring, for `--sidebar-sort-check`.
     func configureWorkspaceSidebarForQA(_ sidebar: WorkspaceSidebarView) { configureWorkspaceSidebar(sidebar) }
@@ -47019,6 +47023,40 @@ extension AppDelegate {
                 "9: family-only provisional rows changed the built rows")
         report.append(String(format: "provisional rows per build: %d (was %d); %.1f ms per build (was %.1f), debug",
                              familyRows.rows, everyRow.rows, familyRows.ms, everyRow.ms))
+
+        // 11 · Which reasons still force a whole-sidebar build with 300 helpers in
+        // families: quiet first, then helpers streaming and turning over.
+        let helperIds = supervisor.records.values.filter { $0.parentAgentID != nil }
+            .sorted(by: AgentStore.isOrderedBefore).map(\.id)
+        func census(_ label: String, _ body: () -> Void) -> (builds: Int, patchRows: Int, ms: Double) {
+            let b0 = app.qaInboxRowBuildCount, r0 = app.qaFamilyPatchRows
+            let m0 = app.qaPatchMisses, f0 = app.qaFullPushReasons
+            let n0 = app.qaAgentSurfacePushNanos
+            body()
+            let builds = app.qaInboxRowBuildCount - b0
+            let miss = app.qaPatchMisses.filter { $0.value != m0[$0.key, default: 0] }
+            let why = app.qaFullPushReasons.filter { $0.value != f0[$0.key, default: 0] }
+            report.append("\(label): \(builds) full builds, \(app.qaFamilyPatchRows - r0) family-patch rows, "
+                + String(format: "%.0f ms main in pushes", Double(app.qaAgentSurfacePushNanos - n0) / 1e6)
+                + ", patch misses \(miss), nameless pushes \(why)")
+            return (builds, app.qaFamilyPatchRows - r0, Double(app.qaAgentSurfacePushNanos - n0) / 1e6)
+        }
+        _ = census("quiet 3 s") { spin(timeout: 3.0) { false } }
+        let streamingHelpers = stride(from: 0, to: helperIds.count, by: 12).map { helperIds[$0] }
+        let busy = census("300 helpers: 25 stream and turn over for 6 s") {
+            for round in 0..<6 {
+                for helper in streamingHelpers {
+                    supervisor.qaDeliver(.turnStarted(threadId: thread(helper), turnId: "q\(round)"), to: helper)
+                    supervisor.qaDeliver(.itemStarted(threadId: thread(helper), itemId: "i\(round)", kind: .commandExecution, title: "rg x"), to: helper)
+                }
+                spin(timeout: 0.5) { false }
+                for helper in streamingHelpers {
+                    supervisor.qaDeliver(.turnCompleted(threadId: thread(helper), turnId: "q\(round)", outcome: .completed, errorMessage: nil), to: helper)
+                }
+                spin(timeout: 0.5) { false }
+            }
+        }
+        _ = busy
 
         if !failures.isEmpty {
             throw Failure(description: "SidebarEventCost RED:\n  " + failures.joined(separator: "\n  "))
