@@ -58,6 +58,8 @@ final class AgentTranscriptUpdateScheduler {
         pending = nil
         visualApplyCount += 1
         Self.qaTotalVisualApplies += 1
+        let hitchTag = MainThreadActivity.begin("transcript-apply")
+        defer { hitchTag.end() }
         update()
     }
 

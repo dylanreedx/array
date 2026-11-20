@@ -1995,6 +1995,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     var qaReplyOptionChipsAcceptFocus: Bool { replyOptionRail.qaChipsAcceptFocus }
     var qaReplyOptionChipAccessibilityLabels: [String] { replyOptionRail.qaChipAccessibilityLabels }
     var qaDraftText: String { draft.text }
+    /// Real editor paths, so a check drives the same delegate callbacks a user does.
+    func qaMoveCaretForChecks(to location: Int) { textView.setSelectedRange(NSRange(location: location, length: 0)) }
+    func qaTypeForChecks(_ text: String) { textView.insertText(text, replacementRange: textView.selectedRange()) }
     var qaQueueRail: ComposerQueuedMessageRailView { queuedMessageRail }
     var qaKeyHint: String? { keyHintLabel.isHidden ? nil : keyHintLabel.stringValue }
     var qaDictationProvisionalRange: NSRange? { dictation.qaProvisionalRange }

@@ -203,6 +203,12 @@ enum TileSurfaceResidencyChecks {
             return true
         }
 
+        /// One real driver pan commit of `dy` points.
+        func panStep(dy: CGFloat) {
+            clock.now += commitGap
+            canvas.cameraDriver.noteScrollPan(dx: 0, dy: dy, location: CGPoint(x: 800, y: 500))
+        }
+
         /// The real settle edge: cancels any glide, flushes, and calls `markSettled`,
         /// which is what fires `onSettle` in a live gesture.
         func settle() {
@@ -310,6 +316,67 @@ enum TileSurfaceResidencyChecks {
         let start = ProcessInfo.processInfo.systemUptime
         body()
         return (ProcessInfo.processInfo.systemUptime - start) * 1_000
+    }
+
+    // MARK: - Far-parked backing stores
+
+    /// Bytes of AppKit backing store a far-parked tile keeps, on the DEFAULT renderer.
+    /// RED with `CONTINUUM_LEGACY_PARKED_BACKING=1` (every store kept), GREEN without.
+    /// Returning tiles must have their pixels back after one display pass, so the
+    /// frame that shows them is not blank.
+    static func runFarParkBackingCheck() throws {
+        let world = World(tileCount: 8)
+        defer { world.teardown() }
+        world.canvas.farParkingEnabled = false
+        world.canvas.surfaceResidencyEnabled = false
+        let views = world.tiles.compactMap { world.agentViews[$0.id] }
+        func total(_ pick: (ManagedAgentTileNSView) -> NSView?) -> ParkedBackingStore.Census {
+            var sum = ParkedBackingStore.Census()
+            for view in views {
+                guard let body = pick(view) else { continue }
+                let c = ParkedBackingStore.census(in: body)
+                sum.layers += c.layers
+                sum.bytes += c.bytes
+                for (k, v) in c.byClass { sum.byClass[k, default: 0] += v }
+            }
+            return sum
+        }
+        for _ in 0..<3 { world.pump() }
+        let native = total { $0.farParkableBody }
+        print("native: \(native.layers) layers, \(native.bytes / 1024) KB, by class \(native.byClass)")
+        try expect(native.bytes > 0, "fixture drew no backing stores, so the witness would prove nothing")
+        for view in views {
+            try expect(view.parkBodyFarOffscreen(park: world.canvas.surfaceParkView), "fixture could not far-park a tile")
+        }
+        print("parked, before any pass: \(total { $0.parkedBody }.bytes / 1024) KB")
+        func kb() -> Int { total { $0.parkedBody }.bytes / 1024 }
+        world.canvas.layoutSubtreeIfNeeded(); print("after layout: \(kb()) KB")
+        world.window.displayIfNeeded(); print("after displayIfNeeded: \(kb()) KB")
+        CATransaction.flush(); print("after flush: \(kb()) KB")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1)); print("after runloop: \(kb()) KB")
+        let dirty = views.filter { $0.parkedBody?.needsDisplay == true }.count
+        print("parked bodies still marked needsDisplay: \(dirty), park hidden: \(world.canvas.surfaceParkView.isHidden)")
+        for _ in 0..<3 { world.pump(); RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let parked = total { $0.parkedBody }
+        let perTile = parked.bytes / max(views.count, 1)
+        print("parked: \(parked.layers) layers, \(parked.bytes / 1024) KB (\(perTile / 1024) KB per tile), by class \(parked.byClass)")
+        var returnMs: [Double] = []
+        for view in views {
+            let ms = milliseconds {
+                view.promoteBodyToNative()
+                world.canvas.layoutSubtreeIfNeeded()
+                world.window.displayIfNeeded()
+                CATransaction.flush()
+            }
+            returnMs.append(ms)
+        }
+        let back = total { $0.farParkableBody }
+        let sorted = returnMs.sorted()
+        print("returned: \(back.bytes / 1024) KB; tile return incl. display: median \(String(format: "%.2f", sorted[sorted.count / 2])) ms, max \(String(format: "%.2f", sorted.last ?? 0)) ms (debug build)")
+        try expect(parked.bytes * 20 <= native.bytes,
+                   "far-parked tiles keep \(parked.bytes / 1024) KB of backing store against \(native.bytes / 1024) KB native")
+        try expect(back.bytes * 10 >= native.bytes * 9,
+                   "returned tiles drew \(back.bytes / 1024) KB of \(native.bytes / 1024) KB in the first display pass")
     }
 
     // MARK: - Run
@@ -916,6 +983,55 @@ enum TileSurfaceResidencyChecks {
         try expect(returned.inputEvents == 0 && returned.inputToFirstFrameMs == nil,
                    "a gesture with no routed input must not invent an input time")
         try runSelectionDefersCursorRectsWhileTheCameraMoves()
+        try runFarReturnsAreSpreadAhead()
+    }
+
+    /// Parked tiles uncovered by a pan return AHEAD of the screen and never more than a
+    /// frame's budget at once. 60 tiles in a 3-wide column of rows, a quarter of them
+    /// parked at any time; a pan at 60/150/300 points a frame.
+    static func runFarReturnsAreSpreadAhead() throws {
+        var results: [String: [Int: (onScreen: Int, worst: Int)]] = [:]
+        defer { _ = results }
+        for legacy in [true, false] {
+            CanvasNSView.qaLegacyFarReturn = legacy
+            defer { CanvasNSView.qaLegacyFarReturn = false }
+            for speed: CGFloat in [60, 150, 300] {
+                let world = World(tileCount: 60)
+                defer { world.teardown() }
+                let canvas = world.canvas
+                canvas.surfaceResidencyEnabled = false
+                canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+                world.pump(); world.settle()
+                world.window.makeFirstResponder(nil)
+                while canvas.qaRunFarParkingPass() { world.pump() }
+                let parkedAtStart = canvas.qaFarParkedTileCount
+                var worstMs = 0.0, worstReturns = 0, total = 0, framesWithReturns = 0
+                let onScreenBefore = canvas.qaFarReturnOnScreenCount
+                let y0 = canvas.viewport.y
+                for _ in 0..<40 {
+                    let returnsBefore = canvas.qaFarReturnCount
+                    let t0 = ProcessInfo.processInfo.systemUptime
+                    world.panStep(dy: -speed)
+                    world.pump()
+                    canvas.qaCompletePendingFrame()
+                    let ms = (ProcessInfo.processInfo.systemUptime - t0) * 1_000
+                    let returns = canvas.qaFarReturnCount - returnsBefore
+                    worstMs = max(worstMs, ms); worstReturns = max(worstReturns, returns)
+                    total += returns; if returns > 0 { framesWithReturns += 1 }
+                }
+                let onScreen = canvas.qaFarReturnOnScreenCount - onScreenBefore
+                print("FARRETURN \(legacy ? "legacy" : "fixed") speed \(Int(speed))/frame: parked at start \(parkedAtStart), "
+                      + "moved y \(Int(canvas.viewport.y - y0)), returns \(total) in \(framesWithReturns) frames, worst \(worstReturns)/frame, "
+                      + "on-screen returns \(onScreen), worst frame \(String(format: "%.1f", worstMs)) ms")
+                results[legacy ? "legacy" : "fixed", default: [:]][Int(speed)] = (onScreen, worstReturns)
+            }
+        }
+        let legacyOnScreen = results["legacy"]?.values.map(\.onScreen).reduce(0, +) ?? 0
+        let fixedOnScreen = results["fixed"]?.values.map(\.onScreen).reduce(0, +) ?? 0
+        try expect(legacyOnScreen > 0, "legacy far returns must land on screen in a fast pan (witness vacuous)")
+        try expect(fixedOnScreen * 2 <= legacyOnScreen, "far returns still land on screen: \(fixedOnScreen) fixed vs \(legacyOnScreen) legacy")
+        try expect(results["fixed"]?[150]?.onScreen == 0, "a 150 pt/frame pan returned parked tiles on screen")
+        try expect((results["fixed"]?.values.map(\.worst).max() ?? 0) <= 5, "a frame returned more than its budget")
     }
 
     /// With tiles selected, every camera step invalidated the selection overlay's

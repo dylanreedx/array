@@ -1310,6 +1310,25 @@ final class AgentSupervisor {
         didSet { if recordStorage.count != characterPackRecordCount { scheduleCharacterPacks() } }
     }
     var records: [AgentID: AgentRecord] { recordStorage }
+
+    /// Every record in `AgentStore.isOrderedBefore` order. A whole-sidebar build
+    /// asked for this sort each time (~23% of a build at ~1,700 records); the
+    /// order moves only when a record arrives, leaves or changes `createdAt`.
+    private var orderedRecordIDsCache: [AgentID]?
+    /// Sorts performed, for the cache witness.
+    private(set) var qaRecordSortCount = 0
+    /// QA seam: `CONTINUUM_QA_RECORD_SORT_CACHE_OFF=1` sorts on every call.
+    nonisolated(unsafe) static var qaRecordSortCacheOff =
+        ProcessInfo.processInfo.environment["CONTINUUM_QA_RECORD_SORT_CACHE_OFF"] == "1"
+    func recordsInDisplayOrder() -> [AgentRecord] {
+        if !Self.qaRecordSortCacheOff, let ids = orderedRecordIDsCache, ids.count == recordStorage.count {
+            return ids.compactMap { recordStorage[$0] }
+        }
+        qaRecordSortCount += 1
+        let sorted = recordStorage.values.sorted(by: AgentStore.isOrderedBefore)
+        orderedRecordIDsCache = sorted.map(\.id)
+        return sorted
+    }
     private var characterPackRecordCount = 0
     private var characterPacksScheduled = false
 
@@ -1317,6 +1336,13 @@ final class AgentSupervisor {
     /// message card reads avoids capturing/copying the complete dictionary on
     /// every agent event while still covering restore, removal and retargeting.
     private func setRecord(_ record: AgentRecord?, for id: AgentID) {
+        // The display order depends on membership and `createdAt` only.
+        if orderedRecordIDsCache != nil {
+            let before = recordStorage[id]
+            if (before == nil) != (record == nil) || before?.createdAt != record?.createdAt {
+                orderedRecordIDsCache = nil
+            }
+        }
         if runtimeObservationObservers[id] != nil,
            (records[id] == nil) != (record == nil) || records[id]?.harness != record?.harness {
             quotaObservationIndexDirty = true
@@ -3729,7 +3755,20 @@ final class AgentSupervisor {
         // child tile does not sit apparently mid-turn forever. Runs at the END,
         // because it needs every restored record in `records` to resolve a child's
         // parent.
-        reconcileObservedRunsAfterRestore()
+        if let ledger = companionTaskLedger, companionTaskTrackingHealthy {
+            // One ledger commit for the whole replay, not one per event.
+            let before = ledger.revision
+            do {
+                try ledger.batch { reconcileObservedRunsAfterRestore() }
+                if before != ledger.revision { onCompanionTasksChanged?() }
+            } catch {
+                companionTaskTrackingHealthy = false
+                warn("Companion task tracking failed; task notifications remain withheld.")
+                onCompanionTasksChanged?()
+            }
+        } else {
+            reconcileObservedRunsAfterRestore()
+        }
         reconcileManagedMode()
         restoreHelperMessageSubscriptions()
         settleHelpersCutOffByRestart()
@@ -4939,6 +4978,7 @@ final class AgentSupervisor {
         operation: @escaping @Sendable (@escaping @Sendable (AgentRuntimeEvent) -> Void) throws -> Void
     ) {
         guard let record = records[id] else { return }
+        prewarmedUnused.removeAll { $0.id == id }
         let runnerGeneration = RunnerGenerationToken()
         if companionAcceptedStarts.remove(id) == nil && !continuingHelperRetry.contains(id) {
             updateCompanionTasks { ledger in companionRunBindings[id] = try ledger.beginUnknown(agentID: id.rawValue) }
@@ -10866,8 +10906,10 @@ final class AgentSupervisor {
 
     /// The durable half of `trackHelperMessage`, read back at restore.
     private func restoreHelperMessageSubscriptions() {
-        for lead in records.values where lead.capabilities.locallyManaged {
-            for row in SpawnResultFile.subscriptions(parentCwd: lead.cwd, recipient: lead.id.rawValue) {
+        let leads = records.values.filter { $0.capabilities.locallyManaged }
+        let rowsByLead = SpawnResultFile.subscriptions(leads: leads.map { ($0.cwd, $0.id.rawValue) })
+        for lead in leads {
+            for row in rowsByLead[lead.id.rawValue] ?? [] {
                 let helper = AgentID(rawValue: row.helper)
                 guard records[helper] != nil,
                       !(helperMessageSubscriptions[helper] ?? []).contains(where: { $0.parent == lead.id && $0.handle == row.handle })
@@ -12577,6 +12619,9 @@ final class AgentSupervisor {
     }
 
     /// Waits for `id`'s serialized queue writes, so a reader counts what is stored.
+    /// The drain `clearRunner` starts after every finished turn.
+    func qaDrainQueueForChecks(_ id: AgentID) { drainQueue(for: id) }
+
     func qaQueueWritesSettled(for id: AgentID) async {
         await queueOpTasks[id]?.value
     }
@@ -12951,6 +12996,8 @@ final class AgentSupervisor {
 
     private func ingestTranscriptEvent(_ event: AgentRuntimeEvent, for id: AgentID, bypassReload: Bool = false,
                                        gestureDrain: Bool = false) {
+        let hitchTag = MainThreadActivity.begin("transcript-ingest")
+        defer { hitchTag.end() }
         guard transcriptStore != nil else { return }
         if !bypassReload, !gestureDrain {
             if case .contentDelta = event, deferIngestForGesture(event, for: id) { return }
@@ -13833,22 +13880,73 @@ final class AgentSupervisor {
 
     /// Nothing is reading or about to write this agent's transcript.
     private func transcriptIsDormant(_ id: AgentID) -> Bool {
-        transcriptStore != nil && records[id] != nil && !isRunning(id)
-            && records[id]?.externalSession == nil && (providerHistoryReadPins[id]?.isEmpty ?? true)
-            && (subscribers[id]?.isEmpty ?? true)
-            && sharedTranscriptDetailObservers[id] == nil
-            && outsideHistoryObservers[id] == nil
-            && (localNoticeObservers[id]?.isEmpty ?? true)
-            && !adoptingSessionHistory.contains(id) && !terminalFaceAgents.contains(id)
-            && !compactingAgents.contains(id) && !activeCompactionOperations.contains(id)
-            && !contextRecoveryInFlight.contains(id)
-            && transcriptPersistenceTasks[id] == nil && transcriptPersistDebounce[id] == nil
-            && transcriptReloads[id] == nil
-            && canonicalTranscriptPreflights[id] == nil
-            && (transcriptProjections[id].map { $0.activeToolCount == 0 } ?? true)
+        transcriptDormancyBlocker(id) == nil
+    }
+
+    /// The first condition that keeps `id`'s transcript resident, nil when it is
+    /// dormant. One list serves the release gate and the retention report, so
+    /// the report names exactly what the gate checked.
+    private func transcriptDormancyBlocker(_ id: AgentID) -> String? {
+        if transcriptStore == nil { return "no-store" }
+        if records[id] == nil { return "no-record" }
+        if isRunning(id) { return "running" }
+        if records[id]?.externalSession != nil { return "external-session" }
+        if !(providerHistoryReadPins[id]?.isEmpty ?? true) { return "provider-read-pin" }
+        if !(subscribers[id]?.isEmpty ?? true) { return "tile-subscriber" }
+        if sharedTranscriptDetailObservers[id] != nil { return "detail-observer" }
+        if outsideHistoryObservers[id] != nil { return "outside-history-observer" }
+        if !(localNoticeObservers[id]?.isEmpty ?? true) { return "notice-observer" }
+        if adoptingSessionHistory.contains(id) { return "adopting-history" }
+        if terminalFaceAgents.contains(id) { return "terminal-face" }
+        if compactingAgents.contains(id) || activeCompactionOperations.contains(id) { return "compacting" }
+        if contextRecoveryInFlight.contains(id) { return "context-recovery" }
+        if transcriptPersistenceTasks[id] != nil || transcriptPersistDebounce[id] != nil { return "save-pending" }
+        if transcriptReloads[id] != nil { return "reloading" }
+        if canonicalTranscriptPreflights[id] != nil { return "preflight" }
+        if let projection = transcriptProjections[id], projection.activeToolCount != 0 { return "active-tool" }
+        return nil
+    }
+
+    /// Why each agent holding a decoded transcript still holds it: blocker name
+    /// to agent count. Agents the release gate would not even schedule for
+    /// (persistence blocked, local-only history, not yet canonical) are named
+    /// by that reason.
+    func transcriptRetentionBlockers() -> [String: Int] {
+        var counts: [String: Int] = [:]
+        let resident = Set(transcriptProjections.keys).union(sharedTranscriptDetails.keys)
+            .union(canonicalTranscriptProjections.keys)
+        for id in resident {
+            let reason: String
+            if transcriptPersistenceBlocked.contains(id) { reason = "persistence-blocked" }
+            else if transcriptHasLocalOnlyHistory.contains(id) { reason = "local-only-history" }
+            else if !canonicalTranscriptReady.contains(id) { reason = "not-canonical-yet" }
+            else { reason = transcriptDormancyBlocker(id) ?? "releasable" }
+            counts[reason, default: 0] += 1
+        }
+        return counts
+    }
+
+    private static let retentionLogger = Logger(subsystem: "continuum.canvas", category: "stall")
+    private var retentionReportTask: Task<Void, Never>?
+
+    /// One line in the hitch-log category, so a prod build can say what keeps
+    /// its transcripts decoded: `retention: 255 resident; tile-subscriber 240, ...`.
+    private func startRetentionReport() {
+        guard retentionReportTask == nil, transcriptStore != nil else { return }
+        retentionReportTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(300))
+                guard let self else { return }
+                let counts = self.transcriptRetentionBlockers()
+                guard !counts.isEmpty else { continue }
+                let parts = counts.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }
+                Self.retentionLogger.notice("retention: \(counts.values.reduce(0, +)) resident; \(parts.joined(separator: ", "))")
+            }
+        }
     }
 
     private func scheduleTranscriptRelease(for id: AgentID) {
+        startRetentionReport()
         guard !transcriptPersistenceBlocked.contains(id), !transcriptHasLocalOnlyHistory.contains(id),
               transcriptProjections[id] != nil || sharedTranscriptDetails[id] != nil,
               transcriptIsDormant(id) else { return }
@@ -14137,6 +14235,10 @@ final class AgentSupervisor {
             for observer in Array((transcriptReloadObservers[id] ?? [:]).values) { observer() }
         }
     }
+
+    /// QA: whether this launch counts `id`'s history as loaded (a restore, a
+    /// transcript of its own, or a live event), as the first reveal asks.
+    func qaHasLoadedHistory(_ id: AgentID) -> Bool { hasLoadedHistory(id) }
 
     /// QA: what this supervisor holds decoded across every agent.
     var qaHeldTranscripts: (projections: Int, rehydrated: Int, toolDetails: Int, events: Int, released: Int) {
@@ -14686,6 +14788,18 @@ final class AgentSupervisor {
     private(set) var qaIdleReapCount = 0
     /// Sessions `prewarmSession` started, for the witness.
     private(set) var qaPrewarmCount = 0
+    /// Pre-warmed sessions nobody has sent to yet, oldest first. At most
+    /// `maxUnusedPrewarmed` live; a newer one closes the oldest.
+    private var prewarmedUnused: [(id: AgentID, runner: AgentRunning)] = []
+    nonisolated static let maxUnusedPrewarmed = 2
+    var qaUnusedPrewarmedCount: Int { prewarmedUnused.count }
+    /// How often an idle session on a visible tile re-reads its visibility once
+    /// the hidden cap has passed.
+    var idleVisibilityPollInterval: TimeInterval = 30
+    /// QA: `CONTINUUM_QA_REAP_VISIBILITY_ONCE=1` restores reading visibility only
+    /// when the timer is scheduled; `CONTINUUM_QA_PREWARM_UNLIMITED=1` lifts the cap.
+    nonisolated static let reapVisibilityOnce = ProcessInfo.processInfo.environment["CONTINUUM_QA_REAP_VISIBILITY_ONCE"] == "1"
+    nonisolated static let prewarmUnlimited = ProcessInfo.processInfo.environment["CONTINUUM_QA_PREWARM_UNLIMITED"] == "1"
     /// QA only: `CONTINUUM_QA_PREWARM_OFF=1` turns pre-warming off, so one
     /// binary shows the witness RED and GREEN.
     nonisolated static let prewarmDisabled = ProcessInfo.processInfo.environment["CONTINUUM_QA_PREWARM_OFF"] == "1"
@@ -15266,7 +15380,13 @@ final class AgentSupervisor {
         let hiddenTimeout = min(visibleTimeout, idleHiddenRunnerTimeout)
         let waited = Date().timeIntervalSince(since)
         let isVisible = agentVisibleProvider?(id) == true
-        let delay = max(0, (isVisible ? visibleTimeout : hiddenTimeout) - waited)
+        var delay = max(0, (isVisible ? visibleTimeout : hiddenTimeout) - waited)
+        // A tile that scrolls off screen while its session idles falls under the
+        // hidden cap: look again at the cap (then every poll) instead of
+        // sleeping out the whole visible timeout.
+        if isVisible, hiddenTimeout < visibleTimeout, !Self.reapVisibilityOnce {
+            delay = min(delay, max(hiddenTimeout - waited, idleVisibilityPollInterval))
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.idleReapTokens[id] == token, self.idleSessionRunners[id] === runner else { return }
             // A running shell job (a dev server) or child keeps the session;
@@ -15282,15 +15402,20 @@ final class AgentSupervisor {
                 self.scheduleIdleReap(for: id, runner: runner, since: since, visibleTimeout: visibleTimeout)
                 return
             }
-            self.idleReapTokens[id] = nil
-            self.idleSessionRunners[id] = nil
             self.qaIdleReapCount &+= 1
-            runner.stop()
-            self.interruptWorkingClaudeMirroredChildren(of: id)
-            self.returnDeliveringSteers(for: id)
-            self.releaseHeldHelperCompletion(id)
-            self.notifyTurnCapabilitiesChanged(id)
+            self.closeIdleSession(id, runner)
         }
+    }
+
+    private func closeIdleSession(_ id: AgentID, _ runner: AgentRunning) {
+        idleReapTokens[id] = nil
+        idleSessionRunners[id] = nil
+        prewarmedUnused.removeAll { $0.id == id }
+        runner.stop()
+        interruptWorkingClaudeMirroredChildren(of: id)
+        returnDeliveringSteers(for: id)
+        releaseHeldHelperCompletion(id)
+        notifyTurnCapabilitiesChanged(id)
     }
 
     /// Starts a dormant Claude agent's session while the user writes to it, so
@@ -15312,6 +15437,11 @@ final class AgentSupervisor {
         idleSessionRunners[id] = runner
         qaPrewarmCount &+= 1
         scheduleIdleReap(for: id, runner: runner)
+        prewarmedUnused.append((id, runner))
+        while !Self.prewarmUnlimited, prewarmedUnused.count > Self.maxUnusedPrewarmed {
+            let oldest = prewarmedUnused.removeFirst()
+            if idleSessionRunners[oldest.id] === oldest.runner { closeIdleSession(oldest.id, oldest.runner) }
+        }
         DispatchQueue.global(qos: .userInitiated).async { try? warming.prewarm() }
         return true
     }

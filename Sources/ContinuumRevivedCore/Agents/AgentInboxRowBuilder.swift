@@ -391,6 +391,11 @@ public enum AgentInboxRowBuilder {
     /// Translate the existing child rollup's two hold-open states into the same
     /// blocker set the parent lifecycle and settle action consume. Failed and
     /// ready descendants remain visible in the rollup but do not block.
+    /// Provisional rows built by `descendantBlockers`, for its witness. Main-thread only.
+    nonisolated(unsafe) public static var qaProvisionalRowCount = 0
+    /// QA seam: `CONTINUUM_QA_EVERY_PROVISIONAL_ROW=1` builds one for every board row.
+    nonisolated(unsafe) public static var qaBuildEveryProvisionalRow =
+        ProcessInfo.processInfo.environment["CONTINUUM_QA_EVERY_PROVISIONAL_ROW"] == "1"
     private static func descendantBlockers(
         in boardRows: [AgentsBoardRow],
         attention: [UUID: InboxAttention],
@@ -398,7 +403,19 @@ public enum AgentInboxRowBuilder {
         lifecycleFacts: [UUID: AgentLifecycleFacts],
         now: Date
     ) -> [UUID: LifecycleBlockers] {
-        let provisionalRows = boardRows.map { boardRow in
+        // Only a row with a present parent or a present child can add to, or take
+        // from, a rollup; the rest were built and sorted for nothing (about 40% of
+        // a full build). Nesting depends on the family alone, so a subset holds
+        // the same rollups.
+        let present = Set(boardRows.map(\.agentId))
+        let parentsPresent = Set(boardRows.compactMap { $0.context?.parentId }.filter(present.contains))
+        let family = AgentInboxRowBuilder.qaBuildEveryProvisionalRow ? boardRows : boardRows.filter {
+            parentsPresent.contains($0.agentId) || $0.context?.parentId.map(present.contains) == true
+        }
+        guard !family.isEmpty else { return [:] }
+        let provisionalRows = family.map { boardRow in
+            AgentInboxRowBuilder.qaProvisionalRowCount += 1
+            return
             row(
                 from: boardRow,
                 attention: attention[boardRow.agentId] ?? .none,

@@ -263,15 +263,64 @@ public final class CompanionTaskLedger: @unchecked Sendable {
         Darwin.close(fd)
     }
 
+    /// `CONTINUUM_LEGACY_LEDGER_BATCH=1` makes `batch` a plain call: every change
+    /// copies, compares and diffs the whole ledger and writes its own journal line.
+    /// The RED arm of `--ledger-batch-check`.
+    nonisolated(unsafe) public static var legacyPerChangeCommit =
+        ProcessInfo.processInfo.environment["CONTINUUM_LEGACY_LEDGER_BATCH"] != nil
+    private let commits = QACounter()
+    public var commitsForQA: Int { commits.value }
+    /// The ledger as it was when the open batch began; nil outside a batch.
+    private var batchBase: File?
+
+    /// Runs `body` (which makes any number of ledger changes) as ONE commit.
+    ///
+    /// Restore replays hundreds of finished runs through `observe`, and each
+    /// change copied the whole ledger, compared it with the old one, diffed every
+    /// dictionary for its journal line and stamped every task: work proportional
+    /// to the ledger, per event (0.7 s of a boot with 147 agents). In a batch each
+    /// change edits the ledger in place, and the stamp, the revision bump and the
+    /// journal line happen once, at the end. Reads inside the batch see every
+    /// earlier change in it.
+    public func batch(_ body: () -> Void) throws {
+        if Self.legacyPerChangeCommit { body(); return }
+        lock.lock()
+        guard batchBase == nil else { lock.unlock(); body(); return }
+        batchBase = file
+        lock.unlock()
+        body()
+        lock.lock(); defer { lock.unlock() }
+        guard let base = batchBase else { return }
+        batchBase = nil
+        guard file != base else { return }
+        Self.stamp(&file, against: base, at: clock().timeIntervalSince1970)
+        guard base.revision < UInt64.max else { throw CompanionTaskLedgerError.revisionExhausted }
+        file.revision = max(file.revision, base.revision + 1)
+        commits.increment()
+        if journalNeedsReset || journalBytes >= Self.compactionThreshold {
+            try compact(file)
+        } else {
+            try append(Delta(from: base, to: file))
+        }
+    }
+
     @discardableResult
     private func change<T>(touching: Bool = true, _ body: (inout File) throws -> T) throws -> T {
         lock.lock(); defer { lock.unlock() }
+        if batchBase != nil {
+            // Take the storage out of `file` so the body mutates it in place.
+            var next = file
+            file = File()
+            defer { file = next }
+            return try body(&next)
+        }
         var next = file
         let result = try body(&next)
         if next != file {
             if touching { Self.stamp(&next, against: file, at: clock().timeIntervalSince1970) }
             guard file.revision < UInt64.max else { throw CompanionTaskLedgerError.revisionExhausted }
             next.revision = max(next.revision, file.revision + 1)
+            commits.increment()
             if journalNeedsReset || journalBytes >= Self.compactionThreshold {
                 try compact(next)
             } else {

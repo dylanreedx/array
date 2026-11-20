@@ -356,6 +356,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// new ones (P6.1). WEAK — the tile is a view of an agent the supervisor owns,
     /// and a view must never keep it alive.
     private weak var agentSource: AgentSupervisor?
+    /// The composer text the pre-warm last saw, so only a real edit starts a session.
+    private var lastDraftTextSeenForPrewarm = ""
     private let leadPlanView = AgentLeadPlanView(frame: .zero)
     private var leadPlanObserverToken: UUID?
     var qaLeadPlanView: AgentLeadPlanView { leadPlanView }
@@ -567,11 +569,20 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             self?.onUserDraftEdited?()
             // A message is being written: start a closed session now so it
             // does not wait for the CLI to boot when it is sent.
-            if !draft.text.isEmpty, let self, let id = self.projectedAgentID {
+            // Only a change of the words counts: a caret move or a click into a
+            // restored, unsent draft is not someone writing, and used to start
+            // a CLI that nothing then used.
+            guard let self else { return }
+            let wordsChanged = draft.text != self.lastDraftTextSeenForPrewarm
+            self.lastDraftTextSeenForPrewarm = draft.text
+            if wordsChanged, !draft.text.isEmpty, let id = self.projectedAgentID {
                 self.agentSource?.prewarmSession(for: id)
             }
         }
-        v2Composer?.onDraftApplied = { [weak self] in self?.updateV2ComposerPresentation() }
+        v2Composer?.onDraftApplied = { [weak self] in
+            self?.lastDraftTextSeenForPrewarm = self?.v2Composer?.draft.text ?? ""
+            self?.updateV2ComposerPresentation()
+        }
         v2Composer?.onSubmitPrompt = { [weak self] prompt in self?.onSubmitPrompt?(prompt) }
         v2Composer?.onSubmissionStarted = { [weak self] prompt in
             self?.beginOptimisticSubmission(prompt)
@@ -795,6 +806,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         supervisor: AgentSupervisor,
         projectName: String? = nil
     ) {
+        farParkedFollow = nil
         if attachedAgentID == agentID, eventSubscription != nil {
             // Assign unconditionally (including nil), matching the full-attach
             // path below: re-attaching after a Change Home to a custom FOLDER
@@ -2194,9 +2206,60 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     var isAttachedToAgent: Bool { attachedAgentID != nil }
 
+    /// Far parking used to keep the tile's event tail and observers, which kept
+    /// its agent from ever going dormant: a canvas of far-parked tiles held every
+    /// agent's decoded transcript for as long as it stayed there. The tile lets go
+    /// of its follow now, as a workspace park does, keeping the transcript it
+    /// shows, and follows again when it comes back. `CONTINUUM_QA_LEGACY_FAR_PARK_KEEPS_TAIL=1`
+    /// restores the old behaviour for the witness's RED arm.
+    static let qaLegacyFarParkKeepsTail = ProcessInfo.processInfo.environment["CONTINUUM_QA_LEGACY_FAR_PARK_KEEPS_TAIL"] == "1"
+    private var farParkedFollow: (agentID: AgentID, supervisor: AgentSupervisor, projectName: String?)?
+
     override func farParkStateDidChange() {
+        if !isFarParked, let follow = farParkedFollow {
+            farParkedFollow = nil
+            statusHeldWhileParked = false
+            attach(agentID: follow.agentID, supervisor: follow.supervisor, projectName: follow.projectName)
+            return
+        }
+        if !isFarParked, statusHeldWhileParked {
+            // Back in view: one refresh brings the row, the tail text, the turn
+            // cards and the stale-What timer up to the agent's current state.
+            statusHeldWhileParked = false
+            refreshLocationStatus()
+        }
         guard let agentID = attachedAgentID, eventSubscription != nil else { return }
+        if isFarParked, !Self.qaLegacyFarParkKeepsTail, let supervisor = agentSource {
+            farParkedFollow = (agentID, supervisor, locationProjectName)
+            detach()
+            return
+        }
         agentSource?.setEventsPresented(!isFarParked, for: agentID)
+    }
+
+    /// A far-parked tile's status row is off every screen, yet each streamed
+    /// chunk, tool event and elapsed tick rebuilt it (the chunk timers of every
+    /// streaming tile start on the same source tick, so the rebuilds landed in
+    /// one run-loop pass, a frame-long stall several times a second at idle).
+    /// While parked the refresh is only noted; the return refreshes once. A
+    /// detached tile still settles its row (`settleLocationForDetach`).
+    private var statusHeldWhileParked = false
+    private var settlingForDetach = false
+    var qaStatusHeldWhileParked: Bool { statusHeldWhileParked }
+    nonisolated(unsafe) static var qaParkedStatusHoldEnabled =
+        ProcessInfo.processInfo.environment["PARKED_STATUS_HOLD"] != "off"
+    /// QA (`--idle-frames-check`): status-row rebuilds, those on parked tiles, the
+    /// main-thread seconds they took, and refreshes held while parked.
+    nonisolated(unsafe) static var qaStatusRefreshes = 0
+    nonisolated(unsafe) static var qaParkedStatusRefreshes = 0
+    nonisolated(unsafe) static var qaStatusRefreshSeconds = 0.0
+    nonisolated(unsafe) static var qaParkedStatusHolds = 0
+
+    private func holdsStatusWhileParked() -> Bool {
+        guard isFarParked, !settlingForDetach, attachedAgentID != nil, Self.qaParkedStatusHoldEnabled else { return false }
+        statusHeldWhileParked = true
+        Self.qaParkedStatusHolds &+= 1
+        return true
     }
 
     func detach() {
@@ -2977,9 +3040,14 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     /// QA: tail events a tile applied (the per-delta main-thread cost it paid).
     nonisolated(unsafe) static var qaTailEventsApplied = 0
+    nonisolated(unsafe) static var qaParkedTailEventsApplied = 0
+    nonisolated(unsafe) static var qaTailEventSeconds = 0.0
 
     private func applyTailEvent(_ event: AgentRuntimeEvent) {
         Self.qaTailEventsApplied &+= 1
+        if isFarParked { Self.qaParkedTailEventsApplied &+= 1 }
+        let started = CACurrentMediaTime()
+        defer { Self.qaTailEventSeconds += CACurrentMediaTime() - started }
         let bound = event.withThreadId(threadId)
         // Capture the provider event before host-local transcript remapping;
         // the original runtime thread is immutable tool identity, not a
@@ -3178,7 +3246,16 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// `now` defaults to `AgentElapsedClock` (`Date()` outside the film build), the
     /// clock the header's own elapsed readout uses, so the two never disagree.
     private func refreshCompactStatus(at now: Date = AgentElapsedClock.now(), location: AgentLocationSnapshot? = nil) {
-        defer { chromeDidChange() }
+        if holdsStatusWhileParked() { return }
+        let hitchTag = MainThreadActivity.begin("status-tick")
+        defer { hitchTag.end() }
+        let started = CACurrentMediaTime()
+        defer {
+            chromeDidChange()
+            Self.qaStatusRefreshSeconds += CACurrentMediaTime() - started
+            Self.qaStatusRefreshes &+= 1
+            if isFarParked { Self.qaParkedStatusRefreshes &+= 1 }
+        }
         // Turn cards: the newest turn's work strip reads the same presence the
         // row does, on the same tick.
         transcriptCollectionFixture?.setTurnPresence(currentPresence)
@@ -3256,13 +3333,39 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                     self?.cancelCompactStatusTick()
                     return
                 }
+                // A camera gesture is not the moment to rebuild every working
+                // tile's status row: the elapsed text is one second coarse, so
+                // the refresh waits for the governor's drain (0.15 s after the
+                // gesture) and runs once, instead of once per tile per second.
+                if Self.qaStatusTickDeferEnabled,
+                   FrameGovernor.shared.deferKeyed(ObjectIdentifier(self), { [weak self] in
+                       guard let self, self.window != nil else { return }
+                       Self.qaStatusTickRuns &+= 1
+                       self.refreshCompactStatus()
+                   }) {
+                    Self.qaStatusTickDeferred &+= 1
+                    return
+                }
+                Self.qaStatusTickRuns &+= 1
+                if self.isFarParked { Self.qaParkedStatusTickRuns &+= 1 }
+                let started = CACurrentMediaTime()
                 self.refreshCompactStatus()
+                Self.qaStatusTickSeconds += CACurrentMediaTime() - started
             }
         }
         timer.tolerance = 0.25
         RunLoop.main.add(timer, forMode: .common)
         compactStatusTickTimer = timer
     }
+
+    /// QA: the 1 Hz status tick's gesture deferral (off = legacy, runs every tick).
+    nonisolated(unsafe) static var qaStatusTickDeferEnabled = true
+    nonisolated(unsafe) static var qaStatusTickRuns = 0
+    nonisolated(unsafe) static var qaStatusTickDeferred = 0
+    /// QA (`--idle-frames-check`): ticks that ran on a far-parked tile, and the
+    /// main-thread seconds every tick spent refreshing the row.
+    nonisolated(unsafe) static var qaParkedStatusTickRuns = 0
+    nonisolated(unsafe) static var qaStatusTickSeconds = 0.0
 
     private func cancelCompactStatusTick() {
         compactStatusTickTimer?.invalidate()
@@ -5022,6 +5125,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             home: snapshot.home,
             whereDirectory: snapshot.workingLocation.directory,
             lastUsefulWhat: snapshot.lastUsefulWhat)
+        // Detaching settles the row now, parked or not, and leaves nothing held
+        // for a return to replay against an agent this tile no longer follows.
+        statusHeldWhileParked = false
+        settlingForDetach = true
+        defer { settlingForDetach = false }
         refreshCompactStatus(at: now, location: settled)
     }
 
@@ -5040,12 +5148,13 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func refreshLocationStatus(at now: Date = AgentElapsedClock.now()) {
-        defer { chromeDidChange() }
-        qaLocationRefreshCount += 1
         chunkStatusTimer?.invalidate()
         chunkStatusTimer = nil
         locationStaleTimer?.invalidate()
         locationStaleTimer = nil
+        if holdsStatusWhileParked() { return }
+        defer { chromeDidChange() }
+        qaLocationRefreshCount += 1
         guard let agentID = projectedAgentID,
               let snapshot = agentSource?.locationSnapshot(for: agentID, at: now) else { return }
         refreshCompactStatus(at: now, location: snapshot)

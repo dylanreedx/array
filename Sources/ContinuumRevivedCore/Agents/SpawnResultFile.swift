@@ -228,6 +228,50 @@ public struct SpawnResultFile: Codable, Equatable, Sendable {
         }.filter { $0.recipient == recipient }
     }
 
+    /// `CONTINUUM_LEGACY_SUBSCRIPTION_SCAN=1` restores one directory listing and
+    /// one substring search per lead. The RED arm of `--subscription-scan-check`.
+    nonisolated(unsafe) public static var legacySubscriptionScan =
+        ProcessInfo.processInfo.environment["CONTINUUM_LEGACY_SUBSCRIPTION_SCAN"] != nil
+    private static let subscriptionListings = QACounter()
+    public static var subscriptionListingsForQA: Int { subscriptionListings.value }
+
+    /// Every lead's subscriptions for a restore, keyed by lead. Leads in one
+    /// project share a directory, and restore asked each of them to list and
+    /// search it (1.7 s of a boot with 147 agents): list each directory once and
+    /// read the recipient straight out of the file name
+    /// (`<helper>-<recipient>-<handle>.json`, UUIDs are 36 characters).
+    public static func subscriptions(leads: [(cwd: String, id: UUID)]) -> [UUID: [MessageSubscription]] {
+        var result: [UUID: [MessageSubscription]] = [:]
+        if legacySubscriptionScan {
+            for lead in leads {
+                subscriptionListings.increment()
+                let rows = subscriptions(parentCwd: lead.cwd, recipient: lead.id)
+                if !rows.isEmpty { result[lead.id] = rows }
+            }
+            return result
+        }
+        let byCwd = Dictionary(grouping: leads, by: \.cwd)
+        for (cwd, group) in byCwd {
+            subscriptionListings.increment()
+            let urls = (try? FileManager.default.contentsOfDirectory(
+                at: subscriptionsDirectory(parentCwd: cwd), includingPropertiesForKeys: nil)) ?? []
+            guard !urls.isEmpty else { continue }
+            let wanted = Dictionary(uniqueKeysWithValues: group.map { ($0.id.uuidString, $0.id) })
+            for url in urls {
+                let name = url.lastPathComponent
+                guard name.count > 74 else { continue }
+                let start = name.index(name.startIndex, offsetBy: 37)
+                let end = name.index(start, offsetBy: 36)
+                guard name[name.index(before: start)] == "-", name[end] == "-",
+                      let lead = wanted[String(name[start..<end])],
+                      let row = try? JSONCodec.makeDecoder().decode(MessageSubscription.self, from: Data(contentsOf: url)),
+                      row.recipient == lead else { continue }
+                result[lead, default: []].append(row)
+            }
+        }
+        return result
+    }
+
     /// Drops DELIVERED rows only (a pending row is a result nobody has had):
     /// those for `helper` or `recipient` when given, and any older than
     /// `before`. File names carry both ids, so unmatched rows are not decoded.

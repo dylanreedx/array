@@ -480,14 +480,107 @@ enum TileChromeCanvasChecks {
         // gesture (one live hovered tile cost a zoom a third of its frames) and
         // the settle wakes it again.
         let hovered = underPointer[0]
-        let motionRests = hovered.qaChromeMotionRestCount
         clock.now += gap
-        canvas.cameraDriver.noteScrollPan(dx: -1, dy: 0, location: pointer)
-        canvas.layoutSubtreeIfNeeded()
-        window.displayIfNeeded()
-        try expect(canvas.isCameraInMotion, "the second pan never moved the camera; the assertion is vacuous")
-        try expect(hovered.isChromeResting && hovered.qaChromeMotionRestCount == motionRests + 1,
-                   "the live tile under the pointer stayed live through a camera gesture")
+        func frameMs(_ dx: Double) -> Double {
+            let t0 = ProcessInfo.processInfo.systemUptime
+            canvas.cameraDriver.noteScrollPan(dx: dx, dy: 0, location: pointer)
+            canvas.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            CATransaction.flush()
+            return (ProcessInfo.processInfo.systemUptime - t0) * 1_000
+        }
+        // Frame 1 of a PAN over the live tile must not rest it (a 13-33 ms reparent in
+        // debug); the legacy arm shows the witness goes RED when it does.
+        func firstPanFrame(legacy: Bool) -> (rests: Int, ms: Double) {
+            CanvasNSView.qaRestsChromeOnPan = legacy
+            defer { CanvasNSView.qaRestsChromeOnPan = false }
+            let before = hovered.qaChromeMotionRestCount
+            clock.now += gap
+            let ms = frameMs(-1)
+            let rests = hovered.qaChromeMotionRestCount - before
+            canvas.cameraDriver.qaMarkSettledNow()
+            canvas.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            return (rests, ms)
+        }
+        let legacyFrame = firstPanFrame(legacy: true)
+        try expect(!hovered.isChromeResting, "the settle did not wake the tile under the pointer again")
+        let pan = firstPanFrame(legacy: false)
+        print("FIRSTFRAME pan frame 1: legacy \(legacyFrame.rests) rest \(legacyFrame.ms) ms; fixed \(pan.rests) rests \(pan.ms) ms")
+        try expect(legacyFrame.rests == 1, "legacy arm must rest the hovered tile in a pan's first frame (witness vacuous)")
+        try expect(pan.rests == 0 && !hovered.isChromeResting, "a pan's first frame rested the live tile under the pointer")
+        // A zoom over it still rests it (one live hovered tile cost a zoom a third of its frames).
+        // Frame 1 of a PINCH: the rest happens at the pinch's `.began`, which carries no camera
+        // step. The legacy arm leaves it to the first step, so frame 1 pays 13-33 ms (debug).
+        func snapshot() -> (width: Int, height: Int, bytes: [UInt8])? {
+            let rect = hovered.convert(hovered.bounds, to: nil)
+            guard let rep = window.contentView?.bitmapImageRepForCachingDisplay(in: window.contentView!.convert(rect, from: nil)),
+                  let root = window.contentView else { return nil }
+            root.cacheDisplay(in: root.convert(rect, from: nil), to: rep)
+            guard let data = rep.bitmapData else { return nil }
+            return (rep.pixelsWide, rep.pixelsHigh, Array(UnsafeBufferPointer(start: data, count: rep.bytesPerRow * rep.pixelsHigh)))
+        }
+        var qaZoomRestVsLivePixels = 0
+        func firstZoomFrame(preRest: Bool) -> (restsInFrame1: Int, beganMs: Double, frame1Ms: Double,
+                                               parts: (reparent: Double, layout: Double), pixels: (differing: Int, total: Int)?) {
+            CanvasNSView.preRestsChromeAtPinchBegan = preRest
+            defer { CanvasNSView.preRestsChromeAtPinchBegan = true }
+            let live = snapshot()
+            clock.now += gap
+            let ts = ProcessInfo.processInfo.systemUptime
+            let t0 = ProcessInfo.processInfo.systemUptime
+            canvas.handlePinch(magnification: 0, phase: .began, location: pointer, timestamp: ts)
+            canvas.layoutSubtreeIfNeeded(); window.displayIfNeeded(); CATransaction.flush()
+            let beganMs = (ProcessInfo.processInfo.systemUptime - t0) * 1_000
+            var pixels: (Int, Int)?
+            var againstLive = 0
+            func differing(_ x: [UInt8], _ y: [UInt8]) -> Int {
+                var count = 0
+                for pixel in stride(from: 0, to: x.count - 3, by: 4) {
+                    if (0..<4).contains(where: { abs(Int(x[pixel + $0]) - Int(y[pixel + $0])) > 2 }) { count += 1 }
+                }
+                return count
+            }
+            if preRest, let live, hovered.isChromeResting, let rested = snapshot(), rested.bytes.count == live.bytes.count {
+                againstLive = differing(live.bytes, rested.bytes)
+                // The pre-rest must draw exactly what the in-step rest draws: wake, rest the old way, compare.
+                hovered.wakeChrome(); window.displayIfNeeded()
+                hovered.restChromeForCameraMotion(pressBelongsToPan: false); window.displayIfNeeded(); CATransaction.flush()
+                if let inStep = snapshot(), inStep.bytes.count == rested.bytes.count {
+                    pixels = (differing(rested.bytes, inStep.bytes), rested.bytes.count / 4)
+                }
+            }
+            qaZoomRestVsLivePixels = againstLive
+            let before = hovered.qaChromeMotionRestCount
+            clock.now += gap
+            let t1 = ProcessInfo.processInfo.systemUptime
+            canvas.handlePinch(magnification: 0.02, phase: .changed, location: pointer, timestamp: ts + 0.008)
+            canvas.layoutSubtreeIfNeeded(); window.displayIfNeeded(); CATransaction.flush()
+            let frame1Ms = (ProcessInfo.processInfo.systemUptime - t1) * 1_000
+            let rests = hovered.qaChromeMotionRestCount - before
+            let parts = hovered.qaChromeCanvas?.qaLastRestPartsMs ?? (0, 0)
+            canvas.handlePinch(magnification: 0, phase: .ended, location: pointer, timestamp: ts + 0.016)
+            canvas.cameraDriver.qaMarkSettledNow()
+            canvas.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+            return (rests, beganMs, frame1Ms, parts, pixels)
+        }
+        let legacyZoom = firstZoomFrame(preRest: false)
+        try expect(hovered.qaChromeCanvas != nil && !hovered.isChromeResting, "the settle did not wake the tile under the pointer again")
+        let zoom = firstZoomFrame(preRest: true)
+        print("FIRSTFRAME zoom frame 1: legacy \(legacyZoom.restsInFrame1) rest, frame \(legacyZoom.frame1Ms) ms (rest: reparent "
+              + "\(legacyZoom.parts.reparent) ms, layout \(legacyZoom.parts.layout) ms); fixed \(zoom.restsInFrame1) rests, frame \(zoom.frame1Ms) ms, "
+              + "pinch-began turn \(zoom.beganMs) ms; pre-rest vs in-step rest pixels differing \(zoom.pixels.map { "\($0.differing)/\($0.total)" } ?? "n/a")")
+        try expect(legacyZoom.restsInFrame1 == 1, "legacy arm must rest the hovered tile in a zoom's first frame (witness vacuous)")
+        try expect(zoom.restsInFrame1 == 0, "a pinch's first camera frame rested the live tile; the pinch's .began should have")
+        try expect(zoom.frame1Ms < legacyZoom.frame1Ms, "zoom frame 1 with the pre-rest (\(zoom.frame1Ms) ms) is not cheaper than legacy (\(legacyZoom.frame1Ms) ms)")
+        print("FIRSTFRAME zoom rest vs hovered-live pixels differing (informational, hover state): \(qaZoomRestVsLivePixels)")
+        if let pixels = zoom.pixels {
+            try expect(pixels.differing == 0, "the pre-rested tile differs from the in-step rested one in \(pixels.differing) of \(pixels.total) pixels")
+        }
+        try expect(!hovered.isChromeResting, "the settle did not wake the tile under the pointer again")
+        clock.now += gap
+        canvas.cameraDriver.noteScrollZoom(deltaY: 1, location: pointer)
+        canvas.layoutSubtreeIfNeeded(); window.displayIfNeeded()
+        try expect(hovered.isChromeResting, "a zoom must still rest the live tile under the pointer")
         canvas.cameraDriver.qaMarkSettledNow()
         canvas.layoutSubtreeIfNeeded()
         window.displayIfNeeded()

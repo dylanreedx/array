@@ -871,6 +871,41 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // Headless witness that a main-thread stall is logged with its label and
+        // the gesture it landed in, and that an idle app logs nothing.
+        if CommandLine.arguments.contains("--hitch-log-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                do {
+                    try await HitchLogChecks.run()
+                    print("HitchLogChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
+        // Headless idle-frame attribution: an off-screen window, never the screen.
+        if CommandLine.arguments.contains("--idle-frames-check") {
+            _ = NSApplication.shared
+            NSApp.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                do {
+                    try await IdleFramesChecks.run()
+                    print("IdleFramesChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         // Headless gesture-deferral witness: an off-screen window, never the screen.
         if CommandLine.arguments.contains("--gesture-defer-check") {
             _ = NSApplication.shared
@@ -2124,6 +2159,20 @@ enum ContinuumApp {
             }
             Task { @MainActor in
                 do { try await TranscriptRetentionChecks.run(); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
+        if CommandLine.arguments.contains("--transcript-dormancy-check") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(240))
+                fputs("FAIL: transcript dormancy check exceeded its 240-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do { try await TranscriptDormancyChecks.run(); Foundation.exit(0) }
                 catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
             }
             NSApp.run()
@@ -4044,6 +4093,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--agent-prewarm-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentSteeringChecks(prewarmOnly: true)
+                    print("AgentPrewarmChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--helper-wait-input-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -5058,6 +5122,62 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--far-park-backing-check") {
+            do {
+                _ = NSApplication.shared
+                try TileSurfaceResidencyChecks.runFarParkBackingCheck()
+                print("far-park backing check passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--ledger-recover-check") {
+            do {
+                try LedgerRecoverChecks.run()
+                print("ledger recover check passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--ledger-batch-check") {
+            do {
+                try LedgerBatchChecks.run()
+                print("ledger batch check passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--subscription-scan-check") {
+            do {
+                try SubscriptionScanChecks.run()
+                print("subscription scan check passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--rollout-scan-check") {
+            do {
+                try RolloutScanChecks.run()
+                print("rollout scan check passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-surface-residency-check") {
             do {
                 _ = NSApplication.shared
@@ -5145,6 +5265,17 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 print(try AppDelegate.runSidebarStreamCostChecks())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
+        if CommandLine.arguments.contains("--sidebar-click-cost-check") {
+            do {
+                _ = NSApplication.shared
+                print(try AppDelegate.runSidebarClickCostCheck())
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)
@@ -6043,6 +6174,20 @@ enum ContinuumApp {
                 fputs("FAIL --header-click-focus-check: \(error)\n", stderr)
                 Foundation.exit(1)
             }
+        }
+
+        if CommandLine.arguments.contains("--outbox-drain-cost-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await AppDelegate.runOutboxDrainCostSelfCheck())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
         }
 
         if CommandLine.arguments.contains("--composer-key-routing-check") {
@@ -9197,6 +9342,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     """
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Names whatever blocks the main run loop for 50 ms or more (one log line,
+        // `continuum.canvas` / `stall`). Idle, it never runs.
+        MainThreadStallWatchdog.install()
         // Continuum's canvas is a dark surface: every tile/card fill is a dark
         // literal. The text, however, used dynamic system colors, which resolve
         // to BLACK under light appearance — that is the "black text on dark
@@ -10643,8 +10791,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if readStateChanged {
             reloadWorkspaceSidebar(rebuildAgentActivity: false)
         } else if previousAgent != agentSupervisor.focusedAgentID {
-            workspaceSidebarView?.setInboxOpenAgent(focusedInboxAgentId())
+            if defersInboxOpenAgent {
+                deferredInboxOpenAgent = .some(focusedInboxAgentId())
+            } else {
+                workspaceSidebarView?.setInboxOpenAgent(focusedInboxAgentId())
+            }
         }
+    }
+
+    /// A sidebar click reloads the sidebar itself at its end, so the open agent it
+    /// focuses is handed to that reload rather than rendered on its own first (two full
+    /// derivations of the list per click). `CONTINUUM_QA_LEGACY_OPEN_AGENT_RENDER=1`
+    /// restores the separate render for the witness.
+    private static let legacyOpenAgentRender = ProcessInfo.processInfo.environment["CONTINUUM_QA_LEGACY_OPEN_AGENT_RENDER"] == "1"
+    private var defersInboxOpenAgent = false
+    private var deferredInboxOpenAgent: UUID??
+
+    private func reloadSidebarCarryingDeferredOpenAgent() {
+        guard let deferred = deferredInboxOpenAgent else { reloadWorkspaceSidebar(); return }
+        deferredInboxOpenAgent = nil
+        workspaceSidebarView?.inboxForQA.setOpenAgentIdForNextPush(deferred)
+        reloadWorkspaceSidebar()
+        workspaceSidebarView?.inboxForQA.refreshOpenAgentInPlace()
     }
 
     /// `AgentInboxRow.terminalIsUnread`, by the builder's formula.
@@ -12240,13 +12408,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         let now = AgentElapsedClock.now()
         guard let cache = lastInboxRows,
               ProcessInfo.processInfo.systemUptime - cache.builtAt < Self.chatterPatchMaxAge,
-              inboxRowsTimeDerivedDeadline.map({ now < $0 }) ?? true else { return nil }
+              inboxRowsTimeDerivedDeadline.map({ now < $0 }) ?? true else { qaPatchMisses[lastInboxRows == nil ? "no-cache" : (inboxRowsTimeDerivedDeadline.map({ now >= $0 }) == true ? "time-deadline" : "cache-age"), default: 0] += 1; return nil }
         var rows = cache.rows
         var patched = agents
         var rebuiltFamilies: Set<UUID> = []
         for agent in agents where !rebuiltFamilies.contains(agent) {
             let id = AgentID(rawValue: agent)
-            guard let index = rows.firstIndex(where: { $0.id == agent }) else { return nil }
+            guard let index = rows.firstIndex(where: { $0.id == agent }) else { qaPatchMisses["agent-not-in-rows", default: 0] += 1; return nil }
             if statePatchAgents.contains(agent) {
                 // Family moves other rows (children follow a parent's lifecycle, a
                 // child holds its parent open), so the agent's whole family, root
@@ -12256,16 +12424,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 guard Self.qaLegacySidebarFamilyPush == false || (rows[index].parentId == nil
                         && agentSupervisor.records[id]?.parentAgentID == nil
                         && !rows.contains(where: { $0.parentId == agent })),
-                      let family = inboxFamily(of: id) else { return nil }
+                      let family = inboxFamily(of: id) else { qaPatchMisses["family-cycle", default: 0] += 1; return nil }
                 let positions = rows.indices.filter { family.contains(rows[$0].id) }
-                guard positions.allSatisfy({ rows[$0].externalSession == nil && rows[$0].sharedAgent == nil }) else { return nil }
+                guard positions.allSatisfy({ rows[$0].externalSession == nil && rows[$0].sharedAgent == nil }) else { qaPatchMisses["family-external-or-shared", default: 0] += 1; return nil }
                 let built = markedForExternalSessions(buildAgentInboxRows(now: now, only: family))
-                guard built.count == positions.count else { return nil }
+                guard built.count == positions.count else { qaPatchMisses["family-count-mismatch", default: 0] += 1; return nil }
                 let byId = Dictionary(built.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 for position in positions {
-                    guard let row = byId[rows[position].id] else { return nil }
+                    guard let row = byId[rows[position].id] else { qaPatchMisses["family-row-missing", default: 0] += 1; return nil }
                     rows[position] = row
                 }
+                qaFamilyPatchRows += family.count
                 rebuiltFamilies.formUnion(family)
                 patched.formUnion(family)
                 continue
@@ -12276,7 +12445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                   let patched = AgentInboxRowBuilder.refreshingChatter(
                     rows[index], turnSnapshot: snapshot, record: record, boardUpdatedAt: updatedAt,
                     lastActivity: agentSupervisor.lastActivity(for: id), now: now)
-            else { return nil }
+            else { qaPatchMisses["chatter-row-not-patchable", default: 0] += 1; return nil }
             rows[index] = patched
         }
         lastInboxRows = (rows, cache.builtAt)
@@ -12345,11 +12514,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `chatterFrom`: the request is tool chatter from this agent (see
     /// `pushScheduledAgentSurfaces`).
     private func scheduleAgentSurfacePush(
-        debounce: TimeInterval, chatterFrom agent: AgentID? = nil, stateFrom stateAgent: AgentID? = nil
+        debounce: TimeInterval, chatterFrom agent: AgentID? = nil, stateFrom stateAgent: AgentID? = nil,
+        fullReason: String = "other"
     ) {
         if let agent { pendingChatterAgents.insert(agent.rawValue) }
         else if let stateAgent { pendingStateAgents.insert(stateAgent.rawValue) }
-        else { pendingPushBuildsRows = true }
+        else { pendingPushBuildsRows = true; qaFullPushReasons[fullReason, default: 0] += 1 }
         // Tool chatter waits out a camera gesture (FrameGovernor); a state change
         // (turn start/end, approval, failure) never does. The pending set above
         // keeps what the one push at the drain must cover.
@@ -16127,6 +16297,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             },
             canvasSnapshot: { [weak self] in
                 try await MainActor.run {
+                    let hitchTag = MainThreadActivity.begin("companion-canvas-snapshot")
+                    defer { hitchTag.end() }
                     guard let self, let canvasView = self.canvasView else {
                         throw CompanionSyncAppError.missingCanvas
                     }
@@ -16154,6 +16326,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // its own (see `companionActivitySnapshot`).
             activitySnapshot: { [weak self] in
                 try await MainActor.run {
+                    let hitchTag = MainThreadActivity.begin("companion-activity-snapshot")
+                    defer { hitchTag.end() }
                     guard let self else { return ActivityLogSnapshot.empty }
                     return try self.companionActivitySnapshot()
                 }
@@ -16783,9 +16957,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         sidebarTurnObserverToken = agentSupervisor.addTurnCapabilitiesObserver { [weak self] id in
             guard let self, self.agentSupervisor.records[id]?.tileId == nil else { return }
-            self.scheduleAgentSurfacePush(debounce: 0.05)
+            // The turn seam names the agent, so its family is patched like any
+            // state change. A nameless request built every row, and every
+            // tile-less helper's turn start and end landed here on top of its own
+            // state push (`startTurn`, `handleQueueOnTurnCompleted`).
+            if Self.qaLegacyTurnObserverPush {
+                self.scheduleAgentSurfacePush(debounce: 0.05, fullReason: "turn-observer")
+            } else {
+                self.scheduleAgentSurfacePush(debounce: 0.05, stateFrom: id)
+            }
         }
     }
+
+    /// QA seam: `CONTINUUM_QA_SIDEBAR_LEGACY_TURN_OBSERVER=1` (or this flag, set by
+    /// a check) restores the whole-sidebar build for a tile-less turn change.
+    nonisolated(unsafe) static var qaLegacyTurnObserverPush =
+        ProcessInfo.processInfo.environment["CONTINUUM_QA_SIDEBAR_LEGACY_TURN_OBSERVER"] == "1"
+    /// Why nameless (whole-sidebar) pushes were requested, by call site.
+    private(set) var qaFullPushReasons: [String: Int] = [:]
+    /// Why a chatter/state patch gave up and a full build ran, and rows rebuilt by family patches.
+    private(set) var qaPatchMisses: [String: Int] = [:]
+    private(set) var qaFamilyPatchRows = 0
 
     /// .plans/113: the sidebar's real host wiring, for `--sidebar-sort-check`.
     func configureWorkspaceSidebarForQA(_ sidebar: WorkspaceSidebarView) { configureWorkspaceSidebar(sidebar) }
@@ -17163,7 +17355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // prompt line, never the "New agent" placeholder.
         let orderedRecords = only.map { subset in
             subset.compactMap { agentSupervisor.records[AgentID(rawValue: $0)] }.sorted(by: AgentStore.isOrderedBefore)
-        } ?? agentSupervisor.records.values.sorted(by: AgentStore.isOrderedBefore)
+        } ?? agentSupervisor.recordsInDisplayOrder()
         let records = orderedRecords.map { record in
             guard let name = agentSupervisor.sidebarUntitledName(for: record.id) else { return record }
             var named = record
@@ -17475,6 +17667,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// settles, un-settles, stops, starts or archives anything.
     @discardableResult
     func revealAgentFromInbox(_ rowId: UUID) -> Bool {
+        defersInboxOpenAgent = !Self.legacyOpenAgentRender
+        defer {
+            defersInboxOpenAgent = false
+            if let leftover = deferredInboxOpenAgent {
+                deferredInboxOpenAgent = nil
+                workspaceSidebarView?.setInboxOpenAgent(leftover)
+            }
+        }
         canvasView?.clearContextualAgentLineage()
         // Someone else's shared agent opens the tile that shows it here; a helper's
         // row opens its lead's, because the helper runs on its owner's Mac.
@@ -17586,7 +17786,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // The mark is a fact the rows carry, so the list has to be told; a
         // cross-workspace reveal has already reloaded, and a same-workspace one has
         // not.
-        reloadWorkspaceSidebar()
+        reloadSidebarCarryingDeferredOpenAgent()
         return true
     }
 
@@ -18525,6 +18725,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// rows: the palette, the companion and the lifecycle verbs read
     /// `buildAgentInboxRows`, which never holds someone else's agent.
     func sidebarInboxRows(now: Date = AgentElapsedClock.now(), inputs: SidebarModelInputs? = nil) -> [AgentInboxRow] {
+        let hitchTag = MainThreadActivity.begin("sidebar-inbox-build")
+        defer { hitchTag.end() }
         let inputs = inputs ?? currentSidebarModelInputs()
         let settle = autoSettle
         let rows = buildAgentInboxRows(now: now, inputs: inputs) + sharedAgentSidebarRows(inputs: inputs, now: now)
@@ -25929,10 +26131,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Performance at scale, item 4: on unless `agents.recordArchive.enabled` is false.
         agentSupervisor.recordArchiveDefaults = settingsDefaults
         agentSupervisor.onArchivedAgentAdopted = { [weak self] _ in
-            self?.scheduleAgentSurfacePush(debounce: 0.05)
+            self?.scheduleAgentSurfacePush(debounce: 0.05, fullReason: "archive-adopted")
         }
         agentSupervisor.onRecordsArchived = { [weak self] _ in
-            self?.scheduleAgentSurfacePush(debounce: 0.05)
+            self?.scheduleAgentSurfacePush(debounce: 0.05, fullReason: "records-archived")
         }
         let collaborationRoot = collaborationSupportRoot
         agentSupervisor.recordArchiveSharedAgents = {
@@ -25966,7 +26168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // An agent's own status or report is drawn under its name in the sidebar
         // (`.plans/102` P2b), from the record on every row build.
         agentSupervisor.onSelfReportChanged = { [weak self] _ in
-            self?.scheduleAgentSurfacePush(debounce: 0.05)
+            self?.scheduleAgentSurfacePush(debounce: 0.05, fullReason: "self-report")
         }
         canvasView.onTileHoverChanged = { [weak self] tileId, hovered in
             self?.completionHoverChanged(tileId: tileId, hovered: hovered)
@@ -26322,6 +26524,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         _ layers: [CanvasNSView.ZoneLayer],
         phase: WorkspaceRuntime.TileHydrationPhase
     ) {
+        let hitchTag = MainThreadActivity.begin("zone-hydration")
+        defer { hitchTag.end() }
         for layer in layers {
             // Ambient (project-less) zones keep their placeholders for now: their
             // tiles live in the workspace document's own register rather than in a
@@ -26468,6 +26672,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         canvas: CanvasNSView,
         wiresAgents: Bool = true
     ) {
+        let hitchTag = MainThreadActivity.begin("agent-restore")
+        defer { hitchTag.end() }
         // Managed agents are BUILT in Phase A but WIRED here: `wireManagedAgentTile`
         // resolves the view through `canvasView.tileView(for:)`, so the layer has to
         // be installed before it can find anything.
@@ -46939,6 +47145,123 @@ extension AppDelegate {
                 "2: control: visiting an unread result did not rebuild rows (\(app.qaInboxRowBuildCount - visitBefore)) or clear it")
         report.append("focus: \(focusBuilds) row builds over 3 moves, unread visit still rebuilds")
 
+        // 7 · A tile-less agent's turns move its own family only. Every real turn
+        // start and end (`startTurn`, `handleQueueOnTurnCompleted`) used to build
+        // every row through the turn observer. Driven by `send`, the real start.
+        let turners = Array(loose.suffix(6))
+        let turnBuildsBefore = app.qaInboxRowBuildCount
+        let reasonsBefore = app.qaFullPushReasons
+        for round in 0..<3 {
+            for agent in turners {
+                _ = supervisor.send("work \(round)", to: agent)
+                supervisor.qaDeliver(.turnStarted(threadId: thread(agent), turnId: "k\(round)"), to: agent)
+                supervisor.qaDeliver(.turnCompleted(threadId: thread(agent), turnId: "k\(round)", outcome: .completed, errorMessage: nil), to: agent)
+            }
+            spin(timeout: 0.6) { false }
+        }
+        settle()
+        let turnBuilds = app.qaInboxRowBuildCount - turnBuildsBefore
+        let turnReasons = app.qaFullPushReasons.filter { $0.value != reasonsBefore[$0.key, default: 0] }
+        witness(turnBuilds == 0, "7: turns of 6 tile-less agents built every sidebar row \(turnBuilds) times, reasons \(turnReasons)")
+        report.append("tile-less turns: \(turnBuilds) full row builds over 18 turn pairs")
+
+        // 8 · The record order is sorted once, not once per whole-sidebar build.
+        // A store shaped like the real one: three families of 100 helpers.
+        let parents = (0..<3).map { spawn("Lead \($0)") }
+        for lead in parents {
+            for index in 0..<100 {
+                let helper = supervisor.spawn(
+                    role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                    projectId: projectId, parentAgentID: lead, tileId: nil)
+                _ = supervisor.rename(agentID: helper, to: "Helper \(index)")
+            }
+        }
+        app.refreshAgentSurfaces(notify: false)
+        settle()
+        func fullBuilds(_ count: Int) -> (sorts: Int, msPerBuild: Double) {
+            let sortsBefore = supervisor.qaRecordSortCount
+            let started = DispatchTime.now().uptimeNanoseconds
+            for _ in 0..<count { _ = app.sidebarInboxRows() }
+            let nanos = DispatchTime.now().uptimeNanoseconds - started
+            return (supervisor.qaRecordSortCount - sortsBefore, Double(nanos) / 1e6 / Double(count))
+        }
+        let wasCacheOff = AgentSupervisor.qaRecordSortCacheOff
+        defer { AgentSupervisor.qaRecordSortCacheOff = wasCacheOff }
+        AgentSupervisor.qaRecordSortCacheOff = true
+        let legacySort = fullBuilds(10)
+        AgentSupervisor.qaRecordSortCacheOff = false
+        _ = app.sidebarInboxRows()
+        let cachedSort = fullBuilds(10)
+        witness(legacySort.sorts == 10, "8: control: with the cache off ten builds sorted \(legacySort.sorts) times")
+        witness(cachedSort.sorts == 0, "8: ten whole-sidebar builds sorted the records \(cachedSort.sorts) times")
+        let beforeSpawn = supervisor.qaRecordSortCount
+        _ = spawn("Late")
+        _ = app.sidebarInboxRows()
+        witness(supervisor.qaRecordSortCount - beforeSpawn == 1, "8: a new record did not re-sort once")
+        report.append(String(format: "sort cache: %d sorts per 10 builds (was %d); %.1f ms per build (was %.1f), debug, %d records",
+                             cachedSort.sorts, legacySort.sorts, cachedSort.msPerBuild, legacySort.msPerBuild, supervisor.records.count))
+
+        // 9 · Rows outside any family are not built for the child rollup.
+        let wasEvery = AgentInboxRowBuilder.qaBuildEveryProvisionalRow
+        defer { AgentInboxRowBuilder.qaBuildEveryProvisionalRow = wasEvery }
+        func provisional() -> (rows: Int, ms: Double, built: [AgentInboxRow]) {
+            AgentInboxRowBuilder.qaProvisionalRowCount = 0
+            let started = DispatchTime.now().uptimeNanoseconds
+            var built: [AgentInboxRow] = []
+            for _ in 0..<10 { built = app.sidebarInboxRows() }
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6 / 10
+            return (AgentInboxRowBuilder.qaProvisionalRowCount / 10, ms, built)
+        }
+        let rowsNow = Date()
+        AgentInboxRowBuilder.qaBuildEveryProvisionalRow = true
+        let everyRow = provisional()
+        AgentInboxRowBuilder.qaBuildEveryProvisionalRow = false
+        let familyRows = provisional()
+        _ = rowsNow
+        let boardCount = everyRow.rows
+        witness(familyRows.rows < boardCount, "9: family-only built \(familyRows.rows) provisional rows, every-row built \(boardCount)")
+        witness(familyRows.rows >= 300, "9: fixture: the 300 helpers were not in a family (\(familyRows.rows))")
+        witness(familyRows.built.map(\.id) == everyRow.built.map(\.id)
+                && familyRows.built.map(\.lifecycle) == everyRow.built.map(\.lifecycle)
+                && familyRows.built.map(\.state) == everyRow.built.map(\.state),
+                "9: family-only provisional rows changed the built rows")
+        report.append(String(format: "provisional rows per build: %d (was %d); %.1f ms per build (was %.1f), debug",
+                             familyRows.rows, everyRow.rows, familyRows.ms, everyRow.ms))
+
+        // 11 · Which reasons still force a whole-sidebar build with 300 helpers in
+        // families: quiet first, then helpers streaming and turning over.
+        let helperIds = supervisor.records.values.filter { $0.parentAgentID != nil }
+            .sorted(by: AgentStore.isOrderedBefore).map(\.id)
+        func census(_ label: String, _ body: () -> Void) -> (builds: Int, patchRows: Int, ms: Double) {
+            let b0 = app.qaInboxRowBuildCount, r0 = app.qaFamilyPatchRows
+            let m0 = app.qaPatchMisses, f0 = app.qaFullPushReasons
+            let n0 = app.qaAgentSurfacePushNanos
+            body()
+            let builds = app.qaInboxRowBuildCount - b0
+            let miss = app.qaPatchMisses.filter { $0.value != m0[$0.key, default: 0] }
+            let why = app.qaFullPushReasons.filter { $0.value != f0[$0.key, default: 0] }
+            report.append("\(label): \(builds) full builds, \(app.qaFamilyPatchRows - r0) family-patch rows, "
+                + String(format: "%.0f ms main in pushes", Double(app.qaAgentSurfacePushNanos - n0) / 1e6)
+                + ", patch misses \(miss), nameless pushes \(why)")
+            return (builds, app.qaFamilyPatchRows - r0, Double(app.qaAgentSurfacePushNanos - n0) / 1e6)
+        }
+        _ = census("quiet 3 s") { spin(timeout: 3.0) { false } }
+        let streamingHelpers = stride(from: 0, to: helperIds.count, by: 12).map { helperIds[$0] }
+        let busy = census("300 helpers: 25 stream and turn over for 6 s") {
+            for round in 0..<6 {
+                for helper in streamingHelpers {
+                    supervisor.qaDeliver(.turnStarted(threadId: thread(helper), turnId: "q\(round)"), to: helper)
+                    supervisor.qaDeliver(.itemStarted(threadId: thread(helper), itemId: "i\(round)", kind: .commandExecution, title: "rg x"), to: helper)
+                }
+                spin(timeout: 0.5) { false }
+                for helper in streamingHelpers {
+                    supervisor.qaDeliver(.turnCompleted(threadId: thread(helper), turnId: "q\(round)", outcome: .completed, errorMessage: nil), to: helper)
+                }
+                spin(timeout: 0.5) { false }
+            }
+        }
+        _ = busy
+
         if !failures.isEmpty {
             throw Failure(description: "SidebarEventCost RED:\n  " + failures.joined(separator: "\n  "))
         }
@@ -47648,5 +47971,133 @@ extension AppDelegate {
             throw Failure(description: "SidebarStreamCost RED (\(line)):\n  " + failures.joined(separator: "\n  "))
         }
         return "SidebarStreamCost: " + line
+    }
+}
+
+// General latency — sidebar click to agent revealed, on a store shaped like Dylan's:
+// a dozen tiled agents and about 300 helper records under them. Every click goes through
+// `revealAgentFromInbox`, the function the sidebar row's click calls.
+extension AppDelegate {
+    @MainActor
+    static func runSidebarClickCostCheck() throws -> String {
+        struct Failure: Error, CustomStringConvertible { let description: String }
+        func spin(_ seconds: TimeInterval) {
+            let until = Date().addingTimeInterval(seconds)
+            while Date() < until { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005)) }
+        }
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory
+            .appendingPathComponent("continuum-sidebar-click-cost-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+        for dir in [appSupport, agentsSupport, projectRoot] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let now = Date()
+        let workspaceId = UUID()
+        let projectId = UUID()
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Cost", projectIds: [projectId], createdAt: now, updatedAt: now)]
+        registry.projects = [ProjectEntry(id: projectId, name: "Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+        let supervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: agentsSupport),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        app.agentSupervisor = supervisor
+
+        // The focus wiring `AppDelegate` installs on its canvas: the broker marks
+        // the tile active, then the app's accepted-focus hook runs.
+        final class AgentTileAdapter: FocusSurfaceAdapter {
+            let focusSurfaceID: FocusSurfaceID
+            let focusSurfaceKind: FocusSurfaceKind = .managedAgent
+            init(_ id: UUID) { focusSurfaceID = .tile(id) }
+            func acquireFocus(reason: FocusRequest) -> Bool { true }
+            func releaseFocus(reason: FocusRequest) {}
+            func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool { false }
+        }
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        canvas.delegate = app
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] tileId in canvas?.markActive(tileId: tileId) }
+        app.installAcceptedTileFocusHook()
+        func focus(_ tile: Tile) {
+            _ = app.focusBroker.requestFocus(.tile(tile.id), reason: .userClick)
+        }
+        var adapters: [AgentTileAdapter] = []
+        func agentTile(_ index: Int) -> Tile {
+            let tile = Tile(
+                id: UUID(), kind: .managedAgent, title: "Agent · \(index)",
+                frame: TileFrame(x: Double(index) * 320, y: 0, width: 300, height: 200),
+                zPosition: .fromLegacyRank(index + 1), runtimeRef: nil, metadata: TileMetadata())
+            canvas.install(tileView: TileNSView(tile: tile), for: tile)
+            adapters.append(AgentTileAdapter(tile.id))
+            app.focusBroker.register(adapters[adapters.count - 1])
+            return tile
+        }
+        func spawn(_ name: String, tile: UUID? = nil) -> AgentID {
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                projectId: projectId, parentAgentID: nil, tileId: tile)
+            _ = supervisor.rename(agentID: id, to: name)
+            return id
+        }
+        func spawnChild(_ name: String, parent: AgentID) -> AgentID {
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                projectId: projectId, parentAgentID: parent, tileId: nil)
+            _ = supervisor.rename(agentID: id, to: name)
+            return id
+        }
+        let tiles = (0..<12).map(agentTile)
+        let leads = tiles.enumerated().map { spawn("Lead \($0.offset)", tile: $0.element.id) }
+        for (i, lead) in leads.enumerated() {
+            for h in 0..<25 { _ = spawnChild("Helper \(i)-\(h)", parent: lead) }
+        }
+
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 4000))
+        let window = NSWindow(contentRect: sidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = sidebar
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
+        app.workspaceSidebarView = sidebar
+        let restoreShelves = WorkspaceSidebarConfig.qaIsolateShelves()
+        defer { restoreShelves() }
+        app.configureWorkspaceSidebar(sidebar)
+        sidebar.configureInboxScope(.all) { _ in }
+        app.refreshAgentSurfaces(notify: false)
+        sidebar.layoutSubtreeIfNeeded()
+        spin(0.7)
+
+        let rounds = Int(ProcessInfo.processInfo.environment["CONTINUUM_CLICK_COST_ROUNDS"] ?? "") ?? 48
+        let builds0 = app.qaInboxRowBuildCount
+        let inputs0 = app.qaSidebarInputsComputedCount
+        let displays0 = sidebar.inboxForQA.displayBuildCountForQA
+        var samples: [Double] = []
+        for i in 0..<rounds {
+            let target = leads[i % leads.count]
+            let start = DispatchTime.now().uptimeNanoseconds
+            guard app.revealAgentFromInbox(target.rawValue) else {
+                throw Failure(description: "sidebar click cost: reveal \(i) refused")
+            }
+            samples.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6)
+            spin(0.02)
+        }
+        samples.sort()
+        let mean = samples.reduce(0, +) / Double(samples.count)
+        return String(format: "sidebar click cost (%d records): mean %.2f ms, p95 %.2f ms, max %.2f ms over %d reveals; row builds/click %.2f, sidebar-input folds/click %.2f, display builds/click %.2f",
+                      supervisor.records.count, mean, samples[Int(Double(samples.count) * 0.95)], samples.last ?? 0, rounds,
+                      Double(app.qaInboxRowBuildCount - builds0) / Double(rounds),
+                      Double(app.qaSidebarInputsComputedCount - inputs0) / Double(rounds),
+                      Double(sidebar.inboxForQA.displayBuildCountForQA - displays0) / Double(rounds))
     }
 }
