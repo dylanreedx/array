@@ -33,8 +33,24 @@ func runAgentInboxRowBuilderChecks() {
     runInboxSortDivergesFromBoardOrderCheck()
     runInboxRowSnapshotIsTheOwnerCheck()
     runInboxRowStampedElapsedCheck()
+    runInboxStaleDeclaredNowCheck()
     runInboxLifecycleDerivationCheck()
     print("AgentInboxRowBuilder checks: coverage/identity, refresh stability, headless rows, title source, terminal sessions, elapsed derivation, branch precedence, the approval/input split, the frozen-vs-attention-first sort divergence, P3.3's snapshot-owned state over all 6 operational kinds, the stamped elapsed anchor, and P6.1 lifecycle/action agreement passed")
+}
+
+/// A declared "now" is true only while its turn runs. Live 2026-11-20: a lead's
+/// "Applying…" stayed on after everything was stopped. Production seam: the same
+/// `selfReport(for:)` the inbox row builder calls for every row.
+private func runInboxStaleDeclaredNowCheck() {
+    var record = inboxTiledAgent()
+    let declared = inboxNow.addingTimeInterval(-7200)
+    record.declaredStatus = AgentDeclaredStatus(now: "Applying changes", declaredAt: declared)
+    record.latestTurnAt = declared.addingTimeInterval(-60)
+    let live = AgentInboxRowBuilder.selfReport(for: record, now: inboxNow)
+    expect(live?.now == "Applying changes", "a status declared in a running turn is shown as it was declared, got \(String(describing: live?.now))")
+    record.latestTerminalEvent = AgentTerminalEvent(sequence: 1, turnID: "t", outcome: .interrupted, endedAt: declared.addingTimeInterval(120))
+    let past = AgentInboxRowBuilder.selfReport(for: record, now: inboxNow)
+    expect(past?.now == "was: Applying changes, 2h ago", "a status whose turn ended after it was declared reads as past, got \(String(describing: past?.now))")
 }
 
 // MARK: - Fixture
