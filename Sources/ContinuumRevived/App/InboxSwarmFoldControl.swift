@@ -115,6 +115,8 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
     private var seed = UUID()
     private var leadColour: NSColor?
     private(set) var isPointerInside = false
+    /// Design round: lets the lead's icon plate take this control's hover.
+    var onPointerChange: ((Bool) -> Void)?
     private(set) var isPressed = false
     /// The pose the layers rest on.
     private(set) var shownExpanded = false
@@ -520,6 +522,7 @@ final class InboxSwarmFoldControl: NSControl, TokenThemed {
     func setPointerInside(_ inside: Bool) {
         guard inside != isPointerInside else { return }
         isPointerInside = inside
+        onPointerChange?(inside)
         applyTokens(animated: canAnimate)
         applyPose(animated: canAnimate, duration: Self.hoverMorph)
     }

@@ -1391,7 +1391,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             attention: row.attention, activity: row.characterActivity ?? .init(),
             title: row.title, allowsMotion: !prefersReducedMotion())
         let plan = controller.plan(for: snapshot, now: now)
-        let plateOn = Self.leadPlateOn && !isSubagentRow && shown?.disclosure != nil && shown?.disclosure != RowDisclosure.none
+        let plateOn = Self.leadPlateOn && !isSubagentRow
         if plateOn {
             sprite.clear()
             if !showsLeadPlate { showsLeadPlate = true; needsLayout = true }
@@ -1400,6 +1400,10 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             leadPlate.show(plan: plan, atlas: atlas, phase: controller.phase(for: row.id), now: now, tint: tint,
                            working: snapshot.state == .working, workingPhase: InboxOwnershipClock.phase(for: row.id),
                            reduceMotion: { [weak self] in self?.prefersReducedMotion() ?? false })
+            leadPlate.setCount(shown?.disclosure == RowDisclosure.none ? 0 : (shown?.rollup?.children ?? 0))
+            disclosureButton.onPointerChange = { [weak self] inside in
+                self?.leadPlate.setHovered(inside, variant: InboxLeadIconVariant.current)
+            }
             leadPlate.setExpanded(shown?.disclosure == .expanded, parent: row.id, variant: InboxLeadIconVariant.current,
                                   animated: !prefersReducedMotion())
             if characterSize != nil { characterSize = nil; needsLayout = true }
@@ -1423,6 +1427,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     private func releaseLeadPlate() {
         guard showsLeadPlate || !leadPlate.isHidden || disclosureButton.alphaValue != 1 else { return }
         showsLeadPlate = false
+        disclosureButton.onPointerChange = nil
         leadPlate.hide()
         disclosureButton.alphaValue = 1
         needsLayout = true
@@ -2301,6 +2306,14 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                                                 width: side, height: side))
                 x += 2
             }
+        } else if showsLeadPlate {
+            // No helpers: the same gutter, so every title starts at one x.
+            let trailing = InboxSwarmFoldControl.glyphCentreX + InboxLeadIconPlate.side / 2
+            let side = InboxLeadIconPlate.side
+            leadPlate.frame = inCard(NSRect(x: InboxOwnershipChrome.laneX - side / 2,
+                                            y: snapped((card.bounds.height - side) / 2),
+                                            width: side, height: side))
+            x = InboxOwnershipChrome.foldX + trailing + 6 + 2
         }
         if let name = shown.row.identityColor {
             let side = AgentInboxView.identityDotSide

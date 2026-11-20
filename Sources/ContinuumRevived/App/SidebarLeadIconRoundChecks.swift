@@ -95,6 +95,8 @@ enum SidebarLeadIconRoundChecks {
             }
             try data.write(to: url)
         }
+        // ARRAY_LEAD_ICON_ONLY=halo refreshes that variant's files and leaves the rest.
+        let only = ProcessInfo.processInfo.environment["ARRAY_LEAD_ICON_ONLY"].flatMap(InboxLeadIconVariant.init(rawValue:))
         let tones: [(NSAppearance.Name, String)] = [(.aqua, "light"), (.darkAqua, "dark")]
         let styles: [AgentCharacterConfig.BubbleStyle] = [.orb, .squircle, .inline]
         var count = 0
@@ -102,14 +104,17 @@ enum SidebarLeadIconRoundChecks {
         try FileManager.default.createDirectory(at: stills, withIntermediateDirectories: true)
         // Stills. `today` = characters on, classic fold control, character at the right.
         for (appearance, tone) in tones {
-            configure(enabled: false, style: .orb)
-            InboxLeadIconVariant.current = .off
-            let offInbox = makeInbox(appearance)
-            try snap(windows.last!, to: stills.appendingPathComponent("icons-off-\(tone).png"))
-            _ = offInbox
+            if only == nil {
+                configure(enabled: false, style: .orb)
+                InboxLeadIconVariant.current = .off
+                let offInbox = makeInbox(appearance)
+                try snap(windows.last!, to: stills.appendingPathComponent("icons-off-\(tone).png"))
+                _ = offInbox
+            }
             for style in styles {
                 for variant in [InboxLeadIconVariant.off, .settle, .halo, .lift] {
                     if variant == .settle && style != .orb { continue }
+                    if let only, variant != only { continue }
                     configure(enabled: true, style: style)
                     InboxLeadIconVariant.current = variant
                     let inbox = makeInbox(appearance)
@@ -128,7 +133,7 @@ enum SidebarLeadIconRoundChecks {
         // Motion: collapse then expand the first lead, one frame every ~30 ms.
         let frames = out.appendingPathComponent("frames", isDirectory: true)
         try FileManager.default.createDirectory(at: frames, withIntermediateDirectories: true)
-        for variant in [InboxLeadIconVariant.settle, .halo, .lift] {
+        for variant in [InboxLeadIconVariant.settle, .halo, .lift] where only == nil || only == variant {
             for (appearance, tone) in tones {
                 configure(enabled: true, style: .orb)
                 InboxLeadIconVariant.current = variant

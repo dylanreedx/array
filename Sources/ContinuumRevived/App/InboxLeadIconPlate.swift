@@ -36,6 +36,12 @@ final class InboxLeadIconPlate: NSView {
     private let halo = CAShapeLayer()
     private var artFrame: CGRect = .zero
     private(set) var expanded = false
+    private(set) var hovered = false
+    private var lastKey: String?
+    /// The helper count, on the plate's lower right corner.
+    private let badge = NSTextField(labelWithString: "")
+    private static let badgeFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
+    var badgeText: String { badge.isHidden ? "" : badge.stringValue }
 
     /// One record per parent: a fold rebuilds cells, so the motion's clock is the
     /// parent's, and a replacement cell joins it mid-flight.
@@ -58,6 +64,12 @@ final class InboxLeadIconPlate: NSView {
         halo.actions = ["strokeEnd": NSNull(), "path": NSNull(), "frame": NSNull(), "bounds": NSNull(), "position": NSNull()]
         host.addSublayer(halo)
         layer?.addSublayer(host)
+        badge.font = Self.badgeFont
+        badge.alignment = .center
+        badge.wantsLayer = true
+        badge.isHidden = true
+        badge.setAccessibilityElement(false)
+        addSubview(badge)
         host.actions = ["transform": NSNull(), "shadowOpacity": NSNull(), "shadowRadius": NSNull(),
                         "position": NSNull(), "bounds": NSNull(), "frame": NSNull()]
     }
@@ -113,6 +125,40 @@ final class InboxLeadIconPlate: NSView {
             textSecondary: TextToken.textSecondary.color.nsColor(for: theme),
             providerForeground: BrandToken.providerForeground.nsColor(for: theme),
             orbRimColors: AgentIconMaterialToken.orbRimCGColors))
+        badge.textColor = TextToken.textPrimary.color.nsColor(in: self)
+        badge.layer?.backgroundColor = SurfaceToken.tileChrome.color.cgColor(in: self)
+        badge.layer?.borderColor = TextToken.textSecondary.color.cgColor(in: self)
+    }
+
+    /// The helper count, as a small pill on the plate's lower right. 0 hides it.
+    func setCount(_ count: Int) {
+        let text = count > 0 ? "\(count)" : ""
+        guard badge.stringValue != text || badge.isHidden != text.isEmpty else { return }
+        badge.stringValue = text
+        badge.isHidden = text.isEmpty
+        needsLayout = true
+    }
+
+    /// The pointer is over the icon's control: it swells a little.
+    func setHovered(_ hovered: Bool, variant: InboxLeadIconVariant) {
+        guard hovered != self.hovered else { return }
+        let from = (host.presentation()?.value(forKeyPath: "transform.scale") as? CGFloat) ?? restScale(variant: variant)
+        self.hovered = hovered
+        lastKey = nil
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        host.transform = CATransform3DMakeScale(restScale(variant: variant), restScale(variant: variant), 1)
+        CATransaction.commit()
+        let swell = CABasicAnimation(keyPath: "transform.scale")
+        swell.fromValue = from
+        swell.toValue = restScale(variant: variant)
+        swell.duration = 0.14
+        swell.timingFunction = InboxLeadIconVariant.timing
+        host.add(swell, forKey: "hover")
+    }
+
+    private func restScale(variant: InboxLeadIconVariant) -> CGFloat {
+        (variant == .lift && expanded ? 1.08 : 1) * (hovered ? 1.06 : 1)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -130,6 +176,14 @@ final class InboxLeadIconPlate: NSView {
         bubble.frame = box
         sprite.frame = artFrame
         halo.frame = box
+        if !badge.isHidden {
+            let size = badge.intrinsicContentSize
+            let h: CGFloat = 13
+            let w = max(h, ceil(size.width) + 6)
+            badge.frame = NSRect(x: Self.side - w + 4, y: Self.side - h + 3, width: w, height: h)
+            badge.layer?.cornerRadius = h / 2
+            badge.layer?.borderWidth = 0.5
+        }
         let path = TileAgentBubbleLayer.Plate.path(bubble.bubbleStyle, in: box.insetBy(dx: -2.5, dy: -2.5),
                                                    tileRadius: CGFloat(Radius.container), outset: 0)
         halo.path = path
@@ -143,6 +197,10 @@ final class InboxLeadIconPlate: NSView {
     /// Rest at `expanded`; when it differs from what this parent last showed,
     /// play the variant's motion on the parent's own clock.
     func setExpanded(_ expanded: Bool, parent: UUID, variant: InboxLeadIconVariant, animated: Bool) {
+        // Re-applying the same state must not cancel a motion in flight.
+        let key = "\(variant.rawValue)-\(expanded)-\(hovered)"
+        guard key != lastKey else { return }
+        lastKey = key
         self.expanded = expanded
         let previous = Self.records[parent]
         var record = previous ?? Record(expanded: expanded, startedAt: -1)
@@ -167,7 +225,8 @@ final class InboxLeadIconPlate: NSView {
         halo.removeAllAnimations()
         halo.strokeEnd = variant == .halo && expanded ? 1 : 0
         let lifted = variant == .lift && expanded
-        host.transform = lifted ? CATransform3DMakeScale(1.08, 1.08, 1) : CATransform3DIdentity
+        let scale = restScale(variant: variant)
+        host.transform = CATransform3DMakeScale(scale, scale, 1)
         host.shadowColor = NSColor.black.cgColor
         host.shadowOpacity = lifted ? 0.30 : 0
         host.shadowRadius = lifted ? 6 : 0
