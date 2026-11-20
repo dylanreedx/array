@@ -1288,6 +1288,7 @@ if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --sidebar-bulk-hide-check
   run_app_check .build/debug/Array --sidebar-quiet-inbox-check
   run_app_check .build/debug/Array --sidebar-dogfood-check
+  run_app_check .build/debug/Array --sidebar-stuck-rows-check
   run_app_check .build/debug/Array --sidebar-scope-popover-check
   run_app_check .build/debug/Array --sidebar-ownership-check
   run_app_check .build/debug/Array --sidebar-fold-expand-check
@@ -2533,6 +2534,8 @@ run_app_check .build/debug/Array --sidebar-scope-popover-check
 run_app_check .build/debug/Array --sidebar-quiet-inbox-check
 # Quiet inbox dogfood fixes (0.7.54), on the production sidebar through real events: History cards per family dated by the last real turn, a cleared card kept opaque across unrelated pushes and rapid reversals, live usage items following probe and runner quota both ways plus time-only expiry, Switch only for a distinct login, and History skipped on chatter.
 run_app_check .build/debug/Array --sidebar-dogfood-check
+# A fold never lends a helper another helper's cached card with that agent's content still on it (0.7.56 stuck "review files" rows), through real clicks and pushes.
+run_app_check .build/debug/Array --sidebar-stuck-rows-check
 # .plans/106: who owns whom. Subagents are one-line rows in their lead's card:
 # each count drawn once, no repeated project or branch, a subagent's ask raised
 # on its lead, the stem's lanes, the card's light, and Pop out / Stop on hover

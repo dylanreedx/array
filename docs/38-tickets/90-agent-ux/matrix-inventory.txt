@@ -309,6 +309,7 @@ check --replay-scoring-check
 check --reply-rules-launch-check
 check --request-telemetry-check
 check --reserved-dispatch-check
+check --resize-corner-cursor-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
 check --restore-delivery-scaling-check
@@ -356,6 +357,7 @@ check --sidebar-helper-hover-check
 check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
 check --sidebar-history-scope-check
+check --sidebar-hover-text-check
 check --sidebar-indicator-settings-check
 check --sidebar-layouts-check
 check --sidebar-ledger-check
@@ -371,6 +373,7 @@ check --sidebar-scope-popover-check
 check --sidebar-screenshot-check
 check --sidebar-sort-check
 check --sidebar-stream-cost-check
+check --sidebar-stuck-rows-check
 check --sidebar-truth-check
 check --sidebar-ux-check
 check --sidebar-workspace-treatment-check
@@ -408,6 +411,7 @@ check --terminal-tmux-observer-wiring-check
 check --terminal-tmux-persistence-check
 check --terminal-tmux-unresponsive-check
 check --terminal-viewport-visibility-check
+check --terminal-wheel-scroll-check
 check --throbber-timeline-check
 check --ticket-queue-tile-check
 check --tidy-camera-check
@@ -845,6 +849,7 @@ leg run_app_check .build/debug/Array --replay-driver-check
 leg run_app_check .build/debug/Array --reply-rules-launch-check
 leg run_app_check .build/debug/Array --request-telemetry-check
 leg run_app_check .build/debug/Array --reserved-dispatch-check
+leg run_app_check .build/debug/Array --resize-corner-cursor-check
 leg run_app_check .build/debug/Array --resize-dimensions-hud-check
 leg run_app_check .build/debug/Array --resize-snap-check
 leg run_app_check .build/debug/Array --restore-delivery-scaling-check
@@ -889,6 +894,7 @@ leg run_app_check .build/debug/Array --sidebar-fold-expand-check
 leg run_app_check .build/debug/Array --sidebar-helper-hover-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
+leg run_app_check .build/debug/Array --sidebar-hover-text-check
 leg run_app_check .build/debug/Array --sidebar-indicator-settings-check
 leg run_app_check .build/debug/Array --sidebar-layouts-check
 leg run_app_check .build/debug/Array --sidebar-ledger-check
@@ -904,6 +910,7 @@ leg run_app_check .build/debug/Array --sidebar-scope-popover-check
 leg run_app_check .build/debug/Array --sidebar-screenshot-check
 leg run_app_check .build/debug/Array --sidebar-sort-check
 leg run_app_check .build/debug/Array --sidebar-stream-cost-check
+leg run_app_check .build/debug/Array --sidebar-stuck-rows-check
 leg run_app_check .build/debug/Array --sidebar-truth-check
 leg run_app_check .build/debug/Array --sidebar-ux-check
 leg run_app_check .build/debug/Array --sidebar-workspace-treatment-check
@@ -941,6 +948,7 @@ leg run_app_check .build/debug/Array --terminal-tmux-observer-wiring-check
 leg run_app_check .build/debug/Array --terminal-tmux-persistence-check
 leg run_app_check .build/debug/Array --terminal-tmux-unresponsive-check
 leg run_app_check .build/debug/Array --terminal-viewport-visibility-check
+leg run_app_check .build/debug/Array --terminal-wheel-scroll-check
 leg run_app_check .build/debug/Array --throbber-timeline-check
 leg run_app_check .build/debug/Array --ticket-queue-tile-check
 leg run_app_check .build/debug/Array --tidy-camera-check
@@ -1182,7 +1190,7 @@ count ContinuumRevivedAgentContentChecks 25
 count ContinuumRevivedAgentUIChecks 24
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 216
+count ContinuumRevivedCoreChecks 217
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0

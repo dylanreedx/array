@@ -3439,6 +3439,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
     }
 
+    /// The agent this card last drew. A card lent from another row still shows
+    /// that row's agent until it is applied again.
+    var shownAgentID: UUID? { shown?.row.id }
     var qaAgentID: UUID? { shown?.row.id }
     var qaVariant: RowVariant? { shown?.row.variant }
 
