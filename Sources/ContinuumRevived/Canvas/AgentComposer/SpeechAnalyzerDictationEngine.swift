@@ -40,9 +40,14 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
     private static var warming: Task<Void, Never>?
     private static let warmLifetime: TimeInterval = 120
 
+    /// QA seam (`--dictation-warmup-check`): when set, the cold prepare is a fake
+    /// that takes this long and needs neither the microphone nor the model, so
+    /// the warm-up/press handoff can be driven without the real SpeechAnalyzer.
+    static var qaColdDelay: Duration?
+
     /// True once the user has already granted the microphone: warming must
     /// never be the thing that raises a permission prompt.
-    static var canWarm: Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+    static var canWarm: Bool { qaColdDelay != nil || AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
 
     /// Starts (or keeps) a warm analyzer. `vocabulary` is called now, so the
     /// file scan behind it begins at focus and its result is ready by the press.
@@ -120,6 +125,16 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
     /// Builds a transcriber and analyzer from scratch. The warm-up task calls
     /// this directly: going through `prepare` would make it wait on itself.
     private func prepareCold() async throws {
+        if let delay = Self.qaColdDelay {
+            try await Task.sleep(for: delay)
+            let transcriber = DictationTranscriber(
+                locale: Locale(identifier: "en_US"), contentHints: [], transcriptionOptions: [],
+                reportingOptions: [], attributeOptions: [])
+            prepared = Prepared(
+                transcriber: transcriber, analyzer: SpeechAnalyzer(modules: [transcriber]),
+                format: AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!)
+            return
+        }
         guard let locale = await Self.resolveLocale() else {
             throw DictationFailure.unsupportedOnThisDevice
         }
@@ -314,6 +329,7 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
     // MARK: - Preparation helpers
 
     private static func ensureMicrophoneAccess() async throws {
+        if qaColdDelay != nil { return }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             return
