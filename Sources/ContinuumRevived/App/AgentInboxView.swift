@@ -1320,9 +1320,40 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// doing"), and it would have needed a host edit to feed something the host is
     /// already feeding. Nil-safe throughout: no open tile, no route-active row,
     /// and the ladder simply has three steps instead of four.
+    /// Set while a caller is about to push rows itself: the new open agent is read by
+    /// that push's own display build, so building one here as well was a whole second
+    /// derivation of the same list per sidebar click.
+    private var suppressesOpenAgentRender = false
+    private var openAgentBeforeSuppressedWrite: UUID?
+    var displayBuildCountForQA: Int { displayEpoch }
+
+    /// Records the open agent without deriving the display; follow with a push of rows
+    /// and `refreshOpenAgentInPlace()`.
+    func setOpenAgentIdForNextPush(_ id: UUID?) {
+        guard id != openAgentId else { return }
+        openAgentBeforeSuppressedWrite = openAgentId
+        suppressesOpenAgentRender = true
+        openAgentId = id
+        suppressesOpenAgentRender = false
+    }
+
+    /// The cheap half of the open-agent change: shared family light, the two rows'
+    /// interaction state, the settle nudge. Membership was already settled by the push.
+    func refreshOpenAgentInPlace() {
+        let old = openAgentBeforeSuppressedWrite
+        openAgentBeforeSuppressedWrite = nil
+        if ownsSubagents {
+            ownershipByTableRow = ownershipSlices()
+            refreshVisibleOwnership()
+        }
+        applyHoverInPlace(tableRows: [old, openAgentId].compactMap { $0 }.compactMap(tableRow(forAgentId:)))
+        refreshSettleNudge()
+    }
+
     var openAgentId: UUID? {
         didSet {
             guard openAgentId != oldValue else { return }
+            if suppressesOpenAgentRender { return }
             let next = display(from: latestPushedRows)
             if next.map(\.identity) == items.map(\.identity) {
                 // The route can change without changing table membership. Refresh

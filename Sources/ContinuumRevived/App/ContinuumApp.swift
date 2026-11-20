@@ -5122,6 +5122,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--sidebar-click-cost-check") {
+            do {
+                _ = NSApplication.shared
+                print(try AppDelegate.runSidebarClickCostCheck())
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--sidebar-event-cost-check") {
             do {
                 _ = NSApplication.shared
@@ -10618,8 +10629,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         if readStateChanged {
             reloadWorkspaceSidebar(rebuildAgentActivity: false)
         } else if previousAgent != agentSupervisor.focusedAgentID {
-            workspaceSidebarView?.setInboxOpenAgent(focusedInboxAgentId())
+            if defersInboxOpenAgent {
+                deferredInboxOpenAgent = .some(focusedInboxAgentId())
+            } else {
+                workspaceSidebarView?.setInboxOpenAgent(focusedInboxAgentId())
+            }
         }
+    }
+
+    /// A sidebar click reloads the sidebar itself at its end, so the open agent it
+    /// focuses is handed to that reload rather than rendered on its own first (two full
+    /// derivations of the list per click). `CONTINUUM_QA_LEGACY_OPEN_AGENT_RENDER=1`
+    /// restores the separate render for the witness.
+    private static let legacyOpenAgentRender = ProcessInfo.processInfo.environment["CONTINUUM_QA_LEGACY_OPEN_AGENT_RENDER"] == "1"
+    private var defersInboxOpenAgent = false
+    private var deferredInboxOpenAgent: UUID??
+
+    private func reloadSidebarCarryingDeferredOpenAgent() {
+        guard let deferred = deferredInboxOpenAgent else { reloadWorkspaceSidebar(); return }
+        deferredInboxOpenAgent = nil
+        workspaceSidebarView?.inboxForQA.setOpenAgentIdForNextPush(deferred)
+        reloadWorkspaceSidebar()
+        workspaceSidebarView?.inboxForQA.refreshOpenAgentInPlace()
     }
 
     /// `AgentInboxRow.terminalIsUnread`, by the builder's formula.
@@ -17472,6 +17503,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// settles, un-settles, stops, starts or archives anything.
     @discardableResult
     func revealAgentFromInbox(_ rowId: UUID) -> Bool {
+        defersInboxOpenAgent = !Self.legacyOpenAgentRender
+        defer {
+            defersInboxOpenAgent = false
+            if let leftover = deferredInboxOpenAgent {
+                deferredInboxOpenAgent = nil
+                workspaceSidebarView?.setInboxOpenAgent(leftover)
+            }
+        }
         canvasView?.clearContextualAgentLineage()
         // Someone else's shared agent opens the tile that shows it here; a helper's
         // row opens its lead's, because the helper runs on its owner's Mac.
@@ -17583,7 +17622,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // The mark is a fact the rows carry, so the list has to be told; a
         // cross-workspace reveal has already reloaded, and a same-workspace one has
         // not.
-        reloadWorkspaceSidebar()
+        reloadSidebarCarryingDeferredOpenAgent()
         return true
     }
 
@@ -47767,5 +47806,133 @@ extension AppDelegate {
             throw Failure(description: "SidebarStreamCost RED (\(line)):\n  " + failures.joined(separator: "\n  "))
         }
         return "SidebarStreamCost: " + line
+    }
+}
+
+// General latency — sidebar click to agent revealed, on a store shaped like Dylan's:
+// a dozen tiled agents and about 300 helper records under them. Every click goes through
+// `revealAgentFromInbox`, the function the sidebar row's click calls.
+extension AppDelegate {
+    @MainActor
+    static func runSidebarClickCostCheck() throws -> String {
+        struct Failure: Error, CustomStringConvertible { let description: String }
+        func spin(_ seconds: TimeInterval) {
+            let until = Date().addingTimeInterval(seconds)
+            while Date() < until { RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.005)) }
+        }
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory
+            .appendingPathComponent("continuum-sidebar-click-cost-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+        let appSupport = tempRoot.appendingPathComponent("AppSupport", isDirectory: true)
+        let agentsSupport = tempRoot.appendingPathComponent("Agents", isDirectory: true)
+        let projectRoot = tempRoot.appendingPathComponent("Project", isDirectory: true)
+        for dir in [appSupport, agentsSupport, projectRoot] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let now = Date()
+        let workspaceId = UUID()
+        let projectId = UUID()
+        var registry = Registry.empty()
+        registry.lastActiveWorkspaceId = workspaceId
+        registry.workspaces = [WorkspaceEntry(id: workspaceId, name: "Cost", projectIds: [projectId], createdAt: now, updatedAt: now)]
+        registry.projects = [ProjectEntry(id: projectId, name: "Project", rootPath: projectRoot.path, workspaceId: workspaceId, lastOpenedAt: now, pinned: false, missing: false)]
+        let registryStore = RegistryStore(applicationSupportDirectory: appSupport)
+        try registryStore.save(registry)
+
+        let app = AppDelegate()
+        app.registryStore = registryStore
+        try app.reconciledManagedSessionSource.reconcile(registry: registry, reason: .continuumRestarted, now: now)
+        let supervisor = AgentSupervisor(
+            store: AgentStore(applicationSupportDirectory: agentsSupport),
+            makeRunner: { _ in ScriptedAgentRunner(script: []) })
+        app.agentSupervisor = supervisor
+
+        // The focus wiring `AppDelegate` installs on its canvas: the broker marks
+        // the tile active, then the app's accepted-focus hook runs.
+        final class AgentTileAdapter: FocusSurfaceAdapter {
+            let focusSurfaceID: FocusSurfaceID
+            let focusSurfaceKind: FocusSurfaceKind = .managedAgent
+            init(_ id: UUID) { focusSurfaceID = .tile(id) }
+            func acquireFocus(reason: FocusRequest) -> Bool { true }
+            func releaseFocus(reason: FocusRequest) {}
+            func canHandleReservedShortcut(_ shortcut: ReservedShortcut) -> Bool { false }
+        }
+        let canvas = CanvasNSView(canvasState: CanvasState(
+            viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [], groups: [], lastActiveTileId: nil))
+        canvas.delegate = app
+        app.canvasView = canvas
+        canvas.focusBroker = app.focusBroker
+        app.focusBroker.onAcceptedTileFocus = { [weak canvas] tileId in canvas?.markActive(tileId: tileId) }
+        app.installAcceptedTileFocusHook()
+        func focus(_ tile: Tile) {
+            _ = app.focusBroker.requestFocus(.tile(tile.id), reason: .userClick)
+        }
+        var adapters: [AgentTileAdapter] = []
+        func agentTile(_ index: Int) -> Tile {
+            let tile = Tile(
+                id: UUID(), kind: .managedAgent, title: "Agent · \(index)",
+                frame: TileFrame(x: Double(index) * 320, y: 0, width: 300, height: 200),
+                zPosition: .fromLegacyRank(index + 1), runtimeRef: nil, metadata: TileMetadata())
+            canvas.install(tileView: TileNSView(tile: tile), for: tile)
+            adapters.append(AgentTileAdapter(tile.id))
+            app.focusBroker.register(adapters[adapters.count - 1])
+            return tile
+        }
+        func spawn(_ name: String, tile: UUID? = nil) -> AgentID {
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                projectId: projectId, parentAgentID: nil, tileId: tile)
+            _ = supervisor.rename(agentID: id, to: name)
+            return id
+        }
+        func spawnChild(_ name: String, parent: AgentID) -> AgentID {
+            let id = supervisor.spawn(
+                role: nil, prompt: nil, cwd: projectRoot, model: "anthropic/claude-opus-5-5", thinking: "medium",
+                projectId: projectId, parentAgentID: parent, tileId: nil)
+            _ = supervisor.rename(agentID: id, to: name)
+            return id
+        }
+        let tiles = (0..<12).map(agentTile)
+        let leads = tiles.enumerated().map { spawn("Lead \($0.offset)", tile: $0.element.id) }
+        for (i, lead) in leads.enumerated() {
+            for h in 0..<25 { _ = spawnChild("Helper \(i)-\(h)", parent: lead) }
+        }
+
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: WorkspaceSidebarConfig.defaultWidth, height: 4000))
+        let window = NSWindow(contentRect: sidebar.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = sidebar
+        window.orderFrontOffscreenForChecks()
+        defer { window.orderOut(nil) }
+        app.workspaceSidebarView = sidebar
+        let restoreShelves = WorkspaceSidebarConfig.qaIsolateShelves()
+        defer { restoreShelves() }
+        app.configureWorkspaceSidebar(sidebar)
+        sidebar.configureInboxScope(.all) { _ in }
+        app.refreshAgentSurfaces(notify: false)
+        sidebar.layoutSubtreeIfNeeded()
+        spin(0.7)
+
+        let rounds = Int(ProcessInfo.processInfo.environment["CONTINUUM_CLICK_COST_ROUNDS"] ?? "") ?? 48
+        let builds0 = app.qaInboxRowBuildCount
+        let inputs0 = app.qaSidebarInputsComputedCount
+        let displays0 = sidebar.inboxForQA.displayBuildCountForQA
+        var samples: [Double] = []
+        for i in 0..<rounds {
+            let target = leads[i % leads.count]
+            let start = DispatchTime.now().uptimeNanoseconds
+            guard app.revealAgentFromInbox(target.rawValue) else {
+                throw Failure(description: "sidebar click cost: reveal \(i) refused")
+            }
+            samples.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1e6)
+            spin(0.02)
+        }
+        samples.sort()
+        let mean = samples.reduce(0, +) / Double(samples.count)
+        return String(format: "sidebar click cost (%d records): mean %.2f ms, p95 %.2f ms, max %.2f ms over %d reveals; row builds/click %.2f, sidebar-input folds/click %.2f, display builds/click %.2f",
+                      supervisor.records.count, mean, samples[Int(Double(samples.count) * 0.95)], samples.last ?? 0, rounds,
+                      Double(app.qaInboxRowBuildCount - builds0) / Double(rounds),
+                      Double(app.qaSidebarInputsComputedCount - inputs0) / Double(rounds),
+                      Double(sidebar.inboxForQA.displayBuildCountForQA - displays0) / Double(rounds))
     }
 }
