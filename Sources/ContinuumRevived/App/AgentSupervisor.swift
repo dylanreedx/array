@@ -2052,7 +2052,15 @@ final class AgentSupervisor {
     /// Set on `.interrupted`. A user who interrupted wants to look first, so
     /// the held queue is not auto-drained into a turn they did not ask for.
     /// Cleared by the next explicit `.send`/`.sendPrompt` or `resumeQueue`.
-    private var pausedQueues: Set<AgentID> = []
+    private var pausedQueues: Set<AgentID> = [] {
+        didSet {
+            // Every release of a held queue leaves a line, whoever released it:
+            // a stranded queue used to be provable only by its absence.
+            for id in oldValue.subtracting(pausedQueues) {
+                appendAgentDiagnostics("queue resumed reason=\(queuePauseReasons[id].map(Self.pauseLogName) ?? "unknown") depth=\(queuedWorkItemsCache[id]?.count ?? 0)", agentID: id)
+            }
+        }
+    }
     /// T5b — why each paused queue is held, for the rail's "Paused after …".
     private var queuePauseReasons: [AgentID: ComposerQueueRailState.Pause] = [:]
 
@@ -2088,8 +2096,19 @@ final class AgentSupervisor {
     private func pauseQueue(_ id: AgentID, _ reason: ComposerQueueRailState.Pause) {
         // An ordinary terminal outcome cannot hide uncertain input custody.
         if pausedQueues.contains(id), queuePauseReasons[id] == .unconfirmed, reason != .unconfirmed { return }
-        pausedQueues.insert(id)
         queuePauseReasons[id] = reason
+        if pausedQueues.insert(id).inserted {
+            appendAgentDiagnostics("queue paused reason=\(Self.pauseLogName(reason)) depth=\(queuedWorkItemsCache[id]?.count ?? 0)", agentID: id)
+        }
+    }
+    private static func pauseLogName(_ reason: ComposerQueueRailState.Pause) -> String {
+        switch reason {
+        case .afterStop: return "afterStop"
+        case .afterRelaunch: return "afterRelaunch"
+        case .afterCompaction: return "afterCompaction"
+        case .unconfirmed: return "unconfirmed"
+        case .held: return "held"
+        }
     }
     /// The outcome of the turn that just freed a runner slot, read by
     /// `clearRunner` — the one moment the slot is actually free to accept the

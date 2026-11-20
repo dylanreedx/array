@@ -3949,6 +3949,22 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Stale leads: a paused queue must say why, and nothing but a person's
+        // own typing may leave an agent message stranded in it.
+        if CommandLine.arguments.contains("--agent-queue-drain-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentQueueDrainChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // Usage resume: a usage stop is a per-agent pause that Array resumes
         // on the same session at the reset, staggered, and tells the lead so.
         if CommandLine.arguments.contains("--agent-usage-resume-check") {
