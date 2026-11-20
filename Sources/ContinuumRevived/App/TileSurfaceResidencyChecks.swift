@@ -203,6 +203,12 @@ enum TileSurfaceResidencyChecks {
             return true
         }
 
+        /// One real driver pan commit of `dy` points.
+        func panStep(dy: CGFloat) {
+            clock.now += commitGap
+            canvas.cameraDriver.noteScrollPan(dx: 0, dy: dy, location: CGPoint(x: 800, y: 500))
+        }
+
         /// The real settle edge: cancels any glide, flushes, and calls `markSettled`,
         /// which is what fires `onSettle` in a live gesture.
         func settle() {
@@ -977,6 +983,55 @@ enum TileSurfaceResidencyChecks {
         try expect(returned.inputEvents == 0 && returned.inputToFirstFrameMs == nil,
                    "a gesture with no routed input must not invent an input time")
         try runSelectionDefersCursorRectsWhileTheCameraMoves()
+        try runFarReturnsAreSpreadAhead()
+    }
+
+    /// Parked tiles uncovered by a pan return AHEAD of the screen and never more than a
+    /// frame's budget at once. 60 tiles in a 3-wide column of rows, a quarter of them
+    /// parked at any time; a pan at 60/150/300 points a frame.
+    static func runFarReturnsAreSpreadAhead() throws {
+        var results: [String: [Int: (onScreen: Int, worst: Int)]] = [:]
+        defer { _ = results }
+        for legacy in [true, false] {
+            CanvasNSView.qaLegacyFarReturn = legacy
+            defer { CanvasNSView.qaLegacyFarReturn = false }
+            for speed: CGFloat in [60, 150, 300] {
+                let world = World(tileCount: 60)
+                defer { world.teardown() }
+                let canvas = world.canvas
+                canvas.surfaceResidencyEnabled = false
+                canvas.setViewport(CanvasViewport(x: 0, y: 0, zoom: 1))
+                world.pump(); world.settle()
+                world.window.makeFirstResponder(nil)
+                while canvas.qaRunFarParkingPass() { world.pump() }
+                let parkedAtStart = canvas.qaFarParkedTileCount
+                var worstMs = 0.0, worstReturns = 0, total = 0, framesWithReturns = 0
+                let onScreenBefore = canvas.qaFarReturnOnScreenCount
+                let y0 = canvas.viewport.y
+                for _ in 0..<40 {
+                    let returnsBefore = canvas.qaFarReturnCount
+                    let t0 = ProcessInfo.processInfo.systemUptime
+                    world.panStep(dy: -speed)
+                    world.pump()
+                    canvas.qaCompletePendingFrame()
+                    let ms = (ProcessInfo.processInfo.systemUptime - t0) * 1_000
+                    let returns = canvas.qaFarReturnCount - returnsBefore
+                    worstMs = max(worstMs, ms); worstReturns = max(worstReturns, returns)
+                    total += returns; if returns > 0 { framesWithReturns += 1 }
+                }
+                let onScreen = canvas.qaFarReturnOnScreenCount - onScreenBefore
+                print("FARRETURN \(legacy ? "legacy" : "fixed") speed \(Int(speed))/frame: parked at start \(parkedAtStart), "
+                      + "moved y \(Int(canvas.viewport.y - y0)), returns \(total) in \(framesWithReturns) frames, worst \(worstReturns)/frame, "
+                      + "on-screen returns \(onScreen), worst frame \(String(format: "%.1f", worstMs)) ms")
+                results[legacy ? "legacy" : "fixed", default: [:]][Int(speed)] = (onScreen, worstReturns)
+            }
+        }
+        let legacyOnScreen = results["legacy"]?.values.map(\.onScreen).reduce(0, +) ?? 0
+        let fixedOnScreen = results["fixed"]?.values.map(\.onScreen).reduce(0, +) ?? 0
+        try expect(legacyOnScreen > 0, "legacy far returns must land on screen in a fast pan (witness vacuous)")
+        try expect(fixedOnScreen * 2 <= legacyOnScreen, "far returns still land on screen: \(fixedOnScreen) fixed vs \(legacyOnScreen) legacy")
+        try expect(results["fixed"]?[150]?.onScreen == 0, "a 150 pt/frame pan returned parked tiles on screen")
+        try expect((results["fixed"]?.values.map(\.worst).max() ?? 0) <= 5, "a frame returned more than its budget")
     }
 
     /// With tiles selected, every camera step invalidated the selection overlay's

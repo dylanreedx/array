@@ -5641,11 +5641,18 @@ final class CanvasNSView: NSView, TokenThemed {
     /// Mid-gesture returns for tiles still in the margin. Tiles already ON screen
     /// return regardless: a blank body is not a brief softness.
     static let maxFarReturnsPerStep = 2
+    /// Camera steps of lookahead a returning pan or zoom leads by.
+    static let farReturnLookaheadFrames: CGFloat = 8
+    private var lastFarReturnOrigin = CGPoint.zero
 
     private(set) var qaFarParkCount = 0
     /// Off only for the motion benchmark's comparison arms (`--canvas-motion-probe`).
     var farParkingEnabled = true
     private(set) var qaFarReturnCount = 0
+    /// Returns that landed while the tile was already ON screen (a blank body shown, or a late frame).
+    private(set) var qaFarReturnOnScreenCount = 0
+    /// QA legacy arm: no velocity lead, count budget only (0.7.56).
+    nonisolated(unsafe) static var qaLegacyFarReturn = false
     /// Zone layers installed this session: a zone becoming live builds every one
     /// of its tile views synchronously, so a frame that waited on one says so.
     private(set) var qaZoneLayerInstallCount = 0
@@ -5744,14 +5751,30 @@ final class CanvasNSView: NSView, TokenThemed {
         let hitchTag = MainThreadActivity.begin("far-return")
         defer { hitchTag.end() }
         let visible = worldPlane.bounds
-        let lead = visible.insetBy(
+        var lead = visible.insetBy(
             dx: -visible.width * Self.farReturnMargin, dy: -visible.height * Self.farReturnMargin)
+        // Look ahead along the camera's own motion, so a fast pan returns tiles
+        // frames before they arrive, a budget's worth a frame, instead of all at once
+        // on screen. One-sided, up to a viewport, and never past what a settled park
+        // would keep. A stationary camera (velocity 0) leads by the plain margin.
+        let step = CGPoint(x: visible.minX - lastFarReturnOrigin.x, y: visible.minY - lastFarReturnOrigin.y)
+        lastFarReturnOrigin = visible.origin
+        if !Self.qaLegacyFarReturn {
+            let ahead = CGPoint(x: max(-visible.width, min(visible.width, step.x * Self.farReturnLookaheadFrames)),
+                                y: max(-visible.height, min(visible.height, step.y * Self.farReturnLookaheadFrames)))
+            lead = lead.union(visible.offsetBy(dx: ahead.x, dy: ahead.y).insetBy(
+                dx: -visible.width * Self.farReturnMargin, dy: -visible.height * Self.farReturnMargin))
+        }
         let parked = worldPlane.tileViews(intersecting: lead).filter(\.isFarParked)
         guard !parked.isEmpty else { return }
         func distance(_ view: TileNSView) -> CGFloat {
             hypot(view.frame.midX - visible.midX, view.frame.midY - visible.midY)
         }
         var budget = offscreenBudget
+        // A pan faster than a fifth of the viewport a step uncovers tiles faster than
+        // the plain budget returns them: spend two more a frame, ahead, rather than
+        // let them arrive blank.
+        if !Self.qaLegacyFarReturn, offscreenBudget != .max, hypot(step.x, step.y) > 0.2 * visible.height { budget += 2 }
         for view in parked.sorted(by: { distance($0) < distance($1) }) {
             if !view.frame.intersects(visible) {
                 guard budget > 0 else {
@@ -5760,6 +5783,7 @@ final class CanvasNSView: NSView, TokenThemed {
                 }
                 budget -= 1
             }
+            if view.frame.intersects(visible) { qaFarReturnOnScreenCount += 1 }
             view.promoteBodyToNative()
             qaFarReturnCount += 1
         }
