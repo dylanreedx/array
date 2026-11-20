@@ -1362,6 +1362,14 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
     _ = restarted.restore()
     let restartAPI = WorkspaceAPIService(runtime: { runtime }, canvas: { canvas }, focusBroker: { delegate.qaFocusBroker },
         supervisor: restarted, registryStore: { registryStore }, epoch: "restart-fixture", approvalHandler: { _ in .allowForSession })
+    // Relaunch calm (96bafd87): this child was stopped by the user and its sender is
+    // not live, so a relaunch must not start it. The message survives, held as
+    // "while you were away", and runs once when the user resumes the queue.
+    try await Task.sleep(for: .milliseconds(600))
+    try expect(occurrences("AFTER-RESTART", in: childPromptLog()) == 0 && !restarted.isRunning(childId)
+               && restarted.awayMessageCount(for: childId) == 1,
+               "a stopped agent's queued message is held, not run, after a relaunch")
+    restarted.resumeQueue(for: childId)
     let restartedDelivered = await waitUntil(timeout: 20, pollInterval: 0.02) {
         occurrences("AFTER-RESTART", in: childPromptLog()) == 1 && !restarted.isRunning(childId)
     }
