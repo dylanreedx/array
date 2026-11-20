@@ -239,5 +239,35 @@ func runAgentQueueDrainChecks() async throws {
         try require(world.provider.runs == 0, "a bundled message does not start a turn")
         try require(diagnostics(agentsDir).contains("held agent messages bundled: count=1"), "the bundling is logged")
     }
+
+    // MARK: 5. A queue whose agent has no record is archived, not stranded.
+    do {
+        let dir = root.appendingPathComponent("s5", isDirectory: true)
+        let agentsDir = dir.appendingPathComponent("agents", isDirectory: true)
+        let orphan = AgentID(rawValue: UUID()), sender = AgentID(rawValue: UUID())
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: dir.appendingPathComponent("drafts"), debounceInterval: 0)
+        let outbox = AgentMessageOutbox(applicationSupportDirectory: agentsDir)
+        let context = AgentMessageQueueContext(caller: sender, recipient: orphan, operationId: "op-orphan",
+            idempotencyKey: "key-orphan", payloadHash: "h")
+        let message = AgentComposerQueuedMessage(text: "message for an agent that is gone",
+            queuedAt: Date().addingTimeInterval(-9 * 86400), agentMessageHops: 1, agentMessageContext: context)
+        try outbox.save(.init(context: context, message: message, queuePosition: 1))
+        try await drafts.enqueueAgentMessage(message, for: orphan)
+        let store = AgentStore(applicationSupportDirectory: agentsDir)
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in Provider() }, warn: { _ in },
+            nameTitlerCommand: { _ in nil }, submissionRecoveryStore: drafts)
+        _ = supervisor.restore()
+        let archived = agentsDir.appendingPathComponent("orphaned-queues/\(orphan.rawValue.uuidString).json")
+        try require(FileManager.default.fileExists(atPath: archived.path)
+            && ((try? String(contentsOf: archived, encoding: .utf8)) ?? "").contains("message for an agent that is gone"),
+            "the orphaned queue is archived whole, not deleted")
+        try require(!FileManager.default.fileExists(atPath: drafts.layout.queuedMessagesFile(for: orphan).path),
+            "the live queue file is gone once archived")
+        let entry = try outbox.lookup(caller: sender, key: "key-orphan")
+        try require(entry?.phase == .cancelled && entry?.result?.reason?.contains("orphaned-queues") == true,
+            "the sender is told where its message went: \(String(describing: entry?.result?.reason))")
+        // Idempotent: a second restore finds nothing more to do.
+        _ = supervisor.restore()
+    }
     print("AgentQueueDrainChecks passed")
 }

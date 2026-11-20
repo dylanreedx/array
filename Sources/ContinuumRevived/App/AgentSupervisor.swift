@@ -3483,6 +3483,7 @@ final class AgentSupervisor {
     func restore(fileManager: FileManager = .default) -> RestoreReport {
         var report = RestoreReport()
         startQueueSweep()
+        defer { repairOrphanedQueues(fileManager: fileManager) }
         if !AgentRecordArchiveConfig.enabled(defaults: recordArchiveDefaults) {
             unarchiveAllBeforeRestore()
         }
@@ -14009,8 +14010,11 @@ final class AgentSupervisor {
         var settled: [AgentComposerQueuedMessage] = []
         for entry in stale {
             let message = entry.message
-            guard let context = message.agentMessageContext,
-                  cancelAgentMessage(message, for: id, reason: "Bundled, not run: held \(entry.hours) h, past the 24 h limit, so it reached \(records[id]?.humanDisplayName ?? "the recipient") inside one \"while you were away\" note on its next turn.")
+            guard let context = message.agentMessageContext else { continue }
+            // A message whose outbox entry is gone still bundles: only the
+            // sender's result record is missing, and the content must survive.
+            let hasEntry = ((try? agentMessageOutbox.lookup(caller: context.caller, key: context.idempotencyKey)) ?? nil) != nil
+            guard !hasEntry || cancelAgentMessage(message, for: id, reason: "Bundled, not run: held \(entry.hours) h, past the 24 h limit, so it reached \(records[id]?.humanDisplayName ?? "the recipient") inside one \"while you were away\" note on its next turn.")
             else { continue }
             var inner = message.text, name = records[context.caller]?.humanDisplayName ?? "Agent"
             if case .agentMessage(let payload) = AgentMessageEnvelope.classify(message.text) {
@@ -14083,6 +14087,48 @@ final class AgentSupervisor {
         guard !pausedQueues.contains(id) else { return }
         if !(deliveringSteers[id]?.isEmpty ?? true) { deferredQueueOutcomes[id] = outcome; return }
         drainQueue(for: id)
+    }
+
+    /// One-time repair, run at every restore (cheap and idempotent): a queue
+    /// file whose agent has no record anywhere can never be hydrated or
+    /// drained, so its messages sat for days. The file moves, whole, to
+    /// `orphaned-queues/` (never deleted), and each agent message in it gets
+    /// a result for its sender saying where it went.
+    func repairOrphanedQueues(fileManager: FileManager = .default) {
+        guard let queue = submissionRecoveryStore,
+              let files = try? fileManager.contentsOfDirectory(at: queue.layout.queuedMessagesDirectory, includingPropertiesForKeys: nil)
+        else { return }
+        let archive = store.layout.applicationSupportDirectory.appendingPathComponent("orphaned-queues", isDirectory: true)
+        for file in files where file.pathExtension == "json" {
+            guard let uuid = UUID(uuidString: file.deletingPathExtension().lastPathComponent) else { continue }
+            let id = AgentID(rawValue: uuid)
+            let recordFile = store.layout.agentsDirectory.appendingPathComponent("\(uuid.uuidString).json")
+            guard records[id] == nil, !fileManager.fileExists(atPath: recordFile.path),
+                  (try? Data(contentsOf: file))?.count ?? 0 > 2 else { continue }
+            do {
+                try fileManager.createDirectory(at: archive, withIntermediateDirectories: true)
+                var target = archive.appendingPathComponent("\(uuid.uuidString).json")
+                var n = 2
+                while fileManager.fileExists(atPath: target.path) {
+                    target = archive.appendingPathComponent("\(uuid.uuidString)-\(n).json"); n += 1
+                }
+                try fileManager.moveItem(at: file, to: target)
+                var settled = 0
+                for entry in (try? agentMessageOutbox.entries()) ?? []
+                where entry.context.recipient == id && (entry.phase == .queued || entry.phase == .started) {
+                    var done = entry
+                    done.phase = .cancelled
+                    done.result = .init(toolCallId: entry.context.operationId, status: .interrupted, agentId: id.rawValue,
+                        reason: "The recipient no longer exists; its queued messages were archived to orphaned-queues/, not run.",
+                        endedAt: Date(), turnIdentity: "orphaned:\(entry.message.id.uuidString)", recipientId: entry.context.caller.rawValue)
+                    if (try? agentMessageOutbox.save(done)) != nil {
+                        settled += 1
+                        if let cwd = records[entry.context.caller]?.cwd { SpawnResultFile.write(done.result!, parentCwd: cwd, warn: warn) }
+                    }
+                }
+                appendAgentDiagnostics("queue repair: no agent record; queue archived to orphaned-queues/\(target.lastPathComponent), \(settled) sender result(s) written", agentID: id)
+            } catch { warn("Orphaned agent queue could not be archived.") }
+        }
     }
 
     // MARK: Queue sweep
