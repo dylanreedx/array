@@ -148,11 +148,14 @@ func runAgentQueueDrainChecks() async throws {
     // pause the queue too, and nothing ever resumed it: ED88C2A4 exited 143
     // with the perf lead's message still queued.
     do {
-        func world(_ name: String) async throws -> (AgentSupervisor, Provider, AgentID) {
+        func world(_ name: String, agentTraffic: Bool = false) async throws -> (AgentSupervisor, Provider, AgentID) {
             let dir = root.appendingPathComponent(name, isDirectory: true)
             let store = AgentStore(applicationSupportDirectory: dir.appendingPathComponent("agents"))
             let id = AgentID(rawValue: UUID())
             try store.upsert(.init(id: id, displayName: "Lead", harness: .pi, model: model, thinking: "medium",
+                cwd: root.path, createdAt: Date(), lastActivityAt: Date()))
+            let sender = AgentID(rawValue: UUID())
+            try store.upsert(.init(id: sender, displayName: "Sender", harness: .pi, model: model, thinking: "medium",
                 cwd: root.path, createdAt: Date(), lastActivityAt: Date()))
             let drafts = AgentComposerDraftStore(applicationSupportDirectory: dir.appendingPathComponent("drafts"), debounceInterval: 0)
             let provider = Provider(); provider.threadId = AgentSupervisor.threadId(for: id)
@@ -161,18 +164,35 @@ func runAgentQueueDrainChecks() async throws {
             _ = supervisor.restore()
             try require(await supervisor.accept(.sendPrompt(.init("first turn")), for: id) == .accepted, "first turn starts")
             try await waitFor("first turn running") { provider.runs == 1 }
+            if agentTraffic {
+                let sent = supervisor.deliverAgentMessage("hold everything", from: sender, to: id, hops: 1)
+                try require(sent.delivery != .refused, "an agent message queues behind the running turn: \(sent)")
+            } else {
             var queued = await supervisor.accept(.queue(.init("second")), for: id)
             for _ in 0..<150 where queued != .accepted {
                 try await Task.sleep(for: .milliseconds(20))
                 queued = await supervisor.accept(.queue(.init("second")), for: id)
             }
             try require(queued == .accepted, "second prompt queues, got \(queued)")
+            }
             return (supervisor, provider, id)
         }
         let programmatic = try await world("s2-kill")
         programmatic.1.endInterrupted()
-        try await waitFor("an interrupted turn nobody asked for lets the queue run") { programmatic.1.runs == 2 }
-        try require(!programmatic.0.isQueuePaused(for: programmatic.2), "an unrequested interrupt does not hold the queue")
+        // 2026-11-20: a user's message the interrupt left unanswered is not history.
+        // It returns to the top of the queue, held, for the user to send again.
+        try await waitFor("an unrequested interrupt holds the user's unanswered message at the top of the queue") {
+            programmatic.0.isQueuePaused(for: programmatic.2) && programmatic.0.queuedMessages(for: programmatic.2).first?.text == "first turn"
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        try require(programmatic.1.runs == 1 && programmatic.0.queuedMessages(for: programmatic.2).map(\.text) == ["first turn", "second"],
+            "nothing runs by itself; the unanswered message precedes the queued one: \(programmatic.0.queuedMessages(for: programmatic.2).map(\.text))")
+        // With another agent's message waiting, a held queue would strand it
+        // (the stuck-lead failure): the unanswered message runs again at once.
+        let agentWorld = try await world("s2-agent", agentTraffic: true)
+        agentWorld.1.endInterrupted()
+        try await waitFor("an unrequested interrupt with agent traffic queued lets the queue run") { agentWorld.1.runs == 2 }
+        try require(!agentWorld.0.isQueuePaused(for: agentWorld.2), "agent traffic is never stranded behind a held queue")
 
         let user = try await world("s2-user")
         try require(await user.0.accept(.stop, for: user.2) == .accepted, "user Stop accepted")

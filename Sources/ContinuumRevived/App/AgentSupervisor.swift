@@ -2132,6 +2132,30 @@ final class AgentSupervisor {
     /// same reason `submissionRecoveryTasks` is: back-to-back UI actions and a
     /// `turnCompleted` drain must not race each other's read-modify-write.
     private var queueOpTasks: [AgentID: Task<Void, Never>] = [:]
+    /// The user's message the running turn is answering, kept until the turn settles.
+    private var inFlightUserMessages: [AgentID: AgentComposerQueuedMessage] = [:]
+    private var restoredUnansweredMessages: Set<UUID> = []
+    /// Live 2026-11-20: a turn interrupted by something other than the user's own
+    /// Stop left their message answered by nothing, and it fell into history. It
+    /// goes back to the top of the queue, held, with a notice; sending the queue
+    /// again is the one click.
+    ///
+    /// Held only when nothing from another agent waits behind it: a held queue
+    /// strands agent messages nobody resumes (the lead-stuck failure), so then the
+    /// message runs again at once. Restored at most once per message, so a turn
+    /// that keeps being interrupted cannot loop.
+    func restoreUnansweredMessage(_ message: AgentComposerQueuedMessage, for id: AgentID) {
+        guard let store = submissionRecoveryStore, restoredUnansweredMessages.insert(message.id).inserted else { return }
+        let agentTrafficWaits = queuedMessages(for: id).contains { $0.agentMessageContext != nil }
+        if !agentTrafficWaits { pauseQueue(id, .held) }
+        appendLocalNotice(id: id, key: "unanswered-\(message.id.uuidString)", title: "Not answered",
+            body: agentTrafficWaits
+                ? "This turn was interrupted before it answered your message. It is running again."
+                : "This turn was interrupted before it answered your message. It is back at the top of the queue; send it again from there.")
+        runQueueOp(for: id) { await store.requeueWorkItemAtFront(.prompt(message), for: id) }
+        if agentTrafficWaits { drainQueue(for: id) }
+        notifyTurnCapabilitiesChanged(id)
+    }
     /// Set on `.interrupted`. A user who interrupted wants to look first, so
     /// the held queue is not auto-drained into a turn they did not ask for.
     /// Cleared by the next explicit `.send`/`.sendPrompt` or `resumeQueue`.
@@ -4845,6 +4869,16 @@ final class AgentSupervisor {
         // Keep the two facts separate so a rename, read, or meter update cannot
         // keep a dead agent out of the settled tail.
         record.latestPromptAt = max(record.latestPromptAt ?? .distantPast, now)
+        // A user's message stays recoverable until its turn settles: an interrupt
+        // nobody asked for must not turn it into history (`handleQueueOnTurnCompleted`).
+        if !AgentMessageEnvelope.classify(prompt.text).isAgentMessage, prompt.imageAttachments.isEmpty,
+           !prompt.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            inFlightUserMessages[id] = prepared.queuedSource ?? AgentComposerQueuedMessage(
+                id: UUID(), text: prompt.text, imageAttachments: [],
+                fileReferences: prompt.fileReferences.map {
+                    AgentComposerDraftFileReference(displayName: $0.displayName, contentType: $0.contentType, path: $0.fileURL.path)
+                }, agentReferences: prompt.agentReferences, boardReferences: prompt.boardReferences, queuedAt: now)
+        } else { inFlightUserMessages[id] = nil }
         // P4.4: a user message is the plainest real activity there is, so a settle
         // does not survive it. Before the runner starts, because this write is the
         // same one `persist` below carries — the clear must not wait for the first
@@ -5811,6 +5845,7 @@ final class AgentSupervisor {
             return
         }
         if usagePauses.removeValue(forKey: id) != nil { releaseUsageQueueHold(id); usagePausesChanged(id) }
+        inFlightUserMessages[id] = nil  // a deliberate teardown, not an interruption to recover from
         recoverForcedMessagesAfterStop(id)
         withdrawQueuedHelperAlert(id)
         // Quit and archive stop an agent without anyone to resume its queue;
@@ -14457,6 +14492,7 @@ final class AgentSupervisor {
         defer { wakeQueuesWaiting(onWriter: id) }
         guard submissionRecoveryStore != nil else { return }
         let userStopped = userStoppedAgents.remove(id) != nil
+        let inFlightMessage = inFlightUserMessages.removeValue(forKey: id)
         if outcome == .interrupted, userStopped {
             pauseQueue(id, .afterStop)
             notifyTurnCapabilitiesChanged(id)
@@ -14469,6 +14505,10 @@ final class AgentSupervisor {
         if outcome == .interrupted, usagePauses[id] != nil {
             pauseQueue(id, .usage)
             notifyTurnCapabilitiesChanged(id)
+            return
+        }
+        if outcome == .interrupted, let message = inFlightMessage, lastAssistantEntryID(id) == turnReplyFloors[id]?.entryID {
+            restoreUnansweredMessage(message, for: id)
             return
         }
         if outcome == .interrupted {
