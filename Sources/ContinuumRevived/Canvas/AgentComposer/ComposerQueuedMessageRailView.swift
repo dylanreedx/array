@@ -31,6 +31,9 @@ struct ComposerQueueRailState: Equatable {
         case afterCompaction
         case unconfirmed
         case held
+        /// The agent's account ran out: held until its usage pause ends, which
+        /// releases it by itself; never a person's Stop.
+        case usage
 
         var title: String {
             switch self {
@@ -39,6 +42,7 @@ struct ComposerQueueRailState: Equatable {
             case .afterCompaction: return "Paused, compaction did not finish"
             case .unconfirmed: return "Unconfirmed; retry may repeat"
             case .held: return "Paused"
+            case .usage: return "Paused for usage"
             }
         }
     }

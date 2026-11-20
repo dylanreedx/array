@@ -455,6 +455,7 @@ check --unified-model-boot-check
 check --update-channel-check
 check --usage-account-fallback-check
 check --usage-pause-account-switch-check
+check --usage-stop-queue-check
 check --uuid-string-order-check
 check --viewport-sanitize-check
 check --web-link-open-check
@@ -990,6 +991,7 @@ leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --update-channel-check
 leg run_app_check .build/debug/Array --usage-account-fallback-check
 leg run_app_check .build/debug/Array --usage-pause-account-switch-check
+leg run_app_check .build/debug/Array --usage-stop-queue-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
 leg run_app_check .build/debug/Array --web-link-open-check
 leg run_app_check .build/debug/Array --window-chrome-check

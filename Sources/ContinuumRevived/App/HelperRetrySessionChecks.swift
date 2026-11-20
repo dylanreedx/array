@@ -90,14 +90,14 @@ func runHelperRetrySessionChecks() async throws {
     let mine = AgentSteeringQAFakes.argvLog(in: claudeBin).filter { $0.argv.contains(session) }
     try require(mine.last?.argv.contains("--resume") == true, "the continuation must resume the same Claude session, got \(String(describing: mine.last?.argv))")
 
-    // 2. A fresh helper replacing a stopped one supersedes it.
+    // 2. A fresh helper replacing one that still holds a queued message
+    //    supersedes it. The message waits behind the helper's running turn (a
+    //    message to an idle or Stopped helper now runs at once).
     let held = helper("Held")
     try require(supervisor.send("SLOW", to: held), "slow send refused")
     try await waitFor("the helper is running") { supervisor.isRunning(held) }
-    supervisor.stop(held)
-    try await waitFor("the helper stops") { !supervisor.isRunning(held) }
-    try require(supervisor.sendAgentMessage("held for the old helper", from: lead, to: held), "message to the stopped helper refused")
-    try await waitFor("the stopped helper's queue holds the message") { supervisor.queuedMessages(for: held).count == 1 }
+    try require(supervisor.sendAgentMessage("held for the old helper", from: lead, to: held), "message to the running helper refused")
+    try await waitFor("the running helper's queue holds the message") { supervisor.queuedMessages(for: held).count == 1 }
     guard let fresh = supervisor.handleSpawnRequest(
         SpawnRequest(role: nil, prompt: "Take over", isolated: false), from: lead,
         childSelection: AgentLaunchSelection(harness: .claudeCode, model: model, thinking: "low"),
@@ -109,5 +109,6 @@ func runHelperRetrySessionChecks() async throws {
     let stored = try store.load(id: held)
     try require(stored?.supersededBy == fresh, "supersededBy must be persisted")
     try await waitFor("the replaced helper's queue must be cancelled") { supervisor.queuedMessages(for: held).isEmpty }
+    supervisor.stop(held)
     print("helper-retry-session-check: PASS")
 }

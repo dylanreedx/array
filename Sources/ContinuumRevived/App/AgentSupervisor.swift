@@ -2089,6 +2089,10 @@ final class AgentSupervisor {
         case .afterCompaction: why = "is paused because a compaction did not finish"
         case .unconfirmed: why = "is paused because an earlier input's delivery is unconfirmed"
         case .held: why = "is paused"
+        case .usage: why = "is paused because its account hit its usage limit"
+        }
+        if queuePauseReasons[id] == .usage {
+            return "Held (\(pending) pending from you): \(name) \(why). Array resumes it when usage returns and then runs held messages in order; nobody needs to press Resume. A held message older than 24 h is bundled into a 'while you were away' note on its next turn, never dropped."
         }
         return "Held (\(pending) pending from you): \(name) \(why). Held messages run in order, each as sent, only when the user resumes it; one held longer than 24 h is bundled into a 'while you were away' note on its next turn, never dropped, and you are told."
     }
@@ -2108,6 +2112,7 @@ final class AgentSupervisor {
         case .afterCompaction: return "afterCompaction"
         case .unconfirmed: return "unconfirmed"
         case .held: return "held"
+        case .usage: return "usage"
         }
     }
     /// The outcome of the turn that just freed a runner slot, read by
@@ -5564,6 +5569,7 @@ final class AgentSupervisor {
             // A paused recipient keeps every held message, in order: "do A"
             // then "also do B" are both instructions. Age, not recency, retires
             // them (`bundleStaleAgentMessages`).
+            reevaluateUsagePause(for: id)
             let heldReason = agentMessageHoldReason(for: id, sender: senderID, adding: 1)
             let held = heldReason != nil
             let item = AgentComposerQueuedMessage(text: prompt.text, queuedAt: agentMessageNow(),
@@ -5707,7 +5713,7 @@ final class AgentSupervisor {
             warn("AgentSupervisor.stop: no agent \(id.rawValue.uuidString)")
             return
         }
-        if usagePauses.removeValue(forKey: id) != nil { usagePausesChanged(id) }
+        if usagePauses.removeValue(forKey: id) != nil { releaseUsageQueueHold(id); usagePausesChanged(id) }
         recoverForcedMessagesAfterStop(id)
         withdrawQueuedHelperAlert(id)
         // Quit and archive stop an agent without anyone to resume its queue;
@@ -9901,6 +9907,27 @@ final class AgentSupervisor {
         return true
     }
 
+    /// A usage pause that ended without `resumeUsagePaused` (a new turn, Stop,
+    /// supersession) must not leave its queue held: only the pause held it.
+    private func releaseUsageQueueHold(_ id: AgentID) {
+        if pausedQueues.contains(id), queuePauseReasons[id] == .usage { resumeQueue(for: id) }
+    }
+
+    /// A message for a usage-paused agent asks again whether usage is back:
+    /// the account its next launch signs in as may have room now, or its own
+    /// account may have been refilled, with nothing yet to wake the pause.
+    private func reevaluateUsagePause(for id: AgentID) {
+        guard let pause = usagePauses[id], pause.resumesAutomatically else { return }
+        let now = usagePauseNow()
+        if usagePauseLeftBehind(id, pause, now: now) {
+            DispatchQueue.main.async { [weak self] in self?.runUsageResumeTick() }
+        } else if let held = pause.accountId, let account = accounts.first(where: { $0.id == held }) {
+            // The CLI's own usage probe (no model turn); a reading with room
+            // frees the pause through `usageReadingArrived`.
+            _ = refreshAccountUsage(account: account, minimumInterval: 60, now: now)
+        }
+    }
+
     // MARK: - Retrying a helper on its own session
 
     /// A lead's `retryOf` can continue `id` itself when its Claude session
@@ -9943,6 +9970,7 @@ final class AgentSupervisor {
         persist(record)
         if usagePauses.removeValue(forKey: old) != nil { usagePausesChanged(old) }
         usageFreed.remove(old)
+        releaseUsageQueueHold(old)
         let name = records[new]?.humanDisplayName ?? "its replacement"
         let note = "Superseded: this helper was replaced by \(name) (\(new.rawValue.uuidString)), so the message was cancelled instead of running. Message the replacement."
         for item in queuedWorkItemsCache[old] ?? [] {
@@ -14269,6 +14297,15 @@ final class AgentSupervisor {
             notifyTurnCapabilitiesChanged(id)
             return
         }
+        // A usage stop is not a Stop: the agent resumes by itself when usage
+        // returns, and that resume releases this hold (`resumeUsagePaused`,
+        // or `releaseUsageQueueHold` when the pause ends another way). Draining
+        // now would run every held message into the spent account.
+        if outcome == .interrupted, usagePauses[id] != nil {
+            pauseQueue(id, .usage)
+            notifyTurnCapabilitiesChanged(id)
+            return
+        }
         if outcome == .interrupted {
             appendAgentDiagnostics("turn interrupted without a user Stop; queue not paused depth=\(queuedWorkItemsCache[id]?.count ?? 0)", agentID: id)
         }
@@ -15371,6 +15408,7 @@ final class AgentSupervisor {
             event = .turnCompleted(threadId: threadId, turnId: turnId, outcome: .interrupted, errorMessage: error)
         }
         if case .turnStarted = event, usagePauses.removeValue(forKey: id) != nil {
+            releaseUsageQueueHold(id)
             usagePausesChanged(id)
         }
         if case .turnCompleted(_, _, .completed, _) = event { usageWindowProvedOpen(by: id, now: now) }

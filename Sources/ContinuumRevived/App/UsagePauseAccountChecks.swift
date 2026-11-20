@@ -296,3 +296,137 @@ func runUsageAccountFallbackChecks() async throws {
     try await waitFor("the lead hears no other account has room") { leadHeard(lead, "no other Claude account has room") }
     print("usage-account-fallback-check: PASS")
 }
+
+
+/// 2026-11-20: a lead's turn hit a usage stop and its queue was held like a
+/// person's Stop ("is paused after a Stop"), so every message its helpers sent
+/// waited all night for a Resume nobody was there to press.
+///
+/// Production supervisor, runner (fake `claude`, exhausted per account folder)
+/// and resume clock:
+/// 1. a usage stop holds the queue for USAGE, in words that say so, never as a
+///    Stop; a helper's message is held, not run into the spent account;
+/// 2. when usage returns the lead resumes by itself and the held message is
+///    delivered, with no Resume press;
+/// 3. a message to a usage-paused helper re-asks whether usage is back: the
+///    account its next launch uses got room (a reading arrived with nothing to
+///    wake the pause), so it resumes and runs the message.
+@MainActor
+func runUsageStopQueueChecks() async throws {
+    struct Failure: Error, CustomStringConvertible { let description: String }
+    func require(_ condition: Bool, _ message: @autoclosure () -> String) throws {
+        guard condition else { throw Failure(description: message()) }
+    }
+    func waitFor(_ message: @autoclosure () -> String, timeout: TimeInterval = 25, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw Failure(description: message())
+    }
+    final class Logins: @unchecked Sendable {
+        private let lock = NSLock()
+        private var byAccount: [String: AgentAccountIdentity] = [:]
+        func set(_ id: String, _ identity: AgentAccountIdentity) { lock.withLock { byAccount[id] = identity } }
+        func read(_ account: AgentAccount) -> AgentAccountUsageProbe.Reading? {
+            .init(identity: lock.withLock { byAccount[account.id] }, quota: nil)
+        }
+    }
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("usage-stop-queue-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fm.removeItem(at: root) }
+    let claudeBin = root.appendingPathComponent("claude-bin", isDirectory: true)
+    _ = try AgentSteeringQAFakes.install(.claude, in: claudeBin)
+    let originalPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+    setenv("PATH", "\(claudeBin.path):\(originalPath)", 1)
+    defer { setenv("PATH", originalPath, 1) }
+    let personalClaude = root.appendingPathComponent("personal-claude", isDirectory: true)
+    try fm.createDirectory(at: personalClaude.appendingPathComponent("projects"), withIntermediateDirectories: true)
+    let cwd = root.appendingPathComponent("project", isDirectory: true)
+    try fm.createDirectory(at: cwd, withIntermediateDirectories: true)
+    let logins = Logins()
+    let supervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true)),
+        makeRunner: AgentSupervisor.productionRunner,
+        submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0))
+    supervisor.personalClaudeDirectory = personalClaude
+    supervisor.personalCodexDirectory = root.appendingPathComponent("personal-codex", isDirectory: true)
+    supervisor.accountUsageReader = { logins.read($0) }
+    supervisor.accountFallbackPreference = false
+    var now = Date()
+    supervisor.usagePauseNow = { now }
+    supervisor.usageResumeStagger = 20
+    defer { supervisor.stopAll() }
+    let personal = AgentAccount.defaultAccount(for: .claudeCode)
+    let work = try supervisor.addAccount(harness: .claudeCode, label: "Work")
+    logins.set(personal.id, AgentAccountIdentity(harness: .claudeCode, email: "me@example.com", organizationName: "Me",
+                                                 organizationId: "org-me", plan: "max", observedAt: now))
+    logins.set(work.id, AgentAccountIdentity(harness: .claudeCode, email: "me@example.com", organizationName: "Team",
+                                             organizationId: "org-team", plan: "team", observedAt: now))
+    supervisor.refreshAccountUsage(harness: .claudeCode, minimumInterval: 0)
+    try await waitFor("both logins must be read") {
+        supervisor.accountIdentity(accountId: personal.id) != nil && supervisor.accountIdentity(accountId: work.id) != nil
+    }
+    func folder(_ a: AgentAccount) -> String { a.configDirectory ?? "<default>" }
+    func exhaust(_ folders: [String]) throws {
+        try folders.map { $0 + "\n" }.joined().write(to: claudeBin.appendingPathComponent("exhausted.txt"), atomically: true, encoding: .utf8)
+    }
+    try "You've hit your 5-hour limit · resets 1:40am (America/Toronto)"
+        .write(to: claudeBin.appendingPathComponent("limit-line.txt"), atomically: true, encoding: .utf8)
+    func received(_ needle: String) -> Bool {
+        AgentSteeringQAFakes.receivedFrames(in: claudeBin).contains { frame in
+            guard let data = try? JSONSerialization.data(withJSONObject: frame) else { return false }
+            return String(decoding: data, as: UTF8.self).contains(needle)
+        }
+    }
+    let model = "anthropic/claude-haiku-4-5-20251001"
+    let lead = supervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .claudeCode, model: model, thinking: "low")
+    let helper = supervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .claudeCode, model: model, thinking: "low",
+                                  parentAgentID: lead, displayName: "Helper")
+
+    // 1 + 2. The lead's usage stop holds its queue for usage; the reset releases it.
+    try exhaust([folder(personal)])
+    try require(supervisor.send("PLAIN lead task", to: lead), "lead send refused")
+    try await waitFor("the lead pauses on usage") { !supervisor.isRunning(lead) && supervisor.usagePause(for: lead) != nil }
+    try require(supervisor.sendAgentMessage("REPORT-FROM-HELPER", from: helper, to: lead), "the helper's message to the lead was refused")
+    try await waitFor("the message is held behind the usage pause") { supervisor.queuedMessages(for: lead).count == 1 }
+    let hold = supervisor.agentMessageHoldReason(for: lead, sender: helper) ?? "<not held>"
+    try require(hold.contains("usage limit") && !hold.contains("Stop") && hold.contains("nobody needs to press Resume"),
+                "the hold must say usage, not Stop, got: \(hold)")
+    try require(!received("REPORT-FROM-HELPER"), "a held message must not run into the spent account")
+    try exhaust([])
+    guard let reset = supervisor.usagePause(for: lead)?.resetsAt else { throw Failure(description: "no reset on the lead's pause") }
+    now = reset.addingTimeInterval(5)
+    supervisor.runUsageResumeTick()
+    try await waitFor("at the reset the lead resumes and the held message is delivered, no Resume press") { received("REPORT-FROM-HELPER") }
+    try await waitFor("the lead settles with its queue empty") {
+        !supervisor.isRunning(lead) && supervisor.queuedMessages(for: lead).isEmpty && supervisor.usagePause(for: lead) == nil
+    }
+
+    // 3. A message to a usage-paused helper re-evaluates the pause.
+    try require(supervisor.switchAccount(to: work.id) == .switched(finishingTurns: 0), "Work is the account in use")
+    try exhaust([folder(work)])
+    try require(supervisor.send("PLAIN helper task", to: helper), "helper send refused")
+    try await waitFor("the helper pauses on Work") { !supervisor.isRunning(helper) && supervisor.usagePause(for: helper) != nil }
+    // Personal is the account in use for nobody yet; make Work the only one with a reading that
+    // says it is spent, then refill Personal and move to it WITHOUT anything waking the pause.
+    try exhaust([])
+    let atB = supervisor.usageResumeLogForQA.count
+    let reading = AgentAccountUsageProbe.Reading(
+        identity: AgentAccountIdentity(harness: .claudeCode, email: "me@example.com", organizationName: "Work",
+                                       organizationId: "org-team", plan: "team", observedAt: now),
+        quota: AgentAccountQuotaSnapshot(harness: .claudeCode,
+            windows: [AgentQuotaWindow(kind: .fiveHour, utilization: 0.30, resetsAt: now.addingTimeInterval(86_400))],
+            observedAt: now.addingTimeInterval(300), source: .claudeUsageRequest, accountId: work.id))
+    now = now.addingTimeInterval(120)
+    try require(supervisor.usagePause(for: helper) != nil, "the helper is paused before the message")
+    supervisor.applyAccountUsageReading(reading, accountId: work.id)
+    // The reading frees Work's own pauses by itself; the message path must
+    // also cope when it arrived earlier than the stop settled: ask again.
+    try require(supervisor.sendAgentMessage("REPORT-TO-HELPER", from: lead, to: helper), "the lead's message to the helper was refused")
+    try await waitFor("the lead's message re-evaluates the pause, resumes the helper and runs the message") {
+        received("REPORT-TO-HELPER") && supervisor.usageResumeLogForQA.count > atB
+    }
+    print("usage-stop-queue-check: PASS")
+}

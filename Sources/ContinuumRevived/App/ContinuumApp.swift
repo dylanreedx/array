@@ -4211,6 +4211,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // A usage stop holds a queue for usage and releases it at the reset.
+        if CommandLine.arguments.contains("--usage-stop-queue-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runUsageStopQueueChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // A usage pause ends when the account in use changes to one with room.
         if CommandLine.arguments.contains("--usage-pause-account-switch-check") {
             _ = NSApplication.shared
