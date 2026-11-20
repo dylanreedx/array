@@ -12208,11 +12208,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// `chatterFrom`: the request is tool chatter from this agent (see
     /// `pushScheduledAgentSurfaces`).
     private func scheduleAgentSurfacePush(
-        debounce: TimeInterval, chatterFrom agent: AgentID? = nil, stateFrom stateAgent: AgentID? = nil
+        debounce: TimeInterval, chatterFrom agent: AgentID? = nil, stateFrom stateAgent: AgentID? = nil,
+        fullReason: String = "other"
     ) {
         if let agent { pendingChatterAgents.insert(agent.rawValue) }
         else if let stateAgent { pendingStateAgents.insert(stateAgent.rawValue) }
-        else { pendingPushBuildsRows = true }
+        else { pendingPushBuildsRows = true; qaFullPushReasons[fullReason, default: 0] += 1 }
         // Tool chatter waits out a camera gesture (FrameGovernor); a state change
         // (turn start/end, approval, failure) never does. The pending set above
         // keeps what the one push at the drain must cover.
@@ -16644,9 +16645,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         sidebarTurnObserverToken = agentSupervisor.addTurnCapabilitiesObserver { [weak self] id in
             guard let self, self.agentSupervisor.records[id]?.tileId == nil else { return }
-            self.scheduleAgentSurfacePush(debounce: 0.05)
+            // The turn seam names the agent, so its family is patched like any
+            // state change. A nameless request built every row, and every
+            // tile-less helper's turn start and end landed here on top of its own
+            // state push (`startTurn`, `handleQueueOnTurnCompleted`).
+            if Self.qaLegacyTurnObserverPush {
+                self.scheduleAgentSurfacePush(debounce: 0.05, fullReason: "turn-observer")
+            } else {
+                self.scheduleAgentSurfacePush(debounce: 0.05, stateFrom: id)
+            }
         }
     }
+
+    /// QA seam: `CONTINUUM_QA_SIDEBAR_LEGACY_TURN_OBSERVER=1` (or this flag, set by
+    /// a check) restores the whole-sidebar build for a tile-less turn change.
+    nonisolated(unsafe) static var qaLegacyTurnObserverPush =
+        ProcessInfo.processInfo.environment["CONTINUUM_QA_SIDEBAR_LEGACY_TURN_OBSERVER"] == "1"
+    /// Why nameless (whole-sidebar) pushes were requested, by call site.
+    private(set) var qaFullPushReasons: [String: Int] = [:]
 
     /// .plans/113: the sidebar's real host wiring, for `--sidebar-sort-check`.
     func configureWorkspaceSidebarForQA(_ sidebar: WorkspaceSidebarView) { configureWorkspaceSidebar(sidebar) }
@@ -25789,10 +25805,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // Performance at scale, item 4: on unless `agents.recordArchive.enabled` is false.
         agentSupervisor.recordArchiveDefaults = settingsDefaults
         agentSupervisor.onArchivedAgentAdopted = { [weak self] _ in
-            self?.scheduleAgentSurfacePush(debounce: 0.05)
+            self?.scheduleAgentSurfacePush(debounce: 0.05, fullReason: "archive-adopted")
         }
         agentSupervisor.onRecordsArchived = { [weak self] _ in
-            self?.scheduleAgentSurfacePush(debounce: 0.05)
+            self?.scheduleAgentSurfacePush(debounce: 0.05, fullReason: "records-archived")
         }
         let collaborationRoot = collaborationSupportRoot
         agentSupervisor.recordArchiveSharedAgents = {
@@ -25826,7 +25842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         // An agent's own status or report is drawn under its name in the sidebar
         // (`.plans/102` P2b), from the record on every row build.
         agentSupervisor.onSelfReportChanged = { [weak self] _ in
-            self?.scheduleAgentSurfacePush(debounce: 0.05)
+            self?.scheduleAgentSurfacePush(debounce: 0.05, fullReason: "self-report")
         }
         canvasView.onTileHoverChanged = { [weak self] tileId, hovered in
             self?.completionHoverChanged(tileId: tileId, hovered: hovered)
@@ -46798,6 +46814,26 @@ extension AppDelegate {
         witness(read != nil && app.qaInboxRowBuildCount > visitBefore,
                 "2: control: visiting an unread result did not rebuild rows (\(app.qaInboxRowBuildCount - visitBefore)) or clear it")
         report.append("focus: \(focusBuilds) row builds over 3 moves, unread visit still rebuilds")
+
+        // 7 · A tile-less agent's turns move its own family only. Every real turn
+        // start and end (`startTurn`, `handleQueueOnTurnCompleted`) used to build
+        // every row through the turn observer. Driven by `send`, the real start.
+        let turners = Array(loose.suffix(6))
+        let turnBuildsBefore = app.qaInboxRowBuildCount
+        let reasonsBefore = app.qaFullPushReasons
+        for round in 0..<3 {
+            for agent in turners {
+                _ = supervisor.send("work \(round)", to: agent)
+                supervisor.qaDeliver(.turnStarted(threadId: thread(agent), turnId: "k\(round)"), to: agent)
+                supervisor.qaDeliver(.turnCompleted(threadId: thread(agent), turnId: "k\(round)", outcome: .completed, errorMessage: nil), to: agent)
+            }
+            spin(timeout: 0.6) { false }
+        }
+        settle()
+        let turnBuilds = app.qaInboxRowBuildCount - turnBuildsBefore
+        let turnReasons = app.qaFullPushReasons.filter { $0.value != reasonsBefore[$0.key, default: 0] }
+        witness(turnBuilds == 0, "7: turns of 6 tile-less agents built every sidebar row \(turnBuilds) times, reasons \(turnReasons)")
+        report.append("tile-less turns: \(turnBuilds) full row builds over 18 turn pairs")
 
         if !failures.isEmpty {
             throw Failure(description: "SidebarEventCost RED:\n  " + failures.joined(separator: "\n  "))
