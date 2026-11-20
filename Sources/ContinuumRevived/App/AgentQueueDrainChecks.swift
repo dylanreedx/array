@@ -93,5 +93,46 @@ func runAgentQueueDrainChecks() async throws {
         try require(diagnostics(dir.appendingPathComponent("agents")).contains("queue resumed reason=afterStop"),
             "resuming leaves a 'queue resumed reason=afterStop' line")
     }
+
+    // MARK: 1. A relaunch never strands agent-to-agent messages.
+    // A queue a previous launch left behind waits for the person only when
+    // the person typed something into it. Messages and results from other
+    // agents were never typed by anyone: they run once the recipient is
+    // hydrated, as they would have had the app stayed open.
+    func relaunch(_ name: String, seed: (AgentComposerDraftStore, AgentID) async throws -> Void) async throws
+        -> (supervisor: AgentSupervisor, provider: Provider, id: AgentID) {
+        let dir = root.appendingPathComponent(name, isDirectory: true)
+        let store = AgentStore(applicationSupportDirectory: dir.appendingPathComponent("agents"))
+        let id = AgentID(rawValue: UUID())
+        try store.upsert(.init(id: id, displayName: "Lead", harness: .pi, model: model, thinking: "medium",
+            cwd: root.path, createdAt: Date(), lastActivityAt: Date()))
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: dir.appendingPathComponent("drafts"), debounceInterval: 0)
+        try await seed(drafts, id)
+        let provider = Provider()
+        provider.blocks = false
+        provider.threadId = AgentSupervisor.threadId(for: id)
+        let supervisor = AgentSupervisor(store: store, makeRunner: { _ in provider }, warn: { _ in },
+            nameTitlerCommand: { _ in nil }, submissionRecoveryStore: drafts)
+        _ = supervisor.restore()
+        return (supervisor, provider, id)
+    }
+    do {
+        let sender = AgentID(rawValue: UUID())
+        let agentOnly = try await relaunch("s1-agent") { drafts, id in
+            let context = AgentMessageQueueContext(caller: sender, recipient: id, operationId: "op-1",
+                idempotencyKey: "key-1", payloadHash: "h")
+            try await drafts.enqueueAgentMessage(.init(text: "<array-agent-message>do the thing</array-agent-message>",
+                queuedAt: Date(), agentMessageHops: 1, agentMessageContext: context), for: id)
+        }
+        try await waitFor("an agent message left in the queue runs after a relaunch") { agentOnly.provider.runs == 1 }
+        try require(!agentOnly.supervisor.isQueuePaused(for: agentOnly.id), "an agent-only queue is not left paused")
+
+        let typed = try await relaunch("s1-typed") { drafts, id in
+            _ = await drafts.enqueueMessage(text: "a follow-up the person typed", for: id)
+        }
+        try await Task.sleep(for: .milliseconds(800))
+        try require(typed.provider.runs == 0 && typed.supervisor.isQueuePaused(for: typed.id),
+            "a follow-up the person typed still waits for them after a relaunch")
+    }
     print("AgentQueueDrainChecks passed")
 }

@@ -13905,6 +13905,22 @@ final class AgentSupervisor {
             if messages.contains(where: { if case .prompt(let m) = $0 { return m.steerUncertain }; return false }) {
                 self.pauseQueue(id, .unconfirmed)
             }
+            // A relaunch holds a queue so a person's typed follow-up never runs
+            // into a turn nobody is watching. Nobody typed an agent's message or
+            // a helper's result: it runs once hydrated, as it would have had the
+            // app stayed open. One typed item keeps the whole queue held, so
+            // order is never rearranged around a person's input.
+            if self.pausedQueues.contains(id), self.queuePauseReasons[id] == .afterRelaunch,
+               !messages.isEmpty,
+               messages.allSatisfy({ item in
+                   guard case .prompt(let m) = item, !m.steerUncertain else { return false }
+                   return m.agentMessageContext != nil || m.helperCompletion || m.helperNote
+               }) {
+                self.pausedQueues.remove(id)
+                self.queuePauseReasons[id] = nil
+                self.notifyTurnCapabilitiesChanged(id)
+                if self.runners[id] == nil { self.drainQueue(for: id) }
+            }
             self.companionQueueHydrationPending.remove(id)
             if !messages.isEmpty { self.notifyTurnCapabilitiesChanged(id) }
         }
