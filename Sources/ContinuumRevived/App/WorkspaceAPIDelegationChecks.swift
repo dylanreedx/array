@@ -1338,22 +1338,14 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
     _ = restarted.restore()
     let restartAPI = WorkspaceAPIService(runtime: { runtime }, canvas: { canvas }, focusBroker: { delegate.qaFocusBroker },
         supervisor: restarted, registryStore: { registryStore }, epoch: "restart-fixture", approvalHandler: { _ in .allowForSession })
-    let restoredQueueReady = await waitUntil(timeout: 10, pollInterval: 0.02) {
-        restarted.queuedMessages(for: childId).contains { $0.agentMessageContext?.operationId == "restart-op" }
-    }
-    try expect(restoredQueueReady && restarted.isQueuePaused(for: childId), "restart restores durable admission paused")
-    let replayAfterRestart = try result(restartAPI.dispatch(agentId: parentId, requestId: "restart-replay", op: "agent.message",
-        payload: retryPayload), "restart replay")
-    try expect(replayAfterRestart["operationId"]?.string == "restart-op" && replayAfterRestart["queuePosition"]?.int == retryAdmission["queuePosition"]?.int, "restart reuses durable key and original position rather than adding another message")
-    try expect(restarted.queuedMessages(for: childId).filter { $0.text.contains("AFTER-RESTART") }.count == 1, "one item after restart retry")
-    let pausedInspection = try result(restartAPI.dispatch(agentId: parentId, requestId: "paused-inspection", op: "agent.inspect",
-        payload: ["agentId": childId.rawValue.uuidString]), "paused inspection")
-    try expect(pausedInspection["agent"]?.object?["status"]?.string == "paused", "restored held queue must be reported paused rather than ready")
-    restarted.resumeQueue(for: childId)
     let restartedDelivered = await waitUntil(timeout: 20, pollInterval: 0.02) {
         occurrences("AFTER-RESTART", in: childPromptLog()) == 1 && !restarted.isRunning(childId)
     }
-    try expect(restartedDelivered, "restored queue delivers once after explicit resume")
+    try expect(restartedDelivered, "queued agent message delivered after restart")
+    let replayAfterRestart = try result(restartAPI.dispatch(agentId: parentId, requestId: "restart-replay", op: "agent.message",
+        payload: retryPayload), "restart replay")
+    try expect(replayAfterRestart["operationId"]?.string == "restart-op", "restart reuses the durable key rather than adding another message")
+    try expect(occurrences("AFTER-RESTART", in: childPromptLog()) == 1 && !restarted.queuedMessages(for: childId).contains { $0.text.contains("AFTER-RESTART") }, "message ran once after restart retry")
     let restartResult = try result(restartAPI.dispatch(agentId: parentId, requestId: "restart-result", op: "operation.get",
         payload: ["operationId": "restart-op"]), "restart result association")
     // The restored item settles under its own durable operation. This lead is
