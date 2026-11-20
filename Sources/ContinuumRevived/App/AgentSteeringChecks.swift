@@ -162,6 +162,28 @@ func runAgentSteeringChecks(waitInputOnly: Bool = false, helperCompletionOnly: B
                    "prewarm-caret: typing into the draft must still start the session")
     }
 
+    // 5a3. At most two pre-warmed sessions wait unused: typing into five agents
+    //      without sending leaves two, the newest. CONTINUUM_QA_PREWARM_UNLIMITED=1 is RED.
+    do {
+        let h = try Harness(.claude, idleTimeout: 60, hiddenTimeout: 60)
+        defer { h.tearDown() }
+        onPath(h)
+        h.supervisor.agentVisibleProvider = { _ in true }
+        let work = h.root.appendingPathComponent("work", isDirectory: true)
+        var ids = [h.id]
+        for _ in 0..<4 {
+            ids.append(h.supervisor.spawn(role: nil, prompt: nil, cwd: work, harness: .claudeCode,
+                                          model: "anthropic/claude-haiku-4-5-20251001", thinking: "low"))
+        }
+        for id in ids { try expect(h.supervisor.prewarmSession(for: id), "prewarm-cap: a closed agent must pre-warm") }
+        let pooled = ids.filter { h.supervisor.qaHasIdleSession($0) }
+        try expect(pooled.count <= 2 && h.supervisor.qaUnusedPrewarmedCount <= 2 && pooled == Array(ids.suffix(2)),
+                   "prewarm-cap: five unsent drafts left \(pooled.count) pre-warmed sessions, want the newest 2")
+        // A message to a pre-warmed agent takes it out of the count.
+        try expect(h.supervisor.send("go", to: ids[4]), "prewarm-cap: send refused")
+        try expect(h.supervisor.qaUnusedPrewarmedCount == 1, "prewarm-cap: a used session still counts, \(h.supervisor.qaUnusedPrewarmedCount)")
+    }
+
     // 5a4. An idle session on a visible tile falls under the hidden cap when the
     //      tile leaves the screen, instead of sleeping out the visible timeout.
     //      CONTINUUM_QA_REAP_VISIBILITY_ONCE=1 is RED.

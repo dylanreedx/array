@@ -4852,6 +4852,7 @@ final class AgentSupervisor {
         operation: @escaping @Sendable (@escaping @Sendable (AgentRuntimeEvent) -> Void) throws -> Void
     ) {
         guard let record = records[id] else { return }
+        prewarmedUnused.removeAll { $0.id == id }
         let runnerGeneration = RunnerGenerationToken()
         if companionAcceptedStarts.remove(id) == nil && !continuingHelperRetry.contains(id) {
             updateCompanionTasks { ledger in companionRunBindings[id] = try ledger.beginUnknown(agentID: id.rawValue) }
@@ -14266,12 +14267,18 @@ final class AgentSupervisor {
     private(set) var qaIdleReapCount = 0
     /// Sessions `prewarmSession` started, for the witness.
     private(set) var qaPrewarmCount = 0
+    /// Pre-warmed sessions nobody has sent to yet, oldest first. At most
+    /// `maxUnusedPrewarmed` live; a newer one closes the oldest.
+    private var prewarmedUnused: [(id: AgentID, runner: AgentRunning)] = []
+    nonisolated static let maxUnusedPrewarmed = 2
+    var qaUnusedPrewarmedCount: Int { prewarmedUnused.count }
     /// How often an idle session on a visible tile re-reads its visibility once
     /// the hidden cap has passed.
     var idleVisibilityPollInterval: TimeInterval = 30
     /// QA: `CONTINUUM_QA_REAP_VISIBILITY_ONCE=1` restores reading visibility only
-    /// when the timer is scheduled.
+    /// when the timer is scheduled; `CONTINUUM_QA_PREWARM_UNLIMITED=1` lifts the cap.
     nonisolated static let reapVisibilityOnce = ProcessInfo.processInfo.environment["CONTINUUM_QA_REAP_VISIBILITY_ONCE"] == "1"
+    nonisolated static let prewarmUnlimited = ProcessInfo.processInfo.environment["CONTINUUM_QA_PREWARM_UNLIMITED"] == "1"
     /// QA only: `CONTINUUM_QA_PREWARM_OFF=1` turns pre-warming off, so one
     /// binary shows the witness RED and GREEN.
     nonisolated static let prewarmDisabled = ProcessInfo.processInfo.environment["CONTINUUM_QA_PREWARM_OFF"] == "1"
@@ -14882,6 +14889,7 @@ final class AgentSupervisor {
     private func closeIdleSession(_ id: AgentID, _ runner: AgentRunning) {
         idleReapTokens[id] = nil
         idleSessionRunners[id] = nil
+        prewarmedUnused.removeAll { $0.id == id }
         runner.stop()
         interruptWorkingClaudeMirroredChildren(of: id)
         returnDeliveringSteers(for: id)
@@ -14908,6 +14916,11 @@ final class AgentSupervisor {
         idleSessionRunners[id] = runner
         qaPrewarmCount &+= 1
         scheduleIdleReap(for: id, runner: runner)
+        prewarmedUnused.append((id, runner))
+        while !Self.prewarmUnlimited, prewarmedUnused.count > Self.maxUnusedPrewarmed {
+            let oldest = prewarmedUnused.removeFirst()
+            if idleSessionRunners[oldest.id] === oldest.runner { closeIdleSession(oldest.id, oldest.runner) }
+        }
         DispatchQueue.global(qos: .userInitiated).async { try? warming.prewarm() }
         return true
     }
