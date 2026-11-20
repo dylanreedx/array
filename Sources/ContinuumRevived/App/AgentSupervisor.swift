@@ -5247,7 +5247,7 @@ final class AgentSupervisor {
     /// inferred, a CLI that is not logged in, and the seconds after launch while
     /// the catalogue probe is still out, during which readiness is `.checking` for
     /// every harness. Silence there reads as a broken app.
-    func sendRefusal(for id: AgentID) -> String? {
+    func sendRefusal(for id: AgentID, ignoringWriter: Bool = false) -> String? {
         guard let record = records[id] else { return nil }
         if terminalFaceAgents.contains(id) {
             return "This agent is open in its Terminal face. Switch the tile back to Array to send from here."
@@ -5266,7 +5266,7 @@ final class AgentSupervisor {
         if waitsForSessionDiscovery(record) {
             return "Checking whether another app has this session open first."
         }
-        if let writer = otherHelperWriting(checkoutOf: record) {
+        if !ignoringWriter, let writer = otherHelperWriting(checkoutOf: record) {
             return "\(writer) is writing this checkout now. Send again once it finishes, or delegate a new helper, which gets its own worktree."
         }
         return Self.sendRefusal(record: record)
@@ -5281,8 +5281,27 @@ final class AgentSupervisor {
               record.latestTerminalEvent != nil, record.delegationContext?.checkoutNotice == nil else { return nil }
         return records.values.first {
             $0.id != record.id && $0.parentAgentID == parent && $0.capabilities != .observedReadOnly
-                && $0.checkoutRoot == record.checkoutRoot && $0.delegationContext?.checkoutNotice == nil && isRunning($0.id)
+                && Self.sharesWritableCheckout($0, record) && $0.delegationContext?.checkoutNotice == nil && isRunning($0.id)
         }?.humanDisplayName
+    }
+
+    /// Two helpers conflict only when they write the SAME directory. Sharing
+    /// a checkout handle is not that: each helper delegated into its own
+    /// worktree works in a directory of its own, and a refusal for it made
+    /// the sender remember to retry, which nobody did.
+    static func sharesWritableCheckout(_ a: AgentRecord, _ b: AgentRecord) -> Bool {
+        a.checkoutRoot == b.checkoutRoot
+            && WorktreeManager.resolved(URL(fileURLWithPath: a.cwd)) == WorktreeManager.resolved(URL(fileURLWithPath: b.cwd))
+    }
+
+    /// A helper finishing frees the checkout a sibling's queued message was
+    /// waiting on: drain those queues now, not at the next sweep.
+    private func wakeQueuesWaiting(onWriter id: AgentID) {
+        guard let parent = records[id]?.parentAgentID else { return }
+        for (sibling, items) in queuedWorkItemsCache where sibling != id && !items.isEmpty
+            && records[sibling]?.parentAgentID == parent && runners[sibling] == nil && !pausedQueues.contains(sibling) {
+            drainQueue(for: sibling)
+        }
     }
 
     /// The rule itself, over a record and a catalogue — pure enough to pin every
@@ -5498,7 +5517,7 @@ final class AgentSupervisor {
                              hops: Int, context: AgentMessageQueueContext? = nil)
         -> (delivery: AgentMessageDelivery, position: Int?, error: String?) {
         let prompt = AgentPrompt(agentMessageText(text, from: senderID))
-        guard records[id] != nil, sendRefusal(for: id) == nil,
+        guard records[id] != nil, sendRefusal(for: id, ignoringWriter: true) == nil,
               !contextRecoveryInFlight.contains(id), sharedAgentControlGates[id]?.isEmpty != false
         else { return (.refused, nil, nil) }
         // A helper note never starts a turn and never blocks one: an agent whose
@@ -5507,7 +5526,10 @@ final class AgentSupervisor {
             if case .prompt(let m) = item { return !m.helperNote }
             return true
         }
-        if runners[id] != nil || pausedQueues.contains(id) || queuedBehind {
+        // Another helper writing this very directory is a reason to wait, never
+        // to refuse: the message is queued and runs when that helper finishes.
+        let writerBusy = records[id].map { otherHelperWriting(checkoutOf: $0) != nil } ?? false
+        if runners[id] != nil || pausedQueues.contains(id) || queuedBehind || writerBusy {
             guard let store = submissionRecoveryStore else { return (.refused, nil, nil) }
             // A paused recipient keeps every held message, in order: "do A"
             // then "also do B" are both instructions. Age, not recency, retires
@@ -14074,6 +14096,7 @@ final class AgentSupervisor {
     /// `pausedQueues`); every other outcome (`.completed`, `.failed`,
     /// `.cancelled`) writes the next queued item as an ordinary send.
     private func handleQueueOnTurnCompleted(outcome: TurnOutcome, for id: AgentID) {
+        defer { wakeQueuesWaiting(onWriter: id) }
         guard submissionRecoveryStore != nil else { return }
         let userStopped = userStoppedAgents.remove(id) != nil
         if outcome == .interrupted, userStopped {
@@ -14324,6 +14347,7 @@ final class AgentSupervisor {
     /// can change it while the durable queue/attachment store is awaited.
     private func canDrainQueue(for id: AgentID) -> Bool {
         runners[id] == nil && !pausedQueues.contains(id) && !isSessionHeld(id)
+            && !(records[id].map { otherHelperWriting(checkoutOf: $0) != nil } ?? false)
             && (deliveringSteers[id]?.isEmpty ?? true)
             && pendingForceSends[id] == nil && deferredForceSends[id] == nil
             && !contextRecoveryInFlight.contains(id)

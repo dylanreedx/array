@@ -827,7 +827,7 @@ extension WorkspaceAPIService {
         //    lists its model. That is a host condition, not the model's fault
         //    and not a silent success — it is a structured `unsupported`, and
         //    nothing was delivered.
-        if let refusal = supervisor.sendRefusal(for: childId) {
+        if let refusal = supervisor.sendRefusal(for: childId, ignoringWriter: true) {
             return failNothingDelivered(.unsupported, "Array did not deliver the message: \(refusal)", approvalRequestId: approvalRequestId)
         }
 
@@ -853,7 +853,7 @@ extension WorkspaceAPIService {
                 op.childAgentId = childId
             }
         } else {
-            let reason = supervisor.sendRefusal(for: childId)
+            let reason = supervisor.sendRefusal(for: childId, ignoringWriter: true)
                 ?? (childWasRunning
                     ? "the child is mid-turn and its follow-up queue is unavailable."
                     : "the child's send path declined the message.")

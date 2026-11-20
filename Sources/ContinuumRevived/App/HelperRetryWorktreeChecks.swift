@@ -356,14 +356,24 @@ enum HelperRetryWorktreeChecks {
         }
         let refused = try await message("PLAIN pick the work up again")
         try await Task.sleep(nanoseconds: 300_000_000)
-        try expect(refused.isError && !r.supervisor.isRunning(earlier) && r.supervisor.isRunning(later),
-                   "a re-messaged helper started writing the checkout another helper is writing: \(refused.reply)")
-        try expect(String(describing: refused.reply).contains("is writing this checkout"), "the refusal did not say why: \(refused.reply)")
+        // Never refused: queued, and not run while another helper writes the checkout.
+        try expect(!refused.isError && !r.supervisor.isRunning(earlier) && r.supervisor.isRunning(later),
+                   "a re-messaged helper was refused, or started writing the checkout another helper is writing: \(refused.reply)")
+        try expect(String(describing: refused.reply).contains("queued"), "the message was not reported queued: \(refused.reply)")
         try await finish(r, later)
-        let accepted = try await message("PLAIN pick the work up again")
-        try expect(!accepted.isError, "a re-message after the other helper finished was refused: \(accepted.reply)")
+        let earlierCwd = URL(fileURLWithPath: r.supervisor.records[earlier]!.cwd)
+        let ran = await waitUntil(timeout: 20, pollInterval: 0.05) {
+            ((try? String(contentsOf: earlierCwd.appendingPathComponent("prompts.log"), encoding: .utf8)) ?? "").contains("PLAIN pick the work up again")
+        }
+        try expect(ran, "the queued message did not run once the other helper finished")
+        // The rule itself: sharing a checkout handle is not writing the same directory.
+        var apart = r.supervisor.records[earlier]!
+        apart.cwd = rRoot.appendingPathComponent(".worktrees/elsewhere").path
+        try expect(!AgentSupervisor.sharesWritableCheckout(apart, r.supervisor.records[later]!)
+                   && AgentSupervisor.sharesWritableCheckout(r.supervisor.records[earlier]!, r.supervisor.records[later]!),
+                   "helpers with their own worktree directory were treated as sharing one")
         r.supervisor.stopAll()
-        print("Helper checkout writers passed: the first helper shares with no worktree made; two delegations in one moment get one checkout each; a finished helper re-messaged while another writes the checkout is refused, then accepted once it finishes")
+        print("Helper checkout writers passed: the first helper shares with no worktree made; two delegations in one moment get one checkout each; a finished helper re-messaged while another writes the checkout is queued, never refused, and runs once it finishes")
 
         // A native spawn that lands while a delegation's git step runs off main
         // takes the shared checkout first. The delegation must then get its own

@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedCore
+import ContinuumRevivedAgentUI
 import Foundation
 
 /// Stale leads (`~/array-scratch/stale-leads/README.md`): a lead stopped
@@ -12,6 +13,10 @@ func runAgentQueueDrainChecks() async throws {
     struct Failure: Error, CustomStringConvertible { let description: String }
     func require(_ condition: Bool, _ message: @autoclosure () -> String) throws {
         guard condition else { throw Failure(description: message()) }
+    }
+    func require2<T>(_ value: T?, _ message: String) throws -> T {
+        guard let value else { throw Failure(description: message) }
+        return value
     }
     func waitFor(_ message: @autoclosure () -> String, timeout: TimeInterval = 15, _ condition: () async -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
@@ -268,6 +273,54 @@ func runAgentQueueDrainChecks() async throws {
             "the sender is told where its message went: \(String(describing: entry?.result?.reason))")
         // Idempotent: a second restore finds nothing more to do.
         _ = supervisor.restore()
+    }
+
+    // MARK: 6. A message to a helper is queued, never refused, while a sibling writes its directory.
+    // Orchestration review finding 7: "is writing this checkout now. Send again
+    // once it finishes" made the sender remember to retry, and nobody did.
+    do {
+        let dir = root.appendingPathComponent("s6", isDirectory: true)
+        let store = AgentStore(applicationSupportDirectory: dir.appendingPathComponent("agents"))
+        let lead = AgentID(rawValue: UUID()), a = AgentID(rawValue: UUID()), b = AgentID(rawValue: UUID())
+        try store.upsert(.init(id: lead, displayName: "Lead", harness: .pi, mode: .managed, model: model, thinking: "medium",
+            cwd: root.path, createdAt: Date(), lastActivityAt: Date()))
+        for (id, name) in [(a, "Earlier helper"), (b, "Later helper")] {
+            try store.upsert(.init(id: id, displayName: name, harness: .pi, model: model, thinking: "medium",
+                cwd: root.path, checkoutRoot: root.path, parentAgentID: lead, createdAt: Date(), lastActivityAt: Date(),
+                latestTerminalEvent: id == a ? AgentTerminalEvent(sequence: 1, turnID: nil, outcome: .succeeded, endedAt: Date()) : nil))
+        }
+        let drafts = AgentComposerDraftStore(applicationSupportDirectory: dir.appendingPathComponent("drafts"), debounceInterval: 0)
+        let providerA = Provider(), providerB = Provider()
+        providerA.blocks = false
+        providerA.threadId = AgentSupervisor.threadId(for: a)
+        providerB.threadId = AgentSupervisor.threadId(for: b)
+        let supervisor = AgentSupervisor(store: store, makeRunner: { launch in launch.record.id == a ? providerA : providerB },
+            warn: { _ in }, nameTitlerCommand: { _ in nil }, submissionRecoveryStore: drafts)
+        _ = supervisor.restore()
+        let previousClaude = AgentModelCatalog.shared.snapshot(for: .claudeCode)
+        defer { AgentModelCatalog.shared.resetForQA(snapshot: previousClaude) }
+        AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready,
+            models: [ManagedModeChecks.model], displayNames: [ManagedModeChecks.model: "Fixture"],
+            contextWindows: [ManagedModeChecks.model: 200_000], effortLevels: [:]))
+        try require(supervisor.setProviderSettings(agentID: lead, harness: .claudeCode, model: ManagedModeChecks.model)
+            && supervisor.setMode(.managed, for: lead), "the lead is a Managed lead")
+        try require(supervisor.records[a]?.latestTerminalEvent != nil && supervisor.records[b]?.parentAgentID == lead,
+            "the helpers are the lead's, and the earlier one has finished a turn")
+        try require(await supervisor.accept(.sendPrompt(.init("write the checkout")), for: b) == .accepted, "the later helper starts writing")
+        try await waitFor("the later helper is writing") { providerB.runs == 1 }
+        try await waitFor("the supervisor sees the later helper running") { supervisor.isRunning(b) }
+        let sent = supervisor.deliverAgentMessage("pick the work up again", from: lead, to: a, hops: 1)
+        try require(sent.delivery != .refused, "a message to a helper whose sibling writes its directory is not refused: \(sent)")
+        try await Task.sleep(for: .milliseconds(500))
+        try require(providerA.runs == 0, "it does not run while the sibling writes the same directory")
+        providerB.release()
+        try await waitFor("it runs once the sibling finishes, with nobody retrying") { providerA.runs == 1 }
+        // Helpers in directories of their own never conflict.
+        var apart = try require2(supervisor.records[a], "record a")
+        apart.cwd = root.appendingPathComponent(".worktrees/elsewhere").path
+        try require(!AgentSupervisor.sharesWritableCheckout(apart, supervisor.records[b]!)
+            && AgentSupervisor.sharesWritableCheckout(supervisor.records[a]!, supervisor.records[b]!),
+            "sharing a checkout handle is not writing the same directory")
     }
     print("AgentQueueDrainChecks passed")
 }
