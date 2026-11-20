@@ -12287,6 +12287,9 @@ final class AgentSupervisor {
     }
 
     /// Waits for `id`'s serialized queue writes, so a reader counts what is stored.
+    /// The drain `clearRunner` starts after every finished turn.
+    func qaDrainQueueForChecks(_ id: AgentID) { drainQueue(for: id) }
+
     func qaQueueWritesSettled(for id: AgentID) async {
         await queueOpTasks[id]?.value
     }

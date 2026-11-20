@@ -65,13 +65,25 @@ public final class AgentMessageOutbox {
     public static var enumerationsForQA: Int { enumerations.value }
     private static let enumerations = QACounter()
 
+    /// The decoded outbox, kept from the first read. Only this object writes entry
+    /// files (`save`), so the directory cannot change under it. Every finished turn
+    /// drains its agent's queue on the main thread and asks for `entries()`; with a
+    /// few hundred retained entries that was a directory scan plus a JSON decode of
+    /// every file per turn (44% of the main thread's busy time in a live sample).
+    /// `CONTINUUM_QA_LEGACY_OUTBOX_RESCAN=1` restores the rescan for the witness.
+    private var cachedEntries: [Entry]?
+    private static let legacyRescan = ProcessInfo.processInfo.environment["CONTINUUM_QA_LEGACY_OUTBOX_RESCAN"] == "1"
+
     public func entries() throws -> [Entry] {
+        if !Self.legacyRescan, let cachedEntries { return cachedEntries }
         guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
         Self.enumerations.increment()
-        return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let decoded = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
             .map { Self.entriesDecoded.increment(); return try JSONCodec.makeDecoder().decode(Entry.self, from: Data(contentsOf: $0)) }
             .sorted { $0.message.queuedAt < $1.message.queuedAt }
+        cachedEntries = decoded
+        return decoded
     }
 
     public func save(_ entry: Entry) throws {
@@ -79,5 +91,12 @@ public final class AgentMessageOutbox {
                                                 attributes: [.posixPermissions: 0o700])
         try writer.write(entry, to: url(caller: entry.context.caller, key: entry.context.idempotencyKey))
         writeRevision &+= 1
+        if var cached = cachedEntries {
+            let at = cached.firstIndex {
+                $0.context.caller == entry.context.caller && $0.context.idempotencyKey == entry.context.idempotencyKey
+            }
+            if let at { cached[at] = entry } else { cached.append(entry) }
+            cachedEntries = cached.sorted { $0.message.queuedAt < $1.message.queuedAt }
+        }
     }
 }

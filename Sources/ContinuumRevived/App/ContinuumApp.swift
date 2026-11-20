@@ -5938,6 +5938,20 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--outbox-drain-cost-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    print(try await AppDelegate.runOutboxDrainCostSelfCheck())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            RunLoop.main.run()
+        }
+
         if CommandLine.arguments.contains("--composer-key-routing-check") {
             do {
                 _ = NSApplication.shared
