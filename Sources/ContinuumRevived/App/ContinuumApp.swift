@@ -941,6 +941,15 @@ enum ContinuumApp {
                 catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
             }
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-family-cap-check") {
+            _ = NSApplication.shared
+            let next = index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : nil
+            let stills = next.flatMap { $0.hasPrefix("--") ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+            MainActor.assumeIsolated {
+                do { print(try SidebarStuckRowsChecks.runFamilyCap(stills: stills)); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-pinned-lead-check") {
             _ = NSApplication.shared
             let next = index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : nil

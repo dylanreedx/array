@@ -1095,6 +1095,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// The user cleared this agent's outcome (sidebar Clear, which is Settle).
     /// A cleared helper folds inside its lead; new activity un-clears it.
     public var isCleared: Bool = false
+    /// The helper this one was spawned to retry. The one it replaced folds
+    /// away under the family's "N folded" instead of drawing its own row.
+    public var retryOf: UUID?
     /// Dogfood fix: the row's CLI has LIVE usage exhausted right now (its
     /// account's reading, not the words of an old failure). Only then is a
     /// usage stop a pause that needs you; stamped by the host per push.
@@ -1326,6 +1329,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         row.failureDetail = source.failureDetail
         row.resumesThroughLead = source.resumesThroughLead
         row.isCleared = source.isCleared
+        row.retryOf = source.retryOf
         row.isStanding = source.isStanding
         row.usageExhaustedNow = source.usageExhaustedNow
         row.usageCanSwitchAccount = source.usageCanSwitchAccount

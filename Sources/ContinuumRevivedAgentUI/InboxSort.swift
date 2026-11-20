@@ -513,15 +513,20 @@ public enum InboxSort {
             guard !children.isEmpty else { return }
 
             // The frozen index breaks every tie, so equal standings keep spawn order.
+            // A helper a retry replaced folds, unless work still runs under it.
+            let superseded = supersededIDs(among: children)
             let ranked = children.enumerated().map { (row: $1, index: $0, standing: standing($1)) }
-            let shown = ranked.filter { $0.standing.rank < 3 }.sorted {
+            func folds(_ entry: (row: AgentInboxRow, index: Int, standing: (rank: Int, at: Date))) -> Bool {
+                entry.standing.rank == 3 || (entry.standing.rank > 1 && superseded.contains(entry.row.id))
+            }
+            let shown = ranked.filter { !folds($0) }.sorted {
                 if $0.standing.rank != $1.standing.rank { return $0.standing.rank < $1.standing.rank }
                 if $0.standing.rank == 2, $0.standing.at != $1.standing.at {
                     return $0.standing.at > $1.standing.at
                 }
                 return $0.index < $1.index
             }
-            let folded = ranked.filter { $0.standing.rank == 3 }.sorted {
+            let folded = ranked.filter(folds).sorted {
                 $0.standing.at != $1.standing.at ? $0.standing.at > $1.standing.at : $0.index < $1.index
             }
             // A child that needs you (rank 0, its own ask or one below it) is
@@ -564,6 +569,31 @@ public enum InboxSort {
             for row in rows where !visited.contains(row.id) { emit(row) }
         }
         return BoundedInbox(rows: emitted, remainders: remainders)
+    }
+
+    /// The siblings a newer helper replaced: one a sibling names as `retryOf`,
+    /// and one that stopped (failed, interrupted or paused on usage) while a
+    /// newer sibling with the same title is live. Neither gets a row of its own.
+    static func supersededIDs(among siblings: [AgentInboxRow]) -> Set<UUID> {
+        guard siblings.count > 1 else { return [] }
+        let ids = Set(siblings.map(\.id))
+        var superseded = Set(siblings.compactMap(\.retryOf).filter(ids.contains))
+        func isLive(_ row: AgentInboxRow) -> Bool {
+            switch row.state {
+            case .working, .approval, .input: return true
+            case .ready, .failed: return false
+            }
+        }
+        let live = siblings.filter(isLive)
+        guard !live.isEmpty else { return superseded }
+        for row in siblings where !isLive(row) {
+            let stopped = endedInFailure(row) || row.terminalEvent?.outcome == .interrupted || row.usageExhaustedNow
+            guard stopped else { continue }
+            if live.contains(where: { $0.createdAt > row.createdAt && $0.displayTitle == row.displayTitle }) {
+                superseded.insert(row.id)
+            }
+        }
+        return superseded
     }
 
     /// Newest-spawned first. **`createdAt` is the only timestamp read here** — the

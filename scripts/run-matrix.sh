@@ -1290,6 +1290,7 @@ if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --sidebar-dogfood-check
   run_app_check .build/debug/Array --sidebar-stuck-rows-check
   run_app_check .build/debug/Array --sidebar-pinned-lead-check
+  run_app_check .build/debug/Array --sidebar-family-cap-check
   run_app_check .build/debug/Array --sidebar-scope-popover-check
   run_app_check .build/debug/Array --sidebar-ownership-check
   run_app_check .build/debug/Array --sidebar-fold-expand-check
@@ -2539,6 +2540,8 @@ run_app_check .build/debug/Array --sidebar-dogfood-check
 run_app_check .build/debug/Array --sidebar-stuck-rows-check
 # A pinned (standing) lead draws a pin beside its clock, and an unpinned lead none; there is no heading to say it.
 run_app_check .build/debug/Array --sidebar-pinned-lead-check
+# An open family of 30 helpers with 3 retry pairs draws at most 8, every live helper, and no helper its retry replaced.
+run_app_check .build/debug/Array --sidebar-family-cap-check
 # .plans/106: who owns whom. Subagents are one-line rows in their lead's card:
 # each count drawn once, no repeated project or branch, a subagent's ask raised
 # on its lead, the stem's lanes, the card's light, and Pop out / Stop on hover

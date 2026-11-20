@@ -197,4 +197,99 @@ enum SidebarStuckRowsChecks {
         }
         return "sidebar-pinned-lead: only the pinned lead draws a pin beside its clock — " + lines.joined(separator: "; ")
     }
+
+    // MARK: - A family's height and its retries
+
+    /// `--sidebar-family-cap-check [stills dir]`. Leads retry helpers, so an open
+    /// family filled with a failed helper and its replacement side by side. A
+    /// helper a retry replaced folds into the family's "N folded", every live
+    /// helper stays drawn, and the card draws at most `maxVisibleChildren`.
+    @MainActor
+    static func runFamilyCap(stills: URL?) throws -> String {
+        let familyLead = UUID(uuidString: "5E000000-0000-0000-0003-000000000000")!
+        func id(_ n: Int) -> UUID { UUID(uuidString: String(format: "5E000000-0000-0000-0003-%012d", n))! }
+        func working(_ n: Int, _ title: String, retryOf: UUID? = nil) -> AgentInboxRow {
+            var row = AgentInboxRow(id: id(n), title: title, state: .working,
+                                    elapsedStartedAt: epoch.addingTimeInterval(-30),
+                                    lastActiveAt: epoch.addingTimeInterval(-10), depth: 1,
+                                    createdAt: epoch.addingTimeInterval(-Double(60 + n)), parentId: familyLead,
+                                    harness: "Codex")
+            row.retryOf = retryOf
+            return row
+        }
+        func finished(_ n: Int, _ title: String, failed: Bool, endedAgo: Double) -> AgentInboxRow {
+            let ended = epoch.addingTimeInterval(-endedAgo)
+            return AgentInboxRow(id: id(n), title: title, state: failed ? .failed : .ready,
+                                 lastActiveAt: ended, depth: 1,
+                                 createdAt: epoch.addingTimeInterval(-Double(3_600 + n)), parentId: familyLead,
+                                 harness: "Codex",
+                                 terminalEvent: AgentTerminalEvent(sequence: 1, turnID: nil,
+                                                                   outcome: failed ? .failed : .succeeded, endedAt: ended),
+                                 terminalIsUnread: failed)
+        }
+        // Three replaced helpers, the newest to finish: on 0.7.56 they took the
+        // card's spare places beside their own replacements.
+        let replaced = [finished(1, "review files", failed: true, endedAgo: 120),
+                        finished(2, "review terminal", failed: true, endedAgo: 130),
+                        finished(3, "transcript review", failed: true, endedAgo: 140)]
+        let replacements = [working(11, "review files", retryOf: id(1)),
+                            working(12, "review terminal", retryOf: id(2)),
+                            // Same title under the same lead, no retry link.
+                            working(13, "transcript review")]
+        let otherLive = [working(21, "fold motion probe"), working(22, "cache audit"), working(23, "scroll anchor")]
+        let done = (0..<21).map { n in finished(100 + n, "Finished helper \(n)", failed: false, endedAgo: Double(300 + n * 60)) }
+        let helpers = replaced + replacements + otherLive + done
+        let leadRow = AgentInboxRow(id: familyLead, title: "Array release lead", state: .working,
+                                    elapsedStartedAt: epoch.addingTimeInterval(-60),
+                                    lastActiveAt: epoch.addingTimeInterval(-5),
+                                    createdAt: epoch.addingTimeInterval(-86_400), harness: "Claude Code")
+        let live = Set((replacements + otherLive).map(\.id))
+        var lines: [String] = []
+        for dark in [false, true] {
+            let suiteName = "sidebar-family-cap-\(UUID().uuidString)"
+            let suite = UserDefaults(suiteName: suiteName)!
+            defer { suite.removePersistentDomain(forName: suiteName) }
+            let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 420, height: 1_000), indicatorDefaults: suite)
+            inbox.clock = { epoch }
+            inbox.prefersReducedMotion = { true }
+            inbox.hoverCardEnabled = false
+            let window = SidebarOwnershipChecks.KeyWindow(
+                contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            window.contentView = inbox
+            window.orderFrontOffscreenForChecks()
+            defer { window.orderOut(nil) }
+            inbox.setScope(.all)
+            inbox.apply(rows: [leadRow] + helpers, changed: .empty)
+            inbox.layoutForQA()
+            let name = dark ? "dark" : "light"
+            try expect(helpers.count == 30, "fixture: \(helpers.count) helpers")
+            let drawn = inbox.rowIdsForQA.filter { $0 != familyLead }
+            try expect(drawn.count <= InboxSort.maxVisibleChildren,
+                       "\(name): the open family draws \(drawn.count) helpers, more than \(InboxSort.maxVisibleChildren)")
+            let duplicates = replaced.filter { drawn.contains($0.id) }.map(\.title)
+            try expect(duplicates.isEmpty, "\(name): a helper its retry replaced still has a row: \(duplicates)")
+            let missingLive = live.subtracting(drawn)
+            try expect(missingLive.isEmpty, "\(name): \(missingLive.count) live helpers are not drawn")
+            try expect(inbox.itemsForQA.contains { item in
+                if case .fanoutRemainder(let remainder) = item {
+                    return remainder.parentId == familyLead && remainder.hiddenChildIDs.count == helpers.count - drawn.count
+                }
+                return false
+            }, "\(name): the rest are not in the family's folded line")
+            if let stills {
+                try FileManager.default.createDirectory(at: stills, withIntermediateDirectories: true)
+                let height = min(inbox.bounds.height, 700)
+                let rect = NSRect(x: 0, y: inbox.isFlipped ? 0 : inbox.bounds.maxY - height,
+                                  width: inbox.bounds.width, height: height)
+                guard let image = InboxFoldMotion.image(of: inbox, in: rect), let tiff = image.tiffRepresentation,
+                      let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+                    throw Failure(description: "\(name): could not render the still")
+                }
+                try png.write(to: stills.appendingPathComponent("family-cap-\(name).png"))
+            }
+            lines.append("\(name): \(drawn.count) of 30 drawn, all \(live.count) live, no retry duplicates")
+        }
+        return "sidebar-family-cap: " + lines.joined(separator: "; ")
+    }
 }
