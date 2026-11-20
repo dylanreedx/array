@@ -53,7 +53,8 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
             defer { warming = nil }
             let engine = SpeechAnalyzerDictationEngine()
             engine.vocabularyProvider = vocabulary
-            guard (try? await engine.prepare()) != nil, let prepared = engine.prepared else { return }
+            // `prepareCold`, never `prepare`: `prepare` waits on `warming`, which is this task.
+            guard (try? await engine.prepareCold()) != nil, let prepared = engine.prepared else { return }
             warmed = (prepared, Date())
             warmExpiry = Task { @MainActor in
                 try? await Task.sleep(for: .seconds(warmLifetime))
@@ -113,6 +114,12 @@ final class SpeechAnalyzerDictationEngine: DictationEngine {
             prepared = warm
             return
         }
+        try await prepareCold()
+    }
+
+    /// Builds a transcriber and analyzer from scratch. The warm-up task calls
+    /// this directly: going through `prepare` would make it wait on itself.
+    private func prepareCold() async throws {
         guard let locale = await Self.resolveLocale() else {
             throw DictationFailure.unsupportedOnThisDevice
         }
