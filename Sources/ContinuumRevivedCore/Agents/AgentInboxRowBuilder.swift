@@ -333,6 +333,7 @@ public enum AgentInboxRowBuilder {
             built.lastTurnAt = [record.latestPromptAt, record.latestTurnAt].compactMap { $0 }.max()
             built.resumesThroughLead = record.parentAgentID != nil && !record.capabilities.locallyManaged
             built.isCleared = record.parentAgentID != nil && record.settledOverride == .settled
+            built.retryOf = record.delegationContext?.retryOf?.rawValue
         }
         return built
     }

@@ -933,6 +933,32 @@ enum ContinuumApp {
                 }
             }
         }
+        // Dylan, 0.7.56: a fold lent a helper another helper's cached card.
+        if CommandLine.arguments.contains("--sidebar-stuck-rows-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do { print(try SidebarStuckRowsChecks.run()); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-family-cap-check") {
+            _ = NSApplication.shared
+            let next = index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : nil
+            let stills = next.flatMap { $0.hasPrefix("--") ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+            MainActor.assumeIsolated {
+                do { print(try SidebarStuckRowsChecks.runFamilyCap(stills: stills)); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--sidebar-pinned-lead-check") {
+            _ = NSApplication.shared
+            let next = index + 1 < CommandLine.arguments.count ? CommandLine.arguments[index + 1] : nil
+            let stills = next.flatMap { $0.hasPrefix("--") ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+            MainActor.assumeIsolated {
+                do { print(try SidebarStuckRowsChecks.runPinnedLead(stills: stills)); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+        }
         // Sidebar round: stills of a COPIED store, both layouts and appearances.
         if let index = CommandLine.arguments.firstIndex(of: "--sidebar-real-stills-check"),
            CommandLine.arguments.count > index + 2 {

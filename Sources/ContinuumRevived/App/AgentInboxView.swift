@@ -4599,7 +4599,11 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         // .plans/113: only a lead in the live block is drawn under a project heading.
         (cell as? AgentInbox96CellView)?.placementRepeatsHeading = sortMode == .byProject
             && model.depth == 0 && InboxSort.section(for: model.lifecycle, now: renderNow) == .active
-        let keepsContent = updatingFold && reusesRecentCell && cell is AgentInbox96CellView
+        // Only a card already showing this agent may skip `apply`: a fold lends a
+        // newly visible helper another helper's card, which would otherwise keep
+        // that agent's content in this row, and every later push skips it.
+        let keepsContent = updatingFold && reusesRecentCell
+            && (cell as? AgentInbox96CellView)?.shownAgentID == model.id
             && recentCellModels[model.id] == model && !parentsWithChildren.contains(model.id)
         if keepsContent {
             (cell as? AgentInbox96CellView)?.clearSelectionForFold()
