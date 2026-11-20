@@ -245,16 +245,77 @@ final class ManagedRunLedger: @unchecked Sendable {
         }
         if (row.kind == "working" || row.kind == "turnEnded"), owners[row.task] == row.agent { leadBoundary[row.task] = row }
     }
+    /// `CONTINUUM_LEGACY_LEDGER_RECOVER=1` decodes every row at load, as before.
+    /// The RED arm of `--ledger-recover-check`.
+    nonisolated(unsafe) static var legacyFullRecover =
+        ProcessInfo.processInfo.environment["CONTINUUM_LEGACY_LEDGER_RECOVER"] != nil
+    /// Bytes of rows decoded in full by the last load, and rows remembered by source.
+    private(set) var qaRecoverDecodedBytes = 0
+    var qaSeenCount: Int { queue.sync { seen.count } }
+    /// The only kinds `reduce` reads. Every other row (hook, usage, helperEvidence,
+    /// ...) contributes nothing but its source to the dedupe set.
+    private static let reducedKinds: Set<String> = [
+        "commandStarted", "taskOpened", "delegated", "turnEnded", "reported",
+        "taskClosed", "taskInterrupted", "working",
+    ]
+
+    /// `kind` and `source` of one line without decoding it, or nil when the line
+    /// is not plain enough to trust (an escape other than `\/`, `\"`, `\\`, no
+    /// `"v":1`): the caller then decodes it in full, as before.
+    private static func peek(_ line: UnsafeRawBufferPointer) -> (kind: String, source: String)? {
+        func find(_ needle: StaticString, from start: Int = 0) -> Int? {
+            guard start < line.count else { return nil }
+            guard let hit = memmem(line.baseAddress! + start, line.count - start, needle.utf8Start, needle.utf8CodeUnitCount)
+            else { return nil }
+            return line.baseAddress!.distance(to: UnsafeRawPointer(hit))
+        }
+        guard line.count > 2, line[0] == UInt8(ascii: "{"), line[line.count - 1] == UInt8(ascii: "}"),
+              find("\"v\":1,") != nil || find("\"v\":1}") != nil,
+              let k = find("\"kind\":\""), let s = find("\"source\":\"") else { return nil }
+        func string(at start: Int) -> String? {
+            var out = [UInt8](); var i = start
+            while i < line.count {
+                let c = line[i]
+                if c == UInt8(ascii: "\"") { return String(decoding: out, as: UTF8.self) }
+                if c == UInt8(ascii: "\\") {
+                    guard i + 1 < line.count else { return nil }
+                    let n = line[i + 1]
+                    guard n == UInt8(ascii: "/") || n == UInt8(ascii: "\"") || n == UInt8(ascii: "\\") else { return nil }
+                    out.append(n); i += 2; continue
+                }
+                out.append(c); i += 1
+            }
+            return nil
+        }
+        guard let kind = string(at: k + 8), let source = string(at: s + 10) else { return nil }
+        return (kind, source)
+    }
+
     private func recover() {
-        if let data = try? Data(contentsOf: url) {
+        // Mapped, not read: one helperEvidence row can be megabytes, and a ledger
+        // of them was 1.4 GB, split into copies and decoded on every launch.
+        if let data = try? Data(contentsOf: url, options: .alwaysMapped) {
             // Preserve all prior bytes, including a torn final append. The sole
             // append path inserts a separator before its next fact.
-            let complete = data.lastIndex(of: 10).map { Data(data[...$0]) } ?? Data()
-            needsSeparator = complete.count != data.count
-            for line in complete.split(separator: 10) {
-                guard let row = try? JSONDecoder().decode(Row.self, from: Data(line)), row.v == 1 else { continue }
-                guard seen.insert(row.source).inserted else { continue }
-                reduce(row)
+            let end = data.lastIndex(of: 10).map { $0 + 1 } ?? 0
+            needsSeparator = end != data.count
+            data.withUnsafeBytes { raw in
+                var start = 0
+                while start < end {
+                    let length = memchr(raw.baseAddress! + start, 10, end - start)
+                        .map { raw.baseAddress!.distance(to: UnsafeRawPointer($0)) - start } ?? end - start
+                    defer { start += length + 1 }
+                    guard length > 0 else { continue }
+                    let line = UnsafeRawBufferPointer(rebasing: raw[start..<(start + length)])
+                    if !Self.legacyFullRecover, let peeked = Self.peek(line), !Self.reducedKinds.contains(peeked.kind) {
+                        seen.insert(peeked.source)
+                        continue
+                    }
+                    qaRecoverDecodedBytes += length
+                    guard let row = try? JSONDecoder().decode(Row.self, from: Data(line)), row.v == 1 else { continue }
+                    guard seen.insert(row.source).inserted else { continue }
+                    reduce(row)
+                }
             }
         }
         // In opening order: a dictionary's order differs per process.

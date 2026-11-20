@@ -5009,6 +5009,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--ledger-recover-check") {
+            do {
+                try LedgerRecoverChecks.run()
+                print("ledger recover check passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--ledger-batch-check") {
             do {
                 try LedgerBatchChecks.run()
