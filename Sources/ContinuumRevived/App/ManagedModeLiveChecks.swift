@@ -183,6 +183,10 @@ func runManagedModeLiveChecks() async throws {
         _ = await waitUntil(timeout: 5, pollInterval: 0.2) { mounted.isRunning(lead) || !mounted.children(of: lead).isEmpty }
         let done = await waitUntil(timeout: 600, pollInterval: 0.5) { settled() && (usageMode != "lead" || !mounted.children(of: lead).isEmpty) }
         _ = await waitUntil(timeout: 120, pollInterval: 0.5) { settled() }
+        // The helper's result wakes the lead after the helper ends; count that turn.
+        if usageMode == "lead" {
+            _ = await waitUntil(timeout: 90, pollInterval: 0.5) { (answers[lead] ?? []).count >= 2 && settled() }
+        }
         snapshotAgents()
         evidence["usageMode"] = usageMode
         evidence["wallSeconds"] = Date().timeIntervalSince(started)
