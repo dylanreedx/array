@@ -443,9 +443,21 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                 // three times and could not find the exact ones. The refusal must
                 // name every id the selected catalogue offers, verbatim.
                 let offered = AgentModelCatalog.shared.snapshot(for: source).models
-                let bare = String(offered.last!.split(separator: "/").last!)
-                let refusedBare = try failure(api.dispatch(agentId: parent, requestId: handle + "-bare", op: "agent.delegate", payload: ["task": "bare", "idempotencyKey": handle + "-bare", "model": bare]), .unsupported, "bare model id")
-                try expect(offered.allSatisfy { refusedBare.message.contains($0) }, "model refusal must list the exact catalogue ids \(offered): \(refusedBare.message)")
+                let exact = offered.last!
+                let bare = String(exact.split(separator: "/").last!)
+                let uniqueBare = offered.filter { $0.split(separator: "/", maxSplits: 1).last.map(String.init) == bare }.count == 1
+                try expect(uniqueBare, "fixture catalogue keeps \(bare) unique")
+                // 2026-11-20: a bare id naming exactly one live id resolves to it and the
+                // exact id is what the helper records. Partial ids stay refused.
+                let accepted = try result(api.dispatch(agentId: parent, requestId: handle + "-bare", op: "agent.delegate", payload: ["task": "bare", "idempotencyKey": handle + "-bare", "model": bare]), "unique bare model id")
+                if let raw = accepted["childAgentId"]?.string, let uuid = UUID(uuidString: raw) {
+                    try expect(supervisor.records[AgentID(rawValue: uuid)]?.model == exact, "bare id \(bare) is recorded as \(exact)")
+                } else { throw Failure(message: "bare id delegate returned no child") }
+                let partial = String(bare.dropLast(2))
+                let refusedPartial = try failure(api.dispatch(agentId: parent, requestId: handle + "-partial", op: "agent.delegate", payload: ["task": "partial", "idempotencyKey": handle + "-partial", "model": partial]), .unsupported, "partial model id")
+                try expect(offered.allSatisfy { refusedPartial.message.contains($0) }, "model refusal must list the exact catalogue ids \(offered): \(refusedPartial.message)")
+                let refusedOther = try failure(api.dispatch(agentId: parent, requestId: handle + "-bare2", op: "agent.delegate", payload: ["task": "x", "idempotencyKey": handle + "-bare2", "model": "nonexistent-model"]), .unsupported, "unknown bare id")
+                try expect(!refusedOther.message.contains("Use `"), "no hint for an unmatched id")
             }
         }
         // MARK: Delegate effort (.plans/116 part 6)

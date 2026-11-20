@@ -116,13 +116,21 @@ extension WorkspaceAPIService {
         // A lead that names no model gets the harness's cheap class from the live
         // catalogue (never a written-down id); a retry keeps its helper's model.
         let defaultTierModel = request.model == nil && request.retryOf == nil ? HelperDefaultTier.model(in: catalog) : nil
-        guard let childModel = request.model ?? defaultTierModel ?? (childHarness == parentHarness ? record.model : catalog.seedModel),
+        // A bare id is accepted only when it equals the part after the provider
+        // prefix of exactly ONE live catalogue id; the exact id is what is recorded.
+        // Ambiguous or partial ids stay refused (no fuzzy matching).
+        let requestedModel: String? = {
+            guard let raw = request.model, !catalog.models.contains(raw), !raw.contains("/") else { return request.model }
+            let matches = catalog.models.filter { $0.split(separator: "/", maxSplits: 1).last.map(String.init) == raw }
+            return matches.count == 1 ? matches[0] : raw
+        }()
+        guard let childModel = requestedModel ?? defaultTierModel ?? (childHarness == parentHarness ? record.model : catalog.seedModel),
               catalog.models.contains(childModel),
-              (request.model == nil && (childHarness == parentHarness || defaultTierModel != nil) || childModel.contains("/")) else {
+              (requestedModel == nil && (childHarness == parentHarness || defaultTierModel != nil) || childModel.contains("/")) else {
             // Name the offered ids verbatim: the caller cannot see the catalogue
             // otherwise, and a guessed bare id ("claude-haiku-5-5") never matches.
             let offered = catalog.models.prefix(24).joined(separator: ", ")
-            return completion(fail(.unsupported, "\(childHarness.rawValue) does not offer the requested child model. Use an exact fully qualified id from its live catalogue: \(offered.isEmpty ? "none offered" : offered). No other CLI was tried."))
+            return completion(fail(.unsupported, "\(childHarness.rawValue) does not offer the requested child model. \(Self.modelHint(request.model, in: catalog.models))Use an exact fully qualified id from its live catalogue: \(offered.isEmpty ? "none offered" : offered). No other CLI was tried."))
         }
 
         func effortRefusal() -> String? {
@@ -426,7 +434,7 @@ extension WorkspaceAPIService {
         // same session, same checkout, the account in use. Only when it cannot
         // (no session, another CLI, model or effort asked) does it spawn.
         if let retryOf = request.retryOf, request.contract == nil,
-           supervisor.canContinueSessionForRetry(retryOf, harness: childHarness, model: request.model, effort: request.effort) {
+           supervisor.canContinueSessionForRetry(retryOf, harness: childHarness, model: requestedModel, effort: request.effort) {
             var resumePrompt = request.task
             if supervisor.continueSessionForRetry(retryOf, prompt: resumePrompt) {
                 return completion(created(retryOf, continued: true))
@@ -1112,4 +1120,13 @@ extension WorkspaceAPIService {
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+extension WorkspaceAPIService {
+    /// "use `anthropic/claude-sonnet-5-5`" when a bare id names exactly one offered id.
+    static func modelHint(_ raw: String?, in models: [String]) -> String {
+        guard let raw, !raw.contains("/") else { return "" }
+        let matches = models.filter { $0.split(separator: "/", maxSplits: 1).last.map(String.init) == raw }
+        return matches.count == 1 ? "Use `\(matches[0])`. " : ""
+    }
 }
