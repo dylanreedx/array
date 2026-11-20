@@ -47,6 +47,11 @@ final class AgentProcessTracker {
     /// Opens a URL in a browser tile, beside the agent's tile when one is given.
     var openURL: ((String, AgentID?) -> Void)?
     var revealAgent: ((AgentID) -> Void)?
+    /// Jobs that were listed and are gone, per agent, minus the ones a person
+    /// stopped from the panel. The supervisor decides whether anyone is woken.
+    var onJobsEnded: ((AgentID, [AgentBackgroundJob]) -> Void)?
+    /// Job ids stopped through `stop(_:)`: an ending the user asked for.
+    private var stoppedByUser: Set<String> = []
 
     private let worker = Worker()
     private let internalPathPrefixes: [String]
@@ -209,14 +214,28 @@ final class AgentProcessTracker {
             next[agent] = jobs
         }
         let changed = Set(next.keys).union(jobsByAgent.keys).filter { next[$0] != jobsByAgent[$0] }
+        let previous = jobsByAgent
         jobsByAgent = next
+        endedJobs(previous: previous, next: next)
         guard !changed.isEmpty else { return }
         NotificationCenter.default.post(
             name: .agentBackgroundJobsDidChange, object: self, userInfo: ["agentIDs": changed])
     }
 
+    private func endedJobs(previous: [AgentID: [AgentBackgroundJob]], next: [AgentID: [AgentBackgroundJob]]) {
+        guard let onJobsEnded else { stoppedByUser.removeAll(); return }
+        for (agent, jobs) in previous {
+            let alive = Set((next[agent] ?? []).map(\.id))
+            let ended = jobs.filter { !alive.contains($0.id) && !stoppedByUser.contains($0.id) }
+            if !ended.isEmpty { onJobsEnded(agent, ended) }
+        }
+        let current = Set(next.values.flatMap { $0.map(\.id) })
+        stoppedByUser.formIntersection(current)
+    }
+
     /// SIGTERM, then SIGKILL after 2s, off the main thread; rescans after.
     func stop(_ jobs: [AgentBackgroundJob], completion: (@MainActor @Sendable () -> Void)? = nil) {
+        stoppedByUser.formUnion(jobs.map(\.id))
         let worker = worker
         worker.queue.async {
             for job in jobs { AgentProcessControl.terminate(job) }

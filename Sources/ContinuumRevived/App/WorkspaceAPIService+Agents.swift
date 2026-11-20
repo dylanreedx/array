@@ -180,6 +180,7 @@ extension WorkspaceAPIService {
             note: document == nil ? AgentInspectResponse.absentEvidenceNote : nil,
             observedAt: now)
         response.liveness = supervisor.helperLiveness[target.id]
+        if let waiting = supervisor.idleWaitingFact(for: target.id, now: now) { response.liveness = waiting }
         response.contextDiet = HelperContextDiet.status(for: target)
         if let document {
             response.promptTitle = Self.promptTitle(from: document)
