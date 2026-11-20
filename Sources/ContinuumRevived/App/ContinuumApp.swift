@@ -5944,6 +5944,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--dictation-warmup-check") {
+            do {
+                _ = NSApplication.shared
+                let summary = try AppDelegate.runDictationWarmupSelfCheck()
+                print("ContinuumRevivedDictationWarmupChecks passed: \(summary)")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--reveal-in-finder-check") {
             do {
                 _ = NSApplication.shared

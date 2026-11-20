@@ -1018,7 +1018,10 @@ if [[ "$STICKY_HEAD_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --leader-snap-check
   run_app_check .build/debug/Array --leader-modal-recovery-check
   run_app_check .build/debug/Array --leader-jump-visible-indicators-check
-  run_app_check .build/debug/Array --palette-jump-check
+  # 0.7.56: the mic pre-warm waited on itself, so a press after it never left
+# "Getting ready…" — a fake cold prepare, then a press, must return within 2s.
+run_app_check .build/debug/Array --dictation-warmup-check
+run_app_check .build/debug/Array --palette-jump-check
   run_app_check .build/debug/Array --palette-jump-framing-check
   run_app_check .build/debug/Array --tile-reveal-work-check
   run_app_check .build/debug/Array --canvas-zoom-momentum-check
