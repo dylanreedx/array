@@ -3527,6 +3527,19 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // Design round only: the lead's icon as its fold control.
+        if CommandLine.arguments.contains("--sidebar-lead-icon-round") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarLeadIconRoundChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL lead icon round: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // Plan 110, slice 4: characters on the real sidebar.
         if CommandLine.arguments.contains("--sidebar-character-check") {
             _ = NSApplication.shared

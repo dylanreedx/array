@@ -721,6 +721,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     static let subagentTitleFont = NSFont.systemFont(ofSize: Typography.style(for: .body).size)
     private let jumpHint = InboxJumpHintView()
     private let disclosureButton = InboxSwarmFoldControl(frame: .zero)
+    /// Design round: the lead's agent icon as its fold control (`InboxLeadIconPlate`).
+    private let leadPlate = InboxLeadIconPlate(frame: .zero)
+    /// Whether this row draws the icon plate instead of the classic fold glyph.
+    static var leadPlateOn: Bool { InboxLeadIconVariant.current != .off && AgentCharacterController.shared.isEnabled }
+    private var showsLeadPlate = false
+    var leadPlateStateForQA: String { "shows=\(showsLeadPlate) hidden=\(leadPlate.isHidden) frame=\(leadPlate.frame) alpha=\(disclosureButton.alphaValue)" }
     var onToggleDisclosure: (() -> Void)?
     private let settleNudge = InboxSettleNudgeButton(frame: .zero)
     private var onSettleNudge: (() -> Void)?
@@ -1121,6 +1127,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(titleShimmer)
         card.addSubview(pulseDots)
 
+        card.addSubview(leadPlate)
+        leadPlate.isHidden = true
         disclosureButton.target = self
         disclosureButton.action = #selector(disclosureClicked)
         disclosureButton.prefersReducedMotion = prefersReducedMotion
@@ -1267,6 +1275,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// cannot disagree.
     static func disclosureTrailing(for disclosure: RowDisclosure, childCount: Int) -> CGFloat {
         guard disclosure != .none else { return 0 }
+        if leadPlateOn { return InboxSwarmFoldControl.glyphCentreX + InboxLeadIconPlate.side / 2 }
         return InboxSwarmFoldControl.width(childCount: childCount)
     }
 
@@ -1375,6 +1384,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         guard let row = shown?.row,
               let atlas = controller.atlas(for: row.id, appearance: AgentCharacterController.appearance(of: self),
                                            name: row.characterName) else {
+            releaseLeadPlate()
             if characterSize != nil {
                 characterSize = nil
                 sprite.clear()
@@ -1386,7 +1396,27 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             state: Self.showsWorkingGlyph(row, rollup: shown?.rollup) ? .working : row.state,
             attention: row.attention, activity: row.characterActivity ?? .init(),
             title: row.title, allowsMotion: !prefersReducedMotion())
-        sprite.show(controller.plan(for: snapshot, now: now), sprite: atlas,
+        let plan = controller.plan(for: snapshot, now: now)
+        let plateOn = Self.leadPlateOn && !isSubagentRow
+        if plateOn {
+            sprite.clear()
+            if !showsLeadPlate { showsLeadPlate = true; needsLayout = true }
+            disclosureButton.alphaValue = 0
+            let tint = row.identityColor.map(AgentInboxView.identityDotColour(named:))
+            leadPlate.show(plan: plan, atlas: atlas, phase: controller.phase(for: row.id), now: now, tint: tint,
+                           working: snapshot.state == .working, workingPhase: InboxOwnershipClock.phase(for: row.id),
+                           reduceMotion: { [weak self] in self?.prefersReducedMotion() ?? false })
+            leadPlate.setCount(shown?.disclosure == RowDisclosure.none ? 0 : (shown?.rollup?.children ?? 0))
+            disclosureButton.onPointerChange = { [weak self] inside in
+                self?.leadPlate.setHovered(inside, variant: InboxLeadIconVariant.current)
+            }
+            leadPlate.setExpanded(shown?.disclosure == .expanded, parent: row.id, variant: InboxLeadIconVariant.current,
+                                  animated: !prefersReducedMotion())
+            if characterSize != nil { characterSize = nil; needsLayout = true }
+            return
+        }
+        releaseLeadPlate()
+        sprite.show(plan, sprite: atlas,
                     phase: controller.phase(for: row.id), now: now)
         // Plan 110 › size: a lead's character takes the size setting, at a whole
         // number of device pixels per art pixel. A subagent's one-line 20 pt row
@@ -1400,11 +1430,21 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         reconcileCharacterVisibility()
     }
 
+    private func releaseLeadPlate() {
+        guard showsLeadPlate || !leadPlate.isHidden || disclosureButton.alphaValue != 1 else { return }
+        showsLeadPlate = false
+        disclosureButton.onPointerChange = nil
+        leadPlate.hide()
+        disclosureButton.alphaValue = 1
+        needsLayout = true
+    }
+
     /// Hold the character still while nobody can see it: out of a window, under a
     /// hidden ancestor, or in an occluded window.
     func reconcileCharacterVisibility() {
         let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
         decorations.characterLayer.setPaused(!visible || isHiddenOrHasHiddenAncestor)
+        leadPlate.setPaused(!visible || isHiddenOrHasHiddenAncestor)
     }
 
     override func viewDidHide() {
@@ -2266,6 +2306,22 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                                                    width: width, height: card.bounds.height - inset * 2))
             disclosureButton.glyphCentreY = l1 - inset
             x = InboxOwnershipChrome.foldX + width + 6
+            if showsLeadPlate {
+                // The icon is the control: centred on the connector lane, mid-card.
+                let side = InboxLeadIconPlate.side
+                leadPlate.frame = inCard(NSRect(x: InboxOwnershipChrome.laneX - side / 2,
+                                                y: snapped((card.bounds.height - side) / 2),
+                                                width: side, height: side))
+                x += 2
+            }
+        } else if showsLeadPlate {
+            // No helpers: the same gutter, so every title starts at one x.
+            let trailing = InboxSwarmFoldControl.glyphCentreX + InboxLeadIconPlate.side / 2
+            let side = InboxLeadIconPlate.side
+            leadPlate.frame = inCard(NSRect(x: InboxOwnershipChrome.laneX - side / 2,
+                                            y: snapped((card.bounds.height - side) / 2),
+                                            width: side, height: side))
+            x = InboxOwnershipChrome.foldX + trailing + 6 + 2
         }
         if let name = shown.row.identityColor {
             let side = AgentInboxView.identityDotSide
