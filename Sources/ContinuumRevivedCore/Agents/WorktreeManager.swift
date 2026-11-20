@@ -651,4 +651,5 @@ final class QACounter: @unchecked Sendable {
     private var count = 0
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
     func increment() { lock.lock(); count += 1; lock.unlock() }
+    func add(_ n: Int) { lock.lock(); count += n; lock.unlock() }
 }

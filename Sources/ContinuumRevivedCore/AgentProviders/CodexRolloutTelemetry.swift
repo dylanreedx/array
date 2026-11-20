@@ -145,15 +145,70 @@ public enum CodexRolloutTelemetry {
         let data = handle.readDataToEndOfFile()
         guard !data.isEmpty else { return nil }
 
-        var lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
-        if discardFirst, !lines.isEmpty { lines.removeFirst() }
-        if data.last != 0x0A, !lines.isEmpty { lines.removeLast() }
-
-        for bytes in lines.reversed() {
-            guard let line = String(data: Data(bytes), encoding: .utf8) else { continue }
-            if let result = snapshot(from: line, freshness: freshness) { return result }
+        if legacyFullSplit {
+            var lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+            if discardFirst, !lines.isEmpty { lines.removeFirst() }
+            if data.last != 0x0A, !lines.isEmpty { lines.removeLast() }
+            linesExamined.add(lines.count)
+            for bytes in lines.reversed() {
+                guard let line = String(data: Data(bytes), encoding: .utf8) else { continue }
+                if let result = snapshot(from: line, freshness: freshness) { return result }
+            }
+            return nil
         }
-        return nil
+        return newestSnapshot(in: data, discardFirst: discardFirst, freshness: freshness)
+    }
+
+    /// `CONTINUUM_LEGACY_ROLLOUT_SCAN=1` restores the old scan, which split the
+    /// whole read (up to 8 MB, byte by byte through `Data`) into lines before
+    /// looking at the last one. Boot paid that once per Codex agent on the main
+    /// thread. The RED arm of `--rollout-scan-check`.
+    nonisolated(unsafe) public static var legacyFullSplit =
+        ProcessInfo.processInfo.environment["CONTINUUM_LEGACY_ROLLOUT_SCAN"] != nil
+    private static let linesExamined = QACounter()
+    public static var linesExaminedForQA: Int { linesExamined.value }
+
+    /// Walks complete lines newest first and only decodes one that names
+    /// `token_count`: the same answer as parsing every line, without touching
+    /// the thousands that cannot match.
+    private static func newestSnapshot(
+        in data: Data, discardFirst: Bool, freshness: AgentContextWindowFreshness
+    ) -> AgentContextWindowSnapshot? {
+        data.withUnsafeBytes { raw -> AgentContextWindowSnapshot? in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            guard let base = bytes.baseAddress, bytes.count > 0 else { return nil }
+            func lastNewline(before end: Int, notBefore low: Int) -> Int? {
+                var i = end - 1
+                while i >= low { if base[i] == 0x0A { return i }; i -= 1 }
+                return nil
+            }
+            var low = 0
+            if discardFirst {
+                guard let first = (0..<bytes.count).first(where: { base[$0] == 0x0A }) else { return nil }
+                low = first + 1
+            }
+            var end = bytes.count
+            if base[end - 1] != 0x0A {
+                // The last line is incomplete: never a candidate.
+                guard let cut = lastNewline(before: end, notBefore: low) else { return nil }
+                end = cut
+            }
+            let needle: [UInt8] = Array("token_count".utf8)
+            while end > low {
+                let newline = lastNewline(before: end, notBefore: low)
+                let start = (newline ?? (low - 1)) + 1
+                if end > start {
+                    linesExamined.increment()
+                    if memmem(base + start, end - start, needle, needle.count) != nil,
+                       let line = String(
+                        data: Data(bytes: base + start, count: end - start), encoding: .utf8),
+                       let result = snapshot(from: line, freshness: freshness) { return result }
+                }
+                guard let newline else { break }
+                end = newline
+            }
+            return nil
+        }
     }
 
     public static func latestSnapshot(

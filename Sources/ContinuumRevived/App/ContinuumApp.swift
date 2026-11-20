@@ -4995,6 +4995,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--rollout-scan-check") {
+            do {
+                try RolloutScanChecks.run()
+                print("rollout scan check passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--tile-surface-residency-check") {
             do {
                 _ = NSApplication.shared
