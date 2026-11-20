@@ -938,6 +938,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The leading status glyph. A VIEW, not a painted decoration, for one reason:
     /// it is the only thing on the row that can animate.
     private let statusGlyph = StatusGlyphView()
+    /// A standing (pinned) lead's pin, beside its clock. The pin is the only
+    /// thing that says a lead is pinned: the list draws no heading for them.
+    private let pinGlyph = StatusGlyphView()
     // Sidebar round (array/sidebar-next): the Ledger layout. nil draws today's
     // row. Set by the list before `apply`.
     struct LedgerFacts: Equatable {
@@ -1085,6 +1088,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(decorations)
         card.addSubview(workspaceLabel)
         card.addSubview(statusGlyph)
+        pinGlyph.symbol = "pin.fill"
+        pinGlyph.isHidden = true
+        card.addSubview(pinGlyph)
 
         placementLabel.font = .token(.caption)
         projectIcon.imageScaling = .scaleProportionallyDown
@@ -1701,6 +1707,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             stateLabel.textColor = TextToken.textSecondary.color.nsColor(in: self)
         }
         decorations.muted = TextToken.textSecondary.color.nsColor(in: self)
+        pinGlyph.colour = TextToken.textSecondary.color.nsColor(in: self)
         // Provider marks are silhouettes, not metadata text. Full-strength
         // Opaque black in Aqua and white in Dark Aqua gives the tiny 14pt artwork
         // maximum contrast without recolouring the vendor shape by status or row
@@ -2216,6 +2223,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         for view in [whereDot, whereIcon, whereLabel, workspaceLabel, selfReportLabel] as [NSView] where sub {
             view.isHidden = true
         }
+        pinGlyph.isHidden = true
         if sub { layoutSubagentLine() } else { layoutLeadLines(pad: pad, l1: l1) }
         if let slot = decorations.markSlot, let markToolTip {
             decorations.addToolTip(slot, owner: markToolTip, userData: nil)
@@ -2273,6 +2281,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         if !stateLabel.isHidden {
             place(stateLabel, x: r - clockWidth, centre: l1, width: clockWidth)
             r -= clockWidth + 4
+        }
+        pinGlyph.isHidden = !shown.row.isStanding
+        if shown.row.isStanding {
+            let side = anatomy.statusIconSide - 2
+            pinGlyph.frame = inCard(NSRect(x: r - side, y: snapped(l1 - side / 2), width: side, height: side))
+            r -= side + 4
         }
         if let throbber {
             let side: CGFloat = 16
@@ -3442,6 +3456,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// The agent this card last drew. A card lent from another row still shows
     /// that row's agent until it is applied again.
     var shownAgentID: UUID? { shown?.row.id }
+    var pinFrameForQA: NSRect? { pinGlyph.isHidden ? nil : pinGlyph.convert(pinGlyph.bounds, to: self) }
     var qaAgentID: UUID? { shown?.row.id }
     var qaVariant: RowVariant? { shown?.row.variant }
 

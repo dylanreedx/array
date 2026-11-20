@@ -130,4 +130,71 @@ enum SidebarStuckRowsChecks {
         return "sidebar-stuck-rows: after a long list evicted a folded helper's card, unfolding its lead "
             + "lent it another helper's card, and the card showed its own agent, on the fold and the next push"
     }
+
+    // MARK: - The pin on a standing lead
+
+    /// `--sidebar-pinned-lead-check [stills dir]`. Pinned (standing) leads sit
+    /// above every other row with no heading, so the row itself must say so: a
+    /// pin beside the clock on the pinned lead's header line, none on the other.
+    @MainActor
+    static func runPinnedLead(stills: URL?) throws -> String {
+        let pinned = UUID(uuidString: "5E000000-0000-0000-0002-000000000001")!
+        let plain = UUID(uuidString: "5E000000-0000-0000-0002-000000000002")!
+        var lines: [String] = []
+        for dark in [false, true] {
+            let suiteName = "sidebar-pinned-lead-\(UUID().uuidString)"
+            let suite = UserDefaults(suiteName: suiteName)!
+            defer { suite.removePersistentDomain(forName: suiteName) }
+            SidebarStandingLeads.save([pinned], to: suite)
+            let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 420, height: 420), indicatorDefaults: suite)
+            inbox.clock = { epoch }
+            inbox.prefersReducedMotion = { true }
+            inbox.hoverCardEnabled = false
+            let window = SidebarOwnershipChecks.KeyWindow(
+                contentRect: inbox.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            window.contentView = inbox
+            window.orderFrontOffscreenForChecks()
+            defer { window.orderOut(nil) }
+            inbox.setScope(.all)
+            func finished(_ id: UUID, _ title: String, hours: Double) -> AgentInboxRow {
+                let ended = epoch.addingTimeInterval(-hours * 3_600)
+                return AgentInboxRow(id: id, title: title, state: .ready, lastActiveAt: ended, createdAt: ended,
+                                     harness: "Claude Code",
+                                     terminalEvent: AgentTerminalEvent(sequence: 1, turnID: nil, outcome: .succeeded, endedAt: ended))
+            }
+            inbox.apply(rows: [
+                finished(pinned, "HR Agent + Workflows", hours: 3),
+                finished(plain, "Plan visual mapper tool redesign", hours: 4),
+            ], changed: .empty)
+            inbox.layoutForQA()
+            let name = dark ? "dark" : "light"
+            guard let pinnedCard = inbox.onScreenCardForQA(id: pinned),
+                  let plainCard = inbox.onScreenCardForQA(id: plain) else {
+                throw Failure(description: "\(name): a lead was not drawn")
+            }
+            guard let pin = pinnedCard.pinFrameForQA else {
+                throw Failure(description: "\(name): the pinned lead draws no pin")
+            }
+            try expect(plainCard.pinFrameForQA == nil, "\(name): an unpinned lead draws a pin")
+            let clock = pinnedCard.qaStatusFrame
+            try expect(pinnedCard.clockTextForQA?.isEmpty == false,
+                       "\(name): the pinned lead draws no clock (\(String(describing: pinnedCard.clockTextForQA)))")
+            try expect(pin.maxX <= clock.minX && clock.minX - pin.maxX < 8 && abs(pin.midY - clock.midY) < 3,
+                       "\(name): the pin \(pin) is not beside the clock '\(pinnedCard.clockTextForQA ?? "")' \(clock)")
+            if let stills {
+                try FileManager.default.createDirectory(at: stills, withIntermediateDirectories: true)
+                let height = min(inbox.bounds.height, 260)
+                let rect = NSRect(x: 0, y: inbox.isFlipped ? 0 : inbox.bounds.maxY - height,
+                                  width: inbox.bounds.width, height: height)
+                guard let image = InboxFoldMotion.image(of: inbox, in: rect), let tiff = image.tiffRepresentation,
+                      let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+                    throw Failure(description: "\(name): could not render the still")
+                }
+                try png.write(to: stills.appendingPathComponent("pinned-lead-\(name).png"))
+            }
+            lines.append("\(name): pin \(Int(pin.width))pt beside the clock")
+        }
+        return "sidebar-pinned-lead: only the pinned lead draws a pin beside its clock — " + lines.joined(separator: "; ")
+    }
 }

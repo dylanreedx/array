@@ -1289,6 +1289,7 @@ if [[ "$SIDEBAR_REFINEMENTS_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --sidebar-quiet-inbox-check
   run_app_check .build/debug/Array --sidebar-dogfood-check
   run_app_check .build/debug/Array --sidebar-stuck-rows-check
+  run_app_check .build/debug/Array --sidebar-pinned-lead-check
   run_app_check .build/debug/Array --sidebar-scope-popover-check
   run_app_check .build/debug/Array --sidebar-ownership-check
   run_app_check .build/debug/Array --sidebar-fold-expand-check
@@ -2536,6 +2537,8 @@ run_app_check .build/debug/Array --sidebar-quiet-inbox-check
 run_app_check .build/debug/Array --sidebar-dogfood-check
 # A fold never lends a helper another helper's cached card with that agent's content still on it (0.7.56 stuck "review files" rows), through real clicks and pushes.
 run_app_check .build/debug/Array --sidebar-stuck-rows-check
+# A pinned (standing) lead draws a pin beside its clock, and an unpinned lead none; there is no heading to say it.
+run_app_check .build/debug/Array --sidebar-pinned-lead-check
 # .plans/106: who owns whom. Subagents are one-line rows in their lead's card:
 # each count drawn once, no repeated project or branch, a subagent's ask raised
 # on its lead, the stem's lanes, the card's light, and Pop out / Stop on hover
