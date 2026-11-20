@@ -1421,14 +1421,26 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         // Plan 110 › size: a lead's character takes the size setting, at a whole
         // number of device pixels per art pixel. A subagent's one-line 20 pt row
         // inside its lead's card keeps the small one, as transcript chips do.
-        let size = controller.spriteSize(of: atlas, backingScale: metadataRasterScale,
+        var size = controller.spriteSize(of: atlas, backingScale: metadataRasterScale,
                                          size: isSubagentRow ? .small : nil)
+        if haloHelperIcon, size.height > 0 {
+            let k = Self.haloHelperIconHeight / size.height
+            size = NSSize(width: (size.width * k).rounded(), height: Self.haloHelperIconHeight)
+        }
         if characterSize != size {
             characterSize = size
             needsLayout = true
         }
         reconcileCharacterVisibility()
     }
+
+    /// Halo: a resting helper (no helpers of its own) shows its plain character
+    /// where its dots would be, a little bigger; working rows keep dots + right icon.
+    private var haloHelperIcon: Bool {
+        guard Self.leadPlateOn, isSubagentRow, let row = shown?.row else { return false }
+        return (shown?.disclosure ?? RowDisclosure.none) == RowDisclosure.none && row.state != .working && Self.ask(row) == nil
+    }
+    private static let haloHelperIconHeight: CGFloat = 18
 
     private func releaseLeadPlate() {
         guard showsLeadPlate || !leadPlate.isHidden || disclosureButton.alphaValue != 1 else { return }
@@ -2500,7 +2512,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         settleNudge.frame = .zero
         statusGlyph.isHidden = true
         let dots = InboxPulseDotsView.size
-        pulseDots.frame = inCard(NSRect(x: x0 - 1, y: snapped(mid - dots.height / 2), width: dots.width, height: dots.height))
+        let leftIcon = haloHelperIcon && characterSize != nil
+        pulseDots.frame = leftIcon ? .zero
+            : inCard(NSRect(x: x0 - 1, y: snapped(mid - dots.height / 2), width: dots.width, height: dots.height))
         var actionsLeft = right
         if !hoverPopOut.isHidden || !hoverStop.isHidden {
             var cx = right
@@ -2553,7 +2567,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         // Plan 110: a helper's character, just left of its mark while it rests;
         // the hover controls take both places.
-        if let size = characterSize {
+        var leftIconWidth: CGFloat = 0
+        if leftIcon, let size = characterSize {
+            decorations.setCharacterSlot(showsResting
+                ? NSRect(x: x0 - 1, y: snapped(mid - size.height / 2), width: size.width, height: size.height) : nil)
+            leftIconWidth = max(0, size.width - 14)
+        } else if let size = characterSize {
             let gap = decorations.mark == nil ? 7 : Self.characterGap
             decorations.setCharacterSlot(showsResting
                 ? NSRect(x: right - restingWidth - gap - size.width,
@@ -2564,7 +2583,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         let used = restingWidth
         defer { fadeTextUnderActions(leftEdge: actionsLeft) }
-        let titleX = x0 + 14
+        let titleX = x0 + 14 + leftIconWidth
         let titleMax = max(0, right - used - 12 - titleX)
         let titleNatural = Self.width(of: titleLabel)
         place(titleLabel, x: titleX, centre: mid, width: min(titleNatural, titleMax))
