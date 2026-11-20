@@ -95,6 +95,7 @@ enum GestureDeferChecks {
         let canvas = fixture.canvas
         governor.adopt(canvas: canvas)
         governor.isEnabled = on
+        ManagedAgentTileNSView.qaStatusTickDeferEnabled = env["GESTURE_QUIET_TICK"] != "off"
         await spin(Double(env["GESTURE_DEFER_WARMUP"] ?? "") ?? 4)
 
         // Agents stream for the whole run: a lead of 1.5 s, the motion, the settle.
@@ -109,6 +110,8 @@ enum GestureDeferChecks {
         let tileBefore = ManagedAgentTileNSView.qaTailEventsApplied
         let deferredBefore = governor.qaDeferredCount
         let ticksBefore = fixture.qaSourceTicks
+        let statusRunsBefore = ManagedAgentTileNSView.qaStatusTickRuns
+        let statusDeferredBefore = ManagedAgentTileNSView.qaStatusTickDeferred
         var motionSamples = 0, motionSeen = 0
 
         // The scripted gesture: 120 Hz scroll inputs on a background clock, applied
@@ -135,6 +138,8 @@ enum GestureDeferChecks {
         let tileAtEnd = ManagedAgentTileNSView.qaTailEventsApplied
         let deferredAtEnd = governor.qaDeferredCount
         let ticksAtEnd = fixture.qaSourceTicks
+        let statusRuns = ManagedAgentTileNSView.qaStatusTickRuns - statusRunsBefore
+        let statusDeferred = ManagedAgentTileNSView.qaStatusTickDeferred - statusDeferredBefore
         let pendingAtEnd = governor.qaHasPending
         let motionBeat = beat.summary
 
@@ -176,6 +181,8 @@ enum GestureDeferChecks {
             "tileEventsAppliedDuringMotion": tileAtEnd - tileBefore,
             "sourceTicksDuringMotion": ticksAtEnd - ticksBefore, "sourceTicksTotal": produced,
             "deferredDuringMotion": deferredAtEnd - deferredBefore,
+            "statusTickRunsDuringMotion": statusRuns, "statusTickDeferredDuringMotion": statusDeferred,
+            "statusTickDeferEnabled": ManagedAgentTileNSView.qaStatusTickDeferEnabled,
             "pendingAtMotionEnd": pendingAtEnd, "drainedAfterSettle": drained,
             "drains": governor.qaDrainCount, "drainedItems": governor.qaDrainedCount,
             "streamDelivered": delivered, "orderErrors": orderErrors, "markersPerAgent": markerCounts,
@@ -194,6 +201,14 @@ enum GestureDeferChecks {
         }
         guard drained, delivered, orderErrors.isEmpty else {
             throw Failure(description: "delivery: drained=\(drained) delivered=\(delivered) order=\(orderErrors.prefix(3))")
+        }
+        if env["GESTURE_QUIET_TICK"] == "off" {
+            guard statusDeferred == 0 else { throw Failure(description: "anti-teeth: legacy tick deferred \(statusDeferred)") }
+        } else if on {
+            // Tiles tick at 1 Hz while working; during a gesture none may run.
+            guard statusRuns == 0 else {
+                throw Failure(description: "status tick ran \(statusRuns) times during a \(motionSeconds)s gesture (deferred \(statusDeferred))")
+            }
         }
         if on {
             guard deferredAtEnd - deferredBefore > 0 else {

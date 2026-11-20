@@ -3256,6 +3256,20 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                     self?.cancelCompactStatusTick()
                     return
                 }
+                // A camera gesture is not the moment to rebuild every working
+                // tile's status row: the elapsed text is one second coarse, so
+                // the refresh waits for the governor's drain (0.15 s after the
+                // gesture) and runs once, instead of once per tile per second.
+                if Self.qaStatusTickDeferEnabled,
+                   FrameGovernor.shared.deferKeyed(ObjectIdentifier(self), { [weak self] in
+                       guard let self, self.window != nil else { return }
+                       Self.qaStatusTickRuns &+= 1
+                       self.refreshCompactStatus()
+                   }) {
+                    Self.qaStatusTickDeferred &+= 1
+                    return
+                }
+                Self.qaStatusTickRuns &+= 1
                 self.refreshCompactStatus()
             }
         }
@@ -3263,6 +3277,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         RunLoop.main.add(timer, forMode: .common)
         compactStatusTickTimer = timer
     }
+
+    /// QA: the 1 Hz status tick's gesture deferral (off = legacy, runs every tick).
+    nonisolated(unsafe) static var qaStatusTickDeferEnabled = true
+    nonisolated(unsafe) static var qaStatusTickRuns = 0
+    nonisolated(unsafe) static var qaStatusTickDeferred = 0
 
     private func cancelCompactStatusTick() {
         compactStatusTickTimer?.invalidate()
