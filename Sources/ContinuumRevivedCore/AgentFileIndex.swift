@@ -2,22 +2,27 @@ import Foundation
 
 public struct AgentFileIndexEntry: Equatable, Sendable {
     public let relativePath: String
-    /// The file's path, not its URL. A listing holds one entry per file of a
-    /// checkout for as long as a tile completes against it, and a held URL
-    /// keeps the resource-value cache its content-type lookup attached: 1.3M
-    /// `_FileCache` and 1.6M `NSURL` in the 0.7.47 heap. A path is one string.
-    public let path: String
+    /// The listed root's path. Every entry of a listing holds the same string
+    /// storage, so a file costs a reference, not a second full path: the path
+    /// is `rootPath` + `relativePath`, and a held copy of it was the largest
+    /// share of the strings in the 0.7.56 heap (600k entries across six roots).
+    private let rootPath: String
     public let isDirectory: Bool
-    private let urlIsDirectory: Bool
 
-    /// Built on demand from `path`, the same URL the entry was listed from.
-    public var fileURL: URL { URL(fileURLWithPath: path, isDirectory: urlIsDirectory) }
+    /// The file's path, built on demand. A held URL keeps the resource-value
+    /// cache its content-type lookup attached (1.3M `_FileCache` in the 0.7.47
+    /// heap), so neither a URL nor a second path string is kept per entry.
+    public var path: String {
+        let relative = isDirectory && relativePath.hasSuffix("/") ? String(relativePath.dropLast()) : relativePath
+        return rootPath == "/" ? "/" + relative : rootPath + "/" + relative
+    }
 
-    public init(relativePath: String, fileURL: URL, isDirectory: Bool) {
+    public var fileURL: URL { URL(fileURLWithPath: path, isDirectory: isDirectory) }
+
+    public init(relativePath: String, rootPath: String, isDirectory: Bool) {
         self.relativePath = relativePath
-        self.path = fileURL.path
+        self.rootPath = rootPath
         self.isDirectory = isDirectory
-        self.urlIsDirectory = fileURL.hasDirectoryPath
     }
 }
 
@@ -278,6 +283,7 @@ public actor AgentFileIndex {
             includingPropertiesForKeys: Array(keys),
             options: [.skipsPackageDescendants]
         )) ?? []
+        let rootPath = root.standardizedFileURL.path
         return children.compactMap { child in
             guard let values = try? child.resourceValues(forKeys: keys),
                   values.isHidden != true,
@@ -286,20 +292,21 @@ public actor AgentFileIndex {
             return indexedEntry(
                 relativePath: child.lastPathComponent,
                 fileURL: child.standardizedFileURL,
+                rootPath: rootPath,
                 isDirectory: values.isDirectory == true
             )
         }
     }
 
     /// Nil for a file no prompt can reference, so no query has to ask again.
-    private func indexedEntry(relativePath: String, fileURL: URL, isDirectory: Bool) -> Indexed? {
+    private func indexedEntry(relativePath: String, fileURL: URL, rootPath: String, isDirectory: Bool) -> Indexed? {
         // The lookup caches resource values on `fileURL`; the entry keeps only
         // its path, so that cache goes when the URL does.
         guard isDirectory || AgentFileReferenceRules.referenceableContentType(for: fileURL) != nil else { return nil }
         return Indexed(
             entry: AgentFileIndexEntry(
                 relativePath: isDirectory ? relativePath + "/" : relativePath,
-                fileURL: fileURL,
+                rootPath: rootPath,
                 isDirectory: isDirectory
             ),
             folded: Array(canonical(relativePath).utf8)
@@ -368,9 +375,10 @@ public actor AgentFileIndex {
                 parent = (parent as NSString).deletingLastPathComponent
             }
         }
+        let rootPath = root.standardizedFileURL.path
         return kinds.keys.sorted().prefix(entryLimit).compactMap { relative in
             guard let url = containedURL(relativePath: relative, root: root) else { return nil }
-            return indexedEntry(relativePath: relative, fileURL: url, isDirectory: kinds[relative] == true)
+            return indexedEntry(relativePath: relative, fileURL: url, rootPath: rootPath, isDirectory: kinds[relative] == true)
         }
     }
 
@@ -419,6 +427,7 @@ public actor AgentFileIndex {
     private func walk(root: URL) -> [Indexed] {
         let excluded = Set([".git", ".array", ".build", "build", "DerivedData", "node_modules", ".cache"])
         var queue = [root]
+        let rootPath = root.standardizedFileURL.path
         var walked = 0
         var result: [Indexed] = []
         while !queue.isEmpty && walked < entryLimit {
@@ -438,7 +447,8 @@ public actor AgentFileIndex {
                 walked += 1
                 let isDirectory = values.isDirectory == true
                 if let item = indexedEntry(
-                    relativePath: relative, fileURL: child.standardizedFileURL, isDirectory: isDirectory
+                    relativePath: relative, fileURL: child.standardizedFileURL,
+                    rootPath: rootPath, isDirectory: isDirectory
                 ) { result.append(item) }
                 if isDirectory { queue.append(child) }
             }

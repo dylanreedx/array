@@ -39,7 +39,7 @@ enum AgentFileIndexMemoryChecks {
     static let goldenSuggestionDigest = "60dfeb4fe7aadd05"
 
     /// Malloc bytes the first index may cost per fixture file.
-    static let maxBytesPerIndexedFile = 1_000
+    static let maxBytesPerIndexedFile = 350
 
     static func mallocBytesInUse() -> Int {
         var stats = malloc_statistics_t()
